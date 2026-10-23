@@ -247,8 +247,8 @@ export const AgentRunRow = memo(function AgentRunRow({
     const answerMarkdown = !message
       ? null
       : smoothMarkdown
-        ? <StreamingMarkdownContent text={message.text} finalized={sealed} allowVisuals />
-        : <MarkdownContent text={message.text} allowVisuals />;
+        ? <StreamingMarkdownContent text={message.text} finalized={sealed} />
+        : <MarkdownContent text={message.text} />;
     return (
       <section className="workspaceProcessSection" data-turn-id={section.turnId} key={section.sectionId}>
         {messageVisible ? message.phase === "compaction" ? (

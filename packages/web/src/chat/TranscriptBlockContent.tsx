@@ -96,14 +96,14 @@ function textSource(body: Record<string, unknown>) {
   };
 }
 
-function ReferencedContent({ store, reference, mode = "markdown", allowVisuals = false }: Readonly<{
-  store: TranscriptViewStore; reference: TranscriptContentRef; mode?: "markdown" | "plain"; allowVisuals?: boolean;
+function ReferencedContent({ store, reference, mode = "markdown" }: Readonly<{
+  store: TranscriptViewStore; reference: TranscriptContentRef; mode?: "markdown" | "plain";
 }>) {
   const identity = useTranscriptIdentity(store);
   if (!identity.sessionId || !identity.projectionGeneration) return null;
   return <TranscriptReferencedContent
     key={`${identity.viewEpoch}:${identity.sessionId}:${identity.projectionGeneration}:${reference.refId}:${reference.revision}`}
-    sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} reference={reference} mode={mode} allowVisuals={allowVisuals}
+    sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} reference={reference} mode={mode}
   />;
 }
 
@@ -442,8 +442,8 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
       <div className="workspaceTranscriptBlock workspaceTranscriptAssistant" data-block-id={block.blockId}>
         <div className="workspaceTerminalAnswer">
           {text === null
-            ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" allowVisuals /> : null)
-            : <MarkdownContent text={text} allowVisuals isStreaming={body.status === "running" || body.status === "queued"} />}
+            ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" /> : null)
+            : <MarkdownContent text={text} />}
         </div>
         {body.status !== "queued" && body.status !== "running" ? <TranscriptMessageMeta key={`${viewEpoch}:${block.blockRevision}`} answer text={text} reference={reference}
           sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} observedAtMs={block.presentation?.observedAtMs} /> : null}

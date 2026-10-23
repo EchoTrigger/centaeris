@@ -1,7 +1,7 @@
 # Inline visualizations
 
 Initial implementation provides a Core catalog, strict validation and text
-projection, a shared json-render React adapter, and Desktop/Web/TUI integration.
+projection, a shared json-render React adapter, and Desktop/TUI integration.
 The compact light reference has passed visual acceptance. The complete Desktop
 foundation integration is reviewed and verified before product acceptance; Web
 adoption follows that acceptance. See [Frontend foundations](FrontendFoundations.md).
@@ -9,7 +9,7 @@ adoption follows that acceptance. See [Frontend foundations](FrontendFoundations
 Assistant answers need a shared way to explain sequences, groups and state
 without losing information when a conversation moves between Desktop, Web and
 TUI. The initial scope is compact cards, status rows, ordered flows and nested
-groups. Desktop and Web use json-render with a shared React registry; TUI derives
+groups. Desktop uses json-render with a React registry prepared for Web adoption; TUI derives
 readable text from the same component tree.
 
 ## Content format

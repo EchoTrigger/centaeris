@@ -5,12 +5,11 @@ import type { TranscriptContentRef } from "./transcriptContract";
 import { TranscriptContentReader } from "./transcriptContentReader";
 import { loadTranscriptContentRange } from "./transcriptContentRanges";
 
-export function TranscriptReferencedContent({ sessionId, projectionGeneration, reference, mode, allowVisuals = false }: Readonly<{
+export function TranscriptReferencedContent({ sessionId, projectionGeneration, reference, mode }: Readonly<{
   sessionId: string;
   projectionGeneration: string;
   reference: TranscriptContentRef;
   mode: "markdown" | "plain";
-  allowVisuals?: boolean;
 }>) {
   const [reader, setReader] = useState<TranscriptContentReader | null>(null);
   const { refId, revision, byteLength } = reference;
@@ -24,14 +23,14 @@ export function TranscriptReferencedContent({ sessionId, projectionGeneration, r
     void next.loadAll();
     return () => { next.dispose(); };
   }, [sessionId, projectionGeneration, refId, revision, byteLength]);
-  return reader ? <Content reader={reader} mode={mode} allowVisuals={allowVisuals} /> : null;
+  return reader ? <Content reader={reader} mode={mode} /> : null;
 }
 
-function Content({ reader, mode, allowVisuals }: Readonly<{ reader: TranscriptContentReader; mode: "markdown" | "plain"; allowVisuals: boolean }>) {
+function Content({ reader, mode }: Readonly<{ reader: TranscriptContentReader; mode: "markdown" | "plain" }>) {
   const { t } = useTranslation();
   const state = useSyncExternalStore(reader.subscribe, reader.getSnapshot, reader.getSnapshot);
   return <>
-    {state.content ? (mode === "markdown" ? <MarkdownContent text={state.content} allowVisuals={allowVisuals} isStreaming={state.loading || state.hasMore} /> : state.content) : null}
+    {state.content ? (mode === "markdown" ? <MarkdownContent text={state.content} /> : state.content) : null}
     {state.unavailable ? <span role="alert">{t("transcriptBlockContent.unableToLoadContent")}</span> : null}
   </>;
 }

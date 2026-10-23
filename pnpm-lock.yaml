@@ -367,9 +367,6 @@ importers:
 
   packages/web:
     dependencies:
-      '@centaeris/visualization-react':
-        specifier: workspace:*
-        version: link:../visualization-react
       '@codemirror/autocomplete':
         specifier: 6.20.3
         version: 6.20.3

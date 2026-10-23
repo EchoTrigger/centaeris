@@ -1,5 +1,4 @@
 import { useStreamPresentation } from "../useStreamPresentation";
-import { VisualMarkdown } from "@centaeris/visualization-react";
 import { Fragment, memo, useEffect, useMemo, useRef } from "react";
 
 function safeHref(href) {
@@ -100,7 +99,7 @@ export function updateMarkdownBlockProjection(previous, text, finalize = false) 
   };
 }
 
-const OrdinaryMarkdownContent = memo(function OrdinaryMarkdownContent(/** @type {{ text: string }} */ { text }) {
+export const MarkdownContent = memo(function MarkdownContent(/** @type {{ text: string }} */ { text }) {
   const lines = text.trim().split(/\r?\n/);
   const nodes = [];
   let index = 0;
@@ -172,12 +171,7 @@ const OrdinaryMarkdownContent = memo(function OrdinaryMarkdownContent(/** @type 
   return <div className="markdownContent">{nodes}</div>;
 });
 
-
-export const MarkdownContent = memo(function MarkdownContent(/** @type {{ text: string, allowVisuals?: boolean, isStreaming?: boolean }} */ { text, allowVisuals = false, isStreaming = false }) {
-  return allowVisuals ? <VisualMarkdown text={text} finalized={!isStreaming} renderMarkdown={(source) => <OrdinaryMarkdownContent text={source} />} />
-    : <OrdinaryMarkdownContent text={text} />;
-});
-export const StreamingMarkdownContent = memo(function StreamingMarkdownContent({ text: sourceText, finalized = false, allowVisuals = false }) {
+export const StreamingMarkdownContent = memo(function StreamingMarkdownContent({ text: sourceText, finalized = false }) {
   const text = useStreamPresentation(sourceText, !finalized);
   const committedProjection = useRef(createMarkdownBlockProjection());
   const projection = useMemo(
@@ -192,7 +186,6 @@ export const StreamingMarkdownContent = memo(function StreamingMarkdownContent({
     committedProjection.current = projection;
   }, [projection]);
   const activeText = projection.sourceText.slice(projection.sealedEnd);
-  if (allowVisuals) return <MarkdownContent text={text} allowVisuals isStreaming={!finalized || text !== sourceText} />;
   return (
     <div className="streamingMarkdownContent">
       {projection.sealedBlocks.map((block) => <MarkdownContent key={block.id} text={block.text} />)}
