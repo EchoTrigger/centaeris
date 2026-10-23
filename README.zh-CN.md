@@ -12,7 +12,7 @@ Centaeris 是使用 Rust 编写、不依赖特定宿主的智能体运行时框�
 
 ## 外观
 
-点击左侧侧栏开关右边的太阳／月亮按钮，在浅色和暗色之间切换。选择会在当前设备记住，并优先于系统变化；首次选择前使用系统外观。正文与过程标题为 14px，过程详情、代码和表格为 13px。每个主题中的过程标题和内容使用同一种灰色。
+在 Settings > Appearance 中选择跟随系统、浅色或暗色，偏好会在当前设备记住。正文与过程标题为 14px，过程详情、代码和表格为 13px。每个主题中的过程标题和内容使用同一种灰色。
 
 ## 功能
 
@@ -49,10 +49,12 @@ Centaeris 是使用 Rust 编写、不依赖特定宿主的智能体运行时框�
 
 本地产品目前仅构建和验证 Windows x64 发布产物：
 
+- 面向当前用户的 Desktop 安装程序 `Centaeris-Desktop-0.1.0-windows-x64-setup.exe`。
+- Desktop 便携压缩包 `centaeris-desktop-windows-x64.zip`。
 - 独立 TUI 压缩包 `centaeris-windows-x64.zip`。
-- 包含 `Centaeris Desktop.exe` 的未打包 Windows 桌面程序目录。
+- 对应版本源码 `centaeris-source.zip`。
 
-目前尚无受支持的 macOS/Linux 下载或 Windows 安装程序。源代码可能在其他平台编译，但这不代表这些平台已获得发布支持。
+首发计划为 **v0.1.0 Windows Preview**，通过 GitHub 预发布提供。本地候选包构建完成不代表已经公开发布。安装和模型配置见 [Windows 配置指南](docs/getting-started/Windows.md)。目前尚无受支持的 macOS/Linux 下载；源代码可能在其他平台编译，但这不代表这些平台已获得发布支持。
 
 ## 从源码构建
 

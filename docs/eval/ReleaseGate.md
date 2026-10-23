@@ -33,7 +33,8 @@ changes do not rebuild the same release artifacts.
 The manual `Release Candidate` workflow runs the full gate and the observation
 storage-growth gate from a clean Windows x64 checkout, packages the Desktop and
 TUI distributions, creates a source archive from the exact checked-out commit,
-and uploads those three ZIP files as a temporary workflow artifact. It does not
+builds and tests the Desktop EXE installer, and uploads the installer and three
+ZIP files as a temporary workflow artifact. It does not
 create a tag or a GitHub Release. GitHub records the uploaded artifact digest;
 the workflow does not create an additional checksum file with no consumer.
 

@@ -66,6 +66,13 @@ jobs:
           $candidateDir = Join-Path $PWD "dist/release-candidate"
           New-Item -ItemType Directory -Path $candidateDir -Force | Out-Null
 
+          node packages/desktop/scripts/build-installer.mjs --output $candidateDir
+          if ($LASTEXITCODE -ne 0) { throw "Desktop installer build failed" }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $installer = Join-Path $candidateDir "Centaeris-Desktop-$version-windows-x64-setup.exe"
+          node packages/desktop/scripts/smoke-installer.mjs $installer
+          if ($LASTEXITCODE -ne 0) { throw "Desktop installer acceptance failed" }
+
           $desktopDist = Join-Path $PWD "packages/desktop/dist/Centaeris Desktop"
           $desktopArchive = Join-Path $candidateDir "centaeris-desktop-windows-x64.zip"
           Compress-Archive -LiteralPath $desktopDist -DestinationPath $desktopArchive -CompressionLevel Optimal
@@ -82,7 +89,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: centaeris-windows-x64-${{ github.sha }}
-          path: dist/release-candidate/*.zip
+          path: |
+            dist/release-candidate/*.zip
+            dist/release-candidate/*-setup.exe
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
