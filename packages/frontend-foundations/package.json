@@ -1,0 +1,57 @@
+{
+  "name": "@centaeris/frontend-foundations",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": {
+    "./provider": "./src/provider.tsx",
+    "./badge": "./src/components/badge.tsx",
+    "./button": "./src/components/button.tsx",
+    "./card": "./src/components/card.tsx",
+    "./checkbox": "./src/components/checkbox.tsx",
+    "./dialog": "./src/components/dialog.tsx",
+    "./dropdown-menu": "./src/components/dropdown-menu.tsx",
+    "./input": "./src/components/input.tsx",
+    "./popover": "./src/components/popover.tsx",
+    "./scroll-area": "./src/components/scroll-area.tsx",
+    "./select": "./src/components/select.tsx",
+    "./separator": "./src/components/separator.tsx",
+    "./switch": "./src/components/switch.tsx",
+    "./tabs": "./src/components/tabs.tsx",
+    "./textarea": "./src/components/textarea.tsx",
+    "./tooltip": "./src/components/tooltip.tsx",
+    "./utils": "./src/utils.ts",
+    "./primitives/dialog": "./src/primitives/dialog.ts",
+    "./primitives/menu": "./src/primitives/menu.ts",
+    "./primitives/popover": "./src/primitives/popover.ts",
+    "./motion": "./src/motion.ts",
+    "./motion-mini": "./src/motion-mini.ts",
+    "./motion-react": "./src/motion-react.ts",
+    "./panels": "./src/panels.ts",
+    "./theme-store": "./src/theme-store.ts",
+    "./theme.css": "./src/theme.css"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@base-ui/react": "1.9.0",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "1.24.0",
+    "motion": "14.4.0",
+    "react-resizable-panels": "4.14.7",
+    "tailwind-merge": "3.5.0",
+    "zustand": "5.0.14"
+  },
+  "peerDependencies": {
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "typescript": "7.0.2"
+  }
+}

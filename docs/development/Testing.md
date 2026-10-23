@@ -197,6 +197,14 @@ The gate checks formatting, the Rust workspace, Clippy with warnings denied,
 focused Core and SQLite integration, all Rust tests and Desktop/UI source checks.
 Packaging and packaged-application smoke checks remain in the Windows release stage.
 
+Shared frontend primitive changes also run `pnpm --filter web run test:components`.
+These mounted React tests protect controlled model/effort choices, focus,
+dismissal, confirmation and drafts. Web retains its own page and transcript
+interaction policy. With `CHROME_BIN` pointing to a local Chromium executable,
+`pnpm --filter web run test:chat-ui` checks production styles, floating-control
+placement, transcript folding and reading position in the browser. The shared
+package has its own `typecheck` script, run by both frontend product gates.
+
 ## Test data
 
 Tests must use temporary roots and synthetic credentials. They must not read a

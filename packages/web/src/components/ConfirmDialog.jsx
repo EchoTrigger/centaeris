@@ -1,7 +1,7 @@
 import { t } from "../i18n";
 import { useTranslation } from "../i18n";
-import { useId } from "react";
-import { useModalDialog } from "./useModalDialog";
+import { useRef } from "react";
+import { Dialog } from "@centaeris/frontend-foundations/primitives/dialog";
 
 export function ConfirmDialog({
   open,
@@ -14,18 +14,25 @@ export function ConfirmDialog({
   onConfirm,
 }) {
   const { t } = useTranslation();
-  const titleId = useId();
-  const dialogRef = useModalDialog({ open, busy, onClose: onCancel });
+  const cancel = useRef(null);
 
   if (!open) return null;
-  return <div className="themeConfirmBackdrop" role="presentation" onMouseDown={() => !busy && onCancel()}>
-    <section className="themeConfirmDialog" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
-      <h2 id={titleId}>{title}</h2>
-      {message ? <p>{message}</p> : null}
-      <footer>
-        <button type="button" autoFocus disabled={busy} onClick={onCancel}>{cancelLabel}</button>
-        <button type="button" className="isDanger" disabled={busy} onClick={onConfirm}>{busy ? t("confirmDialog.value", { value1: confirmLabel }) : confirmLabel}</button>
-      </footer>
-    </section>
-  </div>;
+  return <Dialog.Root open={open} onOpenChange={(next, details) => {
+    if (next) return;
+    if (busy) details.cancel();
+    else onCancel();
+  }}>
+    <Dialog.Portal>
+      <Dialog.Backdrop className="themeConfirmBackdrop">
+        <Dialog.Popup render={<section />} className="themeConfirmDialog" initialFocus={busy ? true : cancel}>
+          <Dialog.Title render={<h2 />}>{title}</Dialog.Title>
+          {message ? <Dialog.Description render={<p />}>{message}</Dialog.Description> : null}
+          <footer>
+            <button type="button" ref={cancel} disabled={busy} onClick={onCancel}>{cancelLabel}</button>
+            <button type="button" className="isDanger" disabled={busy} onClick={onConfirm}>{busy ? t("confirmDialog.value", { value1: confirmLabel }) : confirmLabel}</button>
+          </footer>
+        </Dialog.Popup>
+      </Dialog.Backdrop>
+    </Dialog.Portal>
+  </Dialog.Root>;
 }

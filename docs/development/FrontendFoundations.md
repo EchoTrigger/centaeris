@@ -2,9 +2,37 @@
 
 Desktop and Web should use upstream implementations for common frontend
 capabilities so product work can concentrate on agent execution, useful views
-and delivery. Desktop is the integration target first. Web adopts the verified
-foundation only after maintainer acceptance of the complete Desktop candidate.
-The accepted compact light visualization reference is the visual baseline.
+and delivery. Desktop established the accepted foundation. Web now shares its
+underlying primitives without adopting Desktop page or chat interaction policies.
+The accepted compact light visualization reference remains the Desktop visual baseline.
+
+## Shared package and host policy
+
+`packages/frontend-foundations` owns the upstream-derived Nova components,
+headless Base UI entry points, Motion and panel-library entry points, theme
+declarations, the document-scoped theme store and platform-preference provider.
+Consumers import explicit package subpaths. React remains a peer dependency;
+host controllers own their business state and asynchronous request lifetimes.
+
+Desktop's existing component modules forward to the shared Nova components.
+Web composes the headless primitives with its existing CSS, labels and layout;
+it does not import Desktop's Tailwind reset or palette overrides. Shared theme
+declarations retain their existing values. Icon defaults remain 1.5 in Desktop
+and 2 in Web. The provider respects the platform's reduced-motion preference.
+
+Web retains its independent model and effort controls, confirmation flow,
+centered/new-conversation input behavior, navigation, attachment flow and draft
+ownership. Its transcript still folds process details on the first final answer
+and respects manual reopening and closing. The disclosure component retains
+Web's lazy mounting, reading-anchor behavior and animation timing while using
+Motion mini underneath. Sharing components does not change Web's stream,
+authority reconciliation, virtual-list controller or execution environment.
+
+Real DOM tests protect menu selection, dismissal, focus, disabled states,
+confirmation and drafts. Browser disclosure tests protect visible reading
+position, close/reopen continuity and reduced motion. Both product gates check
+the shared package; the Web image and standalone build install its workspace
+dependency closure.
 
 ## Capability ownership
 
@@ -28,7 +56,7 @@ changing this setting alone does not migrate existing components.
 
 ## Desktop integration
 
-`packages/ui/src/components/ui` contains the upstream-derived Nova primitives.
+`packages/ui/src/components/ui` exposes the shared upstream-derived Nova primitives.
 Business components compose these primitives. Focus trapping, keyboard selection,
 outside dismissal and floating positioning belong to Base UI. The shadcn MIT
 notice is preserved in `THIRD_PARTY_NOTICES.md`. Element resets stay in the CSS

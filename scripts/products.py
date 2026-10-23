@@ -41,7 +41,7 @@ def build_commands(product, release=False):
     if product == "desktop":
         return [["pwsh", "-NoProfile", "-File", "scripts/build-desktop.ps1"]]
     if product == "web":
-        return [[pnpm, "--filter", "web", "--filter", "centaeris", "install", "--frozen-lockfile"],
+        return [[pnpm, "--filter", "web...", "--filter", "centaeris", "install", "--frozen-lockfile"],
                 [pnpm, "--filter", "web", "run", "build"]]
     python = {"api": "api", "worker": "workspace-agent-worker", "document-processor": "centaeris-document-processor"}
     if product in python:

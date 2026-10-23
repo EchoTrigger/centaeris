@@ -1,4 +1,4 @@
-import { animate } from "motion/mini";
+import { animate } from "@centaeris/frontend-foundations/motion-mini";
 import { useStore } from "zustand";
 import { createThemeStore, serverThemeStore, THEME_STORAGE_KEY, type ThemePreference } from "./themeStore";
 export { THEME_STORAGE_KEY, type ThemePreference } from "./themeStore";

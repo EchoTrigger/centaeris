@@ -1,4 +1,4 @@
-import { useAnimate } from "motion/react";
+import { useAnimate } from "@centaeris/frontend-foundations/motion-react";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 // Mount lazily, retain closing readers until Motion settles, then release them.

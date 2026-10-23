@@ -28,9 +28,9 @@ try {
           button.click();
           queueMicrotask(() => {
             const detail = button.nextElementSibling;
-            const animation = detail.getAnimations()[0];
-            if (animation) animation.finish();
-            resolve({ hasAnimation: Boolean(animation), hidden: detail.hidden, inert: detail.inert, ariaHidden: detail.getAttribute('aria-hidden'), opacity: getComputedStyle(detail).opacity, height: detail.getBoundingClientRect().height });
+            const animations = detail.getAnimations();
+            for (const animation of animations) animation.finish();
+            resolve({ hasAnimation: animations.length > 0, hidden: detail.hidden, inert: detail.inert, ariaHidden: detail.getAttribute('aria-hidden'), opacity: getComputedStyle(detail).opacity, height: detail.getBoundingClientRect().height });
           });
         })`);
         console.log(JSON.stringify({ width: scenario.width, end }));
@@ -44,11 +44,11 @@ try {
             button.click();
             queueMicrotask(() => {
               const detail = button.nextElementSibling;
-              const first = detail.getAnimations()[0]; first.currentTime = 80;
+              for (const animation of detail.getAnimations()) animation.currentTime = 80;
               const openingHeight = detail.getBoundingClientRect().height;
               button.click();
               queueMicrotask(() => {
-                const second = detail.getAnimations()[0]; second.currentTime = 80;
+                for (const animation of detail.getAnimations()) animation.currentTime = 80;
                 const closingHeight = detail.getBoundingClientRect().height;
                 button.click();
                 queueMicrotask(() => {

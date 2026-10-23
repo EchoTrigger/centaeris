@@ -72,6 +72,7 @@ def main(skip_frontend_tests=False, stage="All"):
         ("First-party MCP Rust/Python client", [*api, "scripts/workspace/platform-mcp-client-gate.py"]),
         ("Node install", [pnpm, "install", "--frozen-lockfile"]),
         ("Performance artifact validation", ["node", "--test", "scripts/workspace/performance-eval-artifact.test.mjs"]),
+        ("Shared frontend types", [pnpm, "--filter", "@centaeris/frontend-foundations", "run", "typecheck"]),
         ("Web production validation", [pnpm, "--filter", "web", "run", "build"]),
     ]
     if not skip_frontend_tests:
@@ -80,13 +81,14 @@ def main(skip_frontend_tests=False, stage="All"):
         gates.append(("Web fixture toolchain", ["rustup", "show", "active-toolchain"]))
         gates.append(("Web fixture source", ["node", "scripts/workspace/core-source.mjs"]))
         gates.append(("Web unit tests", [pnpm, "--filter", "web", "run", "test:unit"]))
+        gates.append(("Web component interactions", [pnpm, "--filter", "web", "run", "test:components"]))
     rust_gates = []
     for name in rust_packages(hosted=True):
         rust_gates.extend([(f"Rust check {name}", ["cargo", "check", "--locked", "-p", name]),
                            (f"Rust tests {name}", ["cargo", "test", "--locked", "-p", name])])
     rust_labels = {"Core source resolution", "Monorepo Core source", "Rust toolchain consistency",
                    "Transcript exporter cache isolation", "Transcript generated contract"}
-    web_labels = {"Node install", "Web production validation", "Web fixture toolchain", "Web fixture source", "Web unit tests"}
+    web_labels = {"Node install", "Shared frontend types", "Web production validation", "Web fixture toolchain", "Web fixture source", "Web unit tests", "Web component interactions"}
     if stage == "Rust":
         gates = [gate for gate in gates if gate[0] in rust_labels] + rust_gates
     elif stage == "Web":

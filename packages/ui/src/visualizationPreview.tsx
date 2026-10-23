@@ -1,4 +1,4 @@
-import { MotionConfig } from "motion/react";
+import { MotionConfig } from "@centaeris/frontend-foundations/motion-react";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";

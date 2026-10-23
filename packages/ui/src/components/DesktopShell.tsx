@@ -1,5 +1,5 @@
 import { desktopSidebarTransition } from "../lib/desktopMotion";
-import { useAnimate } from "motion/react";
+import { useAnimate } from "@centaeris/frontend-foundations/motion-react";
 import { useLayoutEffect, useRef, type CSSProperties, type ReactNode } from "react";
 
 type SidebarStyle = CSSProperties & { "--sidebar-progress": number };

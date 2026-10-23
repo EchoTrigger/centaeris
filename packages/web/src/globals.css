@@ -541,21 +541,21 @@ button.workspaceActivityGroup:hover { color: var(--on-surface); }
 .workspaceComposerControl.isPending:hover { background: color-mix(in srgb, var(--surface-variant) 65%, transparent); color: var(--on-surface-variant); }
 .workspaceComposerControl.isPending > svg { width: 15px; height: 15px; }
 .workspaceComposerPicker { position: relative; flex: none; }
-.workspaceComposerPicker > summary { display: flex; height: 28px; align-items: center; justify-content: center; border-radius: 6px; color: var(--on-surface-variant); cursor: pointer; list-style: none; }
-.workspaceComposerPicker > summary::-webkit-details-marker { display: none; }
-.workspaceComposerPicker > summary:hover { background: color-mix(in srgb, var(--surface-variant) 65%, transparent); color: var(--on-surface); }
-.workspaceComposerPicker > summary:focus-visible { outline: 2px solid var(--outline); outline-offset: 1px; }
-.workspaceComposerPicker > summary[aria-disabled="true"] { cursor: default; opacity: .55; }
-.workspaceComposerThinking > summary { width: 28px; }
-.workspaceComposerThinking > summary svg { width: 15px; height: 15px; }
+.workspaceComposerPicker > .workspaceComposerPickerTrigger { display: flex; height: 28px; align-items: center; justify-content: center; border-radius: 6px; color: var(--on-surface-variant); cursor: pointer; list-style: none; }
+.workspaceComposerPicker > .workspaceComposerPickerTrigger::-webkit-details-marker { display: none; }
+.workspaceComposerPicker > .workspaceComposerPickerTrigger:hover { background: color-mix(in srgb, var(--surface-variant) 65%, transparent); color: var(--on-surface); }
+.workspaceComposerPicker > .workspaceComposerPickerTrigger:focus-visible { outline: 2px solid var(--outline); outline-offset: 1px; }
+.workspaceComposerPicker > .workspaceComposerPickerTrigger[aria-disabled="true"] { cursor: default; opacity: .55; }
+.workspaceComposerThinking > .workspaceComposerPickerTrigger { width: 28px; }
+.workspaceComposerThinking > .workspaceComposerPickerTrigger svg { width: 15px; height: 15px; }
 .workspaceComposerIconButton { display: inline-grid; width: 28px; height: 28px; flex: none; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--on-surface-variant); }
 .workspaceComposerIconButton:hover:not(:disabled) { background: var(--surface-variant); color: var(--on-surface); }
 .workspaceComposerIconButton:focus-visible, .workspaceSendButton:focus-visible { outline: 2px solid var(--outline); outline-offset: 1px; }
-.workspaceComposerModel > summary { max-width: 190px; gap: 5px; padding: 0 7px 0 9px; font-size: 11px; }
-.workspaceComposerModel > summary span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspaceComposerModel > summary svg { width: 12px; height: 12px; flex: none; transition: transform 120ms ease; }
-.workspaceComposerModel[open] > summary svg { transform: rotate(180deg); }
-.workspaceComposerControl:has(.workspaceComposerPicker[open])::after { display: none; }
+.workspaceComposerModel > .workspaceComposerPickerTrigger { max-width: 190px; gap: 5px; padding: 0 7px 0 9px; font-size: 11px; }
+.workspaceComposerModel > .workspaceComposerPickerTrigger span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspaceComposerModel > .workspaceComposerPickerTrigger svg { width: 12px; height: 12px; flex: none; transition: transform 120ms ease; }
+.workspaceComposerModel > .workspaceComposerPickerTrigger[aria-expanded="true"] svg { transform: rotate(180deg); }
+.workspaceComposerControl:has(.workspaceComposerPickerTrigger[aria-expanded="true"])::after { display: none; }
 .workspaceComposerPickerPanel { position: absolute; z-index: 22; right: 0; bottom: 35px; display: grid; width: 210px; max-height: 300px; overflow: auto; border: 1px solid var(--outline-variant); border-radius: 10px; background: var(--surface-color); padding: 6px; box-shadow: 0 14px 38px rgba(27, 33, 40, .18); }
 .workspaceComposerPickerPanel.is-thinking { width: 154px; }
 .workspaceComposerPickerPanel section + section { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--outline-variant); }
@@ -1164,3 +1164,10 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 
 /* The light surface needs a distinct message background without altering dark mode. */
 :root:not([data-theme="dark"]) .workspaceUserMessage { background: #eceff0; }
+
+/* Floating positioning belongs to the shared primitive; Web retains its visual controls. */
+.workspaceComposerPickerPositioner { z-index:22; outline:none; }
+.workspaceComposerPickerPanel { position:relative; inset:auto; }
+.workspaceComposerPickerTrigger { border:0; background:transparent; font:inherit; }
+.workspaceComposerPickerTrigger:disabled { cursor:default; opacity:.55; }
+.workspaceComposerPickerPanel button[data-highlighted] { background:var(--surface-variant); outline:0; }

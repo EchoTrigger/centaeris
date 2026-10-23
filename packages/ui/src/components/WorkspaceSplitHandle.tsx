@@ -1,4 +1,4 @@
-import { Separator } from "react-resizable-panels";
+import { Separator } from "@centaeris/frontend-foundations/panels";
 
 export function WorkspaceSplitHandle({ disabled = false, onReset }: {
   disabled?: boolean;

@@ -1,7 +1,7 @@
-import { animate } from "motion/react";
+import { animate } from "@centaeris/frontend-foundations/motion-react";
 import { desktopSidebarTransition } from "../lib/desktopMotion";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { Group, Panel, useGroupRef, type Layout } from "react-resizable-panels";
+import { Group, Panel, useGroupRef, type Layout } from "@centaeris/frontend-foundations/panels";
 import { WorkspaceSplitHandle } from "./WorkspaceSplitHandle";
 import "../styles/desktop-layout.css";
 
