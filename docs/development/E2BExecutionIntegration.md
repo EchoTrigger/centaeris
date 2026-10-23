@@ -1639,3 +1639,242 @@ separately; nested endpoint, handshake and method durations must not be summed.
 Provider-internal creation stages and cross-clock first-tool completion remain
 unavailable. Request counts expose helper/polling amplification without adding
 calls or changing responsibility settlement.
+
+## Sized-template SDK lifecycle and resident-load probes
+
+This local probe tested the official SDK path and resident guest workload before
+attempting density or TB2.1 admission. SDK 2.58.0 and two requested vCPUs were
+fixed. The probe Runtime image was
+`sha256:db364e9bb78ead6bdb2ca9ca4fe1038f1f685cf795ed2caa33a08dac21fb7517`.
+It exercises an internal execution backend; it does not add a user-facing
+provider feature or change product source, API contracts or defaults. Private
+builders, probes, manifests and credentials remain outside this repository.
+
+All three new variant build requests selected the exact ready helper template
+`wsizgcvif2rxugbygu7r:6f3d8d60-5bc4-49a7-a14a-11986531366f` and a no-op
+build step. The original source manifest was kept unchanged. Their returned
+build identities and final observed statuses were:
+
+| Requested memory | Template ID | Build ID | Build result / use |
+| --- | --- | --- | --- |
+| 128 MiB | `2j118gxe1nwr9dhkmn7k` | `fbb4cc8e-bea7-4b2a-8a1c-cf5837192ea9` | New variant ready; two separate 50 MiB load attempts below |
+| 256 MiB | `9rapnsbtgaye6ax8m0iw` | `81777bcb-41a1-48ee-bbcb-2c97d91f2e90` | New variant ready; successful 50 and 100 MiB load samples |
+| 512 MiB | `hptsslt57p806rimqckt` | `1f6e7e34-f0c6-4ff2-ab4e-132cf21acceb` | New build reported a generic internal error; cause unknown, no rebuild or retry |
+| 512 MiB control | `wsizgcvif2rxugbygu7r` | `6f3d8d60-5bc4-49a7-a14a-11986531366f` | Explicit original ready baseline; successful 50 and 100 MiB load samples |
+
+The four successful samples have one observation per memory/payload pair; no
+percentiles or causal performance ranking are established. In particular, the
+512 MiB control uses the original ready build, while 256 MiB uses its new sized
+variant. They are not acceptance of an identical construction procedure.
+
+| Template / anonymous payload, MiB | Create, ms | Load, ms | Pause including 1,000 ms stable window, ms | Resume, ms | Proof, ms | Kill, ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 / 50 | 105.094 | 333.926 | 1100.264 | 128.444 | 112.156 | 22.303 |
+| 256 / 100 | 176.857 | 605.994 | 1113.253 | 109.987 | 114.498 | 25.101 |
+| Original 512 / 50 | 198.612 | 333.594 | 1199.413 | 130.473 | 112.643 | 27.461 |
+| Original 512 / 100 | 102.367 | 656.267 | 1106.255 | 120.774 | 113.736 | 25.758 |
+
+These are SDK-adapter diagnostic spans, including the required guest commands
+and polling. Pause includes an intentional 1,000 ms paused stability window;
+subtracting that window still does not isolate a pure provider mutation or VM
+snapshot IO. Helper/tool checks passed in each sample. Guest-visible `MemTotal`
+was 95.629 MiB for the requested 128 MiB template, 221.441 MiB for 256 MiB, and
+473.066 MiB for the original 512 MiB control.
+
+For each successful load, a resident process retained a private anonymous
+50 or 100 MiB payload and touched all 12,800 or 25,600 4 KiB pages. After pause
+and resume, the proof observed the same guest PID and start ticks, live process,
+payload size/page count, payload hash and canary hash, plus the unchanged
+workspace-file hash. Guest OOM-kill observations remained zero before and after
+these four loads. Exact sandbox-ID lookup confirmed absence after each kill;
+all four completed with confirmed cleanup and zero pending probe duties.
+
+Both independent 128 MiB / 50 MiB attempts passed create, resource inspection,
+helper, small-tool and workspace checks, then lost their load receipt. The first
+remains an unknown load outcome without exact OOM evidence. The second had a
+separate bounded diagnostic showing guest OOM kills increasing from zero to one,
+with no surviving resident probe process or load receipt; the exact OOM victim
+is unknown. Later exact-identity retirement and sandbox-ID absence confirmed
+cleanup for both. Their original unknown observations remain preserved, and the
+final responsibility records retain failure with zero pending duties rather
+than converting either load into a success. The 128 MiB / 100 MiB case was not
+run: the 50 MiB OOM evidence stopped further pressure at this size.
+
+All six probe environments have confirmed exact cleanup and zero pending duties.
+This does not settle the two earlier historical Unknown responsibilities. Their
+owner-file SHA-256 values remained
+`da0c965d747bab72976006f054de1e193fced2d03d9faf89e0658f9f4070097a` and
+`40394063943e83a60d67d84e60432c23f8d130272efd974b8bac43afc4246f02`.
+
+Host CPU, normal memory, HugeTLB used/reserved and device IO were continuously
+sampled at 250 ms. The historical SDK clock domains differ from the sampler's,
+and the ended SDK containers have no recorded time-namespace offset evidence.
+Current zero offsets cannot reconstruct those historical facts. Consequently,
+this probe does not report precisely aligned per-sample host resource savings,
+paused-window memory drops, snapshot IO or write amplification. Reducing a
+nominal template from 512 to 256 MiB is a 50% reduction in declared guest size,
+not a measured 50% saving in host memory. The observed fixed 1,024 MiB HugeTLB
+pool was not shrunk by these probes.
+
+Offline private acceptance registered 127 identities: 126 passed on Windows and
+one Linux-only fixture was skipped there; that same Linux fixture passed under
+WSL earlier in this round. The private builder's 24 tests also passed, for 151
+distinct registered identities, without double-counting the cross-platform
+fixture. These private test counts are separate from earlier 210-identity
+product-gate evidence and Core checks; they do not establish a final release gate.
+
+The demonstrated sizing conclusion is bounded: 128 MiB boots and runs small
+helper/tool operations, but this helper image does not promise a 50 MiB resident
+payload at that size. The 256 MiB template is a candidate for the next density
+experiment under these specific loads. It does not change the default template,
+validate 100 simultaneously resident environments, or accept TB2.1's 2-8 GiB/GPU
+requirements. The current Core product-path results follow separately below;
+capacity and benchmark acceptance remain outstanding.
+
+## Core lifecycle comparison with sized templates
+
+The current-source Runtime image was fixed at
+`sha256:db364e9bb78ead6bdb2ca9ca4fe1038f1f685cf795ed2caa33a08dac21fb7517`,
+with executable SHA-256
+`c84380cef9d49f0919fe4fced769a3edf80d6dd60b6cd9e690983125ce7ad8af` and
+SDK 2.58.0. These are the typed-authority implementation already measured above;
+subsequent local repository changes in this round clarify documentation and
+synchronize a source-layout test expectation; product implementation is unchanged.
+Each of the three selected templates ran one fresh perRun fixture and one fresh
+retained powerTiming fixture through authenticated API admission, the real
+Worker, Core/Runtime, PostgreSQL and SDK. The model was a deterministic fixture.
+The 128/256 MiB manifests selected the new sized variants; 512 MiB explicitly
+selected the original ready baseline. No memory default or admission limit was
+changed. All six fixtures completed with complete required measurement coverage,
+zero pending duties and unchanged original Unknown owner files.
+
+A/B here denotes successive Runs, not two concurrent VMs. The retained case
+verifies one original creation, same-instance reuse after a forced Runtime
+restart, pause, durable resume wake, successor execution, Run cleanup and
+independent environment retirement. The perRun case verifies predecessor
+retirement and successor creation. This is not simultaneous VM or Session
+capacity acceptance.
+
+The first successful successor read has separate Core safe-point receipt and
+persistence boundaries. PerRun starts at successor admission returned; retained
+starts at resume returned and includes the deliberate Runtime restart path.
+All values below are milliseconds, each row n=1. The final column is the next
+fixture model callback, an upper bound that includes later persistence and
+callback delivery; it is not the tool completion timestamp.
+
+| Memory / mode | Receipt ready | Receipt committed | Callback upper bound | Independent Core read duration |
+| --- | ---: | ---: | ---: | ---: |
+| 128 / perRun | 1667.569 | 1711.161 | 2040.942 | 84 |
+| 128 / retained | 1800.640 | 1839.510 | 2182.999 | 82 |
+| 256 / perRun | 1677.190 | 1717.855 | 2043.523 | 80 |
+| 256 / retained | 2092.499 | 2141.569 | 2524.440 | 94 |
+| Original 512 / perRun | 1738.043 | 1782.147 | 2100.900 | 82 |
+| Original 512 / retained | 2004.140 | 2052.546 | 2429.637 | 96 |
+
+Current-build pause/resume timing is independent of earlier-build results. The
+following spans are nested; adding columns would double-count work. The Runtime
+power span contains Store preparation/authorization, the adapter subprocess and
+acknowledgement commit; handshake includes SDK import. SDK mutation excludes the
+adapter's identity GET and resume verification.
+
+| Memory / action | Fixture HTTP | Runtime total | Store advance | Adapter handshake | SDK import | SDK mutation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 / pause | 497.765 | 480.101 | 476.217 | 265.668 | 221.209 | 72.423 |
+| 128 / resume | 624.937 | 607.707 | 604.336 | 279.868 | 231.415 | 127.675 |
+| 256 / pause | 568.798 | 549.484 | 545.751 | 299.779 | 245.807 | 99.357 |
+| 256 / resume | 686.251 | 667.831 | 664.232 | 299.448 | 249.542 | 124.336 |
+| Original 512 / pause | 521.688 | 504.028 | 499.826 | 270.338 | 224.759 | 83.454 |
+| Original 512 / resume | 649.639 | 628.515 | 624.222 | 297.392 | 244.376 | 111.461 |
+
+Independent retirement fixture totals were 418.869, 469.422 and 447.329 ms for
+128, 256 and original 512 MiB respectively. The 128 MiB replayed pause took
+5.572 ms in Runtime with no new SDK operation.
+
+The 128 MiB drill-down explains why selecting a smaller guest alone does not
+remove the first-tool delay. Runtime startup A/B took 759/1009 ms perRun and
+843/675 ms retained; sandbox ensure was a nested 672/615 and 756/535 ms. Ordinary
+adapter handshakes were 282.328-309.567 ms while create RTT was
+125.409-149.171 ms; retained B attached in 27.341 ms. Framed mkdir plus cleanup
+calls accumulated 620.839 ms perRun and 573.598 ms retained, compared with actual
+execute spans totaling 95.777 and 92.556 ms. Store dispatch work outside the
+callback accumulated 1701.894 and 1808.603 ms, or 54.63% and 57.19% of summed
+dispatch spans. These are cumulative operation costs, not disjoint pieces of an
+end-to-end critical path. They identify repeated workspace/control operations,
+Store authority work and SDK subprocess startup as measured optimization
+candidates; this round does not remove obligations or introduce a speculative
+behavioral fix.
+
+Whole-fixture host resource windows include migrations, application startup,
+background services, cache activity and samplers. They are not VM-only cost or
+baseline-subtracted savings. The fixed HugeTLB pool was 1024 MiB. Committed Huge
+memory is `(Total - Free + Rsvd) * pageSize`; same-frame peaks include normal
+non-available memory plus Huge used and reserved commitments. Host non-available
+memory (`MemTotal - MemAvailable`) includes the entire fixed pool, including its
+free pages, and is a separate quantity. Do not add these overlapping quantities.
+
+| Memory / mode | Window, s | Host busy core-s | Normal + Huge used + Rsvd same-frame peak, MiB | Huge commitment start / peak / end, MiB | Host non-available peak, MiB |
+| --- | ---: | ---: | ---: | --- | ---: |
+| 128 / perRun | 30.500 | 60.65 | 3534.313 | 450 / 578 / 450 | 3980.313 |
+| 128 / retained | 30.750 | 52.21 | 3519.457 | 450 / 578 / 450 | 3965.457 |
+| 256 / perRun | 28.500 | 48.07 | 3628.488 | 450 / 706 / 450 | 3946.488 |
+| 256 / retained | 33.500 | 62.20 | 3842.332 | 450 / 706 / 450 | 4160.332 |
+| Original 512 / perRun | 29.250 | 49.31 | 4030.676 | 450 / 962 / 450 | 4092.676 |
+| Original 512 / retained | 31.750 | 52.88 | 4097.867 | 450 / 962 / 450 | 4159.867 |
+
+Each smaller profile reduced the observed incremental Huge commitment to its
+selected size and returned to the 450 MiB background commitment after cleanup.
+Thus 256 versus 512 MiB released 256 MiB of *commitment capacity* in these
+single-environment fixtures. This does not establish a 256 MiB increase in
+ordinary host available RAM: the fixed HugeTLB pool remained reserved. The short
+n=1 windows do not rank CPU efficiency or establish savings from automatic idle
+management, which was not enabled.
+
+Actual device read/write counters below cover those complete host windows.
+Values are MiB. Backing-device and NBD layers overlap and must not be summed;
+they are not snapshot-byte or write-amplification measurements.
+
+| Memory / mode | sdd read / write | Individually observed NBD read / write |
+| --- | --- | --- |
+| 128 / perRun | 276.219 / 62.410 | nbd21 12.199 / 0.102; nbd22 12.723 / 0.066 |
+| 128 / retained | 0.063 / 267.871 | nbd23 12.059 / 0; nbd24 2.891 / 0.063 |
+| 256 / perRun | 0.016 / 61.566 | nbd25 4.969 / 0; nbd26 5.047 / 0.063 |
+| 256 / retained | 0.258 / 367.434 | nbd27 5.457 / 0.066; nbd28 2.801 / 0.039 |
+| Original 512 / perRun | 0 / 63.887 | nbd29 5.004 / 0; nbd30 5.336 / 0.152 |
+| Original 512 / retained | 16.000 / 394.160 | nbd31 6.203 / 0; nbd32 1.441 / 0.906 |
+
+Required lifecycle observation loss/error/invalid counts were zero. Independent
+SDK observations remain explicitly unassigned rather than being guessed onto a
+Run; the execution reports retain 494/481 such records per perRun/retained
+fixture and retained power has 12 independent transport records. SDK request
+records do not supply a comparable clock domain, so they were not subtracted
+across container time namespaces. Firecracker process IO was unavailable and
+CPU counters have exit-sampling gaps; host device counters remain separate.
+
+The product-path result is narrow but current: all three templates support the
+minimal Core lifecycle fixture. This does not override the 128 MiB resident-load
+OOM evidence, certify a larger working set, complete TB2.1, or prove concurrent
+capacity. No API Session concurrency setting was added, the existing idle
+skeleton remains frozen, and retained native obligations stay until the later
+benchmark and cleanup exit conditions are met.
+
+
+## Current publication and validation boundary
+
+The published `a45d5bbb49bf4d139140c3b072e1983896f16b3b` result is not an
+all-green required gate. Its [main CI run](https://github.com/EchoTrigger/centaeris/actions/runs/39941921296)
+failed in the source-layout workspace inventory: the expected Python member
+list omitted the already registered `packages/e2b_adapter`. Product jobs were
+then skipped. Local forward commit `f065ca37` synchronizes that positive
+inventory expectation; the same focused failure was reproduced before the
+change, then source-layout 6, CI-scope 8 and product-registry 4 tests passed.
+The [Performance](https://github.com/EchoTrigger/centaeris/actions/runs/39941921352),
+[Hosted Performance](https://github.com/EchoTrigger/centaeris/actions/runs/39941921306)
+and [macOS Runtime](https://github.com/EchoTrigger/centaeris/actions/runs/39941921308)
+workflows passed on the published revision. Those workflows do not replace the
+skipped required product jobs.
+
+This round made local commits only. Remote CI for these follow-up commits has
+not run, and the earlier native source-gate Rustdoc cache/Node toolchain issues
+are not claimed resolved by the successful product measurements. The current
+Core/SDK lifecycle fixtures, private offline tests, source-layout correction and
+still-pending full release/benchmark acceptance remain distinct evidence.
