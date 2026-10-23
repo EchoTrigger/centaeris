@@ -1,6 +1,7 @@
 """Authenticated, bounded Web delivery adapter for Runtime transcript reads."""
 import asyncio
 import copy
+import hashlib
 import json
 from contextlib import contextmanager
 
@@ -13,11 +14,12 @@ from ninja import Router
 
 from app_core.agent_identity import validate_agent_id
 from app_core.agent_definitions import available_agent_definitions
-from app_core.agent_run_stream import _load_live_text_state_async
+from app_core.agent_run_stream import _load_live_text_state_async, _capture_signal_tail, _redis_stream_client, agent_run_signal_key
 from app_core.app_delegations import session_authority_is_current
 from app_core.models import Agent, AgentRun, Session, SessionEvent
 from app_core.operation_presentation import operation_records, operation_detail
 from app_core.presentation_stream import PresentationScope, PROJECTION_VERSION, stream_presentation
+from app_core.presentation_service import create_presentation_hub
 from app_core.runtime_client import request_transcript_page, request_transcript_patches, request_transcript_content
 from app_core.session_event import committed_session_terminal_state, project_committed_agent_run
 from app_core.workspace_access import workspace_membership_for
@@ -55,6 +57,9 @@ class PresentationLoader:
         self.delegation_id = delegation.id if delegation is not None else None
         self.credential_version = getattr(request, "app_delegation_credential_version", None)
         self.business_branch_id = getattr(request, "business_branch_id", None)
+        session_key = getattr(getattr(request, "session", None), "session_key", None) or ""
+        self.observation_key = (self.user_id, scope, self.delegation_id, self.credential_version,
+                                self.business_branch_id, hashlib.sha256(session_key.encode()).hexdigest())
 
     @stream_database_call
     def authorized(self):
@@ -136,6 +141,15 @@ class PresentationLoader:
                 payload__payload__callId=call_id).order_by("sequence"))[:2]
             return [operation_detail(record) for record in records]
 
+    async def live_signal_tail(self, run_id):
+        async with asyncio.timeout(5):
+            return await _capture_signal_tail(run_id)
+
+    async def wait_live_signal(self, run_id, cursor):
+        async with asyncio.timeout(35):
+            batches = await _redis_stream_client.xread({agent_run_signal_key(run_id): cursor}, count=100, block=30000)
+        return batches[-1][1][-1][0] if batches else cursor
+
     async def live(self, run_id):
         try:
             # Ephemeral Redis loss must never prevent the next authoritative
@@ -171,8 +185,22 @@ async def presentation_events(request, workspace_id: str):
         return JsonResponse({"error": "presentation_authority_unavailable"}, status=503)
     if permitted is not True:
         return JsonResponse({"error": "presentation_scope_not_found"}, status=404)
-    response = OwnedAsyncStreamingHttpResponse(stream_presentation(scope, loader,
-        request.headers.get("Last-Event-ID", ""), read_timeout_seconds=READ_TIMEOUT_SECONDS), content_type="text/event-stream")
+    hub = getattr(request, "scope", {}).get("centaeris.presentationHub")
+    owned_hub = hub is None
+    if owned_hub:
+        hub = create_presentation_hub()
+
+    async def content():
+        try:
+            async with hub.observe(loader.observation_key, scope, loader) as observed:
+                async for frame in stream_presentation(scope, observed,
+                        request.headers.get("Last-Event-ID", ""), read_timeout_seconds=READ_TIMEOUT_SECONDS):
+                    yield frame
+        finally:
+            if owned_hub:
+                await hub.aclose()
+
+    response = OwnedAsyncStreamingHttpResponse(content(), content_type="text/event-stream")
     response["Cache-Control"] = "no-store, no-transform"
     response["X-Accel-Buffering"] = "no"
     return response

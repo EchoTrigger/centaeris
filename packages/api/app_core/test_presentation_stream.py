@@ -38,6 +38,10 @@ class PresentationStreamTests(SimpleTestCase):
         self.loader.content = AsyncMock()
         self.loader.operations = AsyncMock(return_value=[])
         self.loader.live = AsyncMock(return_value=None)
+        self.loader.revisions = AsyncMock(return_value=dict(navigation=0, state=0, context=0, history=0, work=0, authority=0, live=0))
+        async def wait_for_change(_previous):
+            await asyncio.Event().wait()
+        self.loader.wait_for_change = AsyncMock(side_effect=wait_for_change)
 
     async def until(self, source, predicate):
         frames = []
@@ -48,6 +52,42 @@ class PresentationStreamTests(SimpleTestCase):
                 if predicate(data(frame), frame):
                     return frames
         self.fail("expected presentation frame was not emitted")
+
+    async def test_idle_completed_stream_does_not_reload_unchanged_business_data(self):
+        source = stream_presentation(self.scope, self.loader, heartbeat_seconds=.01)
+        async def consume():
+            async for _frame in source:
+                pass
+        task = asyncio.create_task(consume())
+        try:
+            await asyncio.sleep(2.1)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await source.aclose()
+        self.assertEqual(self.loader.navigation.await_count, 1)
+        self.assertEqual(self.loader.state.await_count, 1)
+
+    async def test_view_revision_changes_wake_without_reloading_transcript_or_navigation(self):
+        changed = asyncio.Event()
+        versions = self.loader.revisions.return_value
+        async def wait(_previous):
+            await changed.wait()
+            changed.clear()
+        self.loader.wait_for_change.side_effect = wait
+        source = stream_presentation(self.scope, self.loader)
+        try:
+            initial = await self.until(source, lambda item, _frame: item["kind"] == "viewRevision")
+            self.assertEqual(data(initial[-1])["contextRevision"], "0")
+            versions["context"] = 1
+            changed.set()
+            update = await self.until(source, lambda item, _frame: item["kind"] == "viewRevision")
+            self.assertEqual(data(update[-1])["contextRevision"], "1")
+            self.assertEqual(self.loader.state.await_count, 1)
+            self.assertEqual(self.loader.navigation.await_count, 1)
+            self.assertEqual(self.loader.page.await_count, 1)
+        finally:
+            await source.aclose()
 
     async def test_initial_tail_and_terminal_checkpoint_share_one_stream(self):
         source = stream_presentation(self.scope, self.loader)
@@ -327,7 +367,15 @@ class PresentationRouteContractTests(SimpleTestCase):
         def authenticate(_auth, request, _key):
             request.user = SimpleNamespace(id=1, is_authenticated=True)
             return request.user
+        from .presentation_observer import PresentationObserverHub
+        from .presentation_notifications import PresentationHint
+        async def hints(ready):
+            ready.set()
+            await asyncio.Event().wait()
+            yield PresentationHint(None, True)
+        hub = PresentationObserverHub(AsyncMock(return_value=dict(navigation=0, state=0, context=0, history=0, work=0, authority=0)), hints, lambda _: ())
         with patch.object(ProductSessionAuth, "authenticate", authenticate), \
+                patch("app_core.http.presentation.create_presentation_hub", return_value=hub), \
                 patch.object(PresentationLoader, "authorized", AsyncMock(return_value=True)), \
                 patch.object(PresentationLoader, "navigation", fixture.loader.navigation), \
                 patch.object(PresentationLoader, "state", fixture.loader.state), \

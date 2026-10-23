@@ -137,7 +137,7 @@ async def _tail_read(loader, water, timeout):
     return await _projection_read(read, timeout)
 
 
-async def _produce(scope, loader, cursor, read_timeout, poll_seconds):
+async def _produce(scope, loader, cursor, read_timeout):
     generation = None
     water = "0"
     needs_snapshot = scope.session_id is not None
@@ -153,7 +153,8 @@ async def _produce(scope, loader, cursor, read_timeout, poll_seconds):
     navigation = None
     last_state = None
     last_live = object()
-    next_metadata = next_navigation = 0.0
+    last_versions = None
+    last_view_revision = None
     sent_references = set()
     sent_operations = set()
 
@@ -202,15 +203,14 @@ async def _produce(scope, loader, cursor, read_timeout, poll_seconds):
             sent_references.add(identity)
 
     while True:
-        now = time.monotonic()
-        if now >= next_navigation:
+        versions = await _bounded(loader.revisions(), read_timeout)
+        if last_versions is None or versions["navigation"] != last_versions["navigation"]:
             current = await _bounded(loader.navigation(), read_timeout)
             if current != navigation:
                 for frame in _navigation_frames(scope, current):
                     yield frame
                 navigation = current
-            next_navigation = now + 2.0
-        if scope.session_id is not None and now >= next_metadata:
+        if scope.session_id is not None and (last_versions is None or versions["state"] != last_versions["state"]):
             state = await _bounded(loader.state(), read_timeout)
             target = state["sourceHighWater"]
             if not _water(target):
@@ -264,24 +264,28 @@ async def _produce(scope, loader, cursor, read_timeout, poll_seconds):
                                   projectionGeneration=generation, sourceHighWater=water, agentRun=state["agentRun"])
                     needs_snapshot = False
                 last_state = state
-            next_metadata = now + 1.0
         run = last_state["agentRun"] if last_state is not None else None
         if run is not None and run["status"] in {"queued", "running"}:
             live = await _bounded(loader.live(run["agentRunId"]), read_timeout)
             if live != last_live:
                 yield _encode(scope, "live", agentRunId=run["agentRunId"], live=live)
                 last_live = live
-        await asyncio.sleep(poll_seconds)
+        view_revision = {f"{kind}Revision": str(versions[kind]) for kind in ("context", "history", "work")}
+        if view_revision != last_view_revision:
+            yield _encode(scope, "viewRevision", **view_revision)
+            last_view_revision = view_revision
+        last_versions = versions
+        await loader.wait_for_change(versions)
 
 
 async def stream_presentation(scope, loader, cursor="", *, heartbeat_seconds=2.0,
-                              authority_seconds=5.0, read_timeout_seconds=5.0, poll_seconds=.25):
+                              authority_seconds=5.0, read_timeout_seconds=5.0):
     """One pending frame gives natural backpressure; disconnect cancels only reads.
 
     The outer owner checks authority and sends heartbeat comments independently
     of producer waits. Every producer operation also has a finite deadline.
     """
-    producer = _produce(scope, loader, cursor, read_timeout_seconds, poll_seconds)
+    producer = _produce(scope, loader, cursor, read_timeout_seconds)
     pending = None
     next_authority = 0.0
     try:
