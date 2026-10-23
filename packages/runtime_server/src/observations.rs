@@ -419,6 +419,10 @@ fn capture_protection_records<T>(operation: impl FnOnce() -> T) -> (T, Protectio
 }
 
 thread_local! { static JOB: RefCell<Option<String>> = const { RefCell::new(None) }; }
+#[cfg(test)]
+type TimingLog = std::rc::Rc<RefCell<Vec<serde_json::Value>>>;
+#[cfg(test)]
+thread_local! { static TIMING_LOG: RefCell<Option<(bool, TimingLog)>> = const { RefCell::new(None) }; }
 static IN_FLIGHT: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
 const LANES: [&str; 3] = ["ordinary", "control", "listener"];
 
@@ -446,6 +450,11 @@ impl Drop for Span {
 }
 
 pub fn enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = TIMING_LOG.with(|log| log.borrow().as_ref().map(|(enabled, _)| *enabled))
+    {
+        return enabled;
+    }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("WORKSPACE_PERF_OBSERVATIONS").as_deref() == Ok("1"))
 }
@@ -466,11 +475,57 @@ fn emit(mut event: serde_json::Value) {
             event["jobId"] = job.clone().into();
         }
     });
+    #[cfg(test)]
+    if TIMING_LOG.with(|log| {
+        if let Some((_, log)) = log.borrow().as_ref() {
+            log.borrow_mut().push(event.clone());
+            true
+        } else {
+            false
+        }
+    }) {
+        return;
+    }
     let _ = writeln!(std::io::stderr().lock(), "{event}");
 }
 
+#[cfg(test)]
+pub(crate) fn capture_timings<T>(
+    enabled: bool,
+    operation: impl FnOnce() -> T,
+) -> (T, Vec<serde_json::Value>) {
+    let log = std::rc::Rc::new(RefCell::new(Vec::new()));
+    struct Reset(Option<(bool, TimingLog)>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TIMING_LOG.with(|log| log.replace(self.0.take()));
+        }
+    }
+    let _reset = Reset(TIMING_LOG.with(|current| current.replace(Some((enabled, log.clone())))));
+    let result = operation();
+    let records = std::mem::take(&mut *log.borrow_mut());
+    (result, records)
+}
+
 pub struct Context(Option<String>);
+/// A safe identity already admitted by Context, owned by one adapter instance.
+pub(crate) struct ContextSnapshot(Option<String>);
 impl Context {
+    pub(crate) fn snapshot() -> ContextSnapshot {
+        ContextSnapshot(JOB.with(|job| job.borrow().clone()))
+    }
+
+    pub(crate) fn enter_if_absent(snapshot: &ContextSnapshot) -> Self {
+        Self(JOB.with(|job| {
+            let mut current = job.borrow_mut();
+            let previous = current.clone();
+            if current.is_none() {
+                *current = snapshot.0.clone();
+            }
+            previous
+        }))
+    }
+
     pub fn enter(body: &[u8]) -> Self {
         let identity = if enabled() {
             serde_json::from_slice::<serde_json::Value>(body)

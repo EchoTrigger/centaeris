@@ -13,7 +13,7 @@ from django.test import LiveServerTestCase, SimpleTestCase, override_settings
 
 from . import test_e2b_retained_consumption as retained_fixture
 from .e2b_power_timing_test_support import (PowerTimingCollector, PowerTimingMultiplexer,
-    require_power_timing_coverage)
+    require_power_timing_coverage, first_successful_read_timing)
 
 
 def power_acceptance_enabled(environment):
@@ -329,7 +329,8 @@ if power_acceptance_enabled(os.environ):
                     self.assertIsNotNone(first_tool)
                     self.assertEqual(first_tool.payload["payload"]["toolName"], "read")
                     first_tool_clock = {"eventId": first_tool.eventId,
-                        "createdAtUnixMs": first_tool.createdAtMs, "source": "coreEventClock"}
+                        "createdAtUnixMs": first_tool.createdAtMs, "source": "coreEventClock",
+                        "timing": first_successful_read_timing(first_tool.payload, first_tool.createdAtMs)}
                     # Historical ACK replay must not issue another pause or erase
                     # the resumed environment. The original ACK time is stable.
                     self.power_observations.bind_replay(pause["operationId"])

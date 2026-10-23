@@ -27,6 +27,24 @@ _COUNTERS = ("rejectedRecords", "foreignRecords", "malformedRecords", "oversized
              "droppedRecords", "droppedBindings", "droppedInvocations")
 
 
+def first_successful_read_timing(event, created_at_ms):
+    """Existing Core tool duration; no cross-process clock subtraction or body IO."""
+    unavailable = {"status": "unavailable", "latencyMs": None, "resumeClockCorrelation": "notCorrelated"}
+    if (type(event) is not dict or event.get("type") != "tool_result"
+            or type(created_at_ms) is not int or not 0 <= created_at_ms <= _MAX_U64):
+        return unavailable
+    result = event.get("payload")
+    if (type(result) is not dict or result.get("toolName") != "read"
+            or result.get("resultState") not in ("successWithOutput", "successNoOutput")
+            or not _identity(result.get("callId"))
+            or type(result.get("latencyMs")) is not int or not 0 <= result["latencyMs"] <= _MAX_U64):
+        return unavailable
+    return {"status": "observed", "callId": result["callId"], "toolName": "read",
+        "resultState": result["resultState"], "latencyMs": result["latencyMs"],
+        "completedAtUnixMs": created_at_ms, "clockSource": "coreEventClock",
+        "resumeClockCorrelation": "notCorrelated"}
+
+
 def _identity(value):
     return isinstance(value, str) and _IDENTITY.fullmatch(value) is not None
 

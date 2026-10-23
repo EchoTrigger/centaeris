@@ -67,6 +67,7 @@ pub struct AdapterProcess {
     child: Mutex<Child>,
     streams: Mutex<Streams>,
     closed: AtomicBool,
+    observation_context: crate::observations::ContextSnapshot,
 }
 
 impl AdapterProcess {
@@ -162,10 +163,33 @@ impl AdapterProcess {
                 responses,
             }),
             closed: AtomicBool::new(false),
+            observation_context: crate::observations::Context::snapshot(),
         })
     }
 
     pub fn call(
+        &self,
+        request_id: &str,
+        operation: &str,
+        payload: Value,
+        timeout: Duration,
+    ) -> Result<AdapterResponse, AdapterFailure> {
+        let _context = crate::observations::Context::enter_if_absent(&self.observation_context);
+        let mut span = if crate::observations::enabled() {
+            adapter_call_phase(operation).map(crate::observations::Span::new)
+        } else {
+            None
+        };
+        let response = self.call_inner(request_id, operation, payload, timeout);
+        if let Some(span) = &mut span {
+            span.finished(
+                matches!(&response, Ok(value) if value.outcome == AdapterOutcome::Succeeded),
+            );
+        }
+        response
+    }
+
+    fn call_inner(
         &self,
         request_id: &str,
         operation: &str,
@@ -298,6 +322,32 @@ impl Drop for AdapterProcess {
     fn drop(&mut self) {
         self.close();
     }
+}
+
+// Labels are closed host contracts. Never copy arbitrary operation names,
+// request IDs, payloads or SDK diagnostics into observations. These durations
+// cover the adapter transport call, including local rejection; they do not
+// isolate provider HTTP or SDK execution time.
+fn adapter_call_phase(operation: &str) -> Option<&'static str> {
+    Some(match operation {
+        "capabilities" => "e2bAdapterCallCapabilities",
+        "create" => "e2bAdapterCallCreate",
+        "attach" => "e2bAdapterCallAttach",
+        "inspect" => "e2bAdapterCallInspect",
+        "kill" => "e2bAdapterCallKill",
+        "pause" => "e2bAdapterCallPause",
+        "connect" => "e2bAdapterCallConnect",
+        "readFile" => "e2bAdapterCallReadFile",
+        "writeFile" => "e2bAdapterCallWriteFile",
+        "uploadFile" => "e2bAdapterCallUploadFile",
+        "downloadFile" => "e2bAdapterCallDownloadFile",
+        "runCommand" => "e2bAdapterCallRunCommand",
+        "waitCommand" => "e2bAdapterCallWaitCommand",
+        "recoverCommand" => "e2bAdapterCallRecoverCommand",
+        "cancelCommand" => "e2bAdapterCallCancelCommand",
+        "invokeControlHelper" => "e2bAdapterCallInvokeControlHelper",
+        _ => return None,
+    })
 }
 
 fn valid_text(value: &str, maximum: usize) -> bool {

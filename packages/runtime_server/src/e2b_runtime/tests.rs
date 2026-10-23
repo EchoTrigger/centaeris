@@ -217,3 +217,134 @@ fn configuration_accepts_explicit_retained_without_reinterpreting_per_run() {
         "existing profile policy must not be reinterpreted"
     );
 }
+
+#[test]
+fn adapter_transport_timings_measure_each_launch_and_validated_handshake_without_retry() {
+    use crate::observations::{capture_timings, Context};
+    let (root, _, package) = paths();
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let python = std::env::var_os("E2B_ADAPTER_TEST_PYTHON")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            repo.join(if cfg!(windows) {
+                ".venv/Scripts/python.exe"
+            } else {
+                ".venv/bin/python"
+            })
+        });
+    fs::write(package.join("centaeris_e2b_adapter/__main__.py"), r#"import json,pathlib,sys
+lane=sys.argv[-1]
+for line in sys.stdin:
+ request=json.loads(line)
+ with pathlib.Path(__file__).with_name('requests').open('a') as count:
+  count.write(request['operation']+'\n')
+ result={"sdkVersion":"2.58.0","lane":lane,"createIdempotencyConfigured":False,"readOnlyAttach":True,
+ "commandStartIdempotency":False,"runProcessTreeCancellation":False,"controlCommandCancellation":False,
+ "commandOutputBytes":True,"commandOutputRestartRecovery":False,"commandOutputRecovery":"adapterLifetime",
+ "waitBudgetMustCoverOriginalStream":True,"maxCommandEvidence":128,
+ "fixedControlHelpers":["agent-process-state","prepare-workspace","quiesce-agent-processes"] if lane=='control' else [],
+ "bulkFileTransfer":True,"maxTransferBytes":134217728,"transferChunkBytes":65536,"storageQuota":False,
+ "fullMemoryPauseVerified":False,"maxFileBytes":262144,"maxOutputBytes":65536}
+ print(json.dumps({"schema":"runtime.e2b.adapter.response.v1","requestId":request["requestId"],"outcome":"succeeded","result":result}),flush=True)
+"#).unwrap();
+    let config = E2bRuntimeConfig::new(
+        profile(),
+        configured_digest(),
+        python.canonicalize().unwrap(),
+        package.clone(),
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    for (lane, spawn_phase, handshake_phase) in [
+        (
+            E2bAdapterLane::Ordinary,
+            "e2bAdapterSpawnOrdinary",
+            "e2bAdapterHandshakeOrdinary",
+        ),
+        (
+            E2bAdapterLane::Control,
+            "e2bAdapterSpawnControl",
+            "e2bAdapterHandshakeControl",
+        ),
+        (
+            E2bAdapterLane::Cleanup,
+            "e2bAdapterSpawnCleanup",
+            "e2bAdapterHandshakeCleanup",
+        ),
+    ] {
+        let (_, records) = capture_timings(true, || {
+            let _context = Context::enter(br#"{"jobId":"agent_run.lifecycle:handshake"}"#);
+            let process = InstalledAdapterLauncher.launch(&config, lane).unwrap();
+            require_capabilities(&process, lane, Duration::from_secs(10)).unwrap();
+            let wrong_lane = if lane == E2bAdapterLane::Control {
+                E2bAdapterLane::Ordinary
+            } else {
+                E2bAdapterLane::Control
+            };
+            assert_eq!(
+                require_capabilities(&process, wrong_lane, Duration::from_secs(10)),
+                Err(E2bRuntimeError::Rejected(
+                    "e2b_runtime_capabilities_unsupported"
+                ))
+            );
+            process.close().unwrap();
+        });
+        assert_eq!(records.len(), 5);
+        assert_eq!(records[0]["phase"], spawn_phase);
+        assert_eq!(records[0]["outcome"], "ok");
+        assert_eq!(records[1]["phase"], "e2bAdapterCallCapabilities");
+        assert_eq!(records[2]["phase"], handshake_phase);
+        assert_eq!(records[2]["outcome"], "ok");
+        assert_eq!(records[3]["phase"], "e2bAdapterCallCapabilities");
+        assert_eq!(
+            records[3]["outcome"], "ok",
+            "transport success is independent of contract validation"
+        );
+        assert_eq!(records[4]["outcome"], "error");
+        for record in records {
+            assert_eq!(record["jobId"], "agent_run.lifecycle:handshake");
+            assert!(record["elapsedMs"].as_f64().unwrap() >= 0.0);
+        }
+    }
+    assert_eq!(
+        fs::read_to_string(package.join("centaeris_e2b_adapter/requests"))
+            .unwrap()
+            .lines()
+            .count(),
+        6
+    );
+    drop(root);
+}
+
+#[test]
+fn adapter_transport_timings_preserve_failed_spawn_and_disabled_observation() {
+    use crate::observations::capture_timings;
+    let (_root, python, package) = paths();
+    let config = E2bRuntimeConfig::new(
+        profile(),
+        configured_digest(),
+        python,
+        package,
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    for enabled in [false, true] {
+        let (result, records) = capture_timings(enabled, || {
+            InstalledAdapterLauncher.launch(&config, E2bAdapterLane::Ordinary)
+        });
+        assert!(matches!(
+            result,
+            Err(E2bRuntimeError::Unavailable(
+                "e2b_runtime_adapter_unavailable"
+            ))
+        ));
+        if enabled {
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0]["phase"], "e2bAdapterSpawnOrdinary");
+            assert_eq!(records[0]["outcome"], "error");
+            assert!(records[0].get("jobId").is_none());
+        } else {
+            assert!(records.is_empty());
+        }
+    }
+}

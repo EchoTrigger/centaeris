@@ -4,7 +4,7 @@ import math
 from django.test import SimpleTestCase
 
 from .e2b_power_timing_test_support import (PowerTimingCollector, PowerTimingMultiplexer,
-    require_power_timing_coverage)
+    require_power_timing_coverage, first_successful_read_timing)
 from .e2b_workspace_test_support import WorkspaceObservationCollector
 
 RUNTIME = ("storePrepareElapsedMs", "storeDispatchCasElapsedMs", "storeSideEffectPinsElapsedMs",
@@ -182,3 +182,34 @@ class PowerTimingCollectorTests(SimpleTestCase):
         self.assertEqual(self.report(combined), self.report(reference))
         self.assertEqual(self.report(power)["oversizedLines"], 1)
         self.assertEqual(len(self.report(power)["operations"][0]["invocations"][0]["records"]), 1)
+
+
+class FirstSuccessfulReadTimingTests(SimpleTestCase):
+    def result(self, **changes):
+        return {"type": "tool_result", "payload": {"callId": "e2b-1-0", "toolName": "read",
+            "resultState": "successWithOutput", "latencyMs": 37, "output": "private-file-body", **changes}}
+
+    def test_reports_only_existing_success_duration_and_keeps_clocks_uncorrelated(self):
+        observed = first_successful_read_timing(self.result(), 1234)
+        self.assertEqual(observed, {"status": "observed", "callId": "e2b-1-0", "toolName": "read",
+            "resultState": "successWithOutput", "latencyMs": 37, "completedAtUnixMs": 1234,
+            "clockSource": "coreEventClock", "resumeClockCorrelation": "notCorrelated"})
+        self.assertNotIn("private-file-body", json.dumps(observed))
+
+    def test_missing_invalid_or_failed_results_are_unknown_instead_of_zero(self):
+        cases = (None, {}, {"type": "tool_call", "payload": self.result()["payload"]},
+            self.result(toolName="bash"), self.result(resultState="error"), self.result(latencyMs=True),
+            self.result(latencyMs=-1), self.result(latencyMs=1.5), self.result(latencyMs=2**64),
+            self.result(callId="private/path"))
+        for value in cases:
+            with self.subTest(value=value):
+                self.assertEqual(first_successful_read_timing(value, 1234), {"status": "unavailable",
+                    "latencyMs": None, "resumeClockCorrelation": "notCorrelated"})
+        missing = self.result(); del missing["payload"]["latencyMs"]
+        self.assertEqual(first_successful_read_timing(missing, 1234)["status"], "unavailable")
+
+    def test_observed_zero_is_valid_but_invalid_core_event_time_is_unavailable(self):
+        self.assertEqual(first_successful_read_timing(self.result(latencyMs=0), 0)["latencyMs"], 0)
+        for value in (None, True, -1, 1.0, 2**64):
+            with self.subTest(value=value):
+                self.assertEqual(first_successful_read_timing(self.result(), value)["status"], "unavailable")

@@ -118,6 +118,15 @@ impl InstalledAdapterLauncher {
         lane: E2bAdapterLane,
         observation: Option<crate::observations::power::PowerObservation>,
     ) -> Result<Arc<SpoolingAdapterProcess>, E2bRuntimeError> {
+        // Launch readiness is measured separately by require_capabilities.
+        // This span includes private spool and host IO-thread setup.
+        let mut span = crate::observations::enabled().then(|| {
+            crate::observations::Span::new(match lane {
+                E2bAdapterLane::Ordinary => "e2bAdapterSpawnOrdinary",
+                E2bAdapterLane::Control => "e2bAdapterSpawnControl",
+                E2bAdapterLane::Cleanup => "e2bAdapterSpawnCleanup",
+            })
+        });
         // The program is fixed; the trusted package root is a separate argv
         // value, never interpolated into Python or a shell command. -I removes
         // ambient Python search paths and the process working directory.
@@ -132,9 +141,13 @@ impl InstalledAdapterLauncher {
             Some(observation) => SpoolingAdapterProcess::spawn_observed(command, observation),
             None => SpoolingAdapterProcess::spawn(command),
         };
-        process
+        let result = process
             .map(Arc::new)
-            .map_err(|_| E2bRuntimeError::Unavailable("e2b_runtime_adapter_unavailable"))
+            .map_err(|_| E2bRuntimeError::Unavailable("e2b_runtime_adapter_unavailable"));
+        if let Some(span) = &mut span {
+            span.finished(result.is_ok());
+        }
+        result
     }
 }
 
@@ -679,6 +692,25 @@ struct AdapterCapabilities {
 }
 
 fn require_capabilities(
+    process: &SpoolingAdapterProcess,
+    lane: E2bAdapterLane,
+    timeout: Duration,
+) -> Result<(), E2bRuntimeError> {
+    let mut span = crate::observations::enabled().then(|| {
+        crate::observations::Span::new(match lane {
+            E2bAdapterLane::Ordinary => "e2bAdapterHandshakeOrdinary",
+            E2bAdapterLane::Control => "e2bAdapterHandshakeControl",
+            E2bAdapterLane::Cleanup => "e2bAdapterHandshakeCleanup",
+        })
+    });
+    let result = require_capabilities_inner(process, lane, timeout);
+    if let Some(span) = &mut span {
+        span.finished(result.is_ok());
+    }
+    result
+}
+
+fn require_capabilities_inner(
     process: &SpoolingAdapterProcess,
     lane: E2bAdapterLane,
     timeout: Duration,

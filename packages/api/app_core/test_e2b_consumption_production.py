@@ -29,7 +29,7 @@ from django.db import connection
 from django.test import LiveServerTestCase, SimpleTestCase, override_settings
 
 from . import test_native_consumption_production as native_fixture
-from .e2b_lifecycle_timing_test_support import LifecycleCallCollector
+from .e2b_lifecycle_timing_test_support import LifecycleCallCollector, feed_runtime_line
 from .e2b_workspace_test_support import collect_runtime_output, workspace_observation_collector
 from .e2b_workspace_trace_test_support import expected_manifest, fixed_trace_case, trace_steps, trace_workload_report
 from .model_adapter.common import fake_tool_call, zero_usage
@@ -449,6 +449,7 @@ if os.environ.get('CENTAERIS_E2B_PRODUCT_ACCEPTANCE') == '1':
             self.addCleanup(self.stop_runtime)
             def collect():
                 def on_line(line):
+                    feed_runtime_line(getattr(self, "lifecycle_calls", None), line)
                     self.runtime_lines.append(line)
                     if line.startswith(READY):
                         self.runtime_markers.put(line.rstrip())
@@ -535,6 +536,8 @@ if os.environ.get('CENTAERIS_E2B_PRODUCT_ACCEPTANCE') == '1':
             body = response.json()
             self.assertEqual(body.get('status'), 'accepted')
             self.runs.append(body['agentRunId'])
+            if self.lifecycle_calls is not None:
+                self.lifecycle_calls.bind_run(body['agentRunId'])
             if self.workspace_observations is not None:
                 self.workspace_observations.bind(body['agentRunId'], 'agent_run.lifecycle:' + body['agentRunId'])
             return AgentRun.objects.get(pk=body['agentRunId'])
