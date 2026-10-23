@@ -1,0 +1,377 @@
+[
+  {
+    "name": "canonical_known",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "canonical_unknown",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"unknown\",\"reason\":\"generation observation unavailable\"},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "canonical_empty",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":null,\"snapshotSha256\":\"\",\"snapshotSizeBytes\":0,\"expandedSizeBytes\":0,\"fileCount\":0},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "empty_optional_object_ref_omitted",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"snapshotSha256\":\"\",\"snapshotSizeBytes\":0,\"expandedSizeBytes\":0,\"fileCount\":0},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "canonical_unsigned_and_timestamp_maxima",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":18446744073709551615,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":18446744073709551615,\"expandedSizeBytes\":18446744073709551615,\"fileCount\":4294967295},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\",\"generation\":18446744073709551615}},\"createdAtMs\":9223372036854775807}",
+    "expectedValid": true
+  },
+  {
+    "name": "valid_identity_internal_punctuation",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution/path\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "valid_unknown_reason_outer_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"unknown\",\"reason\":\" unavailable \"},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "missing_executionId",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "missing_workspaceGeneration",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "missing_createdAtMs",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}}}",
+    "expectedValid": false
+  },
+  {
+    "name": "unknown_top_level_field",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1,\"unexpected\":true}",
+    "expectedValid": false
+  },
+  {
+    "name": "unknown_snapshot_field",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1,\"unexpected\":true},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "unknown_generation_field",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0},\"unexpected\":true},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "unknown_generation_token_field",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0,\"unexpected\":true}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "zero_session_sequence",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":0,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "overflow_session_sequence",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":18446744073709551616,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "negative_timestamp",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":-1}",
+    "expectedValid": false
+  },
+  {
+    "name": "overflow_timestamp",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":9223372036854775808}",
+    "expectedValid": false
+  },
+  {
+    "name": "boolean_timestamp",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":true}",
+    "expectedValid": false
+  },
+  {
+    "name": "float_session_sequence",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1.0,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "blank_execution_identity",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "outer_whitespace_model_request",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\" request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "negative_generation",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":-1}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "overflow_generation",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":18446744073709551616}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "boolean_generation",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":true}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "empty_generation_epoch",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "overlong_utf8_generation_epoch",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "control_generation_epoch",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"host\\u0000epoch\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "unsupported_generation_status",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"unsupported\"},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "empty_unknown_generation_reason",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"unknown\",\"reason\":\" \\n\"},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "missing_known_generation_token",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\"},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "blank_nonempty_object_ref",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "overflow_snapshot_size",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":18446744073709551616,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "overflow_expanded_size",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":18446744073709551616,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "overflow_file_count",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":4294967296},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "float_snapshot_size",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128.0,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "zero_nonempty_file_count",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":0},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "uppercase_snapshot_digest",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "empty_snapshot_blank_ref_is_not_null",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"\",\"snapshotSha256\":\"\",\"snapshotSizeBytes\":0,\"expandedSizeBytes\":0,\"fileCount\":0},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "missing_snapshot_digest",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "duplicate_top_level_field",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1,\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "duplicate_snapshot_field",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "duplicate_generation_field",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0,\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "nonfinite_timestamp",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":NaN}",
+    "expectedValid": false
+  },
+  {
+    "name": "invalid_json",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1",
+    "expectedValid": false
+  },
+  {
+    "name": "executionId_u001c_prefix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"\\u001cidentity\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "executionId_u001c_suffix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"identity\\u001c\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "modelRequestId_u001c_prefix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"\\u001cidentity\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "modelRequestId_u001c_suffix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"identity\\u001c\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "unknown_reason_u001c_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"unknown\",\"reason\":\"\\u001c\"},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "executionId_u001d_prefix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"\\u001didentity\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "executionId_u001d_suffix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"identity\\u001d\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "modelRequestId_u001d_prefix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"\\u001didentity\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "modelRequestId_u001d_suffix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"identity\\u001d\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "unknown_reason_u001d_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"unknown\",\"reason\":\"\\u001d\"},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "executionId_u001e_prefix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"\\u001eidentity\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "executionId_u001e_suffix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"identity\\u001e\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "modelRequestId_u001e_prefix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"\\u001eidentity\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "modelRequestId_u001e_suffix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"identity\\u001e\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "unknown_reason_u001e_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"unknown\",\"reason\":\"\\u001e\"},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "executionId_u001f_prefix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"\\u001fidentity\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "executionId_u001f_suffix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"identity\\u001f\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "modelRequestId_u001f_prefix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"\\u001fidentity\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "modelRequestId_u001f_suffix_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"identity\\u001f\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "unknown_reason_u001f_is_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"unknown\",\"reason\":\"\\u001f\"},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "unknown_reason_information_separators_are_not_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"unknown\",\"reason\":\"\\u001c\\u001d\\u001e\\u001f\"},\"createdAtMs\":1}",
+    "expectedValid": true
+  },
+  {
+    "name": "executionId_space_prefix_is_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\" identity\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "modelRequestId_space_suffix_is_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"identity \",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "unknown_reason_only_space_is_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"unknown\",\"reason\":\" \"},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "executionId_next_line_prefix_is_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"identity\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "modelRequestId_next_line_suffix_is_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"identity\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "unknown_reason_only_next_line_is_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"unknown\",\"reason\":\"\"},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "executionId_em_space_prefix_is_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\" identity\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "modelRequestId_em_space_suffix_is_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"identity \",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"known\",\"token\":{\"instanceEpoch\":\"fixture-host\",\"generation\":0}},\"createdAtMs\":1}",
+    "expectedValid": false
+  },
+  {
+    "name": "unknown_reason_only_em_space_is_rust_whitespace",
+    "serialized": "{\"schema\":\"runtime.recovery_checkpoint.v1\",\"checkpointId\":\"recovery-checkpoint\",\"sessionId\":\"session-owned\",\"agentRunId\":\"run-owned\",\"executionId\":\"execution-owned\",\"authorizationDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sessionSequence\":1,\"modelRequestId\":\"model-request\",\"workspaceSnapshot\":{\"objectRef\":\"workspaces/workspace/sessions/session-owned/agent-runs/run-owned/execution-checkpoints/key/snapshot\",\"snapshotSha256\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"snapshotSizeBytes\":128,\"expandedSizeBytes\":12,\"fileCount\":1},\"workspaceGeneration\":{\"status\":\"unknown\",\"reason\":\" \"},\"createdAtMs\":1}",
+    "expectedValid": false
+  }
+]
