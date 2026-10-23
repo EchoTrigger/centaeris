@@ -38,6 +38,10 @@ class ScopeTests(unittest.TestCase):
         ui = select_products(["packages/ui/src/components/chat/messageScroll.ts"])
         self.assertTrue(ui["localNode"] and ui["web"])
 
+    def test_visualization_changes_run_the_current_desktop_consumer(self):
+        selected = select_products(["packages/visualization-react/src/Renderer.tsx"])
+        self.assertEqual({key for key, value in selected.items() if value}, {"localNode"})
+
     def test_documentation_can_return_a_result_without_product_builds(self):
         self.assertFalse(any(select_products(["docs/workspace/Product.md"]).values()))
 

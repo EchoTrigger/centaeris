@@ -5,7 +5,7 @@ import {AgentResultStream} from "../src/components/chat/AgentResultStream";
 import {useChatViewStore} from "../src/components/chat/chatViewStore";
 import type {AssistantExecutionTurn} from "../src/components/chat/types";
 const read=vi.hoisted(()=>vi.fn());
-vi.mock("../src/components/chat/transcriptContentRanges",()=>({loadTranscriptContentRange:read}));
+vi.mock("../src/components/chat/transcriptContentRanges",()=>({loadTranscriptContentRange:read,readCachedTranscriptContent:()=>null}));
 globalThis.IS_REACT_ACT_ENVIRONMENT=true;
 let renderer:ReactTestRenderer;
 beforeEach(()=>{useChatViewStore.getState().clear();read.mockReset();});

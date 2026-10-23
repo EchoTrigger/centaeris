@@ -1,14 +1,18 @@
-import { querySessionCatalog } from "./lib/chatBridge";
+import { DesktopShell } from "./components/DesktopShell";
 import { ChatActionsMenu } from "./components/ChatActionsMenu";
-import { SettingsPage } from "./components/SettingsPage";
+import { DropdownMenuItem } from "./components/ui/dropdown-menu";
+import { SettingsNavigation, SettingsPage, type SettingsSection } from "./components/SettingsPage";
 import { ApplicationBar } from "./components/ApplicationBar";
 import { SchedulesPage } from "./components/SchedulesPage";
 import { useAppNavigation, type AppPage } from "./components/app/useAppNavigation";
 import { listenHost } from "./host/hostBridge";
-import { ThemeToggle } from "./components/ThemeToggle";
 import { t } from "./i18n";
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import { PanelRight, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { PanelRight, X, Settings2, LoaderCircle, Folder } from "lucide-react";
+import { Button } from "./components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "./components/ui/dialog";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
+import "./styles/desktop-shell.css";
 import { Sidebar, type ResourceModalKind } from "./components/Sidebar";
 import { ChatArea } from "./components/chat/ChatArea";
 import { PluginsDialog } from "./components/PluginsDialog";
@@ -20,7 +24,7 @@ import {
   type ConfirmAction,
 } from "./components/ConfirmDialog";
 import { WorkspaceOverview } from "./components/WorkspaceOverview";
-import { WorkspaceSplitHandle } from "./components/WorkspaceSplitHandle";
+import { WorkspaceLayout } from "./components/WorkspaceLayout";
 import { SummaryPanel } from "./components/SummaryPanel";
 import { useSessionController } from "./components/app/useSessionController";
 import { useWorkspaceController } from "./components/app/useWorkspaceController";
@@ -31,7 +35,6 @@ import {
 } from "./lib/chatBridge";
 import {
   getWorkspaceInfo,
-  type WorkspaceSnapshot,
 } from "./lib/workspaceBridge";
 
 type AppModal = ResourceModalKind | null;
@@ -53,8 +56,10 @@ const errorMessage = (error: unknown, fallback: string): string =>
 
 function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [workspacePanelRatio, setWorkspacePanelRatio] = useState(0.5);
+  const [newChatRevision, setNewChatRevision] = useState(0);
   const [page, setPage] = useState<AppPage>("chat");
+  const [composerResource, setComposerResource] = useState<ResourceModalKind | null>(null);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("appearance");
   const [pluginId, setPluginId] = useState("");
   const [resourceTab, setResourceTab] = useState<"plugins" | "skills">("plugins");
   const [workspaceBootstrapPending, setWorkspaceBootstrapPending] = useState(true);
@@ -108,6 +113,7 @@ function App() {
   } = workspaceController.actions;
   const sessionController = useSessionController({
     activeWorkspaceRoot,
+    isChatVisible: page === "chat",
     reportError: setHostError,
   });
   const {
@@ -117,6 +123,7 @@ function App() {
     mainSessions,
     runningSessionIds,
     completedSessionIds,
+    waitingSessionIds,
   } = sessionController;
   const {
     beginInitialization: beginSessionInitialization,
@@ -129,6 +136,7 @@ function App() {
     resolveSession,
     selectSession,
     setRunning,
+    setWaiting,
   } = sessionController.actions;
   const workspacePanel = useWorkspacePanelController({
     workspaceRoot: activeWorkspaceRoot,
@@ -159,26 +167,10 @@ function App() {
     void Promise.allSettled([
       workspaceRequest,
       sessionInitialization.load(),
-    ]).then(async ([workspaceResult, sessionResult]) => {
+    ]).then(([, sessionResult]) => {
       if (cancelled) return;
-      let snapshot: WorkspaceSnapshot = {
-        activeWorkspaceRoot: null,
-        workspaces: [],
-        cancelled: false,
-      };
-      if (workspaceResult.status === "fulfilled") {
-        snapshot = workspaceResult.value;
-      }
       if (sessionResult.status === "fulfilled") {
-        const preferredId = snapshot.workspaces.find(
-          (workspace) => normalizeRoot(workspace.root) === normalizeRoot(snapshot.activeWorkspaceRoot),
-        )?.activeSessionId;
-        const items = sessionResult.value;
-        if (preferredId && !items.some(item => item.id === preferredId)) {
-          try { items.push(...(await querySessionCatalog({mode:"lookup",sessionId:preferredId})).items); }
-          catch (error) { if (!cancelled) setHostError(errorMessage(error, t("app.unableToLoadConversations"))); }
-        }
-        if (!cancelled) sessionInitialization.applySessions(items, preferredId);
+        sessionInitialization.applySessions(sessionResult.value);
       } else if (sessionInitialization.isCurrent()) {
         setHostError(errorMessage(sessionResult.reason, t("app.unableToLoadConversations")));
       }
@@ -255,13 +247,14 @@ function App() {
     }
     setPluginId(location.pluginId ?? "");
     if (location.resourceTab) setResourceTab(location.resourceTab);
+    setComposerResource(null);
     setPage(location.page);
     return true;
   });
-  const navigatePage = (next: AppPage) => { void navigation.move({ page: next, sessionId: currentSessionId, root: activeWorkspaceRoot }); };
+  const navigatePage = (next: AppPage) => { if (next === "settings") setSettingsSection("appearance"); void navigation.move({ page: next, sessionId: currentSessionId, root: activeWorkspaceRoot }); };
   const setActiveModal = (kind: AppModal) => {
     if (!kind) { navigatePage("chat"); return; }
-    if (kind === "models") navigatePage("settings");
+    if (kind === "models") { navigatePage("settings"); setSettingsSection("models"); }
     else { setResourceTab(kind); navigatePage("plugins"); }
   };
   const handleOpenWorkspace = async (mode: Parameters<typeof openWorkspace>[0]) => {
@@ -269,11 +262,11 @@ function App() {
     const snapshot = await openWorkspace(mode);
     if (!snapshot) return;
     navigation.accept({ page: "chat", sessionId: null, root: snapshot.activeWorkspaceRoot ?? null }, origin);
-    clearSelection(); clearWorkspacePanel(); setPage("chat");
+    setComposerResource(null); clearSelection(); clearWorkspacePanel(); setPage("chat");
   };
-  const handleSelectWorkspace = async (root: string) => { await navigation.move({ page: "chat", sessionId: null, root }); };
+  const handleSelectWorkspace = async (root: string) => navigation.move({ page: "chat", sessionId: null, root });
   const handleSelectSession = async (sessionId: string) => { await navigation.move({ page: "chat", sessionId, root: sessions.find(s => s.id === sessionId)?.cwd ?? activeWorkspaceRoot }); };
-  const newChat = () => { void navigation.move({ page: "chat", sessionId: null, root: activeWorkspaceRoot }); };
+  const newChat = () => { setNewChatRevision(revision => revision + 1); void navigation.move({ page: "chat", sessionId: null, root: activeWorkspaceRoot }); };
   const menuActions = useRef<(action: string) => void>(() => {});
   menuActions.current = action => {
     if (action === "open-folder") void handleOpenWorkspace("customPath").catch(error => setHostError(String(error)));
@@ -309,16 +302,16 @@ function App() {
   const isFilePaneVisible = page === "chat" && workspacePanel.isVisible;
 
   return (
-    <div className={`thinAppShell ${isSidebarOpen ? "is-sidebar-open" : "is-sidebar-collapsed"}`}>
+    <DesktopShell expanded={isSidebarOpen} className={`thinAppShell ${isSidebarOpen ? "is-sidebar-open" : "is-sidebar-collapsed"}`}>
       <ApplicationBar expanded={isSidebarOpen} onToggle={() => setIsSidebarOpen(open => !open)} canBack={navigation.canBack} canForward={navigation.canForward} onBack={() => void navigation.move(-1)} onForward={() => void navigation.move(1)} onError={setHostError} />
 
-      <div className="thinSidebarSlot">
+      <div className="thinSidebarSlot" inert={!isSidebarOpen}>
         <Sidebar
           onExpandWorkspace={sessionController.actions.expandWorkspace}
           onLoadMore={sessionController.actions.loadMore}
           hasMore={sessionController.hasMore}
           activePage={page}
-          collapsed={!isSidebarOpen}
+          collapsed={!isSidebarOpen || page === "settings"}
           onNavigate={navigatePage}
           onPinSession={pinSession}
           onReorderPinnedSessions={reorderPinnedSessions}
@@ -328,12 +321,13 @@ function App() {
           activeWorkspaceRoot={activeWorkspaceRoot}
           runningSessionIds={runningSessionIds}
           completedSessionIds={completedSessionIds}
+          waitingSessionIds={waitingSessionIds}
           workspaceCatalogError={workspaceCatalogError}
           onNewChat={newChat}
-          onOpenWorkspace={(mode) => void handleOpenWorkspace(mode)}
+          onOpenWorkspace={handleOpenWorkspace}
           onRenameWorkspace={renameWorkspace}
           onRemoveWorkspace={removeWorkspace}
-          onSelectWorkspace={(root) => void handleSelectWorkspace(root)}
+          onSelectWorkspace={handleSelectWorkspace}
           onRetryWorkspaceCatalog={retryCatalog}
           onResetWorkspaceCatalog={handleResetWorkspaceCatalog}
           onSelectSession={(sessionId) => void handleSelectSession(sessionId)}
@@ -342,84 +336,20 @@ function App() {
           onOpenResource={setActiveModal}
           onOpenFile={workspacePanel.actions.openFile}
         />
+        {page === "settings" ? <SettingsNavigation section={settingsSection} onSelect={setSettingsSection} collapsed={!isSidebarOpen} /> : null}
       </div>
       <div className={`thinWorkspaceShell ${page === "chat" ? "is-chat-page" : ""}`}>
-        {page !== "chat" ? <header className="workspacePageHeader"><strong>{page === "schedules" ? "Scheduled" : page === "plugins" ? "Plugins" : page === "settings" ? "Settings" : "About Centaeris"}</strong></header> : null}
 
-        <div className="thinWorkspaceBody" hidden={page !== "chat"} style={{ "--workspace-panel-width": `${workspacePanelRatio * 100}%` } as CSSProperties}>
-          <main className="thinChatColumn">
-        <header className="workspacePageHeader">
-          <strong>{page === "chat" ? currentSession?.title ?? "New chat" : page === "schedules" ? "Scheduled" : page === "plugins" ? "Plugins" : page === "settings" ? "Settings" : "About Centaeris"}</strong>
-          {page === "chat" ? <div className="workspacePageActions">
-            {currentSession ? <ChatActionsMenu><button onClick={() => void pinSession(currentSession.id, !currentSession.isPinned).catch(() => undefined)}>{currentSession.isPinned ? "Unpin chat" : "Pin chat"}</button><button onClick={() => { void confirmAction({ title: "Delete chat?", message: currentSession.title }).then(confirmed => { if (confirmed) void handleDeleteSession(currentSession.id).catch(() => undefined); }); }}>Delete chat</button></ChatActionsMenu> : null}
-          <WorkspaceOverview
-            key={activeWorkspaceRoot ?? "no-workspace"}
-            root={activeWorkspaceRoot}
-            name={workspaces.find((workspace) => normalizeRoot(workspace.root) === normalizeRoot(activeWorkspaceRoot))?.name ?? "Workspace"}
-            agents={sessions.filter((session) => session.sessionKind === "subagent" && session.parentSessionId === currentSessionId)}
-            onFiles={() => workspacePanel.actions.openWorkspaceView("files")}
-            onReview={() => workspacePanel.actions.openWorkspaceView("review")}
-            onAgent={workspacePanel.actions.openAgentSession}
-            sessionId={currentSessionId}
-            onTasks={workspacePanel.actions.openTasks}
-          />
-          {!isFilePaneVisible && workspacePanel.tabs.length > 0 ? (
-            <button
-              type="button"
-              className="nativePanelToggle is-right"
-              onClick={workspacePanel.actions.show}
-              aria-label="Show right sidebar"
-              aria-expanded={false}
-              title="Show right sidebar"
-            >
-              <PanelRight aria-hidden="true" />
-            </button>
-          ) : null}
-          </div> : null}
-        </header>
-            {!chatWorkspaceRoot && workspaceBootstrapPending ? <section className="thinGetStarted" role="status">Opening workspace…</section> : !chatWorkspaceRoot ? (
-              <section className="thinGetStarted">
-                <h1>Get Started</h1>
-                <ol>
-                  <li>Open a project using File → Open Folder</li>
-                  <li>Add models via the <button type="button" onClick={() => setActiveModal("models")}>Models</button> in Settings</li>
-                </ol>
-              </section>
-            ) : hasSelectableModel === false ? (
-              <section className="thinGetStarted">
-                <h1>Configure a model</h1>
-                <p>Use <button type="button" onClick={() => setActiveModal("models")}>Models</button> in Settings to connect a provider.</p>
-              </section>
-            ) : (
-              <ChatArea
-                currentSession={currentSession}
-                currentSessionId={currentSessionId}
-                workspaceName={chatWorkspace?.name ?? "Workspace"}
-                workspaceRoot={chatWorkspaceRoot}
-                gitStatus={chatUsesActiveWorkspace ? gitStatus : null}
-                gitStatusError={chatUsesActiveWorkspace ? gitStatusError : ""}
-                githubCliStatus={githubCliStatus}
-                runtimeConfigRevision={runtimeConfigRevision}
-                onOpenWorkspacePath={workspacePanel.actions.openFilePath}
-                onOpenAgentSession={workspacePanel.actions.openAgentSession}
-                onNewSession={newChat}
-                onOpenResource={setActiveModal}
-                onSessionResolved={resolveSession}
-                onAgentRunningChange={setRunning}
-                onSessionCompleted={completeSession}
-              />
-            )}
-          </main>
-
-          {isFilePaneVisible ? <WorkspaceSplitHandle value={workspacePanelRatio} onChange={setWorkspacePanelRatio} /> : null}
+        <WorkspaceLayout hidden={page !== "chat"} previewVisible={isFilePaneVisible} preview={
           <aside id="workspace-preview" className={`thinFilePane ${isFilePaneVisible ? "is-open" : ""}`} aria-label="Preview" aria-hidden={!isFilePaneVisible}>
             {workspacePanel.tabs.length > 0 ? (
               <SummaryPanel
                 workspaceRoot={activeWorkspaceRoot}
                 sessionId={currentSessionId}
-                onFiles={() => workspacePanel.actions.openWorkspaceView("files")}
-                onReview={() => workspacePanel.actions.openWorkspaceView("review")}
+                onFiles={(id) => workspacePanel.actions.openWorkspaceView("files", id)}
+                onReview={(id) => workspacePanel.actions.openWorkspaceView("review", id)}
                 onTerminal={workspacePanel.actions.openTerminal}
+                onAddTab={workspacePanel.actions.openNewTab}
                 visible={isFilePaneVisible}
                 onRefreshFile={workspacePanel.actions.refreshActiveFile}
                 tabs={workspacePanel.tabs}
@@ -431,11 +361,79 @@ function App() {
               />
             ) : null}
           </aside>
-        </div>
-        {page === "schedules" ? <SchedulesPage onSession={id => void handleSelectSession(id)} /> : null}
-        {page === "plugins" ? <section className="managementPage resourcePage"><div className="resourceTabs" hidden={resourceTab === "plugins" && !!pluginId} role="tablist" aria-label="Extensions">{(["plugins", "skills"] as const).map(tab => <button key={tab} role="tab" id={`resource-${tab}`} aria-controls="resource-content" aria-selected={resourceTab === tab} tabIndex={resourceTab === tab ? 0 : -1} onClick={() => setResourceTab(tab)} onKeyDown={event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) { event.preventDefault(); const next = event.key === "Home" ? "plugins" : event.key === "End" ? "skills" : resourceTab === "plugins" ? "skills" : "plugins"; setResourceTab(next); document.getElementById(`resource-${next}`)?.focus(); } }}>{tab === "plugins" ? "Plugins" : "Skill"}</button>)}</div><div id="resource-content" role="tabpanel" aria-labelledby={`resource-${resourceTab}`}>{resourceTab === "plugins" ? <PluginsDialog selectedPluginId={pluginId} onSelect={id => { void navigation.move({page: "plugins", resourceTab: "plugins", pluginId: id, sessionId: currentSessionId, root: activeWorkspaceRoot}); }} /> : <SkillsDialog workspaceRoot={activeWorkspaceRoot} confirmAction={confirmAction} />}</div></section> : null}
-        {page === "settings" ? <SettingsPage><ModelsDialog onClose={() => navigatePage("chat")} onConfigured={setHasSelectableModel} confirmAction={confirmAction} /></SettingsPage> : null}
-        {page === "about" ? <section className="managementPage"><h1>Centaeris</h1><p>Local agent workspace</p><ThemeToggle /></section> : null}
+        }>
+          <main className="thinChatColumn">
+        <header className={`workspacePageHeader desktopConversationHeader ${currentSessionId ? "" : "is-welcome"}`} aria-label={currentSessionId ? "Conversation" : "Workspace actions"}>
+          {currentSessionId ? <div className="desktopConversationIdentity"><strong role="heading" aria-level={1} title={currentSession?.title}>{currentSession?.title ?? "Conversation"}</strong>
+            <span aria-label="Conversation workspace" title={chatWorkspaceRoot ?? undefined}><Folder size={12} aria-hidden="true" />{chatWorkspace?.name ?? chatWorkspaceRoot?.split(/[\\/]/).filter(Boolean).at(-1) ?? "Workspace"}</span>
+          </div> : null}
+          {page === "chat" ? <div className="workspacePageActions">
+            {currentSession ? <ChatActionsMenu><DropdownMenuItem onClick={() => void pinSession(currentSession.id, !currentSession.isPinned).catch(() => undefined)}>{currentSession.isPinned ? "Unpin chat" : "Pin chat"}</DropdownMenuItem><DropdownMenuItem onClick={() => { void confirmAction({ title: "Delete chat?", message: currentSession.title }).then(confirmed => { if (confirmed) void handleDeleteSession(currentSession.id).catch(() => undefined); }); }}>Delete chat</DropdownMenuItem></ChatActionsMenu> : null}
+          <WorkspaceOverview
+            key={activeWorkspaceRoot ?? "no-workspace"}
+            root={activeWorkspaceRoot}
+            name={workspaces.find((workspace) => normalizeRoot(workspace.root) === normalizeRoot(activeWorkspaceRoot))?.name ?? "Workspace"}
+            agents={sessions.filter((session) => session.sessionKind === "subagent" && session.parentSessionId === currentSessionId)}
+            onFiles={() => workspacePanel.actions.openWorkspaceView("files")}
+            onReview={() => workspacePanel.actions.openWorkspaceView("review")}
+            onAgent={workspacePanel.actions.openAgentSession}
+            sessionId={currentSessionId}
+            onTasks={workspacePanel.actions.openTasks}
+          />
+          {!isFilePaneVisible && (workspacePanel.tabs.length > 0 || activeWorkspaceRoot) ? (
+            <button
+              type="button"
+              className="nativePanelToggle is-right"
+              onClick={() => workspacePanel.tabs.length ? workspacePanel.actions.show() : workspacePanel.actions.openNewTab()}
+              aria-label="Show right sidebar"
+              aria-expanded={false}
+            >
+              <PanelRight aria-hidden="true" />
+            </button>
+          ) : null}
+          </div> : null}
+        </header>
+            {!chatWorkspaceRoot && workspaceBootstrapPending ? <section className="desktopSetupState" role="status"><LoaderCircle className="desktopLoadingIcon" aria-hidden="true" /><p>Opening your workspace…</p></section> : chatWorkspaceRoot && hasSelectableModel === false ? (
+              <section className="desktopSetupState">
+                <Settings2 size={32} strokeWidth={1.4} aria-hidden="true" />
+                <h1>Connect a model to get started</h1>
+                                <Button onClick={() => setActiveModal("models")}><Settings2 aria-hidden="true" /> Configure a model</Button>
+              </section>
+            ) : null}
+              <ChatArea
+                hidden={page !== "chat" || (!chatWorkspaceRoot && workspaceBootstrapPending) || Boolean(chatWorkspaceRoot && hasSelectableModel === false)}
+                workspaces={workspaces}
+                onOpenWorkspace={() => handleOpenWorkspace("customPath")}
+                onSelectWorkspace={handleSelectWorkspace}
+                newChatRevision={newChatRevision}
+                currentSession={currentSession}
+                currentSessionId={currentSessionId}
+                workspaceName={chatWorkspace?.name ?? "Workspace"}
+                workspaceRoot={chatWorkspaceRoot}
+                gitStatus={chatUsesActiveWorkspace ? gitStatus : null}
+                gitStatusError={chatUsesActiveWorkspace ? gitStatusError : ""}
+                githubCliStatus={githubCliStatus}
+                runtimeConfigRevision={runtimeConfigRevision}
+                onOpenWorkspacePath={workspacePanel.actions.openFilePath}
+                onOpenAgentSession={workspacePanel.actions.openAgentSession}
+                onNewSession={newChat}
+                onOpenResource={setComposerResource}
+                onSessionResolved={resolveSession}
+                onAgentRunningChange={setRunning}
+                onSessionWaitingChange={setWaiting}
+                onSessionCompleted={completeSession}
+              />
+          </main>
+
+        </WorkspaceLayout>
+        {page === "schedules" ? <SchedulesPage onSession={id => void handleSelectSession(id)} onCreate={newChat} /> : null}
+        {page === "plugins" ? <Tabs value={resourceTab} onValueChange={value => { if (value === "plugins" || value === "skills") setResourceTab(value); }} className="desktopResourcesPage managementPage resourcePage">
+          <TabsList className="desktopResourceTabs" variant="line" aria-label="Extensions"><TabsTrigger value="plugins">Plugins</TabsTrigger><TabsTrigger value="skills">Skills</TabsTrigger></TabsList>
+          <TabsContent value="plugins"><PluginsDialog selectedPluginId={pluginId} onSelect={id => { void navigation.move({page: "plugins", resourceTab: "plugins", pluginId: id, sessionId: currentSessionId, root: activeWorkspaceRoot}); }} /></TabsContent>
+          <TabsContent value="skills"><SkillsDialog workspaceRoot={activeWorkspaceRoot} confirmAction={confirmAction} /></TabsContent>
+        </Tabs> : null}
+        {page === "settings" ? <SettingsPage section={settingsSection}><ModelsDialog onClose={() => navigatePage("chat")} onConfigured={setHasSelectableModel} confirmAction={confirmAction} /></SettingsPage> : null}
+        {page === "about" ? <section className="managementPage"><h1>Centaeris</h1><p>Local agent workspace</p></section> : null}
       </div>
 
       <ConfirmDialog
@@ -446,10 +444,19 @@ function App() {
         onConfirm={() => answerConfirmation(true)}
       />
 
+      <Dialog open={composerResource !== null} onOpenChange={open => { if (!open) setComposerResource(null); }}>
+        <DialogContent className="desktopResourceDialog" finalFocus={() => document.getElementById("message-input")}>
+          <DialogTitle className="sr-only">{composerResource === "models" ? "Model services" : composerResource === "skills" ? "Skills" : "Plugins"}</DialogTitle>
+          <div className="desktopResourceDialogBody">
+            {composerResource === "models" ? <ModelsDialog onClose={() => setComposerResource(null)} onConfigured={setHasSelectableModel} confirmAction={confirmAction} /> : composerResource === "skills" ? <SkillsDialog workspaceRoot={chatWorkspaceRoot} confirmAction={confirmAction} /> : composerResource === "plugins" ? <PluginsDialog /> : null}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {hostError ? (
-        <div className="thinHostError" role="alert"><span>{hostError}</span><button type="button" onClick={() => setHostError("")}><X aria-hidden="true" /></button></div>
+        <div className="thinHostError desktopHostNotice" role="alert"><span>{hostError}</span><Button variant="ghost" size="icon-sm" aria-label="Dismiss notification" onClick={() => setHostError("")}><X aria-hidden="true" /></Button></div>
       ) : null}
-    </div>
+    </DesktopShell>
   );
 }
 

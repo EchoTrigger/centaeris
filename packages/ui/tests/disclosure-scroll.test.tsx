@@ -14,7 +14,7 @@ afterEach(()=>act(()=>renderer?.unmount()));
 
 test("manual disclosure grows below its title without following the new bottom",()=>{
  const geometry={height:400,contentEnd:1000,anchorTop:0,scrollTop:600};
- const scroll=createMessageScroll({measure:()=>geometry,setPadding:()=>{},scrollTo:value=>{geometry.scrollTop=value;},requestFrame:()=>1,cancelFrame:()=>{},reducedMotion:()=>true,onFollowingChange:()=>{}});
+ const scroll=createMessageScroll({measure:()=>geometry,setPadding:()=>{},scrollTo:value=>{geometry.scrollTop=value;},reducedMotion:()=>true,onFollowingChange:()=>{}});
  const noop=()=>{};
  act(()=>{renderer=create(<VirtualMessageList containerRef={createRef()} onReadingIntent={()=>scroll.pause()}
   onContentSizeChange={()=>scroll.update()} onScroll={()=>scroll.userScroll()} editingUserMessageId={null} editingPrompt="" copiedUserMessageId={null} latestUserMessageId={null} editableUserMessageId={null}
@@ -33,4 +33,54 @@ test("manual disclosure grows below its title without following the new bottom",
  };
  geometry.scrollTop=600;resize(100,1000);expect(geometry.scrollTop).toBe(600);
  resize(100,300);expect(geometry.scrollTop).toBe(840);
+});
+
+
+test.each(["wheel down", "PageDown", "End", "Space", "touch down", "scrollbar"])(
+  "%s takes control before deferred content growth can move the reader", (gesture) => {
+    const geometry = { height: 400, contentEnd: 1000, anchorTop: 0, scrollTop: 600 };
+    const scroll = createMessageScroll({ measure: () => geometry, setPadding: () => {},
+      scrollTo: top => { geometry.scrollTop = top; }, reducedMotion: () => true, onFollowingChange: () => {} });
+    const noop = () => {};
+    act(() => { renderer = create(<VirtualMessageList containerRef={createRef()} onReadingIntent={() => scroll.pause()}
+      onContentSizeChange={() => scroll.update()} onScroll={() => scroll.userScroll()}
+      editingUserMessageId={null} editingPrompt="" copiedUserMessageId={null} latestUserMessageId={null} editableUserMessageId={null}
+      onEditingPromptChange={noop} onCancelEditingUserMessage={noop} onSubmitEditedUserMessage={noop}
+      onCopyUserMessage={noop} onStartEditingUserMessage={noop} />); });
+    const viewport = renderer.root.findByProps({ className: "messages-container uiRsMessagesContainer" });
+    // More content has landed, before the scheduled follower frame.
+    geometry.contentEnd += 300;
+    const currentTarget = { scrollTop: geometry.scrollTop, scrollHeight: geometry.contentEnd, clientHeight: geometry.height };
+    act(() => {
+      if (gesture === "wheel down") viewport.props.onWheel({ deltaY: 100, currentTarget });
+      else if (gesture === "touch down") {
+        viewport.props.onTouchStart({ touches: [{ clientY: 300 }] });
+        viewport.props.onTouchMove({ touches: [{ clientY: 250 }], currentTarget });
+      } else if (gesture === "scrollbar") {
+        const target = {};
+        viewport.props.onPointerDown?.({ target, currentTarget: target });
+      } else viewport.props.onKeyDown({ key: gesture === "Space" ? " " : gesture, shiftKey: false, currentTarget,
+        target: { closest: () => null } });
+    });
+    scroll.update();
+    expect(geometry.scrollTop).toBe(600);
+  },
+);
+
+
+test("scrolling downward at the real end leaves live following enabled", () => {
+  const geometry = { height: 400, contentEnd: 1000, anchorTop: 0, scrollTop: 600 };
+  const scroll = createMessageScroll({ measure: () => geometry, setPadding: () => {},
+    scrollTo: top => { geometry.scrollTop = top; }, reducedMotion: () => true, onFollowingChange: () => {} });
+  const noop = () => {};
+  act(() => { renderer = create(<VirtualMessageList containerRef={createRef()} onReadingIntent={() => scroll.pause()}
+    onContentSizeChange={() => scroll.update()} onScroll={() => scroll.userScroll()}
+    editingUserMessageId={null} editingPrompt="" copiedUserMessageId={null} latestUserMessageId={null} editableUserMessageId={null}
+    onEditingPromptChange={noop} onCancelEditingUserMessage={noop} onSubmitEditedUserMessage={noop}
+    onCopyUserMessage={noop} onStartEditingUserMessage={noop} />); });
+  const viewport = renderer.root.findByProps({ className: "messages-container uiRsMessagesContainer" });
+  act(() => viewport.props.onWheel({ deltaY: 100, currentTarget: { scrollTop: 600, scrollHeight: 1000, clientHeight: 400 } }));
+  geometry.contentEnd += 300;
+  scroll.update();
+  expect(geometry.scrollTop).toBe(900);
 });

@@ -5,6 +5,7 @@ import { expect, test, vi } from "vitest";
 const harness = vi.hoisted(() => ({
   assistantRenders: 0,
   totalSize: 440,
+  notifyMeasurement: () => {},
   messageReads: new Map(),
   roleReads: new Map(),
 }));
@@ -14,16 +15,20 @@ const count = (reads: Map<string, number>, messageId: string) => {
 };
 
 vi.mock("@tanstack/react-virtual", () => ({
-  useVirtualizer: () => ({
-    getTotalSize: () => harness.totalSize,
-    measurementsCache: [{ index: 0, start: 0 }, { index: 1, start: 220 }],
-    getVirtualItems: () => [
-      { index: 0, start: 0 },
-      { index: 1, start: 220 },
-    ],
-    measureElement: () => {},
-    resizeItem: () => {},
-  }),
+  useVirtualizer: (options: { onChange?: (instance: unknown, sync: boolean) => void }) => {
+    const instance = {
+      getTotalSize: () => harness.totalSize,
+      measurementsCache: [{ index: 0, start: 0 }, { index: 1, start: 220 }],
+      getVirtualItems: () => [
+        { index: 0, start: 0 },
+        { index: 1, start: 220 },
+      ],
+      measureElement: () => {},
+      resizeItem: () => {},
+    };
+    harness.notifyMeasurement = () => options.onChange?.(instance, false);
+    return instance;
+  },
 }));
 
 vi.mock("../src/components/chat/chatViewStore", () => {
@@ -60,6 +65,8 @@ vi.mock("../src/components/ui/button", () => ({
 
 vi.mock("../src/components/ui/tooltip", () => ({
   Tooltip: ({ children }: { children: ReactNode }) => children,
+  TooltipTrigger: ({ render }: { render: ReactNode }) => render,
+  TooltipContent: () => null,
 }));
 
 import { VirtualMessageList } from "../src/components/chat/VirtualMessageList";
@@ -150,6 +157,12 @@ test("content-size notifications carry each measured total", async () => {
     renderer = create(<VirtualMessageList {...props} />);
   });
   expect(onContentSizeChange).toHaveBeenLastCalledWith(440, 0, "user");
+
+  // The visible range need not change when an already-mounted answer grows.
+  // Measurement notifications still have to wake the existing latest follower.
+  harness.totalSize = 660;
+  await act(async () => harness.notifyMeasurement());
+  expect(onContentSizeChange).toHaveBeenLastCalledWith(660, 0, "user");
 
   harness.totalSize = 880;
   await act(async () => {

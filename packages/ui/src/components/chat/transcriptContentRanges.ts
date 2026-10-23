@@ -1,3 +1,4 @@
+import { createStore } from "zustand/vanilla";
 import {
   getTranscriptContentRange,
   TRANSCRIPT_PROJECTION_VERSION_V1,
@@ -16,13 +17,15 @@ type Identity = Readonly<{
 }>;
 
 const pages = new Map<string, TranscriptContentRangeV1>();
+const pendingPages = new Map<string, Promise<TranscriptContentRangeV1>>();
 const pageKeysByRef = new Map<string, string[]>();
 let cachedBytes = 0;
 let cacheEpoch = 0;
-const listeners = new Set<() => void>();
-
-function notify() {
-  for (const listener of listeners) listener();
+// The bounded range cache owns its I/O and eviction rules. Zustand exposes the
+// shared usage snapshot and subscriptions without another listener registry.
+const cacheUsageStore = createStore(() => ({ cachedBytes: 0 }));
+function publishCacheUsage() {
+  cacheUsageStore.setState({ cachedBytes });
 }
 
 function refKey(identity: Identity) {
@@ -48,7 +51,7 @@ function remember(key: string, identity: Identity, page: TranscriptContentRangeV
   while (cachedBytes > TRANSCRIPT_CONTENT_CACHE_MAX_BYTES && pages.size > 0) {
     remove(pages.keys().next().value as string);
   }
-  notify();
+  publishCacheUsage();
 }
 
 function remove(key: string) {
@@ -83,42 +86,68 @@ function validate(page: TranscriptContentRangeV1, identity: Identity, offset: st
   return page;
 }
 
+// Synchronous reads let virtual rows reuse retained text on their first commit.
+// Assembly borrows the existing bounded page cache; it retains no second copy.
+export function readCachedTranscriptContent(identity: Identity, offset: string, allPages: boolean) {
+  const parts: string[] = [];
+  let nextOffset = offset;
+  for (;;) {
+    const page = pages.get(pageKey(identity, nextOffset));
+    if (!page || page.byteLength !== identity.reference.byteLength) return null;
+    if (page.hasMore && BigInt(page.endOffset) <= BigInt(nextOffset)) return null;
+    parts.push(page.content);
+    if (!allPages || !page.hasMore) {
+      return { content: parts.join(""), endOffset: page.endOffset, hasMore: page.hasMore };
+    }
+    nextOffset = page.endOffset;
+  }
+}
+
 export async function loadTranscriptContentRange(identity: Identity, offset: string) {
   const epoch = cacheEpoch;
   const key = pageKey(identity, offset);
   const cached = pages.get(key);
   if (cached) return cached;
-  const page = validate(await getTranscriptContentRange({
-    schema: "transcript.content.range.read.v1",
-    sessionId: identity.sessionId,
-    projectionVersion: TRANSCRIPT_PROJECTION_VERSION_V1,
-    projectionGeneration: identity.projectionGeneration,
-    refId: identity.reference.refId,
-    revision: identity.reference.revision,
-    byteLength: identity.reference.byteLength,
-    offset,
-    maxBytes: TRANSCRIPT_CONTENT_RANGE_BYTES,
-  }), identity, offset);
-  if (epoch !== cacheEpoch) throw new Error("transcript content view was cleared");
-  remember(key, identity, page);
-  return page;
+  const pending = pendingPages.get(key);
+  if (pending) return pending;
+  const task = (async () => {
+    const page = validate(await getTranscriptContentRange({
+      schema: "transcript.content.range.read.v1",
+      sessionId: identity.sessionId,
+      projectionVersion: TRANSCRIPT_PROJECTION_VERSION_V1,
+      projectionGeneration: identity.projectionGeneration,
+      refId: identity.reference.refId,
+      revision: identity.reference.revision,
+      byteLength: identity.reference.byteLength,
+      offset,
+      maxBytes: TRANSCRIPT_CONTENT_RANGE_BYTES,
+    }), identity, offset);
+    if (epoch !== cacheEpoch) throw new Error("transcript content view was cleared");
+    remember(key, identity, page);
+    return page;
+  })();
+  pendingPages.set(key, task);
+  try {
+    return await task;
+  } finally {
+    // An older visit must not remove a replacement read after view cleanup.
+    if (pendingPages.get(key) === task) pendingPages.delete(key);
+  }
 }
 
 export function clearTranscriptContentRangeCache() {
   cacheEpoch++;
   pages.clear();
+  pendingPages.clear();
   pageKeysByRef.clear();
   cachedBytes = 0;
-  notify();
+  publishCacheUsage();
 }
 
 export function transcriptContentRangeCacheBytes() {
-  return cachedBytes;
+  return cacheUsageStore.getState().cachedBytes;
 }
 
 export function subscribeTranscriptContentRangeCache(listener: () => void) {
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
-  };
+  return cacheUsageStore.subscribe(listener);
 }

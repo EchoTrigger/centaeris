@@ -1,3 +1,4 @@
+vi.mock("../src/components/chat/ComposerPlane", async () => import("./helpers/composerPlaneTestDouble"));
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type {
@@ -184,7 +185,6 @@ const makeUsage = (
 
 const makeHydrationSnapshot = (
   sessionId: string,
-  contextUsage: AgentContextUsageSummary | null,
 ): SessionHydrationSnapshot => ({
   messages: [
     {
@@ -193,9 +193,6 @@ const makeHydrationSnapshot = (
       text: `from ${sessionId}`,
     },
   ],
-  runtimeConfig,
-  contextUsage,
-  resolvedAutoContinueAfterResumeWait: false,
   replayCursorsByAgentRunId: {},
   pendingQuestionRequest: null,
   restoreMessageId: null,
@@ -239,9 +236,15 @@ const resolveHydration = async (
   contextUsage: AgentContextUsageSummary | null,
 ): Promise<void> => {
   const request = getHydrationRequest(sessionId);
+  const metadataIndex = harness.usageRequests.length;
   await act(async () => {
-    request.resolve(makeHydrationSnapshot(sessionId, contextUsage));
+    request.resolve(makeHydrationSnapshot(sessionId));
     await request.promise;
+  });
+  const metadata = harness.usageRequests.splice(metadataIndex, 1)[0];
+  await act(async () => {
+    if (contextUsage) { metadata.resolve(contextUsage); await metadata.promise; }
+    else { metadata.reject(new Error("Context usage unavailable")); await expect(metadata.promise).rejects.toThrow("unavailable"); }
   });
 };
 
@@ -321,6 +324,7 @@ test("successful manual compaction refreshes usage and clears the pending state"
   expect(harness.usageRequests[0].sessionId).toBe("session");
   await resolveUsage(harness.usageRequests[0], refreshedUsage);
 
+  await resolveUsage(harness.usageRequests.at(-1)!, makeUsage("session", 1, 20));
   expect(getComposerProps().contextUsage).toEqual(refreshedUsage);
   expect(getComposerProps().runtimeConfigError).toBe("");
   expect(getComposerProps().isCompacting).toBe(false);
@@ -405,7 +409,7 @@ test("streaming sessions do not start manual compaction", async () => {
   sessionViewCacheStore.write({
     sessionId,
     snapshot: {
-      messages: makeHydrationSnapshot(sessionId, null).messages,
+      messages: makeHydrationSnapshot(sessionId).messages,
       contextUsage: null,
       autoContinueAfterResumeWait: false,
       pendingQuestion: null,
@@ -503,7 +507,7 @@ test("an older hydration snapshot cannot overwrite refreshed usage", async () =>
 
   await act(async () => {
     hydration.resolve(
-      makeHydrationSnapshot("session", makeUsage("session", 1, 20)),
+      makeHydrationSnapshot("session"),
     );
     await hydration.promise;
   });

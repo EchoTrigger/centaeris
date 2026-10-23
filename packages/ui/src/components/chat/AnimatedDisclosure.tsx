@@ -1,49 +1,57 @@
+import { useAnimate } from "motion/react";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
-// Mount lazily, retain content during closure, and release readers afterwards.
-// Initial/history renders settle immediately; only a changed disclosure animates.
+// Mount lazily, retain closing readers until Motion settles, then release them.
+// Initial/history renders stay still; reversing an interaction resumes in place.
 export function AnimatedDisclosure({ expanded, children, animateHeight = true }: { expanded: boolean; children: ReactNode; animateHeight?: boolean }) {
   const [present, setPresent] = useState(expanded);
-  const elementRef = useRef<HTMLDivElement>(null);
+  const [scope, animate] = useAnimate<HTMLDivElement>();
   const previousExpanded = useRef(expanded);
-  const animationRef = useRef<Animation | null>(null);
+  const initialStyle = useRef({ height: expanded ? "auto" : "0px", opacity: expanded ? 1 : 0 });
   if (expanded && !present) setPresent(true);
 
   useLayoutEffect(() => {
-    const element = elementRef.current;
-    if (!element) { setPresent(expanded); return; }
-    if (previousExpanded.current === expanded) return;
+    const element = scope.current;
+    const changed = previousExpanded.current !== expanded;
     previousExpanded.current = expanded;
-    const previous = animationRef.current;
-    const height = previous ? element.getBoundingClientRect().height : expanded ? 0 : element.scrollHeight;
-    const opacity = previous ? getComputedStyle(element).opacity : expanded ? "0" : "1";
-    previous?.cancel();
-    const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const finish = () => {
-      animationRef.current = null;
+    if (!element) { setPresent(expanded); return; }
+    const settle = () => {
+      // Expanded output can continue streaming after the interaction completes.
+      element.style.height = expanded ? "auto" : "0px";
+      element.style.opacity = expanded ? "1" : "0";
       setPresent(expanded);
     };
-    if (!animateHeight || preference.matches || element.scrollHeight > 1200) { finish(); return; }
-    const animation = element.animate([
-      { height: `${height}px`, opacity },
-      { height: expanded ? `${element.scrollHeight}px` : "0px", opacity: expanded ? 1 : 0 },
-    ], { duration: 180, easing: "cubic-bezier(.2, 0, 0, 1)" });
-    animationRef.current = animation;
-    void animation.finished.then(() => {
-      if (animationRef.current === animation) finish();
-    }, () => { /* Cancellation leaves completion to the replacement animation. */ });
-    const reduce = () => { if (preference.matches) animation.finish(); };
-    preference.addEventListener("change", reduce);
-    return () => { preference.removeEventListener("change", reduce); };
-  }, [expanded, animateHeight]);
-
-  useLayoutEffect(() => () => {
-    if (animationRef.current) {
-      animationRef.current.cancel();
-      animationRef.current = null;
+    const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (!changed || !animateHeight || preference.matches || element.scrollHeight > 1200) {
+      settle();
+      return;
     }
-  }, []);
+    const playback = animate(element,
+      { height: expanded ? "auto" : 0, opacity: expanded ? 1 : 0 },
+      { duration: 0.18, ease: [0.2, 0, 0, 1], reduceMotion: false });
+    let current = true;
+    const reduce = () => {
+      if (!preference.matches) return;
+      current = false;
+      preference.removeEventListener("change", reduce);
+      playback.stop();
+      settle();
+    };
+    preference.addEventListener("change", reduce);
+    void playback.then(() => {
+      if (!current) return;
+      current = false;
+      preference.removeEventListener("change", reduce);
+      settle();
+    });
+    return () => {
+      preference.removeEventListener("change", reduce);
+      current = false;
+      // Motion retains the current visual value so a reversal does not jump.
+      playback.stop();
+    };
+  }, [expanded, animateHeight, animate, scope]);
 
-  return <div className="chatDisclosure" ref={elementRef} inert={!expanded} aria-hidden={!expanded}
-    hidden={!present}>{present ? children : null}</div>;
+  return <div className="chatDisclosure" ref={scope} inert={!expanded} aria-hidden={!expanded}
+    hidden={!present} style={initialStyle.current}>{present ? children : null}</div>;
 }

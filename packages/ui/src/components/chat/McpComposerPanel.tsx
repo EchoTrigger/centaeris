@@ -7,6 +7,8 @@ import {
   type RefObject,
 } from "react";
 import { ArrowLeft, LockKeyhole } from "lucide-react";
+import { Button } from "../ui/button";
+import { Input } from "../ui/input";
 import {
   configureNativeMcp,
   getNativeMcpCatalog,
@@ -51,10 +53,15 @@ export const useMcpComposerController = ({
   const tokenRef = useRef<HTMLInputElement>(null);
   const previousPanelResetKeyRef = useRef(panelResetKey);
   const panelOwnerRevisionRef = useRef(0);
+  const previousModeRef = useRef(mode);
+  const configurationOwnerRef = useRef(0);
   const catalogRequestRef = useRef(0);
+  const saveSequenceRef = useRef(0);
+  const latestSaveReceiptRef = useRef(0);
+  const pendingSaveRef = useRef(new Map<string, number>());
   const [catalog, setCatalog] = useState<NativeMcpCatalog | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(false);
-  const [configurationLoading, setConfigurationLoading] = useState(false);
+  const [pendingSaves, setPendingSaves] = useState<ReadonlyMap<string, number>>(new Map());
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -63,6 +70,13 @@ export const useMcpComposerController = ({
   if (previousPanelResetKeyRef.current !== panelResetKey) {
     previousPanelResetKeyRef.current = panelResetKey;
     panelOwnerRevisionRef.current += 1;
+    configurationOwnerRef.current += 1;
+    pendingSaveRef.current.clear();
+  }
+  // Outside clicks, Escape and runtime pickers can leave without using our Back button.
+  if (previousModeRef.current !== mode) {
+    if (previousModeRef.current === "mcp-configure") configurationOwnerRef.current += 1;
+    previousModeRef.current = mode;
   }
 
   const loadCatalog = useCallback(async () => {
@@ -90,6 +104,7 @@ export const useMcpComposerController = ({
   }, []);
 
   const openCatalog = useCallback(() => {
+    configurationOwnerRef.current += 1;
     setNotice("");
     onModeChange("mcp");
     void loadCatalog();
@@ -100,48 +115,67 @@ export const useMcpComposerController = ({
     if (!server.configurable || server.status === "disabled" || server.status === "unsupported") {
       return;
     }
+    const configurationOwner = ++configurationOwnerRef.current;
+    const panelOwner = panelOwnerRevisionRef.current;
     setConfiguringServer(server);
     setBearerToken("");
     setError("");
     onModeChange("mcp-configure");
-    requestAnimationFrame(() => tokenRef.current?.focus());
+    requestAnimationFrame(() => {
+      if (configurationOwner === configurationOwnerRef.current && panelOwner === panelOwnerRevisionRef.current) tokenRef.current?.focus();
+    });
   }, [onModeChange]);
 
   const backToCatalog = useCallback(() => {
+    configurationOwnerRef.current += 1;
     setBearerToken("");
     setError("");
     onModeChange("mcp");
   }, [onModeChange]);
 
   const saveConfiguration = useCallback(async () => {
-    if (!configuringServer || !bearerToken) {
-      return;
-    }
-    const requestOwner = panelOwnerRevisionRef.current;
-    setConfigurationLoading(true);
-    setError("");
+    if (!configuringServer || !bearerToken) return;
+    const serverKey = JSON.stringify([configuringServer.pluginName, configuringServer.serverId]);
+    // Leaving a view does not cancel its host write or make a second write safe.
+    if (pendingSaveRef.current.has(serverKey)) return;
+    const operation = ++saveSequenceRef.current;
+    const panelOwner = panelOwnerRevisionRef.current;
+    const configurationOwner = configurationOwnerRef.current;
+    catalogRequestRef.current += 1;
+    const ownsPanel = () => panelOwnerRevisionRef.current === panelOwner;
+    const ownsConfiguration = () => ownsPanel() && configurationOwnerRef.current === configurationOwner;
+    pendingSaveRef.current.set(serverKey, operation);
+    setPendingSaves(previous => new Map(previous).set(serverKey, operation));
+    setCatalogLoading(false); setError("");
     try {
       const nextCatalog = await configureNativeMcp({
         pluginName: configuringServer.pluginName,
         serverId: configuringServer.serverId,
         bearerToken,
       });
-      if (panelOwnerRevisionRef.current !== requestOwner) {
-        return;
+      if (!ownsPanel()) return;
+      // A known receipt supersedes reads begun before it completed, while a
+      // late older write cannot replace a newer acknowledged catalog.
+      if (operation >= latestSaveReceiptRef.current) {
+        latestSaveReceiptRef.current = operation;
+        catalogRequestRef.current += 1;
+        setCatalog(nextCatalog); setCatalogLoading(false);
+        if (previousModeRef.current === "mcp") setError("");
       }
-      setCatalog(nextCatalog);
+      if (!ownsConfiguration()) return;
       setBearerToken("");
       setNotice("Saved · applies to next run");
       onModeChange("mcp");
       focusTextarea();
     } catch (saveError) {
-      if (panelOwnerRevisionRef.current !== requestOwner) {
-        return;
-      }
-      setError(saveError instanceof Error ? saveError.message : String(saveError));
+      if (ownsConfiguration()) setError(saveError instanceof Error ? saveError.message : String(saveError));
     } finally {
-      if (panelOwnerRevisionRef.current === requestOwner) {
-        setConfigurationLoading(false);
+      if (pendingSaveRef.current.get(serverKey) === operation) {
+        pendingSaveRef.current.delete(serverKey);
+        if (ownsPanel()) setPendingSaves(previous => {
+          if (previous.get(serverKey) !== operation) return previous;
+          const next = new Map(previous); next.delete(serverKey); return next;
+        });
       }
     }
   }, [bearerToken, configuringServer, focusTextarea, onModeChange]);
@@ -177,8 +211,15 @@ export const useMcpComposerController = ({
     setConfiguringServer(null);
     setError("");
     setCatalogLoading(false);
-    setConfigurationLoading(false);
+    pendingSaveRef.current.clear(); setPendingSaves(previous => previous.size ? new Map() : previous);
   }, [panelResetKey]);
+
+  useEffect(() => () => {
+    panelOwnerRevisionRef.current += 1;
+    configurationOwnerRef.current += 1;
+    catalogRequestRef.current += 1;
+    pendingSaveRef.current.clear();
+  }, []);
 
   useEffect(() => {
     if (mode !== "mcp-configure") {
@@ -189,7 +230,7 @@ export const useMcpComposerController = ({
   return {
     mode,
     catalog,
-    loading: catalogLoading || configurationLoading,
+    loading: catalogLoading || mode === "mcp-configure" && Boolean(configuringServer && pendingSaves.has(JSON.stringify([configuringServer.pluginName, configuringServer.serverId]))),
     error,
     notice,
     selectedIndex,
@@ -286,7 +327,7 @@ export function McpComposerPanels({
   return (
     <section className="slashCommandPanel mcpComposerPanel" aria-label="Configure MCP server">
       <header>
-        <button
+        <Button variant="ghost" size="sm"
           type="button"
           className="mcpPanelBack"
           aria-label="Back to MCP servers"
@@ -294,7 +335,7 @@ export function McpComposerPanels({
         >
           <ArrowLeft aria-hidden="true" />
           MCP
-        </button>
+        </Button>
         <span>{configuringServer.serverId}</span>
       </header>
       <form
@@ -306,7 +347,7 @@ export function McpComposerPanels({
       >
         <label>
           <span>API key</span>
-          <input
+          <Input
             ref={tokenInputRef}
             type="password"
             autoComplete="new-password"
@@ -320,12 +361,12 @@ export function McpComposerPanels({
         </p>
         {error ? <p className="mcpPanelError" role="status">{error}</p> : null}
         <div className="mcpConfigActions">
-          <button type="button" onClick={backToCatalog}>
+          <Button variant="outline" size="sm" type="button" onClick={backToCatalog}>
             Cancel
-          </button>
-          <button type="submit" className="is-primary" disabled={!bearerToken || loading}>
+          </Button>
+          <Button size="sm" type="submit" disabled={!bearerToken || loading}>
             {loading ? "Testing…" : "Save & test"}
-          </button>
+          </Button>
         </div>
       </form>
     </section>

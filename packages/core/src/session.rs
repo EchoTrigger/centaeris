@@ -16,6 +16,7 @@ pub mod store;
 pub mod supplement;
 pub mod transcript;
 pub mod turn_input;
+pub mod visualization;
 
 use crate::execution::MAX_PUBLISHED_ARTIFACT_BYTES;
 use crate::model::prepared_prompt::{ModelMessageRoleV1, ModelMessageV1, PREPARED_PROMPT_SCHEMA};

@@ -1,0 +1,32 @@
+{
+  "name": "@centaeris/visualization-react",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.tsx",
+    "./contract": "./src/contract.ts",
+    "./catalog": "./src/generated.json",
+    "./styles.css": "./src/styles.css",
+    "./renderer": "./src/Renderer.tsx"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@json-render/core": "0.21.1",
+    "@json-render/react": "0.21.1",
+    "@lezer/markdown": "1.7.2",
+    "jsonc-parser": "3.3.1",
+    "lucide-react": "1.24.0",
+    "zod": "4.3.6"
+  },
+  "peerDependencies": {
+    "react": "^19.2.3"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.14",
+    "typescript": "7.0.2"
+  }
+}

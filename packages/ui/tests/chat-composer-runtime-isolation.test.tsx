@@ -1,13 +1,18 @@
+vi.mock("../src/components/ui/dropdown-menu", async () => import("./helpers/menuTestDouble"));
+vi.mock("../src/components/ui/tooltip", async () => import("./helpers/tooltipTestDouble"));
 import { useState, type ChangeEvent, type ComponentProps } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { expect, test, vi } from "vitest";
 import type { ComposerRuntimeControlsProps } from "../src/components/chat/ComposerRuntimeControls";
 
+type ContextProps = Pick<ComposerRuntimeControlsProps, "activePanel" | "contextUsage" | "onPanelChange">;
 const runtimeHarness = vi.hoisted(() => ({
+  receivedContextProps: [] as ContextProps[],
   receivedProps: [] as ComposerRuntimeControlsProps[],
 }));
 
 vi.mock("../src/components/chat/ComposerRuntimeControls", () => ({
+  ComposerContextControl: (props: ContextProps) => { runtimeHarness.receivedContextProps.push(props); return <div />; },
   ComposerRuntimeControls: (props: ComposerRuntimeControlsProps) => {
     runtimeHarness.receivedProps.push(props);
     return <div data-testid="runtime-controls" />;
@@ -23,6 +28,7 @@ const EMPTY_REASONING: ComponentProps<typeof ChatComposer>["reasoningEfforts"] =
 
 test("prompt edits preserve the runtime control prop identities passed by the parent", async () => {
   runtimeHarness.receivedProps.length = 0;
+  runtimeHarness.receivedContextProps.length = 0;
   const stableProps = {
     panelResetKey: "session-one",
     isStreaming: false,
@@ -81,5 +87,10 @@ test("prompt edits preserve the runtime control prop identities passed by the pa
     expect(Object.is(updatedProps[key], initialProps[key]), `${key} changed identity`).toBe(true);
   }
 
+  expect(runtimeHarness.receivedContextProps).toHaveLength(2);
+  const [firstContext, updatedContext] = runtimeHarness.receivedContextProps;
+  for (const key of Object.keys(firstContext) as Array<keyof ContextProps>) {
+    expect(Object.is(firstContext[key], updatedContext[key]), `${key} context prop changed identity`).toBe(true);
+  }
   await act(async () => renderer.unmount());
 });

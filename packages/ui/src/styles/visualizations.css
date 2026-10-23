@@ -1,0 +1,312 @@
+.desktop-visual {
+  --visual-paper: var(--surface-color);
+  --visual-ink: var(--on-surface);
+  --visual-muted: var(--process-text);
+  --visual-rule: var(--outline-variant);
+  --visual-soft: var(--surface-variant);
+  --visual-label: var(--surface-container);
+  --visual-depth: var(--surface-variant);
+  --visual-depth-rule: var(--outline-variant);
+  --visual-success: var(--success);
+  --visual-info: var(--process-text);
+  --visual-warning: var(--warning);
+  --visual-error: var(--error);
+  container-type: inline-size;
+}
+/* Reference-style presentation: ordinary reading order and compact grouping. */
+.desktop-visual.centaeris-visual {
+	--cv-border: var(--visual-rule);
+	--cv-muted: var(--visual-muted);
+	--cv-fill: var(--visual-soft);
+	margin: 0;
+	color: var(--visual-ink);
+	font: inherit;
+	line-height: 1.6;
+}
+.desktop-visual .cv-card {
+	display: block;
+	gap: 0;
+	overflow: visible;
+	box-shadow: none;
+	font: inherit;
+	padding: 16px 18px;
+	border: 1px solid var(--visual-rule);
+	border-radius: 14px;
+	background: var(--visual-paper);
+}
+.desktop-visual .cv-card > .cv-title {
+	margin-bottom: 12px;
+}
+.desktop-visual .cv-group {
+	padding: 0;
+	border: 0;
+	border-radius: 0;
+	background: transparent;
+	text-align: left;
+}
+.desktop-visual .cv-title {
+	font-size: 15px;
+	font-weight: 600;
+	line-height: 1.5;
+	white-space: pre-wrap;
+}
+.desktop-visual .cv-description {
+	margin-top: 4px;
+	color: var(--visual-muted);
+	font-size: 14px;
+	line-height: 1.6;
+}
+.desktop-visual .cv-group > .cv-text {
+	margin-top: 4px;
+}
+.desktop-visual .cv-text-caption {
+	color: var(--visual-muted);
+	font-size: 13px;
+	line-height: 1.65;
+}
+.desktop-visual .cv-group > .cv-group {
+	margin: 10px 0 0;
+	padding: 11px 12px;
+	border: 1px solid var(--visual-rule);
+	border-radius: 8px;
+	background: var(--visual-soft);
+}
+.desktop-visual .cv-sequence {
+	--visual-sequence-gap: 16px;
+}
+.desktop-visual .cv-sequence > ol {
+	display: block;
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+.desktop-visual .cv-sequence > ol > li {
+	display: block;
+	position: relative;
+	margin: 0;
+	padding: 0;
+	border: 0;
+}
+.desktop-visual .cv-sequence > ol > li + li {
+	margin-top: var(--visual-sequence-gap);
+}
+.desktop-visual .cv-sequence > ol > li > div {
+	min-width: 0;
+}
+/* Static ordered explanations use a guide with nodes, ending at the last heading.
+   The centered reference chain retains its existing arrows and containment. */
+.desktop-visual:not(.dv-chain) .cv-sequence > ol > li {
+	padding-inline-start: 20px;
+}
+.desktop-visual:not(.dv-chain) .cv-sequence > ol > li:not(:last-child)::before {
+	content: "";
+	position: absolute;
+	inset-inline-start: 4px;
+	top: 11px;
+	bottom: calc(-1 * var(--visual-sequence-gap) - 11px);
+	border-inline-start: 1px solid var(--visual-rule);
+	pointer-events: none;
+}
+.desktop-visual:not(.dv-chain) .cv-sequence > ol > li::after {
+	content: "";
+	position: absolute;
+	inset-inline-start: 1.5px;
+	top: 8px;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--visual-muted);
+	pointer-events: none;
+}
+.desktop-visual .cv-step {
+	display: none;
+}
+.desktop-visual .cv-status {
+	align-items: flex-start;
+	gap: 8px;
+	margin: 8px 0 0;
+	font-size: 14px;
+	line-height: 1.65;
+}
+.desktop-visual .cv-status svg {
+	flex-shrink: 0;
+	width: 17px;
+	height: 17px;
+	margin-top: 3px;
+	color: var(--visual-muted);
+}
+.desktop-visual .cv-tone-success svg {
+	color: var(--visual-success);
+}
+.desktop-visual .cv-tone-info svg {
+	color: var(--visual-info);
+}
+.desktop-visual .cv-tone-warning svg {
+	color: var(--visual-warning);
+}
+.desktop-visual .cv-tone-error svg {
+	color: var(--visual-error);
+}
+.desktop-visual .cv-icon {
+	margin: 0;
+	color: var(--visual-muted);
+}
+.desktop-visual .cv-badge {
+	height: auto;
+	min-height: 20px;
+	max-width: 100%;
+	flex-shrink: 1;
+	overflow: visible;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	margin: 6px 0 0;
+	padding: 1px 8px;
+	border: 0;
+	border-radius: 5px;
+	background: var(--visual-soft);
+	color: var(--visual-muted);
+	font-size: 12px;
+}
+.desktop-visual .cv-columns-group {
+	margin-top: 9px;
+}
+.desktop-visual .cv-columns {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 7px;
+	margin-top: 8px;
+}
+.desktop-visual .cv-columns > * {
+	margin: 0;
+	padding: 8px 10px;
+	border: 0;
+	border-radius: 6px;
+	background: var(--visual-paper);
+	text-align: left;
+	font-size: 14px;
+}
+.desktop-visual .cv-columns .cv-description {
+	margin-top: 2px;
+	font-size: 13px;
+}
+.desktop-visual .cv-columns .cv-status {
+	margin-top: 4px;
+}
+.desktop-visual .cv-divider {
+	border: 0;
+	height: 1px;
+	background: var(--visual-rule);
+	margin-block: 12px;
+}
+/* Runs read as labeled paragraphs. Only icon-only annotations use an inline row. */
+.desktop-visual.dv-paragraph .cv-sequence > ol > li > div > .cv-group {
+  display: grid;
+  grid-template-columns: fit-content(35%) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0 9px;
+}
+.desktop-visual.dv-paragraph .cv-sequence {
+  --visual-sequence-gap: 15px;
+}
+.desktop-visual.dv-paragraph .cv-sequence > ol > li > div > .cv-group > .cv-title {
+  justify-self: start;
+  max-width: 100%;
+  padding: 1px 8px;
+  border-radius: 99px;
+  background: var(--visual-label);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: pre-wrap;
+}
+.desktop-visual.dv-paragraph .cv-sequence > ol > li > div > .cv-group > .cv-text {
+  margin-top: 0;
+}
+.desktop-visual.dv-paragraph .cv-sequence > ol > li > div > .cv-group > :is(.cv-status, .cv-group, .cv-sequence, .cv-columns-group) {
+  grid-column: 1 / -1;
+}
+.desktop-visual.dv-paragraph .cv-group > .cv-group:has(> .cv-icon):not(:has(> :not(.cv-title, .cv-description, .cv-icon))) {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.desktop-visual.dv-paragraph .cv-group > .cv-group:has(> .cv-icon):not(:has(> :not(.cv-title, .cv-description, .cv-icon))) > .cv-title {
+  color: var(--visual-ink);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+.desktop-visual.dv-paragraph .cv-group > .cv-group:has(> .cv-icon):not(:has(> :not(.cv-title, .cv-description, .cv-icon))) > .cv-icon {
+  order: -1;
+  flex-shrink: 0;
+  width: 17px;
+  height: 17px;
+  margin-top: 3px;
+}
+/* The resource chain follows a single vertical axis, as in the reference. */
+.desktop-visual.dv-chain .cv-group {
+	text-align: center;
+}
+.desktop-visual.dv-chain .cv-sequence > ol > li > div > .cv-group > .cv-title {
+	font-size: 16px;
+	font-weight: 650;
+}
+.desktop-visual.dv-chain .cv-sequence > ol > li + li {
+	margin-top: 32px;
+}
+.desktop-visual.dv-chain .cv-sequence > ol > li + li > .cv-flow-arrow {
+	display: block;
+	position: absolute;
+	top: -26px;
+	left: 50%;
+	transform: translateX(-50%);
+	color: var(--visual-muted);
+	font-size: 17px;
+	line-height: 22px;
+}
+.desktop-visual.dv-chain .cv-sequence > ol > li:last-child > div > .cv-group {
+	padding: 11px 12px;
+	border: 1px solid var(--visual-depth-rule);
+	border-radius: 9px;
+	background: var(--visual-depth);
+}
+.desktop-visual.dv-chain .cv-group > .cv-group {
+	margin-top: 10px;
+	padding: 10px;
+	border: 0;
+	border-radius: 7px;
+	background: var(--visual-label);
+}
+.desktop-visual.dv-chain .cv-group > .cv-group > .cv-icon {
+	display: block;
+	width: 18px;
+	height: 18px;
+	margin: 6px auto 0;
+}
+.desktop-visual.dv-chain .cv-columns {
+	gap: 6px;
+	margin-top: 7px;
+}
+.desktop-visual.dv-chain .cv-columns > * {
+	padding: 6px 10px;
+	text-align: center;
+}
+@container (max-width: 420px) {
+	.desktop-visual .cv-card {
+		padding: 14px;
+		border-radius: 11px;
+	}
+	.desktop-visual .cv-sequence {
+		--visual-sequence-gap: 14px;
+	}
+	.desktop-visual.dv-chain .cv-sequence > ol > li + li {
+		margin-top: 30px;
+	}
+}
+
+.desktop-visual .cv-flow-arrow { display: none; }

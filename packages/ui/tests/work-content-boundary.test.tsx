@@ -14,7 +14,7 @@ vi.mock("@tanstack/react-virtual", () => ({ useVirtualizer: () => ({
   measurementsCache: [{ index: 0, start: 0 }], measureElement() {}, resizeItem() {},
 }) }));
 const read = vi.hoisted(() => vi.fn());
-vi.mock("../src/components/chat/transcriptContentRanges", () => ({ loadTranscriptContentRange: read }));
+vi.mock("../src/components/chat/transcriptContentRanges", () => ({ loadTranscriptContentRange: read, readCachedTranscriptContent: () => null }));
 let renderer: ReactTestRenderer;
 afterEach(() => { act(() => renderer?.unmount()); useChatViewStore.getState().clear(); vi.unstubAllGlobals(); });
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -36,7 +36,7 @@ test("a completed turn renders every stage in order without waiting for scrollin
     id: "viewport", agentRunId: "viewport", finalAnswer: "Final answer", isStreaming: false,
     chunks: Array.from({ length: 40 }, (_, i) => ({ id: `stage-${i}`, kind: "narrative" as const, text: `Stage ${i}` })),
   };
-  act(() => { renderer = create(<AgentResultStream turn={turn} />, { createNodeMock: () => ({ closest: () => null }) }); });
+  act(() => { renderer = create(<AgentResultStream turn={turn} />, { createNodeMock: () => ({ closest: () => null, style: {}, scrollHeight: 100 }) }); });
   const expected = [...Array.from({ length: 40 }, (_, i) => `Stage ${i}`), "Final answer"];
   expect(renderer.root.findAllByType("p").map(node => node.children.join(""))).toEqual(expected);
   expect(renderer.root.findAllByType("p").map(node => node.children.join(""))).toEqual(expected);
@@ -55,7 +55,7 @@ test("projected history renders every loaded process row without gaps", () => {
     editingUserMessageId={null} editingPrompt="" copiedUserMessageId={null} latestUserMessageId={null} editableUserMessageId={null}
     onScroll={noop} onContentSizeChange={noop} onEditingPromptChange={noop} onCancelEditingUserMessage={noop}
     onSubmitEditedUserMessage={noop} onCopyUserMessage={noop} onStartEditingUserMessage={noop}
-  />, { createNodeMock: () => ({ closest: () => null }) }); });
+  />, { createNodeMock: () => ({ closest: () => null, style: {}, scrollHeight: 100 }) }); });
   expect(renderer.root.findAllByType("p").map(node => node.children.join(""))).toEqual([
     ...Array.from({ length: 30 }, (_, i) => `History stage ${i}`), "History final",
   ]);
@@ -66,7 +66,7 @@ test("live stages update without visibility notifications and final keeps the pr
   const turn: AssistantExecutionTurn = { id: "live-viewport", agentRunId: "live-viewport", isStreaming: true, finalAnswer: "",
     chunks: [{ id: "live-stage", kind: "narrative", text: "Early stage" }],
   };
-  act(() => { renderer = create(<AgentResultStream turn={turn} />, { createNodeMock: () => ({ closest: () => null }) }); });
+  act(() => { renderer = create(<AgentResultStream turn={turn} />, { createNodeMock: () => ({ closest: () => null, style: {}, scrollHeight: 100 }) }); });
   const updated: AssistantExecutionTurn = { ...turn, chunks: [{ id: "live-stage", kind: "narrative", text: "Latest stage" }] };
   act(() => renderer.update(<AgentResultStream turn={updated} />));
   expect(renderer.root.findByType("p").children).toEqual(["Latest stage"]);
@@ -93,7 +93,7 @@ test("Tool cards immediately show complete titles while only the selected output
     ],
   };
   read.mockResolvedValue({ content: "Output", startOffset: "0", endOffset: "6", hasMore: false });
-  await act(async () => { renderer = create(<AgentResultStream turn={turn} />, { createNodeMock: () => ({ closest: () => null, scrollHeight: 100 }) }); });
+  await act(async () => { renderer = create(<AgentResultStream turn={turn} />, { createNodeMock: () => ({ closest: () => null, style: {}, scrollHeight: 100 }) }); });
   expect(renderer.root.findAllByProps({ className: "reasoningPreviewText" })).toHaveLength(0);
   expect(renderer.root.findAllByType("p").map(node => node.children.join(""))).toEqual(["Final answer"]);
   expect(read).not.toHaveBeenCalled();

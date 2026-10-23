@@ -15,6 +15,12 @@ gate and inspection of its final artifacts.
 
 ## Test quality
 
+Frontend visual design uses manual appearance acceptance rather than TDD.
+Implement and iterate on layout, icons, spacing, color and typography directly.
+Focused behavioral tests still protect parsing, validation, requests, state
+transitions, streaming, recovery, accessibility interactions and content
+preservation. Do not turn visual preferences into pixel or class-name assertions.
+
 Pure declarative configuration and catalog-data updates do not require new tests
 or a red/green TDD cycle when implementation semantics stay unchanged. This
 includes model IDs, provider endpoints and protocol selections, context/output
@@ -76,6 +82,11 @@ registries, and public protocol results over source text matching. A comment
 mentioning a prohibited dependency must not be mistaken for an actual import.
 Static checks supplement behavioral coverage; they do not establish that a
 feature works merely because certain source text is absent.
+
+Web and Desktop message-scroll tests execute both controllers against the same
+anchoring, reserved-space, manual-reading, return-to-latest and reset contract.
+Host animation adapters may differ. Before replacing the former file-equality
+assertion, an ignored-pause negative control was verified to fail for both hosts.
 
 Choose UI scenarios from observable risks such as wrapping, clipping, keyboard
 navigation, zoom, localization, and layout transitions. Viewport dimensions are

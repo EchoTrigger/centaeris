@@ -1,8 +1,6 @@
 import { t } from "../../i18n";
 import {
-  getAgentContextUsage,
   getAgentRunLiveSnapshot,
-  getAgentRuntimeConfig,
   getAgentState,
   listAgentRuns,
   type AgentStreamPayload,
@@ -28,7 +26,6 @@ import {
   formatExecutionError,
   isRecord,
   makeId,
-  readAutoContinueAfterResumeWaitPreference,
 } from "./chatRuntimeCore";
 import {
   applyPersistedAssistantStatusToTurn,
@@ -573,7 +570,6 @@ export const readHydrationValue = async <T,>(
 export type HydrationControl = {
   isCancelled?: () => boolean;
   yieldToUi?: () => Promise<void>;
-  onStage?: (stage: string) => void;
 };
 
 const HYDRATION_MESSAGE_BATCH_SIZE = 12;
@@ -604,14 +600,6 @@ const yieldHydration = async (control?: HydrationControl): Promise<void> => {
   assertHydrationNotCancelled(control);
 };
 
-const setHydrationStage = (
-  control: HydrationControl | undefined,
-  stage: string,
-): void => {
-  assertHydrationNotCancelled(control);
-  control?.onStage?.(stage);
-};
-
 export const buildSessionHydrationSnapshot = async (
   sessionId: string,
   control?: HydrationControl,
@@ -622,8 +610,7 @@ export const buildSessionHydrationSnapshot = async (
     throw new Error(t("chatRuntimeModel.historyRecoveryFailedSessionidIsEmpty"));
   }
   assertHydrationNotCancelled(control);
-  setHydrationStage(control, "fetchProjection");
-  const [transcriptView, taskResponse, agentState, runtimeConfig, usage] =
+  const [transcriptView, taskResponse, agentState] =
     await Promise.all([
       readHydrationValue(
         t("chatRuntimeModel.loadingHistoryConversationProjection"),
@@ -639,14 +626,6 @@ export const buildSessionHydrationSnapshot = async (
       readHydrationValue(
         t("chatRuntimeModel.loadingAgentState"),
         getAgentState(normalizedSessionId, true),
-      ),
-      readHydrationValue(
-        t("chatRuntimeModel.loadingRuntimeConfiguration"),
-        getAgentRuntimeConfig(),
-      ),
-      readHydrationValue(
-        t("chatRuntimeModel.loadingContextUsage"),
-        getAgentContextUsage(normalizedSessionId),
       ),
     ]);
 
@@ -669,7 +648,6 @@ export const buildSessionHydrationSnapshot = async (
     : "";
   let seedPayloads: AgentStreamPayload[] = [];
   if (replayRun && replayRunAgentRunId && isActiveAgentRun(replayRun)) {
-    setHydrationStage(control, "reduceReplays");
     const replay = await readHydrationValue(
       t("chatRuntimeModel.loadingAgentState"),
       getAgentRunLiveSnapshot({
@@ -687,7 +665,6 @@ export const buildSessionHydrationSnapshot = async (
     seedPayloads = replay.liveSnapshot ? [replay.liveSnapshot] : [];
   }
 
-  setHydrationStage(control, "reduceMessages");
   await yieldHydration(control);
   const historyMessages = transcriptView.materializeMessages(
     Boolean(replayRun && isActiveAgentRun(replayRun)),
@@ -697,13 +674,7 @@ export const buildSessionHydrationSnapshot = async (
       ? buildAgentRunReplayMessage(replayRun, seedPayloads)
       : null;
 
-  setHydrationStage(control, "finalizeSnapshot");
   await yieldHydration(control);
-  const fallbackAutoContinue = readAutoContinueAfterResumeWaitPreference();
-  const resolvedAutoContinueAfterResumeWait =
-    typeof runtimeConfig.autoContinueAfterResumeWait === "boolean"
-      ? runtimeConfig.autoContinueAfterResumeWait
-      : fallbackAutoContinue;
   const pendingQuestionRequest = buildPendingQuestionFromSummary(
     agentState.pending_questions?.[0] || null,
   );
@@ -739,9 +710,6 @@ export const buildSessionHydrationSnapshot = async (
     messages,
     transcriptView,
     transcriptHistoryMessageCount: historyMessages.length,
-    runtimeConfig,
-    contextUsage: usage,
-    resolvedAutoContinueAfterResumeWait,
     replayCursorsByAgentRunId: {},
     pendingQuestionRequest,
     restoreMessageId,

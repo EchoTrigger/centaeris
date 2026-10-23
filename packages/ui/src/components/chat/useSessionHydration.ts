@@ -13,7 +13,6 @@ import type {
 
 export type SessionHydrationControl = {
   isLatest: () => boolean;
-  onStage: (stage: string) => void;
 };
 
 export type SessionHydrationPlan =
@@ -42,7 +41,6 @@ type UseSessionHydrationOptions = {
 
 type SessionHydrationState = {
   isHydratingSession: boolean;
-  hydrationStage: string;
   isSyncingSession: boolean;
   syncError: string;
   reportSyncError: (message: string) => void;
@@ -57,8 +55,8 @@ export const useSessionHydration = ({
   onError,
 }: UseSessionHydrationOptions): SessionHydrationState => {
   const requestIdRef = useRef(0);
+  const preparedSessionIdRef = useRef("");
   const [isHydratingSession, setIsHydratingSession] = useState(false);
-  const [hydrationStage, setHydrationStage] = useState("");
   const [isSyncingSession, setIsSyncingSession] = useState(false);
   const [syncError, reportSyncError] = useState("");
   const [retryRevision, setRetryRevision] = useState(0);
@@ -71,17 +69,16 @@ export const useSessionHydration = ({
     void retryRevision;
     reportSyncError("");
     setIsSyncingSession(false);
+    preparedSessionIdRef.current = currentSessionId;
     const plan = callbacks.current.prepare(currentSessionId);
     if (plan.kind === "preserved") {
       setIsHydratingSession(false);
-      setHydrationStage("");
       return undefined;
     }
 
     requestIdRef.current += 1;
     if (plan.kind === "none") {
       setIsHydratingSession(false);
-      setHydrationStage("");
       return undefined;
     }
 
@@ -92,18 +89,10 @@ export const useSessionHydration = ({
     const requestId = requestIdRef.current;
     const isLatest = () =>
       !cancelled && requestIdRef.current === requestId;
-    const onStage = (stage: string) => {
-      if (isLatest()) {
-        setHydrationStage(stage);
-      }
-    };
-
     if (plan.kind === "cached") {
       setIsHydratingSession(false);
-      setHydrationStage("");
     } else {
       setIsHydratingSession(true);
-      setHydrationStage("fetchProjection");
     }
 
     const hydrateSession = async () => {
@@ -111,7 +100,7 @@ export const useSessionHydration = ({
         if (plan.kind === "cached") {
           for (let attempt = 0; ; attempt += 1) {
             try {
-              await callbacks.current.refreshCachedSession(currentSessionId, plan.entry, { isLatest, onStage });
+              await callbacks.current.refreshCachedSession(currentSessionId, plan.entry, { isLatest });
               break;
             } catch (error) {
               if (!isLatest()) return;
@@ -127,13 +116,11 @@ export const useSessionHydration = ({
             {
               isCancelled: () => !isLatest(),
               yieldToUi: waitForNextPaint,
-              onStage,
             },
           );
           if (!isLatest()) {
             return;
           }
-          onStage("applySnapshot");
           callbacks.current.applySnapshot(snapshot, currentSessionId);
         }
         if (!isLatest()) {
@@ -141,14 +128,12 @@ export const useSessionHydration = ({
         }
         setIsSyncingSession(false);
         setIsHydratingSession(false);
-        setHydrationStage("");
       } catch (error) {
         if (!isLatest()) {
           return;
         }
         setIsSyncingSession(false);
         setIsHydratingSession(false);
-        setHydrationStage("");
         if (plan.kind === "cached") {
           reportSyncError(formatExecutionError(error));
         } else {
@@ -166,10 +151,10 @@ export const useSessionHydration = ({
       if (requestIdRef.current === requestId) {
         setIsSyncingSession(false);
         setIsHydratingSession(false);
-        setHydrationStage("");
       }
     };
   }, [currentSessionId, retryRevision]);
 
-  return { isHydratingSession, isSyncingSession, hydrationStage, syncError, reportSyncError, retrySessionSync };
+  return { isHydratingSession: Boolean(currentSessionId && (preparedSessionIdRef.current !== currentSessionId || isHydratingSession)),
+    isSyncingSession, syncError, reportSyncError, retrySessionSync };
 };

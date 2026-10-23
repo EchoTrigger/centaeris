@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 
-type SessionRequestOwner = {
+export type SessionRequestOwner = {
   sessionId: string;
   epoch: number;
 };

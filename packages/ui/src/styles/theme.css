@@ -107,8 +107,3 @@ html, body { background: var(--surface-color); color: var(--on-surface); }
 
 ::view-transition-old(root), ::view-transition-new(root) { animation:none; mix-blend-mode:normal; }
 ::view-transition-new(root) { z-index:1; }
-.themeToggle { display:flex; align-items:center; margin:0 8px; -webkit-app-region:no-drag; }
-.themeToggle button { border:0; background:transparent; color:var(--process-text); display:grid; place-items:center; width:28px; height:28px; border-radius:6px; cursor:pointer; }
-.themeToggle button:hover { color:var(--on-surface); }
-.themeToggle svg { width:16px; height:16px; }
-.themeToggle button:focus-visible { outline:2px solid var(--primary-color); outline-offset:2px; }

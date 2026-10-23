@@ -7,9 +7,9 @@ import { inspectSystemSkillsBundle } from "./systemSkills.mjs";
 
 const bundledSkillsRoot = path.resolve(import.meta.dirname, "..", "..", "..", "system-skills");
 
-test("public source includes the three built-in System Skills and upstream notices", async () => {
+test("public source includes the built-in System Skills and upstream notices", async () => {
   const bundle = await inspectSystemSkillsBundle(bundledSkillsRoot);
-  assert.deepEqual(bundle.skillNames, ["runtime-recovery", "skill-creator", "skill-installer"]);
+  assert.deepEqual(bundle.skillNames, ["inline-visualizations", "runtime-recovery", "skill-creator", "skill-installer"]);
   for (const name of ["skill-creator", "skill-installer"]) {
     const root = path.join(bundledSkillsRoot, name);
     const licenseName = name === "skill-creator" ? "license.txt" : "LICENSE.txt";

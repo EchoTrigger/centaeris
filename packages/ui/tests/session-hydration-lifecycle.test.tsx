@@ -3,7 +3,8 @@ import { afterEach, expect, test, vi } from "vitest";
 import { useSessionHydration } from "../src/components/chat/useSessionHydration";
 import { sessionViewCacheStore } from "../src/components/chat/chatRuntimeCore";
 import type { SessionViewCacheEntry } from "../src/lib/sessionViewCache";
-import type { SessionViewSnapshot } from "../src/components/chat/types";
+import { buildSessionHydrationSnapshot } from "../src/components/chat/chatRuntimeModel";
+import type { SessionHydrationSnapshot, SessionViewSnapshot } from "../src/components/chat/types";
 
 vi.mock("../src/components/chat/chatRuntimeModel", () => ({ buildSessionHydrationSnapshot: vi.fn() }));
 vi.mock("../src/components/chat/chatAreaModel", () => ({ waitForNextPaint: async () => {} }));
@@ -60,4 +61,21 @@ test("a late cached failure cannot report an error for the next chat", async () 
   await act(async () => reject(new Error("late failure")));
   expect(fatal).not.toHaveBeenCalled();
   expect(state!.syncError).toBe("");
+});
+
+
+test("a selected conversation is loading on its first render and becomes empty only after its snapshot arrives", async () => {
+  let resolve!: (snapshot: SessionHydrationSnapshot) => void;
+  const pending = new Promise<SessionHydrationSnapshot>(done => { resolve = done; });
+  vi.mocked(buildSessionHydrationSnapshot).mockReturnValueOnce(pending);
+  const states: boolean[] = [];
+  function Harness() {
+    const state = useSessionHydration({ currentSessionId: "fresh", prepare: () => ({ kind: "fresh" }), applySnapshot: () => {}, refreshCachedSession: async () => {}, onError: () => {} });
+    states.push(state.isHydratingSession);
+    return null;
+  }
+  await act(async () => { renderer = create(<Harness />); });
+  expect(states[0]).toBe(true);
+  await act(async () => { resolve({ messages: [], replayCursorsByAgentRunId: {}, pendingQuestionRequest: null, restoreMessageId: null, activeReplay: null }); await pending; });
+  expect(states.at(-1)).toBe(false);
 });
