@@ -1143,6 +1143,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertFalse(environment.controller_released)
 
     def test_session_workspace_internal_cas_uses_lease_fence_and_supports_replay(self):
+        from .runtime_schema_test_helpers import isolate_runtime_schema
+        isolate_runtime_schema(self)
         user = User.objects.create_user(
             username="session-workspace@example.com", password="password"
         )
