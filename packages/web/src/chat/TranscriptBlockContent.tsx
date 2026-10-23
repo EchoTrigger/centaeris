@@ -156,13 +156,13 @@ function TranscriptReasoning({ store, body }: Readonly<{
         onClick={() => setExpanded((value) => !value)}
       >
         <Brain aria-hidden="true" />
-        <span className={running ? "statusShimmer" : undefined}>{label}</span>
+        <span className={`workspaceReasoningLabel${running ? " statusShimmer" : ""}`}>{label}</span>
+        <ChevronDown className={`workspaceActivityGroupChevron ${expanded ? "isExpanded" : ""}`} aria-hidden="true" />
         {!expanded && preview ? (
           <span className="reasoningPreview" aria-hidden="true">
             <span className="reasoningPreviewText">{preview}</span>
           </span>
         ) : null}
-        <ChevronDown className={`workspaceActivityGroupChevron ${expanded ? "isExpanded" : ""}`} aria-hidden="true" />
       </button>
       <AnimatedDisclosure expanded={expanded}>
         <div className="workspaceReasoningBody" role="region" aria-label={t("reasoningBlock.thinkingContent")} tabIndex={0} ref={bodyRef}>
@@ -533,13 +533,13 @@ export const TranscriptLiveTail = memo(function TranscriptLiveTail({ live, mode 
             onClick={() => setExpanded((value) => !value)}
           >
             <Brain aria-hidden="true" />
-            <span className="statusShimmer">{t("reasoningBlock.thinking")}</span>
+            <span className="workspaceReasoningLabel statusShimmer">{t("reasoningBlock.thinking")}</span>
+            <ChevronDown className={`workspaceActivityGroupChevron ${expanded ? "isExpanded" : ""}`} aria-hidden="true" />
             {!expanded && preview ? (
               <span className="reasoningPreview" aria-hidden="true">
                 <span className="reasoningPreviewText">{preview}</span>
               </span>
             ) : null}
-            <ChevronDown className={`workspaceActivityGroupChevron ${expanded ? "isExpanded" : ""}`} aria-hidden="true" />
           </button>
           <AnimatedDisclosure expanded={expanded}>
             <div className="workspaceReasoningBody" role="region" aria-label={t("reasoningBlock.thinkingContent")} tabIndex={0} ref={reasoningBodyRef}>

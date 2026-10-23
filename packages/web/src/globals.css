@@ -471,9 +471,11 @@ button.attachmentCardContent:hover { border-color: var(--outline-variant); backg
 .workspaceComposerIconButton .statusIcon, .workspaceSendButton .statusIcon { animation: quietPulse 1500ms var(--motion-emphasized) infinite alternate; }
 .workspaceActivityGroups { display: grid; width: 100%; gap: 4px; }
 .workspaceReasoning { min-width: 0; }
-.workspaceReasoning > .workspaceActivityGroup { width: 100%; }
-.workspaceReasoning > .workspaceActivityGroup > .reasoningPreview { display: flex; text-overflow: clip; }
-.workspaceReasoning > .workspaceActivityGroup { color: var(--reasoning-label); font-size: var(--font-size-process); }
+.workspaceReasoning > .workspaceActivityGroup { width: fit-content; color: var(--reasoning-label); font-size: var(--font-size-process); }
+.workspaceReasoning > .workspaceActivityGroup[aria-expanded="true"] { width: 100%; }
+.workspaceReasoningLabel { flex: none; }
+.workspaceReasoning > .workspaceActivityGroup > .reasoningPreview { display: block; flex: 0 1 auto; }
+.workspaceReasoning .reasoningPreviewText { display: block; min-width: 0; width: auto; overflow: hidden; text-overflow: ellipsis; }
 .workspaceReasoningBody { margin: 8px 0 8px 7px; padding-left: 16px; border-left: 1px solid var(--outline-variant); overflow-wrap: anywhere; max-height: min(360px, 50vh); overflow: auto; scrollbar-gutter: stable; }
 .workspaceReasoningBody, .workspaceReasoningBody * { scrollbar-width: thin; scrollbar-color: var(--reasoning-scroll-thumb) transparent; }
 .workspaceReasoningBody:focus-visible { outline: 1px solid var(--outline); outline-offset: 3px; }
