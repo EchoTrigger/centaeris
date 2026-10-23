@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { ApiError, button, environment, nodes, renderer, subjectLoader } from "./componentHarness.mjs";
 const { AgentChatPageContent } = await import(await subjectLoader()(fileURLToPath(new URL("../../src/routes/AgentChatRoute.tsx", import.meta.url))));
 const history = { schema: "agent.history.v1", agentId: "agent", sessionId: "coord", items: [], nextCursor: "tail", newestCursor: "tail", hasMore: false };
-const session = (id = "unreferenced-work") => ({ id, currentEnvironmentId: `environment-${id}`, executionMode: "perRun", workspaceId: "workspace", agentId: "agent", projectId: null, title: `Work ${id}`, origin: "automation", status: "active", deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: false, updatedAt: "2026-10-05T00:00:00Z", initialInputOrigin: { messageId: `initial-${id}`, agentId: "agent", agentName: "Synthetic Agent" } });
+const session = (id = "unreferenced-work") => ({ id, currentEnvironmentId: `environment-${id}`, executionMode: "perRun", workspaceId: "workspace", agentId: "agent", projectId: null, title: `Work ${id}`, origin: "automation", status: "active", deletedAt: null, isPinned: false, isUnread: false, isManuallyUnread: false, latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", hasActiveAgentRun: false, updatedAt: "2026-10-05T00:00:00Z", initialInputOrigin: { messageId: `initial-${id}`, agentId: "agent", agentName: "Synthetic Agent" } });
 const page = (sessions = [session()], hasMore = false) => ({ schema: "agent.work_sessions.v1", agentId: "agent", workspaceId: "workspace", sessions, nextAfterSessionId: hasMore ? sessions.at(-1).id : null, hasMore });
 const { useAgentWorkSessions } = await import(await subjectLoader()(fileURLToPath(new URL("../../src/agent-chat/useAgentWorkSessions.ts", import.meta.url))));
 
@@ -40,6 +40,29 @@ test("work pages accept the stable environment binding and reject unsupported ex
     { ...bound, executionMode: "persistent" }, { ...bound, executionMode: undefined },
     Object.fromEntries(Object.entries(bound).filter(([key]) => key !== "currentEnvironmentId")),
   ]) assert.throws(() => parseAgentWorkSessionsPage(page([invalid]), "agent", "workspace", null));
+});
+
+test("work pages require the full attention contract and canonical lossless u64 watermarks", () => {
+  const bound = session();
+  for (const value of ["0", "9007199254740993", "18446744073709551615"]) {
+    const valid = { ...bound, latestAttentionSequence: value, readThroughSequence: value, attentionRevision: value };
+    assert.equal(parseAgentWorkSessionsPage(page([valid]), "agent", "workspace", null).sessions[0].sessionId, bound.id);
+  }
+  const attention = ["isManuallyUnread", "latestAttentionSequence", "readThroughSequence", "attentionRevision"];
+  for (const field of attention) {
+    const missing = Object.fromEntries(Object.entries(bound).filter(([key]) => key !== field));
+    assert.throws(() => parseAgentWorkSessionsPage(page([missing]), "agent", "workspace", null));
+  }
+  const oldShape = Object.fromEntries(Object.entries(bound).filter(([key]) => !attention.includes(key)));
+  assert.throws(() => parseAgentWorkSessionsPage(page([oldShape]), "agent", "workspace", null));
+  for (const field of attention.slice(1)) {
+    for (const value of [0, true, "", "01", "-1", "1.0", "1e0", " 1", "1\n", "18446744073709551616"]) {
+      assert.throws(() => parseAgentWorkSessionsPage(page([{ ...bound, [field]: value }]), "agent", "workspace", null));
+    }
+  }
+  for (const invalid of [{ ...bound, isManuallyUnread: "false" }, { ...bound, isUnread: true }]) {
+    assert.throws(() => parseAgentWorkSessionsPage(page([invalid]), "agent", "workspace", null));
+  }
 });
 
 test("work pages preserve authoritative nonlexical order and reject malformed scope, rows and cursors", () => {

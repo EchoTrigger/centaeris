@@ -3,7 +3,7 @@ from pydantic import ValidationError
 
 from app_core.http.schema import ModelsEnvelope
 from app_core.http.response_schema import AgentCoordinationSessionResponse
-from app_core.http.workspaces import SessionMetadataRequest
+from app_core.http.workspaces import SessionMetadataRequest, SessionReadRequest
 
 
 class SchemaWireContractTests(SimpleTestCase):
@@ -33,6 +33,16 @@ class SchemaWireContractTests(SimpleTestCase):
         for payload in [{"is_pinned": True}, {"isPinned": 1}, {"unknown": None}]:
             with self.subTest(payload=payload), self.assertRaises(ValidationError):
                 SessionMetadataRequest.model_validate(payload)
+
+    def test_observed_read_cursor_uses_canonical_lossless_decimal_strings(self):
+        for value in ["0", "1", "9007199254740993", "9223372036854775807"]:
+            self.assertEqual(SessionReadRequest.model_validate({"throughSequence": value}).model_dump(),
+                             {"throughSequence": value})
+        for payload in [{"throughSequence": value} for value in
+                        [0, True, "01", "-1", "1.0", "1e0", " 1", "1\n", "9223372036854775808"]] + [
+                            {"through_sequence": "1"}, {"throughSequence": "1", "unknown": True}]:
+            with self.subTest(payload=payload), self.assertRaises(ValidationError):
+                SessionReadRequest.model_validate(payload)
 
     def test_schema_literal_keeps_its_exceptional_wire_name(self):
         payload = {"schema": "agent.coordination_session.v1", "agentId": "agent_1", "sessionId": "session_1"}

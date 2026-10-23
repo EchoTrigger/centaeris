@@ -216,6 +216,18 @@ class AgentRunSupplementRequest(StrictSchema):
         return value
 
 
+class SessionReadRequest(StrictSchema):
+    through_sequence: str = Field(pattern=r"^(0|[1-9][0-9]*)$", max_length=19)
+
+    @field_validator("through_sequence")
+    @classmethod
+    def validate_sequence(cls, value):
+        from app_core.session_attention import MAX_SEQUENCE
+        if int(value) > MAX_SEQUENCE:
+            raise ValueError("session_read_sequence_invalid")
+        return value
+
+
 class SessionMetadataRequest(StrictSchema):
     title: str | None = None
     is_pinned: bool | None = Field(default=None)
@@ -498,6 +510,8 @@ def list_workspace_sessions(request, workspace_id: str):
         if grant is not None:
             sessions_query = sessions_query.filter(agent__definition_id=grant.definition_id)
     sessions = list(sessions_query.select_related("work_binding__operation").order_by("-isPinned", "-updatedAt"))
+    from app_core.session_attention import refresh_session_attention_many
+    refresh_session_attention_many(sessions)
     running_session_ids = set(
         AgentRun.objects.filter(
             session__in=sessions, status__in=["queued", "running"]
@@ -505,7 +519,7 @@ def list_workspace_sessions(request, workspace_id: str):
     )
     return {
         "sessions": [
-            serialize_session(session, has_active_agent_run=session.id in running_session_ids)
+            serialize_session(session, has_active_agent_run=session.id in running_session_ids, attention_is_current=True)
             for session in sessions
         ]
     }
@@ -654,10 +668,32 @@ def update_session_metadata(
             session.isPinned = payload.is_pinned
             update_fields.append("isPinned")
         if "is_unread" in fields:
-            session.isUnread = payload.is_unread
-            update_fields.append("isUnread")
-        session.save(update_fields=update_fields)
+            from app_core.session_attention import set_manual_session_unread
+            set_manual_session_unread(session, payload.is_unread)
+        if update_fields:
+            session.save(update_fields=update_fields)
     return {"session": serialize_session(session)}
+
+
+@router.post(
+    "/sessions/{session_id}/read",
+    auth=session_auth,
+    response={200: SessionEnvelope} | COMMON_ERROR_RESPONSES,
+)
+def acknowledge_session_notifications(request, response: HttpResponse, session_id: str, payload: SessionReadRequest):
+    from app_core.session_attention import acknowledge_session_read
+    response["Cache-Control"] = "no-store"
+    if request.GET:
+        return Status(400, {"error": "session_read_request_invalid"})
+    with transaction.atomic():
+        session = _session_for_update(request.user, session_id, lock=True)
+        if session is None:
+            return Status(404, {"error": "session_not_found"})
+        try:
+            acknowledge_session_read(session, int(payload.through_sequence))
+        except ValueError as error:
+            return Status(400, {"error": str(error)})
+        return {"session": serialize_session(session)}
 
 
 @router.delete(

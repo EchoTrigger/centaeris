@@ -37,7 +37,7 @@ window.fetch = async (input, init) => {
   const json = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } }));
   if (url.pathname === "/api/library") return json({ objects: [] });
   if (/^\/api\/sessions\/fixture-work-session\/outputs\/fixture-report\/(preview|download)$/.test(url.pathname)) return new Response("Synthetic output only.\n".repeat(64), { headers: { "Content-Type": "text/plain" } });
-  if (url.pathname === `/api/workspaces/${workspace.id}/sessions`) return json({ sessions: [{ id: "fixture-work-session", workspaceId: workspace.id, agentId: "fixture-worker", title: "Synthetic work session", origin: "user", isPinned: false, projectId: null, status: "active", updatedAt: "2026-09-30T14:35:00Z" }] });
+  if (url.pathname === `/api/workspaces/${workspace.id}/sessions`) return json({ sessions: [{ id: "fixture-work-session", currentEnvironmentId: "environment-fixture-work", executionMode: "perRun", workspaceId: workspace.id, agentId: "fixture-worker", title: "Synthetic work session", origin: "user", isPinned: false, projectId: null, status: "active", deletedAt: null, isUnread: false, isManuallyUnread: false, latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", updatedAt: "2026-09-30T14:35:00Z", initialInputOrigin: null, hasActiveAgentRun: true }] });
   if (url.pathname === `/api/workspaces/${workspace.id}/session-projects`) return json({ projects: [] });
   const model = url.pathname.match(/^\/api\/agents\/(fixture-[^/]+)\/model-settings$/);
   if (model) return json({ schema: "agent.model_settings.v1", agentId: model[1], modelConfigRef: null, thinkingMode: null, status: "unconfigured" });
@@ -45,7 +45,7 @@ window.fetch = async (input, init) => {
   if (binding) return binding[1] === "fixture-empty" ? json({ error: "coordination_session_not_found" }, 404) : json({ schema: "agent.coordination_session.v1", agentId: binding[1], sessionId: `fixture-coordination-${binding[1]}` });
   const workSessions = url.pathname.match(/^\/api\/agents\/(fixture-[^/]+)\/work-sessions$/);
   if (workSessions) return json({ schema: "agent.work_sessions.v1", agentId: workSessions[1], workspaceId: workspace.id,
-    sessions: workSessions[1] === "fixture-main" ? [{ id: "fixture-work-session", currentEnvironmentId: "environment-fixture-work", executionMode: "perRun", workspaceId: workspace.id, agentId: "fixture-worker", projectId: null, title: "Synthetic work session", origin: "automation", status: "active", deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: true, updatedAt: "2026-09-30T14:35:00Z", initialInputOrigin: { messageId: "fixture-initial-work", agentId: "fixture-main", agentName: "Synthetic main" } }] : [],
+    sessions: workSessions[1] === "fixture-main" ? [{ id: "fixture-work-session", currentEnvironmentId: "environment-fixture-work", executionMode: "perRun", workspaceId: workspace.id, agentId: "fixture-worker", projectId: null, title: "Synthetic work session", origin: "automation", status: "active", deletedAt: null, isPinned: false, isUnread: false, isManuallyUnread: false, latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", hasActiveAgentRun: true, updatedAt: "2026-09-30T14:35:00Z", initialInputOrigin: { messageId: "fixture-initial-work", agentId: "fixture-main", agentName: "Synthetic main" } }] : [],
     nextAfterSessionId: null, hasMore: false });
   const inputPage = url.pathname.match(/^\/api\/agents\/(fixture-[^/]+)\/inputs$/);
   if (inputPage) return json({ schema: "agent.inputs.v1", agentId: inputPage[1], sessionId: `fixture-coordination-${inputPage[1]}`, inputs: [{ inputId: "fixture-input", sequence: 80, createdAtMs: Date.parse("2026-09-30T14:35:00Z"), body: "Synthetic exact input", attachments: [], read: null }], nextAfterSequence: null });
@@ -119,10 +119,10 @@ window.fetch = async (input, init) => {
     return json(page);
   }
   if (url.pathname === "/api/sessions/fixture-work-session") return json({ session: {
-    id: "fixture-work-session", workspaceId: workspace.id, agentId: "fixture-worker", title: "Synthetic work session", origin: "user", isPinned: false, projectId: null, status: "active", hasActiveAgentRun: true,
+    id: "fixture-work-session", currentEnvironmentId: "environment-fixture-work", executionMode: "perRun", workspaceId: workspace.id, agentId: "fixture-worker", title: "Synthetic work session", origin: "user", isPinned: false, projectId: null, status: "active", deletedAt: null, isUnread: false, isManuallyUnread: false, latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", updatedAt: "2026-09-30T14:35:00Z", initialInputOrigin: null, hasActiveAgentRun: true,
   } });
   if (url.pathname === "/api/sessions/fixture-older-work-session") {
-    const metadata = { session: { id: "fixture-older-work-session", workspaceId: workspace.id, agentId: "fixture-worker", title: "Synthetic older work session", origin: "user", isPinned: false, projectId: null, status: "active", hasActiveAgentRun: false } };
+    const metadata = { session: { id: "fixture-older-work-session", currentEnvironmentId: "environment-fixture-older-work", executionMode: "perRun", workspaceId: workspace.id, agentId: "fixture-worker", title: "Synthetic older work session", origin: "user", isPinned: false, projectId: null, status: "active", hasActiveAgentRun: false, deletedAt: null, isUnread: false, isManuallyUnread: false, latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", updatedAt: "2026-09-30T14:35:00Z", initialInputOrigin: null } };
     if (delayedHistory.olderReference) return new Promise<Response>(resolve => {
       delayedHistory.releaseOlderReference = () => { delayedHistory.olderReference = false; delayedHistory.releaseOlderReference = null; void json(metadata).then(resolve); };
     });
