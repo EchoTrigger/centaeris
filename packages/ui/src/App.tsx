@@ -1,17 +1,16 @@
 import { DesktopShell } from "./components/DesktopShell";
-import { querySessionCatalog } from "./lib/chatBridge";
 import { ChatActionsMenu } from "./components/ChatActionsMenu";
 import { DropdownMenuItem } from "./components/ui/dropdown-menu";
-import { SettingsPage } from "./components/SettingsPage";
+import { SettingsNavigation, SettingsPage, type SettingsSection } from "./components/SettingsPage";
 import { ApplicationBar } from "./components/ApplicationBar";
 import { SchedulesPage } from "./components/SchedulesPage";
 import { useAppNavigation, type AppPage } from "./components/app/useAppNavigation";
 import { listenHost } from "./host/hostBridge";
-import { ThemeToggle } from "./components/ThemeToggle";
 import { t } from "./i18n";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PanelRight, X, FolderOpen, Settings2, LoaderCircle, Folder } from "lucide-react";
+import { PanelRight, X, Settings2, LoaderCircle, Folder } from "lucide-react";
 import { Button } from "./components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "./components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
 import "./styles/desktop-shell.css";
 import { Sidebar, type ResourceModalKind } from "./components/Sidebar";
@@ -36,7 +35,6 @@ import {
 } from "./lib/chatBridge";
 import {
   getWorkspaceInfo,
-  type WorkspaceSnapshot,
 } from "./lib/workspaceBridge";
 
 type AppModal = ResourceModalKind | null;
@@ -58,8 +56,10 @@ const errorMessage = (error: unknown, fallback: string): string =>
 
 function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [newChatRevision, setNewChatRevision] = useState(0);
   const [page, setPage] = useState<AppPage>("chat");
-  const [settingsSection, setSettingsSection] = useState<"appearance" | "models">("appearance");
+  const [composerResource, setComposerResource] = useState<ResourceModalKind | null>(null);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("appearance");
   const [pluginId, setPluginId] = useState("");
   const [resourceTab, setResourceTab] = useState<"plugins" | "skills">("plugins");
   const [workspaceBootstrapPending, setWorkspaceBootstrapPending] = useState(true);
@@ -113,6 +113,7 @@ function App() {
   } = workspaceController.actions;
   const sessionController = useSessionController({
     activeWorkspaceRoot,
+    isChatVisible: page === "chat",
     reportError: setHostError,
   });
   const {
@@ -122,6 +123,7 @@ function App() {
     mainSessions,
     runningSessionIds,
     completedSessionIds,
+    waitingSessionIds,
   } = sessionController;
   const {
     beginInitialization: beginSessionInitialization,
@@ -134,6 +136,7 @@ function App() {
     resolveSession,
     selectSession,
     setRunning,
+    setWaiting,
   } = sessionController.actions;
   const workspacePanel = useWorkspacePanelController({
     workspaceRoot: activeWorkspaceRoot,
@@ -164,26 +167,10 @@ function App() {
     void Promise.allSettled([
       workspaceRequest,
       sessionInitialization.load(),
-    ]).then(async ([workspaceResult, sessionResult]) => {
+    ]).then(([, sessionResult]) => {
       if (cancelled) return;
-      let snapshot: WorkspaceSnapshot = {
-        activeWorkspaceRoot: null,
-        workspaces: [],
-        cancelled: false,
-      };
-      if (workspaceResult.status === "fulfilled") {
-        snapshot = workspaceResult.value;
-      }
       if (sessionResult.status === "fulfilled") {
-        const preferredId = snapshot.workspaces.find(
-          (workspace) => normalizeRoot(workspace.root) === normalizeRoot(snapshot.activeWorkspaceRoot),
-        )?.activeSessionId;
-        const items = sessionResult.value;
-        if (preferredId && !items.some(item => item.id === preferredId)) {
-          try { items.push(...(await querySessionCatalog({mode:"lookup",sessionId:preferredId})).items); }
-          catch (error) { if (!cancelled) setHostError(errorMessage(error, t("app.unableToLoadConversations"))); }
-        }
-        if (!cancelled) sessionInitialization.applySessions(items, preferredId);
+        sessionInitialization.applySessions(sessionResult.value);
       } else if (sessionInitialization.isCurrent()) {
         setHostError(errorMessage(sessionResult.reason, t("app.unableToLoadConversations")));
       }
@@ -260,6 +247,7 @@ function App() {
     }
     setPluginId(location.pluginId ?? "");
     if (location.resourceTab) setResourceTab(location.resourceTab);
+    setComposerResource(null);
     setPage(location.page);
     return true;
   });
@@ -274,11 +262,11 @@ function App() {
     const snapshot = await openWorkspace(mode);
     if (!snapshot) return;
     navigation.accept({ page: "chat", sessionId: null, root: snapshot.activeWorkspaceRoot ?? null }, origin);
-    clearSelection(); clearWorkspacePanel(); setPage("chat");
+    setComposerResource(null); clearSelection(); clearWorkspacePanel(); setPage("chat");
   };
   const handleSelectWorkspace = async (root: string) => navigation.move({ page: "chat", sessionId: null, root });
   const handleSelectSession = async (sessionId: string) => { await navigation.move({ page: "chat", sessionId, root: sessions.find(s => s.id === sessionId)?.cwd ?? activeWorkspaceRoot }); };
-  const newChat = () => { void navigation.move({ page: "chat", sessionId: null, root: activeWorkspaceRoot }); };
+  const newChat = () => { setNewChatRevision(revision => revision + 1); void navigation.move({ page: "chat", sessionId: null, root: activeWorkspaceRoot }); };
   const menuActions = useRef<(action: string) => void>(() => {});
   menuActions.current = action => {
     if (action === "open-folder") void handleOpenWorkspace("customPath").catch(error => setHostError(String(error)));
@@ -317,13 +305,13 @@ function App() {
     <DesktopShell expanded={isSidebarOpen} className={`thinAppShell ${isSidebarOpen ? "is-sidebar-open" : "is-sidebar-collapsed"}`}>
       <ApplicationBar expanded={isSidebarOpen} onToggle={() => setIsSidebarOpen(open => !open)} canBack={navigation.canBack} canForward={navigation.canForward} onBack={() => void navigation.move(-1)} onForward={() => void navigation.move(1)} onError={setHostError} />
 
-      <div className="thinSidebarSlot">
+      <div className="thinSidebarSlot" inert={!isSidebarOpen}>
         <Sidebar
           onExpandWorkspace={sessionController.actions.expandWorkspace}
           onLoadMore={sessionController.actions.loadMore}
           hasMore={sessionController.hasMore}
           activePage={page}
-          collapsed={!isSidebarOpen}
+          collapsed={!isSidebarOpen || page === "settings"}
           onNavigate={navigatePage}
           onPinSession={pinSession}
           onReorderPinnedSessions={reorderPinnedSessions}
@@ -333,6 +321,7 @@ function App() {
           activeWorkspaceRoot={activeWorkspaceRoot}
           runningSessionIds={runningSessionIds}
           completedSessionIds={completedSessionIds}
+          waitingSessionIds={waitingSessionIds}
           workspaceCatalogError={workspaceCatalogError}
           onNewChat={newChat}
           onOpenWorkspace={handleOpenWorkspace}
@@ -347,6 +336,7 @@ function App() {
           onOpenResource={setActiveModal}
           onOpenFile={workspacePanel.actions.openFile}
         />
+        {page === "settings" ? <SettingsNavigation section={settingsSection} onSelect={setSettingsSection} collapsed={!isSidebarOpen} /> : null}
       </div>
       <div className={`thinWorkspaceShell ${page === "chat" ? "is-chat-page" : ""}`}>
 
@@ -356,9 +346,10 @@ function App() {
               <SummaryPanel
                 workspaceRoot={activeWorkspaceRoot}
                 sessionId={currentSessionId}
-                onFiles={() => workspacePanel.actions.openWorkspaceView("files")}
-                onReview={() => workspacePanel.actions.openWorkspaceView("review")}
+                onFiles={(id) => workspacePanel.actions.openWorkspaceView("files", id)}
+                onReview={(id) => workspacePanel.actions.openWorkspaceView("review", id)}
                 onTerminal={workspacePanel.actions.openTerminal}
+                onAddTab={workspacePanel.actions.openNewTab}
                 visible={isFilePaneVisible}
                 onRefreshFile={workspacePanel.actions.refreshActiveFile}
                 tabs={workspacePanel.tabs}
@@ -389,38 +380,32 @@ function App() {
             sessionId={currentSessionId}
             onTasks={workspacePanel.actions.openTasks}
           />
-          {!isFilePaneVisible && workspacePanel.tabs.length > 0 ? (
+          {!isFilePaneVisible && (workspacePanel.tabs.length > 0 || activeWorkspaceRoot) ? (
             <button
               type="button"
               className="nativePanelToggle is-right"
-              onClick={workspacePanel.actions.show}
+              onClick={() => workspacePanel.tabs.length ? workspacePanel.actions.show() : workspacePanel.actions.openNewTab()}
               aria-label="Show right sidebar"
               aria-expanded={false}
-              title="Show right sidebar"
             >
               <PanelRight aria-hidden="true" />
             </button>
           ) : null}
           </div> : null}
         </header>
-            {!chatWorkspaceRoot && workspaceBootstrapPending ? <section className="desktopSetupState" role="status"><LoaderCircle className="desktopLoadingIcon" aria-hidden="true" /><p>Opening your workspace…</p></section> : !chatWorkspaceRoot ? (
-              <section className="desktopSetupState">
-                <FolderOpen size={32} strokeWidth={1.4} aria-hidden="true" />
-                <h1>Start with a workspace</h1>
-                <p>Open a folder to give your agent a place to work. Your conversations, files and terminals stay together.</p>
-                <div><Button onClick={() => void handleOpenWorkspace("customPath").catch(error => setHostError(String(error)))}><FolderOpen aria-hidden="true" /> Open folder</Button>
-                  <Button variant="outline" onClick={() => setActiveModal("models")}><Settings2 aria-hidden="true" /> Model services</Button></div>
-                <small>You can switch workspaces from the sidebar at any time.</small>
-              </section>
-            ) : hasSelectableModel === false ? (
+            {!chatWorkspaceRoot && workspaceBootstrapPending ? <section className="desktopSetupState" role="status"><LoaderCircle className="desktopLoadingIcon" aria-hidden="true" /><p>Opening your workspace…</p></section> : chatWorkspaceRoot && hasSelectableModel === false ? (
               <section className="desktopSetupState">
                 <Settings2 size={32} strokeWidth={1.4} aria-hidden="true" />
                 <h1>Connect a model to get started</h1>
-                <p>Your workspace is ready. Add a model service, then come back to start a conversation.</p>
-                <Button onClick={() => setActiveModal("models")}><Settings2 aria-hidden="true" /> Configure a model</Button>
+                                <Button onClick={() => setActiveModal("models")}><Settings2 aria-hidden="true" /> Configure a model</Button>
               </section>
-            ) : (
+            ) : null}
               <ChatArea
+                hidden={page !== "chat" || (!chatWorkspaceRoot && workspaceBootstrapPending) || Boolean(chatWorkspaceRoot && hasSelectableModel === false)}
+                workspaces={workspaces}
+                onOpenWorkspace={() => handleOpenWorkspace("customPath")}
+                onSelectWorkspace={handleSelectWorkspace}
+                newChatRevision={newChatRevision}
                 currentSession={currentSession}
                 currentSessionId={currentSessionId}
                 workspaceName={chatWorkspace?.name ?? "Workspace"}
@@ -432,23 +417,23 @@ function App() {
                 onOpenWorkspacePath={workspacePanel.actions.openFilePath}
                 onOpenAgentSession={workspacePanel.actions.openAgentSession}
                 onNewSession={newChat}
-                onOpenResource={setActiveModal}
+                onOpenResource={setComposerResource}
                 onSessionResolved={resolveSession}
                 onAgentRunningChange={setRunning}
+                onSessionWaitingChange={setWaiting}
                 onSessionCompleted={completeSession}
               />
-            )}
           </main>
 
         </WorkspaceLayout>
         {page === "schedules" ? <SchedulesPage onSession={id => void handleSelectSession(id)} onCreate={newChat} /> : null}
         {page === "plugins" ? <Tabs value={resourceTab} onValueChange={value => { if (value === "plugins" || value === "skills") setResourceTab(value); }} className="desktopResourcesPage managementPage resourcePage">
-          <TabsList className="desktopResourceTabs" variant="line" hidden={resourceTab === "plugins" && !!pluginId} aria-label="Extensions"><TabsTrigger value="plugins">Plugins</TabsTrigger><TabsTrigger value="skills">Skills</TabsTrigger></TabsList>
+          <TabsList className="desktopResourceTabs" variant="line" aria-label="Extensions"><TabsTrigger value="plugins">Plugins</TabsTrigger><TabsTrigger value="skills">Skills</TabsTrigger></TabsList>
           <TabsContent value="plugins"><PluginsDialog selectedPluginId={pluginId} onSelect={id => { void navigation.move({page: "plugins", resourceTab: "plugins", pluginId: id, sessionId: currentSessionId, root: activeWorkspaceRoot}); }} /></TabsContent>
           <TabsContent value="skills"><SkillsDialog workspaceRoot={activeWorkspaceRoot} confirmAction={confirmAction} /></TabsContent>
         </Tabs> : null}
-        {page === "settings" ? <SettingsPage initialSection={settingsSection}><ModelsDialog onClose={() => navigatePage("chat")} onConfigured={setHasSelectableModel} confirmAction={confirmAction} /></SettingsPage> : null}
-        {page === "about" ? <section className="managementPage"><h1>Centaeris</h1><p>Local agent workspace</p><ThemeToggle /></section> : null}
+        {page === "settings" ? <SettingsPage section={settingsSection}><ModelsDialog onClose={() => navigatePage("chat")} onConfigured={setHasSelectableModel} confirmAction={confirmAction} /></SettingsPage> : null}
+        {page === "about" ? <section className="managementPage"><h1>Centaeris</h1><p>Local agent workspace</p></section> : null}
       </div>
 
       <ConfirmDialog
@@ -458,6 +443,15 @@ function App() {
         onCancel={() => answerConfirmation(false)}
         onConfirm={() => answerConfirmation(true)}
       />
+
+      <Dialog open={composerResource !== null} onOpenChange={open => { if (!open) setComposerResource(null); }}>
+        <DialogContent className="desktopResourceDialog" finalFocus={() => document.getElementById("message-input")}>
+          <DialogTitle className="sr-only">{composerResource === "models" ? "Model services" : composerResource === "skills" ? "Skills" : "Plugins"}</DialogTitle>
+          <div className="desktopResourceDialogBody">
+            {composerResource === "models" ? <ModelsDialog onClose={() => setComposerResource(null)} onConfigured={setHasSelectableModel} confirmAction={confirmAction} /> : composerResource === "skills" ? <SkillsDialog workspaceRoot={chatWorkspaceRoot} confirmAction={confirmAction} /> : composerResource === "plugins" ? <PluginsDialog /> : null}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {hostError ? (
         <div className="thinHostError desktopHostNotice" role="alert"><span>{hostError}</span><Button variant="ghost" size="icon-sm" aria-label="Dismiss notification" onClick={() => setHostError("")}><X aria-hidden="true" /></Button></div>

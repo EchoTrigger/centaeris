@@ -101,19 +101,20 @@ test("skill scope and query survive detail navigation", async () => {
   expect(screen.getByRole("combobox", { name: "Skill scope" }).textContent).toContain("Personal");
 });
 
-test("Skills keeps Personal and System scopes and excludes plugin-owned skills", async () => {
+test("Skills defaults to All sources and keeps explicit Personal and System scopes", async () => {
   const user = userEvent.setup(); render(<SkillsDialog workspaceRoot="/project" confirmAction={async () => true} />);
   await screen.findByRole("button", { name: "Open Design" });
   expect(getSkillCatalog).toHaveBeenCalledExactlyOnceWith("/project");
   const filter = screen.getByRole("combobox", { name: "Skill scope" });
-  expect(filter.textContent).toContain("Personal");
+  expect(filter.textContent).toContain("All sources");
   await user.click(filter);
-  expect(await screen.findAllByRole("option")).toHaveLength(2);
+  expect(await screen.findAllByRole("option")).toHaveLength(3);
+  expect(screen.getByRole("option", { name: "All sources" })).toBeDefined();
   expect(screen.getByRole("option", { name: "Personal" })).toBeDefined();
   expect(screen.getByRole("option", { name: "System" })).toBeDefined();
   await user.keyboard("{Escape}");
   expect(screen.getByRole("button", { name: "Open workspace" })).toBeDefined();
-  expect(screen.queryByRole("button", { name: "Open system" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Open system" })).toBeDefined();
   expect(screen.queryByRole("button", { name: "Open plugin" })).toBeNull();
   await chooseScope(user, "System");
   expect(screen.getByRole("button", { name: "Open system" })).toBeDefined();

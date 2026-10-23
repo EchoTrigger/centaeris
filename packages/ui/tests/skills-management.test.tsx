@@ -25,13 +25,14 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
-test("Personal includes current-workspace skills, System is separate, and owned locations stay outside Skills management", async () => {
+test("All sources includes personal, workspace and grouped system skills while owned locations stay outside management", async () => {
   const user = userEvent.setup(); render(<SkillsDialog workspaceRoot="/project" confirmAction={confirm} />);
   await screen.findByRole("button", { name: "Open personal skill" });
   expect(screen.getByRole("button", { name: "Open workspace skill" })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Open system skill" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Open system skill" })).toBeTruthy();
+  expect(within(screen.getByRole("group", { name: "System skills" })).getByRole("button", { name: "Open system skill" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Open plugin skill" })).toBeNull();
-  expect(within(screen.getByRole("combobox", { name: "Skill scope" })).getByText("Personal")).toBeTruthy();
+  expect(within(screen.getByRole("combobox", { name: "Skill scope" })).getByText("All sources")).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Open personal skill" }));
   await screen.findByText("personal instructions");
   await user.click(screen.getByRole("button", { name: "Manage location" }));
@@ -42,8 +43,8 @@ test("Personal includes current-workspace skills, System is separate, and owned 
   for (const name of ["plugin", "system", "other-workspace"]) expect(screen.queryByRole("button", { name: `Open location ${name}` })).toBeNull();
   await user.click(screen.getByRole("button", { name: "Back to skills" }));
   await user.click(screen.getByRole("combobox", { name: "Skill scope" }));
-  expect((await screen.findAllByRole("option")).map(option => option.textContent)).toEqual(["Personal", "System"]);
-  await user.click(screen.getByRole("option", { name: "System" }));
+  expect((await screen.findAllByRole("option")).map(option => option.textContent)).toEqual(["All sources", "Personal", "System"]);
+  await user.click(await screen.findByRole("option", { name: "System" }));
   expect(screen.getByRole("button", { name: "Open system skill" })).toBeTruthy();
   for (const name of ["personal", "workspace", "plugin"]) expect(screen.queryByRole("button", { name: `Open ${name} skill` })).toBeNull();
   await user.click(screen.getByRole("button", { name: "Open system skill" }));
@@ -52,18 +53,18 @@ test("Personal includes current-workspace skills, System is separate, and owned 
   expect(screen.getByRole("switch", { name: "Disable skill" })).toBeTruthy();
 });
 
-test("clearing skill filters restores the Personal view", async () => {
+test("clearing skill filters restores All sources including system skills", async () => {
   const user = userEvent.setup(); render(<SkillsDialog workspaceRoot="/project" confirmAction={confirm} />);
   await screen.findByRole("button", { name: "Open personal skill" });
   await user.click(screen.getByRole("combobox", { name: "Skill scope" }));
-  await user.click(screen.getByRole("option", { name: "System" }));
+  await user.click(await screen.findByRole("option", { name: "System" }));
   await user.type(screen.getByRole("textbox", { name: "Search skills" }), "missing");
   await user.click(screen.getByRole("button", { name: "Clear filters" }));
-  expect(within(screen.getByRole("combobox", { name: "Skill scope" })).getByText("Personal")).toBeTruthy();
+  expect(within(screen.getByRole("combobox", { name: "Skill scope" })).getByText("All sources")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Open personal skill" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Open workspace skill" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Open plugin skill" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "Open system skill" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Open system skill" })).toBeTruthy();
 });
 
 test("skill mutation responses from a departed workspace cannot overwrite the new workspace", async () => {

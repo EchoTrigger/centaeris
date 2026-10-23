@@ -1,31 +1,17 @@
 .desktop-visual {
-  --visual-paper: #fcfcfc;
-  --visual-ink: #171717;
-  --visual-muted: #666;
-  --visual-rule: #dedede;
-  --visual-soft: #f3f3f3;
-  --visual-label: #f4f4f4;
-  --visual-depth: #eef2f8;
-  --visual-depth-rule: #e3ecf8;
-  --visual-success: #217f53;
-  --visual-info: #416990;
-  --visual-warning: #986315;
-  --visual-error: #b8433b;
+  --visual-paper: var(--surface-color);
+  --visual-ink: var(--on-surface);
+  --visual-muted: var(--process-text);
+  --visual-rule: var(--outline-variant);
+  --visual-soft: var(--surface-variant);
+  --visual-label: var(--surface-container);
+  --visual-depth: var(--surface-variant);
+  --visual-depth-rule: var(--outline-variant);
+  --visual-success: var(--success);
+  --visual-info: var(--process-text);
+  --visual-warning: var(--warning);
+  --visual-error: var(--error);
   container-type: inline-size;
-}
-:root[data-theme="dark"] .desktop-visual {
-  --visual-paper: #0e0e0e;
-  --visual-ink: #e5e5e5;
-  --visual-muted: #a6a6a6;
-  --visual-rule: #303030;
-  --visual-soft: #191919;
-  --visual-label: #292929;
-  --visual-depth: #10151b;
-  --visual-depth-rule: #263748;
-  --visual-success: #35bf81;
-  --visual-info: #91b5da;
-  --visual-warning: #d6a14d;
-  --visual-error: #ec817a;
 }
 /* Reference-style presentation: ordinary reading order and compact grouping. */
 .desktop-visual.centaeris-visual {
@@ -85,6 +71,9 @@
 	border-radius: 8px;
 	background: var(--visual-soft);
 }
+.desktop-visual .cv-sequence {
+	--visual-sequence-gap: 16px;
+}
 .desktop-visual .cv-sequence > ol {
 	display: block;
 	list-style: none;
@@ -99,10 +88,35 @@
 	border: 0;
 }
 .desktop-visual .cv-sequence > ol > li + li {
-	margin-top: 16px;
+	margin-top: var(--visual-sequence-gap);
 }
 .desktop-visual .cv-sequence > ol > li > div {
 	min-width: 0;
+}
+/* Static ordered explanations use a guide with nodes, ending at the last heading.
+   The centered reference chain retains its existing arrows and containment. */
+.desktop-visual:not(.dv-chain) .cv-sequence > ol > li {
+	padding-inline-start: 20px;
+}
+.desktop-visual:not(.dv-chain) .cv-sequence > ol > li:not(:last-child)::before {
+	content: "";
+	position: absolute;
+	inset-inline-start: 4px;
+	top: 11px;
+	bottom: calc(-1 * var(--visual-sequence-gap) - 11px);
+	border-inline-start: 1px solid var(--visual-rule);
+	pointer-events: none;
+}
+.desktop-visual:not(.dv-chain) .cv-sequence > ol > li::after {
+	content: "";
+	position: absolute;
+	inset-inline-start: 1.5px;
+	top: 8px;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--visual-muted);
+	pointer-events: none;
 }
 .desktop-visual .cv-step {
 	display: none;
@@ -191,10 +205,8 @@
   align-items: baseline;
   gap: 0 9px;
 }
-.desktop-visual.dv-paragraph .cv-sequence > ol > li + li {
-  margin-top: 15px;
-  padding-top: 14px;
-  border-top: 1px solid var(--visual-rule);
+.desktop-visual.dv-paragraph .cv-sequence {
+  --visual-sequence-gap: 15px;
 }
 .desktop-visual.dv-paragraph .cv-sequence > ol > li > div > .cv-group > .cv-title {
   justify-self: start;
@@ -289,8 +301,8 @@
 		padding: 14px;
 		border-radius: 11px;
 	}
-	.desktop-visual .cv-sequence > ol > li + li {
-		margin-top: 14px;
+	.desktop-visual .cv-sequence {
+		--visual-sequence-gap: 14px;
 	}
 	.desktop-visual.dv-chain .cv-sequence > ol > li + li {
 		margin-top: 30px;

@@ -80,3 +80,31 @@ test("closing the selected tab chooses the adjacent tab and removing parent sess
   expect(panel().tabs).toEqual([]);
   expect(panel().activeTabId).toBeNull();
 });
+
+
+test("new tabs replace their own slot and reuse existing views without dropping other tabs", async () => {
+  const panel = await mount();
+  await act(async () => panel().actions.openWorkspaceView("review"));
+  const reviewId = panel().activeTabId;
+  await act(async () => panel().actions.openNewTab());
+  const blankId = panel().activeTabId!;
+  expect(panel().tabs.map(tab => tab.kind)).toEqual(["review", "new"]);
+  await act(async () => panel().actions.openWorkspaceView("files", blankId));
+  expect(panel().tabs.map(tab => tab.kind)).toEqual(["review", "files"]);
+  expect(panel().tabs.some(tab => tab.id === blankId)).toBe(false);
+  await act(async () => panel().actions.openNewTab());
+  const nextId = panel().activeTabId!;
+  await act(async () => panel().actions.openWorkspaceView("review", nextId));
+  expect(panel().tabs.map(tab => tab.kind)).toEqual(["review", "files"]);
+  expect(panel().activeTabId).toBe(reviewId);
+});
+
+test("a closed new tab cannot be resurrected by a late terminal completion", async () => {
+  const panel = await mount();
+  await act(async () => panel().actions.openNewTab());
+  const blankId = panel().activeTabId!;
+  await act(async () => panel().actions.closeTab(blankId));
+  await act(async () => panel().actions.openTerminal({ terminalId: "pty", workspaceRoot: "root", sessionId: "main", shell: "pwsh", state: "running", exitCode: null, outputComplete: false, error: null }, "service", "pwsh", blankId));
+  expect(panel().tabs).toEqual([]);
+  expect(panel().activeTabId).toBeNull();
+});

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import visualCatalog from "@centaeris/visualization-react/catalog";
 import { t } from "../../i18n";
-import { loadTranscriptContentRange } from "./transcriptContentRanges";
+import { loadTranscriptContentRange, readCachedTranscriptContent } from "./transcriptContentRanges";
 import type { ChatMessage } from "./types";
 
 export function useTranscriptText(message: ChatMessage | undefined, enabled = true) {
@@ -13,11 +13,19 @@ export function useTranscriptText(message: ChatMessage | undefined, enabled = tr
   const [cursor, setCursor] = useState<{ identity: typeof identity; offsets: string[]; index: number }>({ identity, offsets: ["0"], index: 0 });
   const current = cursor.identity === identity ? cursor : { identity, offsets: ["0"], index: 0 };
   const offset = current.offsets[current.index];
+  const cached = useMemo(() => {
+    // Retry may observe pages populated since the previous attempt.
+    void attempt;
+    if (!identity || !enabled || (assembleAnswer && BigInt(identity.reference.byteLength) > BigInt(visualCatalog.limits.answerBytes))) return null;
+    const content = readCachedTranscriptContent(identity, offset, assembleAnswer);
+    return content ? { identity, text: content.content, endOffset: content.endOffset, hasMore: content.hasMore, offset } : null;
+  }, [identity, enabled, offset, assembleAnswer, attempt]);
+  const visibleResult = enabled && result && result.identity === identity && result.offset === offset ? result : cached;
   useEffect(() => {
     void attempt;
     setResult(null);
     setFailed(false);
-    if (!identity || !enabled) return;
+    if (!identity || !enabled || cached) return;
     let active = true;
 
     // Answer Markdown is one document: a visual or ordinary fence may cross any
@@ -48,10 +56,10 @@ export function useTranscriptText(message: ChatMessage | undefined, enabled = tr
     };
     void read().catch(() => { if (active) setFailed(true); });
     return () => { active = false; };
-  }, [identity, attempt, enabled, offset, assembleAnswer]);
+  }, [identity, attempt, enabled, offset, assembleAnswer, cached]);
   const resolved = useMemo(() => {
-    if (!message || !identity || result?.identity !== identity || result.offset !== offset) return message;
-    const text = result.text;
+    if (!message || !visibleResult) return message;
+    const text = visibleResult.text;
     if (message.role === "user") return { ...message, text };
     const chunks = message.turn.chunks;
     return { ...message, turn: { ...message.turn,
@@ -59,15 +67,15 @@ export function useTranscriptText(message: ChatMessage | undefined, enabled = tr
       chunks: chunks.map((chunk) => chunk.kind === "reasoning" || chunk.kind === "narrative"
         ? { ...chunk, text } : chunk.kind === "task" ? { ...chunk, task: { ...chunk.task, summary: text } } : chunk),
     } };
-  }, [message, identity, result, offset]);
-  const loading = Boolean(enabled && identity && (result?.identity !== identity || result.offset !== offset));
+  }, [message, visibleResult]);
+  const loading = Boolean(enabled && identity && !visibleResult);
   const status = !enabled || !identity ? null : loading ? (
     failed ? <span role="alert">{t("transcriptText.failed")}
       <button type="button" onClick={() => setAttempt((value) => value + 1)}>{t("transcriptText.retry")}</button>
     </span> : <span role="status">{t("transcriptText.loading")}</span>
   ) : <span className="transcriptPageControls">
     {current.index > 0 ? <button type="button" aria-label="Previous content page" onClick={() => setCursor({ ...current, index: current.index - 1 })}>{t("transcriptText.previousOutput")}</button> : null}
-    {result?.hasMore ? <button type="button" aria-label="Next content page" onClick={() => setCursor({ identity, offsets: [...current.offsets.slice(0, current.index + 1), result.endOffset], index: current.index + 1 })}>{t("transcriptText.nextOutput")}</button> : null}
+    {visibleResult?.hasMore ? <button type="button" aria-label="Next content page" onClick={() => setCursor({ identity, offsets: [...current.offsets.slice(0, current.index + 1), visibleResult.endOffset], index: current.index + 1 })}>{t("transcriptText.nextOutput")}</button> : null}
   </span>;
-  return { message: resolved, status, loading, paged: current.index > 0 || Boolean(result?.hasMore) };
+  return { message: resolved, status, loading, paged: current.index > 0 || Boolean(visibleResult?.hasMore) };
 }

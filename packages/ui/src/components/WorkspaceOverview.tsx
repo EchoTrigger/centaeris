@@ -3,7 +3,7 @@ import {
 	FileDiff,
 	FolderOpen,
 	GitBranch,
-	Layers,
+	List,
 	Bot,
 	ListCollapse,
 } from "lucide-react";
@@ -95,14 +95,13 @@ export function WorkspaceOverview({
 				render={
 					<Button
 						variant="ghost"
-						size="sm"
-						className="desktopResourcesTrigger"
+						size="icon-sm"
+						className="nativePanelToggle"
 						aria-label="Workspace overview"
 					/>
 				}
 			>
-				<Layers size={15} aria-hidden="true" />
-				<span>Resources</span>
+				<List size={16} aria-hidden="true" />
 			</PopoverTrigger>
 			<PopoverContent
 				align="end"
@@ -124,7 +123,7 @@ export function WorkspaceOverview({
 					>
 						<FolderOpen size={16} aria-hidden="true" />
 						<span>
-							Files<small>Browse workspace files</small>
+							Files
 						</span>
 					</Button>
 					<Button
@@ -134,7 +133,7 @@ export function WorkspaceOverview({
 					>
 						<FileDiff size={16} aria-hidden="true" />
 						<span>
-							Review changes<small>Inspect changes in your workspace</small>
+							Review changes
 						</span>
 						{gitStatus?.isGitRepository ? (
 							<span className="workspaceOverviewStats">
@@ -153,7 +152,7 @@ export function WorkspaceOverview({
 						>
 							<ListCollapse size={16} aria-hidden="true" />
 							<span>
-								Tasks<small>Running and completed processes</small>
+								Tasks
 							</span>
 							<span className="desktopResourceCount">{taskCount.count}</span>
 						</Button>

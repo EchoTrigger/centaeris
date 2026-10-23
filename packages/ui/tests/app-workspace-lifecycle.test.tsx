@@ -14,6 +14,7 @@ type SidebarHarnessProps = {
   currentSessionId: string | null;
   activeWorkspaceRoot: string | null;
   workspaceCatalogError: { message: string; canReset: boolean } | null;
+  onNewChat: () => void;
   onOpenWorkspace: (mode: WorkspaceOpenMode) => void;
   onSelectWorkspace: (root: string) => void;
   onSelectSession: (sessionId: string) => void;
@@ -23,6 +24,11 @@ type SidebarHarnessProps = {
 };
 
 type ChatHarnessProps = {
+  newChatRevision?: number;
+  hidden?: boolean;
+  workspaceRoot?: string | null;
+  onOpenWorkspace: () => Promise<void>;
+  onSelectWorkspace: (root: string) => Promise<void>;
   currentSessionId: string | null;
   gitStatus: WorkspaceGitStatusResponse | null;
   runtimeConfigRevision: number;
@@ -146,7 +152,7 @@ vi.mock("../src/components/Sidebar", () => ({
 vi.mock("../src/components/chat/ChatArea", () => ({
   ChatArea: (props: ChatHarnessProps) => {
     harness.chatProps = props;
-    return <main data-testid="chat-area" />;
+    return <main data-testid="chat-area" hidden={props.hidden} />;
   },
 }));
 
@@ -342,14 +348,19 @@ beforeEach(() => {
   harness.retryRequests.length = 0;
 });
 
-test("workspace and selected chat appear without waiting for model configuration", async () => {
+test("startup restores the workspace and leaves conversation selection empty without waiting for models", async () => {
   harness.runtimeConfigCalls = 1;
   harness.deferRuntimeConfigRefresh = true;
   let renderer!: ReactTestRenderer;
   await act(async () => { renderer = create(<App />); });
   expect(harness.runtimeConfigRequests).toHaveLength(1);
   expect(harness.sidebarProps?.activeWorkspaceRoot).toBe(currentSnapshot.activeWorkspaceRoot);
-  expect(harness.sidebarProps?.currentSessionId).toBe("current");
+  expect(harness.sidebarProps?.currentSessionId).toBeNull();
+  expect(getChatProps().currentSessionId).toBeNull();
+  expect(getChatProps().newChatRevision).toBe(0);
+  await act(async () => getSidebarProps().onNewChat());
+  expect(getChatProps().newChatRevision).toBe(1);
+  expect(getSidebarProps().activeWorkspaceRoot).toBe(currentSnapshot.activeWorkspaceRoot);
   await act(async () => renderer.unmount());
 });
 
@@ -392,6 +403,8 @@ test("a cancelled folder picker preserves the current session and panel", async 
   await act(async () => {
     renderer = create(<App />);
   });
+  harness.selectResult = currentSnapshot;
+  await act(async () => getSidebarProps().onSelectSession("current"));
   await act(async () => getChatProps().onOpenAgentSession("child", "Child"));
   harness.openResult = {
     activeWorkspaceRoot: "D:\\Ignored",
@@ -548,6 +561,8 @@ test("workspace reset has no side effects until it is confirmed", async () => {
   await act(async () => {
     renderer = create(<App />);
   });
+  harness.selectResult = currentSnapshot;
+  await act(async () => getSidebarProps().onSelectSession("current"));
   await act(async () => getChatProps().onOpenAgentSession("child", "Child"));
   let cancelledReset: Promise<void> | null = null;
   await act(async () => {
@@ -614,7 +629,7 @@ test("a conversation remains accessible when its workspace directory is unavaila
   await act(async () => {
     renderer = create(<App />);
   });
-  expect(harness.chatProps).toBeNull();
+  expect(getChatProps().workspaceRoot).toBeNull();
 
   await act(async () => {
     getSidebarProps().onSelectSession("external");
@@ -698,14 +713,14 @@ test("an older runtime config response cannot overwrite a newer notification", a
     await harness.runtimeConfigRequests[1].promise;
     await Promise.resolve();
   });
-  expect(renderer!.root.findAllByProps({ "data-testid": "chat-area" })).toHaveLength(0);
+  expect(getChatProps().hidden).toBe(true);
 
   await act(async () => {
     harness.runtimeConfigRequests[0].resolve(runtimeConfig(2, true));
     await harness.runtimeConfigRequests[0].promise;
     await Promise.resolve();
   });
-  expect(renderer!.root.findAllByProps({ "data-testid": "chat-area" })).toHaveLength(0);
+  expect(getChatProps().hidden).toBe(true);
 
   await act(async () => renderer?.unmount());
 });
@@ -722,4 +737,22 @@ test("Skills opens with an explicit null workspace when no project is active", a
   expect(harness.skillsProps?.workspaceRoot).toBeNull();
 
   await act(async () => renderer?.unmount());
+});
+
+
+test("an empty workspace offers the shared draft without opening or creating a folder", async () => {
+  harness.initialSnapshot = { activeWorkspaceRoot: null, workspaces: [], cancelled: false };
+  harness.workspaceInfoResult = harness.initialSnapshot;
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<App />); });
+  expect(getChatProps().workspaceRoot).toBeNull();
+  expect(getChatProps().hidden).toBe(false);
+  expect(getChatProps().onOpenWorkspace).toBeTypeOf("function");
+  expect(getChatProps().onSelectWorkspace).toBeTypeOf("function");
+  expect(harness.openRequests).toHaveLength(0);
+  await act(async () => getSidebarProps().onNewChat());
+  expect(getSidebarProps().currentSessionId).toBeNull();
+  expect(getSidebarProps().activeWorkspaceRoot).toBeNull();
+  expect(getChatProps().workspaceRoot).toBeNull();
+  await act(async () => renderer.unmount());
 });

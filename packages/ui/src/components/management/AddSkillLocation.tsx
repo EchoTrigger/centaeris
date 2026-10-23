@@ -55,6 +55,6 @@ export function AddSkillLocation({ workspaceRoot, pending, confirmAction, onAdd,
     <div className="dmField"><label htmlFor="skill-location-path">Path</label><div className="dmPathField"><Input id="skill-location-path" autoFocus value={path} disabled={pending || browsing} onChange={event => setPath(event.target.value)} placeholder={kind === "skillFile" ? "Path to SKILL.md" : "Path to skill directory"} /><Button variant="outline" disabled={pending || browsing} onClick={() => void browse()}><FolderOpen />{browsing ? "Choosing…" : "Browse"}</Button></div></div>
     {scope === "workspace" && workspaceRoot ? <div className="dmBinding"><MapPin size={15} aria-hidden="true" /><span>{workspaceRoot}</span></div> : null}
     {error ? <ManagementError onRetry={error.retryBrowse ? () => void browse() : undefined} retryLabel="Retry browse">{error.message}</ManagementError> : null}
-    <div className="dmFormFooter"><Button variant="outline" disabled={pending || confirming} onClick={() => void cancel()}>Cancel</Button><Button type="submit" disabled={pending || browsing || !path.trim() || scope === "workspace" && !workspaceRoot}><Plus />{pending ? "Adding…" : "Add location"}</Button></div>
+    <div className="dmFormFooter"><Button variant="ghost" disabled={pending || confirming} onClick={() => void cancel()}>Cancel</Button><Button variant="solid" type="submit" disabled={pending || browsing || !path.trim() || scope === "workspace" && !workspaceRoot}><Plus />{pending ? "Adding…" : "Add location"}</Button></div>
   </form>;
 }

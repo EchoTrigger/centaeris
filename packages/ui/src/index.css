@@ -180,7 +180,7 @@ button { cursor: pointer; }
   grid-template-rows: 36px minmax(0, 1fr);
   width: 100%;
   height: 100%;
-  background: var(--surface-color);
+  background: var(--surface-variant);
 }
 
 .thinAppShell.is-sidebar-collapsed {
@@ -276,7 +276,6 @@ button { cursor: pointer; }
 .nativePanelToggle svg {
   width: 18px;
   height: 18px;
-  stroke-width: 1.8;
 }
 
 html[data-platform="win32"] .nativeTitlebarSafeArea {
@@ -559,7 +558,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   min-width: 0;
   flex: 1;
   display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 7px;
   padding: 7px 3px 7px 8px;
@@ -575,13 +574,8 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   background: transparent;
 }
 
-.thinSessionDot.is-running {
-  background: var(--primary-color);
-  box-shadow: 0 0 0 3px rgba(47, 128, 237, 0.12);
-}
-
 .thinSessionDot.is-unread {
-  background: var(--warning);
+  background: var(--primary-color);
 }
 
 .thinSessionCopy {
@@ -1370,7 +1364,7 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   padding: 12px;
   border: 0;
   border-radius: 6px;
-  background: var(--surface-variant);
+  background: var(--code-surface);
 }
 
 .summaryMarkdownContent .markdown-table table {
@@ -3145,15 +3139,14 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 
 .modelServiceRow > .providerLogo, .modelServiceRow > .providerLogoFallback { width:32px; height:32px; flex:0 0 32px; font-size:14px; }
 
-.workspaceTerminal { display:flex; flex-direction:column; height:100%; min-height:0; background:#181818; color:#dedede; }
-.workspaceTerminal header { display:flex; justify-content:space-between; padding:6px 10px; font-size:12px; }
-.workspaceTerminal button { border:0; background:transparent; color:inherit; cursor:pointer; padding:4px 8px; }
-.workspaceTerminalCanvas { flex:1; min-height:0; overflow:hidden; padding:4px 8px; }
-.workspaceAddMenu { position:relative; flex-shrink:0; }
-.workspaceAddMenu > button { display:grid; place-items:center; width:30px; height:30px; border:0; background:transparent; color:inherit; cursor:pointer; }
-.workspaceAddChoices { width:230px; padding:6px; border-radius:9px; background:var(--surface-container); box-shadow:0 8px 25px #0003; max-height:60vh; overflow:auto; }
-.workspaceAddChoices button { display:block; width:100%; text-align:left; padding:9px; background:transparent; color:inherit; border:0; border-radius:6px; cursor:pointer; }
-.workspaceAddChoices button:hover { background:var(--surface-color); }
+.workspaceTerminal { position:relative; display:flex; flex-direction:column; height:100%; min-height:0; padding:16px; background:var(--surface-color); color:var(--on-surface); }
+.workspaceTerminalCanvas { flex:1; min-height:0; overflow:hidden; }
+.workspaceTerminalActions { position:absolute; top:8px; right:8px; z-index:1; }
+.workspaceTerminalActions > button { color:var(--process-text); background:var(--surface-color); }
+.workspaceTerminalExit, .workspaceTerminalError { padding:0 0 10px; color:var(--process-text); font-size:12px; }
+.workspaceTerminalError { display:flex; align-items:center; justify-content:space-between; gap:12px; color:var(--error); }
+.workspaceTerminalError > button { border:0; padding:4px 8px; color:var(--on-surface); background:var(--surface-variant); border-radius:5px; cursor:pointer; }
+
 .workspaceAddChoices small { display:block; padding:12px 9px 4px; color:var(--process-text); }
 .workspaceAddChoices p { padding:8px; font-size:12px; overflow-wrap:anywhere; }
 

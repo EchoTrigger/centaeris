@@ -160,12 +160,6 @@ export function useStreamPresentation(text: string, live: boolean) {
       current.previousFrameAt = now;
       let requestedGraphemes: number;
       if (current.terminalDeadline !== null) {
-        if (now >= current.terminalDeadline) {
-          current.shown = current.target;
-          current.terminalDeadline = null;
-          setVisible(current.shown);
-          return;
-        }
         const framesRemaining = Math.max(
           1,
           Math.ceil(
@@ -173,7 +167,11 @@ export function useStreamPresentation(text: string, live: boolean) {
               STREAM_PRESENTATION_FRAME_MS,
           ),
         );
-        requestedGraphemes = Math.max(1, Math.ceil(remaining / framesRemaining));
+        // Completion is a catch-up target, never permission to dump a large backlog.
+        requestedGraphemes = Math.min(
+          STREAM_PRESENTATION_MAX_GRAPHEMES_PER_FRAME,
+          Math.max(1, Math.ceil(remaining / framesRemaining)),
+        );
       } else {
         const targetRate = Math.min(
           STREAM_PRESENTATION_MAX_GRAPHEMES_PER_SECOND,
@@ -233,6 +231,6 @@ export function useStreamPresentation(text: string, live: boolean) {
     };
   }, [available]);
 
-  // Corrections and history never show stale content; append-only terminal text may drain briefly.
+  // Corrections and history never show stale content; completed live text drains within the same per-frame budget.
   return !available || !text.startsWith(visible) ? text : visible;
 }

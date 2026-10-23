@@ -4,6 +4,39 @@ Run this checklist against a production UI build before a release that changes
 Desktop rendering, streaming, scrolling, theme behavior, or Electron host
 routing. Record the tested commit, Windows version, display scale, and result.
 
+## Conversation loading
+
+- Open a conversation after restarting Desktop: show only the generic loading
+  status until the body is ready; internal recovery stages and premature empty
+  conversation copy must not flash.
+- Delay model configuration or context usage reads. The body, running state and
+  pending question become usable independently; each optional field fills in
+  when its own result arrives, without replacing messages or resetting input.
+- Return to a cached conversation: show cached content while bounded incremental
+  synchronization runs. A failed optional read preserves the body and last known
+  usage; configuration failures stay within the model controls.
+- Switch A → B → A with metadata pending, and close a view during loading. Late
+  responses from the previous visit must not overwrite the current view. Confirm
+  active replay, pending questions, compaction and manual configuration still work.
+  Resolve a question in another client; background verification removes its cached
+  question panel while keeping the conversation readable.
+
+## Desktop management
+
+- Add/install/create entry actions use quiet outline buttons. Save and Confirm
+  use the neutral solid surface; Cancel, Refresh and Back use ghost buttons.
+  Verify keyboard focus and disabled states remain visible in both themes.
+
+- Open Settings: categories replace the chat navigation in the same sidebar.
+  Verify Appearance and Model services, then collapse and reopen the sidebar.
+  Toolbar Back restores the retained chat; Forward restores the active category.
+- At normal and wide window sizes, settings and extension content stays centered
+  in the available main pane with left-aligned headings. Confirm the Plugins/Skills
+  selector remains aligned with the content and available inside plugin details.
+- Skills opens at All sources with Personal and System groups. Filter and search,
+  open instructions, and return without losing filters. Clear filters restores
+  all sources. System and plugin-owned locations retain their access boundaries.
+
 ## Desktop conversation
 
 - Trigger a failed and an interrupted run with a local fixture. Confirm the
@@ -25,6 +58,29 @@ routing. Record the tested commit, Windows version, display scale, and result.
 
 - Open a short and a long Session; confirm the newest content opens without an
   automatic chain of older-page requests.
+- On a cold start, open a long conversation before any view cache exists. Delayed
+  transcript content and virtual-row measurements keep the newest content at the
+  bottom. Scroll upward while loading: your reading position stays put as the
+  remaining content arrives; Jump to latest explicitly restores following.
+- Send a multiline prompt and let the composer return to its resting height.
+  While the response is pending and blank reply space remains, viewport resizing
+  and earlier-row remeasurement must not expose Jump to latest or detach following.
+  Stream enough text to consume that space: following reaches the actual end.
+  Scroll upward during anchoring to confirm that explicit reading still pauses it.
+- Scroll over both empty margins and the text column: the whole main pane responds.
+  During streaming, the newest line and return-to-latest button stay above the
+  input dock. Resize the window, grow the input and open a pending question;
+  measured dock height continues to bound the scroll viewport.
+- While running, a thin LoaderCircle rotates on the chat row's right. It stops
+  under reduced motion. Completion away from the chat shows an unread dot;
+  opening it clears the dot. A question shows a reply dot until answered, including
+  after leaving the chat. Background Runtime discovery updates these indicators
+  without opening the conversation or creating another stream subscription.
+- The first live answer appears before Final or RunFinished. Large incoming text
+  advances through the existing Motion queue, and completion drains the same
+  reader without remounting the Markdown or reopening details. Large terminal
+  backlogs keep the same frame budget beyond the catch-up target. History appears
+  immediately. Multiple active chats use bounded background status reads.
 - Scroll away from the bottom while live answer and reasoning text arrive;
   confirm the viewport stays detached. Return to the bottom and confirm follow
   resumes.
@@ -67,8 +123,21 @@ routing. Record the tested commit, Windows version, display scale, and result.
   does not move it into virtual history; the running flag must settle. Completing
   a visible turn keeps the same keyed subtree and its open preview page/scroll.
   Stale running history does not become a resident tail.
-- Prepending history preserves the visible offset. Resize and live tail growth
-  notify the existing follow controller; they must not override detached reading.
+- Prepending history preserves the visible paragraph's screen position. Trigger
+  an older-page load, continue scrolling before it completes, and verify that
+  neither the response nor later referenced-text measurements move that paragraph.
+  Repeatedly scroll out of and back into cached long answers; no loading placeholder
+  should collapse their height. Wheel in both directions, PageUp/PageDown, Home/End,
+  touch and scrollbar interaction must take control before deferred follow work.
+  A downward gesture already at the end keeps live following; returning to the
+  bottom or Jump to latest resumes it. Resize and live tail growth notify the
+  existing follow controller without overriding detached reading.
+- Mix short answers with long process/final-answer turns. Continuously wheel
+  across their boundaries before reads settle, then make small reverse gestures
+  at a user/assistant boundary. The visible reading area must not show transient
+  loading replacements, lose an already painted message, or jump in height.
+  Nearby offscreen rows provide a viewport-sized buffer; distant history stays
+  virtualized.
 
 Cross-client common typography tokens and font files are checked with
 `node packages/ui/scripts/check-typography-parity.mjs <web-src>`.
@@ -76,6 +145,47 @@ Host selector mappings and stream cadence remain client-specific; the Desktop
 stream-presentation tests protect its existing grapheme pacing and terminal drain.
 
 ## Appearance and accessibility
+
+- The toolbar and left navigation share a continuous background without dividing
+  lines. Only the main surface's left corners are rounded. Close navigation:
+  its entire width disappears and keyboard navigation skips hidden controls.
+  Toolbar buttons stay in place; reopening retains workspace disclosure state.
+- Move the window and change zoom/display scale, then open each application menu.
+  It opens below the clicked button, with English labels and no separators.
+  Native edit shortcuts and automatic screen-edge adjustment still work.
+- Hover navigation, theme, preview and transcript icon controls: no tooltip or
+  duplicate native label appears. Keyboard focus and accessible names remain.
+- Restart Desktop after viewing a conversation. It opens the centered welcome
+  view and restores only the workspace selection. The catalog remains available
+  for explicit conversation selection. New chat returns to this welcome view.
+- With and without a selected workspace, the shared input starts centered with
+  the same width and height. Choosing a workspace alone does not move it. The
+  input stays centered through typing, clearing, submission, session creation
+  and stream connection. The first assistant content or an error moves it down
+  with a smooth, non-bouncing Motion spring; later input edits stay at the bottom.
+  Choosing an existing conversation docks it directly without downward travel,
+  including during a first-response animation and after a management-page detour.
+  New chat resets the welcome position. Check reduced motion, which moves immediately.
+- Without a workspace, Send and Enter never create a folder, session or run.
+  The workspace chooser sits outside the input's upper left and opens upward.
+  It shows Choose workspace when empty and the selected folder name otherwise;
+  it remains available to switch workspaces throughout a new draft. The trigger
+  grows with its label up to 320px total width; centaeris, centaeris-workspace and
+  centaeris-extensions remain fully readable. Longer names truncate only at the
+  width limit, and narrow panes keep both icons inside the composer width. The greeting
+  shows only its icon and time-based text. Selecting an existing workspace or
+  opening a folder preserves the draft and input node.
+  Cancel preserves the draft; failed choices retain an actionable error and retry.
+  File → Open Folder and Ctrl+O continue to use the same native action.
+- The input has text above and controls below. Add context and the context ring
+  are on the left; model/effort and Send/Stop are on the right. The ring has no
+  visible percentage. Open the compact model menu: choices retain provider
+  identity, an inset line separates Effort, and its submenu opens to the right.
+  Check mouse, arrow keys, Escape, /model and /effort. Context counts and MCP tool
+  details remain available by clicking the ring.
+- The selected workspace appears in the input-anchored chooser. Morning,
+  afternoon and evening greetings update at their boundaries or after sleep. Navigation
+  and menus use regular text weight.
 
 - The top-right List icon opens a lightweight workspace overview without a
   permanent text label. Open files, review changes, or a child Agent from it;
@@ -218,9 +328,10 @@ Use newly created sessions; no repair of existing stored records is required.
   and operators (not a shell grammar). Preserve command text exactly.
 - Tool output starts with `  └ ` and subsequent rows use four spaces. Running,
   successful, and unsuccessful operations retain explicit text as well as color.
-- Desktop inline code and fenced code keep their background and rounded corners,
-  without outlines, in both chat and the workspace Markdown preview. Check light
-  and dark themes; input and keyboard-focus outlines remain visible.
+- Desktop fenced code and expanded Shell/tool output have transparent reading
+  backgrounds in both chat and workspace Markdown previews. Inline code keeps a
+  subtle fill; spacing, copy controls and scrolling remain usable. Check light
+  and dark themes; Diff semantics and input/keyboard-focus outlines stay visible.
 
 
 ## Background process observers (before embedded terminal)
@@ -284,14 +395,15 @@ Unknown stream envelope types must still fail explicitly.
 
 ## Desktop application navigation
 
-- The title bar keeps the theme toggle at the top left, followed by sidebar and Back/Forward controls and native File/Edit/View/Help menus. Collapse navigation and open every management page: theme switching remains reachable. Windows caption buttons remain system-owned.
+- The title bar keeps Back/Forward, sidebar controls and native File/Edit/View/Help menus. Change System/Light/Dark in Settings > Appearance and confirm the window chrome follows the selection. Windows caption buttons remain system-owned.
 - File > Open Folder (Ctrl+O) uses the system directory picker. Cancel preserves the current session and panel; success opens a new-chat context for the selected directory without changing any existing session cwd.
-- The sidebar shows New chat, Scheduled tasks and Plugins above cross-workspace Pinned/Recents, with Settings at the bottom. Collapse retains icon navigation; reduced motion disables the width animation.
-- The workspace switcher shows the selected workspace name and full path (with truncation and a full-path tooltip where needed). Open its menu, switch between same-named workspaces, cancel the folder picker, and retry a failed switch. Expanding a workspace group must not silently select it.
-- New chat shows the welcome surface and selected workspace, with no conversation title. Resources and the right-panel toggle remain reachable; returning to an existing conversation restores its title and own workspace.
+- The sidebar shows New chat, Scheduled tasks and Plugins above cross-workspace Pinned/Recents, with Settings at the bottom. Collapse hides all navigation without leaving an icon rail; reduced motion disables the width animation.
+- Click the workspace title, arrow and folder area: each toggles the group without switching workspace or replacing its label with a loading state. The separate row menu exposes Rename and Remove; both labels stay on one line. Current workspace does not need an extra check icon.
+- New chat shows a short local-time greeting; its workspace chooser sits above
+  the input at the left. Its input keeps the same width and height as an existing conversation; no conversation title appears before the first message. Resources and the right-panel toggle remain reachable; returning to an existing conversation restores its title and own workspace.
 - Pin/unpin persists through existing session metadata. Rename uses explicit Save/Cancel and returns focus; deletion requires confirmation. Sort pinned conversations with pointer and keyboard; a failed write recovers the authoritative order.
 - Navigate between a chat and management pages, then Back/Forward. The active chat remains mounted on management pages; returning to another chat restores that chat's saved workspace tabs. Pending file previews explicitly offer retry on return.
-- Plugins and Skills use keyboard-operable tabs on one page. Settings provides Appearance and Model services. Verify System/Light/Dark previews and the permanent title-bar toggle stay synchronized. Composer and welcome model setup actions open Model services directly.
+- Plugins and Skills use keyboard-operable tabs on one page. Settings provides Appearance and Model services. Verify System/Light/Dark previews and the selected appearance stay synchronized. Slash commands configure in the current chat. Verify /model and /effort use inline choices; /models, /skills and /plugins reuse their managers in a dialog. Escape returns to the same chat; these commands do not navigate to Settings.
 - Scheduled tasks reads the existing Host list/history and links occurrences to their sessions. Creating and changing schedules remains agent-driven; the page does not create schedules automatically.
 - Browser-only preview cannot open native menus, folders or Host resources. Validate those in Electron.
 
@@ -300,7 +412,7 @@ Unknown stream envelope types must still fail explicitly.
 - Open Plugins from the sidebar. Plugins / Skills navigation and page headings form one compact header. Verify readable rows, search, filters and details in wide and narrow windows without nested decorative cards.
 - Search plugins, scroll the list, then open one. Verify the full detail page and Plugins breadcrumb; breadcrumb return and global Back retain the list search and scroll. Global Forward restores the selected plugin.
 - Verify existing install, reload, enable/disable, reveal, and managed-plugin removal actions against the local Host.
-- In Skill, verify only Personal / System filters are shown and Personal is selected initially. Personal includes user and current-workspace skills; System includes only built-in skills. Plugin-owned skills remain in their plugin detail, not either Skill filter. Search by name or description. Open a workspace skill and verify its scope and location identify the current workspace. Instructions are readable in the detail page. Back to skills restores the list query and scope; instructions scroll with the page.
+- In Skills, verify All sources is selected initially and groups Personal and System. Personal and System filters remain available. Personal includes user and current-workspace skills; System includes only built-in skills. Plugin-owned skills remain in their plugin detail, not either Skill filter. Search by name or description. Open a workspace skill and verify its scope and location identify the current workspace. Instructions are readable in the detail page. Back to skills restores the list query and scope; instructions scroll with the page.
 - Reload skills, open location management, inspect/toggle a source, and add a location using the native picker. Removing a user/workspace location still requires confirmation and leaves files unchanged.
 - Confirm no store, connected-account, or Try now controls appear without supporting functionality.
 
@@ -316,7 +428,10 @@ Unknown stream envelope types must still fail explicitly.
 
 ### Right-panel interactive terminals
 
-- With the panel closed, use the header + menu; with the panel open, use its tab-strip +. Files/Review reuse tabs, Terminal opens a new numbered shell tab.
+- With no open tools, the header panel button opens a New tab page. The single tab-strip + opens another New tab without contacting the terminal service. Choose Files, Review or Terminal; the choice replaces that New tab in place, or focuses an existing view and removes the empty tab. A closed/departed launcher cannot steal selection with a late create result.
+- The first wide-screen split divides the workspace content equally; manual resizing is remembered and double-clicking the separator restores equal widths. The tab strip has one bottom boundary. Open and close the right pane: it uses the left sidebar’s Motion timing and easing, preserves mounted content, and handles rapid reversals and reduced-motion changes. Dragging the separator stays immediate.
+- New tab keeps terminal discovery behind Existing terminals; only choosing Terminal creates a shell. A lost create response retries the same operation against the current service instance.
+- Light and dark terminals reuse application colors and the code font, with comfortable line spacing and inset. The bundled monospace font loads before xterm first measures its grid. Changing theme or loading fonts refits the existing terminal without reconnecting or clearing output. End terminal is an explicit action in its overflow menu.
 - Verify Windows chooses pwsh when installed and opens the selected workspace. Unix must be accepted separately with the configured login shell.
 - Type commands, paste text, use completion/arrows/Ctrl+C, and run an interactive full-screen program. Resize the split pane and hide/show the panel; no zero-sized geometry or new shell should appear.
 - Close a running terminal tab, switch workspace and return, then reopen Existing terminals. Verify the original shell remains and output replays; history beyond the bounded cache reports a gap.
@@ -332,5 +447,54 @@ the packaged Runtime discovers it alongside the other built-in System Skills.
 resulting portable content in Desktop, then open the same conversation in TUI:
 labels, order and containment remain understandable. Simple answers remain prose.
 - Inspect complete visuals in both themes and a narrow conversation pane. Confirm
-vertical reading order, wrapped labels and real containment; the accepted light
-reference remains the baseline. The host supplies components and appearance.
+vertical reading order, wrapped labels and real containment. Ordered explanations
+use a fine left guide from the first heading to the last, with small neutral circular nodes and
+no progress states; the centered resource chain retains its arrows. The paper,
+groups, text and rules follow the application theme. The accepted light reference
+remains the baseline. The host supplies components and appearance.
+
+### Composer proportions
+
+- New chat and an existing conversation use the same taller input frame with
+  room for two text lines above the existing toolbar. Type multiple lines and
+  clear them: automatic growth and the toolbar stay usable. While following a
+  streamed response, the last text remains above the measured composer area.
+- A short user message fits its text and padding; longer text and attachments
+  retain wrapping and the existing maximum conversation width.
+
+### Conversation spacing and final answer actions
+
+- Final answer copy and authoritative completion time appear on hover or keyboard focus, when available, without moving the following turn. Copy includes the complete final answer, not reasoning or tool output. Streaming and process-only rows have no answer footer; missing completion times are omitted. Check live completion and reopened history.
+- Process rows remain compact, each user-to-assistant exchange has a readable gap, and the next user turn has a larger separation. Hovering user actions does not move the transcript. The latest eligible user input still supports edit, cancel, resend and failure recovery.
+- Confirm these gaps survive virtualization, disclosure expansion and first-open following. The measured row includes its outer spacing; manual reading position and the bottom composer boundary remain stable.
+
+### Older history and deferred visuals
+
+- In a restored Desktop window, scroll upward with the wheel until earlier history
+  loads for the first time. Keep scrolling in both directions while an inline
+  visual is pending. Finishing the visual preserves the text being read without
+  cancelling native wheel movement or briefly shifting it between frames. Text
+  from the incoming page and a finishing visual must never briefly overlap the
+  following turn, including on the first load in a non-maximized window.
+- Continue into earlier process rows before the visual finishes; a later visual
+  below the current reading position must not move those rows. Also open Thoughts
+  while the earlier visual is pending: its title stays in place through both
+  expansion and completion of the visual.
+- Use Return to latest while a visual is pending. Latest-follow mode takes over
+  immediately and remains at the actual bottom after the visual finishes. Repeat
+  with cached history, page cuts inside an answer and manual disclosure expansion.
+
+
+### Stage text and final answer continuity
+
+- Receive a burst of stage text, then start a tool before all text is visible.
+  The same text node continues revealing its remainder without replaying or
+  dumping it; the tool appears immediately. A bounded process summary must not
+  duplicate or replace the complete streamed source.
+- Start the next reply while the earlier stage is still catching up. Both texts
+  advance independently, even with equal wording. Final confirmation and run
+  completion retain the final reader and its remaining presentation buffer.
+- Repeat while following latest and while wheel-reading an earlier paragraph in
+  a restored Desktop window. Latest reaches the actual end; manual reading stays
+  in place. Reopen completed history and check immediate full text, model text
+  corrections, errors, reduced motion and cleanup when leaving the conversation.

@@ -1,3 +1,4 @@
+import { assistantTextIdentity } from "./assistantTextIdentity";
 import {
   getChunkWaterfallOrder,
   getChunkWaterfallSection,
@@ -163,6 +164,7 @@ export const buildTranscriptProcessViewModel = (
       processItems.push({
         kind: "assistantText",
         id: entry.chunk.id,
+        modelText: entry.chunk.modelText,
         phase: entry.chunk.phase === "compaction" ? "compaction" : "process",
         text: entry.chunk.text,
         tone: entry.chunk.tone,
@@ -208,7 +210,7 @@ export const buildTranscriptProcessViewModel = (
 };
 
 export const buildTranscriptFinalItem = (
-  turn: Pick<AssistantExecutionTurn, "finalAnswer" | "id" | "isStreaming">,
+  turn: Pick<AssistantExecutionTurn, "finalAnswer" | "id" | "isStreaming" | "textSegmentId">,
 ): TranscriptViewModel["finalItem"] => {
   const finalText = turn.finalAnswer;
   if (!finalText.trim()) {
@@ -216,7 +218,7 @@ export const buildTranscriptFinalItem = (
   }
   return {
     kind: "assistantText",
-    id: `${turn.id}-answer-text`,
+    id: assistantTextIdentity(turn),
     phase: turn.isStreaming ? "streaming" : "final",
     text: finalText,
     waterfall: {

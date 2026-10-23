@@ -1,10 +1,8 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Collapsible } from "@base-ui/react/collapsible";
 import {
-	Check,
 	ChevronRight,
 	Folder,
-	Loader2,
 	MoreHorizontal,
 	Pencil,
 	Trash2,
@@ -25,8 +23,9 @@ import {
 	DropdownMenuItem,
 	DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
-import type { WorkspaceAction } from "./WorkspaceSwitcher";
 import "../styles/desktop-workbench.css";
+
+export type WorkspaceAction = void | boolean | Promise<void | boolean>;
 
 export function SidebarWorkspaceGroup({
 	root,
@@ -35,16 +34,14 @@ export function SidebarWorkspaceGroup({
 	onRename,
 	onRemove,
 	onExpand,
-	onSelect,
 	active = false,
-	empty = false,
 	initiallyExpanded = true,
+	navigationHidden = false,
 }: {
 	onExpand?: (root: string) => void;
-	onSelect?: (root: string) => WorkspaceAction;
 	active?: boolean;
-	empty?: boolean;
 	initiallyExpanded?: boolean;
+	navigationHidden?: boolean;
 	root: string;
 	name: string;
 	children: ReactNode;
@@ -52,6 +49,8 @@ export function SidebarWorkspaceGroup({
 	onRemove?: (root: string) => Promise<boolean>;
 }) {
 	const [expanded, setExpanded] = useState(initiallyExpanded);
+	const [menuOpen, setMenuOpen] = useState(false);
+	useEffect(() => { if (navigationHidden) setMenuOpen(false); }, [navigationHidden]);
 	const [editing, setEditing] = useState(false);
 	const [draft, setDraft] = useState(name);
 	const [pending, setPending] = useState(false);
@@ -93,39 +92,18 @@ export function SidebarWorkspaceGroup({
 						render={
 							<Button
 								variant="ghost"
-								size="icon-sm"
-								className="desktopWorkspaceDisclosure"
+								className="desktopWorkspaceSelect"
 								aria-label={`Toggle ${name}`}
+								aria-current={active ? "location" : undefined}
+								title={root}
 							/>
 						}
 					>
-						<ChevronRight size={14} aria-hidden="true" />
-					</Collapsible.Trigger>
-					<Button
-						variant="ghost"
-						className="desktopWorkspaceSelect"
-						aria-label={`Select workspace ${name}`}
-						aria-current={active ? "location" : undefined}
-						title={root}
-						aria-busy={pending}
-						disabled={pending || !onSelect}
-						onClick={() => {
-							if (onSelect && !active) void run(() => onSelect(root));
-						}}
-					>
-						{pending ? (
-							<Loader2
-								size={14}
-								className="workbenchSpinner"
-								aria-hidden="true"
-							/>
-						) : (
-							<Folder size={14} aria-hidden="true" />
-						)}
+						<ChevronRight size={14} className="desktopWorkspaceChevron" aria-hidden="true" />
+						<Folder size={14} aria-hidden="true" />
 						<span>{name}</span>
-						{active ? <Check size={12} aria-label="Current workspace" /> : null}
-					</Button>
-					<DropdownMenu>
+					</Collapsible.Trigger>
+					<DropdownMenu open={menuOpen && !navigationHidden} onOpenChange={setMenuOpen}>
 						<DropdownMenuTrigger
 							render={
 								<Button
@@ -139,7 +117,7 @@ export function SidebarWorkspaceGroup({
 						>
 							<MoreHorizontal size={16} aria-hidden="true" />
 						</DropdownMenuTrigger>
-						<DropdownMenuContent align="end">
+						<DropdownMenuContent align="start">
 							<DropdownMenuItem
 								disabled={pending || !onRename}
 								onClick={() => {
@@ -159,16 +137,13 @@ export function SidebarWorkspaceGroup({
 								}}
 							>
 								<Trash2 size={15} aria-hidden="true" />
-								Remove workspace
+								Remove
 							</DropdownMenuItem>
 						</DropdownMenuContent>
 					</DropdownMenu>
 				</div>
 				<Collapsible.Panel className="desktopWorkspaceConversations">
 					{children}
-					{empty ? (
-						<p className="desktopWorkspaceEmpty">No conversations yet</p>
-					) : null}
 				</Collapsible.Panel>
 			</Collapsible.Root>
 			{error && !editing ? (

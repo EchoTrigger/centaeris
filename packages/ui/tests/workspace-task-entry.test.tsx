@@ -77,7 +77,7 @@ test("visible resource entry supports keyboard dismissal, focus restoration and 
 	const user = userEvent.setup();
 	render(<WorkspaceOverview {...props} />);
 	const trigger = screen.getByRole("button", { name: "Workspace overview" });
-	expect(trigger.textContent).toContain("Resources");
+	expect(trigger.getAttribute("aria-label")).toBe("Workspace overview");
 	await user.click(trigger);
 	await screen.findByRole("dialog", { name: "Workspace" });
 	await user.keyboard("{Escape}");

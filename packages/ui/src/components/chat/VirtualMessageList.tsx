@@ -1,10 +1,12 @@
+import { TranscriptScrollAnchor, createTranscriptScrollAnchor } from "./TranscriptScrollAnchor";
+import { AssistantAnswerFooter } from "./AssistantAnswerFooter";
 import { transcriptMessageGroups } from "./transcriptMessageGroups";
 import { historyProcessEntries } from "./historyProcessEntries";
 import { useShallow } from "zustand/react/shallow";
 import { t } from "../../i18n";
-import { memo, useCallback, useLayoutEffect, useMemo, useRef, type ReactNode, type RefObject } from "react";
+import { memo, useCallback, useLayoutEffect, useMemo, useRef, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { Check, Copy, Pencil } from "lucide-react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { defaultRangeExtractor, measureElement, useVirtualizer, type Range, type Virtualizer } from "@tanstack/react-virtual";
 import { AgentResultStream } from "./AgentResultStream";
 import { useTranscriptText } from "./useTranscriptText";
 import {
@@ -16,7 +18,6 @@ import {
 import { formatUserMessageTimestamp } from "./chatRuntimeModel";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
-import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import type { ChatMessage } from "./types";
 
 type VirtualMessageListProps = {
@@ -24,6 +25,7 @@ type VirtualMessageListProps = {
   contentRef?: RefObject<HTMLDivElement | null>;
   spacerRef?: RefObject<HTMLDivElement | null>;
   onReadingIntent?: () => void;
+  isFollowingLatest?: boolean;
   editingUserMessageId: string | null;
   editingPrompt: string;
   copiedUserMessageId: string | null;
@@ -48,6 +50,8 @@ type VirtualMessageListProps = {
 
 const ESTIMATED_MESSAGE_HEIGHT_PX = 220;
 const MESSAGE_LIST_OVERSCAN = 6;
+const MESSAGE_LIST_BUFFER_SCREENS = 2;
+const MESSAGE_LIST_MAX_BUFFER_ROWS = 60;
 
 const UserMessageRow = memo(function UserMessageRow({
   messageId,
@@ -78,7 +82,7 @@ const UserMessageRow = memo(function UserMessageRow({
     return null;
   }
   return (
-    <div className={`message user-message ${isEditing ? "is-editing" : ""}`}>
+    <div data-transcript-anchor={message.id} className={`message user-message ${isEditing ? "is-editing" : ""}`} aria-busy={loading || undefined}>
       {isEditing ? (
         <div className="message-bubble user-edit-bubble">
           <Textarea
@@ -113,41 +117,35 @@ const UserMessageRow = memo(function UserMessageRow({
             <span className="user-message-time">
               {formatUserMessageTimestamp(message.timestamp)}
             </span>
-            <Tooltip>
-<TooltipTrigger render={<Button
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="user-message-icon-btn"
+              onClick={() => onCopyUserMessage(message.id, message.text)}
+              disabled={loading}
+              aria-label={t("virtualMessageList.copy")}
+            >
+              {isCopied ? (
+                <Check className="user-message-action-icon" aria-hidden="true" />
+              ) : (
+                <Copy className="user-message-action-icon" aria-hidden="true" />
+              )}
+            </Button>
+            {canEdit && !loading && !paged ? (
+              <Button
                 type="button"
                 variant="ghost"
                 size="icon"
                 className="user-message-icon-btn"
-                onClick={() => onCopyUserMessage(message.id, message.text)}
-                disabled={loading}
-                aria-label={t("virtualMessageList.copy")}
+                onClick={() => onStartEditingUserMessage(message)}
+                aria-label={t("chatArea.edit")}
               >
-                {isCopied ? (
-                  <Check className="user-message-action-icon" aria-hidden="true" />
-                ) : (
-                  <Copy className="user-message-action-icon" aria-hidden="true" />
-                )}
-              </Button>} />
-<TooltipContent >{t("virtualMessageList.copy")}</TooltipContent>
-</Tooltip>
-            {canEdit && !loading && !paged ? (
-                  <Tooltip>
-<TooltipTrigger render={<Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="user-message-icon-btn"
-                      onClick={() => onStartEditingUserMessage(message)}
-                      aria-label={t("chatArea.edit")}
-                    >
-                      <Pencil
-                        className="user-message-action-icon"
-                        aria-hidden="true"
-                      />
-                    </Button>} />
-<TooltipContent >{t("chatArea.edit")}</TooltipContent>
-</Tooltip>
+                <Pencil
+                  className="user-message-action-icon"
+                  aria-hidden="true"
+                />
+              </Button>
             ) : null}
           </div>
         </div>
@@ -160,12 +158,14 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   messageId,
   projectedMessage,
   isStandaloneRow = true,
+  completedAtMs,
   onOpenAgentSession,
   onOpenWorkspacePath,
 }: {
   messageId: string;
   projectedMessage?: ChatMessage;
   isStandaloneRow?: boolean;
+  completedAtMs?: number;
   onOpenAgentSession?: VirtualMessageListProps["onOpenAgentSession"];
   onOpenWorkspacePath?: VirtualMessageListProps["onOpenWorkspacePath"];
 }) {
@@ -177,12 +177,12 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   const expanded = useChatViewStore(state => Boolean(state.expandedReasoning[reasoningIdentity]));
   const toolOnly = storedMessage?.role === "assistant" && storedMessage.turn.chunks.length > 0
     && storedMessage.turn.chunks.every(chunk => chunk.kind === "task");
-  const { message, status } = useTranscriptText(storedMessage, !toolOnly && (!reasoning || expanded));
+  const { message, status, loading } = useTranscriptText(storedMessage, !toolOnly && (!reasoning || expanded));
   if (!message || message.role !== "assistant") {
     return null;
   }
   return (
-    <div className={`message assistant-message ${isStandaloneRow ? "" : "historyProcessRow"}`}>
+    <div data-transcript-anchor={message.id} className={`message assistant-message ${isStandaloneRow ? "" : "historyProcessRow"}`} aria-busy={loading || undefined}>
       <div className="message-bubble">
         {status}
         <AgentResultStream
@@ -190,6 +190,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           onOpenAgentSession={onOpenAgentSession}
           onOpenWorkspacePath={onOpenWorkspacePath}
         />
+        {!message.turn.isStreaming && !loading && message.turn.finalAnswer.trim() ? <AssistantAnswerFooter text={message.turn.finalAnswer} completedAtMs={message.turn.completedAtMs ?? completedAtMs} /> : null}
       </div>
     </div>
   );
@@ -207,11 +208,14 @@ const HistoryProcessGroup = memo(function HistoryProcessGroup({ ids, onOpenAgent
   const final = entries.at(-1);
   const hasFinal = Boolean(final && isAnswer(final));
   const process = hasFinal ? entries.slice(0, -1) : entries;
-  const row = (message: ChatMessage) => <AssistantMessageRow key={message.id} messageId={message.id} projectedMessage={message}
-    isStandaloneRow={false} onOpenAgentSession={onOpenAgentSession} onOpenWorkspacePath={onOpenWorkspacePath} />;
+  const completedAtMs = final?.role === "assistant" && final.turn.projectionRunId
+    ? messages.find(message => message?.role === "assistant" && message.turn.projectionRunId === final.turn.projectionRunId && message.turn.completedAtMs !== undefined)
+    : undefined;
+  const row = (message: ChatMessage, standalone = false) => <AssistantMessageRow key={message.id} messageId={message.id} projectedMessage={message}
+    isStandaloneRow={standalone} completedAtMs={completedAtMs?.role === "assistant" ? completedAtMs.turn.completedAtMs : undefined} onOpenAgentSession={onOpenAgentSession} onOpenWorkspacePath={onOpenWorkspacePath} />;
   return <>
-    {process.length ? <div className="historyProcessRows">{process.map(row)}</div> : null}
-    {hasFinal && final ? row(final) : null}
+    {process.length ? <div className="historyProcessRows">{process.map(message => row(message))}</div> : null}
+    {hasFinal && final ? row(final, true) : null}
   </>;
 });
 
@@ -259,7 +263,9 @@ const MessageRow = memo(function MessageRow({
 
 // Both layouts keep the same keyed component and DOM parent, so completing a
 // visible tail does not reset an open output page, selection or inner scroll.
-function TimelineRow({ id, item, measureElement, onMeasure, children }: {
+function TimelineRow({ id, item, retainedHeight, messageRole, measureElement, onMeasure, children }: {
+  retainedHeight?: number;
+  messageRole?: "user" | "assistant";
   id: string;
   item?: { index: number; start: number };
   measureElement: (element: HTMLDivElement | null) => void;
@@ -274,15 +280,23 @@ function TimelineRow({ id, item, measureElement, onMeasure, children }: {
   }, [live, measureElement]);
   useLayoutEffect(() => {
     if (!live) return;
-    const measure = () => { if (element.current) onMeasure(id, element.current.getBoundingClientRect().height); };
-    measure();
+    let previousHeight = -1;
+    const report = (height: number) => {
+      if (height === previousHeight) return;
+      previousHeight = height;
+      onMeasure(id, height);
+    };
+    if (element.current) report(element.current.getBoundingClientRect().height);
     if (typeof ResizeObserver === "undefined" || !element.current) return;
-    const observer = new ResizeObserver(measure);
+    const observer = new ResizeObserver((entries = []) => {
+      const height = entries[0]?.borderBoxSize?.[0]?.blockSize ?? element.current?.getBoundingClientRect().height;
+      if (height !== undefined) report(height);
+    });
     observer.observe(element.current);
     return () => observer.disconnect();
   }, [id, live, onMeasure]);
-  return <div ref={setElement} data-index={item?.index} data-live-tail={live ? id : undefined} data-history-row={live ? undefined : id}
-    style={item ? {left:0,position:"absolute",top:0,transform:`translateY(${item.start}px)`,width:"100%"} : {display:"flow-root"}}>{children}</div>;
+  return <div ref={setElement} className="chatTimelineRow" data-message-role={messageRole} data-index={item?.index} data-live-tail={live ? id : undefined} data-history-row={live ? undefined : id}
+    style={item ? {"--chat-retained-row-height":`${retainedHeight ?? 0}px`,left:0,position:"absolute",width:"100%"} as CSSProperties : {display:"flow-root"}}>{children}</div>;
 }
 
 export function VirtualMessageList({
@@ -290,6 +304,7 @@ export function VirtualMessageList({
   contentRef,
   spacerRef,
   onReadingIntent,
+  isFollowingLatest = false,
   hasOlder = false,
   isLoadingOlder = false,
   onLoadOlder,
@@ -305,20 +320,76 @@ export function VirtualMessageList({
     return message?.role === "assistant" && message.turn.isStreaming ? message.id : null;
   });
   const historyGroups = liveKey ? groups.slice(0, -1) : groups;
+  // A page can prepend blocks inside an existing answer. Retain that row's
+  // identity rather than deriving it again from the new first block.
+  const committedKeys = useRef(new Map<string, string>());
+  const groupKeys = historyGroups.map(ids => ids.map(id => committedKeys.current.get(id)).find(key => key !== undefined) ?? ids[0]);
+  const scrollAnchor = useMemo(() => createTranscriptScrollAnchor(() => containerRef.current), [containerRef]);
+  const groupIndexes = useRef(new Map<string, number>());
+  groupIndexes.current = new Map(groupKeys.map((key, index) => [key, index]));
+  const pauseReading = () => { scrollAnchor.manualIntent(); onReadingIntent?.(); };
   const rowHeights = useRef(new Map<string, number>());
-  const virtualizer = useVirtualizer({
+  const virtualizerRef = useRef<Virtualizer<HTMLDivElement, HTMLDivElement> | null>(null);
+  const rangeExtractor = useCallback((range: Range) => {
+    const instance = virtualizerRef.current;
+    const measurements = instance?.measurementsCache;
+    const height = instance?.scrollRect?.height ?? containerRef.current?.clientHeight ?? 0;
+    const firstVisible = measurements?.[range.startIndex];
+    const lastVisible = measurements?.[range.endIndex];
+    if (!height || !firstVisible || !lastVisible) return defaultRangeExtractor(range);
+    const buffer = height * MESSAGE_LIST_BUFFER_SCREENS;
+    let start = Math.max(0, range.startIndex - range.overscan);
+    let end = Math.min(range.count - 1, range.endIndex + range.overscan);
+    while (start > 0 && range.startIndex - start < MESSAGE_LIST_MAX_BUFFER_ROWS
+      && measurements[start].start > firstVisible.start - buffer) start--;
+    while (end < range.count - 1 && end - range.endIndex < MESSAGE_LIST_MAX_BUFFER_ROWS
+      && measurements[end].end < lastVisible.end + buffer) end++;
+    const indexes = Array.from({ length: end - start + 1 }, (_, offset) => start + offset);
+    const retained = scrollAnchor.rowKey;
+    const index = retained ? groupIndexes.current.get(retained) : undefined;
+    if (index !== undefined && !indexes.includes(index)) indexes.push(index);
+    return indexes.sort((a, b) => a - b);
+  }, [containerRef, scrollAnchor]);
+  const previousFirst = useRef<string | undefined>(undefined);
+  const first = historyGroups[0]?.[0];
+  const prepending = previousFirst.current !== undefined && previousFirst.current !== first
+    && historyGroups.some(ids => ids.includes(previousFirst.current!));
+  const userIndex = historyGroups.findIndex((ids) => ids.includes(props.latestUserMessageId ?? ""));
+  const notifySize = useCallback((instance: Virtualizer<HTMLDivElement, HTMLDivElement>, measuredSize = instance.getTotalSize()) => {
+    onContentSizeChange(measuredSize + (liveKey ? rowHeights.current.get(liveKey) ?? 0 : 0), instance.measurementsCache[userIndex]?.start ?? 0, props.latestUserMessageId ?? "");
+  }, [onContentSizeChange, liveKey, userIndex, props.latestUserMessageId]);
+  const virtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
     count: historyGroups.length,
-    getItemKey: (index) => historyGroups[index][0],
+    // TanStack commits row positions and spacer height together in its observer
+    // callback. React scheduling cannot paint long new rows over following text.
+    directDomUpdates: true,
+    // The resident live tail uses normal flow; a retained top is inert there.
+    directDomUpdatesMode: "position",
+    onChange: instance => {
+      if (isFollowingLatest) scrollAnchor.release();
+      scrollAnchor.commit(instance);
+      notifySize(instance);
+    },
+    scrollToFn: scrollAnchor.scrollToFn,
+    anchorTo: prepending ? "end" : "start",
+    measureElement: (element, entry, instance) => {
+      // Ref callbacks run before prepend positioning. Keep their known size;
+      // ResizeObserver measures the committed DOM after that position is applied.
+      if (!entry) {
+        const index = instance.indexFromElement(element);
+        return instance.itemSizeCache.get(instance.options.getItemKey(index)) ?? instance.options.estimateSize(index);
+      }
+      return measureElement(element, entry, instance);
+    },
+    getItemKey: (index) => groupKeys[index],
     getScrollElement: () => containerRef.current,
     estimateSize: (index) => rowHeights.current.get(historyGroups[index][0]) ?? ESTIMATED_MESSAGE_HEIGHT_PX,
     overscan: MESSAGE_LIST_OVERSCAN,
+    rangeExtractor,
   });
-  // A visible row grows down from its title. Only changes entirely above the
-  // viewport need virtualizer compensation to preserve the reading position.
-  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) =>
-    item.end <= (instance.scrollOffset ?? 0) && instance.scrollDirection !== "backward";
+  virtualizerRef.current = virtualizer;
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = scrollAnchor.shouldAdjustSize;
   const previousTail = useRef<string | null>(null);
-  const previousFirst = useRef<string | undefined>(undefined);
   useLayoutEffect(() => {
     const completedKey = previousTail.current;
     previousTail.current = liveKey;
@@ -327,34 +398,25 @@ export function VirtualMessageList({
       const height = virtualizer.elementsCache?.get(completedKey)?.getBoundingClientRect().height ?? rowHeights.current.get(completedKey);
       if (index >= 0 && height !== undefined) virtualizer.resizeItem(index, height);
     }
-    // A prepended page shifts existing rows. Preserve the old first row's
-    // screen offset; completion/appending does not trigger this correction.
-    const first = historyGroups[0]?.[0];
-    if (previousFirst.current && previousFirst.current !== first) {
-      const index = historyGroups.findIndex(ids => ids[0] === previousFirst.current);
-      const offset = index > 0 ? virtualizer.measurementsCache[index]?.start : undefined;
-      if (offset !== undefined && containerRef.current) containerRef.current.scrollTop += offset;
-    }
     previousFirst.current = first;
-  }, [liveKey, historyGroups, virtualizer, containerRef]);
+    committedKeys.current = new Map(historyGroups.flatMap((ids, index) => ids.map(id => [id, groupKeys[index]] as const)));
+  }, [liveKey, historyGroups, virtualizer, first, groupKeys]);
   const virtualItems = virtualizer.getVirtualItems();
   const totalSize = virtualizer.getTotalSize();
+  useLayoutEffect(() => {
+    if (isFollowingLatest) scrollAnchor.release();
+    scrollAnchor.commit(virtualizer);
+  });
   const touchY = useRef<number | null>(null);
-  const userIndex = historyGroups.findIndex((ids) => ids.includes(props.latestUserMessageId ?? ""));
-  const anchorTop = virtualizer.measurementsCache[userIndex]?.start ?? 0;
-
   const viewportHeight = virtualizer.scrollRect?.height;
-  const notifySize = useCallback(() => {
-    onContentSizeChange(totalSize + (liveKey ? rowHeights.current.get(liveKey) ?? 0 : 0), anchorTop, props.latestUserMessageId ?? "");
-  }, [onContentSizeChange, totalSize, liveKey, anchorTop, props.latestUserMessageId]);
   const measureTail = useCallback((id: string, height: number) => {
     rowHeights.current.set(id, height);
-    notifySize();
-  }, [notifySize]);
+    notifySize(virtualizer);
+  }, [notifySize, virtualizer]);
   useLayoutEffect(() => {
     void viewportHeight;
-    notifySize();
-  }, [notifySize, viewportHeight]);
+    notifySize(virtualizer, totalSize);
+  }, [notifySize, virtualizer, totalSize, viewportHeight]);
   useLayoutEffect(() => {
     const retained = new Set(messageIds);
     for (const key of rowHeights.current.keys()) if (!retained.has(key)) rowHeights.current.delete(key);
@@ -367,29 +429,41 @@ export function VirtualMessageList({
       : <MessageRow messageId={messageId} props={props} />;
   };
 
+  const readScroll = (direction: number, viewport: HTMLDivElement) => {
+    // A downward gesture already at the real end cannot move the viewport.
+    // Keep following there; every gesture that can move it cancels pending follow.
+    if (direction < 0 || viewport.scrollTop + viewport.clientHeight < viewport.scrollHeight - 2) pauseReading();
+  };
+
   return (
     <div
       className="messages-container uiRsMessagesContainer"
       style={{overflowAnchor:"none"}}
       ref={containerRef}
-      onScroll={onScroll}
+      onScroll={() => { scrollAnchor.observeScroll(); onScroll(); }}
       onClickCapture={(event) => {
         // Pause before the disclosure changes height, including keyboard clicks.
-        if ((event.target as Element).closest("button[aria-expanded]")) onReadingIntent?.();
+        const disclosure = (event.target as Element).closest("button[aria-expanded]");
+        if (disclosure) { scrollAnchor.hold(disclosure); onReadingIntent?.(); }
       }}
       tabIndex={0}
       onKeyDown={(event) => {
         if ((event.target as HTMLElement).closest("textarea, input, [contenteditable=true]")) return;
-        if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) onReadingIntent?.();
+        if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) readScroll(-1, event.currentTarget);
+        else if (["ArrowDown", "PageDown", "End", " "].includes(event.key)) readScroll(1, event.currentTarget);
+      }}
+      onPointerDown={(event) => {
+        // Native scrollbar presses target the viewport, not its message children.
+        if (event.target === event.currentTarget) pauseReading();
       }}
       onTouchStart={(event) => { touchY.current = event.touches[0]?.clientY ?? null; }}
       onTouchMove={(event) => {
         const y = event.touches[0]?.clientY ?? null;
-        if (y !== null && touchY.current !== null && y > touchY.current) onReadingIntent?.();
+        if (y !== null && touchY.current !== null && y !== touchY.current) readScroll(touchY.current - y, event.currentTarget);
         touchY.current = y;
       }}
       onWheel={(event) => {
-        if (event.deltaY < 0) onReadingIntent?.();
+        if (event.deltaY !== 0) readScroll(event.deltaY, event.currentTarget);
         if (
           event.deltaY < 0 &&
           event.currentTarget.scrollTop <= 0 &&
@@ -400,21 +474,22 @@ export function VirtualMessageList({
         }
       }}
     >
-      <div ref={contentRef} style={{width:"100%",position:"relative",display:"flow-root"}}>
-        <div aria-hidden="true" style={{height:`${totalSize}px`}} />
+      <TranscriptScrollAnchor ids={messageIds} viewportRef={containerRef} contentRef={contentRef} onPrepend={scrollAnchor.begin}>
+        <div ref={virtualizer.containerRef} aria-hidden="true" />
         {[
           ...virtualItems.flatMap(item => {
             const ids = historyGroups[item.index];
             const messageId = ids?.[0];
-            return messageId ? [<TimelineRow key={messageId} id={messageId} item={item} measureElement={virtualizer.measureElement} onMeasure={measureTail}>
+            const rowKey = groupKeys[item.index];
+            return messageId ? [<TimelineRow key={rowKey} id={rowKey} messageRole={useChatViewStore.getState().messageById[messageId]?.role} item={item} retainedHeight={virtualizer.itemSizeCache?.get(rowKey)} measureElement={virtualizer.measureElement} onMeasure={measureTail}>
               {renderGroup(ids)}
             </TimelineRow>] : [];
           }),
-          ...(liveKey && lastGroup ? [<TimelineRow key={liveKey} id={liveKey} measureElement={virtualizer.measureElement} onMeasure={measureTail}>
+          ...(liveKey && lastGroup ? [<TimelineRow key={liveKey} id={liveKey} messageRole="assistant" measureElement={virtualizer.measureElement} onMeasure={measureTail}>
             {renderGroup(lastGroup)}
           </TimelineRow>] : []),
         ]}
-      </div>
+      </TranscriptScrollAnchor>
       <div ref={spacerRef} aria-hidden="true" style={{ height: 0, flexShrink: 0 }} />
     </div>
   );

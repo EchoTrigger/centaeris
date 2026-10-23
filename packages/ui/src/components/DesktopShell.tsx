@@ -1,3 +1,4 @@
+import { desktopSidebarTransition } from "../lib/desktopMotion";
 import { useAnimate } from "motion/react";
 import { useLayoutEffect, useRef, type CSSProperties, type ReactNode } from "react";
 
@@ -8,7 +9,7 @@ export function DesktopShell({ expanded, className, children }: { expanded: bool
   const initialStyle = useRef<SidebarStyle>({
     "--sidebar-progress": expanded ? 1 : 0,
     // The responsive CSS width remains authoritative even during an animation.
-    gridTemplateColumns: "calc(48px + (var(--thin-sidebar-width) - 48px) * var(--sidebar-progress)) minmax(0, 1fr)",
+    gridTemplateColumns: "calc(var(--thin-sidebar-width) * var(--sidebar-progress)) minmax(0, 1fr)",
   });
   useLayoutEffect(() => {
     const changed = previous.current !== expanded;
@@ -18,7 +19,7 @@ export function DesktopShell({ expanded, className, children }: { expanded: bool
     const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
     const target = expanded ? 1 : 0;
     const playback = animate(element, { "--sidebar-progress": target },
-      { duration: preference.matches ? 0 : 0.44, ease: [0.16, 1, 0.3, 1], reduceMotion: false });
+      { ...desktopSidebarTransition, duration: preference.matches ? 0 : desktopSidebarTransition.duration, reduceMotion: false });
     const reduce = () => {
       if (!preference.matches) return;
       playback.complete();

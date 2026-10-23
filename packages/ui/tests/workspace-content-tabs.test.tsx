@@ -208,3 +208,24 @@ test("all-tabs menu exposes long overflowing content, and file failures have a r
 	);
 	expect(select).toHaveBeenCalledWith("b");
 });
+
+
+test("plus opens a real new tab and choosing Files replaces it", async () => {
+  const user = userEvent.setup();
+  function Fixture() {
+    const [tabs, setTabs] = useState<SummaryPanelTab[]>([entries[0]]);
+    const [active, setActive] = useState("a");
+    return <SummaryPanel workspaceRoot="root" tabs={tabs} activeTabId={active}
+      onSelectTab={setActive} onCloseTab={id => setTabs(current => current.filter(tab => tab.id !== id))}
+      onAddTab={() => { setTabs(current => [...current, { id: "new", kind: "new", title: "New tab", workspaceRoot: "root" }]); setActive("new"); }}
+      onFiles={id => { setTabs(current => current.map(tab => tab.id === id ? { id: "files", kind: "files", title: "Files", workspaceRoot: "root" } : tab)); setActive("files"); }}
+      onReview={vi.fn()} onTerminal={vi.fn()} />;
+  }
+  render(<Fixture />);
+  await user.click(screen.getByRole("button", { name: "New tab" }));
+  expect(screen.getByRole("tab", { name: "New tab" }).getAttribute("aria-selected")).toBe("true");
+  await user.click(screen.getByRole("button", { name: "Files" }));
+  expect(screen.getByRole("tab", { name: "Files" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.queryByRole("tab", { name: "New tab" })).toBeNull();
+  expect(screen.getByRole("tab", { name: "a.md" })).toBeTruthy();
+});

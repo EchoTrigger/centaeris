@@ -154,3 +154,57 @@ test("external resizing and panel toggles do not replace the user's requested sp
   await resize(2000);
   await waitFor(() => expect(split()).toBe(25));
 });
+
+
+test("preview opening and closing use intermediate widths without remounting its content", async () => {
+  const view = render(content(false)); await resize(width);
+  const panel = document.getElementById("preview")!;
+  const size = () => Number(panel.style.flexGrow);
+  const subtree = panel.firstElementChild;
+  expect(size()).toBe(0);
+  view.rerender(content(true));
+  await waitFor(() => { expect(size()).toBeGreaterThan(0); expect(size()).toBeLessThan(50); });
+  await waitFor(() => expect(size()).toBe(50));
+  view.rerender(content(false));
+  await waitFor(() => { expect(size()).toBeGreaterThan(0); expect(size()).toBeLessThan(50); });
+  await waitFor(() => expect(size()).toBe(0));
+  expect(panel.firstElementChild).toBe(subtree);
+});
+
+test("reducing motion during preview opening settles immediately and rapid toggles preserve the target", async () => {
+  const listeners = new Set<() => void>();
+  const media = { matches: false, addEventListener: (_: string, fn: () => void) => listeners.add(fn), removeEventListener: (_: string, fn: () => void) => listeners.delete(fn) };
+  vi.stubGlobal("matchMedia", () => media);
+  const view = render(content(false)); await resize(width);
+  const panel = document.getElementById("preview")!;
+  const size = () => Number(panel.style.flexGrow);
+  view.rerender(content(true));
+  await waitFor(() => { expect(size()).toBeGreaterThan(0); expect(size()).toBeLessThan(50); });
+  await act(async () => { media.matches = true; listeners.forEach(fn => fn()); });
+  await waitFor(() => expect(size()).toBe(50));
+  view.rerender(content(false)); expect(size()).toBe(0);
+  view.rerender(content(true)); expect(size()).toBe(50);
+});
+
+
+test("reversing a preview transition settles at the most recent requested visibility", async () => {
+  const view = render(content(false)); await resize(width);
+  const panel = document.getElementById("preview")!;
+  const size = () => Number(panel.style.flexGrow);
+  view.rerender(content(true));
+  await waitFor(() => { expect(size()).toBeGreaterThan(0); expect(size()).toBeLessThan(50); });
+  view.rerender(content(false));
+  view.rerender(content(true));
+  await waitFor(() => expect(size()).toBe(50));
+  expect(screen.getByRole("button", { name: "Preview 0" })).toBeTruthy();
+});
+
+
+test("reduced-motion opening immediately restores keyboard resizing", async () => {
+  vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+  const view = render(content(false)); await resize(width);
+  view.rerender(content(true));
+  expect(split()).toBe(50);
+  fireEvent.keyDown(separator(), { key: "ArrowLeft" });
+  await waitFor(() => expect(split()).toBeLessThan(50));
+});

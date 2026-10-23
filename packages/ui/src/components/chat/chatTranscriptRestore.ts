@@ -1,3 +1,4 @@
+import { assistantTextIdentity } from "./assistantTextIdentity";
 import { t } from "../../i18n";
 import type {
   AgentStreamPayload,
@@ -255,7 +256,7 @@ export const hasNarrativeChunk = (
 ): boolean =>
   turn.chunks.some(
     (chunk) =>
-      chunk.kind === "narrative" && chunk.text === text && chunk.tone === tone,
+      chunk.kind === "narrative" && chunk.text.trim() === text.trim() && chunk.tone === tone,
   );
 
 export const appendPersistedNarrative = (
@@ -313,15 +314,20 @@ export const flushPersistedDraftAnswerToNarrative = (
   if (!draft) {
     return turn;
   }
-  return appendPersistedNarrative(
-    {
-      ...turn,
-      finalAnswer: "",
-    },
-    draft,
-    "normal",
-    turnId,
-  );
+  return {
+    ...turn,
+    finalAnswer: "",
+    textSegmentId: makeId("assistant-text"),
+    chunks: [...turn.chunks, {
+      id: assistantTextIdentity(turn),
+      kind: "narrative",
+      modelText: true,
+      turnId,
+      // Preserve the source prefix, including whitespace, while presentation drains.
+      text: turn.finalAnswer,
+      tone: "normal",
+    }],
+  };
 };
 
 export const normalizePersistedStreamPayloads = (
@@ -719,10 +725,10 @@ export const applySessionEventToAssistantTurn = (
       if (!text) {
         return turn;
       }
-      const nextTurn = turn.finalAnswer.trim()
-        ? flushPersistedDraftAnswerToNarrative(turn, eventTurnId)
-        : turn;
-      return appendPersistedNarrative(nextTurn, text, "normal", eventTurnId);
+      // The summary describes this same model reply and may normalize or truncate
+      // it. Keep its streamed source and identity when that source is available.
+      if (turn.finalAnswer.trim()) return flushPersistedDraftAnswerToNarrative(turn, eventTurnId);
+      return appendPersistedNarrative(turn, text, "normal", eventTurnId);
     }
     case "PromptCompaction": {
       if (event.status !== "done") {

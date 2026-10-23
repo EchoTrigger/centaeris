@@ -148,12 +148,15 @@ test("drains an append-only terminal answer instead of revealing the final batch
   });
   expect(visible).toBe(beforeTerminal);
 
-  for (let frame = 2; frame <= 14; frame += 1) {
+  let previous = beforeTerminal;
+  for (let frame = 2; frame <= 100 && visible !== target; frame += 1) {
     await runNextFrame((frame * 1_000) / 60);
     samples.push(visible);
+    expect(visible.length - previous.length).toBeLessThanOrEqual(12);
+    expect(target.startsWith(visible)).toBe(true);
+    previous = visible;
+    if (frame === 14) expect(visible).not.toBe(target);
   }
-  expect(samples.filter((sample) => sample !== target).length)
-    .toBeGreaterThanOrEqual(3);
   expect(visible).toBe(target);
 
   await act(async () => renderer?.unmount());

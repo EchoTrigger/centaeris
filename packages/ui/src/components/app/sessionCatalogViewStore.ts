@@ -7,9 +7,11 @@ type SessionCatalogViewState = {
   currentSessionId: string | null;
   runningSessionIds: Set<string>;
   completedSessionIds: Set<string>;
+  waitingSessionIds: Set<string>;
   setSessions: (update: UiSession[] | ((previous: UiSession[]) => UiSession[])) => void;
   setCurrentSession: (sessionId: string | null) => void;
   setRunningSessionIds: (update: (previous: Set<string>) => Set<string>) => void;
+  setWaitingSessionIds: (update: (previous: Set<string>) => Set<string>) => void;
   setCompletedSessionIds: (update: (previous: Set<string>) => Set<string>) => void;
   advanceCatalogRevision: () => void;
 };
@@ -23,10 +25,12 @@ export function createSessionCatalogViewStore() {
     currentSessionId: null,
     runningSessionIds: new Set(),
     completedSessionIds: new Set(),
+    waitingSessionIds: new Set(),
     setSessions: update => set(state => ({ sessions: typeof update === "function" ? update(state.sessions) : update })),
     setCurrentSession: currentSessionId => set({ currentSessionId }),
     setRunningSessionIds: update => set(state => ({ runningSessionIds: update(state.runningSessionIds) })),
     setCompletedSessionIds: update => set(state => ({ completedSessionIds: update(state.completedSessionIds) })),
+    setWaitingSessionIds: update => set(state => ({ waitingSessionIds: update(state.waitingSessionIds) })),
     advanceCatalogRevision: () => set(state => ({ catalogRevision: state.catalogRevision + 1 })),
   }));
 }

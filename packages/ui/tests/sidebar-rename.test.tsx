@@ -82,19 +82,17 @@ test("Escape cancels without saving, blank titles remain editable, and failed sa
 	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 	expect(f.onRenameSession).toHaveBeenCalledTimes(2);
 });
-test("application navigation and expanded/collapsed workspace entry remain discoverable", async () => {
-	const props = sidebarProps();
-	const view = render(<Sidebar {...props} />);
-	expect(screen.getByRole("navigation", { name: "Application" })).toBeTruthy();
-	expect(screen.getByRole("region", { name: "Pinned" })).toBeTruthy();
-	expect(screen.getByRole("region", { name: "Recents" })).toBeTruthy();
-	expect(screen.getByRole("button", { name: "Scheduled" })).toBeTruthy();
-	view.rerender(<Sidebar {...props} collapsed />);
-	expect(screen.queryByRole("region", { name: "Recents" })).toBeNull();
-	expect(
-		screen
-			.getByRole("button", { name: "Switch workspace: test" })
-			.getAttribute("title"),
-	).toBe("D:/test");
-	expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
+test("application navigation is available when expanded and fully hidden when collapsed", () => {
+  const props = sidebarProps();
+  const view = render(<Sidebar {...props} />);
+  expect(screen.getByRole("navigation", { name: "Application" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Pinned" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Recents" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Scheduled" })).toBeTruthy();
+  view.rerender(<Sidebar {...props} collapsed />);
+  expect(screen.queryByRole("complementary", { name: "Main navigation" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
+  view.rerender(<Sidebar {...props} />);
+  expect(screen.getByRole("button", { name: "Scheduled" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
 });

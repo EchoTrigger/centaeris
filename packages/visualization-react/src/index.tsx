@@ -14,7 +14,7 @@ const LazyRenderer = lazy(() =>
 	import("./Renderer").then((module) => ({ default: module.VisualRenderer })),
 );
 const pending = (
-	<div className="cv-pending" role="status">
+	<div className="cv-pending" role="status" aria-busy="true">
 		Loading visualization…
 	</div>
 );

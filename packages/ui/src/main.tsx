@@ -1,5 +1,5 @@
+import { LucideProvider } from "lucide-react";
 import { MotionConfig } from "motion/react";
-import { TooltipProvider } from "./components/ui/tooltip";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
@@ -15,7 +15,9 @@ document.documentElement.dataset.platform = /Mac/i.test(navigator.platform)
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <AppErrorBoundary>
-      <MotionConfig reducedMotion="user"><TooltipProvider><App /></TooltipProvider></MotionConfig>
+      <LucideProvider strokeWidth={1.5}>
+        <MotionConfig reducedMotion="user"><App /></MotionConfig>
+      </LucideProvider>
     </AppErrorBoundary>
   </React.StrictMode>
 );

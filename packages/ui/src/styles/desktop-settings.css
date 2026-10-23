@@ -1,40 +1,26 @@
-/* Desktop settings composition; controls retain their shared Nova behavior. */
+/* Settings share the application sidebar; the page owns only its centered content. */
 .desktopSettings {
-  display: grid;
-  grid-template-columns: 180px minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr);
+  flex: 1;
+  min-width: 0;
   min-height: 0;
-  height: 100%;
-  overflow: hidden;
+  overflow: auto;
   color: var(--on-surface);
   font-size: 13px;
 }
-.desktopSettingsNav {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 4px;
-  padding: 24px 12px;
-  border-right: 1px solid var(--outline-variant);
-  overflow-y: auto;
-}
-.desktopSettingsNav > p { margin: 0 10px 10px; color: var(--process-text); font-size: 12px; }
-.desktopSettingsNav [data-slot="button"] { justify-content: flex-start; gap: 9px; padding-inline: 10px; font-size: 13px; }
-.desktopSettingsNav [aria-current="page"] { background: var(--surface-variant); color: var(--on-surface); }
-.desktopSettingsContent { min-width: 0; min-height: 0; overflow: auto; width: 100%; max-width: 1040px; padding: 24px 24px 48px; }
+.desktopSettingsContent { min-width: 0; width: min(calc(var(--desktop-content-width, 720px) + 2 * var(--desktop-page-inset, 24px)), 100%); margin-inline: auto; padding: var(--desktop-page-top, 48px) var(--desktop-page-inset, 24px) 64px; }
 .desktopSettingsHeading { margin-bottom: 28px; }
-.desktopSettingsHeading h1 { margin: 0; font-size: 20px; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+.desktopSettingsHeading h1 { margin: 0; font-size: 22px; font-weight: 500; line-height: 1.4; overflow-wrap: anywhere; }
 .desktopSettingsHeading p { margin: 5px 0 0; color: var(--process-text); font-size: 13px; line-height: 1.6; }
-.desktopSettingsSection { padding-block: 0 24px; }
-.desktopSettingsSection h2, .desktopModelSection h2 { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.5; }
+.desktopSettingsSection { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 24px; padding: 16px; border-radius: 9px; background: var(--surface-variant); }
+.desktopSettingsSection h2, .desktopModelSection h2 { margin: 0; font-size: 13px; font-weight: 500; line-height: 1.5; }
 .desktopSettingsSection > div > p, .desktopModelSectionHeading p { margin: 4px 0 0; color: var(--process-text); font-size: 13px; line-height: 1.6; }
-.desktopThemeChoices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; max-width: 660px; margin-top: 18px; }
-.desktopThemeChoice[data-slot="button"] { display: flex; height: auto; min-width: 0; flex-direction: column; align-items: stretch; gap: 0; padding: 8px; border-radius: 10px; text-align: left; white-space: normal; }
-.desktopThemeChoice[aria-pressed="true"] { border-color: var(--on-surface); box-shadow: 0 0 0 1px var(--on-surface); }
-.desktopThemePreview { display: flex; height: 98px; overflow: hidden; border: 1px solid #dcdcdc; border-radius: 5px; background: #fcfcfc; }
-.desktopThemePreviewSidebar { display: flex; width: 28%; flex-direction: column; gap: 7px; padding: 13px 7px; background: #eeeeee; }
+.desktopThemeChoices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; width: min(308px, 100%); }
+.desktopThemeChoice[data-slot="button"] { display: flex; height: auto; min-width: 0; flex-direction: column; align-items: stretch; gap: 0; padding: 5px; width: 100%; border-radius: 7px; text-align: left; white-space: normal; }
+.desktopThemeChoice[aria-pressed="true"] { border-color: var(--primary-color); box-shadow: 0 0 0 1px var(--primary-color); }
+.desktopThemePreview { display: flex; height: 50px; overflow: hidden; border: 1px solid #dce3eb; border-radius: 4px; background: #fcfdfe; }
+.desktopThemePreviewSidebar { display: flex; width: 28%; flex-direction: column; gap: 5px; padding: 9px 4px; background: #e7edf4; }
 .desktopThemePreviewSidebar i { height: 4px; border-radius: 2px; background: #cecece; }
-.desktopThemePreviewContent { display: flex; flex: 1; flex-direction: column; align-items: flex-start; gap: 7px; padding: 24px 12px; }
+.desktopThemePreviewContent { display: flex; flex: 1; flex-direction: column; align-items: flex-start; gap: 5px; padding: 12px 6px; }
 .desktopThemePreviewContent i { height: 5px; width: 85%; border-radius: 2px; background: #e5e5e5; }
 .desktopThemePreviewContent i:first-child { width: 55%; height: 7px; background: #bdbdbd; }
 .desktopThemePreviewContent i:last-child { width: 65%; }
@@ -45,16 +31,15 @@
 .desktopThemePreview--dark .desktopThemePreviewContent i:first-child { background: #737373; }
 .desktopThemePreview--system { background: linear-gradient(90deg, #fcfcfc 50%, #1b1b1b 50%); }
 .desktopThemePreview--system .desktopThemePreviewContent i { background: linear-gradient(90deg, #e5e5e5 33%, #494949 33%); }
-.desktopThemeLabel { display: flex; align-items: center; gap: 7px; margin-top: 12px; padding-inline: 3px; }
+.desktopThemeLabel { display: flex; align-items: center; gap: 5px; margin-top: 7px; padding-inline: 2px; }
 .desktopThemeLabel strong { flex: 1; font-size: 13px; font-weight: 500; }
-.desktopThemeDescription { color: var(--process-text); font-size: 12px; font-weight: 400; line-height: 1.5; margin-top: 3px; padding: 0 3px 3px; }
 .desktopSettingsNote { margin: 14px 0 0; color: var(--process-text); font-size: 12px; line-height: 1.7; }
 .desktopModels { min-width: 0; font-size: 13px; }
 .desktopModelsHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .desktopModelsHeading > div { min-width: 0; }
-.desktopModelServiceList { border-block: 1px solid var(--outline-variant); }
-.desktopModelServiceRow[data-slot="button"] { display: flex; justify-content: flex-start; width: 100%; height: auto; min-height: 52px; padding: 8px; gap: 12px; border-radius: 0; white-space: normal; text-align: left; }
-.desktopModelServiceRow + .desktopModelServiceRow { border-top: 1px solid var(--outline-variant); }
+.desktopModelServiceList { border: 0; }
+.desktopModelServiceRow[data-slot="button"] { display: flex; justify-content: flex-start; width: 100%; height: auto; min-height: 68px; padding: 14px 10px; gap: 14px; border-radius: 7px; white-space: normal; text-align: left; }
+.desktopModelServiceRow + .desktopModelServiceRow { border: 0; }
 .desktopModelServiceRow > img, .desktopModelServiceRow > .providerLogoFallback, .desktopModelPickerRow > img, .desktopModelPickerRow > .providerLogoFallback { width: 30px; height: 30px; flex: 0 0 30px; object-fit: contain; font-size: 14px; }
 .desktopModelServiceIdentity { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
 .desktopModelServiceIdentity strong, .desktopModelPickerRow strong { font-weight: 500; line-height: 18px; overflow-wrap: anywhere; }
@@ -127,18 +112,10 @@
 .desktopSettingsSpinner { animation: desktopSettingsSpin 900ms linear infinite; }
 @keyframes desktopSettingsSpin { to { transform: rotate(360deg); } }
 @media (max-width: 760px) {
-  .desktopSettings { grid-template-columns: 150px minmax(0, 1fr); }
-  .desktopSettingsContent { padding: 24px 16px 40px; }
   .desktopThemeChoices { gap: 8px; }
-  .desktopThemePreview { height: 78px; }
-  .desktopThemeDescription { font-size: 11px; }
   .desktopModelFacts > div { grid-template-columns: 90px minmax(0, 1fr); gap: 12px; }
 }
 @media (max-width: 560px) {
-  .desktopSettings { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  .desktopSettingsNav { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--outline-variant); padding: 12px 16px; gap: 6px; }
-  .desktopSettingsNav > p { display: none; }
-  .desktopThemePreview { height: 74px; }
   .desktopThemePreviewSidebar { padding-inline: 4px; }
   .desktopThemePreviewContent { padding-inline: 7px; }
   .desktopThemeLabel { gap: 4px; }
@@ -152,3 +129,5 @@
   .desktopModelFormColumns { gap: 12px; }
 }
 @media (prefers-reduced-motion: reduce) { .desktopSettingsSpinner { animation: none; } }
+
+@media (max-width: 620px) { .desktopSettingsSection { align-items: flex-start; flex-direction: column; gap: 16px; } }

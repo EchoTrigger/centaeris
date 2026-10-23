@@ -21,14 +21,14 @@ afterEach(() => { cleanup(); vi.resetAllMocks(); });
 test.each(["outside", "model"])("a completed MCP save cannot reopen or steal focus after leaving via %s", async departure => {
   const request = deferred<NativeMcpCatalog>(); vi.mocked(configureNativeMcp).mockReturnValue(request.promise);
   const user = userEvent.setup(); render(<Harness />); await openCatalog(user); await openServer(user, "first"); await save(user);
-  if (departure === "model") { await user.click(screen.getByRole("combobox", { name: "Global models" })); await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("option", { name: "Model" }))); }
+  if (departure === "model") { await user.click(screen.getByRole("button", { name: "Global models" })); await user.keyboard("{ArrowDown}"); await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "Model" }))); }
   else await user.click(screen.getByRole("button", { name: "Outside" }));
   const focus = document.activeElement;
   await act(async () => request.resolve(catalog("first")));
   expect(screen.queryByRole("region", { name: "MCP servers" })).toBeNull();
   expect(screen.queryByRole("region", { name: "Configure MCP server" })).toBeNull();
   expect(document.activeElement).toBe(focus);
-  if (departure === "model") expect(screen.getByRole("option", { name: "Model" })).toBeTruthy();
+  if (departure === "model") expect(screen.getByRole("menuitemradio", { name: "Model" })).toBeTruthy();
   expect(configureNativeMcp).toHaveBeenCalledOnce();
 });
 

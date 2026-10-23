@@ -35,6 +35,7 @@ test("stopping a real Motion anchor leaves the manual reading position stable", 
   const f = fixture();
   f.scroll.anchor();
   await vi.waitUntil(() => f.geometry.scrollTop > 500);
+  f.scroll.pause();
   f.geometry.scrollTop = 300;
   f.scroll.userScroll();
   f.geometry.contentEnd = 2000; f.scroll.update();

@@ -16,9 +16,10 @@ export const useChatScrollFollow = (sessionKey: string) => {
         const element = messagesContainerRef.current;
         const content = contentRef.current;
         if (!element || !content) return null;
-        const top = content.getBoundingClientRect().top - element.getBoundingClientRect().top + element.scrollTop;
+        const contentRect = content.getBoundingClientRect();
+        const top = contentRect.top - element.getBoundingClientRect().top + element.scrollTop;
         return { height: element.clientHeight, scrollTop: element.scrollTop,
-          contentEnd: top + content.getBoundingClientRect().height + parseFloat(getComputedStyle(element).paddingBottom || "0"),
+          contentEnd: top + contentRect.height + parseFloat(getComputedStyle(element).paddingBottom || "0"),
           anchorTop: top + metrics.current.top };
       },
       setPadding: (value) => { if (spacerRef.current) spacerRef.current.style.height = `${value}px`; },

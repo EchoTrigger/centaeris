@@ -1,4 +1,7 @@
+vi.mock("../src/components/chat/ComposerPlane", async () => import("./helpers/composerPlaneTestDouble"));
 vi.mock("../src/components/ui/tooltip", async () => import("./helpers/tooltipTestDouble"));
+// This Node-only fixture exercises prompt ownership; greeting DOM/timers have their own browser tests.
+vi.mock("../src/components/chat/WelcomeGreeting", () => ({ WelcomeGreeting: () => null }));
 import { Profiler, type ProfilerOnRenderCallback } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -50,6 +53,7 @@ type CapturedStream = {
 };
 
 type ChatLifecycleCallbacks = {
+  onSessionWaitingChange?: (sessionId: string, waiting: boolean) => void;
   onAgentRunningChange?: (sessionId: string, isRunning: boolean) => void;
   onSessionCompleted?: (sessionId: string) => void;
 };
@@ -406,6 +410,7 @@ const renderChat = async (
       currentSessionId={currentSession.id}
       workspaceName="Workspace"
       workspaceRoot="D:\\Workspace"
+      onSessionWaitingChange={callbacks.onSessionWaitingChange}
       onAgentRunningChange={callbacks.onAgentRunningChange}
       onSessionCompleted={callbacks.onSessionCompleted}
     />
@@ -428,13 +433,14 @@ const renderChat = async (
   return renderer;
 };
 
-const renderEmptyChat = async (): Promise<ReactTestRenderer> => {
+const renderEmptyChat = async (onSessionResolved?: (session: UiSession, options?: { activate?: boolean }) => void): Promise<ReactTestRenderer> => {
   let renderer: ReactTestRenderer | null = null;
   await act(async () => {
     renderer = create(
       <ChatArea
         currentSession={null}
         currentSessionId={null}
+        onSessionResolved={onSessionResolved}
         workspaceName="Workspace"
         workspaceRoot={"D:\\Workspace"}
       />,
@@ -707,7 +713,7 @@ test("a terminal cancellation response observes natural completion without a ter
     messages: [{ id: "durable-answer", role: "assistant", turn: {
       id: "durable-turn", agentRunId: "run-1", chunks: [{ id: "reason", kind: "reasoning", text: "Finished reasoning", status: "done" }],
       finalAnswer: "Final text recovered from committed history", isStreaming: false, completedAtMs: 123,
-    } }], runtimeConfig, contextUsage: null, resolvedAutoContinueAfterResumeWait: false,
+    } }],
     replayCursorsByAgentRunId: {}, pendingQuestionRequest: null, restoreMessageId: null, activeReplay: null,
   });
   const renderer = await renderChat(session("one"), { onAgentRunningChange: runningChanged });
@@ -1808,5 +1814,67 @@ test("an unsupported stream payload fails closed and closes the active connectio
     ["one", false],
   ]);
 
+  await act(async () => renderer.unmount());
+});
+
+const composerPosition = (renderer: ReactTestRenderer): string => renderer.root.findByProps({ "aria-label": "Message composer" }).props["data-position"];
+
+test("a new draft waits for actual response content through submission, session adoption and stream opening", async () => {
+  // Browser frame callbacks run after scheduling, including metadata and the first text frame.
+  vi.mocked(window.requestAnimationFrame).mockImplementation(callback => { queueMicrotask(() => callback(0)); return 1; });
+  const accepted = createDeferred<Awaited<ReturnType<typeof harness.sendAgentInput>>>();
+  harness.sendAgentInput.mockReturnValueOnce(accepted.promise);
+  const renderer = await renderEmptyChat((resolved, options) => {
+    if (options?.activate) renderer.update(<ChatArea currentSession={resolved} currentSessionId={resolved.id} workspaceName="Workspace" workspaceRoot="D:/Workspace" />);
+  });
+  await act(async () => getComposer().onInputChange("Start a task"));
+  expect(composerPosition(renderer)).toBe("center");
+  await act(async () => { getComposer().onSubmit(); await flushAsyncWork(); });
+  expect(harness.sendAgentInput).toHaveBeenCalledOnce();
+  expect(composerPosition(renderer)).toBe("center");
+  await act(async () => { accepted.resolve({ sessionId: "created-session", agentRunId: "run-1", turnId: "turn-1" }); await flushAsyncWork(); });
+  const stream = getStream(0);
+  await openStream(stream);
+  expect(composerPosition(renderer)).toBe("center");
+  await act(async () => { stream.onMessage(modelRequestStartPayload("created-session", "run-1")); await flushAsyncWork(); });
+  expect(composerPosition(renderer)).toBe("center");
+  await act(async () => { stream.onMessage(textDeltaPayload("created-session", "run-1", "private-delta", "internal", "internal")); await flushAsyncWork(); });
+  expect(composerPosition(renderer)).toBe("center");
+  await act(async () => { stream.onMessage(textDeltaPayload("created-session", "run-1", "first-response", "I will inspect the project.")); await flushAsyncWork(); });
+  expect(composerPosition(renderer)).toBe("bottom");
+  await act(async () => { getComposer().onInputChange("Follow-up"); getComposer().onInputChange(""); });
+  expect(composerPosition(renderer)).toBe("bottom");
+  await act(async () => { renderer.update(<ChatArea currentSession={null} currentSessionId={null} newChatRevision={1} workspaceName="Workspace" workspaceRoot="D:/Workspace" />); await flushAsyncWork(); });
+  expect(composerPosition(renderer)).toBe("center");
+  await act(async () => renderer.unmount());
+});
+
+test("a failed first submission reveals the error in the docked conversation", async () => {
+  harness.sendAgentInput.mockRejectedValueOnce(new Error("Provider unavailable"));
+  const renderer = await renderEmptyChat();
+  await submitPrompt("Please help");
+  expect(composerPosition(renderer)).toBe("bottom");
+  expect(Object.values(useChatViewStore.getState().messageById).some(message => message.role === "assistant" && message.turn.chunks.some(chunk => chunk.kind === "narrative" && chunk.text.includes("Provider unavailable")))).toBe(true);
+  await act(async () => renderer.unmount());
+});
+
+test("opening an existing conversation docks before any new response", async () => {
+  const renderer = await renderChat(session("one"));
+  expect(composerPosition(renderer)).toBe("bottom");
+  await act(async () => renderer.unmount());
+});
+
+test("question arrival and answering publish attention for the owning session", async () => {
+  const waiting = vi.fn();
+  const renderer = await renderChat(session("one"), { onSessionWaitingChange: waiting });
+  expect(waiting).not.toHaveBeenCalled(); // Initial hydration is not a reply acknowledgement.
+  await submitPrompt("Help me deploy");
+  const stream = getStream(0);
+  await openStream(stream);
+  await requireQuestion(stream);
+  expect(waiting).toHaveBeenLastCalledWith("one", true);
+  await act(async () => getQuestionPanel().onTextChange("Taipei"));
+  await act(async () => { getQuestionPanel().onSubmit(); await flushAsyncWork(); });
+  expect(waiting).toHaveBeenLastCalledWith("one", false);
   await act(async () => renderer.unmount());
 });

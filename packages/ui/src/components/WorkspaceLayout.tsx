@@ -1,3 +1,5 @@
+import { animate } from "motion/react";
+import { desktopSidebarTransition } from "../lib/desktopMotion";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Group, Panel, useGroupRef, type Layout } from "react-resizable-panels";
 import { WorkspaceSplitHandle } from "./WorkspaceSplitHandle";
@@ -15,6 +17,10 @@ export function WorkspaceLayout({ children, preview, previewVisible, hidden = fa
   const groupRef = useGroupRef();
   const rememberedLayout = useRef(equalSplit);
   const [availableWidth, setAvailableWidth] = useState(0);
+  const previous = useRef({ visible: previewVisible, compact: false, placed: false });
+  const [moving, setMoving] = useState(false);
+  const [settledVisible, setSettledVisible] = useState(previewVisible);
+  const transitioning = moving || settledVisible !== previewVisible;
   const compact = availableWidth > 0 && availableWidth <= 800;
   useLayoutEffect(() => {
     const element = container.current;
@@ -31,31 +37,51 @@ export function WorkspaceLayout({ children, preview, previewVisible, hidden = fa
   }, []);
   useLayoutEffect(() => {
     if (!container.current || availableWidth <= 0) return;
-    // Reapply the requested split when the container grows after a temporary
-    // pixel constraint. setLayout may otherwise remember the clamped percentage.
-    groupRef.current?.setLayout(!previewVisible ? { chat: 100, preview: 0 }
-      : compact ? { chat: 0, preview: 100 } : rememberedLayout.current);
-  }, [availableWidth, compact, previewVisible, groupRef]);
+    const before = previous.current;
+    previous.current = { visible: previewVisible, compact, placed: true };
+    const target = !previewVisible ? { chat: 100, preview: 0 }
+      : compact ? { chat: 0, preview: 100 } : rememberedLayout.current;
+    const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (!before.placed || before.visible === previewVisible || before.compact || compact || hidden || preference.matches) {
+      setMoving(false); setSettledVisible(previewVisible); groupRef.current?.setLayout(target); return;
+    }
+    // Motion owns pacing; the panel library owns every intermediate layout.
+    const from = groupRef.current?.getLayout().preview ?? (before.visible ? rememberedLayout.current.preview : 0);
+    let owned = true;
+    setMoving(true);
+    const playback = animate(from, target.preview, {
+      ...desktopSidebarTransition,
+      onUpdate: preview => { if (owned) groupRef.current?.setLayout({ chat: 100 - preview, preview }); },
+    });
+    const finish = () => {
+      if (!owned) return;
+      groupRef.current?.setLayout(target); setMoving(false); setSettledVisible(previewVisible);
+    };
+    const reduce = () => { if (preference.matches) { playback.complete(); finish(); } };
+    preference.addEventListener("change", reduce);
+    void playback.then(() => { preference.removeEventListener("change", reduce); finish(); });
+    return () => { owned = false; preference.removeEventListener("change", reduce); playback.stop(); };
+  }, [availableWidth, compact, previewVisible, hidden, groupRef]);
   const reset = () => {
     rememberedLayout.current = equalSplit;
     groupRef.current?.setLayout(equalSplit);
   };
   return <div ref={container} className="thinWorkspaceBody desktopWorkspaceLayout" hidden={hidden}
-    data-compact={compact || undefined} data-preview-visible={previewVisible || undefined}>
+    data-preview-animating={transitioning || undefined} data-compact={compact || undefined} data-preview-visible={previewVisible || undefined}>
     <Group id="desktop-workspace-layout" groupRef={groupRef} defaultLayout={equalSplit}
-      className="desktopWorkspaceGroup" orientation="horizontal" disabled={compact || !previewVisible}
+      className="desktopWorkspaceGroup" orientation="horizontal" disabled={compact || !previewVisible || transitioning}
       onLayoutChanged={(layout, meta) => {
         if (meta.isUserInteraction && previewVisible && !compact) rememberedLayout.current = meta.requestedLayout ?? layout;
       }}>
-      <Panel id="chat" defaultSize="50%" minSize={compact || !previewVisible ? 0 : 320}
-        maxSize={compact || !previewVisible ? "100%" : "75%"}
-        collapsible={compact} className="desktopChatPanel" aria-hidden={compact && previewVisible}
+      <Panel id="chat" defaultSize="50%" minSize={compact || !previewVisible || transitioning ? 0 : 320}
+        maxSize={compact || !previewVisible || transitioning ? "100%" : "75%"}
+        collapsible={compact || transitioning} className="desktopChatPanel" aria-hidden={compact && previewVisible}
         inert={compact && previewVisible}>
         {children}
       </Panel>
-      <WorkspaceSplitHandle disabled={compact || !previewVisible} onReset={reset} />
-      <Panel id="preview" defaultSize="50%" minSize={compact || !previewVisible ? 0 : 320}
-        maxSize={compact || !previewVisible ? "100%" : "75%"} collapsible={!previewVisible}
+      <WorkspaceSplitHandle disabled={compact || !previewVisible || transitioning} onReset={reset} />
+      <Panel id="preview" defaultSize="50%" minSize={compact || !previewVisible || transitioning ? 0 : 320}
+        maxSize={compact || !previewVisible || transitioning ? "100%" : "75%"} collapsible={!previewVisible || transitioning}
         className="desktopPreviewPanel" aria-hidden={!previewVisible} inert={!previewVisible}>
         {preview}
       </Panel>

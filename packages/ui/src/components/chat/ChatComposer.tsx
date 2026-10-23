@@ -1,8 +1,13 @@
+import { Plus, Blocks, Sparkles, Plug } from "lucide-react";
+import { Button } from "../ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "../ui/dropdown-menu";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
-import { SquareTerminal } from "lucide-react";
-import { Button } from "../ui/button";
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "../ui/dropdown-menu";
 import type {
   AgentContextUsageSummary,
   ModelThinkingMode,
@@ -19,11 +24,19 @@ import {
 } from "./ComposerPromptInput";
 import {
   ComposerRuntimeControls,
+  ComposerContextControl,
   type RuntimeComposerPanel,
 } from "./ComposerRuntimeControls";
 
 type ResourceKind = "models" | "skills" | "plugins";
-type ComposerPanel = "commands" | "model" | "reasoning" | "context" | "mcp" | "mcp-configure" | null;
+type ComposerPanel =
+  | "commands"
+  | "model"
+  | "reasoning"
+  | "context"
+  | "mcp"
+  | "mcp-configure"
+  | null;
 type ComposerCommandId =
   | "new"
   | "model"
@@ -45,6 +58,7 @@ type ChatComposerProps = {
   inputValue: string;
   isStreaming: boolean;
   hasInput: boolean;
+  submitDisabled?: boolean;
   modelRuntimeSummary: string;
   selectableModels: SelectableModel[];
   activeModelIndex: number;
@@ -72,6 +86,7 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
   inputValue,
   isStreaming,
   hasInput,
+  submitDisabled = false,
   modelRuntimeSummary,
   selectableModels,
   activeModelIndex,
@@ -101,7 +116,10 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
     setActivePanel(mode);
   }, []);
   const mcpController = useMcpComposerController({
-    mode: activePanel === "mcp" || activePanel === "mcp-configure" ? activePanel : null,
+    mode:
+      activePanel === "mcp" || activePanel === "mcp-configure"
+        ? activePanel
+        : null,
     panelResetKey,
     onModeChange: handleMcpModeChange,
     focusTextarea,
@@ -133,7 +151,9 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
     {
       id: "compact",
       name: "/compact",
-      description: isCompacting ? "Compaction in progress" : "Compact current conversation",
+      description: isCompacting
+        ? "Compaction in progress"
+        : "Compact current conversation",
       disabled: !compactInteractive || isStreaming || isCompacting,
     },
     {
@@ -161,14 +181,16 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
     },
   ];
   const commandQuery = slashCommandQuery(inputValue);
-  const matchingCommands = commandQuery === null
-    ? []
-    : commands.filter((command) =>
-      command.name.slice(1).startsWith(commandQuery)
-    );
-  const selectedCommand = matchingCommands[
-    Math.min(selectedCommandIndex, Math.max(matchingCommands.length - 1, 0))
-  ];
+  const matchingCommands =
+    commandQuery === null
+      ? []
+      : commands.filter((command) =>
+          command.name.slice(1).startsWith(commandQuery),
+        );
+  const selectedCommand =
+    matchingCommands[
+      Math.min(selectedCommandIndex, Math.max(matchingCommands.length - 1, 0))
+    ];
 
   useEffect(() => {
     setSelectedCommandIndex(0);
@@ -177,18 +199,23 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
         ? "commands"
         : current === "commands"
           ? null
-          : current
+          : current,
     );
   }, [commandQuery]);
 
   useEffect(() => {
-    if (!activePanel || activePanel === "model" || activePanel === "reasoning" || activePanel === "context") {
+    if (
+      !activePanel ||
+      activePanel === "model" ||
+      activePanel === "reasoning" ||
+      activePanel === "context"
+    ) {
       return;
     }
     const closeOnOutsidePointer = (event: PointerEvent) => {
       if (
-        event.target instanceof Node
-        && !composerRef.current?.contains(event.target)
+        event.target instanceof Node &&
+        !composerRef.current?.contains(event.target)
       ) {
         setActivePanel(null);
       }
@@ -206,25 +233,34 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
     };
   }, [activePanel]);
 
-  const handleRuntimePanelChange = useCallback((panel: RuntimeComposerPanel) => {
-    setActivePanel(panel);
-  }, []);
+  const handleRuntimePanelChange = useCallback(
+    (panel: RuntimeComposerPanel) => {
+      setActivePanel(panel);
+    },
+    [],
+  );
 
-  const handleRuntimeModelSelect = useCallback((model: SelectableModel) => {
-    onModelSelect(model);
-    setActivePanel(null);
-  }, [onModelSelect]);
+  const handleRuntimeModelSelect = useCallback(
+    (model: SelectableModel) => {
+      onModelSelect(model);
+      setActivePanel(null);
+    },
+    [onModelSelect],
+  );
 
-  const handleRuntimeReasoningEffortSelect = useCallback((effort: ModelThinkingMode) => {
-    onReasoningEffortSelect(effort);
-    setActivePanel(null);
-  }, [onReasoningEffortSelect]);
+  const handleRuntimeReasoningEffortSelect = useCallback(
+    (effort: ModelThinkingMode) => {
+      onReasoningEffortSelect(effort);
+      setActivePanel(null);
+    },
+    [onReasoningEffortSelect],
+  );
 
-  const runComposerCommand = (command: ComposerCommand, fromInput = true) => {
+  const runComposerCommand = (command: ComposerCommand) => {
     if (command.disabled) {
       return;
     }
-    if (fromInput || commandQuery !== null) onInputChange("");
+    onInputChange("");
     switch (command.id) {
       case "new":
         setActivePanel(null);
@@ -263,8 +299,9 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
     if (!matchingCommands.length) {
       return;
     }
-    setSelectedCommandIndex((current) =>
-      (current + delta + matchingCommands.length) % matchingCommands.length
+    setSelectedCommandIndex(
+      (current) =>
+        (current + delta + matchingCommands.length) % matchingCommands.length,
     );
   };
 
@@ -321,21 +358,25 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
               <span>↑↓ / Tab · Enter</span>
             </header>
             <div>
-              {matchingCommands.length ? matchingCommands.map((command, index) => (
-                <button
-                  type="button"
-                  role="option"
-                  aria-selected={index === selectedCommandIndex}
-                  className={index === selectedCommandIndex ? "is-selected" : ""}
-                  disabled={command.disabled}
-                  key={command.id}
-                  onMouseEnter={() => setSelectedCommandIndex(index)}
-                  onClick={() => runComposerCommand(command)}
-                >
-                  <strong>{command.name}</strong>
-                  <span>{command.description}</span>
-                </button>
-              )) : (
+              {matchingCommands.length ? (
+                matchingCommands.map((command, index) => (
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={index === selectedCommandIndex}
+                    className={
+                      index === selectedCommandIndex ? "is-selected" : ""
+                    }
+                    disabled={command.disabled}
+                    key={command.id}
+                    onMouseEnter={() => setSelectedCommandIndex(index)}
+                    onClick={() => runComposerCommand(command)}
+                  >
+                    <strong>{command.name}</strong>
+                    <span>{command.description}</span>
+                  </button>
+                ))
+              ) : (
                 <p>No matching command</p>
               )}
             </div>
@@ -345,8 +386,84 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
         <ComposerPromptInput
           ref={promptInputRef}
           value={inputValue}
+          leadingControls={
+            <>
+              <DropdownMenu
+                onOpenChange={(open) => {
+                  if (open) setActivePanel(null);
+                }}
+              >
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="composerAddButton"
+                      aria-label="Add context"
+                    />
+                  }
+                >
+                  <Plus aria-hidden="true" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  side="top"
+                  align="start"
+                  sideOffset={8}
+                  className="composerAddMenu"
+                >
+                  <DropdownMenuItem
+                    disabled={!onOpenResource}
+                    onClick={() => onOpenResource?.("skills")}
+                  >
+                    <Sparkles aria-hidden="true" />
+                    Skills
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={!onOpenResource}
+                    onClick={() => onOpenResource?.("plugins")}
+                  >
+                    <Blocks aria-hidden="true" />
+                    Plugins
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => mcpController.openCatalog()}>
+                    <Plug aria-hidden="true" />
+                    MCP servers
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </>
+          }
+          trailingControls={
+            <>
+              <ComposerContextControl
+                activePanel={activePanel === "context" ? "context" : null}
+                contextUsage={contextUsage}
+                onPanelChange={handleRuntimePanelChange}
+              />
+              <ComposerRuntimeControls
+                activePanel={
+                  activePanel === "model" ||
+                  activePanel === "reasoning" ||
+                  activePanel === "context"
+                    ? activePanel
+                    : null
+                }
+                modelRuntimeSummary={modelRuntimeSummary}
+                selectableModels={selectableModels}
+                activeModelIndex={activeModelIndex}
+                reasoningEffort={reasoningEffort}
+                reasoningEfforts={reasoningEfforts}
+                contextUsage={contextUsage}
+                runtimeConfigError={runtimeConfigError}
+                onPanelChange={handleRuntimePanelChange}
+                onModelSelect={handleRuntimeModelSelect}
+                onReasoningEffortSelect={handleRuntimeReasoningEffortSelect}
+              />
+            </>
+          }
           isStreaming={isStreaming}
           hasInput={hasInput}
+          submitDisabled={submitDisabled}
           commandsExpanded={activePanel === "commands"}
           mcpExpanded={activePanel === "mcp"}
           onChange={onInputChange}
@@ -366,33 +483,16 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
           onPanelKeyDown={handlePromptPanelKeyDown}
         />
       </div>
-      <ComposerRuntimeControls
-        activePanel={
-          activePanel === "model" || activePanel === "reasoning" || activePanel === "context"
-            ? activePanel
-            : null
-        }
-        modelRuntimeSummary={modelRuntimeSummary}
-        selectableModels={selectableModels}
-        activeModelIndex={activeModelIndex}
-        reasoningEffort={reasoningEffort}
-        reasoningEfforts={reasoningEfforts}
-        contextUsage={contextUsage}
-        runtimeConfigError={runtimeConfigError}
-        onPanelChange={handleRuntimePanelChange}
-        onModelSelect={handleRuntimeModelSelect}
-        onReasoningEffortSelect={handleRuntimeReasoningEffortSelect}
-      />
-      <div className="desktopComposerFooter">
-        <DropdownMenu><DropdownMenuTrigger render={<Button variant="ghost" size="xs" aria-label="Composer commands" />}><SquareTerminal size={13} aria-hidden="true" /> Commands</DropdownMenuTrigger>
-          <DropdownMenuContent align="start" side="top" className="desktopComposerCommands">{commands.map(command => <DropdownMenuItem key={command.id} disabled={command.disabled} onClick={() => runComposerCommand(command, false)}><span>{command.description}</span><kbd>{command.name}</kbd></DropdownMenuItem>)}</DropdownMenuContent>
-        </DropdownMenu>
-        <span><kbd>Enter</kbd> to send · <kbd>Shift Enter</kbd> for a new line</span>
-      </div>
+
+      {runtimeConfigError.trim() ? (
+        <div className="composer-error">{runtimeConfigError}</div>
+      ) : null}
     </div>
   );
 });
 
-export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps) {
+export const ChatComposer = memo(function ChatComposer(
+  props: ChatComposerProps,
+) {
   return <ChatComposerLifecycle {...props} key={props.panelResetKey} />;
 });

@@ -1,4 +1,4 @@
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const createTrustedRendererPolicy = ({ filePath, devServerUrl }) => {
   const fileUrl = pathToFileURL(filePath).href;
@@ -19,7 +19,7 @@ export const createTrustedRendererPolicy = ({ filePath, devServerUrl }) => {
 export const requireTrustedRendererUrl = (rawUrl, policy) => {
   const url = new URL(rawUrl);
   if (url.protocol === "file:") {
-    if (url.href !== policy.fileUrl) {
+    if (url.search || url.hash || fileURLToPath(url) !== fileURLToPath(policy.fileUrl)) {
       throw new Error(`untrusted renderer file URL: ${url.href}`);
     }
     return url.href;

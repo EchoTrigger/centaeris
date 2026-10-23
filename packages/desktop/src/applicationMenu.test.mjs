@@ -11,9 +11,9 @@ test("File opens a folder through an application action and Edit uses native rol
   assert.throws(() => applicationMenuTemplate("Unknown", () => {}));
 });
 
-test("application menus anchor below their button in screen coordinates, including zoom", () => {
+test("application menus anchor below their button in window content coordinates, including zoom", () => {
   const owner = { getContentBounds: () => ({ x: 100, y: 50, width: 1200, height: 800 }), webContents: { getZoomFactor: () => 1.25 } };
-  assert.deepEqual(applicationMenuPosition(owner, { x: 80, y: 36 }), { x: 200, y: 95 });
+  assert.deepEqual(applicationMenuPosition(owner, { x: 80, y: 36 }), { x: 100, y: 45 });
   assert.throws(() => applicationMenuPosition(owner, { x: NaN, y: 36 }));
 });
 
@@ -21,4 +21,21 @@ test("native menus follow the chosen theme and retain System tracking", () => {
  const theme = {};
  for (const preference of ["dark", "light", "system"]) { applyDesktopTheme(theme, {preference}); assert.equal(theme.themeSource, preference); }
  assert.throws(() => applyDesktopTheme(theme, {preference:"dark", extra:true}));
+});
+
+
+test("application menu labels remain English with native roles and no separators", () => {
+  const expected = {
+    File: ["New chat", "Open Folder…", "Settings"],
+    Edit: ["Undo", "Redo", "Cut", "Copy", "Paste", "Select All"],
+    View: ["Toggle sidebar", "Toggle right panel", "Actual Size", "Zoom In", "Zoom Out", "Toggle Full Screen"],
+    Help: ["About Centaeris"],
+  };
+  for (const [name, labels] of Object.entries(expected)) {
+    const items = applicationMenuTemplate(name, () => {});
+    assert.deepEqual(items.map(item => item.label), labels);
+    assert.ok(items.every(item => item.type !== "separator"));
+  }
+  const owner = { getContentBounds: () => ({ x: -900, y: 100, width: 1200, height: 800 }), webContents: { getZoomFactor: () => 1.25 } };
+  assert.deepEqual(applicationMenuPosition(owner, { x: 80, y: 36 }), { x: 100, y: 45 });
 });

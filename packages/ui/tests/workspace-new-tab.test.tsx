@@ -2,11 +2,8 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { WorkspaceAddMenu } from "../src/components/WorkspaceAddMenu";
-import type {
-	createTerminal,
-	TerminalSnapshot,
-} from "../src/lib/terminalBridge";
+import { WorkspaceNewTab } from "../src/components/WorkspaceNewTab";
+import type { createTerminal, TerminalSnapshot } from "../src/lib/terminalBridge";
 
 type StartRequest = Parameters<typeof createTerminal>[0];
 const host = vi.hoisted(() => ({
@@ -15,10 +12,7 @@ const host = vi.hoisted(() => ({
 	start: vi.fn(),
 }));
 vi.mock("../src/host/hostBridge", () => ({ invokeHost: host.invokeHost }));
-const terminal = (
-	sessionId: string | null = null,
-	root = "/root",
-): TerminalSnapshot => ({
+const terminal = (sessionId: string | null = null, root = "/root"): TerminalSnapshot => ({
 	terminalId: `terminal:${sessionId}`,
 	workspaceRoot: root,
 	sessionId,
@@ -45,23 +39,17 @@ beforeEach(() => {
 				};
 			},
 		) => {
-			if (command !== "terminal_manage")
-				throw new Error(`Unexpected host command ${command}`);
-			if (payload.request.action === "list")
-				return host.list(payload.request.workspaceRoot);
-			if (payload.request.action === "start")
-				return host.start(payload.request.request);
+			if (command !== "terminal_manage") throw new Error(`Unexpected host command ${command}`);
+			if (payload.request.action === "list") return host.list(payload.request.workspaceRoot);
+			if (payload.request.action === "start") return host.start(payload.request.request);
 			throw new Error(`Unexpected terminal action ${payload.request.action}`);
 		},
 	);
 });
 afterEach(cleanup);
-const choices = (
-	root: string,
-	sessionId: string | null,
-	onTerminal = vi.fn(),
-) => (
-	<WorkspaceAddMenu
+const choices = (root: string, sessionId: string | null, onTerminal = vi.fn()) => (
+	<WorkspaceNewTab
+		active
 		root={root}
 		sessionId={sessionId}
 		onFiles={() => {}}
@@ -70,13 +58,10 @@ const choices = (
 	/>
 );
 async function openChoices(user: ReturnType<typeof userEvent.setup>) {
-	await user.click(screen.getByRole("button", { name: "Add workspace tab" }));
-	await waitFor(() =>
-		expect(
-			(screen.getByRole("button", { name: "Terminal" }) as HTMLButtonElement)
-				.disabled,
-		).toBe(false),
-	);
+	const trigger = screen.getByRole("button", { name: "Existing terminals" });
+	if (trigger.getAttribute("aria-expanded") === "true") await user.click(trigger);
+	await user.click(trigger);
+	await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
 }
 function pendingStart() {
 	let resolve!: (value: TerminalSnapshot) => void;
@@ -96,9 +81,7 @@ test("lost create response reuses the same operation; reopening an existing term
 		serviceInstanceId: "service-a",
 		terminals: [existing],
 	});
-	host.start
-		.mockRejectedValueOnce(Error("disconnected"))
-		.mockResolvedValueOnce(existing);
+	host.start.mockRejectedValueOnce(Error("disconnected")).mockResolvedValueOnce(existing);
 	render(choices("/root", null, open));
 	await openChoices(user);
 	await user.click(screen.getByRole("button", { name: "Terminal" }));
@@ -111,21 +94,24 @@ test("lost create response reuses the same operation; reopening an existing term
 		request: { action: "start", request: host.start.mock.calls[0][0] },
 	});
 	await openChoices(user);
-	await user.click(await screen.findByRole("button", { name: /pwsh 1/ }));
+	await user.click(await screen.findByRole("button", { name: /^pwsh/ }));
 	expect(host.start).toHaveBeenCalledTimes(2);
 	expect(open).toHaveBeenLastCalledWith(existing, "service-a", "pwsh 1");
 });
 
-test("workspace choices dismiss on Escape and restore the trigger focus", async () => {
-	const user = userEvent.setup();
-	render(choices("/root", null));
-	const trigger = screen.getByRole("button", { name: "Add workspace tab" });
-	await openChoices(user);
-	await user.keyboard("{Escape}");
-	await waitFor(() =>
-		expect(screen.queryByRole("button", { name: "Files" })).toBeNull(),
-	);
-	expect(document.activeElement).toBe(trigger);
+test("opening a new tab performs no terminal request and closing it rejects late completion", async () => {
+	const user = userEvent.setup(),
+		open = vi.fn();
+	const request = pendingStart();
+	host.start.mockReturnValue(request.promise);
+	const view = render(choices("/root", null, open));
+	expect(host.list).not.toHaveBeenCalled();
+	expect(host.start).not.toHaveBeenCalled();
+	await user.click(screen.getByRole("button", { name: "Terminal" }));
+	await waitFor(() => expect(host.start).toHaveBeenCalledOnce());
+	view.unmount();
+	await act(async () => request.resolve(terminal()));
+	expect(open).not.toHaveBeenCalled();
 });
 
 test("a lost create response from session A is not retried for session B in the same workspace", async () => {
@@ -143,9 +129,7 @@ test("a lost create response from session A is not retried for session B in the 
 	view.rerender(choices("/root", "session-b", open));
 	await user.click(screen.getByRole("button", { name: "Terminal" }));
 	await waitFor(() => expect(open).toHaveBeenCalledOnce());
-	const [first, second] = host.start.mock.calls.map(
-		([request]) => request as StartRequest,
-	);
+	const [first, second] = host.start.mock.calls.map(([request]) => request as StartRequest);
 	expect(first).toMatchObject({
 		workspaceRoot: "/root",
 		sessionId: "session-a",
@@ -157,11 +141,7 @@ test("a lost create response from session A is not retried for session B in the 
 		serviceInstanceId: "service-a",
 	});
 	expect(second.operationId).not.toBe(first.operationId);
-	expect(open).toHaveBeenCalledWith(
-		terminal("session-b"),
-		"service-a",
-		"pwsh 1",
-	);
+	expect(open).toHaveBeenCalledWith(terminal("session-b"), "service-a", "pwsh 1");
 });
 
 test.each([
@@ -174,26 +154,22 @@ test.each([
 			open = vi.fn();
 		const first = pendingStart(),
 			second = pendingStart();
-		host.start
-			.mockReturnValueOnce(first.promise)
-			.mockReturnValueOnce(second.promise);
+		host.start.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
 		const view = render(choices("/root", "session-a", open));
 		await openChoices(user);
 		await user.click(screen.getByRole("button", { name: "Terminal" }));
 		view.rerender(choices(root, sessionId, open));
 		await waitFor(() =>
-			expect(
-				(screen.getByRole("button", { name: "Terminal" }) as HTMLButtonElement)
-					.disabled,
-			).toBe(false),
+			expect((screen.getByRole("button", { name: "Terminal" }) as HTMLButtonElement).disabled).toBe(
+				false,
+			),
 		);
 		await user.click(screen.getByRole("button", { name: "Terminal" }));
 		await act(async () => first.reject(new Error("departed create failed")));
 		expect(screen.queryByText("Error: departed create failed")).toBeNull();
-		expect(
-			(screen.getByRole("button", { name: "Starting…" }) as HTMLButtonElement)
-				.disabled,
-		).toBe(true);
+		expect((screen.getByRole("button", { name: "Starting…" }) as HTMLButtonElement).disabled).toBe(
+			true,
+		);
 		await act(async () => second.resolve(terminal(sessionId, root)));
 		await waitFor(() =>
 			expect(open).toHaveBeenCalledExactlyOnceWith(
@@ -214,16 +190,10 @@ test("a new service instance starts its own operation and rejects late errors fr
 		open = vi.fn();
 	const first = pendingStart(),
 		second = pendingStart();
-	host.start
-		.mockReturnValueOnce(first.promise)
-		.mockReturnValueOnce(second.promise);
+	host.start.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
 	render(choices("/root", "session-a", open));
 	await openChoices(user);
 	await user.click(screen.getByRole("button", { name: "Terminal" }));
-	await user.keyboard("{Escape}");
-	await waitFor(() =>
-		expect(screen.queryByRole("button", { name: "Files" })).toBeNull(),
-	);
 	host.list.mockResolvedValue({
 		serviceInstanceId: "service-b",
 		terminals: [],
@@ -232,21 +202,14 @@ test("a new service instance starts its own operation and rejects late errors fr
 	await user.click(screen.getByRole("button", { name: "Terminal" }));
 	await act(async () => first.reject(new Error("old service failed")));
 	expect(screen.queryByText("Error: old service failed")).toBeNull();
-	expect(
-		(screen.getByRole("button", { name: "Starting…" }) as HTMLButtonElement)
-			.disabled,
-	).toBe(true);
+	expect((screen.getByRole("button", { name: "Starting…" }) as HTMLButtonElement).disabled).toBe(
+		true,
+	);
 	await act(async () => second.resolve(terminal("session-a")));
 	await waitFor(() =>
-		expect(open).toHaveBeenCalledExactlyOnceWith(
-			terminal("session-a"),
-			"service-b",
-			"pwsh 1",
-		),
+		expect(open).toHaveBeenCalledExactlyOnceWith(terminal("session-a"), "service-b", "pwsh 1"),
 	);
-	const [older, current] = host.start.mock.calls.map(
-		([request]) => request as StartRequest,
-	);
+	const [older, current] = host.start.mock.calls.map(([request]) => request as StartRequest);
 	expect(current).toMatchObject({
 		workspaceRoot: "/root",
 		sessionId: "session-a",
@@ -286,49 +249,38 @@ test.each(["resolve", "reject"] as const)(
 		});
 		expect(open).not.toHaveBeenCalled();
 		expect(screen.queryByRole("status")).toBeNull();
-		expect(
-			(screen.getByRole("button", { name: "Starting…" }) as HTMLButtonElement)
-				.disabled,
-		).toBe(true);
+		expect((screen.getByRole("button", { name: "Starting…" }) as HTMLButtonElement).disabled).toBe(
+			true,
+		);
 		await act(async () => currentA.reject(new Error("current A disconnected")));
 		await screen.findByText("Error: current A disconnected");
 		await user.click(screen.getByRole("button", { name: "Terminal" }));
 		await waitFor(() =>
-			expect(open).toHaveBeenCalledExactlyOnceWith(
-				terminal("session-a"),
-				"service-a",
-				"pwsh 1",
-			),
+			expect(open).toHaveBeenCalledExactlyOnceWith(terminal("session-a"), "service-a", "pwsh 1"),
 		);
-		const requests = host.start.mock.calls.map(
-			([request]) => request as StartRequest,
-		);
+		const requests = host.start.mock.calls.map(([request]) => request as StartRequest);
 		expect(requests[2].operationId).not.toBe(requests[0].operationId);
 		expect(requests[3]).toEqual(requests[2]);
 	},
 );
 
-test("terminal list failure has visible retry and cannot start without an authoritative service", async () => {
+test("terminal catalog failure is retryable and never creates a terminal implicitly", async () => {
 	const user = userEvent.setup();
 	host.list
 		.mockRejectedValueOnce(Error("Terminal service unavailable"))
 		.mockResolvedValueOnce({ serviceInstanceId: "service-a", terminals: [] });
 	render(choices("/root", null));
-	await user.click(screen.getByRole("button", { name: "Add workspace tab" }));
-	expect((await screen.findByRole("alert")).textContent).toContain(
-		"Terminal service unavailable",
+	await user.click(screen.getByRole("button", { name: "Existing terminals" }));
+	expect((await screen.findByRole("alert")).textContent).toContain("Terminal service unavailable");
+	expect((screen.getByRole("button", { name: "Terminal" }) as HTMLButtonElement).disabled).toBe(
+		false,
 	);
-	expect(
-		(screen.getByRole("button", { name: "Terminal" }) as HTMLButtonElement)
-			.disabled,
-	).toBe(true);
 	expect(host.start).not.toHaveBeenCalled();
 	await user.click(screen.getByRole("button", { name: "Retry" }));
 	await waitFor(() =>
-		expect(
-			(screen.getByRole("button", { name: "Terminal" }) as HTMLButtonElement)
-				.disabled,
-		).toBe(false),
+		expect((screen.getByRole("button", { name: "Terminal" }) as HTMLButtonElement).disabled).toBe(
+			false,
+		),
 	);
 	expect(host.list).toHaveBeenCalledTimes(2);
 });

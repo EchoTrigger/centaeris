@@ -30,8 +30,8 @@ export function ManagementError({ children, onRetry, retryLabel = "Retry" }: { c
 export function ManagementLoading({ children }: { children: ReactNode }) {
   return <p className="dmLoading" role="status"><LoaderCircle size={16} className="dmSpinner" aria-hidden="true" />{children}</p>;
 }
-export function ManagementEmpty({ title, description, action }: { title: string; description: string; action?: ReactNode }) {
-  return <div className="dmEmpty"><h2>{title}</h2><p>{description}</p>{action}</div>;
+export function ManagementEmpty({ title, description, action }: { title: string; description?: string; action?: ReactNode }) {
+  return <div className="dmEmpty"><h2>{title}</h2>{description ? <p>{description}</p> : null}{action}</div>;
 }
 export function ManagementStatus({ children, tone = "neutral" }: { children: ReactNode; tone?: "neutral" | "success" | "warning" | "error" }) {
   return <span className="dmStatus" data-tone={tone}>{children}</span>;

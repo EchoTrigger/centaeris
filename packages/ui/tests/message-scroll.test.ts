@@ -20,14 +20,15 @@ describe("message anchoring", () => {
   function fixture(reducedMotion = false) {
     const geometry = { height: 800, contentEnd: 1300, anchorTop: 1200, scrollTop: 500 };
     let padding = 0;
+    let following = true;
     const scroll = createMessageScroll({
       measure: () => geometry,
       setPadding: (value) => { padding = value; },
       scrollTo: (value) => { geometry.scrollTop = value; },
       reducedMotion: () => reducedMotion,
-      onFollowingChange: () => {},
+      onFollowingChange: value => { following = value; },
     });
-    return { geometry, scroll, padding: () => padding, progress: (value: number) => motion.current?.progress(value) };
+    return { geometry, scroll, following: () => following, padding: () => padding, progress: (value: number) => motion.current?.progress(value) };
   }
 
   it("eases a sent message to one quarter and consumes space as content grows", () => {
@@ -45,6 +46,40 @@ describe("message anchoring", () => {
     f.geometry.contentEnd = 2000; f.scroll.update();
     expect(f.padding()).toBe(0);
     expect(f.geometry.scrollTop).toBe(1200);
+  });
+
+
+  it("keeps sent-turn following and reserved reply space through history remeasurement", () => {
+    const f = fixture(true);
+    f.scroll.anchor();
+    f.geometry.anchorTop -= 40;
+    f.geometry.contentEnd -= 40;
+    f.geometry.scrollTop -= 40;
+    f.scroll.userScroll();
+    expect(f.following()).toBe(true);
+    expect(f.padding()).toBe(500);
+    f.geometry.contentEnd += 200;
+    f.scroll.update();
+    expect(f.padding()).toBe(300);
+    f.geometry.contentEnd += 600;
+    f.scroll.update();
+    expect(f.following()).toBe(true);
+    expect(f.padding()).toBe(0);
+    expect(f.geometry.scrollTop).toBe(f.geometry.contentEnd - f.geometry.height);
+  });
+
+  it("retains the sent-turn Motion animation when virtual rows compensate its offset", () => {
+    const f = fixture();
+    f.scroll.anchor();
+    f.progress(0.25);
+    f.geometry.anchorTop += 40;
+    f.geometry.contentEnd += 40;
+    f.geometry.scrollTop += 40;
+    f.scroll.userScroll();
+    f.progress(1);
+    expect(f.following()).toBe(true);
+    expect(f.geometry.scrollTop).toBe(1040);
+    expect(f.padding()).toBe(500);
   });
 
   it("reclaims blank space while reading upward without moving the reading position", () => {
@@ -96,14 +131,61 @@ describe("message anchoring", () => {
     expect(f.padding()).toBe(500);
   });
 
-  it("a real user scroll cancels anchoring and later content cannot pull the reader down", () => {
+  it("explicit reading intent cancels anchoring and later content cannot pull the reader down", () => {
     const f = fixture();
     f.scroll.anchor(); f.progress(0); f.progress(0.25);
+    f.scroll.pause();
     f.geometry.scrollTop = 300;
     f.scroll.userScroll();
     f.progress(1);
     f.geometry.contentEnd = 1800; f.scroll.update();
     expect(f.geometry.scrollTop).toBe(300);
+  });
+
+
+  it("keeps following when a programmatic scroll event arrives after content growth", () => {
+    const f = fixture();
+    f.geometry.scrollTop = 0;
+    f.scroll.reset();
+    f.scroll.update();
+    f.geometry.contentEnd += 500;
+    f.scroll.userScroll();
+    f.scroll.update();
+    expect(f.geometry.scrollTop).toBe(f.geometry.contentEnd - f.geometry.height);
+  });
+
+  it("keeps following when virtual row compensation advances the scroll offset", () => {
+    const f = fixture();
+    f.scroll.reset();
+    f.scroll.update();
+    f.geometry.contentEnd += 500;
+    f.geometry.scrollTop += 100;
+    f.scroll.userScroll();
+    f.scroll.update();
+    expect(f.geometry.scrollTop).toBe(f.geometry.contentEnd - f.geometry.height);
+  });
+
+
+  it("starts a new conversation at latest even if a scroll event precedes its first positioning frame", () => {
+    const f = fixture();
+    f.scroll.update();
+    f.scroll.reset();
+    f.geometry.scrollTop = 0;
+    f.geometry.contentEnd += 500;
+    f.scroll.userScroll();
+    f.scroll.update();
+    expect(f.geometry.scrollTop).toBe(f.geometry.contentEnd - f.geometry.height);
+  });
+
+  it("keeps following when row remeasurement moves a programmatic offset backward", () => {
+    const f = fixture();
+    f.scroll.update();
+    f.geometry.contentEnd += 300;
+    f.geometry.scrollTop -= 100;
+    f.scroll.userScroll();
+    f.geometry.contentEnd += 500;
+    f.scroll.update();
+    expect(f.geometry.scrollTop).toBe(f.geometry.contentEnd - f.geometry.height);
   });
 
 });

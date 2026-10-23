@@ -1,3 +1,4 @@
+import { readSessionActivity, retainEqualSet } from "./sessionActivity";
 import { SessionCatalogClient } from "../../lib/sessionCatalogClient";
 import { sortSessionCatalog as sortSessions } from "../sidebarSessions";
 import { t } from "../../i18n";
@@ -5,6 +6,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { UiSession } from "../../types/ui";
 import {
   activateSession,
+  getAgentState,
+  listAgentRuns,
   deleteSession,
   querySessionCatalog,
   reorderSessions,
@@ -57,9 +60,11 @@ const toUiSession = (item: SessionItem): UiSession => ({
 
 export function useSessionController({
   activeWorkspaceRoot,
+  isChatVisible = true,
   reportError,
 }: {
   activeWorkspaceRoot: string | null;
+  isChatVisible?: boolean;
   reportError: (message: string) => void;
 }) {
   const catalogRef = useRef<SessionCatalogClient | null>(null);
@@ -67,7 +72,7 @@ export function useSessionController({
   const catalog = catalogRef.current;
   const [store] = useState(createSessionCatalogViewStore);
   const getViewState = store.getState;
-  const { catalogRevision, sessions, currentSessionId, runningSessionIds, completedSessionIds } = useStore(
+  const { catalogRevision, sessions, currentSessionId, runningSessionIds, completedSessionIds, waitingSessionIds } = useStore(
     store,
     useShallow(state => ({
       catalogRevision: state.catalogRevision,
@@ -75,15 +80,17 @@ export function useSessionController({
       currentSessionId: state.currentSessionId,
       runningSessionIds: state.runningSessionIds,
       completedSessionIds: state.completedSessionIds,
+      waitingSessionIds: state.waitingSessionIds,
     })),
   );
-  const { setSessions, setCurrentSession, setRunningSessionIds, setCompletedSessionIds, advanceCatalogRevision } = getViewState();
-  const inputsRef = useRef({ activeWorkspaceRoot, reportError });
+  const { setSessions, setCurrentSession, setRunningSessionIds, setCompletedSessionIds, setWaitingSessionIds, advanceCatalogRevision } = getViewState();
+  const inputsRef = useRef({ activeWorkspaceRoot, reportError, isChatVisible });
   const selectionEpochRef = useRef(0);
   const refreshRequestIdRef = useRef(0);
   const catalogMutationRef = useRef(0);
+  const activityMutationRef = useRef(0);
   const pendingPins = useRef(new Set<string>());
-  inputsRef.current = { activeWorkspaceRoot, reportError };
+  inputsRef.current = { activeWorkspaceRoot, reportError, isChatVisible };
 
   const clearSelection = useCallback(() => {
     selectionEpochRef.current += 1;
@@ -174,7 +181,38 @@ export function useSessionController({
         if (!unchanged) {
           setSessions(fetched);
         }
-        // Discovery updates the catalog only: never select another session or erase a draft.
+        // Discovery observes existing Runtime facts without selecting chats or loading transcripts.
+        const activityMutation = activityMutationRef.current;
+        const selectionEpoch = selectionEpochRef.current;
+        const chatVisible = inputsRef.current.isChatVisible;
+        const isCurrent = () => !disposed && mutation === catalogMutationRef.current &&
+          requestId === refreshRequestIdRef.current && activityMutation === activityMutationRef.current &&
+          selectionEpoch === selectionEpochRef.current && chatVisible === inputsRef.current.isChatVisible;
+        const viewedSessionId = chatVisible ? getViewState().currentSessionId : null;
+        const observed = getViewState();
+        const questionCandidates = new Set([...observed.runningSessionIds, ...observed.waitingSessionIds]);
+        const activity = await readSessionActivity(fetched, viewedSessionId, {
+          listRuns: async () => (await listAgentRuns({ includeTerminal: true })).agentRuns,
+          readQuestionCount: async id => (await getAgentState(id, true)).pending_question_count,
+        }, isCurrent, questionCandidates);
+        if (activity && isCurrent()) {
+          const previousRunning = getViewState().runningSessionIds;
+          setRunningSessionIds(previous => retainEqualSet(previous, activity.runningSessionIds));
+          setCompletedSessionIds(previous => {
+            // Locally observed completion remains unread until explicit acknowledgement.
+            const next = new Set([...previous].filter(id => id !== viewedSessionId));
+            activity.completedSessionIds.forEach(id => next.add(id));
+            previousRunning.forEach(id => {
+              if (id !== viewedSessionId && !activity.runningSessionIds.has(id) && activity.terminalSessionIds.has(id)) next.add(id);
+            });
+            return retainEqualSet(previous, next);
+          });
+          setWaitingSessionIds(previous => {
+            const next = new Set([...previous].filter(id => !activity.checkedWaitingSessionIds.has(id)));
+            activity.waitingSessionIds.forEach(id => next.add(id));
+            return retainEqualSet(previous, next);
+          });
+        }
       } catch (error) {
         if (!disposed) inputsRef.current.reportError(errorMessage(error, t("app.unableToLoadConversations")));
       } finally {
@@ -191,7 +229,7 @@ export function useSessionController({
       window.removeEventListener("focus", onVisible);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [catalog, setSessions, getViewState]);
+  }, [catalog, setSessions, getViewState, setRunningSessionIds, setCompletedSessionIds, setWaitingSessionIds]);
 
   const selectSession = useCallback(async (
     sessionId: string,
@@ -347,6 +385,7 @@ export function useSessionController({
         deletedIds.forEach((id) => next.delete(id));
         return next;
       });
+      setWaitingSessionIds(items => new Set([...items].filter(id => !deletedIds.has(id))));
       const selectedSessionId = getViewState().currentSessionId;
       await refresh(selectedSessionId && !deletedIds.has(selectedSessionId) ? selectedSessionId : null);
       return deletedIds;
@@ -354,7 +393,7 @@ export function useSessionController({
       inputsRef.current.reportError(errorMessage(error, t("useSessionController.unableToDeleteConversation")));
       throw error;
     }
-  }, [refresh, getViewState, setRunningSessionIds, setCompletedSessionIds]);
+  }, [refresh, getViewState, setRunningSessionIds, setCompletedSessionIds, setWaitingSessionIds]);
 
   const resolveSession = useCallback((session: UiSession, options?: { activate?: boolean }) => {
     catalogMutationRef.current += 1;
@@ -369,21 +408,35 @@ export function useSessionController({
   }, [setCurrentSession, setSessions]);
 
   const setRunning = useCallback((sessionId: string, running: boolean) => {
+    activityMutationRef.current += 1;
+    if (getViewState().runningSessionIds.has(sessionId) === running) return;
     setRunningSessionIds((previous) => {
       const next = new Set(previous);
       if (running) next.add(sessionId);
       else next.delete(sessionId);
       return next;
     });
-  }, [setRunningSessionIds]);
+  }, [getViewState, setRunningSessionIds]);
+
+  const setWaiting = useCallback((sessionId: string, waiting: boolean) => {
+    activityMutationRef.current += 1;
+    if (getViewState().waitingSessionIds.has(sessionId) === waiting) return;
+    setWaitingSessionIds(previous => {
+      if (previous.has(sessionId) === waiting) return previous;
+      const next = new Set(previous);
+      if (waiting) next.add(sessionId); else next.delete(sessionId);
+      return next;
+    });
+  }, [getViewState, setWaitingSessionIds]);
 
   const completeSession = useCallback((sessionId: string) => {
+    activityMutationRef.current += 1;
     setRunningSessionIds((previous) => {
       const next = new Set(previous);
       next.delete(sessionId);
       return next;
     });
-    if (getViewState().currentSessionId !== sessionId) {
+    if (getViewState().currentSessionId !== sessionId || !inputsRef.current.isChatVisible) {
       setCompletedSessionIds((previous) => new Set(previous).add(sessionId));
       setSessions((items) => items.map(
         (session) => session.id === sessionId ? { ...session, isUnread: true } : session,
@@ -422,6 +475,7 @@ export function useSessionController({
     resolveSession,
     selectSession,
     setRunning,
+    setWaiting,
   }), [
     expandWorkspace,
     loadMore,
@@ -436,6 +490,7 @@ export function useSessionController({
     resolveSession,
     selectSession,
     setRunning,
+    setWaiting,
   ]);
 
   const currentSession = useMemo(
@@ -455,6 +510,7 @@ export function useSessionController({
     mainSessions,
     runningSessionIds,
     completedSessionIds,
+    waitingSessionIds,
     actions,
   };
 }

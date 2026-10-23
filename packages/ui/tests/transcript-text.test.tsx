@@ -6,7 +6,7 @@ import { AgentProcessTranscript } from "../src/components/chat/AgentTranscriptSe
 import { buildTranscriptProcessViewModel } from "../src/components/chat/agentTranscriptModel";
 
 const read = vi.hoisted(() => vi.fn());
-vi.mock("../src/components/chat/transcriptContentRanges", () => ({ loadTranscriptContentRange: read }));
+vi.mock("../src/components/chat/transcriptContentRanges", () => ({ loadTranscriptContentRange: read, readCachedTranscriptContent: () => null }));
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 beforeEach(() => { read.mockReset(); });
 

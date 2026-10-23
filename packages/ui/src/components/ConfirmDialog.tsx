@@ -14,8 +14,8 @@ export function ConfirmDialog({ open, title, message, onCancel, onConfirm }: Con
         {message ? <DialogDescription>{message}</DialogDescription> : null}
       </DialogHeader>
       <DialogFooter>
-        <DialogClose render={<Button ref={cancel} variant="outline" />}>Cancel</DialogClose>
-        <Button type="button" onClick={onConfirm}>Confirm</Button>
+        <DialogClose render={<Button ref={cancel} variant="ghost" />}>Cancel</DialogClose>
+        <Button variant="solid" type="button" onClick={onConfirm}>Confirm</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>;

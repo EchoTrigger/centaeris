@@ -33,12 +33,12 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 48px 16px 36px;
+  padding: 48px max(16px, calc((100% - 820px) / 2)) 16px;
   box-sizing: border-box;
   scroll-behavior: auto;
   overflow-anchor: none;
-  max-width: min(852px, 100%);
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
   width: 100%;
   scrollbar-width: none;
   background: var(--surface-color);
@@ -237,6 +237,7 @@
 }
 
 .user-message .message-bubble {
+  min-width: 0;
   background: var(--surface-variant);
   border: 1px solid var(--outline-variant);
   color: var(--on-surface);
@@ -278,8 +279,7 @@
 }
 
 .user-message:hover .user-message-meta-row,
-.user-message:focus-within .user-message-meta-row,
-.user-message-meta-row.is-copied {
+.user-message:focus-within .user-message-meta-row {
   opacity: 1;
   pointer-events: auto;
 }
@@ -306,7 +306,6 @@
 .user-message-action-icon {
   width: 16px;
   height: 16px;
-  stroke-width: 1.9;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -649,7 +648,6 @@
 .agentGuidedSupplementIcon {
   width: 15px;
   height: 15px;
-  stroke-width: 1.9;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -919,7 +917,6 @@ details.agent-tool-node > .agent-tool-node-summary {
   width: 16px;
   height: 16px;
   color: color-mix(in srgb, var(--on-surface-variant) 82%, var(--on-surface) 18%);
-  stroke-width: 1.9;
   stroke-linecap: round;
   stroke-linejoin: round;
   flex: 0 0 auto;
@@ -991,7 +988,7 @@ button.agent-tool-chip {
 
 .agent-tool-chip.is-clickable:hover {
   border-color: color-mix(in srgb, var(--primary-color) 32%, var(--outline-variant) 68%);
-  background: color-mix(in srgb, var(--surface-color) 72%, var(--primary-container) 28%);
+  background: var(--surface-hover);
   color: color-mix(in srgb, var(--primary-color) 72%, var(--on-surface) 28%);
 }
 
@@ -1027,7 +1024,7 @@ button.agent-tool-chip {
   overflow: hidden;
   border: 1px solid var(--outline-variant);
   border-radius: 10px;
-  background: var(--surface-container);
+  background: var(--code-surface);
 }
 
 .agent-tool-detail-title {
@@ -1142,7 +1139,7 @@ button.agent-tool-chip {
   min-width: 0;
   border: none;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--surface-container) 72%, var(--surface-container) 28%);
+  background: var(--code-surface);
   padding: 8px 10px 7px;
   overflow: hidden;
 }
@@ -1224,7 +1221,7 @@ button.agent-tool-chip {
 .agent-tool-command-section.is-command {
   border: 1px solid color-mix(in srgb, var(--outline-variant) 54%, transparent 46%);
   border-radius: 6px;
-  background: color-mix(in srgb, var(--surface-container) 48%, var(--surface-color) 52%);
+  background: var(--code-surface);
   overflow: hidden;
   max-width: 100%;
 }
@@ -2783,7 +2780,7 @@ button.agent-tool-chip {
 .answerPathInlineButton code {
   color: var(--primary-color);
   border-color: color-mix(in srgb, var(--primary-color) 24%, var(--outline-variant) 76%);
-  background: color-mix(in srgb, var(--surface-variant) 72%, var(--primary-container) 28%);
+  background: var(--code-inline-surface);
 }
 
 .answerPathInlineButton:hover code,
@@ -2793,7 +2790,7 @@ button.agent-tool-chip {
 
 .markdown-content code {
   border-radius: 5px;
-  background: var(--surface-variant);
+  background: var(--code-inline-surface);
   color: var(--on-surface);
   padding: 1px 5px;
   font-family: var(--font-mono);
@@ -2813,7 +2810,7 @@ button.agent-tool-chip {
 
 .answer-content pre {
   margin: 0.4em 0 0.75em;
-  background: var(--surface-variant);
+  background: var(--code-surface);
   border: 0;
   padding: 0.75em 1em;
   border-radius: var(--radius-md);
@@ -2825,7 +2822,7 @@ button.agent-tool-chip {
 
 .markdown-code-block {
   margin: 0;
-  background: var(--surface-variant);
+  background: var(--code-surface);
   border: 0;
   padding: 10px 12px;
   border-radius: 8px;
@@ -3046,33 +3043,17 @@ button.agent-tool-chip {
 
 .chatBottomPlane {
   flex: 0 0 auto;
-  position: relative;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  left: 0;
   z-index: 3;
   background: var(--surface-color);
 }
 
 .chatBottomPlane.is-welcome {
-  position: absolute;
-  top: 45%;
-  right: 0;
-  left: 0;
-  transform: translateY(-50%);
   background: transparent;
 }
-
-.emptyChatIdentity {
-  width: min(820px, calc(100% - 32px));
-  margin: 0 auto 8px;
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding: 0 18px;
-  color: var(--process-text);
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-
-.emptyChatIdentity strong { color: var(--on-surface); font-size: 18px; font-weight: 650; }
 
 .input-section {
   background: transparent;
@@ -3082,6 +3063,7 @@ button.agent-tool-chip {
 .input-container {
   width: 100%;
   max-width: 852px;
+  position: relative;
   margin: 0 auto;
   padding: 10px 16px 18px;
 }
@@ -3126,8 +3108,8 @@ button.agent-tool-chip {
   background: var(--surface-color);
   border: 1px solid var(--outline-variant);
   border-radius: 12px;
-  min-height: 50px;
-  padding: 7px 8px 7px 14px;
+  min-height: 112px;
+  padding: 12px 12px 10px 16px;
   transition: border-color 140ms ease, box-shadow 140ms ease;
   position: relative;
   box-shadow: 0 1px 2px rgba(20, 31, 43, 0.04);
@@ -3141,13 +3123,15 @@ button.agent-tool-chip {
 
 .text-input-container {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
   width: 100%;
 }
 
 #message-input {
-  flex: 1;
+  flex: 0 0 auto;
+  width: 100%;
   border: none;
   background: none;
   resize: none;
@@ -3155,10 +3139,10 @@ button.agent-tool-chip {
   font-family: var(--font-family);
   color: var(--on-surface);
   font-size: 14px;
-  line-height: 1.55;
-  padding: 4px 0;
+  line-height: 24px;
+  padding: 0;
   max-height: 200px;
-  min-height: 24px;
+  min-height: 48px;
   overflow-y: auto;
   scrollbar-width: none;
 }
@@ -3178,12 +3162,12 @@ button.agent-tool-chip {
 }
 
 .send-button {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   border: none;
   background: var(--solid-surface);
   color: var(--solid-text);
-  border-radius: 8px;
+  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3269,7 +3253,6 @@ button.agent-tool-chip {
 .composerLucideIcon {
   width: 14px;
   height: 14px;
-  stroke-width: 2;
 }
 
 .composerLucideIcon.is-chevron {
@@ -3414,7 +3397,6 @@ button.agent-tool-chip {
 .composerPickerCheck svg {
   width: 12px;
   height: 12px;
-  stroke-width: 2.2;
 }
 
 .contextWindowPicker { margin-left: 2px; }
@@ -3434,11 +3416,11 @@ button.agent-tool-chip {
 
 .contextWindowIndicator > span {
   --context-used: 0deg;
-  width: 15px;
-  height: 15px;
+  width: 12px;
+  height: 12px;
   display: block;
   border-radius: 999px;
-  background: conic-gradient(var(--primary-color) var(--context-used), var(--surface-container) 0);
+  background: conic-gradient(var(--process-text) var(--context-used), var(--surface-container) 0);
   mask: radial-gradient(circle, transparent 43%, #000 46%);
 }
 
@@ -3460,7 +3442,7 @@ button.agent-tool-chip {
   font-size: 12px;
 }
 
-.contextWindowPanel header strong { color: var(--process-text); font-weight: 550; }
+.contextWindowPanel header strong { color: var(--process-text); font-weight: 400; }
 
 .contextWindowBar {
   height: 6px;
@@ -3477,7 +3459,7 @@ button.agent-tool-chip {
 .contextWindowRows > div {
   min-height: 24px;
   display: grid;
-  grid-template-columns: 9px minmax(0, 1fr) 66px 48px;
+  grid-template-columns: 9px minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 7px;
   font-size: 11px;
@@ -4367,3 +4349,27 @@ button.agent-tool-node-summary { cursor: pointer; }
 .agent-tool-command-card {
   grid-template-columns: minmax(0, 1fr);
 }
+
+/* Row padding is part of the virtualizer's measured box; one owner per turn. */
+.chatTimelineRow { box-sizing: border-box; padding-bottom: 16px; }
+.chatTimelineRow[data-message-role="user"] { padding-bottom: 22px; }
+.chatTimelineRow .message { margin-bottom: 0; }
+.chatTimelineRow .user-message-stack { position: relative; gap: 0; }
+.chatTimelineRow .user-message-meta-row { position: absolute; top: 100%; right: 0; min-height: 22px; height: 22px; gap: 4px; }
+.chatTimelineRow .user-message-icon-btn { width: 22px; height: 22px; }
+.chatTimelineRow .historyProcessRows + .assistant-message { padding-top: 16px; }
+.chatTimelineRow .agentResultMain > .runStatusLine:only-child { margin-top: 0; }
+.assistantAnswerFooter { opacity: 0; pointer-events: none; transition: opacity 120ms ease; display: flex; align-items: center; gap: 8px; min-height: 20px; margin-top: 6px; color: var(--process-text); font-size: 12px; line-height: 18px; }
+.assistantAnswerFooter > button { width: 20px; height: 20px; padding: 3px; color: var(--process-text); }
+.assistantAnswerFooter > time { white-space: nowrap; }
+
+.assistant-message:hover .assistantAnswerFooter, .assistant-message:focus-within .assistantAnswerFooter { opacity: 1; pointer-events: auto; }
+@media (prefers-reduced-motion: reduce) { .assistantAnswerFooter { transition: none; } }
+
+/* Keep a known row footprint while an evicted reference is being read again. */
+.chatTimelineRow[data-history-row]:has([aria-busy="true"]) { min-height: var(--chat-retained-row-height, 0px); }
+
+/* One keyed section list retains text readers through phase/final classification. */
+.agentReplySections { gap: 0; }
+.agentReplySections > :not(:first-child) { margin-top: 13px; }
+.agentReplySections > :is(.agentCurrentTextSection, .agentSubagentResults):not(:first-child) { margin-top: 6px; }

@@ -6,10 +6,10 @@ import {
   useImperativeHandle,
   useRef,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 import { ArrowUp, Square } from "lucide-react";
 import { Button } from "../ui/button";
-import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
 
@@ -19,8 +19,11 @@ export type ComposerPromptInputHandle = {
 
 type ComposerPromptInputProps = {
   value: string;
+  leadingControls?: ReactNode;
+  trailingControls?: ReactNode;
   isStreaming: boolean;
   hasInput: boolean;
+  submitDisabled?: boolean;
   commandsExpanded: boolean;
   mcpExpanded: boolean;
   onChange: (value: string) => void;
@@ -33,18 +36,24 @@ type ComposerPromptInputProps = {
 export const ComposerPromptInput = forwardRef<
   ComposerPromptInputHandle,
   ComposerPromptInputProps
->(function ComposerPromptInput({
-  value,
-  isStreaming,
-  hasInput,
-  commandsExpanded,
-  mcpExpanded,
-  onChange,
-  onSubmit,
-  onAction,
-  onFocus,
-  onPanelKeyDown,
-}, forwardedRef) {
+>(function ComposerPromptInput(
+  {
+    value,
+    leadingControls,
+    trailingControls,
+    isStreaming,
+    hasInput,
+    submitDisabled = false,
+    commandsExpanded,
+    mcpExpanded,
+    onChange,
+    onSubmit,
+    onAction,
+    onFocus,
+    onPanelKeyDown,
+  },
+  forwardedRef,
+) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
   const lastCompositionEndAtRef = useRef(0);
@@ -69,17 +78,17 @@ export const ComposerPromptInput = forwardRef<
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const nativeEvent = event.nativeEvent;
     const recentlyComposed =
-      Date.now() - lastCompositionEndAtRef.current
-      < COMPOSITION_END_ENTER_GRACE_MS;
+      Date.now() - lastCompositionEndAtRef.current <
+      COMPOSITION_END_ENTER_GRACE_MS;
     const isComposing =
-      isComposingRef.current
-      || nativeEvent.isComposing
-      || nativeEvent.keyCode === 229;
+      isComposingRef.current ||
+      nativeEvent.isComposing ||
+      nativeEvent.keyCode === 229;
 
     if (
-      event.key === "Enter"
-      && !event.shiftKey
-      && (isComposing || recentlyComposed)
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      (isComposing || recentlyComposed)
     ) {
       if (recentlyComposed) {
         event.preventDefault();
@@ -91,7 +100,7 @@ export const ComposerPromptInput = forwardRef<
     }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      onSubmit();
+      if (!submitDisabled) onSubmit();
     }
   };
 
@@ -102,7 +111,11 @@ export const ComposerPromptInput = forwardRef<
         id="message-input"
         aria-label="Message"
         value={value}
-        placeholder={isStreaming ? t("composerPromptInput.addInputWithoutInterruptingTheCurrentRun") : t("composerPromptInput.message")}
+        placeholder={
+          isStreaming
+            ? t("composerPromptInput.addInputWithoutInterruptingTheCurrentRun")
+            : t("composerPromptInput.message")
+        }
         rows={1}
         aria-controls={commandsExpanded ? "composer-slash-commands" : undefined}
         aria-expanded={commandsExpanded || mcpExpanded}
@@ -117,33 +130,43 @@ export const ComposerPromptInput = forwardRef<
           lastCompositionEndAtRef.current = Date.now();
         }}
       />
-      <Tooltip>
-<TooltipTrigger render={<Button
-          type="button"
-          variant={!hasInput && isStreaming ? "composerStop" : "composerSend"}
-          size="composerSend"
-          className={`send-button ${!hasInput && isStreaming ? "is-stop" : ""}`}
-          disabled={!hasInput && !isStreaming}
-          aria-label={!hasInput && isStreaming ? t("composerPromptInput.stopThisConversation") : t("composerPromptInput.send")}
-          onClick={() => {
-            onAction();
-            focus();
-          }}
-        >
-          {!hasInput && isStreaming ? (
-            <Square
-              className="composerLucideIcon action-icon"
-              aria-hidden="true"
-            />
-          ) : (
-            <ArrowUp
-              className="composerLucideIcon action-icon"
-              aria-hidden="true"
-            />
-          )}
-        </Button>} />
-<TooltipContent align="end">{!hasInput && isStreaming ? t("composerPromptInput.stopThisConversation") : t("composerPromptInput.send")}</TooltipContent>
-</Tooltip>
+      <div className="composerToolbar">
+        <div className="composerToolbarLeading">{leadingControls}</div>
+        <div className="composerToolbarTrailing">
+          {trailingControls}
+          <Button
+            type="button"
+            variant={!hasInput && isStreaming ? "composerStop" : "composerSend"}
+            size="composerSend"
+            className={`send-button ${!hasInput && isStreaming ? "is-stop" : ""}`}
+            disabled={
+              (!hasInput && !isStreaming) ||
+              (submitDisabled && (hasInput || !isStreaming))
+            }
+            aria-label={
+              !hasInput && isStreaming
+                ? t("composerPromptInput.stopThisConversation")
+                : t("composerPromptInput.send")
+            }
+            onClick={() => {
+              onAction();
+              focus();
+            }}
+          >
+            {!hasInput && isStreaming ? (
+              <Square
+                className="composerLucideIcon action-icon"
+                aria-hidden="true"
+              />
+            ) : (
+              <ArrowUp
+                className="composerLucideIcon action-icon"
+                aria-hidden="true"
+              />
+            )}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 });

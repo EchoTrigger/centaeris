@@ -20,6 +20,7 @@ type PreviewRequest = {
 };
 
 type ChatHarnessProps = {
+	onOpenResource: (kind: "models" | "skills" | "plugins") => void;
 	onOpenWorkspacePath: (
 		path: string,
 		options?: { startLine?: number; endLine?: number; taskId?: string },
@@ -32,6 +33,7 @@ type SummaryHarnessProps = {
 	activeTabId: string | null;
 	onCloseTab: (tabId: string) => void;
 	onCollapse: () => void;
+  onAddTab: () => void;
 };
 
 const harness = vi.hoisted(() => ({
@@ -41,7 +43,7 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock("../src/components/Sidebar", () => ({
-	Sidebar: () => <aside data-testid="sidebar" />,
+	Sidebar: ({ onNavigate, collapsed }: { onNavigate: (page: "settings" | "plugins") => void; collapsed: boolean }) => <aside data-testid="sidebar" aria-label="Main navigation" hidden={collapsed}><button onClick={() => onNavigate("settings")}>Settings</button><button onClick={() => onNavigate("plugins")}>Plugins</button></aside>,
 }));
 
 vi.mock("../src/components/chat/ChatArea", () => ({
@@ -67,7 +69,7 @@ vi.mock("../src/components/SkillsDialog", () => ({
 }));
 
 vi.mock("../src/components/PluginsDialog", () => ({
-	PluginsDialog: () => null,
+	PluginsDialog: ({ selectedPluginId, onSelect }: { selectedPluginId?: string; onSelect?: (id: string) => void }) => <section><h1>{selectedPluginId ? "Example plugin" : "Plugins"}</h1><button onClick={() => onSelect?.("example")}>Open example plugin</button></section>,
 }));
 
 vi.mock("../src/components/ConfirmDialog", () => ({
@@ -469,4 +471,64 @@ test("Agent tabs are durable and closing the active tab selects its neighbor", a
 	);
 
 	await act(async () => renderer?.unmount());
+});
+
+
+test.each([["models", "Model services"], ["skills", "Skills"], ["plugins", "Plugins"]] as const)("composer %s management stays over the current chat and closes back to it", async (kind, title) => {
+  const user = userEvent.setup();
+  render(<App />);
+  await waitFor(() => expect(harness.chatProps).not.toBeNull());
+  const chat = screen.getByRole("main");
+  await act(async () => getChatProps().onOpenResource(kind));
+  expect(await screen.findByRole("dialog", { name: title })).toBeTruthy();
+  expect(screen.queryByRole("navigation", { name: "Settings categories" })).toBeNull();
+  expect(document.body.contains(chat)).toBe(true);
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByRole("main")).toBe(chat);
+});
+
+test("settings takes over the existing navigation and toolbar Back restores the retained chat", async () => {
+  const user = userEvent.setup();
+  render(<App />);
+  const chat = await screen.findByTestId("chat-area");
+  await user.click(screen.getByRole("button", { name: "Settings" }));
+  expect(await screen.findByRole("navigation", { name: "Settings categories" })).toBeTruthy();
+  expect(screen.queryByRole("complementary", { name: "Main navigation" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Model services" }));
+  expect(screen.getByRole("button", { name: "Model services" }).getAttribute("aria-current")).toBe("page");
+  await user.click(screen.getByRole("button", { name: "Hide left sidebar" }));
+  expect(screen.queryByRole("navigation", { name: "Settings categories" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Show left sidebar" }));
+  expect(screen.getByRole("button", { name: "Model services" }).getAttribute("aria-current")).toBe("page");
+  await user.click(screen.getByRole("button", { name: "Back" }));
+  expect(await screen.findByRole("complementary", { name: "Main navigation" })).toBeTruthy();
+  expect(screen.queryByRole("navigation", { name: "Settings categories" })).toBeNull();
+  expect(screen.getByTestId("chat-area")).toBe(chat);
+  await user.click(screen.getByRole("button", { name: "Forward" }));
+  expect(await screen.findByRole("navigation", { name: "Settings categories" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Model services" }).getAttribute("aria-current")).toBe("page");
+});
+
+test("Plugins and Skills keep their shared selector visible inside plugin details", async () => {
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByTestId("chat-area");
+  await user.click(screen.getByRole("button", { name: "Plugins" }));
+  await user.click(await screen.findByRole("button", { name: "Open example plugin" }));
+  expect(await screen.findByRole("heading", { name: "Example plugin" })).toBeTruthy();
+  expect(screen.getByRole("tablist", { name: "Extensions" })).toBeTruthy();
+  await user.click(screen.getByRole("tab", { name: "Skills" }));
+  expect(screen.getByRole("tab", { name: "Skills" }).getAttribute("aria-selected")).toBe("true");
+});
+
+
+test("opening an empty workspace panel starts at New tab and plus adds another independent tab", async () => {
+  render(<App />);
+  await waitFor(() => expect(harness.chatProps).not.toBeNull());
+  await click("Show right sidebar");
+  expect(getSummaryProps().tabs.map(tab => tab.kind)).toEqual(["new"]);
+  await act(async () => getSummaryProps().onAddTab());
+  expect(getSummaryProps().tabs.map(tab => tab.kind)).toEqual(["new", "new"]);
+  expect(new Set(getSummaryProps().tabs.map(tab => tab.id)).size).toBe(2);
 });

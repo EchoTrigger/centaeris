@@ -14,7 +14,7 @@ type PanelAction =
   | { type: "select"; tabId: string }
   | { type: "browse-file"; tabId: string }
   | { type: "open-tab"; tab: SummaryPanelTab }
-  | { type: "focus-or-open-tab"; tab: SummaryPanelTab }
+  | { type: "focus-or-open-tab"; tab: SummaryPanelTab; fromNewTabId?: string }
   | { type: "replace-tab"; tabId: string; tab: SummaryPanelTab }
   | { type: "close-tab"; tabId: string }
   | { type: "remove-agent-sessions"; sessionIds: ReadonlySet<string> };
@@ -99,9 +99,14 @@ const panelReducer = (state: PanelState, action: PanelAction): PanelState => {
       };
     }
     case "focus-or-open-tab": {
+      const source = action.fromNewTabId;
+      // A closed/departed launcher cannot publish a late asynchronous result.
+      if (source && !state.tabs.some(tab => tab.id === source && tab.kind === "new")) return state;
       const existing = state.tabs.find((tab) => tab.id === action.tab.id);
       return {
-        tabs: existing ? state.tabs : [...state.tabs, action.tab],
+        tabs: existing ? source ? state.tabs.filter(tab => tab.id !== source) : state.tabs
+          : source ? state.tabs.map(tab => tab.id === source ? action.tab : tab)
+          : [...state.tabs, action.tab],
         activeTabId: action.tab.id,
         isOpen: true,
       };

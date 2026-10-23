@@ -1,3 +1,4 @@
+vi.mock("../src/components/chat/ComposerPlane", async () => import("./helpers/composerPlaneTestDouble"));
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type {
@@ -45,7 +46,7 @@ vi.mock("../src/lib/chatBridge", () => ({
   cancelAgentRun: vi.fn(),
   compactAgentContext: vi.fn(),
   createSession: vi.fn(),
-  getAgentContextUsage: vi.fn(),
+  getAgentContextUsage: vi.fn(async () => { throw new Error("Context usage unavailable in fixture"); }),
   getAgentRuntimeConfig: vi.fn(async () => runtimeConfig),
   getAgentState: vi.fn(),
   getSession: harness.getSession,
@@ -105,7 +106,7 @@ vi.mock("../src/host/hostBridge", () => ({
 }));
 
 import { ChatArea } from "../src/components/chat/ChatArea";
-import { sessionViewCacheStore } from "../src/components/chat/chatRuntimeCore";
+import { buildPendingTurn, sessionViewCacheStore } from "../src/components/chat/chatRuntimeCore";
 import { useChatViewStore } from "../src/components/chat/chatViewStore";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -132,9 +133,6 @@ const makeSnapshot = (sessionId: string): SessionHydrationSnapshot => ({
       timestamp: 1,
     },
   ],
-  runtimeConfig,
-  contextUsage: null,
-  resolvedAutoContinueAfterResumeWait: false,
   replayCursorsByAgentRunId: {},
   pendingQuestionRequest: null,
   restoreMessageId: null,
@@ -539,4 +537,31 @@ test("a cached snapshot is refreshed through the bounded transcript page path", 
   ).toEqual(["message-full-replay"]);
 
   await act(async () => renderer?.unmount());
+});
+
+
+test("a pending conversation uses a single generic loading status", async () => {
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<ChatArea currentSession={makeSession("loading")} currentSessionId="loading" workspaceName="Workspace" workspaceRoot="D:/Workspace" />); });
+  try { expect(renderer.root.findByProps({ "data-chat-view-mode": "restoring" }).findByType("span").children.join("")).toBe("Loading conversation…"); }
+  finally { await act(async () => renderer.unmount()); }
+});
+
+
+test("background verification removes a cached question that is no longer pending", async () => {
+  const id = "question-cache";
+  sessionViewCacheStore.write({ sessionId: id, snapshot: {
+    messages: [...makeSnapshot(id).messages, { id: "cached-question", role: "assistant", turn: { ...buildPendingTurn(), isStreaming: false } }],
+    contextUsage: null, autoContinueAfterResumeWait: false,
+    pendingQuestion: { assistantMessageId: "cached-question", request: { id: "question", question: "Continue?", options: ["Yes", "No"], multiSelect: false, required: true }, selectedOptions: [], answerText: "", submitting: false },
+    pendingQuestionError: "", activeReplay: null,
+  }});
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<ChatArea currentSession={makeSession(id)} currentSessionId={id} workspaceName="Workspace" workspaceRoot="D:/Workspace" />); });
+  try {
+    expect(renderer.root.findAllByProps({ "data-testid": "pending-question" })).toHaveLength(1);
+    await act(async () => { getHydrationRequest(id).resolve(makeSnapshot(id)); await getHydrationRequest(id).promise; });
+    expect(renderer.root.findAllByProps({ "data-testid": "pending-question" })).toHaveLength(0);
+    expect(useChatViewStore.getState().messageIds).toEqual(["message-" + id]);
+  } finally { await act(async () => renderer.unmount()); }
 });

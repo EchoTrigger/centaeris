@@ -193,7 +193,7 @@ export function useWorkspacePanelController({
     });
   }, [dispatch]);
 
-  const openWorkspaceView = useCallback((kind: "files" | "review") => {
+  const openWorkspaceView = useCallback((kind: "files" | "review", fromNewTabId?: string) => {
     const root = inputsRef.current.workspaceRoot;
     if (!root) return;
     if (kind === "files") {
@@ -203,8 +203,7 @@ export function useWorkspacePanelController({
         current.tabs.find(tab => tab.kind === "file" && tab.isPreview) ??
         current.tabs.find(tab => tab.kind === "file");
       if (file) {
-        dispatch({ type: "select", tabId: file.id });
-        dispatch({ type: "show" });
+        dispatch({ type: "focus-or-open-tab", tab: file, fromNewTabId });
         return;
       }
     }
@@ -216,6 +215,7 @@ export function useWorkspacePanelController({
         title: kind === "files" ? "Files" : "Review",
         workspaceRoot: root,
       },
+      fromNewTabId,
     });
   }, [dispatch, getPanelState]);
 
@@ -228,8 +228,13 @@ export function useWorkspacePanelController({
     }});
   }, [dispatch]);
 
-  const openTerminal = useCallback((terminal:TerminalSnapshot,serviceInstanceId:string,title?:string)=>{
-    dispatch({type:"focus-or-open-tab",tab:{id:`terminal:${terminal.terminalId}`,kind:"terminal",title:title || terminal.shell.split(/[\\/]/).pop() || "Terminal",workspaceRoot:terminal.workspaceRoot,terminalId:terminal.terminalId,serviceInstanceId}});
+  const openNewTab = useCallback(() => {
+    const { workspaceRoot, currentSessionId } = inputsRef.current;
+    dispatch({ type: "focus-or-open-tab", tab: { id: `new:${crypto.randomUUID()}`, kind: "new", title: "New tab", workspaceRoot: workspaceRoot ?? undefined, sessionId: currentSessionId ?? undefined } });
+  }, [dispatch]);
+
+  const openTerminal = useCallback((terminal:TerminalSnapshot,serviceInstanceId:string,title?:string,fromNewTabId?:string)=>{
+    dispatch({type:"focus-or-open-tab",fromNewTabId,tab:{id:`terminal:${terminal.terminalId}`,kind:"terminal",title:title || terminal.shell.split(/[\\/]/).pop() || "Terminal",workspaceRoot:terminal.workspaceRoot,terminalId:terminal.terminalId,serviceInstanceId}});
   },[dispatch]);
   const actions = useMemo(
     () => ({
@@ -245,6 +250,7 @@ export function useWorkspacePanelController({
       openWorkspaceView,
       openTasks,
       openTerminal,
+      openNewTab,
       removeAgentSessions,
       selectTab,
       show,
@@ -262,6 +268,7 @@ export function useWorkspacePanelController({
       openWorkspaceView,
       openTasks,
       openTerminal,
+      openNewTab,
       removeAgentSessions,
       selectTab,
       show,

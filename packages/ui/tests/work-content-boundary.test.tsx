@@ -14,7 +14,7 @@ vi.mock("@tanstack/react-virtual", () => ({ useVirtualizer: () => ({
   measurementsCache: [{ index: 0, start: 0 }], measureElement() {}, resizeItem() {},
 }) }));
 const read = vi.hoisted(() => vi.fn());
-vi.mock("../src/components/chat/transcriptContentRanges", () => ({ loadTranscriptContentRange: read }));
+vi.mock("../src/components/chat/transcriptContentRanges", () => ({ loadTranscriptContentRange: read, readCachedTranscriptContent: () => null }));
 let renderer: ReactTestRenderer;
 afterEach(() => { act(() => renderer?.unmount()); useChatViewStore.getState().clear(); vi.unstubAllGlobals(); });
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;

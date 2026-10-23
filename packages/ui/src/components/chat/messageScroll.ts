@@ -18,8 +18,6 @@ export function createMessageScroll(port: Port) {
   let animation: ReturnType<typeof animate> | null = null;
   let animating = false;
   let target = 0;
-  let lastScrollTop = 0;
-  const scrollTo = (top: number) => { lastScrollTop = top; port.scrollTo(top); };
   const setFollowing = (value: boolean) => {
     following = value;
     port.onFollowingChange(value);
@@ -47,7 +45,7 @@ export function createMessageScroll(port: Port) {
     target = anchored ? Math.max(naturalEnd, g.anchorTop - g.height / 4, 0) : naturalEnd;
     setPadding(anchored ? Math.max(0, target + g.height - g.contentEnd) : 0);
     if (anchored && padding === 0) anchored = false;
-    if (!animating) scrollTo(target);
+    if (!animating) port.scrollTo(target);
   };
   return {
     update,
@@ -59,7 +57,6 @@ export function createMessageScroll(port: Port) {
       setFollowing(true);
       if (port.reducedMotion()) { update(); return; }
       const start = g.scrollTop;
-      lastScrollTop = start;
       animating = true;
       animation = animate(0, 1, {
         duration: 0.32, ease: "easeOut",
@@ -67,7 +64,7 @@ export function createMessageScroll(port: Port) {
           // Motion may emit a final value while stop() captures its velocity.
           if (!animating) return;
           update();
-          scrollTo(start + (target - start) * progress);
+          port.scrollTo(start + (target - start) * progress);
         },
         onComplete: () => {
           if (!animating) return;
@@ -82,9 +79,10 @@ export function createMessageScroll(port: Port) {
     userScroll() {
       const g = port.measure();
       if (!g) return;
-      if (animating || anchored) {
-        if (Math.abs(g.scrollTop - lastScrollTop) <= 2) return;
-        cancel(); anchored = false; setFollowing(false); update();
+      // Virtual measurements and viewport resizing can clamp even a sent-turn
+      // anchor. Only explicit wheel/key/touch/scrollbar intent pauses following.
+      if (following) {
+        update();
         return;
       }
       // A temporary tail must never count as the real end when resuming follow.

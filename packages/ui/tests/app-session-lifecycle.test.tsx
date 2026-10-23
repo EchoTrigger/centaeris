@@ -17,16 +17,19 @@ type SessionRefreshRequest = {
 };
 
 type SidebarHarnessProps = {
+  onNavigate: (page: "settings" | "schedules" | "plugins") => void;
   sessions: UiSession[];
   currentSessionId: string | null;
   runningSessionIds: Set<string>;
   completedSessionIds: Set<string>;
+  waitingSessionIds: Set<string>;
   onNewChat: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => Promise<void>;
 };
 
 type ChatHarnessProps = {
+  onSessionWaitingChange: (sessionId: string, waiting: boolean) => void;
   currentSessionId: string | null;
   onAgentRunningChange: (sessionId: string, running: boolean) => void;
   onOpenAgentSession: (sessionId: string, title: string) => void;
@@ -196,7 +199,7 @@ test("the latest selection owns cross-workspace activation", async () => {
   await act(async () => {
     renderer = create(<App />);
   });
-  expect(getSidebarProps().currentSessionId).toBe("current");
+  expect(getSidebarProps().currentSessionId).toBeNull();
 
   await act(async () => {
     getSidebarProps().onSelectSession("session-a");
@@ -235,6 +238,7 @@ test("a subagent session cannot replace the selected main session", async () => 
   await act(async () => {
     renderer = create(<App />);
   });
+  await act(async () => getSidebarProps().onSelectSession("current"));
 
   await act(async () => getSidebarProps().onSelectSession("child-a"));
   expect(getSidebarProps().currentSessionId).toBe("current");
@@ -301,6 +305,7 @@ test("completion distinguishes the current session from a background main sessio
   await act(async () => {
     renderer = create(<App />);
   });
+  await act(async () => getSidebarProps().onSelectSession("current"));
   harness.deferSessionRefresh = true;
 
   await act(async () => {
@@ -447,7 +452,7 @@ test("new chat is a welcome surface without a conversation title; a real session
   let renderer!: ReactTestRenderer;
   await act(async () => { renderer = create(<App />); });
   const headers = () => renderer.root.findAllByProps({ "aria-label": "Conversation" });
-  expect(headers()).toHaveLength(1);
+  expect(headers()).toHaveLength(0);
   await act(async () => getSidebarProps().onNewChat());
   expect(getSidebarProps().currentSessionId).toBeNull();
   expect(headers()).toHaveLength(0);
@@ -455,4 +460,33 @@ test("new chat is a welcome surface without a conversation title; a real session
   expect(headers()).toHaveLength(1);
   expect(headers()[0].findAllByType("strong").some(node => node.children.join("") === "Session session-local")).toBe(true);
   await act(async () => renderer.unmount());
+});
+
+test("question attention survives navigation and completion until the question is answered", async () => {
+  let renderer: ReactTestRenderer | null = null;
+  await act(async () => { renderer = create(<App />); });
+  await act(async () => getSidebarProps().onSelectSession("current"));
+  await act(async () => getChatProps().onSessionWaitingChange("current", true));
+  expect(getSidebarProps().waitingSessionIds.has("current")).toBe(true);
+  await act(async () => getSidebarProps().onSelectSession("session-a"));
+  expect(getSidebarProps().waitingSessionIds.has("current")).toBe(true);
+  await act(async () => getChatProps().onSessionWaitingChange("current", false));
+  expect(getSidebarProps().waitingSessionIds.has("current")).toBe(false);
+  await act(async () => getChatProps().onSessionWaitingChange("current", true));
+  await act(async () => getChatProps().onSessionCompleted("current"));
+  expect(getSidebarProps().waitingSessionIds.has("current")).toBe(true);
+  await act(async () => getChatProps().onSessionWaitingChange("current", false));
+  expect(getSidebarProps().waitingSessionIds.has("current")).toBe(false);
+  await act(async () => renderer?.unmount());
+});
+
+test("completion while settings is open is unread even when its chat is still selected", async () => {
+  let renderer: ReactTestRenderer | null = null;
+  await act(async () => { renderer = create(<App />); });
+  await act(async () => getSidebarProps().onSelectSession("current"));
+  await act(async () => getSidebarProps().onNavigate("settings"));
+  harness.deferSessionRefresh = true;
+  await act(async () => getChatProps().onSessionCompleted("current"));
+  expect(getSidebarProps().completedSessionIds.has("current")).toBe(true);
+  await act(async () => renderer?.unmount());
 });

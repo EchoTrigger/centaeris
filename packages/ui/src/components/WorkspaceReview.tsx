@@ -184,7 +184,6 @@ function Review({ root, onOpenFile }: { root: string; onOpenFile?: (path: string
         <button
           type="button"
           aria-label="Refresh"
-          title="Refresh"
           disabled={busy || loading}
           onClick={() => setRevision((value) => value + 1)}
         >

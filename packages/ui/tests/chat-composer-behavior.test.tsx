@@ -1,5 +1,5 @@
 vi.mock("../src/components/ui/dropdown-menu", async () => import("./helpers/menuTestDouble"));
-vi.mock("../src/components/chat/ComposerRuntimeControls", () => ({ ComposerRuntimeControls: ({ activePanel }: { activePanel: string | null }) => activePanel === "context" ? <div role="region" aria-label="Context details" /> : null }));
+vi.mock("../src/components/chat/ComposerRuntimeControls", () => ({ ComposerRuntimeControls: () => null, ComposerContextControl: ({ activePanel }: { activePanel: string | null }) => activePanel === "context" ? <div role="region" aria-label="Context details" /> : null }));
 import type { ReactNode } from "react";
 import {
   useState,

@@ -1,12 +1,11 @@
 import { recentWorkspaceGroups, sortSessionCatalog } from "./sidebarSessions";
-import { SidebarWorkspaceGroup } from "./SidebarWorkspaceGroup";
-import { WorkspaceSwitcher, type WorkspaceAction } from "./WorkspaceSwitcher";
+import { SidebarWorkspaceGroup, type WorkspaceAction } from "./SidebarWorkspaceGroup";
 import { SortablePinnedSessions } from "./SortablePinnedSessions";
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
 	Blocks,
 	Clock,
-	Loader2,
+	LoaderCircle,
 	MoreHorizontal,
 	Pencil,
 	Pin,
@@ -34,10 +33,8 @@ import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
-	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
-import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import "../styles/desktop-workbench.css";
 
 export type ResourceModalKind = "models" | "skills" | "plugins";
@@ -58,6 +55,7 @@ type SidebarProps = {
 	activeWorkspaceRoot: string | null;
 	runningSessionIds: Set<string>;
 	completedSessionIds: Set<string>;
+	waitingSessionIds?: ReadonlySet<string>;
 	workspaceCatalogError: { message: string; canReset: boolean } | null;
 	onNewChat: () => void;
 	onOpenWorkspace: (mode: WorkspaceOpenMode) => WorkspaceAction;
@@ -88,10 +86,9 @@ export function Sidebar({
 	currentSessionId,
 	runningSessionIds,
 	completedSessionIds,
+	waitingSessionIds,
 	workspaceCatalogError,
 	onNewChat,
-	onOpenWorkspace,
-	onSelectWorkspace,
 	onRetryWorkspaceCatalog,
 	onResetWorkspaceCatalog,
 	onSelectSession,
@@ -99,6 +96,8 @@ export function Sidebar({
 	onDeleteSession,
 	onOpenResource,
 }: SidebarProps) {
+	const [sessionMenu, setSessionMenu] = useState<string | null>(null);
+	useEffect(() => { if (collapsed) setSessionMenu(null); }, [collapsed]);
 	const [dialog, setDialog] = useState<{
 		kind: "rename" | "delete";
 		session: UiSession;
@@ -149,6 +148,8 @@ export function Sidebar({
 		const current = activePage === "chat" && session.id === currentSessionId;
 		const running = runningSessionIds.has(session.id);
 		const unread = completedSessionIds.has(session.id) || session.isUnread;
+		const waiting = waitingSessionIds?.has(session.id) ?? false;
+		const needsAttention = waiting || (!current && unread);
 		return (
 			<div
 				className={`thinSessionRow ${current ? "is-active" : ""}`}
@@ -162,26 +163,19 @@ export function Sidebar({
 					aria-current={current ? "page" : undefined}
 					onClick={() => onSelectSession(session.id)}
 				>
-					<span
-						className={`thinSessionDot ${running ? "is-running" : unread ? "is-unread" : ""}`}
-						aria-hidden="true"
-					/>
 					<span className="thinSessionCopy">
 						<strong>{session.title || "New chat"}</strong>
-						<small>
-							{running
-								? "Running"
-								: unread
-									? "Unread"
-									: formatRelativeTime(session.updatedAt)}
-						</small>
+						{!running && !needsAttention ? (
+							<small>{formatRelativeTime(session.updatedAt)}</small>
+						) : null}
 					</span>
 					{session.isPinned ? (
 						<Pin className="thinPinnedIcon" aria-hidden="true" />
 					) : null}
+					{needsAttention ? <span className="thinSessionDot is-unread" role="status" aria-label={waiting ? "Reply needed" : "Unread messages"} /> : running ? <LoaderCircle size={12} className="animate-spin motion-reduce:animate-none" role="status" aria-label="Running" /> : null}
 				</button>
 				<div className="thinSessionActions">
-					<DropdownMenu>
+					<DropdownMenu open={!collapsed && sessionMenu === session.id} onOpenChange={(open) => setSessionMenu(open ? session.id : null)}>
 						<DropdownMenuTrigger
 							render={
 								<Button
@@ -198,7 +192,7 @@ export function Sidebar({
 						>
 							<MoreHorizontal size={16} aria-hidden="true" />
 						</DropdownMenuTrigger>
-						<DropdownMenuContent align="end">
+						<DropdownMenuContent align="start">
 							{onPinSession ? (
 								<>
 									<DropdownMenuItem
@@ -213,7 +207,6 @@ export function Sidebar({
 										<Pin size={15} aria-hidden="true" />
 										{session.isPinned ? "Unpin" : "Pin"}
 									</DropdownMenuItem>
-									<DropdownMenuSeparator />
 								</>
 							) : null}
 							<DropdownMenuItem
@@ -266,33 +259,23 @@ export function Sidebar({
 		<aside
 			className={`thinSidebar desktopWorkbenchSidebar ${collapsed ? "is-collapsed" : ""}`}
 			aria-label="Main navigation"
+			hidden={collapsed}
+			inert={collapsed}
 		>
-			<WorkspaceSwitcher
-				workspaces={workspaces}
-				activeRoot={activeWorkspaceRoot}
-				collapsed={collapsed}
-				onSelect={onSelectWorkspace}
-				onOpen={onOpenWorkspace}
-			/>
+			<div className="desktopSidebarBrand" hidden={collapsed}><strong>Centaeris</strong></div>
 			<nav className="appNavigation" aria-label="Application">
 				{navigation.map(({ label, icon: Icon, action, current }) => (
-					<Tooltip key={label}>
-						<TooltipTrigger
-							render={
-								<Button
-									ref={label === "New chat" ? newChatButton : undefined}
-									variant="ghost"
-									aria-label={label}
-									aria-current={current ? "page" : undefined}
-									onClick={action}
-								/>
-							}
-						>
-							<Icon size={16} aria-hidden="true" />
-							<span>{label}</span>
-						</TooltipTrigger>
-						<TooltipContent side="right">{label}</TooltipContent>
-					</Tooltip>
+					<Button
+						key={label}
+						ref={label === "New chat" ? newChatButton : undefined}
+						variant="ghost"
+						aria-label={label}
+						aria-current={current ? "page" : undefined}
+						onClick={action}
+					>
+						<Icon size={16} aria-hidden="true" />
+						<span>{label}</span>
+					</Button>
 				))}
 			</nav>
 			<div className="sidebarExpandedContent" hidden={collapsed}>
@@ -312,7 +295,7 @@ export function Sidebar({
 								onClick={() => void recoverCatalog(onRetryWorkspaceCatalog)}
 							>
 								{catalogBusy ? (
-									<Loader2 className="workbenchSpinner" aria-hidden="true" />
+									<LoaderCircle className="workbenchSpinner" aria-hidden="true" />
 								) : null}
 								Retry
 							</Button>
@@ -352,11 +335,6 @@ export function Sidebar({
 						) : (
 							pinnedSessions.map((session) => renderSession(session))
 						)}
-						{!pinnedSessions.length ? (
-							<p className="desktopWorkspaceEmpty">
-								Pin conversations to keep them here
-							</p>
-						) : null}
 						{hasMore?.("pinned") ? (
 							<Button
 								variant="ghost"
@@ -371,7 +349,7 @@ export function Sidebar({
 				</section>
 				<section className="thinSessionRegion" aria-label="Recents">
 					<div className="thinSectionHeader">
-						<span>Conversations</span>
+						<span>Recents</span>
 					</div>
 					<div className="thinSessionList">
 						{groups.map((group) => (
@@ -380,11 +358,10 @@ export function Sidebar({
 								root={group.root}
 								name={group.name}
 								active={group.root === activeWorkspaceRoot}
-								onSelect={onSelectWorkspace}
 								onRename={onRenameWorkspace}
 								onRemove={onRemoveWorkspace}
 								onExpand={onExpandWorkspace}
-								empty={!group.sessions.length && !hasMore?.(group.root)}
+								navigationHidden={collapsed}
 								initiallyExpanded={
 									!onExpandWorkspace || group.root === activeWorkspaceRoot
 								}
@@ -402,48 +379,19 @@ export function Sidebar({
 								) : null}
 							</SidebarWorkspaceGroup>
 						))}
-						{!groups.length ? (
-							<div className="desktopSidebarEmpty">
-								<p>Open a folder to start a conversation.</p>
-								<Button
-									variant="outline"
-									size="sm"
-									disabled={pending}
-									onClick={() =>
-										void execute(async () => {
-											if ((await onOpenWorkspace("customPath")) === false)
-												throw new Error(
-													"The workspace could not be opened. Try again.",
-												);
-										})
-									}
-								>
-									Open folder…
-								</Button>
-							</div>
-						) : null}
 					</div>
 				</section>
 			</div>
 			<footer className="thinSidebarFooter">
-				<Tooltip>
-					<TooltipTrigger
-						render={
-							<Button
-								variant="ghost"
-								aria-label="Settings"
-								aria-current={activePage === "settings" ? "page" : undefined}
-								onClick={() =>
-									onNavigate ? onNavigate("settings") : onOpenResource("models")
-								}
-							/>
-						}
-					>
-						<Settings size={16} aria-hidden="true" />
-						<span>Settings</span>
-					</TooltipTrigger>
-					<TooltipContent side="right">Settings</TooltipContent>
-				</Tooltip>
+				<Button
+					variant="ghost"
+					aria-label="Settings"
+					aria-current={activePage === "settings" ? "page" : undefined}
+					onClick={() => onNavigate ? onNavigate("settings") : onOpenResource("models")}
+				>
+					<Settings size={16} aria-hidden="true" />
+					<span>Settings</span>
+				</Button>
 			</footer>
 			<Dialog
 				open={Boolean(dialog)}
@@ -470,7 +418,7 @@ export function Sidebar({
 							</DialogTitle>
 							<DialogDescription>
 								{currentDialog.kind === "rename"
-									? "Choose a name that is easy to find in your workspace."
+									? currentDialog.session.title
 									: `“${currentDialog.session.title || "New chat"}” will be deleted. Running work in this conversation will be stopped.`}
 							</DialogDescription>
 						</DialogHeader>

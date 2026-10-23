@@ -1,3 +1,6 @@
+vi.mock("../src/components/chat/ComposerPlane", async () => import("./helpers/composerPlaneTestDouble"));
+// Runtime config races use a Node-only window double; welcome DOM behavior is covered separately.
+vi.mock("../src/components/chat/WelcomeGreeting", () => ({ WelcomeGreeting: () => null }));
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type {
@@ -43,7 +46,7 @@ vi.mock("../src/lib/chatBridge", () => ({
   cancelAgentRun: vi.fn(),
   compactAgentContext: vi.fn(),
   createSession: vi.fn(),
-  getAgentContextUsage: vi.fn(),
+  getAgentContextUsage: vi.fn(async () => { throw new Error("Context usage unavailable in fixture"); }),
   getAgentRuntimeConfig: vi.fn(() => {
     let resolveConfig: (config: AgentRuntimeConfig) => void = () => {};
     const promise = new Promise<AgentRuntimeConfig>((resolve) => {
@@ -161,7 +164,6 @@ const makeSession = (id: string): UiSession => ({
 
 const makeHydrationSnapshot = (
   sessionId: string,
-  config: AgentRuntimeConfig,
 ): SessionHydrationSnapshot => ({
   messages: [
     {
@@ -170,9 +172,6 @@ const makeHydrationSnapshot = (
       text: `from ${sessionId}`,
     },
   ],
-  runtimeConfig: config,
-  contextUsage: null,
-  resolvedAutoContinueAfterResumeWait: false,
   replayCursorsByAgentRunId: {},
   pendingQuestionRequest: null,
   restoreMessageId: null,
@@ -415,9 +414,11 @@ test("an older hydration snapshot cannot cancel a model selection in flight", as
   const selection = harness.configUpdates[0];
   const hydration = getHydrationRequest("session");
   await act(async () => {
-    hydration.resolve(makeHydrationSnapshot("session", initialConfig));
+    hydration.resolve(makeHydrationSnapshot("session"));
     await hydration.promise;
   });
+  const metadata = harness.configRequests.at(-1)!;
+  await act(async () => { metadata.resolve(initialConfig); await metadata.promise; });
   await act(async () => {
     selection.resolve(
       makeConfig("provider-b", "model-b", 2, "low", [

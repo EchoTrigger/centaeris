@@ -1,4 +1,4 @@
-import { WorkspaceAddMenu } from "./WorkspaceAddMenu";
+import { WorkspaceNewTab } from "./WorkspaceNewTab";
 import type { TerminalSnapshot } from "../lib/terminalBridge";
 import { t } from "../i18n";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
@@ -26,7 +26,6 @@ import {
 	DropdownMenuRadioItem,
 } from "./ui/dropdown-menu";
 import "../styles/desktop-workbench.css";
-import { Tooltip, TooltipTrigger, TooltipContent } from "./ui/tooltip";
 import type { DiffPanelData, DiffPanelFile } from "../lib/diffPanel";
 import type { FilePreviewContentKind } from "../lib/workspaceBridge";
 import { renderMarkdownNodes } from "./MarkdownRenderer";
@@ -40,15 +39,7 @@ export type SummaryPanelTab = {
 	title: string;
 	terminalId?: string;
 	serviceInstanceId?: string;
-	kind:
-		| "terminal"
-		| "summary"
-		| "file"
-		| "diffs"
-		| "agent"
-		| "files"
-		| "review"
-		| "tasks";
+	kind: "new" | "terminal" | "summary" | "file" | "diffs" | "agent" | "files" | "review" | "tasks";
 	workspaceRoot?: string;
 	isPreview?: boolean;
 	sessionId?: string;
@@ -77,12 +68,13 @@ type OpenWorkspacePathOptions = {
 type SummaryPanelProps = {
 	workspaceRoot?: string | null;
 	sessionId?: string | null;
-	onFiles?: () => void;
-	onReview?: () => void;
+	onFiles?: (fromNewTabId?: string) => void;
+	onReview?: (fromNewTabId?: string) => void;
 	onTerminal?: (
 		terminal: TerminalSnapshot,
 		serviceInstanceId: string,
 		title?: string,
+		fromNewTabId?: string,
 	) => void;
 	visible?: boolean;
 	onRefreshFile?: () => void;
@@ -90,13 +82,10 @@ type SummaryPanelProps = {
 	activeTabId: string | null;
 	onSelectTab: (tabId: string) => void;
 	onCloseTab: (tabId: string) => void;
-	onAddSummaryTab?: () => void;
+	onAddTab?: () => void;
 	onCollapse?: () => void;
 	showTabStrip?: boolean;
-	onOpenWorkspacePath?: (
-		path: string,
-		options?: OpenWorkspacePathOptions,
-	) => void;
+	onOpenWorkspacePath?: (path: string, options?: OpenWorkspacePathOptions) => void;
 };
 
 const getActiveTab = (
@@ -120,13 +109,9 @@ const isMarkdownPath = (path: string | undefined): boolean => {
 
 function MarkdownPreview({ text }: { text: string }) {
 	if (!text.trim()) {
-		return (
-			<div className="summaryPanelHint">{t("summaryPanel.theFileIsEmpty")}</div>
-		);
+		return <div className="summaryPanelHint">{t("summaryPanel.theFileIsEmpty")}</div>;
 	}
-	return (
-		<div className="summaryMarkdownContent">{renderMarkdownNodes(text)}</div>
-	);
+	return <div className="summaryMarkdownContent">{renderMarkdownNodes(text)}</div>;
 }
 
 function ImagePreview({ tab }: { tab: SummaryPanelTab }) {
@@ -144,9 +129,7 @@ function ImagePreview({ tab }: { tab: SummaryPanelTab }) {
 			</div>
 			<div className="summaryImageMeta">
 				{tab.mimeType ? <span>{tab.mimeType}</span> : null}
-				{typeof tab.byteLen === "number" ? (
-					<span>{tab.byteLen.toLocaleString()} bytes</span>
-				) : null}
+				{typeof tab.byteLen === "number" ? <span>{tab.byteLen.toLocaleString()} bytes</span> : null}
 			</div>
 		</div>
 	);
@@ -165,9 +148,7 @@ function PdfPreview({ tab }: { tab: SummaryPanelTab }) {
 			<iframe title={tab.title} src={tab.dataUrl} className="summaryPdfFrame" />
 			<div className="summaryImageMeta">
 				{tab.mimeType ? <span>{tab.mimeType}</span> : null}
-				{typeof tab.byteLen === "number" ? (
-					<span>{tab.byteLen.toLocaleString()} bytes</span>
-				) : null}
+				{typeof tab.byteLen === "number" ? <span>{tab.byteLen.toLocaleString()} bytes</span> : null}
 			</div>
 		</div>
 	);
@@ -210,10 +191,7 @@ function DiffPanelFileRow({
 	file: DiffPanelFile;
 	isSelected: boolean;
 	onSelect: () => void;
-	onOpenWorkspacePath?: (
-		path: string,
-		options?: OpenWorkspacePathOptions,
-	) => void;
+	onOpenWorkspacePath?: (path: string, options?: OpenWorkspacePathOptions) => void;
 }) {
 	return (
 		<article className={`summaryDiffFile ${isSelected ? "is-active" : ""}`}>
@@ -237,32 +215,20 @@ function DiffPanelFileRow({
 					<DiffStats added={file.added} removed={file.removed} compact />
 				)}
 				{onOpenWorkspacePath ? (
-					<Tooltip>
-						<TooltipTrigger
-							render={
-								<Button
-									type="button"
-									variant="workspace"
-									size="workspaceIcon"
-									className="summaryDiffOpenButton"
-									aria-label={t("toolActivityTranscript.openValue", {
-										value1: file.path,
-									})}
-									onClick={() => {
-										onOpenWorkspacePath(file.path, { taskId: file.taskId });
-									}}
-								>
-									<ExternalLink
-										className="summaryPanelIcon"
-										aria-hidden="true"
-									/>
-								</Button>
-							}
-						/>
-						<TooltipContent align="end">
-							{t("summaryPanel.openFile")}
-						</TooltipContent>
-					</Tooltip>
+					<Button
+						type="button"
+						variant="workspace"
+						size="workspaceIcon"
+						className="summaryDiffOpenButton"
+						aria-label={t("toolActivityTranscript.openValue", {
+							value1: file.path,
+						})}
+						onClick={() => {
+							onOpenWorkspacePath(file.path, { taskId: file.taskId });
+						}}
+					>
+						<ExternalLink className="summaryPanelIcon" aria-hidden="true" />
+					</Button>
 				) : null}
 			</div>
 		</article>
@@ -274,28 +240,19 @@ function DiffPanelPreview({
 	onOpenWorkspacePath,
 }: {
 	data: DiffPanelData;
-	onOpenWorkspacePath?: (
-		path: string,
-		options?: OpenWorkspacePathOptions,
-	) => void;
+	onOpenWorkspacePath?: (path: string, options?: OpenWorkspacePathOptions) => void;
 }) {
-	const [selectedFileId, setSelectedFileId] = useState<string | null>(
-		data.files[0]?.id ?? null,
-	);
+	const [selectedFileId, setSelectedFileId] = useState<string | null>(data.files[0]?.id ?? null);
 	const selectedFile =
-		data.files.find((file) => file.id === selectedFileId) ??
-		data.files[0] ??
-		null;
+		data.files.find((file) => file.id === selectedFileId) ?? data.files[0] ?? null;
 
 	const totals = useMemo(
 		() => ({
 			added: normalizeDiffCount(
-				data.totalAdded ||
-					data.files.reduce((sum, file) => sum + file.added, 0),
+				data.totalAdded || data.files.reduce((sum, file) => sum + file.added, 0),
 			),
 			removed: normalizeDiffCount(
-				data.totalRemoved ||
-					data.files.reduce((sum, file) => sum + file.removed, 0),
+				data.totalRemoved || data.files.reduce((sum, file) => sum + file.removed, 0),
 			),
 		}),
 		[data.files, data.totalAdded, data.totalRemoved],
@@ -329,11 +286,7 @@ function DiffPanelPreview({
 						</div>
 					) : selectedFile ? (
 						<Suspense
-							fallback={
-								<div className="summaryPanelHint">
-									{t("summaryPanel.loadingDiff")}
-								</div>
-							}
+							fallback={<div className="summaryPanelHint">{t("summaryPanel.loadingDiff")}</div>}
 						>
 							<CodePreview
 								content={selectedFile.diffPreview}
@@ -343,10 +296,7 @@ function DiffPanelPreview({
 						</Suspense>
 					) : null}
 				</div>
-				<div
-					className="summaryDiffFileList"
-					aria-label={t("summaryPanel.reviewFileList")}
-				>
+				<div className="summaryDiffFileList" aria-label={t("summaryPanel.reviewFileList")}>
 					{data.files.map((file) => (
 						<DiffPanelFileRow
 							file={file}
@@ -374,7 +324,7 @@ export function SummaryPanel({
 	activeTabId,
 	onSelectTab,
 	onCloseTab,
-	onAddSummaryTab,
+	onAddTab,
 	onCollapse,
 	showTabStrip = true,
 	onOpenWorkspacePath,
@@ -383,8 +333,7 @@ export function SummaryPanel({
 	const browserRoot = tabs.find(
 		(tab) => tab.kind === "file" || tab.kind === "files",
 	)?.workspaceRoot;
-	const showFileBrowser =
-		activeTab?.kind === "file" || activeTab?.kind === "files";
+	const showFileBrowser = activeTab?.kind === "file" || activeTab?.kind === "files";
 
 	const tabRefs = useRef(new Map<string, HTMLButtonElement>());
 	const toolbarRef = useRef<HTMLButtonElement>(null);
@@ -392,26 +341,16 @@ export function SummaryPanel({
 	const selectedTabId = activeTab?.id;
 	useEffect(() => {
 		if (visible && selectedTabId)
-			tabRefs.current
-				.get(selectedTabId)
-				?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+			tabRefs.current.get(selectedTabId)?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
 	}, [selectedTabId, visible]);
 	useEffect(() => {
-		if (
-			closingFocus.current &&
-			!tabs.some((tab) => tab.id === closingFocus.current)
-		) {
+		if (closingFocus.current && !tabs.some((tab) => tab.id === closingFocus.current)) {
 			closingFocus.current = null;
-			(selectedTabId
-				? tabRefs.current.get(selectedTabId)
-				: toolbarRef.current
-			)?.focus();
+			(selectedTabId ? tabRefs.current.get(selectedTabId) : toolbarRef.current)?.focus();
 		}
 	}, [selectedTabId, tabs]);
 	const closeTab = (id: string) => {
-		if (
-			tabRefs.current.get(id)?.parentElement?.contains(document.activeElement)
-		)
+		if (tabRefs.current.get(id)?.parentElement?.contains(document.activeElement))
 			closingFocus.current = id;
 		onCloseTab(id);
 	};
@@ -426,63 +365,6 @@ export function SummaryPanel({
 		>
 			{showTabStrip ? (
 				<>
-					<div className="desktopPreviewToolbar">
-						<div className="desktopPreviewTools" aria-label="Workspace views">
-							{onFiles ? (
-								<Button
-									ref={toolbarRef}
-									variant="ghost"
-									size="sm"
-									disabled={!workspaceRoot}
-									onClick={onFiles}
-								>
-									<FolderOpen size={15} aria-hidden="true" />
-									<span>Files</span>
-								</Button>
-							) : null}
-							{onReview ? (
-								<Button
-									variant="ghost"
-									size="sm"
-									disabled={!workspaceRoot}
-									onClick={onReview}
-								>
-									<FileDiff size={15} aria-hidden="true" />
-									<span>Review</span>
-								</Button>
-							) : null}
-							{workspaceRoot && onFiles && onReview && onTerminal ? (
-								<WorkspaceAddMenu
-									triggerLabel="Terminal"
-									root={workspaceRoot}
-									sessionId={sessionId ?? null}
-									onFiles={onFiles}
-									onReview={onReview}
-									onTerminal={onTerminal}
-								/>
-							) : null}
-						</div>
-						{onCollapse ? (
-							<Tooltip>
-								<TooltipTrigger
-									render={
-										<Button
-											variant="ghost"
-											size="icon-sm"
-											className="desktopPreviewCollapse"
-											onClick={onCollapse}
-											aria-label={t("summaryPanel.collapseRightPanel")}
-										/>
-									}
-								>
-									<PanelRight size={16} aria-hidden="true" />
-								</TooltipTrigger>
-								<TooltipContent align="end">
-									{t("summaryPanel.collapseRightPanel")}
-								</TooltipContent>
-							</Tooltip>
-						) : null}
-					</div>
 					<div className="summaryPanelTabStrip desktopPreviewTabStrip">
 						<TabsList
 							variant="line"
@@ -492,17 +374,19 @@ export function SummaryPanel({
 						>
 							{tabs.map((tab) => {
 								const Icon =
-									tab.kind === "terminal"
-										? TerminalSquare
-										: tab.kind === "tasks"
-											? ListCollapse
-											: tab.kind === "agent"
-												? Bot
-												: tab.kind === "files"
-													? FolderOpen
-													: tab.kind === "diffs" || tab.kind === "review"
-														? FileDiff
-														: FileText;
+									tab.kind === "new"
+										? Plus
+										: tab.kind === "terminal"
+											? TerminalSquare
+											: tab.kind === "tasks"
+												? ListCollapse
+												: tab.kind === "agent"
+													? Bot
+													: tab.kind === "files"
+														? FolderOpen
+														: tab.kind === "diffs" || tab.kind === "review"
+															? FileDiff
+															: FileText;
 								return (
 									<div
 										className={`summaryPanelTab ${activeTab?.id === tab.id ? "is-active" : ""} ${tab.isPreview ? "is-preview" : ""}`}
@@ -542,68 +426,65 @@ export function SummaryPanel({
 											})}
 											onClick={() => closeTab(tab.id)}
 										>
-											<X
-												className="summaryPanelIcon is-close"
-												aria-hidden="true"
-											/>
+											<X className="summaryPanelIcon is-close" aria-hidden="true" />
 										</Button>
 									</div>
 								);
 							})}
 						</TabsList>
 						<div className="desktopPreviewTabActions">
-							{tabs.length > 1 ? (
-								<DropdownMenu>
-									<DropdownMenuTrigger
-										render={
-											<Button
-												variant="ghost"
-												size="icon-sm"
-												aria-label="All open tabs"
-											/>
-										}
-									>
-										<ChevronDown size={15} aria-hidden="true" />
-									</DropdownMenuTrigger>
-									<DropdownMenuContent align="end" className="desktopOpenTabs">
-										<DropdownMenuRadioGroup
-											value={activeTab?.id ?? ""}
-											onValueChange={(value) => {
-												onSelectTab(String(value));
-											}}
+							{onAddTab ? (
+								<Button
+									variant="ghost"
+									size="icon-sm"
+									onClick={onAddTab}
+									ref={toolbarRef}
+									aria-label="New tab"
+								>
+									<Plus size={15} aria-hidden="true" />
+								</Button>
+							) : null}
+							<div className="desktopPreviewTabEnd">
+								{tabs.length > 1 ? (
+									<DropdownMenu>
+										<DropdownMenuTrigger
+											render={<Button variant="ghost" size="icon-sm" aria-label="All open tabs" />}
 										>
-											{tabs.map((tab) => (
-												<DropdownMenuRadioItem
-													key={tab.id}
-													value={tab.id}
-													title={tab.path ?? tab.title}
-												>
-													<span>{tab.title}</span>
-												</DropdownMenuRadioItem>
-											))}
-										</DropdownMenuRadioGroup>
-									</DropdownMenuContent>
-								</DropdownMenu>
-							) : null}
-							{onAddSummaryTab ? (
-								<Tooltip>
-									<TooltipTrigger
-										render={
-											<Button
-												variant="ghost"
-												size="icon-sm"
-												onClick={onAddSummaryTab}
-												aria-label={t("summaryPanel.openSummary")}
-											/>
-										}
+											<ChevronDown size={15} aria-hidden="true" />
+										</DropdownMenuTrigger>
+										<DropdownMenuContent align="start" className="desktopOpenTabs">
+											<DropdownMenuRadioGroup
+												value={activeTab?.id ?? ""}
+												onValueChange={(value) => {
+													onSelectTab(String(value));
+												}}
+											>
+												{tabs.map((tab) => (
+													<DropdownMenuRadioItem
+														key={tab.id}
+														value={tab.id}
+														title={tab.path ?? tab.title}
+													>
+														<span>{tab.title}</span>
+													</DropdownMenuRadioItem>
+												))}
+											</DropdownMenuRadioGroup>
+										</DropdownMenuContent>
+									</DropdownMenu>
+								) : null}
+
+								{onCollapse ? (
+									<Button
+										variant="ghost"
+										size="icon-sm"
+										className="desktopPreviewCollapse"
+										onClick={onCollapse}
+										aria-label={t("summaryPanel.collapseRightPanel")}
 									>
-										<Plus size={15} aria-hidden="true" />
-									</TooltipTrigger>
-									<TooltipContent>
-										{t("summaryPanel.openSummary")}
-									</TooltipContent>
-								</Tooltip>
-							) : null}
+										<PanelRight size={16} aria-hidden="true" />
+									</Button>
+								) : null}
+							</div>
 						</div>
 					</div>
 				</>
@@ -614,10 +495,7 @@ export function SummaryPanel({
 						<div className="desktopPreviewEmpty">
 							<FolderOpen size={24} aria-hidden="true" />
 							<strong>Workspace preview</strong>
-							<span>
-								Open files, review changes or start a terminal using the
-								toolbar.
-							</span>
+							<span>Open files, review changes or start a terminal using the toolbar.</span>
 						</div>
 					) : null}
 					{tabs.map((tab) => (
@@ -628,12 +506,25 @@ export function SummaryPanel({
 							id={`panel-${tab.id}`}
 							className="summaryContentTab"
 						>
-							<SummaryTabContent
-								active={visible && activeTab?.id === tab.id}
-								onRefreshFile={onRefreshFile}
-								activeTab={tab}
-								onOpenWorkspacePath={onOpenWorkspacePath}
-							/>
+							{tab.kind === "new" ? (
+								<WorkspaceNewTab
+									root={tab.workspaceRoot ?? workspaceRoot ?? null}
+									sessionId={tab.sessionId ?? sessionId ?? null}
+									active={visible && activeTab?.id === tab.id}
+									onFiles={() => onFiles?.(tab.id)}
+									onReview={() => onReview?.(tab.id)}
+									onTerminal={(terminal, instance, title) =>
+										onTerminal?.(terminal, instance, title, tab.id)
+									}
+								/>
+							) : (
+								<SummaryTabContent
+									active={visible && activeTab?.id === tab.id}
+									onRefreshFile={onRefreshFile}
+									activeTab={tab}
+									onOpenWorkspacePath={onOpenWorkspacePath}
+								/>
+							)}
 						</TabsContent>
 					))}
 				</div>
@@ -646,9 +537,7 @@ export function SummaryPanel({
 						<WorkspaceFilesPanel
 							isOpen={visible && showFileBrowser}
 							workspaceRoot={browserRoot}
-							focusedPath={
-								activeTab?.kind === "file" ? activeTab.path : undefined
-							}
+							focusedPath={activeTab?.kind === "file" ? activeTab.path : undefined}
 							onOpenFile={(entry) => onOpenWorkspacePath?.(entry.path)}
 						/>
 					</aside>
@@ -669,22 +558,15 @@ function SummaryTabContent({
 	activeTab: SummaryPanelTab;
 	onOpenWorkspacePath: SummaryPanelProps["onOpenWorkspacePath"];
 }) {
-	const shouldRenderFileAsImage =
-		activeTab?.kind === "file" && activeTab.contentKind === "image";
-	const shouldRenderFileAsPdf =
-		activeTab?.kind === "file" && activeTab.contentKind === "pdf";
+	const shouldRenderFileAsImage = activeTab?.kind === "file" && activeTab.contentKind === "image";
+	const shouldRenderFileAsPdf = activeTab?.kind === "file" && activeTab.contentKind === "pdf";
 	const shouldRenderFileAsCode =
 		activeTab?.kind === "file" &&
 		!shouldRenderFileAsImage &&
 		!shouldRenderFileAsPdf &&
-		(!isMarkdownPath(activeTab.path) ||
-			typeof activeTab.targetLine === "number");
+		(!isMarkdownPath(activeTab.path) || typeof activeTab.targetLine === "number");
 
-	if (
-		activeTab.kind === "terminal" &&
-		activeTab.terminalId &&
-		activeTab.serviceInstanceId
-	)
+	if (activeTab.kind === "terminal" && activeTab.terminalId && activeTab.serviceInstanceId)
 		return (
 			<Suspense fallback={<div>Loading terminal…</div>}>
 				<WorkspaceTerminal
@@ -704,8 +586,7 @@ function SummaryTabContent({
 						{activeTab.kind === "agent" ? (
 							<h1 className="agentSessionPanelBreadcrumb">
 								<span>
-									{activeTab.parentTitle ||
-										t("useWorkspacePanelController.mainConversation")}
+									{activeTab.parentTitle || t("useWorkspacePanelController.mainConversation")}
 								</span>
 								<span aria-hidden="true">/</span>
 								<strong>{activeTab.title}</strong>
@@ -713,31 +594,22 @@ function SummaryTabContent({
 						) : (
 							<h1>{activeTab.title}</h1>
 						)}
-						{activeTab.kind === "file" && activeTab.path ? (
-							<span>{activeTab.path}</span>
-						) : null}
+						{activeTab.kind === "file" && activeTab.path ? <span>{activeTab.path}</span> : null}
 					</div>
 					{activeTab.kind === "file" && onRefreshFile ? (
-						<Tooltip>
-							<TooltipTrigger
-								render={
-									<Button
-										variant="ghost"
-										size="icon-sm"
-										aria-label="Refresh file"
-										disabled={activeTab.loading}
-										onClick={onRefreshFile}
-									/>
-								}
-							>
-								<RefreshCw
-									size={14}
-									className={activeTab.loading ? "workbenchSpinner" : undefined}
-									aria-hidden="true"
-								/>
-							</TooltipTrigger>
-							<TooltipContent align="end">Refresh file</TooltipContent>
-						</Tooltip>
+						<Button
+							variant="ghost"
+							size="icon-sm"
+							aria-label="Refresh file"
+							disabled={activeTab.loading}
+							onClick={onRefreshFile}
+						>
+							<RefreshCw
+								size={14}
+								className={activeTab.loading ? "workbenchSpinner" : undefined}
+								aria-hidden="true"
+							/>
+						</Button>
 					) : null}
 				</header>
 			) : null}
@@ -745,9 +617,7 @@ function SummaryTabContent({
 				className={`summaryPanelBody ${shouldRenderFileAsCode || shouldRenderFileAsPdf ? "is-code" : ""} ${activeTab.kind === "diffs" ? "is-diff" : ""} ${activeTab.kind === "agent" ? "is-agent" : ""}`}
 			>
 				{activeTab.loading ? (
-					<div className="summaryPanelHint">
-						{t("summaryPanel.loadingFile")}
-					</div>
+					<div className="summaryPanelHint">{t("summaryPanel.loadingFile")}</div>
 				) : null}
 				{activeTab.error ? (
 					<div className="summaryPanelHint is-error" role="alert">
@@ -785,11 +655,7 @@ function SummaryTabContent({
 						<MarkdownPreview text={activeTab.content ?? ""} />
 					) : (
 						<Suspense
-							fallback={
-								<div className="summaryPanelHint">
-									{t("summaryPanel.loadingEditor")}
-								</div>
-							}
+							fallback={<div className="summaryPanelHint">{t("summaryPanel.loadingEditor")}</div>}
 						>
 							<CodePreview
 								content={activeTab.content ?? ""}
@@ -821,10 +687,7 @@ function SummaryTabContent({
 					/>
 				) : null}
 				{activeTab.kind === "review" && activeTab.workspaceRoot ? (
-					<WorkspaceReview
-						root={activeTab.workspaceRoot}
-						onOpenFile={onOpenWorkspacePath}
-					/>
+					<WorkspaceReview root={activeTab.workspaceRoot} onOpenFile={onOpenWorkspacePath} />
 				) : null}
 			</div>
 		</>

@@ -1,91 +1,35 @@
-/* Desktop workbench: context first, quiet rows, one visible action per group. */
+/* Desktop navigation: shared edges, clear groups, quiet interaction feedback. */
 .desktopWorkbenchSidebar {
+	width: var(--thin-sidebar-width);
+	min-width: var(--thin-sidebar-width);
 	color: var(--on-surface);
 }
-.desktopWorkspaceSwitcher {
+.desktopSidebarBrand {
 	flex: none;
-	padding: 12px 10px 8px;
-	min-width: 0;
+	padding: 18px 20px 14px;
+	font-size: 15px;
+	line-height: 22px;
+	letter-spacing: -.015em;
 }
-.desktopWorkspaceSwitcher .desktopWorkspaceTrigger {
-	display: flex;
-	align-items: center;
-	justify-content: flex-start;
-	gap: 9px;
-	width: 100%;
-	height: auto;
-	min-height: 48px;
-	padding: 7px 8px;
-	border: 1px solid var(--outline-variant);
-	border-radius: 9px;
-	text-align: left;
-	background: var(--surface-color);
-}
-.desktopWorkspaceIdentity {
-	flex: 1;
-	min-width: 0;
-	display: flex;
-	flex-direction: column;
-	gap: 3px;
-}
-.desktopWorkspaceIdentity strong {
-	font-size: 13px;
-	font-weight: 600;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-.desktopWorkspaceIdentity > span {
-	font-size: 11px;
+.desktopSidebarBrand strong { font-weight: 500; }
+.desktopSidebarBrand[hidden] { display: none; }
+.desktopWorkbenchSidebar [data-slot="button"] {
 	font-weight: 400;
-	color: var(--process-text);
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-.desktopWorkspaceChoices {
-	width: min(360px, calc(100vw - 24px));
-	max-height: min(70vh, 520px);
-	overflow-y: auto;
-}
-.desktopWorkspaceChoice {
-	min-height: 48px;
-	gap: 10px;
-	padding-block: 8px;
-}
-.desktopWorkspaceChoice > span:last-child {
-	flex: 1;
-	min-width: 0;
-	display: flex;
-	flex-direction: column;
-	gap: 3px;
-}
-.desktopWorkspaceChoice strong {
-	font-size: 13px;
-	font-weight: 500;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-.desktopWorkspaceChoice small {
-	font-size: 11px;
-	color: var(--process-text);
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
+	translate: none;
+	transition-property: color, background-color, border-color, box-shadow;
 }
 .desktopWorkbenchSidebar .appNavigation {
 	display: grid;
-	gap: 2px;
-	padding: 2px 10px 10px;
+	gap: 3px;
+	padding: 0 10px 14px;
 }
 .desktopWorkbenchSidebar .appNavigation button {
 	justify-content: flex-start;
-	min-height: 34px;
-	height: 34px;
+	min-height: 36px;
+	height: 36px;
 	width: 100%;
 	gap: 10px;
-	padding-inline: 9px;
+	padding-inline: 10px;
 	font-size: 13px;
 	border-radius: 7px;
 }
@@ -102,7 +46,7 @@
 	overflow-y: auto;
 	overscroll-behavior: contain;
 	scrollbar-width: thin;
-	padding: 0 7px 12px;
+	padding: 0 10px 12px;
 }
 .desktopWorkbenchSidebar .sidebarExpandedContent[hidden] {
 	display: none;
@@ -110,7 +54,7 @@
 .desktopWorkbenchSidebar .thinSessionRegion {
 	flex: none;
 	min-height: 0;
-	padding: 0 0 14px;
+	padding: 0 0 18px;
 }
 .desktopWorkbenchSidebar .thinSectionHeader {
 	justify-content: space-between;
@@ -118,7 +62,7 @@
 	padding: 4px 10px;
 	color: var(--process-text);
 	font-size: 11px;
-	font-weight: 500;
+	font-weight: 400;
 }
 .desktopWorkbenchSidebar .thinSectionHeader small {
 	font-size: 10px;
@@ -132,7 +76,8 @@
 	overflow: visible;
 }
 .desktopWorkbenchSidebar .thinSessionRow {
-	min-height: 45px;
+	min-height: 34px;
+	contain-intrinsic-size: auto 34px;
 	padding: 0 3px;
 	margin: 0;
 	border: 0;
@@ -143,27 +88,36 @@
 	background: var(--surface-container);
 }
 .desktopWorkbenchSidebar .thinSessionSelect {
+	display: flex;
 	min-width: 0;
 	flex: 1;
-	min-height: 45px;
+	min-height: 34px;
 	padding: 6px 5px;
 	gap: 7px;
 	align-items: center;
 }
 .desktopWorkbenchSidebar .thinSessionCopy {
 	min-width: 0;
-	gap: 3px;
+	flex: 1;
+	flex-direction: row;
+	align-items: center;
+	gap: 8px;
 }
 .desktopWorkbenchSidebar .thinSessionCopy strong {
+	min-width: 0;
+	flex: 1;
 	font-size: 12px;
-	font-weight: 500;
+	font-weight: 400;
 	line-height: 1.5;
 }
 .desktopWorkbenchSidebar .thinSessionCopy small {
+	flex: none;
+	margin-top: 0;
 	font-size: 10px;
 	color: var(--process-text);
 	line-height: 1.4;
 }
+.desktopWorkbenchSidebar .thinSessionSelect > [role="status"] { flex-shrink: 0; }
 .desktopWorkbenchSidebar .thinSessionDot {
 	width: 4px;
 	height: 4px;
@@ -191,26 +145,17 @@
 	display: flex;
 	gap: 1px;
 	min-height: 34px;
-	padding: 0 1px;
-}
-.desktopWorkspaceDisclosure {
-	flex: none;
-	width: 24px;
-	padding: 0;
-	color: var(--process-text);
-}
-.desktopWorkspaceDisclosure[aria-expanded="true"] svg {
-	transform: rotate(90deg);
+	padding: 0 2px;
 }
 .desktopWorkspaceSelect {
 	min-width: 0;
 	flex: 1;
 	justify-content: flex-start;
 	gap: 6px;
-	padding: 0 4px;
+	padding: 0 6px;
 	height: 30px;
 	font-size: 12px;
-	font-weight: 500;
+	font-weight: 400;
 	color: var(--process-text);
 }
 .desktopWorkspaceSelect > span {
@@ -220,6 +165,7 @@
 	white-space: nowrap;
 }
 .desktopWorkspaceSelect[aria-current="location"] {
+	font-weight: 500;
 	color: var(--on-surface);
 }
 .desktopWorkspaceConversations {
@@ -249,44 +195,17 @@
 	font-size: 11px;
 }
 .desktopWorkbenchSidebar .thinSidebarFooter {
-	padding: 8px 10px;
-	border-top: 1px solid var(--outline-variant);
+	padding: 10px;
+	border-top: 0;
 }
 .desktopWorkbenchSidebar .thinSidebarFooter button {
 	width: 100%;
 	justify-content: flex-start;
 	gap: 10px;
-	min-height: 32px;
-	font-size: 12px;
+	min-height: 36px;
+	font-size: 13px;
 }
-.desktopWorkbenchSidebar.is-collapsed .appNavigation,
-.desktopWorkbenchSidebar.is-collapsed .thinSidebarFooter {
-	padding-inline: 6px;
-}
-.desktopWorkbenchSidebar.is-collapsed .appNavigation button,
-.desktopWorkbenchSidebar.is-collapsed .thinSidebarFooter button {
-	justify-content: center;
-	width: 34px;
-	padding: 0;
-}
-.desktopWorkbenchSidebar.is-collapsed .appNavigation button > span,
-.desktopWorkbenchSidebar.is-collapsed .thinSidebarFooter button > span {
-	display: none;
-}
-.desktopWorkspaceSwitcher[data-collapsed] {
-	padding: 10px 6px 8px;
-}
-.desktopWorkspaceSwitcher[data-collapsed] .desktopWorkspaceTrigger {
-	width: 34px;
-	min-height: 34px;
-	justify-content: center;
-	padding: 0;
-	border: 0;
-	background: transparent;
-}
-.desktopWorkspaceIdentity[hidden] {
-	display: none;
-}
+.desktopWorkbenchSidebar[hidden] { display: none; }
 .workbenchDialog {
 	overflow-wrap: anywhere;
 }
@@ -469,35 +388,12 @@
 	font-size: 12px;
 }
 .desktopWorkbenchPreview {
+	gap: 0;
 	min-width: 0;
 	min-height: 0;
 	height: 100%;
 	overflow: hidden;
 	background: var(--surface-color);
-}
-.desktopPreviewToolbar {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 4px;
-	flex-shrink: 0;
-	min-height: 40px;
-	padding: 4px 8px;
-	border-bottom: 1px solid var(--outline-variant);
-}
-.desktopPreviewTools {
-	display: flex;
-	align-items: center;
-	gap: 2px;
-	min-width: 0;
-	flex-wrap: wrap;
-}
-.desktopPreviewTools > button {
-	font-size: 12px;
-	gap: 6px;
-	height: 30px;
-	padding: 0 8px;
-	color: var(--process-text);
 }
 .desktopPreviewCollapse {
 	color: var(--process-text);
@@ -508,8 +404,8 @@
 	justify-content: space-between;
 	gap: 0;
 	padding: 0 5px 0 8px;
-	min-height: 37px;
-	height: 37px;
+	min-height: 44px;
+	height: 44px;
 	border-bottom: 1px solid var(--outline-variant);
 	background: transparent;
 }
@@ -517,9 +413,9 @@
 	display: flex;
 	justify-content: flex-start;
 	align-items: stretch;
-	flex: 1;
+	flex: 0 1 auto;
 	min-width: 0;
-	height: 36px;
+	height: 43px;
 	padding: 0;
 	gap: 0;
 	border-radius: 0;
@@ -535,24 +431,24 @@
 	flex: 0 0 auto;
 	min-width: 0;
 	max-width: 200px;
-	height: 36px;
+	height: 32px;
+	margin: 5px 2px 5px 0;
 	gap: 0;
 	padding: 0;
-	border: 0;
-	border-radius: 0;
+	border: 1px solid transparent;
+	border-radius: 6px;
 	background: transparent;
 	box-shadow: none;
-	border-bottom: 2px solid transparent;
 }
 .desktopWorkbenchPreview .summaryPanelTab.is-active {
-	border-bottom-color: var(--on-surface);
-	background: transparent;
+	border-color: var(--outline-variant);
+	background: var(--surface-variant);
 }
 .desktopWorkbenchPreview .summaryPanelTabSelect {
 	display: flex;
 	justify-content: flex-start;
 	min-width: 0;
-	height: 34px;
+	height: 30px;
 	padding: 0 7px 0 9px;
 	gap: 6px;
 	color: var(--process-text);
@@ -594,6 +490,8 @@
 	background: var(--surface-variant);
 }
 .desktopPreviewTabActions {
+	flex: 1 0 auto;
+	min-width: max-content;
 	display: flex;
 	align-items: center;
 	flex-shrink: 0;
@@ -693,3 +591,19 @@
 .desktopWorkbenchSidebar .pinnedDragHandle:disabled {
 	opacity: 0.25;
 }
+
+.desktopWorkspaceSelect[aria-expanded="true"] > .desktopWorkspaceChevron { transform: rotate(90deg); }
+
+.desktopPreviewTabEnd { margin-left: auto; display: flex; align-items: center; }
+.workspaceNewTab { display: grid; place-items: center; flex: 1; min-height: 0; overflow: auto; padding: 32px 24px; }
+.workspaceNewTabContent { width: min(100%, 420px); }
+.workspaceNewTab h1 { margin: 0 0 20px; color: var(--on-surface); font-size: 16px; font-weight: 500; }
+.workspaceNewTabTools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.workspaceNewTabTools > button { justify-content: flex-start; gap: 10px; min-height: 42px; padding: 10px 12px; border-radius: 7px; background: var(--surface-variant); color: var(--on-surface); font-size: 13px; }
+.workspaceNewTabTools > button:hover { background: var(--surface-container); }
+.workspaceNewTabTerminals { margin-top: 24px; }
+.workspaceNewTabTerminals > button { padding: 4px 0; color: var(--process-text); gap: 6px; font-size: 12px; }
+.workspaceNewTabTerminals > button[aria-expanded="false"] svg { transform: rotate(-90deg); }
+.workspaceExistingTerminals { display: grid; gap: 4px; margin-top: 8px; font-size: 12px; color: var(--process-text); }
+.workspaceExistingTerminals > button { justify-content: flex-start; gap: 8px; padding: 8px 10px; }
+.workspaceExistingTerminals small { margin-left: auto; font-size: 11px; color: var(--process-text); }

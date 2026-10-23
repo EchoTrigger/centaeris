@@ -64,3 +64,39 @@ test("content retained across sessions stays within the shared cache byte budget
   expect(getTranscriptContentRange).toHaveBeenCalledTimes(pages + 2);
   expect(transcriptContentRangeCacheBytes()).toBe(TRANSCRIPT_CONTENT_CACHE_MAX_BYTES);
 });
+
+
+test("overlapping readers share an in-flight content range and failure permits a fresh read", async () => {
+  let finish!: (page: TranscriptContentRangeV1) => void;
+  vi.mocked(getTranscriptContentRange).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const first = loadTranscriptContentRange(identity(), "0");
+  const second = loadTranscriptContentRange(identity(), "0");
+  expect(getTranscriptContentRange).toHaveBeenCalledTimes(1);
+  finish(response());
+  expect(await first).toEqual(await second);
+  expect(transcriptContentRangeCacheBytes()).toBe(6);
+  clearTranscriptContentRangeCache();
+  vi.mocked(getTranscriptContentRange).mockRejectedValueOnce(new Error("disconnected"));
+  const failed = loadTranscriptContentRange(identity(), "0");
+  const sharedFailure = loadTranscriptContentRange(identity(), "0");
+  await expect(failed).rejects.toThrow("disconnected");
+  await expect(sharedFailure).rejects.toThrow("disconnected");
+  vi.mocked(getTranscriptContentRange).mockResolvedValueOnce(response());
+  expect(await loadTranscriptContentRange(identity(), "0")).toEqual(response());
+  expect(getTranscriptContentRange).toHaveBeenCalledTimes(3);
+});
+
+test("clearing shared reads cannot erase or accept the replacement request", async () => {
+  const requests: ((page: TranscriptContentRangeV1) => void)[] = [];
+  vi.mocked(getTranscriptContentRange).mockImplementation(() => new Promise(resolve => { requests.push(resolve); }));
+  const stale = loadTranscriptContentRange(identity(), "0");
+  const rejected = expect(stale).rejects.toThrow("transcript content view was cleared");
+  clearTranscriptContentRangeCache();
+  const replacement = loadTranscriptContentRange(identity(), "0");
+  requests[0](response());
+  await rejected;
+  const shared = loadTranscriptContentRange(identity(), "0");
+  expect(getTranscriptContentRange).toHaveBeenCalledTimes(2);
+  requests[1](response());
+  expect(await replacement).toEqual(await shared);
+});
