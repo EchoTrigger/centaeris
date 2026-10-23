@@ -1,7 +1,7 @@
 # Forward-only snapshot publication responsibilities; historical files are not backfilled.
 
 import django.db.models.deletion
-from django.db import migrations, models
+from django.db import NotSupportedError, migrations, models
 
 
 PUBLICATION_DDL = r"""
@@ -42,6 +42,16 @@ CREATE TRIGGER snapshot_publication_facts BEFORE INSERT OR UPDATE OR DELETE ON a
 """
 
 
+def install_publication_protection(apps, schema_editor):
+    vendor = schema_editor.connection.vendor
+    if vendor == "postgresql":
+        schema_editor.execute(PUBLICATION_DDL, params=None)
+    elif vendor != "sqlite":
+        raise NotSupportedError(f"snapshot_publication_backend_unsupported: {vendor}")
+    # SQLite serves only the structural migration gate; production ownership
+    # protection is enforced and tested on PostgreSQL.
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -75,5 +85,5 @@ class Migration(migrations.Migration):
                 'constraints': [models.UniqueConstraint(fields=('agent_run', 'purpose', 'purpose_key'), name='unique_snapshot_publication_purpose'), models.CheckConstraint(condition=models.Q(('purpose__in', ['sessionCommit', 'executionCheckpoint'])), name='snapshot_publication_purpose_valid'), models.CheckConstraint(condition=models.Q(('encoding', 'frameV1')), name='snapshot_publication_encoding_valid'), models.CheckConstraint(condition=models.Q(models.Q(('confirmed_at__isnull', True), ('state', 'pending')), models.Q(('confirmed_at__isnull', False), ('state__in', ['staged', 'committed'])), _connector='OR'), name='snapshot_publication_confirmation_valid')],
             },
         ),
-        migrations.RunSQL(PUBLICATION_DDL),
+        migrations.RunPython(install_publication_protection),
     ]
