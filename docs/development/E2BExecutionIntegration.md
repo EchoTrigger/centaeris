@@ -160,6 +160,14 @@ Provider idempotency is
 an optional additional capability and remains unverified in the local
 deployment. A client capability flag does not enable it on the server.
 
+The adapter exposes [bounded HTTP failure categories](../../packages/e2b_adapter/README.md)
+while retaining an Unknown outcome. SDK 2.58.0 discards the provider semantic
+error code, so HTTP 409/422 cannot prove a particular idempotency state. The
+deployed server enablement and retention window remain unverified; these
+diagnostics authorize neither replay nor settlement. Loopback SDK tests cover
+the adapter response, not end-to-end Runtime error presentation or real-provider
+recovery.
+
 Keep global 8 / Workspace 4 / ordinary Worker 8 as the acceptance baseline.
 These are business execution limits; physical admission belongs to E2B.
 A control lease does not authorize ordinary execution, create or resume.
@@ -1878,3 +1886,51 @@ not run, and the earlier native source-gate Rustdoc cache/Node toolchain issues
 are not claimed resolved by the successful product measurements. The current
 Core/SDK lifecycle fixtures, private offline tests, source-layout correction and
 still-pending full release/benchmark acceptance remain distinct evidence.
+
+## Lifecycle separation implementation boundaries
+
+Session and historical Run responses now derive `executionMode` from the
+validated frozen Environment profile. A historical Run retains its captured
+binding even when the Session selects a different Environment. The work-list
+parser accepts the closed `perRun` / `retained` contract, and Session lists keep
+constant query counts. Worker policy selection remains process-configured and
+must match the signed profile.
+
+Live Run and Environment slots now use owned guards. Checkout and return hold
+only a short mutex; a guard can move between workers while preserving per-key
+exclusion, payload return, panic poisoning and exact-slot removal fencing. This
+does not change physical preparation timing or capacity admission.
+
+The [workspace protection inventory](WorkspaceSnapshotProtection.md) reports
+Session heads, frozen Run versions and recovery checkpoint references without
+reading payloads. Core and Python validate a shared checkpoint corpus. Missing
+indexes, concurrent changes and truncated or invalid records remain explicit;
+`deletionAuthorized` is always false. Upload protection, prepared-completion
+roots, shared blobs and active-version GC still require implementation.
+
+These changes have automated evidence only. The mode projection passed 95
+focused PostgreSQL API tests and the related frontend checks. The slot refactor
+passed its 13 pre-change characterization tests and 15 post-change tests.
+Source Rust, Node, Web and hosted Rust gates passed; Runtime Server reported
+686 passed with 306 integration entries left to their dedicated runners, and
+Web reported 452 passed. The latest complete hosted Python gate stopped at
+Outbox PostgreSQL connection timeout, before database tests ran. The tightened
+inventory parser passed 19 database-free record tests and 75 shared contract
+cases through both the real Core type and Python; its latest PostgreSQL
+regression run remains pending. Earlier inventory database
+results precede that parser tightening and are not final-candidate acceptance.
+
+Runs still prepare their physical environment before the model. Safe on-demand
+preparation must connect authoritative startup-file reads, first-use preparation
+and the never-materialized finalizer. Existing template preparation preserves
+root files, so an empty Session archive cannot prove `AGENTS.md` is absent.
+A trustworthy exact-build startup baseline is required before avoiding that
+read. Physical binding generations, rebuildable release and separate resource
+budgets remain pending; `perRun` and 8/4/8 remain the current baseline.
+
+The legacy execution route remains reachable for non-E2B profiles and existing
+signed bindings and cleanup duties. Its retirement requires the replacement
+TB2.1 product path to pass and the outstanding legacy responsibilities to drain.
+The frozen idle-policy skeleton is not part of this implementation. No new
+real-provider lifecycle timing or resource-savings result is established here;
+the original Unknown creation responsibilities remain open.
