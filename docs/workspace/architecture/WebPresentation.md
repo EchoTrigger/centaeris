@@ -141,6 +141,9 @@ facts in one grouped read rather than one query per Session.
 
 The browser sends an automatic acknowledgement only while the selected Session
 is visible, reading the latest content, and applied through its attention water.
+Latest-content visibility is measured independently of automatic scroll following:
+pausing following for a disclosure does not make a visible answer unread, and
+content contraction can reveal the latest answer without resuming following.
 Concurrent observations are coalesced. An unsuccessful acknowledgement waits for
 another observation rather than starting a polling loop. Late sidebar/HTTP
 responses merge attention fields by `attentionRevision`; older responses cannot

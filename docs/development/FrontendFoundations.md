@@ -153,6 +153,14 @@ and scrollbar interaction pause following before the viewport moves. A downward
 gesture already at the real end leaves following enabled. Detail expansion also
 pauses immediately.
 
+The Web transcript view separates input intent from actual movement. Inert wheel,
+touch or navigation-key input does not detach following. Actual upward movement
+or a requested older-history page pauses it. Chromium can apply scrolling before
+a passive wheel listener runs, so input timestamps do not overwrite the last
+observed position; native scroll and programmatic positioning maintain that
+baseline. Latest-answer visibility and read acknowledgements remain independent
+of automatic following.
+
 TanStack owns virtual measurements, ranges and stable row keys. One content-anchor
 controller preserves reading position while older pages are inserted, including
 insertion within an existing answer. It captures the visible content before the

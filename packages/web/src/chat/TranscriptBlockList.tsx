@@ -34,7 +34,7 @@ type Props = Readonly<{
   pendingUserMessage?: PendingTranscriptMessage | null;
   historyMemoryPressure?: boolean;
   onReleaseLoadedHistory?(): void;
-  onReadingLatestChange?(sessionId: string | null, following: boolean): void;
+  onReadingLatestChange?(sessionId: string | null, readingLatest: boolean): void;
   initialInputOrigin?: TranscriptInitialInputOrigin | null;
   onShowCitation?(citation: CitationSummary, origin: { elementId: string }): void;
   onShowArtifact?(artifact: import("./useTranscriptTurnMetadata").PublishedArtifact): void;
@@ -131,7 +131,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   const submittedTurnKeysRef = useRef(new Map<string, string>());
   const pendingAnchorRef = useRef<{ userId: string | null } | null>(null);
   const userScrollInputRef = useRef(0);
-  const userScrollStartRef = useRef(0);
+  const observedScrollTopRef = useRef(0);
   const scrollbarDragRef = useRef(false);
   const touchYRef = useRef<number | null>(null);
   const upwardIntentRef = useRef(false);
@@ -149,8 +149,23 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   const renderedViewEpochRef = useRef(viewEpoch);
   const followingLatestRef = useRef(true);
   const previousCountRef = useRef(blockIds.length);
+  const setProgrammaticScrollTop = useCallback((element: HTMLElement, top: number) => {
+    element.scrollTop = top;
+    observedScrollTopRef.current = element.scrollTop;
+  }, []);
   const [followingLatest, setFollowingLatest] = useState(true);
-  useEffect(() => { if (!loadingHistory) onReadingLatestChange?.(sessionId, followingLatest); }, [followingLatest, loadingHistory, onReadingLatestChange, sessionId]);
+  const [latestContentVisible, setLatestContentVisible] = useState(false);
+  const observeReadingLatest = useCallback(() => {
+    const element = scrollRef.current;
+    const content = contentRef.current;
+    if (!element || !content) return;
+    // Pausing auto-follow preserves a reading anchor; it does not mean the
+    // latest reply is unseen. Observe natural content, excluding tail padding,
+    // and tolerate fractional scroll positions just as the scroll controller does.
+    setLatestContentVisible(element.clientHeight > 0
+      && measuredContentEnd(element, content) <= element.scrollTop + element.clientHeight + 2);
+  }, []);
+  useEffect(() => { if (!loadingHistory) onReadingLatestChange?.(sessionId, latestContentVisible); }, [latestContentVisible, loadingHistory, onReadingLatestChange, sessionId]);
   useEffect(() => {
     if (shouldReleaseLoadedHistory(historyMemoryPressure, followingLatest, loadingOlderHistory)) onReleaseLoadedHistory?.();
   }, [historyMemoryPressure, followingLatest, loadingOlderHistory, onReleaseLoadedHistory]);
@@ -197,8 +212,8 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     disclosurePaddingRef.current = Math.max(0, top + element.clientHeight
       - Math.min(contentEnd, anchor.closingContentEnd ?? contentEnd));
     applyTailPadding();
-    element.scrollTop = top;
-  }, [applyTailPadding, reclaimDisclosurePadding]);
+    setProgrammaticScrollTop(element, top);
+  }, [applyTailPadding, reclaimDisclosurePadding, setProgrammaticScrollTop]);
 
   const getController = useCallback(() => {
     controllerRef.current ??= createMessageScroll({
@@ -214,7 +229,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
           anchorTop: anchor ? anchor.getBoundingClientRect().top - top + element.scrollTop : 0 };
       },
       setPadding: (value) => { controllerPaddingRef.current = value; applyTailPadding(); },
-      scrollTo: (top) => { if (scrollRef.current) scrollRef.current.scrollTop = top; },
+      scrollTo: (top) => { if (scrollRef.current) setProgrammaticScrollTop(scrollRef.current, top); },
       requestFrame: (callback) => requestAnimationFrame(callback),
       cancelFrame: (id) => cancelAnimationFrame(id),
       reducedMotion: () => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false,
@@ -230,7 +245,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
       },
     });
     return controllerRef.current;
-  }, [applyTailPadding]);
+  }, [applyTailPadding, setProgrammaticScrollTop]);
   const pendingStartedAt = pendingUserMessage?.startedAtMs;
   const pendingTurnKey = pendingStartedAt === undefined ? null : `pending:${pendingStartedAt}`;
   const pendingRunKey = pendingUserMessage?.agentRunId && pendingUserMessage.sessionId
@@ -305,9 +320,9 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     const anchor = recoveryAnchorRef.current;
     if (!element || !anchor) return;
     const node = element.querySelector(`[data-block-id="${CSS.escape(anchor.blockId)}"]`);
-    if (node) element.scrollTop += node.getBoundingClientRect().top
-      - element.getBoundingClientRect().top - anchor.offset;
-  }, []);
+    if (node) setProgrammaticScrollTop(element, element.scrollTop + node.getBoundingClientRect().top
+      - element.getBoundingClientRect().top - anchor.offset);
+  }, [setProgrammaticScrollTop]);
 
   useLayoutEffect(() => {
     if (renderedViewEpochRef.current === viewEpoch) return;
@@ -325,12 +340,16 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     if (anchor !== null) {
       const node = element.querySelector(`[data-block-id="${CSS.escape(anchor.blockId)}"]`);
       if (node !== null) {
-        element.scrollTop += node.getBoundingClientRect().top
-          - element.getBoundingClientRect().top - anchor.offset;
+        setProgrammaticScrollTop(element, element.scrollTop + node.getBoundingClientRect().top
+          - element.getBoundingClientRect().top - anchor.offset);
       }
       anchorRef.current = null;
     } else getController().update();
-  }, [blockIds, getController]);
+  }, [blockIds, getController, setProgrammaticScrollTop]);
+
+  // Read visibility follows the committed layout, independently of whether
+  // anchoring, streamed content or a disclosure caused that layout to change.
+  useLayoutEffect(observeReadingLatest);
 
   useEffect(() => {
     const content = contentRef.current;
@@ -342,11 +361,12 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
       restoreRecoveryAnchor();
       restoreDisclosureAnchor();
       getController().update();
+      observeReadingLatest();
     });
     observer.observe(content);
     observer.observe(element);
     return () => { observer.disconnect(); controllerRef.current?.dispose(); };
-  }, [getController, restoreRecoveryAnchor, restoreDisclosureAnchor]);
+  }, [getController, restoreRecoveryAnchor, restoreDisclosureAnchor, observeReadingLatest]);
 
   async function requestOlder() {
     const element = scrollRef.current;
@@ -370,10 +390,12 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
 
   function recordUpwardIntent() {
     upwardIntentRef.current = true;
-    getController().pause();
     const element = scrollRef.current;
     if (element && shouldLoadEarlier(element.scrollTop, hasOlder, loadingOlderHistory)) {
       upwardIntentRef.current = false;
+      // Loading earlier content is an actual reading action even at the top
+      // boundary. Preserve that anchor; other input waits for real movement.
+      getController().pause();
       void requestOlder();
     }
   }
@@ -381,15 +403,19 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   function handleScroll() {
     const element = scrollRef.current;
     if (!element) return;
+    const previousScrollTop = observedScrollTopRef.current;
+    observedScrollTopRef.current = element.scrollTop;
+    observeReadingLatest();
     // Ignore scroll events with no recent user input (browser scroll anchoring,
     // expand/collapse layout shifts) so they never detach following by themselves.
     if (!scrollbarDragRef.current && performance.now() - userScrollInputRef.current > 150) return;
-    if (element.scrollTop === userScrollStartRef.current) return;
+    if (element.scrollTop === previousScrollTop) return;
+    const movedUpward = element.scrollTop < previousScrollTop;
     recoveryAnchorRef.current = null;
     disclosureAnchorRef.current = null;
-    userScrollStartRef.current = element.scrollTop;
     reclaimDisclosurePadding();
-    getController().userScroll();
+    if (movedUpward) getController().pause();
+    else getController().userScroll();
     if (shouldLoadEarlier(element.scrollTop, hasOlder, loadingOlderHistory) && upwardIntentRef.current) {
       upwardIntentRef.current = false;
       void requestOlder();
@@ -401,7 +427,8 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   }
 
   function recordScrollInput() {
-    userScrollStartRef.current = scrollRef.current?.scrollTop ?? 0;
+    // A passive wheel handler can run after Chromium already moved the scroll
+    // offset. Keep the last observed/programmatic baseline until scroll arrives.
     userScrollInputRef.current = performance.now();
   }
 
