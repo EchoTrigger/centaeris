@@ -1,8 +1,7 @@
-import { coreFile } from '../../../../scripts/workspace/core-source.mjs';
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { createMessageScroll } from "../../src/chat/messageScroll.ts";
+import { createMessageScroll as createDesktopMessageScroll } from "../../../ui/src/components/chat/messageScroll.ts";
 
 describe("message anchoring", () => {
   function fixture(reducedMotion = false) {
@@ -62,7 +61,73 @@ describe("message anchoring", () => {
   });
 });
 
-it("keeps desktop and web scrolling rules identical", () => {
-  assert.equal(readFileSync(new URL("../../src/chat/messageScroll.ts", import.meta.url), "utf8"),
-    readFileSync(coreFile("packages/ui/src/components/chat/messageScroll.ts"), "utf8"));
-});
+
+// Both hosts share reading and anchoring semantics; animation adapters may differ.
+for (const [host, create] of [["Web", createMessageScroll], ["Desktop", createDesktopMessageScroll]] as const) {
+  describe(`${host} message scrolling contract`, () => {
+    function fixture() {
+      const geometry = { height: 800, contentEnd: 1300, anchorTop: 1200, scrollTop: 500 };
+      let padding = 0;
+      let following = true;
+      const scroll = create({
+        measure: () => geometry,
+        setPadding: value => { padding = value; },
+        scrollTo: value => { geometry.scrollTop = value; },
+        requestFrame: () => { throw new Error("Reduced motion must not schedule animation"); },
+        cancelFrame: () => {},
+        reducedMotion: () => true,
+        onFollowingChange: value => { following = value; },
+      });
+      return { geometry, scroll, padding: () => padding, following: () => following };
+    }
+
+    it("anchors the sent prompt, consumes reserved space and follows arriving content", () => {
+      const f = fixture();
+      f.scroll.anchor();
+      assert.equal(f.geometry.scrollTop, 1000);
+      assert.equal(f.padding(), 500);
+      assert.equal(f.following(), true);
+      f.geometry.contentEnd = 1600; f.scroll.update();
+      assert.equal(f.geometry.scrollTop, 1000);
+      assert.equal(f.padding(), 200);
+      f.geometry.contentEnd = 2000; f.scroll.update();
+      assert.equal(f.geometry.scrollTop, 1200);
+      assert.equal(f.padding(), 0);
+      f.scroll.dispose();
+    });
+
+    it("preserves explicit manual reading until return to latest", () => {
+      const f = fixture();
+      f.scroll.anchor(); f.scroll.pause();
+      f.geometry.scrollTop = 700; f.scroll.userScroll();
+      assert.equal(f.padding(), 200);
+      f.geometry.scrollTop = 400; f.scroll.userScroll();
+      assert.equal(f.padding(), 0);
+      f.geometry.contentEnd = 1800; f.scroll.update();
+      assert.equal(f.following(), false);
+      assert.equal(f.geometry.scrollTop, 400);
+      f.scroll.jump();
+      assert.equal(f.following(), true);
+      assert.equal(f.geometry.scrollTop, 1000);
+      f.scroll.dispose();
+    });
+
+    it("retargets resized content and clears reserved space on conversation reset", () => {
+      const f = fixture();
+      f.geometry.contentEnd = 500; f.geometry.anchorTop = 400;
+      f.scroll.anchor();
+      assert.equal(f.geometry.scrollTop, 200);
+      assert.equal(f.padding(), 500);
+      f.geometry.height = 400;
+      f.scroll.update();
+      assert.equal(f.geometry.scrollTop, 300);
+      assert.equal(f.padding(), 200);
+      f.scroll.reset();
+      assert.equal(f.padding(), 0);
+      assert.equal(f.following(), true);
+      f.scroll.update();
+      assert.equal(f.geometry.scrollTop, 100);
+      f.scroll.dispose();
+    });
+  });
+}

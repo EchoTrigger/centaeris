@@ -83,6 +83,11 @@ mentioning a prohibited dependency must not be mistaken for an actual import.
 Static checks supplement behavioral coverage; they do not establish that a
 feature works merely because certain source text is absent.
 
+Web and Desktop message-scroll tests execute both controllers against the same
+anchoring, reserved-space, manual-reading, return-to-latest and reset contract.
+Host animation adapters may differ. Before replacing the former file-equality
+assertion, an ignored-pause negative control was verified to fail for both hosts.
+
 Choose UI scenarios from observable risks such as wrapping, clipping, keyboard
 navigation, zoom, localization, and layout transitions. Viewport dimensions are
 test inputs, not correctness criteria. Assert useful relationships such as
