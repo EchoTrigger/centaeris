@@ -1,10 +1,6 @@
 fn main() {
     let result = match std::env::args().nth(1).as_deref() {
         #[cfg(target_os = "linux")]
-        Some("guest-task-once") => hosted_execution::guest_task::run_client(),
-        #[cfg(target_os = "linux")]
-        Some("guest-task-broker") => hosted_execution::guest_task::run_broker(),
-        #[cfg(target_os = "linux")]
         Some("environment-keeper") => hosted_execution::task_service::workload_keeper(),
         #[cfg(target_os = "linux")]
         Some("runsc-control") => hosted_execution::runsc_task::run(),

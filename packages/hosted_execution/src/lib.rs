@@ -6,6 +6,3 @@ pub mod protocol;
 pub mod runsc_task;
 #[cfg(any(target_os = "linux", test))]
 pub mod task_service;
-
-#[cfg(any(target_os = "linux", test))]
-pub mod guest_task;
