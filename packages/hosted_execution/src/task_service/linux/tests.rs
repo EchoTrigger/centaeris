@@ -2105,3 +2105,64 @@ sleep 30
             .any(|line| line == "populated 1")
     );
 }
+
+#[test]
+fn start_rejects_an_unverified_process_domain_before_acceptance_or_launch() {
+    let root = lock_root();
+    let control = root.join("control");
+    let output = root.join("output");
+    let groups = root.join("ordinary-directory");
+    for path in [&control, &output, &groups] {
+        fs::create_dir(path).unwrap();
+    }
+    let manager = Arc::new(Mutex::new(
+        Manager::open(
+            TaskStorage::new(control, output.clone(), OUTPUT_BUDGET_BYTES).unwrap(),
+            groups,
+            "i",
+        )
+        .unwrap(),
+    ));
+    let fence = EnvironmentTaskFence {
+        environment_instance_id: "i".into(),
+        controller_owner: EnvironmentTaskOwner::MaintenanceOperation {
+            operation_id: "prepare".into(),
+        },
+        controller_epoch: 1,
+        controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+    };
+    Manager::handle(
+        &manager,
+        EnvironmentTaskRequest::Takeover {
+            environment_instance_id: fence.environment_instance_id.clone(),
+            controller_owner: fence.controller_owner.clone(),
+            controller_epoch: fence.controller_epoch,
+            controller_purpose: fence.controller_purpose.clone(),
+        },
+    )
+    .unwrap();
+    let marker = root.join("unexpected-workload");
+    let result = Manager::handle(
+        &manager,
+        EnvironmentTaskRequest::Start {
+            fence: fence.clone(),
+            operation_id: fence.operation_id("setup"),
+            scope: EnvironmentTaskScope::Operation {
+                operation_id: "prepare".into(),
+            },
+            program: "/usr/bin/touch".into(),
+            args: vec![marker.to_str().unwrap().into()],
+            env: Default::default(),
+            cwd: "/".into(),
+            timeout_ms: 1000,
+        },
+    );
+    assert_eq!(result.unwrap_err(), "task_tree_supervision_unavailable");
+    assert!(!marker.exists());
+    assert!(manager.lock().unwrap().journal.tasks.is_empty());
+    assert_eq!(fs::read_dir(&output).unwrap().count(), 0);
+    let listed = Manager::handle(&manager, EnvironmentTaskRequest::List { fence }).unwrap();
+    assert!(matches!(listed, EnvironmentTaskResult::Listed { tasks } if tasks.is_empty()));
+    drop(manager);
+    fs::remove_dir_all(root).unwrap();
+}

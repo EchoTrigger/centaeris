@@ -17,6 +17,44 @@ pub(crate) struct OciTarget {
     pub spec_digest: String,
 }
 
+/// The task manager owns one attested launch target. Backend-specific launch
+/// and process-domain operations stay outside the durable task state machine.
+#[derive(Clone)]
+pub(crate) enum TaskLaunchTarget {
+    Oci(OciTarget),
+}
+
+impl TaskLaunchTarget {
+    pub(super) fn runsc_target(&self) -> Option<&OciTarget> {
+        match self {
+            Self::Oci(target)
+                if target.runtime == crate::host_supervisor::HostOciRuntime::Runsc =>
+            {
+                Some(target)
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn workspace_context(&self) -> Result<(String, String), String> {
+        match self {
+            Self::Oci(target) => crate::host_supervisor::workspace_context(&target.process),
+        }
+    }
+
+    pub(super) fn spawn(
+        &self,
+        id: &str,
+        request: TaskProcess<'_>,
+        cgroup: &Path,
+        trusted: Option<&TrustedLaunch>,
+    ) -> Result<Spawned, String> {
+        match self {
+            Self::Oci(target) => target.spawn(id, request, cgroup, trusted),
+        }
+    }
+}
+
 pub(super) struct TaskProcess<'a> {
     pub program: &'a str,
     pub args: &'a [String],

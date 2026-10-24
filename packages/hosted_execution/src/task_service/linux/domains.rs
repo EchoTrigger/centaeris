@@ -1,15 +1,13 @@
 use super::*;
-use crate::{host_supervisor::HostOciRuntime, runsc_task::RunnerAction};
+use crate::runsc_task::RunnerAction;
 
-fn virtual_target(launcher: &Option<Arc<OciTarget>>) -> Option<&OciTarget> {
-    launcher
-        .as_deref()
-        .filter(|target| target.runtime == HostOciRuntime::Runsc)
+fn virtual_target(launcher: &Option<Arc<TaskLaunchTarget>>) -> Option<&OciTarget> {
+    launcher.as_deref().and_then(TaskLaunchTarget::runsc_target)
 }
 
-pub(super) fn initialize(launcher: &OciTarget, root: &Path) -> Result<(), String> {
-    if launcher.runtime == HostOciRuntime::Runsc {
-        runsc::initialize(launcher)?;
+pub(super) fn initialize(launcher: &TaskLaunchTarget, root: &Path) -> Result<(), String> {
+    if let Some(target) = launcher.runsc_target() {
+        runsc::initialize(target)?;
         if !root.exists() {
             use std::os::unix::fs::DirBuilderExt;
             fs::DirBuilder::new()
@@ -28,7 +26,7 @@ pub(super) fn initialize(launcher: &OciTarget, root: &Path) -> Result<(), String
 }
 
 pub(super) fn create(
-    launcher: &Option<Arc<OciTarget>>,
+    launcher: &Option<Arc<TaskLaunchTarget>>,
     root: &Path,
     path: &Path,
 ) -> Result<Option<File>, String> {
@@ -57,7 +55,10 @@ pub(super) fn create(
     }
 }
 
-pub(super) fn events(launcher: &Option<Arc<OciTarget>>, path: &Path) -> Result<String, String> {
+pub(super) fn events(
+    launcher: &Option<Arc<TaskLaunchTarget>>,
+    path: &Path,
+) -> Result<String, String> {
     if let Some(target) = virtual_target(launcher) {
         runsc::events(target, path)
     } else {
@@ -66,7 +67,7 @@ pub(super) fn events(launcher: &Option<Arc<OciTarget>>, path: &Path) -> Result<S
     }
 }
 
-pub(super) fn kill(launcher: &Option<Arc<OciTarget>>, path: &Path) -> Result<bool, String> {
+pub(super) fn kill(launcher: &Option<Arc<TaskLaunchTarget>>, path: &Path) -> Result<bool, String> {
     if let Some(target) = virtual_target(launcher) {
         runsc::kill(target, path)
     } else {
@@ -74,7 +75,7 @@ pub(super) fn kill(launcher: &Option<Arc<OciTarget>>, path: &Path) -> Result<boo
     }
 }
 
-pub(super) fn remove(launcher: &Option<Arc<OciTarget>>, path: &Path) -> Result<(), String> {
+pub(super) fn remove(launcher: &Option<Arc<TaskLaunchTarget>>, path: &Path) -> Result<(), String> {
     if let Some(target) = virtual_target(launcher) {
         runsc::administer(target, path, RunnerAction::Remove)?;
     }

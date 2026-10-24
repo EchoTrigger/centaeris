@@ -301,3 +301,44 @@ fn leader_exit_does_not_destroy_a_background_task_domain() {
     physical_snapshot(&mut task, Some(Some(0)), true, true);
     assert!(task.cleanup_complete);
 }
+
+#[test]
+fn task_projection_keeps_attested_workspace_identity_separate_from_request_environment() {
+    let baseline = json!({
+        "user": {"uid": 10001, "gid": 10001, "additionalGids": []},
+        "args": ["/keeper"], "cwd": "/", "terminal": false,
+        "noNewPrivileges": true,
+        "env": ["PATH=/usr/bin:/bin", "CENTAERIS_WORKSPACE_ROOT=/mnt/data",
+            "CENTAERIS_WORKSPACE_USER=10001:10001"]
+    });
+    let frozen = baseline.clone();
+    let requested_environment = [
+        (
+            "CENTAERIS_WORKSPACE_ROOT".into(),
+            "/tmp/request-selected".into(),
+        ),
+        ("CENTAERIS_WORKSPACE_USER".into(), "0:0".into()),
+    ]
+    .into();
+    let args = ["literal ; argument".into(), "$(not-a-shell)".into()];
+    let projected = task_process(
+        &baseline,
+        "/bin/printf",
+        &args,
+        "/mnt/data",
+        &requested_environment,
+    )
+    .unwrap();
+    assert_eq!(
+        projected["args"],
+        json!(["/bin/printf", "literal ; argument", "$(not-a-shell)"])
+    );
+    assert_eq!(projected["cwd"], "/mnt/data");
+    assert_eq!(projected["user"], frozen["user"]);
+    assert_eq!(projected["noNewPrivileges"], true);
+    assert_eq!(baseline, frozen);
+    assert_eq!(
+        workspace_context(&baseline).unwrap(),
+        ("/mnt/data".into(), "10001:10001".into())
+    );
+}

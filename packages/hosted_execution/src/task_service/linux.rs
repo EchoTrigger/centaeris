@@ -89,7 +89,7 @@ mod domains;
 pub(crate) mod launcher;
 mod runsc;
 mod trusted;
-use launcher::{OciTarget, Spawned, TaskChild};
+use launcher::{OciTarget, Spawned, TaskChild, TaskLaunchTarget};
 pub(crate) use trusted::HelperBinary;
 use trusted::{HelperCapture, ReservedInput, TrustedLaunch};
 struct Live {
@@ -150,7 +150,7 @@ struct Manager {
     _control_lease: ControlLease,
     storage: TaskStorage,
     cgroups: PathBuf,
-    launcher: Option<Arc<OciTarget>>,
+    launcher: Option<Arc<TaskLaunchTarget>>,
     helper_root: Option<PathBuf>,
     journal: Journal,
     live: BTreeMap<String, Live>,
@@ -1300,12 +1300,13 @@ impl NativeManager {
         helper_root: PathBuf,
         helper_binary: Option<Arc<HelperBinary>>,
     ) -> Result<Self, String> {
+        let launcher = TaskLaunchTarget::Oci(launcher);
         domains::initialize(&launcher, &cgroups)?;
         let lease = ControlLease::acquire(&control)?;
         let journal = Journal::open(&control, instance)?;
         let storage = TaskStorage::new(control.clone(), output.clone(), OUTPUT_BUDGET_BYTES)?;
         let mut manager = Manager::from_journal(storage, cgroups, journal, lease)?;
-        let (workspace_root, _) = crate::host_supervisor::workspace_context(&launcher.process)?;
+        let (workspace_root, _) = launcher.workspace_context()?;
         manager.helper_root = Some(helper_root.clone());
         manager.launcher = Some(Arc::new(launcher));
         let manager = Arc::new(Mutex::new(manager));
