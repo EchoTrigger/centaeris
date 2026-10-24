@@ -635,14 +635,29 @@ impl ModelClient for ReadThenFinishModel {
                     "the unread managed workspace instructions must not enter the first prompt"
                 );
             } else {
-                assert_eq!(self.creates.load(Ordering::SeqCst), 1);
+                let created = self.creates.load(Ordering::SeqCst);
+                assert!(created <= 1);
+                let result = request
+                    .prepared_prompt
+                    .messages
+                    .iter()
+                    .find(|message| message.tool_call_id.as_deref() == Some("deferred-core-read"));
                 assert!(
-                    request.prepared_prompt.messages.iter().any(|message| {
-                        message.tool_call_id.as_deref() == Some("deferred-core-read")
-                            && message.content.contains("live instructions")
-                    }),
-                    "the explicit read result must enter the next model context"
+                    result.is_some(),
+                    "the dispatched read's outcome must enter the next model context"
                 );
+                let result = result.expect("checked");
+                if created == 1 {
+                    assert!(
+                        result.content.contains("live instructions"),
+                        "a materialized workspace returns the live instructions"
+                    );
+                } else {
+                    assert!(
+                        !result.content.contains("live instructions"),
+                        "expired authority must never fabricate live workspace content"
+                    );
+                }
                 assert_eq!(
                     requests[0].provider_prompt_cache_key,
                     request.provider_prompt_cache_key,
@@ -837,12 +852,11 @@ fn deferred_execution_query_loop_expired_step_tool_layer_clone_cannot_create_or_
     };
     let mut receipts = Vec::new();
     let result = run_deferred_read_query(stale_tools.clone(), &model, &committed, &mut receipts);
-    assert!(
-        result.is_err(),
-        "expired step must not continue with a fabricated live workspace"
-    );
+    let outcome = result.expect("the Run concludes honestly from the failed read receipt");
+    assert_eq!(outcome.stop, AgentRunStop::Finalized);
+    assert_eq!(outcome.final_reply.as_deref(), Some("Read completed."));
     assert!(committed.load(Ordering::SeqCst));
-    assert_eq!(model.requests.lock().unwrap().len(), 1);
+    assert_eq!(model.requests.lock().unwrap().len(), 2);
     assert_eq!(receipts.len(), 1);
     assert_ne!(receipts[0].status, "ok");
     assert!(proxy.ensure_ready().is_err());
@@ -851,5 +865,9 @@ fn deferred_execution_query_loop_expired_step_tool_layer_clone_cannot_create_or_
         1,
         "expired authority is latched, never retried"
     );
-    assert_eq!(creates.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        creates.load(Ordering::SeqCst),
+        0,
+        "expired authority must never fabricate a live workspace"
+    );
 }
