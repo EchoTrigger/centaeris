@@ -248,14 +248,14 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
             }
             let pending_wake_ids = tx
                 .query(
-                    "SELECT wake.event_id FROM runtime_events AS wake WHERE wake.task_id=$1 AND wake.event_type='runtime_job_wake_requested' AND NOT EXISTS(SELECT 1 FROM runtime_events AS consumed WHERE consumed.event_id='runtime_job_wake_consumed:' || substring(wake.event_id FROM char_length('runtime_job_wake:')+1)) ORDER BY wake.at_ms,wake.event_id",
-                    &[&r.job_id],
+                    "SELECT wake.event_id,COALESCE(wake.payload_json::jsonb->>'transitionReason','')<>'capacity_released' OR $2::text='e2b_environment_capacity_wait' AS applies FROM runtime_events AS wake WHERE wake.task_id=$1 AND wake.event_type='runtime_job_wake_requested' AND NOT EXISTS(SELECT 1 FROM runtime_events AS consumed WHERE consumed.event_id='runtime_job_wake_consumed:' || substring(wake.event_id FROM char_length('runtime_job_wake:')+1)) ORDER BY wake.at_ms,wake.event_id",
+                    &[&r.job_id,&r.transition_reason],
                 )
                 .map_err(|error| format!("query pending Postgres runtime job wakes failed: {error}"))?
                 .into_iter()
-                .map(|row| row.get::<_, String>(0))
+                .map(|row| (row.get::<_, String>(0),row.get::<_,bool>(1)))
                 .collect::<Vec<_>>();
-            let effective_run_at_ms = if pending_wake_ids.is_empty() {
+            let effective_run_at_ms = if !pending_wake_ids.iter().any(|(_,applies)|*applies) {
                 r.run_at_ms
             } else {
                 r.yielded_at_ms
@@ -274,7 +274,7 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
                 &[&event_id, &session_id, &r.job_id, &r.yielded_at_ms, &payload],
             )
             .map_err(|error| format!("append Postgres runtime job yield event failed: {error}"))?;
-            for wake_event_id in pending_wake_ids {
+            for (wake_event_id,_) in pending_wake_ids {
                 let consumed_event_id = wake_event_id.replacen(
                     "runtime_job_wake:",
                     "runtime_job_wake_consumed:",

@@ -73,6 +73,7 @@ pub(crate) fn validate_backfill(db: &mut impl GenericClient) -> Result<(), Strin
 
 #[cfg(test)]
 pub(in crate::postgres_store) fn restore_previous_fixture(db: &mut postgres::Client) {
+    super::super::origin::schema::restore_previous_fixture(db);
     let exists: bool = db.query_one("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='runtime' AND table_name='provider_environment_run_uses' AND column_name='creation_attempt_id')", &[]).unwrap().get(0);
     if !exists {
         return;

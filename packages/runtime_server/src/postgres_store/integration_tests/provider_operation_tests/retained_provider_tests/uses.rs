@@ -208,7 +208,10 @@ fn postgres_retained_provider_successor_uses_current_authority_after_creator_job
         .unwrap();
     assert_ne!(use_a.provider_use_id, use_b.provider_use_id);
     assert_eq!(use_b.target, use_a.target);
-    assert_eq!(use_b.target.identity.agent_run_id, a.original.agent_run_id);
+    assert_eq!(
+        use_b.target.identity.agent_run_id(),
+        Some(a.original.agent_run_id.as_str())
+    );
     reopened
         .with_retained_provider_execution_dispatch(
             &b.authority(ControllerPurpose::Execute),

@@ -1,12 +1,47 @@
 //! Independently authorized provider pause and resume over the exact creation identity.
 use super::*;
-use crate::e2b_run_registry::E2bEnvironmentBinding;
+use crate::e2b_run_registry::{E2bEnvironmentBinding, E2bRunRegistry};
 use crate::observations::power::{PowerMetric, PowerObservation};
 use crate::postgres_store::provider_operations::retained::power::{
     ProviderEnvironmentPowerAcknowledgement, ProviderEnvironmentPowerAction,
     ProviderEnvironmentPowerRequest, ProviderEnvironmentPowerResult,
 };
 use std::collections::BTreeMap;
+
+pub(crate) fn with_power_environment(
+    registry: &E2bRunRegistry,
+    binding: &E2bEnvironmentBinding,
+    advance: impl FnOnce(
+        &mut Option<Arc<E2bPreparedHost>>,
+    ) -> Result<ProviderEnvironmentPowerResult, E2bRuntimeError>,
+) -> Result<ProviderEnvironmentPowerResult, E2bRuntimeError> {
+    let slot = registry
+        .existing_environment(binding)
+        .map_err(|_| E2bRuntimeError::Rejected("e2b_power_binding_rejected"))?;
+    // Preserve the same local-guard -> durable-Environment-pin order as Run steps.
+    // Maintenance after restart never reserves ordinary live-context capacity.
+    let mut held = slot
+        .as_ref()
+        .map(|slot| {
+            slot.try_enter()
+                .map_err(|_| E2bRuntimeError::Unavailable("e2b_power_context_unavailable"))?
+                .ok_or(E2bRuntimeError::Unavailable(
+                    "e2b_environment_already_active",
+                ))
+        })
+        .transpose()?;
+    let mut absent = None;
+    let context = held.as_deref_mut().unwrap_or(&mut absent);
+    // The callback invalidates this handle only when the Store supplies a fresh
+    // dispatch permit. Historical ACK replay must preserve a successor's handle.
+    let result = advance(context)?;
+    if result.environment_id != binding.environment_id {
+        return Err(E2bRuntimeError::Unknown(
+            "e2b_power_result_binding_rejected",
+        ));
+    }
+    Ok(result)
+}
 
 impl E2bRuntime {
     /// Pure binding check before acquiring the existing local Environment guard.
@@ -42,6 +77,14 @@ impl E2bRuntime {
         request: &ProviderEnvironmentPowerRequest,
         before_dispatch: impl FnOnce() -> Result<(), String> + Send,
     ) -> Result<ProviderEnvironmentPowerResult, E2bRuntimeError> {
+        self.power_guarded(request, false, before_dispatch)
+    }
+    pub(crate) fn power_guarded(
+        &self,
+        request: &ProviderEnvironmentPowerRequest,
+        automatic_resume: bool,
+        before_dispatch: impl FnOnce() -> Result<(), String> + Send,
+    ) -> Result<ProviderEnvironmentPowerResult, E2bRuntimeError> {
         let binding = self.power_binding(request)?;
         let EnvironmentProfile::E2b(profile) = self.config.profile() else {
             return Err(E2bRuntimeError::Rejected("e2b_power_profile_rejected"));
@@ -59,9 +102,11 @@ impl E2bRuntime {
             // Historical ACKs and Unknown replays cannot invalidate a newer Run's
             // context or enter the provider. No creator/successor Job is borrowed.
             self.store
-                .advance_provider_environment_power(
+                .advance_provider_environment_power_guarded(
                     request,
                     &self.config.provider_config_digest,
+                    self.config.running_limit,
+                    automatic_resume,
                     |target, current| {
                         dispatch_power(
                             target,
@@ -180,13 +225,15 @@ mod tests {
                 environment_id: "environment".into(),
                 session_id: "session".into(),
                 workspace_id: "workspace".into(),
-                agent_run_id: "original-run-a".into(),
+                owner: centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+                    run_id: "original-run-a".into(),
+                },
                 authorization_digest: format!("sha256:{}", "a".repeat(64)),
                 profile_digest: format!("sha256:{}", "b".repeat(64)),
                 provider_config_digest: format!("sha256:{}", "c".repeat(64)),
                 request_digest: format!("sha256:{}", "d".repeat(64)),
                 idempotency_key: "original-key".into(),
-                processing_job_id: "original-job-a".into(),
+                processing_job_id: Some("original-job-a".into()),
             },
             sandbox_id: "original-sandbox".into(),
             verification_digest: format!("sha256:{}", "e".repeat(64)),

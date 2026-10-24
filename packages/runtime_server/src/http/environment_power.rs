@@ -1,46 +1,15 @@
 //! Independent maintenance control over a retained provider Environment.
 use super::*;
+#[cfg(test)]
 use crate::e2b_run_registry::{E2bEnvironmentBinding, E2bRunRegistry};
-use crate::e2b_runtime::{E2bPreparedHost, E2bRuntimeError};
-use crate::postgres_store::provider_operations::retained::power::{
-    ProviderEnvironmentPowerRequest, ProviderEnvironmentPowerResult,
-};
+use crate::e2b_runtime::E2bRuntimeError;
+use crate::postgres_store::provider_operations::retained::power::ProviderEnvironmentPowerRequest;
+#[cfg(test)]
 use std::sync::Arc;
 
-fn with_power_environment(
-    registry: &E2bRunRegistry,
-    binding: &E2bEnvironmentBinding,
-    advance: impl FnOnce(
-        &mut Option<Arc<E2bPreparedHost>>,
-    ) -> Result<ProviderEnvironmentPowerResult, E2bRuntimeError>,
-) -> Result<ProviderEnvironmentPowerResult, E2bRuntimeError> {
-    let slot = registry
-        .existing_environment(binding)
-        .map_err(|_| E2bRuntimeError::Rejected("e2b_power_binding_rejected"))?;
-    // Preserve the same local-guard -> durable-Environment-pin order as Run steps.
-    // Maintenance after restart never reserves ordinary live-context capacity.
-    let mut held = slot
-        .as_ref()
-        .map(|slot| {
-            slot.try_enter()
-                .map_err(|_| E2bRuntimeError::Unavailable("e2b_power_context_unavailable"))?
-                .ok_or(E2bRuntimeError::Unavailable(
-                    "e2b_environment_already_active",
-                ))
-        })
-        .transpose()?;
-    let mut absent = None;
-    let context = held.as_deref_mut().unwrap_or(&mut absent);
-    // The callback invalidates this handle only when the Store supplies a fresh
-    // dispatch permit. Historical ACK replay must preserve a successor's handle.
-    let result = advance(context)?;
-    if result.environment_id != binding.environment_id {
-        return Err(E2bRuntimeError::Unknown(
-            "e2b_power_result_binding_rejected",
-        ));
-    }
-    Ok(result)
-}
+use crate::e2b_runtime::with_power_environment;
+#[cfg(test)]
+use crate::postgres_store::provider_operations::retained::power::ProviderEnvironmentPowerResult;
 
 pub(super) fn power(
     state: HttpServerState,

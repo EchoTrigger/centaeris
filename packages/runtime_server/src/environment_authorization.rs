@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use crate::agent_run_authorization::WorkspaceAgentRunAuthorization;
 
 pub(crate) mod maintenance;
+pub(crate) mod provider_maintenance;
 pub(crate) mod provision;
 
 const DOMAIN: &[u8] = b"workspace:environment-authorization:v1\0";

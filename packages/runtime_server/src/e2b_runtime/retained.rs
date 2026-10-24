@@ -164,7 +164,11 @@ impl E2bRuntime {
             &self.config.provider_config_digest,
         )?);
         let binding = binding_for(authorization, &value.target)?;
-        let transport = Arc::new(E2bSdkTransport::new(ordinary, control));
+        let transport = Arc::new(E2bSdkTransport::new(
+            ordinary,
+            control,
+            self.config.profile.clone(),
+        ));
         let runner = Arc::new(
             E2bExecutionHostRunner::new(
                 self.config.profile.clone(),
@@ -199,7 +203,7 @@ impl E2bRuntime {
             return self.prepare_new(authority, authorization, execution_id);
         };
         if operation.dispatch_state == ProviderCreationDispatchState::Prepared
-            && operation.identity.agent_run_id == authorization.agent_run_id
+            && operation.identity.agent_run_id() == Some(authorization.agent_run_id.as_str())
             && operation.identity.execution_id == execution_id
         {
             return self.prepare_new(authority, authorization, execution_id);
@@ -214,7 +218,7 @@ impl E2bRuntime {
         // A successor can attach after the prior consumer positively closed;
         // an open current consumer cannot discard its lost command streams.
         if previous.is_none()
-            && (operation.identity.agent_run_id == authorization.agent_run_id
+            && (operation.identity.agent_run_id() == Some(authorization.agent_run_id.as_str())
                 || self
                     .store
                     .retained_provider_run_use(&authorization.agent_run_id)
@@ -290,7 +294,11 @@ impl E2bRuntime {
             E2bExecutionHostRunner::new(
                 self.config.profile.clone(),
                 binding,
-                Arc::new(E2bSdkTransport::new(ordinary, control)),
+                Arc::new(E2bSdkTransport::new(
+                    ordinary,
+                    control,
+                    self.config.profile.clone(),
+                )),
                 dispatch.clone(),
             )
             .map_err(|_| E2bRuntimeError::Unknown("e2b_retained_host_unconfirmed"))?
@@ -325,7 +333,7 @@ impl E2bRuntime {
                 if operation.dispatch_state == ProviderCreationDispatchState::Dispatched {
                     // Only the original creator can recover its own missing use.
                     // A locator is evidence to inspect, not proof of absent effects.
-                    if operation.identity.agent_run_id != *run_id
+                    if operation.identity.agent_run_id() != Some(run_id.as_str())
                         || operation.reported_sandbox_id.is_none()
                     {
                         return Err(E2bRuntimeError::Unknown(
@@ -365,7 +373,11 @@ impl E2bRuntime {
                             template_id: profile.template_ref.template_id.clone(),
                             metadata: expected_metadata(&target.identity),
                         },
-                        Arc::new(E2bSdkTransport::new(control.clone(), control)),
+                        Arc::new(E2bSdkTransport::new(
+                            control.clone(),
+                            control,
+                            self.config.profile.clone(),
+                        )),
                         Arc::new(CleanupOnlyAuthority),
                     )
                     .map_err(|_| {

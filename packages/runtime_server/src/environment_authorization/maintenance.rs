@@ -4,7 +4,7 @@ use centaeris_core::execution::{
     EnvironmentTaskControllerPurpose, EnvironmentTaskFence, EnvironmentTaskOwner,
 };
 
-const SCHEMA: &str = "workspace.environment_maintenance_authorization.v1";
+pub(crate) const SCHEMA: &str = "workspace.environment_maintenance_authorization.v1";
 const DOMAIN: &[u8] = b"workspace:environment-maintenance-authorization:v1\0";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

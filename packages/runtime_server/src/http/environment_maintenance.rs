@@ -1,5 +1,6 @@
 //! Independently authorized maintenance uses the ordinary environment task channel.
 use super::*;
+mod provider;
 use crate::environment_authorization::maintenance::MaintenanceAuthorization;
 use centaeris_core::execution::{
     EnvironmentTaskEnvelope, EnvironmentTaskFence, EnvironmentTaskOwner, EnvironmentTaskRequest,
@@ -147,6 +148,9 @@ pub(super) fn task(
     if let Err((status, code)) = body_authority(&request) {
         return json_error_response(status, code);
     }
+    if provider::owns_task_request(request.body()) {
+        return provider::task(state, request);
+    }
     let dispatch: Dispatch = match serde_json::from_slice(request.body()) {
         Ok(value) => value,
         Err(_) => return json_error_response(400, "maintenance_request_invalid"),
@@ -261,6 +265,9 @@ pub(super) fn filesystem(
 ) -> Result<Response<Body>, String> {
     if let Err((status, code)) = body_authority(&request) {
         return json_error_response(status, code);
+    }
+    if provider::owns_file_request(request.body()) {
+        return provider::filesystem(state, request);
     }
     let (dispatch, raw) = match file_dispatch(request.body()) {
         Ok(value) => value,

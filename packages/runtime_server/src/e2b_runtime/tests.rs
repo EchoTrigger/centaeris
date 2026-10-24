@@ -348,3 +348,78 @@ fn adapter_transport_timings_preserve_failed_spawn_and_disabled_observation() {
         }
     }
 }
+
+#[test]
+fn running_limit_is_opt_in_bounded_and_requires_retained_lifetime() {
+    let (_root, python, package) = paths();
+    let configured = |selected| {
+        E2bRuntimeConfig::new(
+            selected,
+            configured_digest(),
+            python.clone(),
+            package.clone(),
+            Duration::from_secs(20),
+        )
+        .unwrap()
+    };
+    assert_eq!(configured(profile()).running_limit, None);
+    assert!(configured(profile()).with_running_limit(Some(1)).is_err());
+    let mut retained = profile();
+    let EnvironmentProfile::E2b(value) = &mut retained else {
+        unreachable!()
+    };
+    value.lifetime = "retained".into();
+    for invalid in [0, 65, u32::MAX] {
+        assert!(configured(retained.clone())
+            .with_running_limit(Some(invalid))
+            .is_err());
+    }
+    for valid in [1, 64] {
+        let selected = configured(retained.clone())
+            .with_running_limit(Some(valid))
+            .unwrap();
+        assert_eq!(selected.running_limit, Some(valid));
+        assert_eq!(selected.profile(), &retained);
+    }
+}
+
+#[test]
+fn idle_rotation_requires_explicit_retained_running_budget_and_positive_grace() {
+    let (_root, python, package) = paths();
+    let mut retained = profile();
+    let EnvironmentProfile::E2b(value) = &mut retained else {
+        unreachable!()
+    };
+    value.lifetime = "retained".into();
+    let configured = || {
+        E2bRuntimeConfig::new(
+            retained.clone(),
+            configured_digest(),
+            python.clone(),
+            package.clone(),
+            Duration::from_secs(20),
+        )
+        .unwrap()
+    };
+    assert!(
+        configured().idle_pause_timeout.is_none(),
+        "ordinary configuration performs no automatic scans"
+    );
+    assert!(configured()
+        .with_idle_pause_timeout(Some(Duration::from_millis(1)))
+        .is_err());
+    assert!(configured()
+        .with_running_limit(Some(1))
+        .unwrap()
+        .with_idle_pause_timeout(Some(Duration::ZERO))
+        .is_err());
+    let selected = configured()
+        .with_running_limit(Some(1))
+        .unwrap()
+        .with_idle_pause_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    assert_eq!(
+        selected.idle_pause_timeout,
+        Some(Duration::from_millis(100))
+    );
+}

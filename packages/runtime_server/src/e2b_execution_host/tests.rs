@@ -150,7 +150,7 @@ fn identity() -> ExecutionFileIdentity {
         display_path: "binary".into(),
     }
 }
-pub(super) fn binding() -> E2bSandboxBinding {
+pub(crate) fn binding() -> E2bSandboxBinding {
     let mut metadata: BTreeMap<String, String> = [
         "centaerisAttemptId",
         "environmentId",
@@ -475,8 +475,8 @@ fn unsupported_profile_and_binding_fail_before_any_provider_action() {
     let fixture = Arc::new(FixtureTransport::new());
     for (field, value) in [
         ("lifetime", "unsupported"),
-        ("user", "root"),
-        ("workspaceRoot", "/another"),
+        ("user", "INVALID"),
+        ("workspaceRoot", "/app/../escape"),
     ] {
         let mut value_profile = serde_json::to_value(profile()).unwrap();
         value_profile[field] = value.into();
@@ -947,4 +947,41 @@ fn managed_profile_selects_owned_workspace_and_denies_private_backing_paths() {
         .contains(&"/var/lib/centaeris-host".into()));
 }
 
+mod creation_origin;
+
 mod capacity;
+
+#[test]
+fn task_image_profile_preserves_root_and_app_command_policy() {
+    let mut selected = serde_json::to_value(profile()).unwrap();
+    selected["user"] = "root".into();
+    selected["workspaceRoot"] = "/app".into();
+    let selected: EnvironmentProfile = serde_json::from_value(selected).unwrap();
+    let mut bound = binding();
+    bound
+        .metadata
+        .insert("profileDigest".into(), selected.digest().unwrap());
+    let runner = E2bExecutionHostRunner::new(
+        selected,
+        bound,
+        Arc::new(FixtureTransport::new()),
+        Arc::new(FixtureAuthority::new()),
+    )
+    .expect("the task's frozen image identity is supported");
+    let mut expected = ExecutionPolicy::workspace_write_no_network("/app");
+    expected.filesystem.denied_read_paths =
+        vec!["/run/centaeris".into(), "/run/centaeris-host".into()];
+    expected.filesystem.denied_write_paths = expected.filesystem.denied_read_paths.clone();
+    assert_eq!(runner.execution_policy(), expected);
+    assert_eq!(runner.workspace_root(), "/app");
+    let mut request = command(&runner);
+    request.cwd = "/app".into();
+    assert_eq!(
+        runner
+            .run_host_command(Some("task-image-command"), request, None)
+            .unwrap()
+            .process
+            .exit_code,
+        Some(7)
+    );
+}

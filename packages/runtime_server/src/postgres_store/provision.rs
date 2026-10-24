@@ -10,7 +10,7 @@ use centaeris_core::execution::{
 };
 use sha2::{Digest, Sha256};
 
-fn locked(
+pub(super) fn locked(
     tx: &mut postgres::Transaction<'_>,
     auth: &ProvisionAuthorization,
     key: &[u8],

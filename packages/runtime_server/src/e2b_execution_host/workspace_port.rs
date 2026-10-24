@@ -69,6 +69,13 @@ impl HeldWorkspace<'_> {
 }
 
 impl WorkspaceHelperSession for HeldWorkspace<'_> {
+    fn verify_retained_provider_binding(
+        &self,
+    ) -> Result<crate::session_workspace::RetainedProviderWorkspaceBinding, E2bHostError> {
+        require_known(self.runner)?;
+        self.runner.verify_retained_provider_binding()
+    }
+
     fn take_capture_baseline(
         &self,
         expected: &WorkspaceSnapshotDescriptor,

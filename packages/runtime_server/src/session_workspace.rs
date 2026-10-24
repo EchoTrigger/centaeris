@@ -29,9 +29,20 @@ pub(crate) enum SessionWorkspaceApiError {
     Unavailable(String),
 }
 
+/// Files remain referenced by the durable Environment binding and original Run
+/// authorization. This receipt is not an archive generation or snapshot commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetainedProviderWorkspaceBinding {
+    pub environment_id: String,
+    pub instance_id: String,
+    pub sandbox_id: String,
+    pub profile_digest: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionWorkspaceCommitOutcome {
     ProtectionDeferred,
+    RetainedProvider(RetainedProviderWorkspaceBinding),
     Accepted,
     Unchanged,
     Rejected(String),

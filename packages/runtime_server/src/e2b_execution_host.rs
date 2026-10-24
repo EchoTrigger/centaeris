@@ -142,9 +142,11 @@ pub(crate) struct E2bExecutionHostRunner {
 
 pub(crate) fn execution_policy_for_profile(profile: &EnvironmentProfile) -> ExecutionPolicy {
     let mut policy = match profile.network() {
-        ExecutionNetwork::Disabled => ExecutionPolicy::workspace_write_no_network("/mnt/data"),
+        ExecutionNetwork::Disabled => {
+            ExecutionPolicy::workspace_write_no_network(profile.workspace_root())
+        }
         ExecutionNetwork::PublicInternet => {
-            ExecutionPolicy::workspace_write_public_internet("/mnt/data")
+            ExecutionPolicy::workspace_write_public_internet(profile.workspace_root())
         }
     };
     policy.filesystem.denied_read_paths =
@@ -171,24 +173,52 @@ impl E2bExecutionHostRunner {
             return Err("e2b_host_profile_unsupported".into());
         };
         if !matches!(value.lifetime.as_str(), "perRun" | "retained")
-            || value.workspace_root != "/mnt/data"
-            || value.user != "agent"
             || value.template_ref.template_id != binding.template_id
         {
             return Err("e2b_host_profile_unsupported".into());
         }
-        let keys = [
-            "centaerisAttemptId",
-            "environmentId",
-            "instanceId",
-            "executionId",
-            "agentRunId",
-            "sessionId",
-            "workspaceId",
-            "profileDigest",
-            "authorizationDigest",
-            "processingJobId",
-        ];
+        let keys = if let Some(kind) = binding.metadata.get("creationOwnerKind") {
+            if kind != "maintenanceOperation"
+                || value.lifetime != "retained"
+                || binding
+                    .metadata
+                    .get("maintenanceOperationId")
+                    .is_none_or(|id| {
+                        id.is_empty()
+                            || id.len() > 160
+                            || !id
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))
+                    })
+            {
+                return Err("e2b_host_binding_invalid".into());
+            }
+            [
+                "centaerisAttemptId",
+                "environmentId",
+                "instanceId",
+                "executionId",
+                "sessionId",
+                "workspaceId",
+                "profileDigest",
+                "authorizationDigest",
+                "creationOwnerKind",
+                "maintenanceOperationId",
+            ]
+        } else {
+            [
+                "centaerisAttemptId",
+                "environmentId",
+                "instanceId",
+                "executionId",
+                "agentRunId",
+                "sessionId",
+                "workspaceId",
+                "profileDigest",
+                "authorizationDigest",
+                "processingJobId",
+            ]
+        };
         if binding.sandbox_id.is_empty()
             || binding.sandbox_id.len() > 128
             || !binding
@@ -305,6 +335,13 @@ impl E2bExecutionHostRunner {
             return Err(E2bHostError::NotDispatched("e2b_cleanup_environment_busy"));
         };
         self.require_closed_commands()?;
+        if self.profile.task_image() {
+            // These cleanup pins authorize this read-only exact identity check.
+            // Closed Core commands do not authorize killing root services or
+            // claiming that every VM process is quiescent.
+            let observed = self.transport.inspect(&self.binding)?;
+            return self.require_observed_binding(&observed);
+        }
         let result = (|| {
             self.transport.quiesce(&self.binding)?;
             let output = self.transport.helper(
@@ -352,6 +389,39 @@ impl E2bExecutionHostRunner {
         // Keep dispatch activity through semantic validation, so an uncertain
         // response cannot become an idle workspace observation in between.
         let _activity = self.begin_activity()?;
+        if self.profile.task_image() {
+            self.verify_retained_provider_binding()?;
+            let request = ExecutionCommandRequest {
+                program: "/usr/bin/test".into(),
+                args: vec!["-d".into(), ".".into()],
+                cwd: self.workspace_root().into(),
+                env: HashMap::new(),
+                timeout_ms: 20_000,
+                policy: self.execution_policy(),
+            };
+            let pid = match self.dispatch(|| {
+                self.transport
+                    .start(&self.binding, &request)
+                    .map(E2bDispatchResult::Process)
+            })? {
+                E2bDispatchResult::Process(pid) if pid > 0 => pid,
+                _ => return Err(E2bHostError::Unknown("e2b_task_image_preparation_invalid")),
+            };
+            let output = self
+                .transport
+                .wait(&self.binding, pid, Duration::from_secs(25))?;
+            if output.sandbox_id != self.binding.sandbox_id
+                || output.pid != pid
+                || output.exit_code != 0
+                || !output.stdout.is_empty()
+                || !output.stderr.is_empty()
+            {
+                return Err(E2bHostError::Unknown(
+                    "e2b_task_image_preparation_unconfirmed",
+                ));
+            }
+            return Ok(());
+        }
         let kind = if self.profile.managed_files() {
             TrustedHelperKind::PrepareManagedWorkspace
         } else {
@@ -366,6 +436,49 @@ impl E2bExecutionHostRunner {
         }
         Ok(())
     }
+    fn require_observed_binding(
+        &self,
+        observed: &E2bSandboxObservation,
+    ) -> Result<(), E2bHostError> {
+        if observed.binding != self.binding
+            || !observed.running
+            || !observed.on_timeout_kill
+            || observed.auto_resume
+        {
+            return Err(E2bHostError::Unknown("e2b_host_observation_mismatch"));
+        }
+        Ok(())
+    }
+
+    fn verify_retained_provider_binding(
+        &self,
+    ) -> Result<crate::session_workspace::RetainedProviderWorkspaceBinding, E2bHostError> {
+        if !self.profile.task_image() {
+            return Err(E2bHostError::NotDispatched(
+                "e2b_retained_provider_binding_unsupported",
+            ));
+        }
+        if !self.helper_effects_known() {
+            return Err(E2bHostError::Unknown("e2b_prior_helper_effects_unknown"));
+        }
+        self.require_closed_commands()?;
+        let observed = match self.dispatch(|| {
+            self.transport
+                .inspect(&self.binding)
+                .map(E2bDispatchResult::Observation)
+        })? {
+            E2bDispatchResult::Observation(observed) => observed,
+            _ => return Err(E2bHostError::Unknown("e2b_host_observation_mismatch")),
+        };
+        self.require_observed_binding(&observed)?;
+        Ok(crate::session_workspace::RetainedProviderWorkspaceBinding {
+            environment_id: self.binding.metadata["environmentId"].clone(),
+            instance_id: self.binding.metadata["instanceId"].clone(),
+            sandbox_id: self.binding.sandbox_id.clone(),
+            profile_digest: self.binding.metadata["profileDigest"].clone(),
+        })
+    }
+
     pub(crate) fn execution_policy(&self) -> ExecutionPolicy {
         self.policy.clone()
     }
@@ -445,6 +558,11 @@ impl E2bExecutionHostRunner {
         observation: Option<&WorkspaceProtection>,
     ) -> Result<Vec<u8>, E2bHostError> {
         let _context = crate::observations::Context::enter_owned(&self.observation_context);
+        if self.profile.task_image() {
+            return Err(E2bHostError::NotDispatched(
+                "e2b_task_image_helper_unsupported",
+            ));
+        }
         if !self.helper_effects_known()
             && !matches!(
                 kind,

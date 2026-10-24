@@ -14,6 +14,7 @@ const HELPER_PATH: &str = "/opt/centaeris/bin/execution_agent";
 
 pub(crate) struct E2bSdkTransport {
     ordinary: Arc<SpoolingAdapterProcess>,
+    profile: EnvironmentProfile,
     control: Arc<SpoolingAdapterProcess>,
     observation_context: crate::observations::ContextSnapshot,
 }
@@ -22,9 +23,11 @@ impl E2bSdkTransport {
     pub(crate) fn new(
         ordinary: Arc<SpoolingAdapterProcess>,
         control: Arc<SpoolingAdapterProcess>,
+        profile: EnvironmentProfile,
     ) -> Self {
         Self {
             ordinary,
+            profile,
             control,
             observation_context: crate::observations::Context::snapshot(),
         }
@@ -68,6 +71,7 @@ impl E2bSdkTransport {
         binding: &E2bSandboxBinding,
         script: String,
         user: &str,
+        cwd: &str,
         envs: Value,
         timeout: Duration,
     ) -> Result<i32, E2bHostError> {
@@ -78,7 +82,7 @@ impl E2bSdkTransport {
         let result = call(
             &self.ordinary,
             "runCommand",
-            json!({"sandboxId":binding.sandbox_id,"command":script,"user":user,"cwd":"/mnt/data","envs":envs,"timeoutSeconds":seconds}),
+            json!({"sandboxId":binding.sandbox_id,"command":script,"user":user,"cwd":cwd,"envs":envs,"timeoutSeconds":seconds}),
             CONTROL_TIMEOUT,
         )?;
         #[derive(Deserialize)]
@@ -101,7 +105,7 @@ impl E2bSdkTransport {
         script: String,
         timeout: Duration,
     ) -> Result<(), E2bHostError> {
-        let pid = self.shell(binding, script, "root", helper_environment(), timeout)?;
+        let pid = self.shell(binding, script, "root", "/", helper_environment(), timeout)?;
         let output = self.wait(binding, pid, timeout.saturating_add(Duration::from_secs(5)))?;
         if output.exit_code != 0 {
             return Err(E2bHostError::Unknown("e2b_helper_process_failed"));
@@ -116,6 +120,11 @@ impl E2bSdkTransport {
         output_limit: usize,
         observation: Option<&WorkspaceProtection>,
     ) -> Result<Vec<u8>, E2bHostError> {
+        if self.profile.task_image() {
+            return Err(E2bHostError::NotDispatched(
+                "e2b_task_image_helper_unsupported",
+            ));
+        }
         let _context = crate::observations::Context::enter_if_absent(&self.observation_context);
         let timing = HelperObservation::new(kind);
         timing.timed(HelperMetric::Total, || {
@@ -229,7 +238,7 @@ impl E2bSdkTransport {
                 environment["WORKSPACE_PERF_OPERATION_ID"] = observation.operation_id().into();
             }
             let pid = timing.timed(HelperMetric::Execute, || {
-                self.shell(binding, script, "root", environment, timeout)
+                self.shell(binding, script, "root", "/", environment, timeout)
             })?;
             timing.timed(HelperMetric::Wait, || {
                 let completed =
@@ -290,6 +299,43 @@ impl E2bSdkTransport {
 
 impl E2bHostTransport for E2bSdkTransport {
     fn inspect(&self, binding: &E2bSandboxBinding) -> Result<E2bSandboxObservation, E2bHostError> {
+        if self.profile.task_image() {
+            // The adapter's attach performs fresh GET, exact immutable metadata,
+            // running/kill/autoResume=false checks and native SDK client creation.
+            // It never resumes, extends TTL or runs an image helper.
+            let value = call(
+                &self.ordinary,
+                "attach",
+                json!({"sandboxId":binding.sandbox_id,
+                "expectedTemplateId":binding.template_id,"expectedMetadata":binding.metadata,
+                "workspaceRoot":self.profile.workspace_root(),"workspaceUser":self.profile.user()}),
+                CONTROL_TIMEOUT,
+            )?;
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Attached {
+                sandbox_id: String,
+                template_id: String,
+                metadata: BTreeMap<String, String>,
+                state: String,
+            }
+            let value: Attached = serde_json::from_value(value)
+                .map_err(|_| E2bHostError::Unknown("e2b_task_image_attach_invalid"))?;
+            let observed = E2bSandboxBinding {
+                sandbox_id: value.sandbox_id,
+                template_id: value.template_id,
+                metadata: value.metadata,
+            };
+            if observed != *binding || value.state != "running" {
+                return Err(E2bHostError::Unknown("e2b_task_image_attach_mismatch"));
+            }
+            return Ok(E2bSandboxObservation {
+                binding: observed,
+                running: true,
+                on_timeout_kill: true,
+                auto_resume: false,
+            });
+        }
         let _context = crate::observations::Context::enter_if_absent(&self.observation_context);
         let timing = HelperObservation::new(TrustedHelperKind::AgentProcessState);
         timing.timed(HelperMetric::Total, || {
@@ -348,7 +394,11 @@ impl E2bHostTransport for E2bSdkTransport {
         self.shell(
             binding,
             script,
-            "agent",
+            self.profile.user(),
+            request
+                .cwd
+                .to_str()
+                .ok_or(E2bHostError::NotDispatched("e2b_command_cwd_invalid"))?,
             serde_json::to_value(&request.env)
                 .map_err(|_| E2bHostError::NotDispatched("e2b_command_environment_invalid"))?,
             Duration::from_millis(request.timeout_ms),
@@ -374,6 +424,11 @@ impl E2bHostTransport for E2bSdkTransport {
         receipt.output(&binding.sandbox_id, Some(pid))
     }
     fn quiesce(&self, binding: &E2bSandboxBinding) -> Result<(), E2bHostError> {
+        if self.profile.task_image() {
+            return Err(E2bHostError::NotDispatched(
+                "e2b_task_image_quiescence_unsupported",
+            ));
+        }
         let _context = crate::observations::Context::enter_if_absent(&self.observation_context);
         let timing = HelperObservation::new(TrustedHelperKind::QuiesceAgentProcesses);
         timing.timed(HelperMetric::Total, || {
@@ -474,4 +529,4 @@ fn helper_environment() -> Value {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

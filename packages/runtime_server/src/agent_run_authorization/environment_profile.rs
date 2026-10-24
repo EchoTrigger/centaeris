@@ -151,6 +151,7 @@ pub struct E2bEnvironmentProfile {
 #[serde(rename_all = "camelCase")]
 pub enum WorkspaceInitialization {
     ManagedFiles,
+    TaskImage,
 }
 
 fn deserialize_workspace_initialization<'de, D: Deserializer<'de>>(
@@ -250,6 +251,11 @@ impl E2bEnvironmentProfile {
         {
             return Err("environment_profile_workspace_initialization_invalid".into());
         }
+        if self.workspace_initialization == Some(WorkspaceInitialization::TaskImage)
+            && self.lifetime != "retained"
+        {
+            return Err("environment_profile_workspace_initialization_invalid".into());
+        }
         if self.schema != "runtime.e2b_environment_profile.v1" || self.provider != "e2b" {
             return Err("environment_profile_schema_invalid".into());
         }
@@ -322,6 +328,11 @@ fn validate_workspace_root(root: &str) -> Result<(), String> {
 }
 
 impl EnvironmentProfile {
+    pub fn task_image(&self) -> bool {
+        matches!(self, Self::E2b(profile)
+            if profile.workspace_initialization == Some(WorkspaceInitialization::TaskImage))
+    }
+
     pub fn managed_files(&self) -> bool {
         matches!(self, Self::E2b(profile)
             if profile.workspace_initialization == Some(WorkspaceInitialization::ManagedFiles))
@@ -384,5 +395,46 @@ impl EnvironmentProfile {
             serde_json::to_value(self).map_err(|_| "environment profile serialization failed")?;
         let canonical = canonical_json(value)?;
         Ok(format!("sha256:{:x}", Sha256::digest(canonical.as_bytes())))
+    }
+}
+
+#[cfg(test)]
+mod task_image_tests {
+    use super::*;
+    fn selected() -> serde_json::Value {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/workspace/fixtures/e2b_environment_profile/v1/valid.json"
+        ))
+        .unwrap();
+        value["workspaceInitialization"] = "taskImage".into();
+        value["lifetime"] = "retained".into();
+        value["workspaceRoot"] = "/app".into();
+        value["user"] = "root".into();
+        value
+    }
+    #[test]
+    fn task_image_profile_explicitly_preserves_original_user_and_working_directory() {
+        let value = selected();
+        let profile: EnvironmentProfile = serde_json::from_value(value.clone()).unwrap();
+        profile.validate().unwrap();
+        assert_eq!(profile.user(), "root");
+        assert_eq!(profile.workspace_root(), "/app");
+        assert_eq!(serde_json::to_value(profile).unwrap(), value);
+    }
+    #[test]
+    fn task_image_profile_requires_retained_lifetime_and_has_no_aliases() {
+        let mut value = selected();
+        value["lifetime"] = "perRun".into();
+        let profile: EnvironmentProfile = serde_json::from_value(value).unwrap();
+        assert!(profile.validate().is_err());
+        for unsupported in [
+            serde_json::Value::Null,
+            serde_json::json!("task_image"),
+            serde_json::json!("native"),
+        ] {
+            let mut value = selected();
+            value["workspaceInitialization"] = unsupported;
+            assert!(serde_json::from_value::<EnvironmentProfile>(value).is_err());
+        }
     }
 }

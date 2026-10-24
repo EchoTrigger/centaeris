@@ -170,6 +170,19 @@ impl WorkspaceHelperPort for Helper {
     }
 }
 impl WorkspaceHelperSession for Held<'_> {
+    fn verify_retained_provider_binding(
+        &self,
+    ) -> Result<RetainedProviderWorkspaceBinding, E2bHostError> {
+        assert!(self.0.held.load(Ordering::SeqCst));
+        self.0.events.lock().unwrap().push("verifyRetainedBinding");
+        Ok(RetainedProviderWorkspaceBinding {
+            environment_id: "environment-owned".into(),
+            instance_id: "instance-owned".into(),
+            sandbox_id: "sandbox-owned".into(),
+            profile_digest: task_image::task_profile().digest().unwrap(),
+        })
+    }
+
     // Legacy transfer-only fixtures do not model a live runner cache; the
     // conditional_capture module exercises persistence through the real guard.
     fn take_capture_baseline(
@@ -802,3 +815,5 @@ fn complete_commit_measurements_include_resolve_and_correlate_early_outcomes() {
 }
 
 mod conditional_capture;
+
+mod task_image;

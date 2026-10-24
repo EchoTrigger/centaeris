@@ -9,15 +9,12 @@ use crate::session_workspace::{
 };
 use centaeris_core::execution::{
     ExecutionCancellationProbe, ExecutionCommandRequest, ExecutionError, ExecutionFileSystemError,
-    ExecutionFileSystemErrorKind, ExecutionFileSystemOperation, ExecutionFileSystemOutput,
-    ExecutionFileSystemRequest, ExecutionHostCommandOutput, ExecutionHostCommandRecovery,
-    ExecutionHostKind, ExecutionHostRunner, ExecutionHostStatus, ExecutionPolicy,
-    ExecutionWorkspaceGeneration,
+    ExecutionFileSystemErrorKind, ExecutionFileSystemOutput, ExecutionFileSystemRequest,
+    ExecutionHostCommandOutput, ExecutionHostCommandRecovery, ExecutionHostKind,
+    ExecutionHostRunner, ExecutionHostStatus, ExecutionPolicy, ExecutionWorkspaceGeneration,
 };
-use centaeris_core::tool::layer::WorkspaceInstructionReadPort;
 use hosted_execution::protocol::SandboxArtifactMetadata;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -365,61 +362,6 @@ impl SessionWorkspacePort for DeferredE2bExecution {
             }
             Err(SessionWorkspaceApiError::Rejected(reason)) => {
                 Ok(SessionWorkspaceCommitOutcome::Rejected(reason))
-            }
-        }
-    }
-}
-
-impl WorkspaceInstructionReadPort for DeferredE2bExecution {
-    fn read_agents_file(
-        &self,
-        cwd: &Path,
-        max_bytes: usize,
-    ) -> Result<Vec<u8>, ExecutionFileSystemError> {
-        if cwd != Path::new("/mnt/data") || max_bytes == 0 {
-            return Err(ExecutionFileSystemError::new(
-                ExecutionFileSystemErrorKind::InvalidPath,
-                "e2b_deferred_instruction_request_invalid",
-            ));
-        }
-        self.require_empty_binding().map_err(file_error)?;
-        loop {
-            self.require_current().map_err(file_error)?;
-            let state = self.lock().map_err(file_error)?;
-            match &state.phase {
-                Phase::Deferred => {
-                    // The caller selected this port only for the signed managed-file
-                    // policy and its logically empty initial namespace. No statement
-                    // is made about the inherited template's physical root.
-                    return Err(ExecutionFileSystemError::new(
-                        ExecutionFileSystemErrorKind::NotFound,
-                        "e2b_managed_instruction_file_absent",
-                    ));
-                }
-                Phase::CheckingWorkspace => {
-                    self.wait(state).map_err(file_error)?;
-                }
-                Phase::Failed(reason) => return Err(file_error(reason.clone())),
-                Phase::Preparing | Phase::Ready(_) => {
-                    drop(state);
-                    let execution = self.ensure_ready().map_err(file_error)?;
-                    let output = execution.runner().run_file_system_operation(
-                        ExecutionFileSystemRequest {
-                            operation_id: None,
-                            cwd: cwd.to_owned(),
-                            policy: execution.execution_policy(),
-                            model_path: "AGENTS.md".into(),
-                            operation: ExecutionFileSystemOperation::ReadFile { max_bytes },
-                        },
-                    )?;
-                    return match output {
-                        ExecutionFileSystemOutput::ReadFile(read) => Ok(read.bytes),
-                        _ => Err(ExecutionFileSystemError::new(
-                            ExecutionFileSystemErrorKind::Io,
-                            "e2b_deferred_instruction_result_invalid",
-                        )),
-                    };
-                }
             }
         }
     }

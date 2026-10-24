@@ -55,3 +55,44 @@ impl PostgresRuntimeStore {
         })
     }
 }
+
+/// Read-only provider facts keep their own typed identity; native allocation
+/// identifiers are never aliases for a provider sandbox.
+#[derive(Clone)]
+pub(crate) struct ProviderEnvironmentObservation {
+    pub session_id: String,
+    pub environment_id: String,
+    pub profile: EnvironmentProfile,
+    pub profile_digest: String,
+    pub controller_epoch: i64,
+    pub controller_owner: Option<EnvironmentTaskOwner>,
+    pub creation: Option<super::provider_operations::ProviderCreationOperation>,
+    pub provider_target: Option<super::provider_operations::cleanup::ProviderVerifiedTarget>,
+    pub power:
+        Option<super::provider_operations::retained::power::ProviderEnvironmentPowerOperation>,
+    pub removed: bool,
+}
+impl PostgresRuntimeStore {
+    pub(crate) fn with_provider_environment_observation<T: Send>(
+        &self,
+        session: &str,
+        environment: &str,
+        observe: impl FnOnce(&ProviderEnvironmentObservation) -> Result<T, String> + Send,
+    ) -> Result<T, String> {
+        self.with_client(|client|{
+            let mut tx=client.transaction().map_err(|_|"provider_environment_observation_unavailable")?;
+            tx.batch_execute("SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout='5s';SELECT pg_advisory_xact_lock(731946,3)").map_err(|_|"provider_environment_observation_unavailable")?;
+            let session_row=tx.query_opt("SELECT current_environment_id FROM public.app_core_session WHERE id=$1 FOR SHARE",&[&session]).map_err(|_|"provider_environment_observation_unavailable")?.ok_or("environment_session_missing")?;
+            let env=tx.query_opt("SELECT session_id,environment_profile::text,environment_profile_digest,controller_epoch,controller_run_id,controller_maintenance_operation_id,controller_released FROM public.app_core_sessionenvironment WHERE id=$1 FOR SHARE",&[&environment]).map_err(|_|"provider_environment_observation_unavailable")?.ok_or("environment_missing")?;
+            if env.get::<_,String>(0)!=session||session_row.get::<_,Option<String>>(0).as_deref()!=Some(environment){return Err("environment_session_binding_rejected".into());}
+            let profile:EnvironmentProfile=serde_json::from_str(&env.get::<_,Option<String>>(1).ok_or("environment_profile_missing")?).map_err(|_|"environment_profile_invalid")?;
+            let digest:String=env.get::<_,Option<String>>(2).ok_or("environment_profile_missing")?;
+            if profile.digest()?!=digest{return Err("environment_profile_binding_rejected".into());}
+            let run:Option<String>=env.get(4);let operation:Option<String>=env.get(5);
+            let owner=if env.get::<_,bool>(6){None}else{match(run,operation){(Some(run_id),None)=>Some(EnvironmentTaskOwner::AgentRun{run_id}),(None,Some(operation_id))=>Some(EnvironmentTaskOwner::MaintenanceOperation{operation_id}),_=>return Err("environment_controller_invalid".into())}};
+            let facts=super::provider_operations::provider_environment_facts(&mut tx,environment)?;
+            let target=ProviderEnvironmentObservation{session_id:session.into(),environment_id:environment.into(),profile,profile_digest:digest,controller_epoch:env.get(3),controller_owner:owner,creation:facts.creation,provider_target:facts.verified_target,power:facts.power,removed:facts.removed};
+            let result=observe(&target)?;tx.commit().map_err(|_|"provider_environment_observation_unavailable")?;Ok(result)
+        })
+    }
+}

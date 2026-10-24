@@ -1,6 +1,7 @@
 use super::*;
 mod cleanup_tests;
 mod product_preparation_tests;
+mod provision_tests;
 mod retained_preparation_tests;
 use crate::agent_run_authorization::EnvironmentProfile;
 use crate::e2b_adapter::bulk::SpoolingAdapterProcess;

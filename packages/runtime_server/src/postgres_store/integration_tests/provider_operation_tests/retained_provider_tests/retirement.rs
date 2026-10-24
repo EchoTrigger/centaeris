@@ -413,7 +413,10 @@ fn postgres_retained_provider_retirement_closes_all_successor_uses_without_creat
     assert_eq!(
         store
             .retire_provider_environment(&retirement_request(4), CONFIG, |target| {
-                assert_eq!(target.identity.agent_run_id, a.original.agent_run_id);
+                assert_eq!(
+                    target.identity.agent_run_id(),
+                    Some(a.original.agent_run_id.as_str())
+                );
                 Ok(ProviderRemovalEvidence::Deleted {
                     sandbox_id: target.sandbox_id.clone(),
                 })

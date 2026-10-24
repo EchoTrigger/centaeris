@@ -139,3 +139,69 @@ fn postgres_retained_provider_invalid_prior_receipt_use_or_quiescence_blocks_no_
         );
     }
 }
+
+#[test]
+#[ignore = "requires exclusively owned disposable PostgreSQL"]
+fn postgres_retained_provider_maintenance_handoff_requires_all_consumers_cleanup_and_release_without_exclusion(
+) {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (url, store, mut db) = retained::setup();
+    let (mut a, _, use_a) = candidate(&store, &mut db);
+    use crate::postgres_store::provider_operations::retained::require_maintenance_handoff;
+    assert!(require_maintenance_handoff(&mut db, &use_a.target).is_err());
+    terminal(&mut db, &mut a);
+    store
+        .confirm_retained_provider_run_cleanup(
+            &a.authority(ControllerPurpose::Cleanup),
+            &use_a,
+            CONFIG,
+            |v| Ok(uses::proof(v, 2)),
+        )
+        .unwrap();
+    assert!(require_maintenance_handoff(&mut db, &use_a.target).is_err());
+    release(&mut db, &a);
+    require_maintenance_handoff(&mut db, &use_a.target).unwrap();
+    let mut blocker = Client::connect(&url, NoTls).unwrap();
+    let mut held = blocker.transaction().unwrap();
+    held.query_one(
+        "SELECT provider_use_id FROM runtime.provider_environment_run_uses FOR UPDATE",
+        &[],
+    )
+    .unwrap();
+    db.batch_execute("SET lock_timeout='50ms'").unwrap();
+    assert!(require_maintenance_handoff(&mut db, &use_a.target).is_err());
+    held.rollback().unwrap();
+    require_maintenance_handoff(&mut db, &use_a.target).unwrap();
+    let mut b = successor(&store, &mut db, &a);
+    let use_b = store
+        .bind_retained_provider_run_use(
+            &b.authority(ControllerPurpose::Execute),
+            "retained-b",
+            "retained-attempt",
+            CONFIG,
+        )
+        .unwrap();
+    assert!(require_maintenance_handoff(&mut db, &use_b.target).is_err());
+    terminal(&mut db, &mut b);
+    store
+        .confirm_retained_provider_run_cleanup(
+            &b.authority(ControllerPurpose::Cleanup),
+            &use_b,
+            CONFIG,
+            |v| {
+                Ok(uses::proof(
+                    v,
+                    b.grant
+                        .payload
+                        .controller
+                        .as_ref()
+                        .unwrap()
+                        .controller_epoch,
+                ))
+            },
+        )
+        .unwrap();
+    assert!(require_maintenance_handoff(&mut db, &use_b.target).is_err());
+    release(&mut db, &b);
+    require_maintenance_handoff(&mut db, &use_b.target).unwrap();
+}

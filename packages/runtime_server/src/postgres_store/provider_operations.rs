@@ -7,7 +7,11 @@ use super::PostgresRuntimeStore;
 use crate::agent_run_authorization::EnvironmentProfile;
 use postgres::{GenericClient, Row};
 
+pub(crate) mod capacity;
 pub mod cleanup;
+pub mod origin;
+pub(crate) mod provision;
+use centaeris_core::execution::EnvironmentTaskOwner;
 pub mod retained;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,13 +22,22 @@ pub struct ProviderCreationIdentity {
     pub environment_id: String,
     pub session_id: String,
     pub workspace_id: String,
-    pub agent_run_id: String,
+    pub owner: EnvironmentTaskOwner,
     pub authorization_digest: String,
     pub profile_digest: String,
     pub provider_config_digest: String,
     pub request_digest: String,
     pub idempotency_key: String,
-    pub processing_job_id: String,
+    pub processing_job_id: Option<String>,
+}
+
+impl ProviderCreationIdentity {
+    pub fn agent_run_id(&self) -> Option<&str> {
+        match &self.owner {
+            EnvironmentTaskOwner::AgentRun { run_id } => Some(run_id),
+            EnvironmentTaskOwner::MaintenanceOperation { .. } => None,
+        }
+    }
 }
 
 pub struct ProviderCreationRequest<'a> {
@@ -99,13 +112,13 @@ impl PostgresRuntimeStore {
                 environment_id: authority.environment_authorization.payload.environment_id.clone(),
                 session_id: verified.authorization.session_id.clone(),
                 workspace_id: verified.authorization.workspace_id.clone(),
-                agent_run_id: verified.authorization.agent_run_id.clone(),
+                owner: EnvironmentTaskOwner::AgentRun { run_id: verified.authorization.agent_run_id.clone() },
                 authorization_digest: verified.authorization_digest,
                 profile_digest: verified.authorization.environment_profile_digest.clone(),
                 provider_config_digest: profile.provider_config_digest.clone(),
                 request_digest: request.request_digest.into(),
                 idempotency_key: request.idempotency_key.into(),
-                processing_job_id: authority.lease.job_id.clone(),
+                processing_job_id: Some(authority.lease.job_id.clone()),
             };
             if let Some(existing) = load(&mut tx, request.attempt_id, true)? {
                 require_identity(&existing, &identity)?;
@@ -117,15 +130,15 @@ impl PostgresRuntimeStore {
                 r#"INSERT INTO runtime.provider_creation_operations(
                     attempt_id,execution_id,instance_id,environment_id,session_id,workspace_id,
                     agent_run_id,authorization_digest,profile_digest,provider,provider_config_digest,
-                    request_digest,idempotency_key,processing_job_id,dispatch_state,recorded_at_ms)
+                    request_digest,idempotency_key,processing_job_id,dispatch_state,recorded_at_ms,creation_owner_json,maintenance_operation_id)
                    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'e2b',$10,$11,$12,$13,'prepared',
-                    (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint)"#,
+                    (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,$14,NULL)"#,
                 &[
                     &identity.attempt_id, &identity.execution_id, &identity.instance_id,
                     &identity.environment_id, &identity.session_id, &identity.workspace_id,
-                    &identity.agent_run_id, &identity.authorization_digest, &identity.profile_digest,
+                    &identity.agent_run_id(), &identity.authorization_digest, &identity.profile_digest,
                     &identity.provider_config_digest, &identity.request_digest,
-                    &identity.idempotency_key, &identity.processing_job_id,
+                    &identity.idempotency_key, &identity.processing_job_id, &serde_json::to_string(&identity.owner).map_err(|_| "provider_creation_owner_invalid")?,
                 ],
             ).map_err(|_| "provider_creation_identity_or_open_operation_conflict")?;
             let operation = load(&mut tx, request.attempt_id, false)?.ok_or("provider_creation_missing")?;
@@ -141,6 +154,14 @@ impl PostgresRuntimeStore {
         authority: &ControllerAuthorityRequest<'_>,
         identity: &ProviderCreationIdentity,
     ) -> Result<FreshProviderCreationDispatchPermit, String> {
+        self.dispatch_provider_creation_limited(authority, identity, None)
+    }
+    pub(crate) fn dispatch_provider_creation_limited(
+        &self,
+        authority: &ControllerAuthorityRequest<'_>,
+        identity: &ProviderCreationIdentity,
+        limit: Option<u32>,
+    ) -> Result<FreshProviderCreationDispatchPermit, String> {
         require_execute(authority)?;
         self.with_client(|client| {
             let mut tx = client.transaction().map_err(|error| error.to_string())?;
@@ -152,6 +173,7 @@ impl PostgresRuntimeStore {
             if operation.dispatch_state != ProviderCreationDispatchState::Prepared {
                 return Err("provider_creation_dispatch_not_authorized".into());
             }
+            capacity::require(&mut tx,limit,&identity.provider_config_digest)?;
             tx.execute(
                 "UPDATE runtime.provider_creation_operations SET dispatch_state='dispatched' WHERE attempt_id=$1 AND dispatch_state='prepared'",
                 &[&identity.attempt_id],
@@ -278,11 +300,11 @@ fn require_current_binding(
     if identity.environment_id != authority.environment_authorization.payload.environment_id
         || identity.session_id != original.session_id
         || identity.workspace_id != original.workspace_id
-        || identity.agent_run_id != original.agent_run_id
+        || identity.agent_run_id() != Some(original.agent_run_id.as_str())
         || identity.authorization_digest != verified.authorization_digest
         || identity.profile_digest != original.environment_profile_digest
         || identity.provider_config_digest != profile.provider_config_digest
-        || identity.processing_job_id != authority.lease.job_id
+        || identity.processing_job_id.as_deref() != Some(authority.lease.job_id.as_str())
     {
         return Err("provider_creation_authority_binding_rejected".into());
     }
@@ -304,14 +326,85 @@ fn load(
     attempt_id: &str,
     locked: bool,
 ) -> Result<Option<ProviderCreationOperation>, String> {
-    let query=format!("SELECT attempt_id,execution_id,instance_id,environment_id,session_id,workspace_id,agent_run_id,authorization_digest,profile_digest,provider_config_digest,request_digest,idempotency_key,processing_job_id,dispatch_state,reported_sandbox_id,recorded_at_ms FROM runtime.provider_creation_operations WHERE attempt_id=$1{}",if locked {" FOR UPDATE"} else {""});
+    // Optional fields are reconstructed only while upgrading released Run rows.
+    // JSON projection keeps that migration read in the original single SQL call.
+    let query=format!("SELECT attempt_id,execution_id,instance_id,environment_id,session_id,workspace_id,agent_run_id,authorization_digest,profile_digest,provider_config_digest,request_digest,idempotency_key,processing_job_id,dispatch_state,reported_sandbox_id,recorded_at_ms,to_jsonb(p)->>'creation_owner_json',to_jsonb(p)->>'maintenance_operation_id' FROM runtime.provider_creation_operations p WHERE attempt_id=$1{}",if locked {" FOR UPDATE"} else {""});
     db.query_opt(&query, &[&attempt_id])
         .map_err(|e| e.to_string())?
         .map(decode)
         .transpose()
 }
 
+/// Read-only durable facts for provider environment observation. No fact here
+/// grants execution authority or fabricates a physical identity.
+pub(in crate::postgres_store) struct ProviderEnvironmentFacts {
+    pub(in crate::postgres_store) creation: Option<ProviderCreationOperation>,
+    pub(in crate::postgres_store) verified_target: Option<cleanup::ProviderVerifiedTarget>,
+    pub(in crate::postgres_store) power: Option<retained::power::ProviderEnvironmentPowerOperation>,
+    pub(in crate::postgres_store) removed: bool,
+}
+
+pub(in crate::postgres_store) fn provider_environment_facts(
+    db: &mut impl GenericClient,
+    environment_id: &str,
+) -> Result<ProviderEnvironmentFacts, String> {
+    let Some(binding) = db
+        .query_opt(
+            "SELECT creation_attempt_id FROM runtime.provider_environment_bindings WHERE environment_id=$1 FOR SHARE",
+            &[&environment_id],
+        )
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(ProviderEnvironmentFacts {
+            creation: None,
+            verified_target: None,
+            power: None,
+            removed: false,
+        });
+    };
+    let creation = load(db, &binding.get::<_, String>(0), false)?;
+    let verified_target = creation
+        .as_ref()
+        .map(|operation| cleanup::load_target(db, &operation.identity))
+        .transpose()?
+        .flatten();
+    let power = retained::power::latest_environment_power(db, environment_id)?;
+    let removed: bool = db
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM runtime.provider_environment_retirements WHERE environment_id=$1)",
+            &[&environment_id],
+        )
+        .map_err(|e| e.to_string())?
+        .get(0);
+    Ok(ProviderEnvironmentFacts {
+        creation,
+        verified_target,
+        power,
+        removed,
+    })
+}
+
 fn decode(row: Row) -> Result<ProviderCreationOperation, String> {
+    let run: Option<String> = row.get(6);
+    let job: Option<String> = row.get(12);
+    let owner = match row.get::<_, Option<String>>(16) {
+        Some(json) => serde_json::from_str::<EnvironmentTaskOwner>(&json)
+            .map_err(|_| "provider_creation_owner_invalid")?,
+        None => EnvironmentTaskOwner::AgentRun {
+            run_id: run
+                .clone()
+                .ok_or("provider_creation_legacy_owner_missing")?,
+        },
+    };
+    origin::owner_metadata(&owner, job.as_deref())?;
+    let maintenance: Option<String> = row.get(17);
+    match &owner {
+        EnvironmentTaskOwner::AgentRun { run_id }
+            if run.as_deref() == Some(run_id.as_str()) && maintenance.is_none() => {}
+        EnvironmentTaskOwner::MaintenanceOperation { operation_id }
+            if run.is_none() && maintenance.as_deref() == Some(operation_id.as_str()) => {}
+        _ => return Err("provider_creation_owner_columns_rejected".into()),
+    }
     Ok(ProviderCreationOperation {
         identity: ProviderCreationIdentity {
             attempt_id: row.get(0),
@@ -320,13 +413,13 @@ fn decode(row: Row) -> Result<ProviderCreationOperation, String> {
             environment_id: row.get(3),
             session_id: row.get(4),
             workspace_id: row.get(5),
-            agent_run_id: row.get(6),
+            owner,
             authorization_digest: row.get(7),
             profile_digest: row.get(8),
             provider_config_digest: row.get(9),
             request_digest: row.get(10),
             idempotency_key: row.get(11),
-            processing_job_id: row.get(12),
+            processing_job_id: job,
         },
         dispatch_state: match row.get::<_, String>(13).as_str() {
             "prepared" => ProviderCreationDispatchState::Prepared,
@@ -376,7 +469,20 @@ pub(super) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?
         .get::<_, bool>(0);
-    let guard = if cleanup { cleanup::GUARD_DDL } else { DDL };
+    let typed: bool = db
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM runtime.schema_migrations WHERE version=22)",
+            &[],
+        )
+        .map_err(|e| e.to_string())?
+        .get(0);
+    let guard = if typed {
+        origin::schema::creation_guard()
+    } else if cleanup {
+        cleanup::GUARD_DDL.to_owned()
+    } else {
+        DDL.to_owned()
+    };
     let body = guard
         .split_once("FUNCTION runtime.protect_provider_creation_operation() RETURNS trigger LANGUAGE plpgsql AS $$")
         .ok_or("provider creation function missing")?
@@ -422,10 +528,24 @@ pub(super) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
             &[],
         )
         .map_err(|error| error.to_string())?;
-    if constraints.get::<_, i64>(0) != if cleanup { 8 } else { 6 }
+    if constraints.get::<_, i64>(0)
+        != if typed {
+            9
+        } else if cleanup {
+            8
+        } else {
+            6
+        }
         || !constraints.get::<_, bool>(1)
         || (2..=6).any(|column| constraints.get::<_, i64>(column) != 1)
-        || constraints.get::<_, i64>(7) != if cleanup { 2 } else { 1 }
+        || constraints.get::<_, i64>(7)
+            != if typed {
+                3
+            } else if cleanup {
+                2
+            } else {
+                1
+            }
     {
         return Err("Postgres provider creation identity constraints mismatch".into());
     }
@@ -466,6 +586,9 @@ pub(super) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
                 != Some(if cleanup { "((dispatch_state = ANY (ARRAY['prepared'::text, 'dispatched'::text])) AND (settlement_id IS NULL))" } else { "(dispatch_state = ANY (ARRAY['prepared'::text, 'dispatched'::text]))" })
     }) {
         return Err("Postgres provider creation open intent index mismatch".into());
+    }
+    if typed {
+        origin::schema::validate(db)?;
     }
     Ok(())
 }

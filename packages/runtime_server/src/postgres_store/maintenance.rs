@@ -246,7 +246,7 @@ fn write_completion(
     Ok(())
 }
 
-fn completed_operation(result: &EnvironmentTaskResult) -> Result<String, String> {
+pub(super) fn completed_operation(result: &EnvironmentTaskResult) -> Result<String, String> {
     let EnvironmentTaskResult::OperationEnded {
         task_ids,
         cleanup_complete: true,

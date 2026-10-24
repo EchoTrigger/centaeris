@@ -161,64 +161,82 @@ impl ApiModelClient {
         // Own only this RPC attempt, including full JSON/SSE consumption. Returning
         // or dropping this future releases local capacity before retry/backoff.
         let _attempt = match &self.admission {
-            Some(admission) => Some(admission.acquire_attempt(&self.agent_run_id).await),
+            Some(admission) => {
+                let mut wait = crate::observations::enabled()
+                    .then(|| crate::observations::Span::new("modelAdmissionWait"));
+                let permit = admission.acquire_attempt(&self.agent_run_id).await;
+                if let Some(wait) = &mut wait {
+                    wait.finished(true);
+                }
+                Some(permit)
+            }
             None => None,
         };
-        let url = format!(
-            "{}/internal/model-runs",
-            self.api_internal_url.trim_end_matches('/')
-        );
-        let response = self
-            .client
-            .post(url)
-            .header("Content-Type", "application/json")
-            .header("X-Internal-Token", self.internal_api_token.as_str())
-            .json(&model_run_request)
-            .send()
-            .await
-            .map_err(|error| {
+        let mut span = crate::observations::enabled()
+            .then(|| crate::observations::Span::new("modelRpcAttempt"));
+        let result = async {
+            let url = format!(
+                "{}/internal/model-runs",
+                self.api_internal_url.trim_end_matches('/')
+            );
+            let response = self
+                .client
+                .post(url)
+                .header("Content-Type", "application/json")
+                .header("X-Internal-Token", self.internal_api_token.as_str())
+                .json(&model_run_request)
+                .send()
+                .await
+                .map_err(|error| {
+                    ModelClientError::new(
+                        ModelClientErrorKind::Network,
+                        format!("api model run request failed: {error}"),
+                        true,
+                    )
+                })?;
+            let status = response.status();
+            let body = response.text().await.map_err(|error| {
                 ModelClientError::new(
                     ModelClientErrorKind::Network,
-                    format!("api model run request failed: {error}"),
+                    format!("read api model run response failed: {error}"),
                     true,
                 )
             })?;
-        let status = response.status();
-        let body = response.text().await.map_err(|error| {
-            ModelClientError::new(
-                ModelClientErrorKind::Network,
-                format!("read api model run response failed: {error}"),
-                true,
-            )
-        })?;
-        if !status.is_success() {
-            if status == reqwest::StatusCode::BAD_GATEWAY {
-                if let Ok(failure) = serde_json::from_str::<ModelHttpFailure>(&body) {
-                    if failure.error == "model_run_failed" {
-                        return Err(hosted_model_error(ModelStreamFailure {
-                            schema: "api.model.stream.v1".to_string(),
-                            event_type: "error".to_string(),
-                            reason_type: failure.reason_type,
-                            http_status: failure.http_status,
-                            truncated_tool_calls: failure.truncated_tool_calls,
-                        })?);
+            if !status.is_success() {
+                if status == reqwest::StatusCode::BAD_GATEWAY {
+                    if let Ok(failure) = serde_json::from_str::<ModelHttpFailure>(&body) {
+                        if failure.error == "model_run_failed" {
+                            return Err(hosted_model_error(ModelStreamFailure {
+                                schema: "api.model.stream.v1".to_string(),
+                                event_type: "error".to_string(),
+                                reason_type: failure.reason_type,
+                                http_status: failure.http_status,
+                                truncated_tool_calls: failure.truncated_tool_calls,
+                            })?);
+                        }
                     }
                 }
+                return Err(ModelClientError::new(
+                    ModelClientErrorKind::Provider,
+                    format!("api model run returned {}", status.as_u16()),
+                    false,
+                ));
             }
-            return Err(ModelClientError::new(
-                ModelClientErrorKind::Provider,
-                format!("api model run returned {}", status.as_u16()),
-                false,
-            ));
+            let payload =
+                serde_json::from_str::<ModelRunResponse>(body.as_str()).map_err(|error| {
+                    ModelClientError::new(
+                        ModelClientErrorKind::Provider,
+                        format!("parse api model run response failed: {error}"),
+                        false,
+                    )
+                })?;
+            model_response(payload)
         }
-        let payload = serde_json::from_str::<ModelRunResponse>(body.as_str()).map_err(|error| {
-            ModelClientError::new(
-                ModelClientErrorKind::Provider,
-                format!("parse api model run response failed: {error}"),
-                false,
-            )
-        })?;
-        model_response(payload)
+        .await;
+        if let Some(span) = &mut span {
+            span.finished(result.is_ok());
+        }
+        result
     }
 
     async fn call_api_with_retries(
@@ -261,182 +279,202 @@ impl ApiModelClient {
         // Own only this RPC attempt, including full JSON/SSE consumption. Returning
         // or dropping this future releases local capacity before retry/backoff.
         let _attempt = match &self.admission {
-            Some(admission) => Some(admission.acquire_attempt(&self.agent_run_id).await),
+            Some(admission) => {
+                let mut wait = crate::observations::enabled()
+                    .then(|| crate::observations::Span::new("modelAdmissionWait"));
+                let permit = admission.acquire_attempt(&self.agent_run_id).await;
+                if let Some(wait) = &mut wait {
+                    wait.finished(true);
+                }
+                Some(permit)
+            }
             None => None,
         };
-        let url = format!(
-            "{}/internal/model-runs",
-            self.api_internal_url.trim_end_matches('/')
-        );
-        let mut response = self
-            .client
-            .post(url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .header("X-Internal-Token", self.internal_api_token.as_str())
-            .json(&model_run_request)
-            .send()
-            .await
-            .map_err(|error| stream_error("api model stream request failed", error))?;
-        if !response.status().is_success() {
-            return Err(ModelClientError::new(
-                ModelClientErrorKind::Provider,
-                format!("api model stream returned {}", response.status().as_u16()),
-                false,
-            ));
-        }
-        let mut decoder = SseFrameDecoder::new();
-        let mut streamed_text = String::new();
-        let mut result = None;
-        let mut terminal_received = false;
-        loop {
-            let chunk = match response.chunk().await {
-                Ok(Some(chunk)) => chunk,
-                Ok(None) => break,
-                Err(_) if terminal_received => break,
-                Err(error) => return Err(stream_error("read api model stream failed", error)),
-            };
-            let frames = decoder.push(chunk.as_ref()).map_err(|message| {
-                ModelClientError::new(
-                    ModelClientErrorKind::ProviderResponseInterrupted,
-                    format!("api model stream {message}"),
+        let mut span = crate::observations::enabled()
+            .then(|| crate::observations::Span::new("modelRpcAttempt"));
+        let result = async {
+            let url = format!(
+                "{}/internal/model-runs",
+                self.api_internal_url.trim_end_matches('/')
+            );
+            let mut response = self
+                .client
+                .post(url)
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .header("X-Internal-Token", self.internal_api_token.as_str())
+                .json(&model_run_request)
+                .send()
+                .await
+                .map_err(|error| stream_error("api model stream request failed", error))?;
+            if !response.status().is_success() {
+                return Err(ModelClientError::new(
+                    ModelClientErrorKind::Provider,
+                    format!("api model stream returned {}", response.status().as_u16()),
                     false,
-                )
-            })?;
-            for data in frames {
-                let event =
-                    serde_json::from_str::<serde_json::Value>(data.as_str()).map_err(|error| {
-                        ModelClientError::new(
-                            ModelClientErrorKind::ProviderResponseInterrupted,
-                            format!("decode api model stream event failed: {error}"),
-                            false,
-                        )
-                    })?;
-                if terminal_received {
-                    return Err(ModelClientError::new(
+                ));
+            }
+            let mut decoder = SseFrameDecoder::new();
+            let mut streamed_text = String::new();
+            let mut result = None;
+            let mut terminal_received = false;
+            loop {
+                let chunk = match response.chunk().await {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(_) if terminal_received => break,
+                    Err(error) => return Err(stream_error("read api model stream failed", error)),
+                };
+                let frames = decoder.push(chunk.as_ref()).map_err(|message| {
+                    ModelClientError::new(
                         ModelClientErrorKind::ProviderResponseInterrupted,
-                        "api model stream emitted an event after result",
+                        format!("api model stream {message}"),
                         false,
-                    ));
-                }
-                if event.get("schema").and_then(serde_json::Value::as_str)
-                    != Some("api.model.stream.v1")
-                {
-                    return Err(ModelClientError::new(
-                        ModelClientErrorKind::ProviderResponseInterrupted,
-                        "api model stream schema mismatch",
-                        false,
-                    ));
-                }
-                match event.get("type").and_then(serde_json::Value::as_str) {
-                    Some("error") => {
-                        let failure = serde_json::from_value::<ModelStreamFailure>(event).map_err(
-                            |error| {
-                                ModelClientError::new(
-                                    ModelClientErrorKind::Provider,
-                                    format!("invalid api model failure: {error}"),
-                                    false,
-                                )
-                            },
-                        )?;
-                        return Err(hosted_model_error(failure)?);
-                    }
-                    Some("reasoning") => {
-                        if event.as_object().is_none_or(|fields| fields.len() != 3) {
-                            return Err(ModelClientError::new(
+                    )
+                })?;
+                for data in frames {
+                    let event = serde_json::from_str::<serde_json::Value>(data.as_str()).map_err(
+                        |error| {
+                            ModelClientError::new(
                                 ModelClientErrorKind::ProviderResponseInterrupted,
-                                "api reasoning fields mismatch",
+                                format!("decode api model stream event failed: {error}"),
                                 false,
-                            ));
-                        }
-                        let text = event
-                            .get("text")
-                            .and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| {
-                                ModelClientError::new(
-                                    ModelClientErrorKind::ProviderResponseInterrupted,
-                                    "api reasoning text is invalid",
-                                    false,
-                                )
-                            })?;
-                        sink(ModelClientStreamEvent::Reasoning {
-                            text: text.to_string(),
-                        });
-                    }
-                    Some("delta") => {
-                        let delta = event
-                            .get("delta")
-                            .and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| {
-                                ModelClientError::new(
-                                    ModelClientErrorKind::ProviderResponseInterrupted,
-                                    "api model stream delta is missing",
-                                    false,
-                                )
-                            })?;
-                        streamed_text.push_str(delta);
-                        sink(ModelClientStreamEvent::Token {
-                            content: delta.to_string(),
-                        });
-                    }
-                    Some("result") => {
-                        let mut event = event;
-                        let fields = event.as_object_mut().expect("validated result object");
-                        fields.remove("schema");
-                        fields.remove("type");
-                        result = Some(serde_json::from_value::<ModelRunResponse>(event).map_err(
-                            |error| {
-                                ModelClientError::new(
-                                    ModelClientErrorKind::ProviderResponseInterrupted,
-                                    format!("decode api model stream result failed: {error}"),
-                                    false,
-                                )
-                            },
-                        )?);
-                        terminal_received = true;
-                    }
-                    _ => {
+                            )
+                        },
+                    )?;
+                    if terminal_received {
                         return Err(ModelClientError::new(
                             ModelClientErrorKind::ProviderResponseInterrupted,
-                            "api model stream event type is unsupported",
+                            "api model stream emitted an event after result",
                             false,
                         ));
                     }
+                    if event.get("schema").and_then(serde_json::Value::as_str)
+                        != Some("api.model.stream.v1")
+                    {
+                        return Err(ModelClientError::new(
+                            ModelClientErrorKind::ProviderResponseInterrupted,
+                            "api model stream schema mismatch",
+                            false,
+                        ));
+                    }
+                    match event.get("type").and_then(serde_json::Value::as_str) {
+                        Some("error") => {
+                            let failure = serde_json::from_value::<ModelStreamFailure>(event)
+                                .map_err(|error| {
+                                    ModelClientError::new(
+                                        ModelClientErrorKind::Provider,
+                                        format!("invalid api model failure: {error}"),
+                                        false,
+                                    )
+                                })?;
+                            return Err(hosted_model_error(failure)?);
+                        }
+                        Some("reasoning") => {
+                            if event.as_object().is_none_or(|fields| fields.len() != 3) {
+                                return Err(ModelClientError::new(
+                                    ModelClientErrorKind::ProviderResponseInterrupted,
+                                    "api reasoning fields mismatch",
+                                    false,
+                                ));
+                            }
+                            let text = event
+                                .get("text")
+                                .and_then(serde_json::Value::as_str)
+                                .ok_or_else(|| {
+                                    ModelClientError::new(
+                                        ModelClientErrorKind::ProviderResponseInterrupted,
+                                        "api reasoning text is invalid",
+                                        false,
+                                    )
+                                })?;
+                            sink(ModelClientStreamEvent::Reasoning {
+                                text: text.to_string(),
+                            });
+                        }
+                        Some("delta") => {
+                            let delta = event
+                                .get("delta")
+                                .and_then(serde_json::Value::as_str)
+                                .ok_or_else(|| {
+                                    ModelClientError::new(
+                                        ModelClientErrorKind::ProviderResponseInterrupted,
+                                        "api model stream delta is missing",
+                                        false,
+                                    )
+                                })?;
+                            streamed_text.push_str(delta);
+                            sink(ModelClientStreamEvent::Token {
+                                content: delta.to_string(),
+                            });
+                        }
+                        Some("result") => {
+                            let mut event = event;
+                            let fields = event.as_object_mut().expect("validated result object");
+                            fields.remove("schema");
+                            fields.remove("type");
+                            result =
+                                Some(serde_json::from_value::<ModelRunResponse>(event).map_err(
+                                    |error| {
+                                        ModelClientError::new(
+                                            ModelClientErrorKind::ProviderResponseInterrupted,
+                                            format!(
+                                                "decode api model stream result failed: {error}"
+                                            ),
+                                            false,
+                                        )
+                                    },
+                                )?);
+                            terminal_received = true;
+                        }
+                        _ => {
+                            return Err(ModelClientError::new(
+                                ModelClientErrorKind::ProviderResponseInterrupted,
+                                "api model stream event type is unsupported",
+                                false,
+                            ));
+                        }
+                    }
                 }
             }
+            decoder.finish().map_err(|message| {
+                ModelClientError::new(
+                    ModelClientErrorKind::ProviderResponseInterrupted,
+                    format!("api model stream {message}"),
+                    true,
+                )
+            })?;
+            let payload = result.ok_or_else(|| {
+                ModelClientError::new(
+                    ModelClientErrorKind::ProviderResponseInterrupted,
+                    "api model stream ended without result",
+                    true,
+                )
+            })?;
+            if payload.text != streamed_text {
+                return Err(ModelClientError::new(
+                    ModelClientErrorKind::ProviderResponseInterrupted,
+                    "api model stream text/result mismatch",
+                    false,
+                ));
+            }
+            let response = model_response(payload)?;
+            for call in &response.generate_result.tool_calls {
+                sink(ModelClientStreamEvent::ToolCallReady {
+                    call_id: call.id.clone(),
+                    provider_item_id: None,
+                    name: call.name.clone(),
+                    args_json: call.args_json.clone(),
+                    args_preview: String::new(),
+                });
+            }
+            Ok(response)
         }
-        decoder.finish().map_err(|message| {
-            ModelClientError::new(
-                ModelClientErrorKind::ProviderResponseInterrupted,
-                format!("api model stream {message}"),
-                true,
-            )
-        })?;
-        let payload = result.ok_or_else(|| {
-            ModelClientError::new(
-                ModelClientErrorKind::ProviderResponseInterrupted,
-                "api model stream ended without result",
-                true,
-            )
-        })?;
-        if payload.text != streamed_text {
-            return Err(ModelClientError::new(
-                ModelClientErrorKind::ProviderResponseInterrupted,
-                "api model stream text/result mismatch",
-                false,
-            ));
+        .await;
+        if let Some(span) = &mut span {
+            span.finished(result.is_ok());
         }
-        let response = model_response(payload)?;
-        for call in &response.generate_result.tool_calls {
-            sink(ModelClientStreamEvent::ToolCallReady {
-                call_id: call.id.clone(),
-                provider_item_id: None,
-                name: call.name.clone(),
-                args_json: call.args_json.clone(),
-                args_preview: String::new(),
-            });
-        }
-        Ok(response)
+        result
     }
 
     async fn call_api_stream_with_retries(
@@ -528,7 +566,12 @@ impl ModelClient for ApiModelClient {
 async fn sleep_before_retry(attempt: u32, retry_backoff_ms: u64) {
     let delay_ms = retry_backoff_ms.saturating_mul(u64::from(attempt));
     if delay_ms > 0 {
+        let mut span = crate::observations::enabled()
+            .then(|| crate::observations::Span::new("modelRetryBackoff"));
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        if let Some(span) = &mut span {
+            span.finished(true);
+        }
     }
 }
 

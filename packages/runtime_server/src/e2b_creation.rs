@@ -45,6 +45,16 @@ pub struct E2bCreationRequest<'a> {
     pub transport_timeout: Duration,
 }
 
+pub(crate) struct E2bProvisionCreationRequest<'a> {
+    pub authorization: &'a crate::environment_authorization::provision::ProvisionAuthorization,
+    pub signing_key: &'a [u8],
+    pub execution_id: &'a str,
+    pub attempt_id: &'a str,
+    pub idempotency_key: &'a str,
+    pub configured_provider_config_digest: &'a str,
+    pub transport_timeout: Duration,
+}
+
 #[derive(Debug)]
 pub enum E2bCreationError {
     Rejected(&'static str),
@@ -58,11 +68,21 @@ pub enum E2bCreationError {
 pub struct E2bCreationDriver<'a, A: E2bCreationAdapter + ?Sized> {
     store: &'a PostgresRuntimeStore,
     adapter: &'a A,
+    running_limit: Option<u32>,
 }
 
 impl<'a, A: E2bCreationAdapter + ?Sized> E2bCreationDriver<'a, A> {
     pub fn new(store: &'a PostgresRuntimeStore, adapter: &'a A) -> Self {
-        Self { store, adapter }
+        Self {
+            store,
+            adapter,
+            running_limit: None,
+        }
+    }
+
+    pub(crate) fn with_running_limit(mut self, limit: Option<u32>) -> Self {
+        self.running_limit = limit;
+        self
     }
 
     pub fn create_or_reopen(
@@ -112,9 +132,107 @@ impl<'a, A: E2bCreationAdapter + ?Sized> E2bCreationDriver<'a, A> {
         }
         let permit = self
             .store
-            .dispatch_provider_creation(authority, &operation.identity)
+            .dispatch_provider_creation_limited(authority, &operation.identity, self.running_limit)
             .map_err(E2bCreationError::Store)?;
-        self.send_create(authority, permit, planned, request.transport_timeout)
+        self.send_create(
+            permit,
+            planned,
+            request.transport_timeout,
+            |identity, observation| {
+                if authority.environment_authorization.payload.execution_mode == "retained" {
+                    self.store
+                        .record_retained_provider_execution_target(
+                            authority,
+                            identity,
+                            &identity.provider_config_digest,
+                            observation,
+                        )
+                        .map(|_| ())
+                } else {
+                    self.store
+                        .record_provider_execution_target(
+                            authority,
+                            identity,
+                            &identity.provider_config_digest,
+                            observation,
+                        )
+                        .map(|_| ())
+                }
+            },
+        )
+    }
+
+    pub(crate) fn create_provision_or_reopen(
+        &self,
+        request: &E2bProvisionCreationRequest<'_>,
+    ) -> Result<ProviderCreationOperation, E2bCreationError> {
+        let planned = PlannedCreation::for_provision(request)?;
+        if let Some(recorded) = self
+            .store
+            .provider_creation_operation(request.attempt_id)
+            .map_err(E2bCreationError::Store)?
+        {
+            planned.require_identity(&recorded)?;
+            if recorded.dispatch_state != ProviderCreationDispatchState::Prepared {
+                return Ok(recorded);
+            }
+        }
+        let operation = self
+            .store
+            .prepare_provider_provision_creation(
+                request.authorization,
+                request.signing_key,
+                &ProviderCreationRequest {
+                    execution_id: request.execution_id,
+                    attempt_id: request.attempt_id,
+                    idempotency_key: request.idempotency_key,
+                    request_digest: &planned.identity.request_digest,
+                    configured_provider_config_digest: request.configured_provider_config_digest,
+                },
+            )
+            .map_err(E2bCreationError::Store)?;
+        planned.require_identity(&operation)?;
+        if operation.dispatch_state != ProviderCreationDispatchState::Prepared {
+            return Ok(operation);
+        }
+        if request.transport_timeout.is_zero()
+            || request.transport_timeout > Duration::from_secs(60)
+        {
+            self.store
+                .close_provider_provision_creation_before_dispatch(
+                    request.authorization,
+                    request.signing_key,
+                    &operation.identity,
+                )
+                .map_err(E2bCreationError::Store)?;
+            return Err(E2bCreationError::Rejected(
+                "e2b_creation_transport_timeout_invalid",
+            ));
+        }
+        let permit = self
+            .store
+            .dispatch_provider_provision_creation_limited(
+                request.authorization,
+                request.signing_key,
+                &operation.identity,
+                self.running_limit,
+            )
+            .map_err(E2bCreationError::Store)?;
+        self.send_create(
+            permit,
+            planned,
+            request.transport_timeout,
+            |identity, observation| {
+                self.store
+                    .record_provider_provision_target(
+                        request.authorization,
+                        request.signing_key,
+                        identity,
+                        observation,
+                    )
+                    .map(|_| ())
+            },
+        )
     }
 
     pub fn record_late_candidate(
@@ -132,10 +250,13 @@ impl<'a, A: E2bCreationAdapter + ?Sized> E2bCreationDriver<'a, A> {
 
     fn send_create(
         &self,
-        authority: &ControllerAuthorityRequest<'_>,
         permit: FreshProviderCreationDispatchPermit,
         planned: PlannedCreation,
         timeout: Duration,
+        record_target: impl FnOnce(
+            &ProviderCreationIdentity,
+            &ProviderSandboxObservation,
+        ) -> Result<(), String>,
     ) -> Result<ProviderCreationOperation, E2bCreationError> {
         let operation = permit.consume();
         planned.require_identity(&operation)?;
@@ -211,23 +332,7 @@ impl<'a, A: E2bCreationAdapter + ?Sized> E2bCreationDriver<'a, A> {
                 template_id,
                 metadata,
             };
-            let result = if authority.environment_authorization.payload.execution_mode == "retained"
-            {
-                self.store.record_retained_provider_execution_target(
-                    authority,
-                    &operation.identity,
-                    &operation.identity.provider_config_digest,
-                    &observation,
-                )
-            } else {
-                self.store.record_provider_execution_target(
-                    authority,
-                    &operation.identity,
-                    &operation.identity.provider_config_digest,
-                    &observation,
-                )
-            };
-            result.map_err(E2bCreationError::Store)?;
+            record_target(&operation.identity, &observation).map_err(E2bCreationError::Store)?;
         }
         Ok(recorded)
     }
@@ -338,29 +443,23 @@ impl PlannedCreation {
                 .clone(),
             session_id: request.authorization.session_id.clone(),
             workspace_id: request.authorization.workspace_id.clone(),
-            agent_run_id: request.authorization.agent_run_id.clone(),
+            owner: centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+                run_id: request.authorization.agent_run_id.clone(),
+            },
             authorization_digest,
             profile_digest: request.authorization.environment_profile_digest.clone(),
             provider_config_digest: request.configured_provider_config_digest.into(),
             request_digest: String::new(),
             idempotency_key: request.idempotency_key.into(),
-            processing_job_id: authority.lease.job_id.clone(),
+            processing_job_id: Some(authority.lease.job_id.clone()),
         };
-        let metadata = BTreeMap::from([
-            ("centaerisAttemptId".into(), identity.attempt_id.clone()),
-            ("environmentId".into(), identity.environment_id.clone()),
-            ("instanceId".into(), identity.instance_id.clone()),
-            ("executionId".into(), identity.execution_id.clone()),
-            ("agentRunId".into(), identity.agent_run_id.clone()),
-            ("sessionId".into(), identity.session_id.clone()),
-            ("workspaceId".into(), identity.workspace_id.clone()),
-            ("profileDigest".into(), identity.profile_digest.clone()),
-            (
-                "authorizationDigest".into(),
-                identity.authorization_digest.clone(),
-            ),
-            ("processingJobId".into(), identity.processing_job_id.clone()),
-        ]);
+        crate::postgres_store::provider_operations::origin::owner_metadata(
+            &identity.owner,
+            identity.processing_job_id.as_deref(),
+        )
+        .map_err(|_| E2bCreationError::Rejected("e2b_creation_owner_invalid"))?;
+        let metadata =
+            crate::postgres_store::provider_operations::cleanup::expected_metadata(&identity);
         if metadata
             .values()
             .any(|value| value.is_empty() || value.len() > 4096 || value.contains('\0'))
@@ -383,6 +482,99 @@ impl PlannedCreation {
         let canonical = canonical_json(payload.clone())
             .map_err(|_| E2bCreationError::Rejected("e2b_creation_payload_invalid"))?;
         // These fixed fields stay well below the transport's 1 MiB frame cap.
+        if canonical.len() > 64 * 1024 {
+            return Err(E2bCreationError::Rejected("e2b_creation_payload_too_large"));
+        }
+        identity.request_digest = format!("sha256:{:x}", Sha256::digest(canonical.as_bytes()));
+        Ok(Self {
+            identity,
+            payload,
+            metadata,
+        })
+    }
+
+    fn for_provision(request: &E2bProvisionCreationRequest<'_>) -> Result<Self, E2bCreationError> {
+        request
+            .authorization
+            .verify_signature(request.signing_key)
+            .map_err(|_| E2bCreationError::Rejected("e2b_creation_authorization_invalid"))?;
+        let binding = &request.authorization.payload;
+        let EnvironmentProfile::E2b(profile) = &binding.environment_profile else {
+            return Err(E2bCreationError::Rejected(
+                "e2b_creation_requires_e2b_profile",
+            ));
+        };
+        if profile.lifetime != "retained"
+            || profile.provider_config_digest != request.configured_provider_config_digest
+        {
+            return Err(E2bCreationError::Rejected("e2b_creation_policy_rejected"));
+        }
+        if request.idempotency_key.is_empty()
+            || request.idempotency_key.len() > 255
+            || !request
+                .idempotency_key
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(E2bCreationError::Rejected(
+                "e2b_creation_idempotency_key_invalid",
+            ));
+        }
+        for (value, max) in [(request.attempt_id, 128), (request.execution_id, 256)] {
+            if value.is_empty()
+                || value.len() > max
+                || !value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
+            {
+                return Err(E2bCreationError::Rejected("e2b_creation_identity_invalid"));
+            }
+        }
+        let mut identity = ProviderCreationIdentity {
+            attempt_id: request.attempt_id.into(),
+            execution_id: request.execution_id.into(),
+            instance_id: crate::postgres_store::execution_instances::instance_id(
+                request.execution_id,
+            ),
+            environment_id: binding.environment_id.clone(),
+            session_id: binding.session_id.clone(),
+            workspace_id: binding.workspace_id.clone(),
+            owner: binding.controller_owner.clone(),
+            authorization_digest: request
+                .authorization
+                .digest()
+                .map_err(|_| E2bCreationError::Rejected("e2b_creation_authorization_invalid"))?,
+            profile_digest: binding.environment_profile_digest.clone(),
+            provider_config_digest: request.configured_provider_config_digest.into(),
+            request_digest: String::new(),
+            idempotency_key: request.idempotency_key.into(),
+            processing_job_id: None,
+        };
+        crate::postgres_store::provider_operations::origin::owner_metadata(&identity.owner, None)
+            .map_err(|_| E2bCreationError::Rejected("e2b_creation_owner_invalid"))?;
+        let metadata =
+            crate::postgres_store::provider_operations::cleanup::expected_metadata(&identity);
+        if metadata
+            .values()
+            .any(|value| value.is_empty() || value.len() > 4096 || value.contains('\0'))
+        {
+            return Err(E2bCreationError::Rejected("e2b_creation_metadata_invalid"));
+        }
+        let payload = serde_json::to_value(CreatePayload {
+            attempt_id: request.attempt_id,
+            idempotency_key: request.idempotency_key,
+            template_ref: TemplateReference {
+                template_id: &profile.template_ref.template_id,
+                build_id: &profile.template_ref.build_id,
+            },
+            metadata: metadata.clone(),
+            timeout_seconds: profile.timeout_seconds,
+            allow_internet_access: profile.network == ExecutionNetwork::PublicInternet,
+            on_timeout: "kill",
+        })
+        .map_err(|_| E2bCreationError::Rejected("e2b_creation_payload_invalid"))?;
+        let canonical = canonical_json(payload.clone())
+            .map_err(|_| E2bCreationError::Rejected("e2b_creation_payload_invalid"))?;
         if canonical.len() > 64 * 1024 {
             return Err(E2bCreationError::Rejected("e2b_creation_payload_too_large"));
         }

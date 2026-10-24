@@ -795,3 +795,59 @@ fn observed_capture_counts_exact_raw_spool_and_preserves_fencing_and_unknown_lat
         Err(E2bHostError::Unknown(_))
     ));
 }
+
+fn task_image_setup() -> (Arc<E2bExecutionHostRunner>, Arc<Fixture>, Arc<Authority>) {
+    let (_, transport, authority, _) = setup(false, false);
+    let mut value = serde_json::to_value(profile()).unwrap();
+    value["workspaceInitialization"] = json!("taskImage");
+    value["lifetime"] = json!("retained");
+    value["user"] = json!("root");
+    value["workspaceRoot"] = json!("/app");
+    let profile: EnvironmentProfile = serde_json::from_value(value).unwrap();
+    let mut binding = binding();
+    binding
+        .metadata
+        .insert("profileDigest".into(), profile.digest().unwrap());
+    let runner = Arc::new(
+        E2bExecutionHostRunner::new(profile, binding, transport.clone(), authority.clone())
+            .unwrap(),
+    );
+    (runner, transport, authority)
+}
+#[test]
+fn task_image_retention_proves_current_identity_without_quiescing_environment_services() {
+    let (runner, transport, authority) = task_image_setup();
+    transport.count.store(5, Ordering::SeqCst);
+    let session = runner.try_exclusive().unwrap().unwrap();
+    let binding = session.verify_retained_provider_binding().unwrap();
+    assert_eq!(
+        binding.environment_id,
+        runner.binding.metadata["environmentId"]
+    );
+    assert_eq!(binding.instance_id, runner.binding.metadata["instanceId"]);
+    assert_eq!(binding.sandbox_id, runner.binding.sandbox_id);
+    assert_eq!(binding.profile_digest, runner.profile.digest().unwrap());
+    assert_eq!(transport.count.load(Ordering::SeqCst), 5);
+    assert!(transport.calls.lock().unwrap().is_empty());
+    authority.denied.store(true, Ordering::SeqCst);
+    assert_eq!(
+        session.verify_retained_provider_binding(),
+        Err(E2bHostError::NotDispatched("fixture_authority_denied"))
+    );
+}
+#[test]
+fn task_image_retention_rejects_unclosed_original_commands_even_when_sdk_identity_is_known() {
+    let (runner, transport, _) = task_image_setup();
+    transport.wait_unknown.store(true, Ordering::SeqCst);
+    let mut request = command(&runner);
+    request.cwd = "/app".into();
+    assert!(runner
+        .run_host_command(Some("1:unclosed"), request, None)
+        .is_err());
+    let session = runner.try_exclusive().unwrap().unwrap();
+    assert_eq!(
+        session.verify_retained_provider_binding(),
+        Err(E2bHostError::NotDispatched("e2b_run_commands_unresolved"))
+    );
+    assert!(transport.calls.lock().unwrap().is_empty());
+}

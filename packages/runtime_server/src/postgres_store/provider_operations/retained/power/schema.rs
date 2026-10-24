@@ -56,7 +56,16 @@ pub(crate) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
     }
     let expected=DDL.split_once("CREATE FUNCTION runtime.protect_provider_environment_power() RETURNS trigger LANGUAGE plpgsql AS $$").ok_or("provider_environment_power_guard_missing")?.1.split_once("$$;").ok_or("provider_environment_power_guard_missing")?.0;
     let actual:String=db.query_one("SELECT prosrc FROM pg_proc WHERE oid='runtime.protect_provider_environment_power()'::regprocedure",&[]).map_err(|e|e.to_string())?.get(0);
-    if actual != expected {
+    let automatic: bool = db
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM runtime.schema_migrations WHERE version=24)",
+            &[],
+        )
+        .map_err(|e| e.to_string())?
+        .get(0);
+    if automatic {
+        super::automatic_resume::validate(db)?;
+    } else if actual != expected {
         return Err("provider_environment_power_schema_guard_rejected".into());
     }
     let constraints=db.query_one("SELECT count(*),bool_and(convalidated AND NOT condeferrable) FROM pg_constraint WHERE conrelid='runtime.provider_environment_power_operations'::regclass AND contype<>'n'",&[]).map_err(|e|e.to_string())?;

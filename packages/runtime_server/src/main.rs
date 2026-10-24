@@ -178,6 +178,7 @@ const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_RUN_WAITING_TRANSITION_REASONS: &[&str] = &[
     "execution_resident_capacity_wait",
     "e2b_live_context_capacity_wait",
+    "e2b_environment_capacity_wait",
     "e2b_environment_already_active",
     "e2b_step_already_active",
     "execution_recovery_checkpoint_committed",
@@ -1160,6 +1161,9 @@ async fn serve_http(
     listener: tokio::net::TcpListener,
     state: HttpServerState,
 ) -> Result<(), String> {
+    if let Some(provider) = state.e2b_runtime.as_ref() {
+        provider.start_rotation(state.runtime.as_ref(), state.e2b_runs.clone());
+    }
     let router = http_router(state);
     let connection_slots = Arc::new(Semaphore::new(MAX_HTTP_CONNECTIONS));
     loop {
@@ -1483,6 +1487,11 @@ impl AgentRunStepOutcome {
 
 fn hosted_agent_runtime_config(start: &AgentRunStart) -> AgentRuntimeConfig {
     AgentRuntimeConfig {
+        allowed_tools: start
+            .authorization
+            .environment_profile
+            .task_image()
+            .then(|| vec!["bash".into()]),
         tool_parallelism: centaeris_core::runtime::MAX_TOOL_PARALLELISM,
         required_completion_tool: start
             .coordination_session_id
@@ -1493,6 +1502,63 @@ fn hosted_agent_runtime_config(start: &AgentRunStart) -> AgentRuntimeConfig {
         model_max_output_tokens: start.model_max_output_tokens,
         ..AgentRuntimeConfig::default()
     }
+}
+
+fn validate_retained_provider_workspace_binding(
+    start: &AgentRunStart,
+    proof: &session_workspace::RetainedProviderWorkspaceBinding,
+    binding: &e2b_execution_host::E2bSandboxBinding,
+    use_binding: &postgres_store::provider_operations::retained::RetainedProviderRunUse,
+) -> Result<(), String> {
+    let original = &start.authorization;
+    let identity = &use_binding.target.identity;
+    let environment = &start.environment_authorization.payload;
+    if !original.environment_profile.task_image()
+        || original.environment_profile.digest().as_deref()
+            != Ok(original.environment_profile_digest.as_str())
+        || environment.execution_mode != "retained"
+        || environment.environment_id != proof.environment_id
+        || environment.agent_run_id != start.agent_run_id
+        || environment.agent_run_authorization_digest != start.authorization_digest
+        || use_binding.agent_run_id != start.agent_run_id
+        || use_binding.authorization_digest != start.authorization_digest
+        || identity.environment_id != proof.environment_id
+        || identity.instance_id != proof.instance_id
+        || identity.session_id != original.session_id
+        || identity.workspace_id != original.workspace_id
+        || identity.profile_digest != original.environment_profile_digest
+        || proof.profile_digest != original.environment_profile_digest
+        || use_binding.target.sandbox_id != proof.sandbox_id
+        || binding.sandbox_id != proof.sandbox_id
+        || binding.metadata.get("environmentId") != Some(&proof.environment_id)
+        || binding.metadata.get("instanceId") != Some(&proof.instance_id)
+        || binding.metadata.get("profileDigest") != Some(&proof.profile_digest)
+    {
+        return Err("retained_provider_workspace_binding_rejected".into());
+    }
+    Ok(())
+}
+
+fn validate_workspace_commit_outcome(
+    outcome: SessionWorkspaceCommitOutcome,
+    start: &AgentRunStart,
+    live: Option<&e2b_run_registry::E2bLiveContext>,
+) -> Result<SessionWorkspaceCommitOutcome, String> {
+    if let SessionWorkspaceCommitOutcome::RetainedProvider(proof) = &outcome {
+        let host = &live
+            .ok_or("retained_provider_workspace_binding_rejected")?
+            .host;
+        let use_binding = host
+            .retained_use()
+            .ok_or("retained_provider_workspace_binding_rejected")?;
+        validate_retained_provider_workspace_binding(
+            start,
+            proof,
+            host.runner().binding(),
+            use_binding,
+        )?;
+    }
+    Ok(outcome)
 }
 
 fn requires_session_workspace_restore(has_started_fact: bool, completing_recovery: bool) -> bool {
@@ -2675,6 +2741,11 @@ fn execute_agent_run(
     }
     let execution = match prepared_execution {
         Ok(runner) => runner,
+        Err(error) if error == postgres_store::provider_operations::capacity::WAIT => {
+            return Ok(recovery_preparation_waiting(
+                postgres_store::provider_operations::capacity::WAIT,
+            ));
+        }
         Err(error) if error == resident_capacity::RESIDENT_CAPACITY_WAIT => {
             return Ok(AgentRunStepOutcome {
                 disposition: "waiting",
@@ -2958,9 +3029,6 @@ fn execute_agent_run(
     .with_execution_owner(agent_run_start.agent_run_id.clone())
     .with_resource_claim_store(Arc::new((*store).clone()))
     .with_resolved_input_manifest(resolved_inputs.clone());
-    if let Some(deferred) = &deferred_e2b_execution {
-        tool_layer = tool_layer.with_workspace_instruction_read_port(deferred.clone());
-    }
     tool_layer.register_dynamic_tool_provider(Arc::new(WorkspaceArtifactToolProvider::new(
         artifact_publication,
     )))?;
@@ -3136,11 +3204,19 @@ fn execute_agent_run(
                     )
                 },
             );
+            let workspace_commit = workspace_commit.and_then(|outcome| {
+                validate_workspace_commit_outcome(
+                    outcome,
+                    &agent_run_start,
+                    e2b_context.as_ref().and_then(|context| context.as_ref()),
+                )
+            });
             match workspace_commit {
                 Ok(
                     SessionWorkspaceCommitOutcome::Accepted
                     | SessionWorkspaceCommitOutcome::Unchanged
-                    | SessionWorkspaceCommitOutcome::ProtectionDeferred,
+                    | SessionWorkspaceCommitOutcome::ProtectionDeferred
+                    | SessionWorkspaceCommitOutcome::RetainedProvider(_),
                 ) => {}
                 Ok(SessionWorkspaceCommitOutcome::Pending) => {
                     return Ok(AgentRunStepOutcome {
@@ -4487,15 +4563,24 @@ fn execute_agent_run(
                 &recovery_workspace_snapshot,
                 &agent_run_start.authorization.session_workspace,
             ) {
-                match execution.collect_and_commit_session_workspace(
-                    &workspace_lease,
-                    &agent_run_start.authorization.session_workspace,
-                    workspace_input_upper_bound_bytes,
-                ) {
+                match execution
+                    .collect_and_commit_session_workspace(
+                        &workspace_lease,
+                        &agent_run_start.authorization.session_workspace,
+                        workspace_input_upper_bound_bytes,
+                    )
+                    .and_then(|outcome| {
+                        validate_workspace_commit_outcome(
+                            outcome,
+                            &agent_run_start,
+                            e2b_context.as_ref().and_then(|context| context.as_ref()),
+                        )
+                    }) {
                     Ok(
                         SessionWorkspaceCommitOutcome::Accepted
                         | SessionWorkspaceCommitOutcome::Unchanged
-                        | SessionWorkspaceCommitOutcome::ProtectionDeferred,
+                        | SessionWorkspaceCommitOutcome::ProtectionDeferred
+                        | SessionWorkspaceCommitOutcome::RetainedProvider(_),
                     ) => {}
                     Ok(SessionWorkspaceCommitOutcome::Pending) => {
                         let mut pending_sequence =
@@ -7703,6 +7788,114 @@ mod tests {
             .is_none());
     }
 
+    #[test]
+    fn task_image_workspace_completion_requires_current_provider_and_run_bindings() {
+        use postgres_store::provider_operations::{
+            cleanup::ProviderVerifiedTarget, retained::RetainedProviderRunUse,
+            ProviderCreationIdentity,
+        };
+        let mut start = agent_run_start();
+        let mut profile: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/workspace/fixtures/e2b_environment_profile/v1/valid.json"
+        ))
+        .unwrap();
+        profile["workspaceInitialization"] = json!("taskImage");
+        profile["lifetime"] = json!("retained");
+        profile["workspaceRoot"] = json!("/app");
+        profile["user"] = json!("root");
+        start.authorization.environment_profile = serde_json::from_value(profile).unwrap();
+        start.authorization.environment_profile_digest =
+            start.authorization.environment_profile.digest().unwrap();
+        start.authorization_digest = start.authorization.digest().unwrap();
+        start.environment_authorization.payload.environment_id = "proof-environment".into();
+        start.environment_authorization.payload.execution_mode = "retained".into();
+        start
+            .environment_authorization
+            .payload
+            .agent_run_authorization_digest = start.authorization_digest.clone();
+        let proof = session_workspace::RetainedProviderWorkspaceBinding {
+            environment_id: "proof-environment".into(),
+            instance_id: "proof-instance".into(),
+            sandbox_id: "proof-sandbox".into(),
+            profile_digest: start.authorization.environment_profile_digest.clone(),
+        };
+        let binding = e2b_execution_host::E2bSandboxBinding {
+            sandbox_id: proof.sandbox_id.clone(),
+            template_id: "template".into(),
+            metadata: std::collections::BTreeMap::from([
+                ("environmentId".into(), proof.environment_id.clone()),
+                ("instanceId".into(), proof.instance_id.clone()),
+                ("profileDigest".into(), proof.profile_digest.clone()),
+            ]),
+        };
+        let use_binding = RetainedProviderRunUse {
+            provider_use_id: "use".into(),
+            provider_use_digest: format!("sha256:{}", "a".repeat(64)),
+            agent_run_id: start.agent_run_id.clone(),
+            authorization_digest: start.authorization_digest.clone(),
+            execution_id: "successor-execution".into(),
+            target: ProviderVerifiedTarget {
+                sandbox_id: proof.sandbox_id.clone(),
+                verification_digest: format!("sha256:{}", "b".repeat(64)),
+                identity: ProviderCreationIdentity {
+                    attempt_id: "original-attempt".into(),
+                    execution_id: "original-execution".into(),
+                    instance_id: proof.instance_id.clone(),
+                    environment_id: proof.environment_id.clone(),
+                    session_id: start.authorization.session_id.clone(),
+                    workspace_id: start.authorization.workspace_id.clone(),
+                    owner: centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
+                        run_id: "original-provenance-run".into(),
+                    },
+                    authorization_digest: format!("sha256:{}", "c".repeat(64)),
+                    profile_digest: proof.profile_digest.clone(),
+                    provider_config_digest: format!("sha256:{}", "d".repeat(64)),
+                    request_digest: format!("sha256:{}", "e".repeat(64)),
+                    idempotency_key: "original-key".into(),
+                    processing_job_id: Some("original-job".into()),
+                },
+            },
+        };
+        validate_retained_provider_workspace_binding(&start, &proof, &binding, &use_binding)
+            .unwrap();
+        assert_eq!(
+            hosted_agent_runtime_config(&start).allowed_tools,
+            Some(vec!["bash".to_string()])
+        );
+        assert!(hosted_agent_runtime_config(&agent_run_start())
+            .allowed_tools
+            .is_none());
+        for field in 0..8 {
+            let mut changed_proof = proof.clone();
+            let mut changed_binding = binding.clone();
+            let mut changed_use = use_binding.clone();
+            match field {
+                0 => changed_proof.environment_id = "foreign".into(),
+                1 => changed_proof.instance_id = "foreign".into(),
+                2 => changed_proof.sandbox_id = "foreign".into(),
+                3 => changed_proof.profile_digest = format!("sha256:{}", "f".repeat(64)),
+                4 => changed_binding
+                    .metadata
+                    .insert("instanceId".into(), "foreign".into())
+                    .map(|_| ())
+                    .unwrap(),
+                5 => changed_use.agent_run_id = "foreign".into(),
+                6 => changed_use.authorization_digest = format!("sha256:{}", "f".repeat(64)),
+                _ => changed_use.target.identity.session_id = "foreign".into(),
+            }
+            assert!(
+                validate_retained_provider_workspace_binding(
+                    &start,
+                    &changed_proof,
+                    &changed_binding,
+                    &changed_use
+                )
+                .is_err(),
+                "field {field}"
+            );
+        }
+        assert!(validate_workspace_commit_outcome(SessionWorkspaceCommitOutcome::RetainedProvider(proof),&start,None).is_err(),"a backend without a live retained binding cannot publish provider workspace completion");
+    }
     pub(super) fn agent_run_start() -> AgentRunStart {
         let mut authorization: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
             serde_json::from_str(include_str!(

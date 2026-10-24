@@ -21,7 +21,7 @@ fn postgres_retained_provider_forward_migration_keeps_original_signatures_and_ru
     crate::postgres_store::provider_operations::retained::restore_previous_fixture(&mut db);
     let old: String = db
         .query_one(
-            "SELECT row_to_json(p)::text FROM runtime.provider_creation_operations p",
+            "SELECT (to_jsonb(p)-'creation_owner_json'-'maintenance_operation_id')::text FROM runtime.provider_creation_operations p",
             &[],
         )
         .unwrap()
@@ -46,7 +46,7 @@ fn postgres_retained_provider_forward_migration_keeps_original_signatures_and_ru
     drop(PostgresRuntimeStore::new(&url).unwrap());
     assert_eq!(
         db.query_one(
-            "SELECT row_to_json(p)::text FROM runtime.provider_creation_operations p",
+            "SELECT (to_jsonb(p)-'creation_owner_json'-'maintenance_operation_id')::text FROM runtime.provider_creation_operations p",
             &[]
         )
         .unwrap()
@@ -76,7 +76,7 @@ fn postgres_retained_provider_forward_migration_keeps_original_signatures_and_ru
         db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
             .unwrap()
             .get::<_, i64>(0),
-        21
+        24
     );
 }
 

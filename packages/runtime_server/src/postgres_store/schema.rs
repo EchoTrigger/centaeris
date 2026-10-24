@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 21;
+const STORE_SCHEMA_VERSION: i64 = 24;
 const MAINTENANCE_COMPLETION_DDL: &str = r#"
 CREATE TABLE runtime.environment_maintenance_completions(
  operation_id text PRIMARY KEY,environment_id text NOT NULL,instance_id text NOT NULL,
@@ -20,6 +20,8 @@ const PREVIOUS_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text
 const CURRENT_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text, 'input_image'::text, 'tool_catalog'::text, 'compaction_prompt'::text, 'input_uptake'::text, 'required_completion_delivery'::text";
 
 pub(super) const RUNTIME_TABLES: &[&str] = &[
+    "provider_environment_provision_completions",
+    "provider_environment_maintenance_completions",
     "provider_environment_power_operations",
     "provider_environment_bindings",
     "provider_environment_run_uses",
@@ -307,6 +309,9 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         upgrade_retained_provider_uses(client)?;
         upgrade_provider_environment_power(client)?;
         upgrade_retained_provider_history(client)?;
+        upgrade_provider_creation_owners(client)?;
+        upgrade_provider_maintenance_completions(client)?;
+        upgrade_cancelled_automatic_resumes(client)?;
     }
     validate_schema_version(client)?;
     validate_schema(client, CURRENT_OBSERVATION_KINDS)
@@ -489,6 +494,75 @@ fn upgrade_environment_retirements(client: &mut Client) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(11,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|e| e.to_string())?;
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn upgrade_cancelled_automatic_resumes(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != (1..=23).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|e| e.to_string())?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|e| e.to_string())?;
+    if schema_versions(&mut tx)? != (1..=23).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.batch_execute(&super::provider_operations::retained::power::automatic_resume::ddl())
+        .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(24,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|e| e.to_string())?;
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn upgrade_provider_maintenance_completions(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != (1..=22).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|e| e.to_string())?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|e| e.to_string())?;
+    if schema_versions(&mut tx)? != (1..=22).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.batch_execute(super::provider_maintenance_schema::DDL)
+        .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(23,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|e| e.to_string())?;
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn upgrade_provider_creation_owners(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != (1..=21).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|e| e.to_string())?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|e| e.to_string())?;
+    if schema_versions(&mut tx)? != (1..=21).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.batch_execute(&super::provider_operations::origin::schema::ddl())
+        .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(22,$1)",
         &[&now_ms()?],
     )
     .map_err(|e| e.to_string())?;
@@ -842,6 +916,12 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.batch_execute(super::provider_operations::retained::schema::DDL)
         .map_err(|e| e.to_string())?;
+    tx.batch_execute(&super::provider_operations::origin::schema::ddl())
+        .map_err(|e| e.to_string())?;
+    tx.batch_execute(super::provider_maintenance_schema::DDL)
+        .map_err(|e| e.to_string())?;
+    tx.batch_execute(&super::provider_operations::retained::power::automatic_resume::ddl())
+        .map_err(|e| e.to_string())?;
     for version in 1..=STORE_SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES($1, $2)",
@@ -885,16 +965,22 @@ fn validate_schema_with_resource_budgets(
     let retained_provider = provider_cleanup && schema_versions(client)?.contains(&19);
     let provider_power = retained_provider && schema_versions(client)?.contains(&20);
     let provider_history = provider_power && schema_versions(client)?.contains(&21);
+    let provider_provision = provider_history && schema_versions(client)?.contains(&22);
+    let provider_maintenance = provider_provision && schema_versions(client)?.contains(&23);
+    let automatic_resume = provider_maintenance && schema_versions(client)?.contains(&24);
     let tables = object_names(client, "BASE TABLE")?;
     let expected_tables = RUNTIME_TABLES
         .iter()
         .copied()
         .filter(|table| {
-            (capacity_waits
-                || !matches!(
-                    *table,
-                    "resident_capacity_clock" | "resident_capacity_waiters"
-                ))
+            (provider_provision || *table != "provider_environment_provision_completions")
+                && (provider_maintenance
+                    || *table != "provider_environment_maintenance_completions")
+                && (capacity_waits
+                    || !matches!(
+                        *table,
+                        "resident_capacity_clock" | "resident_capacity_waiters"
+                    ))
                 && (provider_power || *table != "provider_environment_power_operations")
                 && (creation_attempts || *table != "environment_creation_attempts")
                 && (retained_provider
@@ -982,6 +1068,21 @@ fn validate_schema_with_resource_budgets(
         } else {
             expected
         };
+        let expected = if provider_provision && *table == "provider_creation_operations" {
+            format!(
+                "{},creation_owner_json:text:NO,maintenance_operation_id:text:YES",
+                expected
+                    .replace("agent_run_id:text:NO", "agent_run_id:text:YES")
+                    .replace("processing_job_id:text:NO", "processing_job_id:text:YES")
+            )
+        } else {
+            expected
+        };
+        let expected = if automatic_resume && *table == "provider_environment_power_operations" {
+            format!("{expected},automatic_demand_json:text:YES,not_dispatched_at_ms:bigint:YES")
+        } else {
+            expected
+        };
         let actual = client.query(
             "SELECT column_name,data_type,is_nullable FROM information_schema.columns WHERE table_schema='runtime' AND table_name=$1 ORDER BY ordinal_position",
             &[table],
@@ -991,6 +1092,9 @@ fn validate_schema_with_resource_budgets(
                 "Postgres runtime table definition mismatch: {table}"
             ));
         }
+    }
+    if provider_maintenance {
+        super::provider_maintenance_schema::validate(client)?;
     }
     if capacity_waits {
         super::capacity_wait::validate(client)?;
@@ -1241,6 +1345,12 @@ fn validate_schema_with_resource_budgets(
         .map(|row| row.get::<_, String>(0))
         .collect::<BTreeSet<_>>();
     let mut expected_functions = BTreeSet::from(["notify_runtime_job_ready_v1".to_string()]);
+    if provider_provision {
+        expected_functions.insert("protect_provider_environment_provision_completion".into());
+    }
+    if provider_maintenance {
+        expected_functions.insert("protect_provider_environment_maintenance_completion".into());
+    }
     if typed_owners {
         expected_functions.insert("protect_environment_provision_completion".into());
         expected_functions.insert("protect_agent_run_cleanup_receipt".into());
@@ -1384,6 +1494,12 @@ fn validate_schema_with_resource_budgets(
         .map(|row| row.get::<_, String>(0))
         .collect::<BTreeSet<_>>();
     let mut expected_triggers = BTreeSet::from(["runtime_jobs_ready_notify_v1".to_string()]);
+    if provider_provision {
+        expected_triggers.insert("provider_environment_provision_completion_facts".into());
+    }
+    if provider_maintenance {
+        expected_triggers.insert("provider_environment_maintenance_completion_facts".into());
+    }
     if control_leases {
         expected_triggers.insert("lifecycle_lease_purpose_facts".into());
     }
@@ -1573,7 +1689,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 21);
+        assert_eq!(STORE_SCHEMA_VERSION, 24);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",

@@ -16,6 +16,7 @@ const REQUEST: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddd
 mod cleanup_tests;
 mod creation_driver_tests;
 mod e2b_runtime_tests;
+mod provision_tests;
 mod retained_provider_tests;
 mod zero_creation_cleanup_tests;
 
@@ -144,7 +145,10 @@ fn postgres_provider_creation_persists_exact_identity_and_processing_duty_before
         run.original.environment_profile_digest
     );
     assert_eq!(operation.identity.provider_config_digest, CONFIG);
-    assert_eq!(operation.identity.processing_job_id, run.fence.job_id);
+    assert_eq!(
+        operation.identity.processing_job_id.as_deref(),
+        Some(run.fence.job_id.as_str())
+    );
     assert_eq!(
         operation.identity.instance_id,
         crate::postgres_store::execution_instances::instance_id("execution-provider")
@@ -457,13 +461,16 @@ fn postgres_provider_observation_requires_all_original_identity_fields() {
             "environment" => &mut changed.environment_id,
             "session" => &mut changed.session_id,
             "workspace" => &mut changed.workspace_id,
-            "run" => &mut changed.agent_run_id,
+            "run" => match &mut changed.owner {
+                centaeris_core::execution::EnvironmentTaskOwner::AgentRun { run_id } => run_id,
+                _ => unreachable!(),
+            },
             "authorization" => &mut changed.authorization_digest,
             "profile" => &mut changed.profile_digest,
             "config" => &mut changed.provider_config_digest,
             "request" => &mut changed.request_digest,
             "key" => &mut changed.idempotency_key,
-            "job" => &mut changed.processing_job_id,
+            "job" => changed.processing_job_id.as_mut().unwrap(),
             _ => unreachable!(),
         };
         value.push('x');
@@ -539,7 +546,7 @@ fn postgres_provider_creation_schema_upgrade_preserves_legacy_grants_and_job_his
         db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
             .unwrap()
             .get::<_, i64>(0),
-        21
+        24
     );
     assert_eq!(db.query("SELECT version,applied_at_ms FROM runtime.schema_migrations WHERE version<=16 ORDER BY version",&[]).unwrap().iter().map(|row|(row.get(0),row.get(1))).collect::<Vec<(i64,i64)>>(),prior);
     let after=db.query_one("SELECT payload::text,signature,(SELECT row_to_json(j)::text FROM runtime.runtime_jobs j WHERE j.job_id=$2) FROM public.app_core_agentrunauthorization WHERE agent_run_id=$1",&[&legacy.original.agent_run_id,&legacy.fence.job_id]).unwrap();
@@ -664,4 +671,46 @@ fn postgres_provider_creation_reopen_rejects_missing_identity_and_transition_gua
         assert!(PostgresRuntimeStore::new(&url).is_err(),"{change}");
         assert_eq!(db.query("SELECT version,applied_at_ms FROM runtime.schema_migrations ORDER BY version",&[]).unwrap().iter().map(|row|(row.get(0),row.get(1))).collect::<Vec<(i64,i64)>>(),before);
     }
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_provider_capacity_unknown_creation_keeps_its_slot_across_reopen() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (url, store, mut db) = retained::setup();
+    let run = run(&store, &mut db);
+    let op = store
+        .prepare_provider_creation(
+            &run.authority(ControllerPurpose::Execute),
+            &request("capacity-execution", "capacity-attempt", "capacity-key"),
+        )
+        .unwrap();
+    store
+        .dispatch_provider_creation(&run.authority(ControllerPurpose::Execute), &op.identity)
+        .unwrap();
+    for _ in 0..2 {
+        let reopened = PostgresRuntimeStore::new(&url).unwrap();
+        reopened
+            .cleanup_view()
+            .with_client(|client| {
+                let mut tx = client.transaction().map_err(|e| e.to_string())?;
+                assert_eq!(
+                    crate::postgres_store::provider_operations::capacity::require(
+                        &mut tx,
+                        Some(1),
+                        CONFIG
+                    )
+                    .unwrap_err(),
+                    crate::postgres_store::provider_operations::capacity::WAIT
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+    assert!(store
+        .provider_creation_operation("capacity-attempt")
+        .unwrap()
+        .unwrap()
+        .reported_sandbox_id
+        .is_none());
 }

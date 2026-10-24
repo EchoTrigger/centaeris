@@ -292,3 +292,257 @@ async fn hosted_model_admission_disabled_preserves_wire_stream_and_attempts() {
         completed(task, 1).await;
     }
 }
+
+fn capture_model_timings<F: std::future::Future>(
+    enabled: bool,
+    future: F,
+) -> (F::Output, Vec<serde_json::Value>) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    crate::observations::capture_timings(enabled, || runtime.block_on(future))
+}
+
+fn model_timing_records(records: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+    records
+        .iter()
+        .filter(|row| {
+            matches!(
+                row["phase"].as_str(),
+                Some("modelAdmissionWait" | "modelRpcAttempt" | "modelRetryBackoff")
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn hosted_model_timing_covers_complete_json_body_and_sse_eof() {
+    for streaming in [false, true] {
+        let (_, records) = capture_model_timings(true, async {
+            let _context = crate::observations::Context::enter(
+                br#"{"jobId":"agent_run.lifecycle:timed-run"}"#,
+            );
+            let mut server = Server::start().await;
+            let domains = HostedModelAdmission::configured(&[("shared", 1)]).unwrap();
+            let task = start(
+                client(&server, &domains, "shared", "timed-run"),
+                streaming,
+                0,
+            );
+            let mut request = server.next().await;
+            let response = body(streaming);
+            if streaming {
+                request.stream.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n{response}\r\n",
+                    response.len()
+                ).as_bytes()).await.unwrap();
+            } else {
+                request.stream.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{{",
+                    response.len()
+                ).as_bytes()).await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(
+                !task.is_finished(),
+                "response headers/result must not close the RPC attempt"
+            );
+            {
+                let mut boundary = crate::observations::Span::new("testModelBodyBoundary");
+                boundary.finished(true);
+            }
+            if streaming {
+                request.stream.write_all(b"0\r\n\r\n").await.unwrap();
+            } else {
+                request
+                    .stream
+                    .write_all(&response.as_bytes()[1..])
+                    .await
+                    .unwrap();
+            }
+            completed(task, 1).await;
+        });
+        let timings = model_timing_records(&records);
+        assert_eq!(
+            timings.len(),
+            2,
+            "one admission and one complete-body RPC span"
+        );
+        assert_eq!(timings[0]["phase"], "modelAdmissionWait");
+        assert_eq!(timings[1]["phase"], "modelRpcAttempt");
+        assert!(timings.iter().all(|row| row["outcome"] == "ok"));
+        let boundary = records
+            .iter()
+            .position(|row| row["phase"] == "testModelBodyBoundary")
+            .unwrap();
+        let rpc = records
+            .iter()
+            .position(|row| row["phase"] == "modelRpcAttempt")
+            .unwrap();
+        assert!(
+            boundary < rpc,
+            "RPC timing must remain open through body/EOF consumption"
+        );
+    }
+}
+
+#[test]
+fn hosted_model_timing_separates_json_and_sse_retry_backoff() {
+    for streaming in [false, true] {
+        let (_, records) = capture_model_timings(true, async {
+            let mut server = Server::start().await;
+            let domains = HostedModelAdmission::configured(&[("shared", 1)]).unwrap();
+            let task = start(
+                client(&server, &domains, "shared", "timed-run"),
+                streaming,
+                50,
+            );
+            let mut first = server.next().await;
+            first
+                .stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            drop(first);
+            let retry = server.next().await;
+            assert_eq!(retry.wire["agentRunId"], "timed-run");
+            finish(retry, streaming).await;
+            completed(task, 2).await;
+        });
+        let actual: Vec<_> = model_timing_records(&records)
+            .into_iter()
+            .map(|row| {
+                (
+                    row["phase"].as_str().unwrap(),
+                    row["outcome"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                ("modelAdmissionWait", "ok"),
+                ("modelRpcAttempt", "error"),
+                ("modelRetryBackoff", "ok"),
+                ("modelAdmissionWait", "ok"),
+                ("modelRpcAttempt", "ok"),
+            ],
+            "failed RPC closes before backoff; a retry has its own admission and RPC timing"
+        );
+    }
+}
+
+#[test]
+fn hosted_model_timing_closes_queued_and_active_cancellation_and_error() {
+    for mode in ["queued", "activeCancel", "activeError"] {
+        let (_, records) = capture_model_timings(true, async {
+            let mut server = Server::start().await;
+            let domains = HostedModelAdmission::configured(&[("shared", 1)]).unwrap();
+            let admission = domains.for_domain("shared").unwrap();
+            let held = if mode == "queued" {
+                Some(admission.acquire_attempt("occupier").await)
+            } else {
+                None
+            };
+            let task = start(client(&server, &domains, "shared", "timed-run"), false, 0);
+            if mode == "queued" {
+                server.assert_no_dispatch().await;
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                let mut request = server.next().await;
+                if mode == "activeCancel" {
+                    request
+                        .stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    task.abort();
+                    assert!(task.await.unwrap_err().is_cancelled());
+                } else {
+                    request.stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                    let error = task.await.unwrap().unwrap_err();
+                    assert_eq!(error.provider_attempts, 1);
+                    assert!(!error.retryable);
+                }
+            }
+            drop(held);
+        });
+        let actual: Vec<_> = model_timing_records(&records)
+            .into_iter()
+            .map(|row| {
+                (
+                    row["phase"].as_str().unwrap(),
+                    row["outcome"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        let expected = match mode {
+            "queued" => vec![("modelAdmissionWait", "interrupted")],
+            "activeCancel" => vec![
+                ("modelAdmissionWait", "ok"),
+                ("modelRpcAttempt", "interrupted"),
+            ],
+            _ => vec![("modelAdmissionWait", "ok"), ("modelRpcAttempt", "error")],
+        };
+        assert_eq!(
+            actual, expected,
+            "cancellation must not fabricate a successful attempt"
+        );
+    }
+}
+
+#[test]
+fn hosted_model_timing_disabled_preserves_wire_and_results_without_private_fields() {
+    for enabled in [false, true] {
+        for streaming in [false, true] {
+            let (_, records) = capture_model_timings(enabled, async {
+                let _context = crate::observations::Context::enter(
+                    br#"{"jobId":"agent_run.lifecycle:timed-run"}"#,
+                );
+                let mut server = Server::start().await;
+                let client = model_client(server.url.clone(), None, 1_024);
+                let expected =
+                    serde_json::to_value(client.model_run_request(&model_request()).unwrap())
+                        .unwrap();
+                let task = start(client, streaming, 0);
+                let request = server.next().await;
+                assert_eq!(request.wire, expected);
+                finish(request, streaming).await;
+                completed(task, 1).await;
+            });
+            let timings = model_timing_records(&records);
+            assert_eq!(timings.len(), usize::from(enabled));
+            for row in timings {
+                let mut keys: Vec<_> = row
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                keys.sort_unstable();
+                assert_eq!(
+                    keys,
+                    [
+                        "atUnixMs",
+                        "elapsedMs",
+                        "jobId",
+                        "outcome",
+                        "phase",
+                        "schema",
+                        "source"
+                    ]
+                );
+                assert_eq!(row["phase"], "modelRpcAttempt");
+                assert_eq!(row["jobId"], "agent_run.lifecycle:timed-run");
+                assert_eq!(row["schema"], "workspace.perf.v1");
+                assert_eq!(row["source"], "runtime");
+                assert_eq!(row["outcome"], "ok");
+                assert!(row["elapsedMs"].as_f64().unwrap() >= 0.0);
+            }
+        }
+    }
+}

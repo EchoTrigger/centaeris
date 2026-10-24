@@ -1,0 +1,28 @@
+{
+  "payload": {
+    "schema": "workspace.provider_environment_maintenance_authorization.v1",
+    "workspaceId": "workspace_test",
+    "sessionId": "session_test",
+    "environmentId": "environment_test",
+    "profileDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "controllerOwner": {
+      "kind": "maintenanceOperation",
+      "operationId": "prepare_test"
+    },
+    "controllerEpoch": 2,
+    "controllerLeaseDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "controllerPurpose": "execute",
+    "requestDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "expiresAtMs": 1800000000000,
+    "operationKind": "task",
+    "providerTarget": {
+      "provider": "e2b",
+      "creationAttemptId": "provider_create_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "instanceId": "instance_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sandboxId": "sandbox-example_01",
+      "verificationDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "providerConfigDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  },
+  "signature": "hmac-sha256:a3dc2d60e47206ab3b3bf87d2f43f007e553b956c7cc9098818e8c77290c3353"
+}

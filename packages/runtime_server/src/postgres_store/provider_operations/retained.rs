@@ -6,6 +6,7 @@ use super::cleanup::{
 use super::*;
 use sha2::{Digest, Sha256};
 
+pub(crate) mod idle;
 pub(crate) mod power;
 pub(in crate::postgres_store) mod receipts;
 pub(crate) mod retirement;
@@ -149,6 +150,20 @@ fn require_open_target(
     Ok(())
 }
 
+pub(super) fn require_provision_target(
+    db: &mut impl GenericClient,
+    identity: &ProviderCreationIdentity,
+) -> Result<ProviderVerifiedTarget, String> {
+    power::require_admission(db, &identity.environment_id)?;
+    reject_retirement(db, &identity.environment_id)?;
+    let target = load_environment_target(db, &identity.environment_id)?;
+    if &target.identity != identity {
+        return Err("provider_provision_current_target_rejected".into());
+    }
+    require_open_target(db, &target)?;
+    Ok(target)
+}
+
 fn binding_digest(
     run: &str,
     authorization: &str,
@@ -156,8 +171,20 @@ fn binding_digest(
     target: &ProviderVerifiedTarget,
 ) -> Result<String, String> {
     let i = &target.identity;
-    let fields = serde_json::json!({"agentRunId":run,"authorizationDigest":authorization,"executionId":execution,
-        "creation":{"attemptId":i.attempt_id,"executionId":i.execution_id,"instanceId":i.instance_id,"environmentId":i.environment_id,"sessionId":i.session_id,"workspaceId":i.workspace_id,"agentRunId":i.agent_run_id,"authorizationDigest":i.authorization_digest,"profileDigest":i.profile_digest,"providerConfigDigest":i.provider_config_digest,"requestDigest":i.request_digest,"idempotencyKey":i.idempotency_key,"processingJobId":i.processing_job_id},"sandboxId":target.sandbox_id,"verificationDigest":target.verification_digest});
+    let mut fields = serde_json::json!({"agentRunId":run,"authorizationDigest":authorization,"executionId":execution,
+        "creation":{"attemptId":i.attempt_id,"executionId":i.execution_id,"instanceId":i.instance_id,"environmentId":i.environment_id,"sessionId":i.session_id,"workspaceId":i.workspace_id,"agentRunId":i.agent_run_id(),"authorizationDigest":i.authorization_digest,"profileDigest":i.profile_digest,"providerConfigDigest":i.provider_config_digest,"requestDigest":i.request_digest,"idempotencyKey":i.idempotency_key,"processingJobId":i.processing_job_id},"sandboxId":target.sandbox_id,"verificationDigest":target.verification_digest});
+    if matches!(i.owner, EnvironmentTaskOwner::MaintenanceOperation { .. }) {
+        let creation = fields["creation"]
+            .as_object_mut()
+            .ok_or("retained_provider_creation_invalid")?;
+        creation.remove("agentRunId");
+        creation.remove("processingJobId");
+        creation.insert(
+            "owner".into(),
+            serde_json::to_value(&i.owner).map_err(|_| "retained_provider_creation_invalid")?,
+        );
+        return fact_digest("runtime:retained-provider-use:v2\0", &fields);
+    }
     fact_digest("runtime:retained-provider-use:v1\0", &fields)
 }
 
@@ -170,16 +197,25 @@ pub(super) fn fact_digest(domain: &str, fields: &serde_json::Value) -> Result<St
 
 fn require_prior_uses_closed(
     db: &mut impl GenericClient,
-    run: &str,
+    run: Option<&str>,
     target: &ProviderVerifiedTarget,
 ) -> Result<(), String> {
-    if run != target.identity.agent_run_id && db.query_opt("SELECT provider_use_id FROM runtime.provider_environment_run_uses WHERE agent_run_id=$1 AND environment_id=$2", &[&target.identity.agent_run_id,&target.identity.environment_id]).map_err(|e|e.to_string())?.is_none() {
-        return Err("retained_provider_creation_consumer_unconfirmed".into());
+    match &target.identity.owner {
+        EnvironmentTaskOwner::AgentRun { run_id } => {
+            if run != Some(run_id.as_str()) && db.query_opt("SELECT provider_use_id FROM runtime.provider_environment_run_uses WHERE agent_run_id=$1 AND environment_id=$2", &[&run_id,&target.identity.environment_id]).map_err(|e|e.to_string())?.is_none() { return Err("retained_provider_creation_consumer_unconfirmed".into()); }
+        },
+        EnvironmentTaskOwner::MaintenanceOperation { .. } => super::provision::require_completed_handoff(db,target)?,
     }
-    let prior = db.query(
-        "SELECT agent_run_id FROM runtime.provider_environment_run_uses WHERE environment_id=$1 AND agent_run_id<>$2 ORDER BY provider_use_id FOR SHARE",
-        &[&target.identity.environment_id,&run],
-    ).map_err(|e|e.to_string())?;
+    let sql = if run.is_some() {
+        "SELECT agent_run_id FROM runtime.provider_environment_run_uses WHERE environment_id=$1 AND agent_run_id<>$2 ORDER BY provider_use_id FOR SHARE"
+    } else {
+        // Maintenance already pins the Environment. Never wait backwards for a
+        // Runtime consumer that could itself be waiting on that Environment.
+        "SELECT agent_run_id FROM runtime.provider_environment_run_uses WHERE environment_id=$1 AND ($2::text IS NULL OR agent_run_id<>$2) ORDER BY provider_use_id FOR SHARE NOWAIT"
+    };
+    let prior = db
+        .query(sql, &[&target.identity.environment_id, &run])
+        .map_err(|e| e.to_string())?;
     for row in prior {
         let prior_run: String = row.get(0);
         let receipt = receipts::load_receipt(db, &prior_run)?
@@ -199,6 +235,15 @@ fn require_prior_uses_closed(
         }
     }
     Ok(())
+}
+
+/// Maintenance excludes no Run: original creator and all later consumers
+/// require their exact cleanup proof and business release before guest work.
+pub(in crate::postgres_store) fn require_maintenance_handoff(
+    db: &mut impl GenericClient,
+    target: &ProviderVerifiedTarget,
+) -> Result<(), String> {
+    require_prior_uses_closed(db, None, target)
 }
 
 fn insert_use(
@@ -411,7 +456,7 @@ impl PostgresRuntimeStore {
             }
             require_target_scope(&grant, authority, &target)?;
             require_open_target(&mut tx, &target)?;
-            require_prior_uses_closed(&mut tx, &grant.authorization.agent_run_id, &target)?;
+            require_prior_uses_closed(&mut tx, Some(&grant.authorization.agent_run_id), &target)?;
             let value = insert_use(&mut tx, &grant, execution_id, &target)?;
             require_authority(&mut tx, authority, Some(configured_digest))?;
             tx.commit().map_err(|e| e.to_string())?;
@@ -707,7 +752,13 @@ pub(super) fn require_unsent_cleanup(
     require_current_binding(&grant, authority, identity)?;
     let bound=tx.query_opt("SELECT creation_attempt_id FROM runtime.provider_environment_bindings WHERE environment_id=$1 FOR SHARE",&[&identity.environment_id]).map_err(|e|e.to_string())?.ok_or("retained_provider_environment_binding_missing")?;
     if bound.get::<_, String>(0) != identity.attempt_id
-        || load_use(tx, &identity.agent_run_id)?.is_some()
+        || load_use(
+            tx,
+            identity
+                .agent_run_id()
+                .ok_or("retained_provider_run_origin_required")?,
+        )?
+        .is_some()
     {
         return Err("retained_provider_unsent_scope_rejected".into());
     }
@@ -744,7 +795,7 @@ pub(super) fn require_no_effects_environment(
     if anchor.is_some() {
         let target = load_environment_target(db, environment)?;
         require_open_target(db, &target)?;
-        require_prior_uses_closed(db, run, &target)
+        require_prior_uses_closed(db, Some(run), &target)
     } else {
         let pending:bool=db.query_one("SELECT EXISTS(SELECT 1 FROM runtime.provider_creation_operations WHERE environment_id=$1 AND settlement_id IS NULL)",&[&environment]).map_err(|e|e.to_string())?.get(0);
         if pending {
@@ -817,4 +868,26 @@ impl PostgresRuntimeStore {
             Ok(use_)
         })
     }
+}
+
+#[cfg(test)]
+#[test]
+fn provider_creation_origin_preserves_legacy_retained_use_digest() {
+    let identity = super::origin::legacy_test_identity();
+    let target = ProviderVerifiedTarget {
+        identity,
+        sandbox_id: "sandbox".into(),
+        verification_digest:
+            "sha256:afae5c30e32925a0877778177aa876364f4a118390abe78ccd9bbeb3ca7d70fb".into(),
+    };
+    assert_eq!(
+        binding_digest(
+            "consumer",
+            &format!("sha256:{}", "e".repeat(64)),
+            "consumer-execution",
+            &target
+        )
+        .unwrap(),
+        "sha256:7b64fae20d6093dc6ead1f9fb6e2a11f917fa6c81158b07d2ac1159c1e719442"
+    );
 }

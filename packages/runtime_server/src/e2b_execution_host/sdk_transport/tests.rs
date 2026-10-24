@@ -2,10 +2,10 @@ use super::*;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn process(log: &Path, frame: &[u8]) -> Arc<SpoolingAdapterProcess> {
+pub(crate) fn process(log: &Path, frame: &[u8]) -> Arc<SpoolingAdapterProcess> {
     process_with_capture_outcome(log, frame, "default")
 }
-fn process_with_capture_outcome(
+pub(crate) fn process_with_capture_outcome(
     log: &Path,
     frame: &[u8],
     mode: &str,
@@ -32,11 +32,15 @@ for sequence, line in enumerate(sys.stdin, 1):
  if sequence==failure_at:
   print(json.dumps({'schema':'runtime.e2b.adapter.response.v1','requestId':request['requestId'],'outcome':'unknown','error':{'code':'fixtureUnknown','message':'private diagnostic /secret/path token=hidden'}}),flush=True)
   continue
- if op=='runCommand':
+ if op=='attach':
+  result={'sandboxId':p['sandboxId'],'templateId':p['expectedTemplateId'],'metadata':p['expectedMetadata'],'state':'running'}
+  if mode=='attachMismatch':result['sandboxId']='other-sandbox'
+ elif op=='runCommand':
   pid+=1;contexts[pid]=p.get('envs',{});result={'sandboxId':p['sandboxId'],'pid':pid}
  elif op in ('waitCommand','invokeControlHelper'):
   data=b'{"activeProcessCount":0}' if op=='invokeControlHelper' and p['helper']=='agent-process-state' else b''
-  result={'sandboxId':p['sandboxId'],'pid':p.get('pid',999),'exitCode':0,'stdout':data.decode(),'stderr':'','stdoutBytesBase64':base64.b64encode(data).decode(),'stderrBytesBase64':'','stdoutByteLength':len(data),'stderrByteLength':0}
+  if op=='waitCommand' and mode=='maintenanceCommand':data=output
+  result={'sandboxId':p['sandboxId'],'pid':p.get('pid',999),'exitCode':0,'stdout':data.decode(errors='replace'),'stderr':'','stdoutBytesBase64':base64.b64encode(data).decode(),'stderrBytesBase64':'','stdoutByteLength':len(data),'stderrByteLength':0}
   if op=='invokeControlHelper':result['helper']=p['helper']
   if mode=='helperExitError' and sequence==5:result['exitCode']=7
   env=contexts.get(p.get('pid'),{})
@@ -47,6 +51,8 @@ for sequence, line in enumerate(sys.stdin, 1):
     stderr+=json.dumps(event).encode()+b'\n'
    event['message']='private injected field'; stderr+=json.dumps(event).encode()+b'\n'
    result.update({'stderrBytesBase64':base64.b64encode(stderr).decode(),'stderrByteLength':len(stderr),'exitCode':7 if mode=='helperError' else 0})
+ elif op=='listDirectory':
+  result={'sandboxId':p['sandboxId'],'entries':[{'path':p['path']+'/result.bin','kind':'file','sizeBytes':len(output)}]}
  elif op=='uploadFile':
   data=(root/(p['transferId']+'.upload')).read_bytes()
   assert hashlib.sha256(data).hexdigest()==p['sha256'] and len(data)==p['byteLength']
@@ -63,12 +69,18 @@ for sequence, line in enumerate(sys.stdin, 1):
 "#).arg(log).arg(frame.iter().map(|b|format!("{b:02x}")).collect::<String>()).arg(mode);
     Arc::new(SpoolingAdapterProcess::spawn(command).unwrap())
 }
-fn requests(log: &Path) -> Vec<Value> {
+pub(crate) fn requests(log: &Path) -> Vec<Value> {
     std::fs::read_to_string(log)
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+fn transport(
+    ordinary: Arc<SpoolingAdapterProcess>,
+    control: Arc<SpoolingAdapterProcess>,
+) -> E2bSdkTransport {
+    E2bSdkTransport::new(ordinary, control, super::super::tests::profile())
 }
 fn binding() -> E2bSandboxBinding {
     super::super::tests::binding()
@@ -81,7 +93,7 @@ fn helper_frame_uses_private_bulk_staging_and_fixed_executable_then_exact_cleanu
     let output = b"\0\xffbinary-frame";
     let ordinary = process(&log, output);
     let control = process(&control_log, output);
-    let transport = E2bSdkTransport::new(ordinary, control);
+    let transport = transport(ordinary, control);
     let input = vec![255; 2 * 1024 * 1024 + 17];
     assert_eq!(
         transport
@@ -136,7 +148,7 @@ fn status_and_quiescence_use_fresh_fixed_control_without_ordinary_connection() {
     let temp = tempfile::tempdir().unwrap();
     let log = temp.path().join("ordinary.jsonl");
     let control_log = temp.path().join("control.jsonl");
-    let transport = E2bSdkTransport::new(process(&log, b""), process(&control_log, b""));
+    let transport = transport(process(&log, b""), process(&control_log, b""));
     let observed = transport.inspect(&binding()).unwrap();
     assert!(observed.running && observed.on_timeout_kill && !observed.auto_resume);
     assert_eq!(observed.binding, binding());
@@ -156,7 +168,7 @@ fn status_and_quiescence_use_fresh_fixed_control_without_ordinary_connection() {
 fn ordinary_command_quotes_each_argv_and_retains_agent_identity() {
     let temp = tempfile::tempdir().unwrap();
     let log = temp.path().join("ordinary.jsonl");
-    let transport = E2bSdkTransport::new(
+    let transport = transport(
         process(&log, b""),
         process(&temp.path().join("control.jsonl"), b""),
     );
@@ -203,7 +215,7 @@ fn helper_budget_and_long_lived_helper_are_rejected_before_any_request() {
     let temp = tempfile::tempdir().unwrap();
     let log = temp.path().join("ordinary.jsonl");
     let control_log = temp.path().join("control.jsonl");
-    let transport = E2bSdkTransport::new(process(&log, b""), process(&control_log, b""));
+    let transport = transport(process(&log, b""), process(&control_log, b""));
     assert!(matches!(
         transport.helper(&binding(), TrustedHelperKind::WorkspaceWatch, b"", 1024),
         Err(E2bHostError::NotDispatched(_))
@@ -225,7 +237,7 @@ fn helper_budget_and_long_lived_helper_are_rejected_before_any_request() {
 fn filesystem_helper_keeps_private_frames_but_runs_as_workload_identity() {
     let temp = tempfile::tempdir().unwrap();
     let log = temp.path().join("ordinary.jsonl");
-    let transport = E2bSdkTransport::new(
+    let transport = transport(
         process(&log, b"result"),
         process(&temp.path().join("control.jsonl"), b""),
     );
@@ -248,7 +260,7 @@ fn filesystem_helper_keeps_private_frames_but_runs_as_workload_identity() {
 fn observed_capture_propagates_operation_context_to_the_dispatched_guest_helper() {
     let temp = tempfile::tempdir().unwrap();
     let log = temp.path().join("ordinary.jsonl");
-    let transport = E2bSdkTransport::new(
+    let transport = transport(
         process(&log, b"capture-frame"),
         process(&temp.path().join("control.jsonl"), b""),
     );
@@ -301,7 +313,7 @@ fn observed_capture_forwards_only_valid_numeric_guest_records_even_on_helper_fai
     for mode in ["guestSuccess", "helperError", "partialDownload"] {
         let temp = tempfile::tempdir().unwrap();
         let log = temp.path().join("ordinary.jsonl");
-        let transport = E2bSdkTransport::new(
+        let transport = transport(
             process_with_capture_outcome(&log, b"capture-frame", mode),
             process(&temp.path().join("control.jsonl"), b""),
         );
@@ -393,7 +405,7 @@ fn helper_timing_records_each_frame_kind_and_serial_stage_without_extra_requests
     ];
     let (_, events) = capture_timings(true, || {
         let _context = Context::enter(br#"{"jobId":"agent_run.lifecycle:helper-timing"}"#);
-        let transport = E2bSdkTransport::new(
+        let transport = transport(
             process(&log, b"private response bytes"),
             process(&control_log, b""),
         );
@@ -470,7 +482,7 @@ fn helper_timing_controls_are_counted_once_per_actual_kind_without_frame_staging
     let control_log = temp.path().join("control.jsonl");
     let (_, events) = capture_timings(true, || {
         let _context = Context::enter(br#"{"jobId":"agent_run.lifecycle:helper-control"}"#);
-        let transport = E2bSdkTransport::new(process(&log, b""), process(&control_log, b""));
+        let transport = transport(process(&log, b""), process(&control_log, b""));
         for kind in [
             TrustedHelperKind::PrepareWorkspace,
             TrustedHelperKind::AgentProcessState,
@@ -535,7 +547,7 @@ fn helper_timing_failure_records_only_reached_stages_and_preserves_unknown_witho
         let log = temp.path().join("ordinary.jsonl");
         let control_log = temp.path().join("control.jsonl");
         let (result, events) = capture_timings(true, || {
-            let transport = E2bSdkTransport::new(
+            let transport = transport(
                 process_with_capture_outcome(&log, b"result", mode),
                 process(&control_log, b""),
             );
@@ -576,7 +588,7 @@ fn helper_timing_rejection_and_opt_out_preserve_existing_dispatch_and_results() 
     let log = temp.path().join("ordinary.jsonl");
     let control_log = temp.path().join("control.jsonl");
     let (_, events) = capture_timings(true, || {
-        let transport = E2bSdkTransport::new(process(&log, b""), process(&control_log, b""));
+        let transport = transport(process(&log, b""), process(&control_log, b""));
         for kind in [
             TrustedHelperKind::WorkspaceWatch,
             TrustedHelperKind::WorkspaceGenerationRpc,
@@ -609,7 +621,7 @@ fn helper_timing_rejection_and_opt_out_preserve_existing_dispatch_and_results() 
         .all(|event| event["metric"] == "totalElapsedMs" && event["outcome"] == "error"));
     assert!(!log.exists() && !control_log.exists());
     let (_, events) = capture_timings(false, || {
-        let transport = E2bSdkTransport::new(process(&log, b"result"), process(&control_log, b""));
+        let transport = transport(process(&log, b"result"), process(&control_log, b""));
         assert_eq!(
             transport
                 .helper(&binding(), TrustedHelperKind::FileSystem, b"input", 1024)
@@ -632,7 +644,7 @@ fn helper_timing_carries_safe_job_context_across_threads_and_restores_the_worker
     let control_log = temp.path().join("control.jsonl");
     let (transport, _) = capture_timings(true, || {
         let _context = Context::enter(br#"{"jobId":"agent_run.lifecycle:helper-owner"}"#);
-        E2bSdkTransport::new(process(&log, b"result"), process(&control_log, b""))
+        transport(process(&log, b"result"), process(&control_log, b""))
     });
     let events = std::thread::spawn(move || {
         let (_, events) = capture_timings(true, || {
@@ -695,7 +707,7 @@ fn native_restore_wrapper(output_limit: usize, helper_body: &str) -> NativeHelpe
 
     let root = tempfile::tempdir().unwrap();
     let log = root.path().join("ordinary.jsonl");
-    let transport = E2bSdkTransport::new(
+    let transport = transport(
         process(&log, b""),
         process(&root.path().join("control.jsonl"), b""),
     );
@@ -814,7 +826,7 @@ fn managed_workspace_preparation_uses_control_without_staging_or_generic_shell()
     let temp = tempfile::tempdir().unwrap();
     let ordinary_log = temp.path().join("ordinary.jsonl");
     let control_log = temp.path().join("control.jsonl");
-    let transport = E2bSdkTransport::new(process(&ordinary_log, b""), process(&control_log, b""));
+    let transport = transport(process(&ordinary_log, b""), process(&control_log, b""));
     transport
         .helper(
             &binding(),
@@ -840,4 +852,144 @@ fn managed_workspace_preparation_uses_control_without_staging_or_generic_shell()
         serde_json::to_value(binding().metadata).unwrap()
     );
     assert!(!ordinary_log.exists());
+}
+
+#[test]
+fn task_image_command_uses_frozen_user_and_requested_working_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("ordinary.jsonl");
+    let mut profile = serde_json::to_value(super::super::tests::profile()).unwrap();
+    profile["user"] = "root".into();
+    profile["workspaceRoot"] = "/app".into();
+    let transport = E2bSdkTransport::new(
+        process(&log, b""),
+        process(&temp.path().join("control.jsonl"), b""),
+        serde_json::from_value(profile).unwrap(),
+    );
+    let request = ExecutionCommandRequest {
+        program: "/bin/bash".into(),
+        args: vec!["-c".into(), "printf task-image".into()],
+        cwd: "/app".into(),
+        env: HashMap::from([("TASK_FLAG".into(), "preserved".into())]),
+        timeout_ms: 1000,
+        policy: ExecutionPolicy::workspace_write_no_network("/app"),
+    };
+    transport.start(&binding(), &request).unwrap();
+    let seen = requests(&log);
+    assert_eq!(seen[0]["payload"]["user"], "root");
+    assert_eq!(seen[0]["payload"]["cwd"], "/app");
+    assert_eq!(seen[0]["payload"]["envs"]["TASK_FLAG"], "preserved");
+}
+
+fn task_image_transport(
+    ordinary: Arc<SpoolingAdapterProcess>,
+    control: Arc<SpoolingAdapterProcess>,
+) -> E2bSdkTransport {
+    let mut profile = serde_json::to_value(super::super::tests::profile()).unwrap();
+    profile["workspaceInitialization"] = json!("taskImage");
+    profile["lifetime"] = json!("retained");
+    profile["workspaceRoot"] = json!("/app");
+    profile["user"] = json!("root");
+    E2bSdkTransport::new(ordinary, control, serde_json::from_value(profile).unwrap())
+}
+#[test]
+fn task_image_health_uses_read_only_native_attach_with_original_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("ordinary.jsonl");
+    let control_log = temp.path().join("control.jsonl");
+    let transport = task_image_transport(process(&log, b""), process(&control_log, b""));
+    let observed = transport.inspect(&binding()).unwrap();
+    assert_eq!(observed.binding, binding());
+    assert!(observed.running && observed.on_timeout_kill && !observed.auto_resume);
+    let seen = requests(&log);
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0]["operation"], "attach");
+    assert_eq!(seen[0]["payload"]["workspaceRoot"], "/app");
+    assert_eq!(seen[0]["payload"]["workspaceUser"], "root");
+    assert_eq!(
+        seen[0]["payload"]["expectedMetadata"],
+        serde_json::to_value(binding().metadata).unwrap()
+    );
+    assert!(!control_log.exists());
+}
+#[test]
+fn task_image_rejects_mismatched_attach_and_unimplemented_helpers_before_effects() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("ordinary.jsonl");
+    let control_log = temp.path().join("control.jsonl");
+    let transport = task_image_transport(
+        process_with_capture_outcome(&log, b"", "attachMismatch"),
+        process(&control_log, b""),
+    );
+    assert!(transport.inspect(&binding()).is_err());
+    for kind in [
+        TrustedHelperKind::FileSystem,
+        TrustedHelperKind::SnapshotCapture,
+        TrustedHelperKind::SnapshotRestore,
+    ] {
+        assert_eq!(
+            transport.helper(&binding(), kind, &[], 1024),
+            Err(E2bHostError::NotDispatched(
+                "e2b_task_image_helper_unsupported"
+            ))
+        );
+    }
+    assert_eq!(
+        transport.quiesce(&binding()),
+        Err(E2bHostError::NotDispatched(
+            "e2b_task_image_quiescence_unsupported"
+        ))
+    );
+    assert_eq!(requests(&log).len(), 1);
+    assert!(!control_log.exists());
+}
+
+struct TaskImageAuthority;
+impl E2bDispatchAuthority for TaskImageAuthority {
+    fn dispatch(
+        &self,
+        operation: &mut (dyn FnMut() -> Result<E2bDispatchResult, E2bHostError> + Send),
+    ) -> Result<E2bDispatchResult, E2bHostError> {
+        operation()
+    }
+}
+#[test]
+fn task_image_preparation_and_closed_run_cleanup_preserve_background_services() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("ordinary.jsonl");
+    let control_log = temp.path().join("control.jsonl");
+    let transport = task_image_transport(process(&log, b""), process(&control_log, b""));
+    let profile = transport.profile.clone();
+    let mut binding = binding();
+    binding
+        .metadata
+        .insert("profileDigest".into(), profile.digest().unwrap());
+    let runner = E2bExecutionHostRunner::new(
+        profile,
+        binding.clone(),
+        Arc::new(transport),
+        Arc::new(TaskImageAuthority),
+    )
+    .unwrap();
+    runner.prepare_workspace().unwrap();
+    runner
+        .confirm_run_quiescence_under_cleanup_pins(
+            &binding.metadata["instanceId"],
+            &binding.sandbox_id,
+        )
+        .unwrap();
+    let seen = requests(&log);
+    assert_eq!(
+        seen.iter()
+            .map(|r| r["operation"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["attach", "runCommand", "waitCommand", "attach"]
+    );
+    assert_eq!(seen[1]["payload"]["user"], "root");
+    assert_eq!(seen[1]["payload"]["cwd"], "/app");
+    assert_eq!(
+        seen[1]["payload"]["command"],
+        "exec '/usr/bin/test' '-d' '.'"
+    );
+    assert!(!control_log.exists());
 }

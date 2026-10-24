@@ -92,6 +92,9 @@ pub(crate) mod lease_renewal;
 pub(crate) mod lifecycle_control;
 pub(crate) mod maintenance;
 pub(crate) mod pre_admission_failure;
+pub(crate) mod provider_maintenance;
+#[path = "postgres_store/provider_maintenance/schema.rs"]
+pub(crate) mod provider_maintenance_schema;
 pub mod provider_operations;
 pub(crate) mod provision;
 mod reliability;

@@ -46,7 +46,10 @@ fn observation(identity: &ProviderCreationIdentity) -> ProviderSandboxObservatio
             ("environmentId".into(), identity.environment_id.clone()),
             ("instanceId".into(), identity.instance_id.clone()),
             ("executionId".into(), identity.execution_id.clone()),
-            ("agentRunId".into(), identity.agent_run_id.clone()),
+            (
+                "agentRunId".into(),
+                identity.agent_run_id().unwrap().to_owned(),
+            ),
             ("sessionId".into(), identity.session_id.clone()),
             ("workspaceId".into(), identity.workspace_id.clone()),
             ("profileDigest".into(), identity.profile_digest.clone()),
@@ -54,7 +57,10 @@ fn observation(identity: &ProviderCreationIdentity) -> ProviderSandboxObservatio
                 "authorizationDigest".into(),
                 identity.authorization_digest.clone(),
             ),
-            ("processingJobId".into(), identity.processing_job_id.clone()),
+            (
+                "processingJobId".into(),
+                identity.processing_job_id.clone().unwrap(),
+            ),
         ]),
     }
 }

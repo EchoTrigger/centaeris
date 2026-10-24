@@ -569,12 +569,15 @@ fn require_cleanup(
 }
 
 pub(crate) fn expected_metadata(identity: &ProviderCreationIdentity) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    let mut metadata = BTreeMap::from([
         ("centaerisAttemptId".into(), identity.attempt_id.clone()),
         ("environmentId".into(), identity.environment_id.clone()),
         ("instanceId".into(), identity.instance_id.clone()),
         ("executionId".into(), identity.execution_id.clone()),
-        ("agentRunId".into(), identity.agent_run_id.clone()),
+        (
+            "agentRunId".into(),
+            identity.agent_run_id().unwrap_or_default().into(),
+        ),
         ("sessionId".into(), identity.session_id.clone()),
         ("workspaceId".into(), identity.workspace_id.clone()),
         ("profileDigest".into(), identity.profile_digest.clone()),
@@ -582,8 +585,18 @@ pub(crate) fn expected_metadata(identity: &ProviderCreationIdentity) -> BTreeMap
             "authorizationDigest".into(),
             identity.authorization_digest.clone(),
         ),
-        ("processingJobId".into(), identity.processing_job_id.clone()),
-    ])
+        (
+            "processingJobId".into(),
+            identity.processing_job_id.clone().unwrap_or_default(),
+        ),
+    ]);
+    if let EnvironmentTaskOwner::MaintenanceOperation { operation_id } = &identity.owner {
+        metadata.remove("agentRunId");
+        metadata.remove("processingJobId");
+        metadata.insert("creationOwnerKind".into(), "maintenanceOperation".into());
+        metadata.insert("maintenanceOperationId".into(), operation_id.clone());
+    }
+    metadata
 }
 
 fn digest(domain: &str, value: &serde_json::Value) -> Result<String, String> {
@@ -594,7 +607,7 @@ fn digest(domain: &str, value: &serde_json::Value) -> Result<String, String> {
     Ok(format!("sha256:{:x}", hash.finalize()))
 }
 
-pub(super) fn load_target(
+pub(in crate::postgres_store) fn load_target(
     db: &mut impl GenericClient,
     identity: &ProviderCreationIdentity,
 ) -> Result<Option<ProviderVerifiedTarget>, String> {

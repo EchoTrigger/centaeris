@@ -9,9 +9,9 @@ use crate::session_workspace::snapshot::{
     SnapshotCaptureResult, WorkspaceSnapshotDescriptor, SESSION_WORKSPACE_MANIFEST_LIMIT,
 };
 use crate::session_workspace::{
-    SessionWorkspaceApi, SessionWorkspaceApiError, SessionWorkspaceCommitOutcome,
-    SessionWorkspaceLease, SessionWorkspaceLeaseRequest, SessionWorkspaceResolution,
-    SESSION_WORKSPACE_DOWNLOAD_SCHEMA,
+    RetainedProviderWorkspaceBinding, SessionWorkspaceApi, SessionWorkspaceApiError,
+    SessionWorkspaceCommitOutcome, SessionWorkspaceLease, SessionWorkspaceLeaseRequest,
+    SessionWorkspaceResolution, SESSION_WORKSPACE_DOWNLOAD_SCHEMA,
 };
 use hosted_execution::protocol::{SandboxSnapshotCaptureRequest, SANDBOX_SNAPSHOT_CAPTURE_SCHEMA};
 use std::fs::File;
@@ -34,6 +34,16 @@ pub(crate) trait WorkspaceHelperPort: Send + Sync {
 /// Success means exit zero and a fully received helper result. This is neither
 /// VM cleanup proof nor permission to resume an environment.
 pub(crate) trait WorkspaceHelperSession {
+    /// Prove only this Run's closed command/effect evidence and the fresh exact
+    /// provider identity. Environment-scoped services are not VM quiescence.
+    fn verify_retained_provider_binding(
+        &self,
+    ) -> Result<RetainedProviderWorkspaceBinding, E2bHostError> {
+        Err(E2bHostError::NotDispatched(
+            "e2b_retained_provider_binding_unsupported",
+        ))
+    }
+
     /// Consume before any capture side effect; failures cannot retain a stale entry.
     fn take_capture_baseline(
         &self,
@@ -81,8 +91,8 @@ impl E2bSessionWorkspace {
             return Err("e2b_workspace_profile_unsupported".into());
         };
         if !matches!(value.lifetime.as_str(), "perRun" | "retained")
-            || value.workspace_root != "/mnt/data"
-            || value.user != "agent"
+            || (!profile.task_image()
+                && (value.workspace_root != "/mnt/data" || value.user != "agent"))
         {
             return Err("e2b_workspace_profile_unsupported".into());
         }
@@ -135,7 +145,46 @@ impl E2bSessionWorkspace {
         lease: &SessionWorkspaceLease,
         frozen: &SessionWorkspace,
     ) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
+        if self.profile.task_image() {
+            return self.resolve_task_image(lease, frozen, 0);
+        }
         self.api().resolve(lease, frozen)
+    }
+
+    fn require_task_image_empty(
+        &self,
+        frozen: &SessionWorkspace,
+        inputs: u64,
+    ) -> Result<(), String> {
+        frozen.validate()?;
+        if frozen.generation != 0
+            || !frozen.snapshot_sha256.is_empty()
+            || frozen.snapshot_size_bytes != 0
+            || frozen.expanded_size_bytes != 0
+            || frozen.file_count != 0
+        {
+            return Err("e2b_task_image_archive_unsupported".into());
+        }
+        if inputs != 0 {
+            return Err("e2b_task_image_inputs_unsupported".into());
+        }
+        Ok(())
+    }
+
+    fn resolve_task_image(
+        &self,
+        lease: &SessionWorkspaceLease,
+        frozen: &SessionWorkspace,
+        inputs: u64,
+    ) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
+        self.require_task_image_empty(frozen, inputs)
+            .map_err(SessionWorkspaceApiError::Rejected)?;
+        match self.api().resolve(lease, frozen)? {
+            SessionWorkspaceResolution::Empty => Ok(SessionWorkspaceResolution::Empty),
+            _ => Err(SessionWorkspaceApiError::Rejected(
+                "e2b_task_image_archive_unsupported".into(),
+            )),
+        }
     }
 
     pub(crate) fn restore(
@@ -144,6 +193,11 @@ impl E2bSessionWorkspace {
         frozen: &SessionWorkspace,
         input_upper_bound_bytes: u64,
     ) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
+        if self.profile.task_image() {
+            // The original node filesystem is authoritative; nothing is restored
+            // or quiesced when the signed Session archive is explicitly empty.
+            return self.resolve_task_image(lease, frozen, input_upper_bound_bytes);
+        }
         let Some(session) = self.helpers.try_exclusive().map_err(restore_helper_error)? else {
             return Err(SessionWorkspaceApiError::Unavailable(
                 "e2b_workspace_exclusion_busy".into(),
@@ -276,6 +330,7 @@ impl E2bSessionWorkspace {
             Ok(SessionWorkspaceCommitOutcome::Accepted) if already_advanced => "alreadyAdvanced",
             Ok(SessionWorkspaceCommitOutcome::Accepted) => "full",
             Ok(SessionWorkspaceCommitOutcome::Unchanged) => "unchanged",
+            Ok(SessionWorkspaceCommitOutcome::RetainedProvider(_)) => "retainedProvider",
             Ok(
                 SessionWorkspaceCommitOutcome::Pending
                 | SessionWorkspaceCommitOutcome::ProtectionDeferred,
@@ -288,11 +343,48 @@ impl E2bSessionWorkspace {
             matches!(
                 &result,
                 Ok(SessionWorkspaceCommitOutcome::Accepted
-                    | SessionWorkspaceCommitOutcome::Unchanged)
+                    | SessionWorkspaceCommitOutcome::Unchanged
+                    | SessionWorkspaceCommitOutcome::RetainedProvider(_))
             ),
         );
         observation.workspace_commit_disposition(disposition);
         result
+    }
+
+    fn retain_task_image(
+        &self,
+        lease: &SessionWorkspaceLease,
+        frozen: &SessionWorkspace,
+        inputs: u64,
+    ) -> Result<SessionWorkspaceCommitOutcome, String> {
+        match self.resolve_task_image(lease, frozen, inputs) {
+            Ok(_) => {}
+            Err(SessionWorkspaceApiError::Rejected(reason)) => {
+                return Ok(SessionWorkspaceCommitOutcome::Rejected(reason))
+            }
+            Err(SessionWorkspaceApiError::Unavailable(_)) => {
+                return Ok(SessionWorkspaceCommitOutcome::Pending)
+            }
+        }
+        let session = match self.helpers.try_exclusive() {
+            Ok(Some(session)) => session,
+            Ok(None) => return Ok(SessionWorkspaceCommitOutcome::Pending),
+            Err(error) => return Ok(capture_helper_error(error, "retainedProvider")),
+        };
+        match session.verify_retained_provider_binding() {
+            Ok(binding)
+                if binding.profile_digest == self.profile.digest()?
+                    && !binding.environment_id.is_empty()
+                    && !binding.instance_id.is_empty()
+                    && !binding.sandbox_id.is_empty() =>
+            {
+                Ok(SessionWorkspaceCommitOutcome::RetainedProvider(binding))
+            }
+            Ok(_) => Ok(SessionWorkspaceCommitOutcome::Rejected(
+                "e2b_task_image_binding_mismatch".into(),
+            )),
+            Err(error) => Ok(capture_helper_error(error, "retainedProvider")),
+        }
     }
 
     fn collect_and_commit_observed(
@@ -303,6 +395,9 @@ impl E2bSessionWorkspace {
         observation: &WorkspaceProtection,
         already_advanced: &mut bool,
     ) -> Result<SessionWorkspaceCommitOutcome, String> {
+        if self.profile.task_image() {
+            return self.retain_task_image(lease, frozen, input_upper_bound_bytes);
+        }
         if let Err(reason) = frozen.validate() {
             return Ok(SessionWorkspaceCommitOutcome::Rejected(reason));
         }

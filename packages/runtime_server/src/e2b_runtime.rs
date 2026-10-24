@@ -27,14 +27,20 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 mod cleanup;
+pub(crate) mod maintenance;
+pub(crate) mod observation;
 mod power;
+pub(crate) use power::with_power_environment;
+mod provision;
 mod retained;
 mod retirement;
+pub(crate) mod rotation;
 #[cfg(test)]
 mod tests;
 pub(crate) use cleanup::E2bCleanupOutcome;
 #[cfg(test)]
 pub(crate) use cleanup::E2bCleanupPendingStage;
+pub(crate) use provision::E2bProvisionOutcome;
 
 /// Host-selected paths and public provider identity. Credentials stay inherited
 /// by the SDK child and this type deliberately implements no Debug.
@@ -44,6 +50,8 @@ pub(crate) struct E2bRuntimeConfig {
     python: PathBuf,
     adapter_package_root: PathBuf,
     request_timeout: Duration,
+    running_limit: Option<u32>,
+    idle_pause_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,8 +202,8 @@ impl E2bRuntimeConfig {
             return Err(E2bRuntimeError::Rejected("e2b_runtime_profile_unsupported"));
         };
         if !matches!(selected.lifetime.as_str(), "perRun" | "retained")
-            || selected.workspace_root != "/mnt/data"
-            || selected.user != "agent"
+            || (!profile.task_image()
+                && (selected.workspace_root != "/mnt/data" || selected.user != "agent"))
             || selected.provider_config_digest != provider_config_digest
         {
             return Err(E2bRuntimeError::Rejected("e2b_runtime_profile_unsupported"));
@@ -233,9 +241,39 @@ impl E2bRuntimeConfig {
             python,
             adapter_package_root,
             request_timeout,
+            running_limit: None,
+            idle_pause_timeout: None,
         })
     }
 
+    pub(crate) fn with_running_limit(
+        mut self,
+        limit: Option<u32>,
+    ) -> Result<Self, E2bRuntimeError> {
+        crate::postgres_store::provider_operations::capacity::validate_limit(limit)
+            .map_err(|_| E2bRuntimeError::Rejected("e2b_running_limit_invalid"))?;
+        if limit.is_some()
+            && !matches!(&self.profile,EnvironmentProfile::E2b(value) if value.lifetime=="retained")
+        {
+            return Err(E2bRuntimeError::Rejected(
+                "e2b_rotation_requires_retained_profile",
+            ));
+        }
+        self.running_limit = limit;
+        Ok(self)
+    }
+    pub(crate) fn with_idle_pause_timeout(
+        mut self,
+        timeout: Option<Duration>,
+    ) -> Result<Self, E2bRuntimeError> {
+        if let Some(timeout) = timeout {
+            if self.running_limit.is_none() || crate::postgres_store::provider_operations::retained::idle::policy::IdlePausePolicy::new(timeout).is_err() {
+                return Err(E2bRuntimeError::Rejected("e2b_idle_pause_configuration_invalid"));
+            }
+        }
+        self.idle_pause_timeout = timeout;
+        Ok(self)
+    }
     pub(crate) fn profile(&self) -> &EnvironmentProfile {
         &self.profile
     }
@@ -260,6 +298,7 @@ pub(crate) struct E2bRuntime {
     store: PostgresRuntimeStore,
     config: E2bRuntimeConfig,
     launcher: Arc<dyn E2bAdapterLauncher>,
+    rotation_started: AtomicBool,
 }
 
 impl E2bRuntime {
@@ -268,6 +307,7 @@ impl E2bRuntime {
             store,
             config,
             launcher: Arc::new(InstalledAdapterLauncher),
+            rotation_started: AtomicBool::new(false),
         }
     }
 
@@ -281,7 +321,22 @@ impl E2bRuntime {
             store,
             config,
             launcher,
+            rotation_started: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn start_rotation(
+        self: &Arc<Self>,
+        runtime: &tokio::runtime::Runtime,
+        registry: Arc<crate::e2b_run_registry::E2bRunRegistry>,
+    ) -> bool {
+        if self.config.idle_pause_timeout.is_none()
+            || self.rotation_started.swap(true, Ordering::AcqRel)
+        {
+            return false;
+        }
+        runtime.spawn(rotation::run(self.clone(), registry));
+        true
     }
 
     pub(crate) fn attempt_key(
@@ -415,8 +470,18 @@ impl E2bRuntime {
             succeeded: AtomicBool::new(false),
         };
         let operation = E2bCreationDriver::new(&self.store, &adapter)
+            .with_running_limit(self.config.running_limit)
             .create_or_reopen(authority, &request)
-            .map_err(|_| E2bRuntimeError::Unknown("e2b_runtime_creation_unconfirmed"))?;
+            .map_err(|error| match error {
+                crate::e2b_creation::E2bCreationError::Store(reason)
+                    if reason == crate::postgres_store::provider_operations::capacity::WAIT =>
+                {
+                    E2bRuntimeError::Unavailable(
+                        crate::postgres_store::provider_operations::capacity::WAIT,
+                    )
+                }
+                _ => E2bRuntimeError::Unknown("e2b_runtime_creation_unconfirmed"),
+            })?;
         if !adapter.sent.load(Ordering::Acquire) {
             return Ok(pending_existing(operation));
         }
@@ -463,7 +528,11 @@ impl E2bRuntime {
             &target,
             &self.config.provider_config_digest,
         )?);
-        let transport = Arc::new(E2bSdkTransport::new(ordinary, control));
+        let transport = Arc::new(E2bSdkTransport::new(
+            ordinary,
+            control,
+            self.config.profile.clone(),
+        ));
         let runner = Arc::new(
             E2bExecutionHostRunner::new(
                 self.config.profile.clone(),

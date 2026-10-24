@@ -320,14 +320,6 @@ fn deferred_execution_empty_workspace_finishes_without_factory_or_snapshot_mutat
         ExecutionWorkspaceGeneration::Unknown { .. }
     ));
     assert_eq!(
-        proxy
-            .read_agents_file(Path::new("/mnt/data"), 128)
-            .err()
-            .unwrap()
-            .kind,
-        ExecutionFileSystemErrorKind::NotFound
-    );
-    assert_eq!(
         proxy.resolve(&lease(), &empty()).unwrap(),
         SessionWorkspaceResolution::Empty
     );
@@ -408,15 +400,9 @@ fn deferred_execution_ready_ports_preserve_requests_results_and_live_instruction
         proxy.collect_and_commit(&lease(), &empty(), 0).unwrap(),
         SessionWorkspaceCommitOutcome::ProtectionDeferred
     );
-    assert_eq!(
-        proxy.read_agents_file(Path::new("/mnt/data"), 128).unwrap(),
-        b"live instructions"
-    );
     let requests = ports.files.lock().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].operation_id.as_deref(), Some("read-owned"));
-    assert_eq!(requests[1].operation_id, None);
-    assert_eq!(requests[1].policy, policy());
     assert_eq!(creates.load(Ordering::SeqCst), 1);
 }
 #[test]
@@ -563,14 +549,6 @@ fn deferred_execution_scope_and_nonempty_inputs_fail_before_http_or_creation() {
         proxy.resolve(&lease(), &changed),
         Err(SessionWorkspaceApiError::Rejected(_))
     ));
-    assert_eq!(
-        proxy
-            .read_agents_file(Path::new("/other"), 128)
-            .err()
-            .unwrap()
-            .kind,
-        ExecutionFileSystemErrorKind::InvalidPath
-    );
     assert_eq!(creates.load(Ordering::SeqCst), 0);
 }
 #[test]
@@ -653,21 +631,22 @@ impl ModelClient for ReadThenFinishModel {
                         .prepared_prompt
                         .messages
                         .iter()
-                        .all(|message| { !message.message_id.ends_with(":agents_context") }),
-                    "the logical managed workspace starts without AGENTS.md"
+                        .all(|message| !message.content.contains("live instructions")),
+                    "the unread managed workspace instructions must not enter the first prompt"
                 );
             } else {
                 assert_eq!(self.creates.load(Ordering::SeqCst), 1);
                 assert!(
                     request.prepared_prompt.messages.iter().any(|message| {
-                        message.message_id.ends_with(":agents_context")
+                        message.tool_call_id.as_deref() == Some("deferred-core-read")
                             && message.content.contains("live instructions")
                     }),
-                    "the next model context must read materialized live instructions"
+                    "the explicit read result must enter the next model context"
                 );
-                assert_ne!(
+                assert_eq!(
                     requests[0].provider_prompt_cache_key,
-                    request.provider_prompt_cache_key
+                    request.provider_prompt_cache_key,
+                    "an explicit AGENTS.md read must not invalidate the provider prompt cache identity"
                 );
             }
             requests.push(request.clone());
@@ -718,7 +697,6 @@ fn deferred_tools(proxy: Arc<DeferredE2bExecution>) -> ToolLayer {
         host,
     )
     .unwrap()
-    .with_workspace_instruction_read_port(proxy)
 }
 
 #[cfg(target_os = "linux")]
@@ -822,8 +800,8 @@ fn deferred_execution_query_loop_materializes_only_after_durable_file_demand_and
     );
     assert_eq!(tool_reads[0].model_path, "AGENTS.md");
     assert!(
-        files.iter().any(|request| request.operation_id.is_none()),
-        "the next startup-instruction read must reach the same live host"
+        files.iter().all(|request| request.operation_id.is_some()),
+        "AGENTS.md may only be read through the durable tool boundary"
     );
 }
 
@@ -867,7 +845,6 @@ fn deferred_execution_query_loop_expired_step_tool_layer_clone_cannot_create_or_
     assert_eq!(model.requests.lock().unwrap().len(), 1);
     assert_eq!(receipts.len(), 1);
     assert_ne!(receipts[0].status, "ok");
-    assert!(stale_tools.read_agents_instructions().is_err());
     assert!(proxy.ensure_ready().is_err());
     assert_eq!(
         attempts.load(Ordering::SeqCst),

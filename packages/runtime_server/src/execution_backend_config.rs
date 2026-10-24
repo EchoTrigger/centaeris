@@ -46,6 +46,21 @@ impl ExecutionBackendConfig {
             .unwrap_or_else(|| "20".into())
             .parse::<u64>()
             .map_err(|_| "runtime_e2b_timeout_invalid")?;
+        let running_limit = get("RUNTIME_E2B_MAX_RUNNING_ENVIRONMENTS")
+            .map(|value| {
+                value
+                    .parse::<u32>()
+                    .map_err(|_| "e2b_running_limit_invalid".to_string())
+            })
+            .transpose()?;
+        let idle_pause_timeout = get("RUNTIME_E2B_IDLE_PAUSE_MS")
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .map(Duration::from_millis)
+                    .map_err(|_| "e2b_idle_pause_configuration_invalid".to_string())
+            })
+            .transpose()?;
         E2bRuntimeConfig::new(
             profile,
             required("RUNTIME_E2B_PROVIDER_CONFIG_DIGEST")?,
@@ -53,6 +68,8 @@ impl ExecutionBackendConfig {
             PathBuf::from(required("RUNTIME_E2B_ADAPTER_PACKAGE_ROOT")?),
             Duration::from_secs(timeout),
         )
+        .and_then(|config| config.with_running_limit(running_limit))
+        .and_then(|config| config.with_idle_pause_timeout(idle_pause_timeout))
         .map(|config| Self::E2b(Box::new(config)))
         .map_err(|error| match error {
             crate::e2b_runtime::E2bRuntimeError::Rejected(code)

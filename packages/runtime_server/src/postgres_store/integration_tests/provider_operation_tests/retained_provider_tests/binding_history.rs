@@ -131,14 +131,14 @@ fn postgres_retained_history_schema_requires_immutable_attempt_reference() {
         db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
             .unwrap()
             .get::<_, i64>(0),
-        21
+        24
     );
     let column = db.query_opt("SELECT is_nullable FROM information_schema.columns WHERE table_schema='runtime' AND table_name='provider_environment_run_uses' AND column_name='creation_attempt_id'", &[]).unwrap().expect("history anchor is required");
     assert_eq!(column.get::<_, String>(0), "NO");
 }
 
 fn durable_facts(db: &mut Client) -> String {
-    db.query_one("SELECT jsonb_build_object('creation',(SELECT jsonb_agg(to_jsonb(p) ORDER BY attempt_id) FROM runtime.provider_creation_operations p),'binding',(SELECT jsonb_agg(to_jsonb(b) ORDER BY environment_id) FROM runtime.provider_environment_bindings b),'uses',(SELECT jsonb_agg(to_jsonb(u)-'creation_attempt_id' ORDER BY provider_use_id) FROM runtime.provider_environment_run_uses u),'authorization',(SELECT jsonb_agg(to_jsonb(g) ORDER BY agent_run_id) FROM public.app_core_agentrunauthorization g))::text", &[]).unwrap().get(0)
+    db.query_one("SELECT jsonb_build_object('creation',(SELECT jsonb_agg(to_jsonb(p)-'creation_owner_json'-'maintenance_operation_id' ORDER BY attempt_id) FROM runtime.provider_creation_operations p),'binding',(SELECT jsonb_agg(to_jsonb(b) ORDER BY environment_id) FROM runtime.provider_environment_bindings b),'uses',(SELECT jsonb_agg(to_jsonb(u)-'creation_attempt_id' ORDER BY provider_use_id) FROM runtime.provider_environment_run_uses u),'authorization',(SELECT jsonb_agg(to_jsonb(g) ORDER BY agent_run_id) FROM public.app_core_agentrunauthorization g))::text", &[]).unwrap().get(0)
 }
 
 fn history_versions(db: &mut Client, through: i64) -> Vec<(i64, i64)> {
@@ -153,7 +153,7 @@ fn copy_creation(
     verified: bool,
 ) -> String {
     let attempt = format!("{environment}-attempt");
-    db.execute("INSERT INTO runtime.provider_creation_operations(attempt_id,execution_id,instance_id,environment_id,session_id,workspace_id,agent_run_id,authorization_digest,profile_digest,provider,provider_config_digest,request_digest,idempotency_key,processing_job_id,dispatch_state,recorded_at_ms) SELECT $1,$1||'-execution',$1||'-instance',$2,session_id,workspace_id,agent_run_id,authorization_digest,$3,provider,$4,request_digest,$1||'-key',processing_job_id,'prepared',recorded_at_ms FROM runtime.provider_creation_operations ORDER BY attempt_id LIMIT 1", &[&attempt,&environment,&profile,&config]).unwrap();
+    db.execute("INSERT INTO runtime.provider_creation_operations(attempt_id,execution_id,instance_id,environment_id,session_id,workspace_id,agent_run_id,authorization_digest,profile_digest,provider,provider_config_digest,request_digest,idempotency_key,processing_job_id,dispatch_state,recorded_at_ms,creation_owner_json,maintenance_operation_id) SELECT $1,$1||'-execution',$1||'-instance',$2,session_id,workspace_id,agent_run_id,authorization_digest,$3,provider,$4,request_digest,$1||'-key',processing_job_id,'prepared',recorded_at_ms,creation_owner_json,maintenance_operation_id FROM runtime.provider_creation_operations ORDER BY attempt_id LIMIT 1", &[&attempt,&environment,&profile,&config]).unwrap();
     db.execute("UPDATE runtime.provider_creation_operations SET dispatch_state='dispatched' WHERE attempt_id=$1", &[&attempt]).unwrap();
     if verified {
         db.execute("UPDATE runtime.provider_creation_operations SET reported_sandbox_id=$1||'-sandbox' WHERE attempt_id=$1", &[&attempt]).unwrap();
