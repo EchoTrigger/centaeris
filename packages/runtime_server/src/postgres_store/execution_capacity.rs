@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use centaeris_core::session::reliability::{
     ClaimDueRuntimeJobsRequest, RuntimeJobRecord, RuntimeJobStorePort,
     ScheduleRuntimeJobDisposition, ScheduleRuntimeJobRequest, ScheduleRuntimeJobResult,
@@ -16,8 +14,6 @@ pub(super) const ACTIVE_EXECUTIONS: &str = "WITH active AS MATERIALIZED (
     SELECT t.workspace_id FROM runtime_jobs j
     LEFT JOIN execution_job_tenants t ON t.job_id=j.job_id
     WHERE j.job_kind='agent_run.lifecycle' AND j.status IN ('leased','running') AND j.lease_purpose='execute'
-), tenant_usage AS MATERIALIZED (
-    SELECT workspace_id,COUNT(*) AS used FROM active GROUP BY workspace_id
 )";
 
 impl PostgresRuntimeStore {
@@ -91,42 +87,29 @@ impl PostgresRuntimeStore {
                 .map_err(|error| error.to_string())?.get::<_, bool>(0) {
                 return Err("execution claim busy".to_string());
             }
-            let rows = tx.query(&format!("{ACTIVE_EXECUTIONS} SELECT workspace_id,used FROM tenant_usage"), &[])
-                .map_err(|error| error.to_string())?;
-            let mut used = 0usize;
-            let mut tenants = HashMap::<String, usize>::new();
-            for row in rows {
-                let count = usize::try_from(row.get::<_, i64>(1)).map_err(|error| error.to_string())?;
-                used = used.saturating_add(count);
-                if let Some(tenant) = row.get::<_, Option<String>>(0) { tenants.insert(tenant, count); }
-            }
+            let used = usize::try_from(tx.query_one(&format!("{ACTIVE_EXECUTIONS} SELECT COUNT(*) FROM active"), &[])
+                .map_err(|error| error.to_string())?.get::<_, i64>(0)).map_err(|error| error.to_string())?;
             let available = limits.global.saturating_sub(used).min(req.limit);
             if available == 0 { return Ok(Vec::new()); }
-            let full = tenants.iter().filter(|(_, used)| **used >= limits.tenant)
-                .map(|(tenant, _)| tenant.clone()).collect::<Vec<_>>();
             let now = tx.query_one("SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint", &[])
                 .map_err(|error| error.to_string())?.get::<_, i64>(0);
             let due=super::capacity_wait::DUE_AT;
-            let candidates = tx.query(&format!("SELECT j.job_id,t.workspace_id FROM runtime_jobs j
+            let candidates = tx.query(&format!("SELECT j.job_id FROM runtime_jobs j
                 JOIN execution_job_tenants t ON t.job_id=j.job_id
                 WHERE j.status='queued' AND j.job_kind='agent_run.lifecycle' AND {due}<=$1
                 AND COALESCE(j.lease_reclaim_not_before_ms,{due})<=$1
                 AND ($2::text IS NULL OR j.job_id=$2) AND ($3::text IS NULL OR j.session_id=$3)
-                AND NOT(t.workspace_id=ANY($4)) AND NOT({})
-                ORDER BY {due},j.created_at_ms,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT $5", super::lifecycle_control::PENDING),
-                &[&now, &req.job_id, &req.session_id, &full, &(available as i64)])
+                AND NOT({})
+                ORDER BY {due},j.created_at_ms,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT $4", super::lifecycle_control::PENDING),
+                &[&now, &req.job_id, &req.session_id, &(available as i64)])
                 .map_err(|error| error.to_string())?;
             let until = now.checked_add(i64::try_from(req.lease_ms).map_err(|error| error.to_string())?)
                 .ok_or("execution lease deadline overflow")?;
             let mut jobs = Vec::new();
             for row in candidates {
                 let id: String = row.get(0);
-                let tenant: String = row.get(1);
-                let tenant_used = tenants.entry(tenant).or_default();
-                if *tenant_used >= limits.tenant { continue; }
                 tx.execute("UPDATE runtime_jobs SET run_at_ms=LEAST(run_at_ms,$2),status='leased',lease_owner=gen_random_uuid()::text,lease_expires_at_ms=$1,updated_at_ms=$2,heartbeat_at_ms=$2,lease_purpose='execute',lease_control_stage=NULL WHERE job_id=$3 AND status='queued'",
                     &[&until,&now,&id]).map_err(|error| error.to_string())?;
-                *tenant_used += 1;
                 jobs.push(load_job(&mut tx, &id)?.ok_or("claimed execution job missing")?);
             }
             tx.commit().map_err(|error| error.to_string())?;

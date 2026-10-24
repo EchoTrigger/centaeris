@@ -139,7 +139,6 @@ Invalid or unsafe budgets fail instead of falling back to an unbounded value.
 | Variable | Default | Scope |
 | --- | ---: | --- |
 | `EXECUTION_GLOBAL_LIMIT` | 8 | Leased/running hosted AgentRun lifecycle steps across worker and Runtime replicas |
-| `EXECUTION_TENANT_LIMIT` | 4 | The same execution leases within one Workspace |
 | `EXECUTION_GLOBAL_QUEUE_LIMIT` | 128 | Queued and running AgentRuns across API replicas |
 | `EXECUTION_TENANT_QUEUE_LIMIT` | 32 | The same nonterminal obligations within one Workspace |
 | `EXECUTION_QUEUE_WAIT_SECONDS` | 300 | Maximum age before first execution; expiry requests semantic cancellation |
@@ -163,12 +162,20 @@ independent material-processing backlog.
 
 The runtime job lease is the execution permit: yield and terminal transitions
 release it; expired leases remain counted until lifecycle reconciliation.
-`WORKER_SLOT_COUNT` remains a local worker-thread limit. The execution limits do
-not count suspended sandbox containers, knowledge-processing jobs, or a parent's
-internal subagents; they are not a total-container or total-process memory budget.
-Parent logical waits release the lifecycle lease, avoiding a parent/child permit
-deadlock. A single-Workspace perf run reaches the tenant limit before the global
-limit; change its isolated environment explicitly when measuring another capacity.
+`WORKER_SLOT_COUNT` remains a local worker-thread limit (default 8). It describes
+one deployment's ordinary Job handling capacity, not tools within an environment.
+Execution admission has no per-Workspace quota: one Workspace can use all eight
+global permits. Its persisted Workspace binding remains an identity fact. The
+execution limit does not count suspended environments, knowledge-processing jobs,
+or a parent's internal subagents; it is not a memory budget or a limit on all
+nonterminal AgentRuns. Parent logical waits release the lifecycle lease.
+
+Hosted Runtime explicitly selects tool parallelism 64; Core's generic default
+remains 16. A parent and its hosted child runtimes share their tool coordinator.
+This capacity bounds eligible parallel tools; tools requiring serial execution,
+including the default bash/write/edit policies, still share one serial permit.
+The current hosted subagent batch budget is three across a Runtime process,
+not three per Session; that separate scheduling boundary remains to be revised.
 
 Queue expiry is checked under the same AgentRun row lock as the first running
 transition, and by the bounded lifecycle reconciler. Logical waits and recovery

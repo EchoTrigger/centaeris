@@ -44,9 +44,9 @@ fn schedule_run(
     id
 }
 
-fn cancellation_at_capacity(global_full: bool) {
+fn cancellation_at_capacity(multiple_workspaces: bool) {
     let limits = crate::execution_capacity::ExecutionCapacity::from_env().unwrap();
-    assert_eq!((limits.global, limits.tenant), (8, 4));
+    assert_eq!(limits.global, 8);
     let url = test_url();
     reset_store(&url);
     let store = PostgresRuntimeStore::new(&url).unwrap();
@@ -64,14 +64,10 @@ fn cancellation_at_capacity(global_full: bool) {
         )
         .unwrap()
         .get(0);
-    let count = if global_full {
-        limits.global
-    } else {
-        limits.tenant
-    };
+    let count = limits.global;
     let mut blockers = Vec::new();
     for index in 0..count {
-        let workspace = if index < limits.tenant {
+        let workspace = if !multiple_workspaces || index % 2 == 0 {
             "workspace-a"
         } else {
             "workspace-b"
@@ -87,8 +83,8 @@ fn cancellation_at_capacity(global_full: bool) {
             .unwrap();
         blockers.push((id, lease.lease_owner));
     }
-    // An empty third Workspace isolates the global cap from the tenant cap.
-    let workspace = if global_full {
+    // Both a single Workspace and multiple Workspaces share the global cap.
+    let workspace = if multiple_workspaces {
         "workspace-c"
     } else {
         "workspace-a"
@@ -198,7 +194,7 @@ fn cancellation_at_capacity(global_full: bool) {
 
 #[test]
 #[ignore = "requires owned disposable PostgreSQL and default execution limits"]
-fn postgres_queued_cancellation_is_claimable_when_workspace_execution_capacity_is_full() {
+fn postgres_queued_cancellation_is_claimable_when_one_workspace_fills_global_execution_capacity() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     cancellation_at_capacity(false);
 }

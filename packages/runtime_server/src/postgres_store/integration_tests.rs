@@ -43,6 +43,7 @@ mod cold_append_lease_tests;
 mod cold_append_tests;
 mod environment_observation_tests;
 mod environment_owner_schema_tests;
+mod execution_capacity_tests;
 mod execution_instance_tests;
 mod host_retirement_tests;
 mod lease_renewal_tests;
@@ -3892,7 +3893,7 @@ fn postgres_runtime_store_rejects_schema_drift() {
 fn hosted_execution_capacity_is_shared_across_replicas_and_released_on_yield() {
     let _guard = TEST_LOCK.lock().unwrap();
     let limits = crate::execution_capacity::ExecutionCapacity::from_env().unwrap();
-    assert_eq!((limits.global, limits.tenant), (8, 4));
+    assert_eq!(limits.global, 8);
     let url = test_url();
     reset_store(&url);
     let replicas = [
@@ -3953,20 +3954,6 @@ fn hosted_execution_capacity_is_shared_across_replicas_and_released_on_yield() {
         assert!(claimed.len() <= 8);
     }
     assert_eq!(claimed.len(), 8);
-    assert_eq!(
-        claimed
-            .iter()
-            .filter(|job| job.job_id.contains("_a_"))
-            .count(),
-        4
-    );
-    assert_eq!(
-        claimed
-            .iter()
-            .filter(|job| job.job_id.contains("_b_"))
-            .count(),
-        4
-    );
     let waiting = replicas[1]
         .wait_for_runtime_jobs(
             &["agent_run.lifecycle".to_string()],

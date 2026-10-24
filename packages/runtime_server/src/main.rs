@@ -1481,6 +1481,20 @@ impl AgentRunStepOutcome {
     }
 }
 
+fn hosted_agent_runtime_config(start: &AgentRunStart) -> AgentRuntimeConfig {
+    AgentRuntimeConfig {
+        tool_parallelism: centaeris_core::runtime::MAX_TOOL_PARALLELISM,
+        required_completion_tool: start
+            .coordination_session_id
+            .is_some()
+            .then(|| "send_message".to_string()),
+        agent_instructions: start.agent_instructions.clone(),
+        model_context_tokens: start.model_context_tokens,
+        model_max_output_tokens: start.model_max_output_tokens,
+        ..AgentRuntimeConfig::default()
+    }
+}
+
 fn requires_session_workspace_restore(has_started_fact: bool, completing_recovery: bool) -> bool {
     !has_started_fact && !completing_recovery
 }
@@ -2966,16 +2980,7 @@ fn execute_agent_run(
             agent_run_start.authorization.session_id.clone(),
             agent_run_start.agent_run_id.clone(),
         )?));
-    let agent_runtime_config = AgentRuntimeConfig {
-        required_completion_tool: agent_run_start
-            .coordination_session_id
-            .is_some()
-            .then(|| "send_message".to_string()),
-        agent_instructions: agent_run_start.agent_instructions.clone(),
-        model_context_tokens: agent_run_start.model_context_tokens,
-        model_max_output_tokens: agent_run_start.model_max_output_tokens,
-        ..AgentRuntimeConfig::default()
-    };
+    let agent_runtime_config = hosted_agent_runtime_config(&agent_run_start);
     let tool_concurrency = ToolConcurrencyCoordinator::global_for_scope(
         format!("session:{}", agent_run_start.authorization.session_id),
         agent_runtime_config.tool_parallelism,
@@ -7661,6 +7666,41 @@ mod tests {
         log_live_supersession_result(Err(LiveTextError::Fatal(
             "simulated Redis command failure".to_string(),
         )));
+    }
+
+    #[test]
+    fn hosted_runtime_uses_full_tool_capacity_without_changing_core_default() {
+        let mut start = agent_run_start();
+        start.agent_instructions = "hosted capacity fixture".into();
+        start.model_context_tokens = 123456;
+        start.model_max_output_tokens = 64000;
+        start.coordination_session_id = Some("coordination-fixture".into());
+        let config = hosted_agent_runtime_config(&start);
+        let effective = ToolConcurrencyCoordinator::new(config.tool_parallelism);
+        assert_eq!(
+            effective.capacity(),
+            64,
+            "hosted Runtime must explicitly select the supported tool ceiling"
+        );
+        assert_eq!(
+            AgentRuntimeConfig::default().tool_parallelism,
+            16,
+            "Core's general default is independent"
+        );
+        assert_eq!(config.agent_instructions, start.agent_instructions);
+        assert_eq!(config.model_context_tokens, start.model_context_tokens);
+        assert_eq!(
+            config.model_max_output_tokens,
+            start.model_max_output_tokens
+        );
+        assert_eq!(
+            config.required_completion_tool.as_deref(),
+            Some("send_message")
+        );
+        start.coordination_session_id = None;
+        assert!(hosted_agent_runtime_config(&start)
+            .required_completion_tool
+            .is_none());
     }
 
     pub(super) fn agent_run_start() -> AgentRunStart {

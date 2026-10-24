@@ -97,12 +97,11 @@ fn next_runtime_job(
         .query_one(
             &format!("{} SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,MIN(GREATEST({due},COALESCE(j.lease_reclaim_not_before_ms,{due})))
                 FROM runtime_jobs j LEFT JOIN execution_job_tenants t ON t.job_id=j.job_id
-                LEFT JOIN tenant_usage u ON u.workspace_id=t.workspace_id
                 WHERE j.status='queued' AND j.job_kind=ANY($1)
                 AND (j.job_kind<>'agent_run.lifecycle' OR
-                    (t.job_id IS NOT NULL AND (SELECT COUNT(*) FROM active)<$2 AND COALESCE(u.used,0)<$3 AND NOT({})))",
+                    (t.job_id IS NOT NULL AND (SELECT COUNT(*) FROM active)<$2 AND NOT({})))",
                 super::execution_capacity::ACTIVE_EXECUTIONS, super::lifecycle_control::PENDING),
-            &[&job_kinds, &(limits.global as i64), &(limits.tenant as i64)],
+            &[&job_kinds, &(limits.global as i64)],
         )
         .map_err(|error| format!("query next Postgres runtime job failed: {error}"))?;
     Ok((row.get(0), row.get(1)))
