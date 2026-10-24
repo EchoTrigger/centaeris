@@ -720,7 +720,6 @@ fn build_provider_prompt_cache_key(
     system_prompt: Option<&str>,
     tool_definitions: &[ModelToolDefinition],
     skill_catalog_hash: Option<&str>,
-    agents_context_hash: Option<&str>,
     agent_instructions_hash: Option<&str>,
     config: &AgentRuntimeConfig,
 ) -> Result<Option<String>, String> {
@@ -734,7 +733,6 @@ fn build_provider_prompt_cache_key(
         "systemPromptHash": stable_text_hash(system_prompt),
         "toolSchemaHash": stable_text_hash(tool_schema_json.as_str()),
         "skillCatalogHash": skill_catalog_hash,
-        "agentsContextHash": agents_context_hash,
         "agentInstructionsHash": agent_instructions_hash,
         "systemPromptTemplateEnabled": config.enable_system_prompt_template,
         "systemPromptSchema": "system_prompt_v1",

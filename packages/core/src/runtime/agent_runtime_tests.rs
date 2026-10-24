@@ -5341,14 +5341,12 @@ fn provider_prompt_cache_key_changes_when_tool_schema_changes() {
         base_tools.as_slice(),
         None,
         None,
-        None,
         &config,
     )
     .expect("build base key");
     let changed = build_provider_prompt_cache_key(
         Some("stable system prompt"),
         changed_tools.as_slice(),
-        None,
         None,
         None,
         &config,
@@ -5371,7 +5369,6 @@ fn provider_prompt_cache_key_changes_when_skill_catalog_changes() {
         tools.as_slice(),
         Some("catalog-a"),
         None,
-        None,
         &config,
     )
     .expect("build base key");
@@ -5379,7 +5376,6 @@ fn provider_prompt_cache_key_changes_when_skill_catalog_changes() {
         Some("stable system prompt"),
         tools.as_slice(),
         Some("catalog-b"),
-        None,
         None,
         &config,
     )
@@ -6349,7 +6345,7 @@ fn assert_unavailable_image_history(change: impl FnOnce(&std::path::Path)) {
 }
 
 #[test]
-fn agents_file_is_ephemeral_user_context_and_part_of_cache_identity() {
+fn agents_file_reaches_the_model_only_through_explicit_tool_reads() {
     let workspace_root = temp_dir_path("agents_user_context_workspace");
     std::fs::create_dir_all(workspace_root.as_path()).expect("create workspace root");
     std::fs::write(
@@ -6365,7 +6361,7 @@ fn agents_file_is_ephemeral_user_context_and_part_of_cache_identity() {
     let tool_layer = ToolLayer::new()
         .with_cwd(workspace_root.clone())
         .expect("bind workspace root");
-    let engine = AgentRuntime::new_for_test_with_tools(store.clone(), tool_layer, config);
+    let engine = AgentRuntime::new_for_test_with_tools(store, tool_layer, config);
 
     let first = engine
         .build_generate_driver_request(
@@ -6374,29 +6370,14 @@ fn agents_file_is_ephemeral_user_context_and_part_of_cache_identity() {
             "inspect the protocol",
             0,
         )
-        .expect("build request with AGENTS.md");
-    let agents_index = first
-        .prepared_prompt
-        .messages
-        .iter()
-        .position(|message| message.message_id.ends_with(":agents_context"))
-        .expect("AGENTS context message");
-    assert!(agents_index > 0);
-    assert!(first.prepared_prompt.messages[agents_index - 1]
-        .message_id
-        .ends_with(":execution_context"));
-    assert_eq!(
-        first.prepared_prompt.messages[agents_index].content,
-        prompt_projection::build_agents_context_message(
-            "chat-agents-context",
-            "turn-agents-context",
-            workspace_root
-                .canonicalize()
-                .expect("canonical workspace")
-                .as_path(),
-            "Use exact protocol names.\n",
-        )
-        .content
+        .expect("build request without reading AGENTS.md");
+    assert!(
+        first
+            .prepared_prompt
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("Use exact protocol names.")),
+        "workspace instructions must reach the model only through explicit tool reads"
     );
     assert_eq!(
         first
@@ -6419,63 +6400,20 @@ fn agents_file_is_ephemeral_user_context_and_part_of_cache_identity() {
             "inspect the protocol",
             0,
         )
-        .expect("rebuild request with changed AGENTS.md");
-    assert_ne!(
-        first.provider_prompt_cache_key,
-        second.provider_prompt_cache_key
+        .expect("rebuild request after an unread AGENTS.md change");
+    assert_eq!(
+        first.provider_prompt_cache_key, second.provider_prompt_cache_key,
+        "unread AGENTS.md changes must not affect the provider prompt cache identity"
     );
-
-    let answer_now = engine
-        .build_generate_driver_request_with_runtime_scope(
-            "chat-agents-context",
-            "turn-agents-answer-now",
-            &TurnInput::AnswerNow {
-                attachments: Vec::new(),
-                message: "answer now".to_string(),
-                intervention: AgentRunInterventionV1::answer_now("intervention-1", "agent-run-1"),
-                supplement_ids: vec![],
-            },
-            0,
-            PromptCompactionScopeV1::main(),
-        )
-        .expect("AnswerNow request keeps AGENTS.md");
-    assert!(answer_now.prepared_prompt.messages.iter().any(|message| {
-        message.message_id.ends_with(":agents_context")
-            && message.content.contains("Use canonical identities.")
-    }));
-
-    let persisted = SessionManager::new(store)
-        .load_or_create_session("chat-agents-context")
-        .expect("load session");
-    assert!(persisted
+    assert_eq!(
+        first.prepared_prompt.messages, second.prepared_prompt.messages,
+        "unread AGENTS.md changes must not affect the model prompt"
+    );
+    assert!(second
+        .prepared_prompt
         .messages
         .iter()
-        .all(|message| !message.content.contains("# AGENTS.md instructions")));
-
-    let _ = std::fs::remove_dir_all(workspace_root);
-}
-
-#[test]
-fn agents_file_rejects_invalid_utf8_and_oversize_content() {
-    let workspace_root = temp_dir_path("agents_invalid_workspace");
-    std::fs::create_dir_all(workspace_root.as_path()).expect("create workspace root");
-    let tool_layer = ToolLayer::new()
-        .with_cwd(workspace_root.clone())
-        .expect("bind workspace root");
-
-    std::fs::write(workspace_root.join("AGENTS.md"), [0xff, 0xfe])
-        .expect("write invalid UTF-8 AGENTS.md");
-    assert!(tool_layer
-        .read_agents_instructions()
-        .expect_err("invalid UTF-8 must fail")
-        .contains("valid UTF-8"));
-
-    std::fs::write(workspace_root.join("AGENTS.md"), "x".repeat(32_769))
-        .expect("write oversized AGENTS.md");
-    assert!(tool_layer
-        .read_agents_instructions()
-        .expect_err("oversized AGENTS.md must fail")
-        .contains("exceeds character limit"));
+        .all(|message| !message.content.contains("Use canonical identities.")));
 
     let _ = std::fs::remove_dir_all(workspace_root);
 }

@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::execution::{
-    classify_execution_host_failure, ExecutionCancellationProbe, ExecutionFileSystemErrorKind,
-    ExecutionFileSystemOperation, ExecutionFileSystemOutput, ExecutionHostBinding,
-    ExecutionHostFailureKind, ExecutionHostKind, ExecutionHostMode,
+    classify_execution_host_failure, ExecutionCancellationProbe, ExecutionFileSystemOperation,
+    ExecutionFileSystemOutput, ExecutionHostBinding, ExecutionHostFailureKind, ExecutionHostKind,
+    ExecutionHostMode,
 };
 use crate::execution::{ExecutionPolicy, FileSystemPolicy, NetworkPolicy};
 use crate::extension::skills::{SkillCatalogLoadConfig, SkillIndex};
@@ -32,7 +32,6 @@ mod providers;
 mod read;
 mod result_capture;
 mod result_state;
-mod workspace_instructions;
 mod write;
 
 use edit::EditToolHandler;
@@ -47,7 +46,6 @@ use read::ReadToolHandler;
 pub(crate) use result_capture::tool_result_capture;
 pub use result_capture::MODEL_TOOL_RESULT_MAX_BYTES;
 pub use result_state::ToolResultState;
-pub use workspace_instructions::WorkspaceInstructionReadPort;
 use write::WriteToolHandler;
 
 #[derive(Debug, Clone)]
@@ -83,7 +81,6 @@ pub trait FileMutationCommitPort {
 #[derive(Clone)]
 pub struct ToolRuntimeContext {
     execution_host_binding: Option<Arc<ExecutionHostBinding>>,
-    workspace_instruction_read_port: Option<Arc<dyn WorkspaceInstructionReadPort>>,
     execution_cancellation_probe: Option<Arc<ExecutionCancellationProbe>>,
     pub session_id: Option<String>,
     pub execution_owner: Option<String>,
@@ -102,7 +99,6 @@ impl Default for ToolRuntimeContext {
     fn default() -> Self {
         Self {
             execution_host_binding: None,
-            workspace_instruction_read_port: None,
             execution_cancellation_probe: None,
             session_id: None,
             execution_owner: None,
@@ -132,10 +128,6 @@ impl std::fmt::Debug for ToolRuntimeContext {
             .field(
                 "execution_host_binding_configured",
                 &self.execution_host_binding.is_some(),
-            )
-            .field(
-                "workspace_instruction_read_port_configured",
-                &self.workspace_instruction_read_port.is_some(),
             )
             .field(
                 "execution_cancellation_probe_configured",
@@ -732,14 +724,6 @@ impl ToolLayer {
         self
     }
 
-    pub fn with_workspace_instruction_read_port(
-        mut self,
-        port: Arc<dyn WorkspaceInstructionReadPort>,
-    ) -> Self {
-        self.runtime_context.workspace_instruction_read_port = Some(port);
-        self
-    }
-
     pub fn with_file_mutation_commit_port(
         mut self,
         port: Arc<dyn FileMutationCommitPort + Send + Sync>,
@@ -911,71 +895,6 @@ impl ToolLayer {
             .execution_host_binding
             .as_ref()
             .map(|binding| binding.kind())
-    }
-
-    pub fn read_agents_instructions(&self) -> Result<Option<(String, String)>, String> {
-        const AGENTS_MAX_BYTES: usize = 32_768 * 4;
-        const AGENTS_MAX_CHARS: usize = 32_768;
-
-        if self.runtime_context.execution_host_binding.is_none() {
-            return Ok(None);
-        }
-        let binding = self
-            .runtime_context
-            .execution_host_binding()
-            .map_err(|error| format!("read AGENTS.md failed: {error}"))?;
-        let (bytes, file_hash) = match self
-            .runtime_context
-            .workspace_instruction_read_port
-            .as_ref()
-        {
-            Some(port) => {
-                let bytes = match port.read_agents_file(binding.cwd(), AGENTS_MAX_BYTES) {
-                    Ok(bytes) => bytes,
-                    Err(error) if error.kind == ExecutionFileSystemErrorKind::NotFound => {
-                        return Ok(None);
-                    }
-                    Err(error) => return Err(format!("read AGENTS.md failed: {error}")),
-                };
-                (bytes, None)
-            }
-            None => {
-                let output = match binding.run_file_system_operation(
-                    "AGENTS.md",
-                    ExecutionFileSystemOperation::ReadFile {
-                        max_bytes: AGENTS_MAX_BYTES,
-                    },
-                ) {
-                    Ok(output) => output,
-                    Err(error) if error.kind == ExecutionFileSystemErrorKind::NotFound => {
-                        return Ok(None);
-                    }
-                    Err(error) => return Err(format!("read AGENTS.md failed: {error}")),
-                };
-                let ExecutionFileSystemOutput::ReadFile(read) = output else {
-                    return Err(
-                        "read AGENTS.md returned an unexpected filesystem output".to_string()
-                    );
-                };
-                (read.bytes, Some(read.file_hash))
-            }
-        };
-        if bytes.len() > AGENTS_MAX_BYTES {
-            return Err(format!(
-                "AGENTS.md exceeds byte limit: actualBytes={} maxBytes={AGENTS_MAX_BYTES}",
-                bytes.len()
-            ));
-        }
-        let file_hash = file_hash.unwrap_or_else(|| mutation::sha256_bytes(&bytes));
-        let content = String::from_utf8(bytes)
-            .map_err(|error| format!("AGENTS.md must be valid UTF-8: {error}"))?;
-        let char_count = content.chars().count();
-        if char_count > AGENTS_MAX_CHARS {
-            return Err(format!(
-                "AGENTS.md exceeds character limit: actualChars={char_count} maxChars={AGENTS_MAX_CHARS}"
-            ));
-        }
-        Ok(Some((content, file_hash)))
     }
 
     pub fn bash_description(&self) -> Result<&'static str, String> {

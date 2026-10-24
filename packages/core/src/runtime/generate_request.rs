@@ -553,26 +553,6 @@ impl<
         if let Some(message) = agent_instructions_message {
             runtime_context_messages.push(message);
         }
-        let agents_context_message = match (
-            self.tools_port.cwd(),
-            self.tools_port.read_agents_instructions()?,
-        ) {
-            (Some(cwd), Some((instructions, _file_hash))) => {
-                Some(prompt_projection::build_agents_context_message(
-                    session_id,
-                    turn_id,
-                    cwd,
-                    instructions.as_str(),
-                ))
-            }
-            _ => None,
-        };
-        let agents_context_hash = agents_context_message
-            .as_ref()
-            .map(|message| stable_text_hash(message.content.as_str()));
-        if let Some(message) = agents_context_message {
-            runtime_context_messages.push(message);
-        }
         let skill_catalog_message = if answer_now {
             None
         } else {
@@ -647,7 +627,6 @@ impl<
             system_prompt.as_deref(),
             tool_definitions.as_slice(),
             skill_catalog_hash.as_deref(),
-            agents_context_hash.as_deref(),
             agent_instructions_hash.as_deref(),
             &self.config,
         )?;

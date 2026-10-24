@@ -86,27 +86,6 @@ pub(super) fn build_agent_instructions_message(
     }))
 }
 
-pub(super) fn build_agents_context_message(
-    session_id: &str,
-    turn_id: &str,
-    cwd: &Path,
-    instructions: &str,
-) -> ModelMessageV1 {
-    let content = format!(
-        "# AGENTS.md instructions for {}\n\n<INSTRUCTIONS>\n{}\n</INSTRUCTIONS>",
-        model_path_text(cwd),
-        instructions
-    );
-    ModelMessageV1 {
-        message_id: format!("msg:{session_id}:{turn_id}:agents_context"),
-        role: ModelMessageRoleV1::User,
-        content,
-        tool_calls: Vec::new(),
-        tool_call_id: None,
-        reasoning_content: None,
-    }
-}
-
 pub(super) fn build_skill_catalog_message(
     session_id: &str,
     turn_id: &str,
@@ -258,21 +237,6 @@ mod tests {
             build_agent_instructions_message("chat-1", "turn-1", " trailing ")
                 .expect_err("non-canonical instructions must fail"),
             "agent_instructions_invalid"
-        );
-    }
-
-    #[test]
-    fn agents_instructions_are_wrapped_as_user_context() {
-        let message = build_agents_context_message(
-            "chat-1",
-            "turn-1",
-            Path::new(r"D:\Projects\Centaeris"),
-            "Use exact names.",
-        );
-        assert_eq!(message.role, ModelMessageRoleV1::User);
-        assert_eq!(
-            message.content,
-            "# AGENTS.md instructions for D:/Projects/Centaeris\n\n<INSTRUCTIONS>\nUse exact names.\n</INSTRUCTIONS>"
         );
     }
 }
