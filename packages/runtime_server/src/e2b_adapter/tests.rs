@@ -124,7 +124,9 @@ fn blocked_ordinary_sdk_cannot_consume_control_process_capacity() {
     }
     assert_eq!(
         ordinary.call("extra", "inspect", json!({}), Duration::from_secs(1)),
-        Err(AdapterFailure::NotDispatched("adapter_busy"))
+        Err(AdapterFailure::NotDispatched(
+            "adapter_deadline_before_dispatch"
+        ))
     );
     assert!(control
         .call("control", "inspect", json!({}), Duration::from_secs(2))
@@ -412,4 +414,252 @@ fn adapter_transport_timings_carry_owned_job_into_worker_without_overriding_or_l
     assert_eq!(records[2]["jobId"], "agent_run.lifecycle:current");
     assert_eq!(records[3]["jobId"], "agent_run.lifecycle:current");
     assert!(records[4].get("jobId").is_none());
+}
+
+fn blocking_adapter() -> (
+    std::sync::Arc<AdapterProcess>,
+    tempfile::TempDir,
+    std::thread::JoinHandle<Result<AdapterResponse, AdapterFailure>>,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let entered = directory.path().join("entered");
+    let mut command = fixture("barrier");
+    command.arg(&entered).arg(directory.path().join("release"));
+    let adapter = std::sync::Arc::new(AdapterProcess::spawn(command).unwrap());
+    let worker = adapter.clone();
+    let running = std::thread::spawn(move || {
+        worker.call("held", "block", json!({}), Duration::from_secs(15))
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !entered.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "SDK fixture never received first frame"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    (adapter, directory, running)
+}
+
+#[test]
+fn short_sdk_calls_queue_without_rejection_or_frame_mixing() {
+    let (adapter, directory, running) = blocking_adapter();
+    let waiting = adapter.clone();
+    let (began, started) = mpsc::channel();
+    let (finished, completion) = mpsc::channel();
+    let queued = std::thread::spawn(move || {
+        began.send(()).unwrap();
+        let result = waiting.call("queued", "inspect", json!({}), Duration::from_secs(5));
+        finished.send(result).unwrap();
+    });
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    let premature = completion.recv_timeout(Duration::from_millis(80));
+    std::fs::write(directory.path().join("release"), "released").unwrap();
+    let first = running.join().unwrap().unwrap();
+    let was_pending = matches!(&premature, Err(mpsc::RecvTimeoutError::Timeout));
+    let second = match premature {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            completion.recv_timeout(Duration::from_secs(5)).unwrap()
+        }
+        Err(error) => panic!("queued worker disconnected: {error}"),
+    };
+    queued.join().unwrap();
+    assert!(
+        was_pending,
+        "a short concurrent request was rejected while the SDK lane was still healthy: {second:?}"
+    );
+    let second = second.unwrap();
+    assert_eq!(first.request_id, "held");
+    assert_eq!(first.result.as_ref().unwrap()["sequence"], 1);
+    assert_eq!(second.request_id, "queued");
+    assert_eq!(second.result.as_ref().unwrap()["sequence"], 2);
+    assert_eq!(
+        first.result.unwrap()["process"],
+        second.result.unwrap()["process"]
+    );
+}
+
+fn wait_for_adapter_queue(adapter: &AdapterProcess, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let queued = adapter.streams.state.lock().unwrap().waiters.len();
+        if queued == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected {expected} queued calls, observed {queued}"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn queued_sdk_deadline_never_dispatches_or_closes_a_healthy_lane_and_is_observed() {
+    let (adapter, directory, running) = blocking_adapter();
+    let started = Instant::now();
+    let (result, records) = crate::observations::capture_timings(true, || {
+        adapter.call("deadline", "inspect", json!({}), Duration::from_millis(80))
+    });
+    let elapsed = started.elapsed();
+    std::fs::write(directory.path().join("release"), "released").unwrap();
+    assert!(running.join().unwrap().is_ok());
+    assert_eq!(
+        result,
+        Err(AdapterFailure::NotDispatched(
+            "adapter_deadline_before_dispatch"
+        ))
+    );
+    assert!(elapsed >= Duration::from_millis(80));
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "queue wait ignored its call deadline"
+    );
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["phase"], "e2bAdapterQueueWait");
+    assert_eq!(records[0]["outcome"], "error");
+    assert_eq!(records[1]["phase"], "e2bAdapterCallInspect");
+    assert!(!serde_json::to_string(&records)
+        .unwrap()
+        .contains("deadline"));
+    let probe = adapter
+        .call("probe", "inspect", json!({}), Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(
+        probe.result.unwrap()["sequence"],
+        2,
+        "expired queued call reached the SDK"
+    );
+}
+
+#[test]
+fn closing_sdk_lane_wakes_unsent_callers_without_waiting_for_the_holder() {
+    let (adapter, directory, running) = blocking_adapter();
+    let waiting = adapter.clone();
+    let (done, completion) = mpsc::channel();
+    let queued = std::thread::spawn(move || {
+        done.send(waiting.call("queued", "inspect", json!({}), Duration::from_secs(10)))
+            .unwrap();
+    });
+    wait_for_adapter_queue(&adapter, 1);
+    let closing = Instant::now();
+    adapter.close();
+    let result = completion.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(result, Err(AdapterFailure::NotDispatched("adapter_closed")));
+    assert!(closing.elapsed() < Duration::from_secs(2));
+    assert!(matches!(
+        running.join().unwrap(),
+        Err(AdapterFailure::Unknown(_))
+    ));
+    queued.join().unwrap();
+    assert!(
+        !directory.path().join("release").exists(),
+        "close required the holder's normal release"
+    );
+}
+
+#[test]
+fn sixty_four_sdk_waiters_are_fifo_bounded_and_never_mix_frames() {
+    let (adapter, directory, running) = blocking_adapter();
+    let mut queued = Vec::new();
+    for index in 0..64 {
+        let waiting = adapter.clone();
+        queued.push(
+            std::thread::Builder::new()
+                .stack_size(256 * 1024)
+                .spawn(move || {
+                    let id = format!("queued-{index}");
+                    waiting.call(&id, "inspect", json!({}), Duration::from_secs(15))
+                })
+                .unwrap(),
+        );
+        wait_for_adapter_queue(&adapter, index + 1);
+    }
+    let excess = adapter.call("excess", "inspect", json!({}), Duration::from_secs(1));
+    std::fs::write(directory.path().join("release"), "released").unwrap();
+    assert!(running.join().unwrap().is_ok());
+    assert_eq!(
+        excess,
+        Err(AdapterFailure::NotDispatched("adapter_queue_capacity"))
+    );
+    for (index, queued) in queued.into_iter().enumerate() {
+        let response = queued.join().unwrap().unwrap();
+        assert_eq!(response.request_id, format!("queued-{index}"));
+        assert_eq!(response.result.unwrap()["sequence"], index + 2);
+    }
+    assert_eq!(
+        adapter
+            .call("probe", "inspect", json!({}), Duration::from_secs(5))
+            .unwrap()
+            .result
+            .unwrap()["sequence"],
+        66,
+        "overflow request was dispatched"
+    );
+}
+
+#[test]
+fn lost_sdk_reply_closes_the_lane_and_wakes_queued_calls_without_replay() {
+    let directory = tempfile::tempdir().unwrap();
+    let entered = directory.path().join("entered");
+    let release = directory.path().join("release");
+    let mut command = fixture("exit");
+    command.arg(&entered).arg(&release);
+    let adapter = std::sync::Arc::new(AdapterProcess::spawn(command).unwrap());
+    let worker = adapter.clone();
+    let running = std::thread::spawn(move || {
+        worker.call("effect", "block", json!({}), Duration::from_secs(10))
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !entered.exists() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let waiting = adapter.clone();
+    let queued = std::thread::spawn(move || {
+        waiting.call("effect", "inspect", json!({}), Duration::from_secs(10))
+    });
+    wait_for_adapter_queue(&adapter, 1);
+    std::fs::write(&release, "released").unwrap();
+    assert_eq!(
+        running.join().unwrap(),
+        Err(AdapterFailure::Unknown("adapter_response_unavailable"))
+    );
+    assert_eq!(
+        queued.join().unwrap(),
+        Err(AdapterFailure::NotDispatched("adapter_closed"))
+    );
+    assert_eq!(std::fs::read_to_string(&entered).unwrap(), "entered");
+    assert_eq!(
+        adapter.call("effect", "block", json!({}), Duration::from_secs(1)),
+        Err(AdapterFailure::NotDispatched("adapter_closed"))
+    );
+}
+
+#[test]
+fn expired_fifo_head_does_not_pin_the_next_unsent_sdk_call() {
+    let (adapter, directory, running) = blocking_adapter();
+    let front = adapter.clone();
+    let expired = std::thread::spawn(move || {
+        front.call("expired", "inspect", json!({}), Duration::from_millis(200))
+    });
+    wait_for_adapter_queue(&adapter, 1);
+    let next = adapter.clone();
+    let queued =
+        std::thread::spawn(move || next.call("next", "inspect", json!({}), Duration::from_secs(5)));
+    wait_for_adapter_queue(&adapter, 2);
+    let expiration = expired.join().unwrap();
+    wait_for_adapter_queue(&adapter, 1);
+    std::fs::write(directory.path().join("release"), "released").unwrap();
+    assert!(running.join().unwrap().is_ok());
+    assert_eq!(
+        expiration,
+        Err(AdapterFailure::NotDispatched(
+            "adapter_deadline_before_dispatch"
+        ))
+    );
+    let next = queued.join().unwrap().unwrap();
+    assert_eq!(next.request_id, "next");
+    assert_eq!(next.result.unwrap()["sequence"], 2);
 }

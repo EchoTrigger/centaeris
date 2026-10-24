@@ -27,6 +27,13 @@ for line in sys.stdin:
  request=json.loads(line);payload=request['payload'];operation=request['operation']
  seen.append(request)
  log.write_text(json.dumps({'root':str(root),'requests':seen}))
+ if operation == 'block':
+  Path(sys.argv[3]).write_text('entered')
+  release = Path(sys.argv[4]); deadline = time.monotonic() + 20
+  while not release.exists():
+   if time.monotonic() >= deadline: sys.exit(2)
+   time.sleep(0.005)
+ if mode=='exit': sys.exit(1)
  if operation not in ('uploadFile','downloadFile'):
   result={'connected':True}
  elif operation=='uploadFile':
@@ -53,6 +60,8 @@ for line in sys.stdin:
   if mode=='wrongLength':result['byteLength']+=1
   if mode=='wrongDigest':result['sha256']='0'*64
  response={'schema':'runtime.e2b.adapter.response.v1','requestId':request['requestId'],'outcome':'succeeded','result':result}
+ if mode=='providerUnknown' and operation=='create':
+  response.update(outcome='unknown',result=None,error={'code':'providerFailure','message':'fixture-provider-unknown'})
  print(json.dumps(response),flush=True)
 "#);
     command.arg(mode).arg(log);
@@ -332,7 +341,7 @@ with provider_fixture() as control, bulk_data_fixture() as (data_url,received):
 }
 
 #[test]
-fn bulk_local_staging_reserves_one_nonwaiting_lane_without_killing_child() {
+fn bulk_local_staging_reserves_one_deadline_bound_lane_without_killing_child() {
     struct BlockedSource {
         entered: Option<std::sync::mpsc::Sender<()>>,
         release: std::sync::mpsc::Receiver<()>,
@@ -375,10 +384,20 @@ fn bulk_local_staging_reserves_one_nonwaiting_lane_without_killing_child() {
         ),
         Err(AdapterFailure::NotDispatched(_))
     ));
-    assert!(matches!(
-        client.upload_reader(&request(1), &mut Cursor::new([1])),
-        Err(BulkTransferError::NotDispatched(_))
-    ));
+    let mut queued_request = request(1);
+    queued_request.timeout = Duration::from_millis(80);
+    let mut queued_source = Cursor::new([1]);
+    assert_eq!(
+        client.upload_reader(&queued_request, &mut queued_source),
+        Err(BulkTransferError::NotDispatched(
+            "adapter_deadline_before_dispatch"
+        ))
+    );
+    assert_eq!(
+        queued_source.position(),
+        0,
+        "queue waiting consumed upload input"
+    );
     assert_eq!(metadata(&log)["requests"].as_array().unwrap().len(), 1);
     release.send(()).unwrap();
     assert!(running.join().unwrap().is_ok());
@@ -390,4 +409,267 @@ fn bulk_local_staging_reserves_one_nonwaiting_lane_without_killing_child() {
             Duration::from_secs(10)
         )
         .is_ok());
+}
+
+#[test]
+fn bulk_short_calls_queue_before_the_shared_spool_lane() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("requests.json");
+    let entered = directory.path().join("entered");
+    let release = directory.path().join("release");
+    let mut command = fixture("barrier", &log);
+    command.arg(&entered).arg(&release);
+    let client = std::sync::Arc::new(SpoolingAdapterProcess::spawn(command).unwrap());
+    let worker = client.clone();
+    let running = std::thread::spawn(move || {
+        worker.call("held", "block", json!({}), Duration::from_secs(15))
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !entered.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "spooling fixture never entered first call"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let waiting = client.clone();
+    let (began, started) = std::sync::mpsc::channel();
+    let (finished, completion) = std::sync::mpsc::channel();
+    let queued = std::thread::spawn(move || {
+        began.send(()).unwrap();
+        finished
+            .send(waiting.call("queued", "inspect", json!({}), Duration::from_secs(5)))
+            .unwrap();
+    });
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    let premature = completion.recv_timeout(Duration::from_millis(80));
+    std::fs::write(&release, "released").unwrap();
+    assert!(running.join().unwrap().is_ok());
+    let was_pending = matches!(&premature, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+    let second = match premature {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            completion.recv_timeout(Duration::from_secs(5)).unwrap()
+        }
+        Err(error) => panic!("queued worker disconnected: {error}"),
+    };
+    queued.join().unwrap();
+    assert!(
+        was_pending,
+        "the outer spool lane rejected a normal concurrent short call: {second:?}"
+    );
+    assert_eq!(second.unwrap().request_id, "queued");
+    let recorded = metadata(&log);
+    assert_eq!(recorded["requests"].as_array().unwrap().len(), 2);
+    assert_eq!(recorded["requests"][0]["requestId"], "held");
+    assert_eq!(recorded["requests"][1]["requestId"], "queued");
+}
+
+struct HeldStagingSource {
+    entered: Option<std::sync::mpsc::Sender<()>>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+impl Read for HeldStagingSource {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let Some(entered) = self.entered.take() else {
+            return Ok(0);
+        };
+        entered.send(()).unwrap();
+        self.release.recv_timeout(Duration::from_secs(10)).unwrap();
+        buffer[0] = b'Z';
+        Ok(1)
+    }
+}
+
+#[test]
+fn bulk_close_wakes_waiters_before_a_local_source_releases_its_permit() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("requests.json");
+    let client =
+        std::sync::Arc::new(SpoolingAdapterProcess::spawn(fixture("success", &log)).unwrap());
+    prime(&client);
+    let (entered, ready) = std::sync::mpsc::channel();
+    let (release, proceed) = std::sync::mpsc::channel();
+    let worker = client.clone();
+    let running = std::thread::spawn(move || {
+        worker.upload_reader(
+            &request(1),
+            &mut HeldStagingSource {
+                entered: Some(entered),
+                release: proceed,
+            },
+        )
+    });
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    let waiting = client.clone();
+    let (done, completion) = std::sync::mpsc::channel();
+    let queued = std::thread::spawn(move || {
+        done.send(waiting.call("queued", "inspect", json!({}), Duration::from_secs(10)))
+            .unwrap();
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.lane.state.lock().unwrap().waiters.len() != 1 {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let closing = Instant::now();
+    client.close().unwrap();
+    let unsent = completion.recv_timeout(Duration::from_secs(2)).unwrap();
+    let elapsed = closing.elapsed();
+    release.send(()).unwrap();
+    let held = running.join().unwrap();
+    queued.join().unwrap();
+    assert_eq!(unsent, Err(AdapterFailure::NotDispatched("adapter_closed")));
+    assert_eq!(
+        held,
+        Err(BulkTransferError::NotDispatched("adapter_closed"))
+    );
+    assert!(elapsed < Duration::from_secs(2));
+    assert_eq!(metadata(&log)["requests"].as_array().unwrap().len(), 1);
+    assert_eq!(std::fs::read_dir(&client.root).unwrap().count(), 0);
+}
+
+#[test]
+fn bulk_queue_wait_and_local_staging_share_the_original_deadline() {
+    struct SlowSource(bool);
+    impl Read for SlowSource {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.0 {
+                return Ok(0);
+            }
+            self.0 = true;
+            std::thread::sleep(Duration::from_millis(100));
+            buffer[0] = b'Z';
+            Ok(1)
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("requests.json");
+    let entered = directory.path().join("entered");
+    let release = directory.path().join("release");
+    let mut command = fixture("barrier", &log);
+    command.arg(&entered).arg(&release);
+    let client = std::sync::Arc::new(SpoolingAdapterProcess::spawn(command).unwrap());
+    let worker = client.clone();
+    let running = std::thread::spawn(move || {
+        worker.call("held", "block", json!({}), Duration::from_secs(10))
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !entered.exists() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let waiting = client.clone();
+    let queued = std::thread::spawn(move || {
+        let mut bounded = request(1);
+        bounded.timeout = Duration::from_millis(160);
+        waiting.upload_reader(&bounded, &mut SlowSource(false))
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.lane.state.lock().unwrap().waiters.len() != 1 {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    std::fs::write(&release, "released").unwrap();
+    assert!(running.join().unwrap().is_ok());
+    assert_eq!(
+        queued.join().unwrap(),
+        Err(BulkTransferError::NotDispatched("bulk_deadline_exceeded"))
+    );
+    assert_eq!(
+        metadata(&log)["requests"].as_array().unwrap().len(),
+        1,
+        "staging received a fresh timeout after queueing"
+    );
+    assert_eq!(std::fs::read_dir(&client.root).unwrap().count(), 0);
+    assert!(client
+        .call("probe", "inspect", json!({}), Duration::from_secs(5))
+        .is_ok());
+}
+
+#[test]
+fn bulk_lost_reply_closes_spool_queue_before_unsent_upload_reads_its_source() {
+    struct CountedSource {
+        reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        sent: bool,
+    }
+    impl Read for CountedSource {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.sent {
+                return Ok(0);
+            }
+            self.sent = true;
+            buffer[0] = b'Z';
+            Ok(1)
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("requests.json");
+    let entered = directory.path().join("entered");
+    let release = directory.path().join("release");
+    let mut command = fixture("exit", &log);
+    command.arg(&entered).arg(&release);
+    let client = std::sync::Arc::new(SpoolingAdapterProcess::spawn(command).unwrap());
+    let worker = client.clone();
+    let running = std::thread::spawn(move || {
+        worker.call("effect", "block", json!({}), Duration::from_secs(10))
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !entered.exists() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = reads.clone();
+    let waiting = client.clone();
+    let queued = std::thread::spawn(move || {
+        waiting.upload_reader(
+            &request(1),
+            &mut CountedSource {
+                reads: counter,
+                sent: false,
+            },
+        )
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.lane.state.lock().unwrap().waiters.len() != 1 {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    std::fs::write(&release, "released").unwrap();
+    assert_eq!(
+        running.join().unwrap(),
+        Err(AdapterFailure::Unknown("adapter_response_unavailable"))
+    );
+    assert_eq!(
+        queued.join().unwrap(),
+        Err(BulkTransferError::NotDispatched("adapter_closed"))
+    );
+    assert_eq!(
+        reads.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "an upload queued behind a lost reply consumed input after the physical lane closed"
+    );
+    assert_eq!(metadata(&log)["requests"].as_array().unwrap().len(), 1);
+    assert_eq!(std::fs::read_dir(&client.root).unwrap().count(), 0);
+
+    let healthy_log = directory.path().join("healthy-requests.json");
+    let healthy = SpoolingAdapterProcess::spawn(fixture("providerUnknown", &healthy_log)).unwrap();
+    let response = healthy
+        .call("unknown", "create", json!({}), Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(response.outcome, AdapterOutcome::Unknown);
+    let receipt = healthy
+        .upload_reader(&request(1), &mut Cursor::new([b'Z']))
+        .unwrap();
+    assert_eq!(
+        receipt.byte_length, 1,
+        "a valid provider Unknown response must keep transport healthy"
+    );
+    assert_eq!(
+        metadata(&healthy_log)["requests"].as_array().unwrap().len(),
+        2
+    );
 }

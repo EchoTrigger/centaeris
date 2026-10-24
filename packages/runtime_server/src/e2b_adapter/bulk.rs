@@ -3,7 +3,9 @@
 //! Sources and sinks must be finite owned local IO. Deadlines are checked
 //! between chunks; arbitrary blocking Read/Write implementations are not
 //! interruptible. A download sink remains unpublished until this API returns Ok.
-use super::{AdapterFailure, AdapterOutcome, AdapterProcess, AdapterResponse};
+use super::{
+    AdapterFailure, AdapterLane, AdapterOutcome, AdapterPermit, AdapterProcess, AdapterResponse,
+};
 use crate::e2b_creation::E2bCreationAdapter;
 use same_file::Handle;
 use serde::{Deserialize, Serialize};
@@ -13,7 +15,6 @@ use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -53,7 +54,7 @@ pub struct SpoolingAdapterProcess {
     process: AdapterProcess,
     spool: Option<TempDir>,
     root: PathBuf,
-    lane: Mutex<()>,
+    lane: AdapterLane<()>,
 }
 
 impl SpoolingAdapterProcess {
@@ -91,7 +92,7 @@ impl SpoolingAdapterProcess {
             process,
             spool: Some(spool),
             root,
-            lane: Mutex::new(()),
+            lane: AdapterLane::new(()),
         })
     }
 
@@ -105,11 +106,25 @@ impl SpoolingAdapterProcess {
         if matches!(operation, "uploadFile" | "downloadFile") {
             return Err(AdapterFailure::NotDispatched("bulk_stream_api_required"));
         }
-        let _lane = self
-            .lane
-            .try_lock()
-            .map_err(|_| AdapterFailure::NotDispatched("adapter_busy"))?;
-        self.process.call(request_id, operation, payload, timeout)
+        let deadline = if timeout.is_zero() {
+            None
+        } else {
+            Instant::now().checked_add(timeout)
+        }
+        .ok_or(AdapterFailure::NotDispatched("adapter_request_invalid"))?;
+        let _context =
+            crate::observations::Context::enter_if_absent(&self.process.observation_context);
+        let _lane = self.lane.acquire(deadline, "e2bAdapterSpoolQueueWait")?;
+        let response = self
+            .process
+            .call_before(request_id, operation, payload, deadline);
+        if matches!(response, Err(AdapterFailure::Unknown(_))) {
+            // A failed transport closes the physical lane. Reject queued local
+            // staging before returning this permit; provider Unknown responses
+            // are valid frames and do not close a healthy transport.
+            self.lane.close();
+        }
+        response
     }
 
     pub fn upload_reader(
@@ -118,7 +133,9 @@ impl SpoolingAdapterProcess {
         source: &mut impl Read,
     ) -> Result<TransferReceipt, BulkTransferError> {
         let clock = TransferClock::new(request.timeout)?;
-        let _lane = self.try_lane()?;
+        let _context =
+            crate::observations::Context::enter_if_absent(&self.process.observation_context);
+        let _lane = self.acquire_lane(clock.deadline)?;
         validate_request(request)?;
         let transfer_id = Uuid::new_v4().to_string();
         let path = self.root.join(format!("{transfer_id}.upload"));
@@ -143,13 +160,13 @@ impl SpoolingAdapterProcess {
             });
         drop(staged);
         let result = staged_result.and_then(|(length, digest)| {
-            let remaining = clock.remaining(false)?;
+            clock.remaining(false)?;
             let mut payload = json!({"sandboxId":request.sandbox_id,"path":request.path,
                 "transferId":transfer_id,"byteLength":length,"sha256":digest});
             add_user(&mut payload, request.user);
-            let response = self
-                .process
-                .call(&transfer_id, "uploadFile", payload, remaining);
+            let response =
+                self.process
+                    .call_before(&transfer_id, "uploadFile", payload, clock.deadline);
             let receipt = response_receipt(response, request, &transfer_id)?;
             if receipt.byte_length != length || receipt.sha256 != digest {
                 return Err(BulkTransferError::Unknown("bulk_integrity_mismatch"));
@@ -166,7 +183,9 @@ impl SpoolingAdapterProcess {
         destination: &mut impl Write,
     ) -> Result<TransferReceipt, BulkTransferError> {
         let clock = TransferClock::new(request.timeout)?;
-        let _lane = self.try_lane()?;
+        let _context =
+            crate::observations::Context::enter_if_absent(&self.process.observation_context);
+        let _lane = self.acquire_lane(clock.deadline)?;
         validate_request(request)?;
         if request.max_bytes == 0 {
             return Err(BulkTransferError::NotDispatched(
@@ -178,12 +197,10 @@ impl SpoolingAdapterProcess {
         let mut payload = json!({"sandboxId":request.sandbox_id,"path":request.path,
             "transferId":transfer_id,"maxBytes":request.max_bytes});
         add_user(&mut payload, request.user);
-        let response = self.process.call(
-            &transfer_id,
-            "downloadFile",
-            payload,
-            clock.remaining(false)?,
-        );
+        clock.remaining(false)?;
+        let response =
+            self.process
+                .call_before(&transfer_id, "downloadFile", payload, clock.deadline);
         let mut owned = None;
         let result = response_receipt(response, request, &transfer_id).and_then(|receipt| {
             let file = OwnedTransfer::open(&path)
@@ -218,15 +235,19 @@ impl SpoolingAdapterProcess {
     }
 
     pub fn close(&self) -> Result<(), BulkTransferError> {
+        self.lane.close();
         self.process
             .stop_and_wait()
             .map_err(|_| BulkTransferError::Unknown("bulk_child_stop_unconfirmed"))
     }
 
-    fn try_lane(&self) -> Result<MutexGuard<'_, ()>, BulkTransferError> {
+    fn acquire_lane(&self, deadline: Instant) -> Result<AdapterPermit<'_, ()>, BulkTransferError> {
         self.lane
-            .try_lock()
-            .map_err(|_| BulkTransferError::NotDispatched("adapter_busy"))
+            .acquire(deadline, "e2bAdapterSpoolQueueWait")
+            .map_err(|error| match error {
+                AdapterFailure::NotDispatched(code) => BulkTransferError::NotDispatched(code),
+                AdapterFailure::Unknown(code) => BulkTransferError::Unknown(code),
+            })
     }
 
     fn finish_transfer<T>(
@@ -266,6 +287,7 @@ impl E2bCreationAdapter for SpoolingAdapterProcess {
 
 impl Drop for SpoolingAdapterProcess {
     fn drop(&mut self) {
+        self.lane.close();
         let stopped = self.process.stop_and_wait().is_ok();
         if let Some(spool) = self.spool.take() {
             if let Err(retained) = finish_spool(spool, stopped) {
@@ -285,8 +307,7 @@ fn finish_spool(spool: TempDir, stop_confirmed: bool) -> Result<(), PathBuf> {
 }
 
 struct TransferClock {
-    started: Instant,
-    timeout: Duration,
+    deadline: Instant,
 }
 impl TransferClock {
     fn new(timeout: Duration) -> Result<Self, BulkTransferError> {
@@ -294,12 +315,13 @@ impl TransferClock {
             return Err(BulkTransferError::NotDispatched("bulk_deadline_invalid"));
         }
         Ok(Self {
-            started: Instant::now(),
-            timeout,
+            deadline: Instant::now()
+                .checked_add(timeout)
+                .ok_or(BulkTransferError::NotDispatched("bulk_deadline_invalid"))?,
         })
     }
     fn remaining(&self, dispatched: bool) -> Result<Duration, BulkTransferError> {
-        let remaining = self.timeout.saturating_sub(self.started.elapsed());
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(transfer_error(dispatched, "bulk_deadline_exceeded"));
         }

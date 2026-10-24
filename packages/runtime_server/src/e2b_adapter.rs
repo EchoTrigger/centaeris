@@ -4,7 +4,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Mutex, TryLockError};
+use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,147 @@ pub struct AdapterResponse {
     pub error: Option<AdapterError>,
 }
 
+/// One physical frame at a time, with a bounded FIFO of existing callers.
+/// Waiting owns no process thread or frame slot and never extends the deadline.
+struct AdapterLane<T> {
+    state: Mutex<AdapterLaneState<T>>,
+    changed: std::sync::Condvar,
+}
+
+struct AdapterLaneState<T> {
+    resource: Option<T>,
+    waiters: std::collections::VecDeque<std::sync::Arc<()>>,
+    closed: bool,
+}
+
+struct AdapterPermit<'a, T> {
+    lane: &'a AdapterLane<T>,
+    resource: Option<T>,
+}
+
+const MAX_ADAPTER_WAITERS: usize = 64;
+
+impl<T> AdapterLane<T> {
+    fn new(resource: T) -> Self {
+        Self {
+            state: Mutex::new(AdapterLaneState {
+                resource: Some(resource),
+                waiters: std::collections::VecDeque::new(),
+                closed: false,
+            }),
+            changed: std::sync::Condvar::new(),
+        }
+    }
+
+    fn acquire(
+        &self,
+        deadline: Instant,
+        phase: &'static str,
+    ) -> Result<AdapterPermit<'_, T>, AdapterFailure> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AdapterFailure::NotDispatched("adapter_closed"))?;
+        if state.closed {
+            return Err(AdapterFailure::NotDispatched("adapter_closed"));
+        }
+        if deadline <= Instant::now() {
+            return Err(AdapterFailure::NotDispatched(
+                "adapter_deadline_before_dispatch",
+            ));
+        }
+        if state.waiters.is_empty() {
+            if let Some(resource) = state.resource.take() {
+                return Ok(AdapterPermit {
+                    lane: self,
+                    resource: Some(resource),
+                });
+            }
+        }
+        if state.waiters.len() >= MAX_ADAPTER_WAITERS {
+            return Err(AdapterFailure::NotDispatched("adapter_queue_capacity"));
+        }
+        let ticket = std::sync::Arc::new(());
+        state.waiters.push_back(ticket.clone());
+        let mut span =
+            crate::observations::enabled().then(|| crate::observations::Span::new(phase));
+        let result = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let rejection = if state.closed {
+                Some("adapter_closed")
+            } else if remaining.is_zero() {
+                Some("adapter_deadline_before_dispatch")
+            } else {
+                None
+            };
+            if let Some(reason) = rejection {
+                state
+                    .waiters
+                    .retain(|queued| !std::sync::Arc::ptr_eq(queued, &ticket));
+                self.changed.notify_all();
+                drop(state);
+                break Err(AdapterFailure::NotDispatched(reason));
+            }
+            if state
+                .waiters
+                .front()
+                .is_some_and(|queued| std::sync::Arc::ptr_eq(queued, &ticket))
+            {
+                if let Some(resource) = state.resource.take() {
+                    state.waiters.pop_front();
+                    drop(state);
+                    break Ok(AdapterPermit {
+                        lane: self,
+                        resource: Some(resource),
+                    });
+                }
+            }
+            state = match self.changed.wait_timeout(state, remaining) {
+                Ok((state, _)) => state,
+                Err(poisoned) => {
+                    let (mut state, _) = poisoned.into_inner();
+                    state.closed = true;
+                    state.waiters.clear();
+                    self.changed.notify_all();
+                    break Err(AdapterFailure::NotDispatched("adapter_closed"));
+                }
+            };
+        };
+        if let Some(span) = &mut span {
+            span.finished(result.is_ok());
+        }
+        result
+    }
+
+    fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.closed = true;
+        self.changed.notify_all();
+    }
+}
+
+impl<T> std::ops::Deref for AdapterPermit<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.resource.as_ref().expect("owned adapter lane resource")
+    }
+}
+
+impl<T> Drop for AdapterPermit<'_, T> {
+    fn drop(&mut self) {
+        let mut state = self
+            .lane
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.resource = self.resource.take();
+        self.lane.changed.notify_all();
+    }
+}
+
 struct Streams {
     requests: mpsc::SyncSender<Vec<u8>>,
     responses: mpsc::Receiver<Result<Vec<u8>, ()>>,
@@ -65,7 +206,7 @@ struct Streams {
 /// cleanup; it is not evidence that a provider side effect has stopped.
 pub struct AdapterProcess {
     child: Mutex<Child>,
-    streams: Mutex<Streams>,
+    streams: AdapterLane<Streams>,
     closed: AtomicBool,
     observation_context: crate::observations::ContextSnapshot,
 }
@@ -161,7 +302,7 @@ impl AdapterProcess {
         }
         Ok(Self {
             child: Mutex::new(child),
-            streams: Mutex::new(Streams {
+            streams: AdapterLane::new(Streams {
                 requests,
                 responses,
             }),
@@ -177,13 +318,38 @@ impl AdapterProcess {
         payload: Value,
         timeout: Duration,
     ) -> Result<AdapterResponse, AdapterFailure> {
+        let deadline = if timeout.is_zero() {
+            None
+        } else {
+            Instant::now().checked_add(timeout)
+        };
+        self.call_deadline(request_id, operation, payload, deadline)
+    }
+
+    pub(super) fn call_before(
+        &self,
+        request_id: &str,
+        operation: &str,
+        payload: Value,
+        deadline: Instant,
+    ) -> Result<AdapterResponse, AdapterFailure> {
+        self.call_deadline(request_id, operation, payload, Some(deadline))
+    }
+
+    fn call_deadline(
+        &self,
+        request_id: &str,
+        operation: &str,
+        payload: Value,
+        deadline: Option<Instant>,
+    ) -> Result<AdapterResponse, AdapterFailure> {
         let _context = crate::observations::Context::enter_if_absent(&self.observation_context);
         let mut span = if crate::observations::enabled() {
             adapter_call_phase(operation).map(crate::observations::Span::new)
         } else {
             None
         };
-        let response = self.call_inner(request_id, operation, payload, timeout);
+        let response = self.call_inner(request_id, operation, payload, deadline);
         if let Some(span) = &mut span {
             span.finished(
                 matches!(&response, Ok(value) if value.outcome == AdapterOutcome::Succeeded),
@@ -197,30 +363,16 @@ impl AdapterProcess {
         request_id: &str,
         operation: &str,
         payload: Value,
-        timeout: Duration,
+        deadline: Option<Instant>,
     ) -> Result<AdapterResponse, AdapterFailure> {
-        let started = Instant::now();
-        if !valid_text(request_id, 128)
-            || !valid_text(operation, 64)
-            || !payload.is_object()
-            || timeout.is_zero()
-        {
+        let deadline = deadline.ok_or(AdapterFailure::NotDispatched("adapter_request_invalid"))?;
+        if !valid_text(request_id, 128) || !valid_text(operation, 64) || !payload.is_object() {
             return Err(AdapterFailure::NotDispatched("adapter_request_invalid"));
         }
         if self.closed.load(Ordering::Acquire) {
             return Err(AdapterFailure::NotDispatched("adapter_closed"));
         }
-        // Refuse excess work rather than wait behind an unrelated long request.
-        let streams = match self.streams.try_lock() {
-            Ok(streams) => streams,
-            Err(TryLockError::WouldBlock) => {
-                return Err(AdapterFailure::NotDispatched("adapter_busy"));
-            }
-            Err(TryLockError::Poisoned(_)) => {
-                self.close();
-                return Err(AdapterFailure::NotDispatched("adapter_closed"));
-            }
-        };
+        let streams = self.streams.acquire(deadline, "e2bAdapterQueueWait")?;
         if self.closed.load(Ordering::Acquire) {
             return Err(AdapterFailure::NotDispatched("adapter_closed"));
         }
@@ -244,7 +396,7 @@ impl AdapterProcess {
         )
         .and_then(|()| frame.write_all(b"\n").map_err(serde_json::Error::io))
         .map_err(|_| AdapterFailure::NotDispatched("adapter_request_too_large"))?;
-        let remaining = timeout.saturating_sub(started.elapsed());
+        let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(AdapterFailure::NotDispatched(
                 "adapter_deadline_before_dispatch",
@@ -255,7 +407,10 @@ impl AdapterProcess {
             .requests
             .try_send(frame.0)
             .map_err(|_| AdapterFailure::NotDispatched("adapter_request_channel_unavailable"))?;
-        let response = match streams.responses.recv_timeout(remaining) {
+        let response = match streams
+            .responses
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
             Ok(Ok(frame)) => serde_json::from_slice::<AdapterResponse>(&frame)
                 .map_err(|_| AdapterFailure::Unknown("adapter_response_invalid")),
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -292,6 +447,7 @@ impl AdapterProcess {
 
     pub(super) fn stop_and_wait(&self) -> Result<(), &'static str> {
         self.closed.store(true, Ordering::Release);
+        self.streams.close();
         let mut child = self
             .child
             .lock()
