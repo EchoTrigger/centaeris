@@ -18,6 +18,12 @@ def run(label, args, capture=False):
     print(f"==> {label}", flush=True)
     env = {**os.environ, "CARGO_BUILD_JOBS": os.environ.get("CARGO_BUILD_JOBS", "2")}
     env.setdefault("E2B_ADAPTER_TEST_PYTHON", sys.executable)
+    if args[:2] == ["cargo", "test"]:
+        # Loopback fixtures keep their local servers outside inherited proxies.
+        exclusions = [entry.strip() for name in ("NO_PROXY", "no_proxy")
+                      for entry in env.get(name, "").split(",") if entry.strip()]
+        exclusions.extend(("127.0.0.1", "localhost", "::1"))
+        env["NO_PROXY"] = env["no_proxy"] = ",".join(dict.fromkeys(exclusions))
     if args[:5] == ["uv", "run", "--frozen", "--package", "centaeris-e2b-adapter"]:
         # Set before test discovery imports the SDK; side effects must not retry.
         env["E2B_CONNECTION_RETRIES"] = "0"

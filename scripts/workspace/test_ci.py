@@ -24,6 +24,55 @@ class PortableCITests(unittest.TestCase):
             self.assertEqual(command.call_args.kwargs["env"]["E2B_ADAPTER_TEST_PYTHON"], sys.executable)
             self.assertNotIn("E2B_ADAPTER_TEST_PYTHON", os.environ)
 
+    def test_cargo_tests_keep_proxy_exceptions_and_bypass_loopback_in_both_variable_cases(self):
+        cases = [
+            ({}, ["127.0.0.1", "localhost", "::1"]),
+            ({"NO_PROXY": ".company.example"}, [".company.example", "127.0.0.1", "localhost", "::1"]),
+            ({"no_proxy": "registry.internal"}, ["registry.internal", "127.0.0.1", "localhost", "::1"]),
+            ({"NO_PROXY": ".company.example,127.0.0.1", "no_proxy": "registry.internal,localhost"},
+             [".company.example", "registry.internal", "127.0.0.1", "localhost", "::1"]),
+            ({"NO_PROXY": "localhost,127.0.0.1,::1", "no_proxy": "localhost"},
+             ["localhost", "127.0.0.1", "::1"]),
+            ({"NO_PROXY": " LOCALHOST , .EXAMPLE.COM ,127.0.0.1,,", "no_proxy": ".example.com,[::1]"},
+             ["LOCALHOST", ".EXAMPLE.COM", "127.0.0.1", ".example.com", "[::1]", "localhost", "::1"]),
+        ]
+        proxies = {"HTTP_PROXY": "http://proxy.invalid:3128", "HTTPS_PROXY": "http://tls-proxy.invalid:3128",
+                   "http_proxy": "http://lower-proxy.invalid:3128", "ALL_PROXY": "socks5://all-proxy.invalid:1080"}
+        for configured, expected in cases:
+            with self.subTest(configured=configured):
+                environment = {key: value for key, value in os.environ.items() if key.lower() != "no_proxy"}
+                environment["SystemRoot"] = os.environ.get("SystemRoot", "C:/Windows")
+                environment.update(proxies)
+                environment.update(configured)
+                before = environment.copy()
+                with patch.object(ci.os, "environ", environment), \
+                        patch.object(ci.subprocess, "run") as command, redirect_stdout(io.StringIO()):
+                    ci.run("Rust tests", ["cargo", "test", "--locked", "-p", "runtime_server"])
+                    self.assertTrue(environment == before, "Cargo launch changed the host environment")
+                child = command.call_args.kwargs["env"]
+                for name in ("NO_PROXY", "no_proxy"):
+                    self.assertCountEqual(child.get(name, "").split(","), expected)
+                self.assertEqual(child["NO_PROXY"], child["no_proxy"])
+                for name, value in proxies.items():
+                    self.assertEqual(child[name], value)
+
+    def test_loopback_proxy_overrides_do_not_change_other_gate_commands(self):
+        environment = {**os.environ, "NO_PROXY": ".company.example", "no_proxy": "registry.internal",
+                       "HTTP_PROXY": "http://proxy.invalid:3128"}
+        environment["SystemRoot"] = os.environ.get("SystemRoot", "C:/Windows")
+        before = environment.copy()
+        for args in (["cargo", "check", "--locked", "-p", "runtime_server"],
+                     ["node", "--test", "scripts/workspace/core-source.test.mjs"],
+                     ["uv", "run", "--frozen", "--package", "centaeris-e2b-adapter", "python", "-m", "unittest"]):
+            with self.subTest(args=args), patch.object(ci.os, "environ", environment), \
+                    patch.object(ci.subprocess, "run") as command, redirect_stdout(io.StringIO()):
+                ci.run("Unrelated gate", args)
+                self.assertTrue(environment == before, "Gate launch changed the host environment")
+                child = command.call_args.kwargs["env"]
+                self.assertEqual(child["NO_PROXY"], ".company.example")
+                self.assertEqual(child["no_proxy"], "registry.internal")
+                self.assertEqual(child["HTTP_PROXY"], "http://proxy.invalid:3128")
+
     def test_e2b_adapter_behavior_runs_in_python_stage_with_its_pinned_package(self):
         expected = ["uv", "run", "--frozen", "--package", "centaeris-e2b-adapter", "python", "-B",
                     "-m", "unittest", "discover", "-s", "packages/e2b_adapter/tests", "-v"]
