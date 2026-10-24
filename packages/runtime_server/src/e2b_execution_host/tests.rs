@@ -946,3 +946,5 @@ fn managed_profile_selects_owned_workspace_and_denies_private_backing_paths() {
         .denied_write_paths
         .contains(&"/var/lib/centaeris-host".into()));
 }
+
+mod capacity;

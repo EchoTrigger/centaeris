@@ -14,6 +14,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 pub(crate) mod authority;
+mod command_evidence;
 pub(crate) mod sdk_transport;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -136,6 +137,7 @@ pub(crate) struct E2bExecutionHostRunner {
     // Run-owned diagnostics; physical bindings/transports can outlive this Run.
     observation_context: crate::observations::ContextSnapshot,
     commands: Mutex<HashMap<String, Arc<CommandRecord>>>,
+    completed_cache: Mutex<command_evidence::CompletedCache>,
 }
 
 pub(crate) fn execution_policy_for_profile(profile: &EnvironmentProfile) -> ExecutionPolicy {
@@ -227,6 +229,7 @@ impl E2bExecutionHostRunner {
             authority,
             observation_context: crate::observations::Context::snapshot(),
             commands: Mutex::new(HashMap::new()),
+            completed_cache: Mutex::new(command_evidence::CompletedCache::new()),
         })
     }
 
@@ -254,6 +257,7 @@ impl E2bExecutionHostRunner {
             authority,
             observation_context: crate::observations::Context::snapshot(),
             commands: Mutex::new(HashMap::new()),
+            completed_cache: Mutex::new(command_evidence::CompletedCache::new()),
         })
     }
 
@@ -557,11 +561,48 @@ impl E2bExecutionHostRunner {
             }
             return Ok(record.clone());
         }
+        let mut cache = self
+            .completed_cache
+            .lock()
+            .map_err(|_| indeterminate("e2b_command_evidence_unavailable"))?;
+        if let Some(output) = cache.lookup(operation_id, digest)? {
+            return Ok(Arc::new(CommandRecord {
+                digest: digest.into(),
+                state: Mutex::new(CommandState::Completed(Box::new(output))),
+            }));
+        }
         if records.len() >= MAX_COMMAND_EVIDENCE {
-            return Err(ExecutionError::CapacityRejected {
-                stage: ExecutionOperationStage::Start,
-                reason: "e2b_command_evidence_capacity".into(),
-            });
+            // Never block on a command holding its state while waiting for
+            // activity or the provider. Only confirmed final output can spill.
+            let mut completed = None;
+            let mut saw_completed = false;
+            for (id, record) in records.iter() {
+                let Ok(state) = record.state.try_lock() else {
+                    continue;
+                };
+                if let CommandState::Completed(output) = &*state {
+                    saw_completed = true;
+                    if cache.candidate_fits(id, &record.digest, output)? {
+                        completed = Some((id.clone(), record.digest.clone(), output.clone()));
+                        break;
+                    }
+                }
+            }
+            let Some((retired_id, retired_digest, output)) = completed else {
+                return Err(if saw_completed {
+                    command_evidence::storage_capacity()
+                } else {
+                    ExecutionError::CapacityRejected {
+                        stage: ExecutionOperationStage::Start,
+                        reason: "e2b_command_evidence_capacity".into(),
+                    }
+                });
+            };
+            // Publish full cold replay evidence before removing the hot entry.
+            // On every failure the original hot receipt remains available for
+            // replay and the new command has never been dispatched.
+            cache.archive(&retired_id, &retired_digest, &output)?;
+            records.remove(&retired_id);
         }
         let record = Arc::new(CommandRecord {
             digest: digest.into(),
@@ -639,7 +680,7 @@ impl E2bExecutionHostRunner {
                         });
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        return Err(indeterminate("e2b_command_wait_unavailable"))
+                        return Err(indeterminate("e2b_command_wait_unavailable"));
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         if cancelled || control_failed {
@@ -755,7 +796,7 @@ impl ExecutionHostRunner for E2bExecutionHostRunner {
         match &*state {
             CommandState::Completed(output) => return Ok(*output.clone()),
             CommandState::Running(_) | CommandState::Unknown => {
-                return Err(indeterminate("e2b_command_original_unresolved"))
+                return Err(indeterminate("e2b_command_original_unresolved"));
             }
             CommandState::Prepared | CommandState::NotDispatched(_) => (),
         }
