@@ -109,7 +109,7 @@ class UnifiedTransportTests(unittest.TestCase):
                         'instanceId': 'instance', 'containerId': 'container', 'hostId': 'host', 'resourceHolding': 1}
                 elif self.path.endswith('/task'):
                     request = value['task']['request']
-                    kind = request['kind']
+                    kind = request['operation']
                     task = {'taskId': 'task-one', 'operationId': str(value['authorization']['payload']['controllerEpoch']) + ':execute', 'scope': {'kind': 'operation',
                         'operationId': value['authorization']['payload']['controllerOwner']['operationId']},
                         'state': 'exited', 'exitCode': 0, 'cleanupComplete': True, 'outputComplete': True}
@@ -120,7 +120,8 @@ class UnifiedTransportTests(unittest.TestCase):
                     result = {'schema': 'environment.task.v1', 'status': 'success', 'result':
                         {'kind': 'takenOver', 'fence': {key: request[key] for key in ('environmentInstanceId',
                             'controllerOwner', 'controllerEpoch', 'controllerPurpose')}} if kind == 'takeover' else
-                        {'kind': 'mutated', 'task': task} if kind == 'start' else
+                        {'kind': 'task', 'task': task, 'output': [], 'earliestCursor': 0,
+                            'nextCursor': 0, 'gap': False, 'hasMore': False} if kind == 'start' else
                         {'kind': 'task', 'task': task, 'output': [{'cursor': 0, 'stream': 'stdout', 'data': [111, 107]}],
                             'earliestCursor': 0, 'nextCursor': 1, 'gap': False, 'hasMore': False} if kind == 'query' else
                         {'kind': 'operationEnded', 'taskIds': [], 'cleanupComplete': True}}
@@ -177,7 +178,7 @@ class UnifiedTransportTests(unittest.TestCase):
         self.assertEqual(self.provisioner.exec(self.owned, command='printf ok', cwd='/app', env={}, user='0:0',
             timeout_sec=5), {'returnCode': 0, 'stdout': 'ok', 'stderr': ''})
         commands = [value['task']['request'] for path, value in self.requests if path.endswith('/task')]
-        self.assertEqual([value['kind'] for value in commands], ['takeover', 'start', 'query', 'endOperation'])
+        self.assertEqual([value['operation'] for value in commands], ['takeover', 'start', 'query', 'endOperation'])
         self.assertEqual(commands[1]['scope']['kind'], 'operation')
         self.assertTrue(self.requests[-1][0].endswith('/release'))
 
@@ -186,7 +187,7 @@ class UnifiedTransportTests(unittest.TestCase):
         with self.assertRaises(WorkspaceError):
             self.provisioner.exec(self.owned, command='external-effect', timeout_sec=5)
         starts = [value for path, value in self.requests if path.endswith('/task')
-            and value['task']['request']['kind'] == 'start']
+            and value['task']['request']['operation'] == 'start']
         self.assertEqual(len(starts), 1)
 
     def test_upload_cap_is_checked_before_any_remote_mutation(self):

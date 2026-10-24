@@ -313,6 +313,62 @@ def _fields(value, schema, fields):
         raise WorkspaceError("control_response_invalid")
 
 
+def _task_text(value, maximum):
+    try:
+        return (isinstance(value, str) and 0 < len(value.encode("utf-8")) <= maximum
+            and not any(ord(character) < 32 or 127 <= ord(character) < 160 for character in value))
+    except UnicodeError:
+        return False
+
+
+def _task_cursor(value):
+    return type(value) is int and 0 <= value < 2**64
+
+
+def _task_page(result, operation_id, scope, *, task_id=None, cursor=0):
+    """Validate a Core page before consuming output or forwarding its cursor.
+
+    The first task address is opaque. Subsequent reads keep that exact address,
+    original operation and scope; this client does not derive Core task IDs.
+    """
+    if (not isinstance(result, dict)
+            or set(result) != {"kind", "task", "output", "earliestCursor", "nextCursor", "gap", "hasMore"}
+            or result["kind"] != "task"):
+        raise WorkspaceError("maintenance_task_output_unconfirmed")
+    task = result["task"]
+    if (not isinstance(task, dict)
+            or set(task) != {"taskId", "operationId", "scope", "state", "exitCode", "cleanupComplete", "outputComplete"}
+            or not _task_text(task["taskId"], 128)
+            or task_id is not None and task["taskId"] != task_id
+            or task["operationId"] != operation_id or task["scope"] != scope
+            or not isinstance(task["state"], str) or task["state"] not in {"accepted", "running", "exited", "unknown"}
+            or type(task["cleanupComplete"]) is not bool or type(task["outputComplete"]) is not bool
+            or task["exitCode"] is not None and (type(task["exitCode"]) is not int
+                or not -(2**31) <= task["exitCode"] < 2**31)):
+        raise WorkspaceError("maintenance_task_output_unconfirmed")
+    if (not _task_cursor(result["earliestCursor"]) or not _task_cursor(result["nextCursor"])
+            or result["earliestCursor"] > cursor or result["nextCursor"] < cursor
+            or result["gap"] is not False or type(result["hasMore"]) is not bool
+            or result["hasMore"] and result["nextCursor"] == cursor
+            or not isinstance(result["output"], list)):
+        raise WorkspaceError("maintenance_task_output_unconfirmed")
+    previous, size = None, 0
+    for chunk in result["output"]:
+        if (not isinstance(chunk, dict) or set(chunk) != {"cursor", "stream", "data"}
+                or not _task_cursor(chunk["cursor"])
+                or not cursor <= chunk["cursor"] < result["nextCursor"]
+                or previous is not None and chunk["cursor"] <= previous
+                or not isinstance(chunk["stream"], str) or chunk["stream"] not in {"stdout", "stderr"}
+                or not isinstance(chunk["data"], list)
+                or any(type(byte) is not int or not 0 <= byte <= 255 for byte in chunk["data"])):
+            raise WorkspaceError("maintenance_task_output_invalid")
+        previous = chunk["cursor"]
+        size += len(chunk["data"])
+        if size > TRANSFER_BLOCK_BYTES:
+            raise WorkspaceError("maintenance_task_output_invalid")
+    return task
+
+
 class WorkspaceHTTPProvisioner:
     """Independent maintenance authority; instantiate only in the controller.
 
@@ -491,31 +547,29 @@ class WorkspaceHTTPProvisioner:
         fence = {'environmentInstanceId': owned.instance_id, 'controllerOwner': payload['controllerOwner'],
             'controllerEpoch': payload['controllerEpoch'], 'controllerPurpose': payload['controllerPurpose']}
         prefix = str(payload['controllerEpoch']) + ':'
-        ended = False
+        start_operation = prefix + 'execute'
+        scope = {'kind': 'operation', 'operationId': operation}
         try:
-            self._task(grant, logical, {'kind': 'takeover', **fence})
-            result = self._task(grant, logical, {'kind': 'start', 'fence': fence, 'operationId': prefix + 'execute',
-                'scope': {'kind': 'operation', 'operationId': operation}, **logical})
-            if result.get('kind') != 'mutated' or not isinstance(result.get('task'), dict):
+            takeover = self._task(grant, logical, {'operation': 'takeover', **fence})
+            if (set(takeover) != {'kind', 'fence'} or takeover['kind'] != 'takenOver'
+                    or takeover['fence'] != fence or type(takeover['fence'].get('controllerEpoch')) is not int):
                 raise WorkspaceError('maintenance_task_unconfirmed')
-            task_id = result['task']['taskId']
+            result = self._task(grant, logical, {'operation': 'start', 'fence': fence, 'operationId': start_operation,
+                'scope': scope, **logical})
+            initial = _task_page(result, start_operation, scope)
+            task_id = initial['taskId']
             cursor = 0
             streams = {'stdout': bytearray(), 'stderr': bytearray()}
             deadline = time.monotonic() + timeout_sec + 10
             while time.monotonic() < deadline:
-                result = self._task(grant, logical, {'kind': 'query', 'fence': fence, 'taskId': task_id,
+                result = self._task(grant, logical, {'operation': 'query', 'fence': fence, 'taskId': task_id,
                     'cursor': cursor, 'maxBytes': TRANSFER_BLOCK_BYTES})
-                if result.get('kind') != 'task' or result.get('gap') is not False:
-                    raise WorkspaceError('maintenance_task_output_unconfirmed')
+                snapshot = _task_page(result, initial['operationId'], initial['scope'], task_id=task_id, cursor=cursor)
                 for chunk in result['output']:
-                    stream, data = chunk['stream'], chunk['data']
-                    if stream not in streams or not isinstance(data, list) or any(type(b) is not int or not 0 <= b <= 255 for b in data):
-                        raise WorkspaceError('maintenance_task_output_invalid')
-                    streams[stream].extend(data)
+                    streams[chunk['stream']].extend(chunk['data'])
                 if sum(map(len, streams.values())) > 8 * 1024 * 1024:
                     raise WorkspaceError('maintenance_task_output_limit_exceeded')
                 cursor = result['nextCursor']
-                snapshot = result['task']
                 if (not result['hasMore'] and snapshot.get('state') == 'exited'
                         and snapshot.get('cleanupComplete') is True and snapshot.get('outputComplete') is True):
                     if type(snapshot.get('exitCode')) is not int:
@@ -526,9 +580,11 @@ class WorkspaceHTTPProvisioner:
         finally:
             # EndOperation closes its journal before accepting any later Start;
             # this is safe even when Start's acknowledgement was lost.
-            result = self._task(grant, logical, {'kind': 'endOperation', 'fence': fence,
+            result = self._task(grant, logical, {'operation': 'endOperation', 'fence': fence,
                 'ownerOperationId': operation, 'operationId': prefix + 'close'})
-            if result.get('kind') != 'operationEnded' or result.get('cleanupComplete') is not True:
+            if (set(result) != {'kind', 'taskIds', 'cleanupComplete'} or result['kind'] != 'operationEnded'
+                    or result['cleanupComplete'] is not True or not isinstance(result['taskIds'], list)
+                    or any(not _task_text(task_id, 128) for task_id in result['taskIds'])):
                 raise WorkspaceError('maintenance_cleanup_unconfirmed')
             self._release(grant)
 

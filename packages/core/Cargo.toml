@@ -25,6 +25,10 @@ required-features = ["contract-schema"]
 name = "model_image_contract"
 test = true
 
+[[example]]
+name = "environment_task_contract"
+test = true
+
 [dependencies]
 async-trait = "=0.1.89"
 schemars = { version = "=1.2.1", optional = true }

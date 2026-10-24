@@ -1,0 +1,300 @@
+{
+  "command": {
+    "args": [
+      "-lc",
+      "printf ok"
+    ],
+    "cwd": "/app",
+    "program": "/bin/bash",
+    "timeoutMs": 5000
+  },
+  "endOperation": {
+    "request": {
+      "request": {
+        "fence": {
+          "controllerEpoch": 1,
+          "controllerOwner": {
+            "kind": "maintenanceOperation",
+            "operationId": "maintenance-00000000000000000000000000000001"
+          },
+          "controllerPurpose": "execute",
+          "environmentInstanceId": "instance"
+        },
+        "operation": "endOperation",
+        "operationId": "1:close",
+        "ownerOperationId": "maintenance-00000000000000000000000000000001"
+      },
+      "schema": "environment.task.v1"
+    },
+    "response": {
+      "result": {
+        "cleanupComplete": true,
+        "kind": "operationEnded",
+        "taskIds": [
+          "task-da504ab20ba557fc0efc44e36d9eab19fefb4529c7ec228a0aaf4f921acbe932"
+        ]
+      },
+      "schema": "environment.task.v1",
+      "status": "success"
+    }
+  },
+  "queryPages": [
+    {
+      "request": {
+        "request": {
+          "cursor": 0,
+          "fence": {
+            "controllerEpoch": 1,
+            "controllerOwner": {
+              "kind": "maintenanceOperation",
+              "operationId": "maintenance-00000000000000000000000000000001"
+            },
+            "controllerPurpose": "execute",
+            "environmentInstanceId": "instance"
+          },
+          "maxBytes": 65536,
+          "operation": "query",
+          "taskId": "task-da504ab20ba557fc0efc44e36d9eab19fefb4529c7ec228a0aaf4f921acbe932"
+        },
+        "schema": "environment.task.v1"
+      },
+      "response": {
+        "result": {
+          "earliestCursor": 0,
+          "gap": false,
+          "hasMore": true,
+          "kind": "task",
+          "nextCursor": 1,
+          "output": [
+            {
+              "cursor": 0,
+              "data": [
+                111
+              ],
+              "stream": "stdout"
+            }
+          ],
+          "task": {
+            "cleanupComplete": true,
+            "exitCode": 0,
+            "operationId": "1:execute",
+            "outputComplete": true,
+            "scope": {
+              "kind": "operation",
+              "operationId": "maintenance-00000000000000000000000000000001"
+            },
+            "state": "exited",
+            "taskId": "task-da504ab20ba557fc0efc44e36d9eab19fefb4529c7ec228a0aaf4f921acbe932"
+          }
+        },
+        "schema": "environment.task.v1",
+        "status": "success"
+      }
+    },
+    {
+      "request": {
+        "request": {
+          "cursor": 1,
+          "fence": {
+            "controllerEpoch": 1,
+            "controllerOwner": {
+              "kind": "maintenanceOperation",
+              "operationId": "maintenance-00000000000000000000000000000001"
+            },
+            "controllerPurpose": "execute",
+            "environmentInstanceId": "instance"
+          },
+          "maxBytes": 65536,
+          "operation": "query",
+          "taskId": "task-da504ab20ba557fc0efc44e36d9eab19fefb4529c7ec228a0aaf4f921acbe932"
+        },
+        "schema": "environment.task.v1"
+      },
+      "response": {
+        "result": {
+          "earliestCursor": 0,
+          "gap": false,
+          "hasMore": false,
+          "kind": "task",
+          "nextCursor": 2,
+          "output": [
+            {
+              "cursor": 1,
+              "data": [
+                107
+              ],
+              "stream": "stdout"
+            }
+          ],
+          "task": {
+            "cleanupComplete": true,
+            "exitCode": 0,
+            "operationId": "1:execute",
+            "outputComplete": true,
+            "scope": {
+              "kind": "operation",
+              "operationId": "maintenance-00000000000000000000000000000001"
+            },
+            "state": "exited",
+            "taskId": "task-da504ab20ba557fc0efc44e36d9eab19fefb4529c7ec228a0aaf4f921acbe932"
+          }
+        },
+        "schema": "environment.task.v1",
+        "status": "success"
+      }
+    }
+  ],
+  "replayedStart": {
+    "request": {
+      "request": {
+        "args": [
+          "-lc",
+          "printf ok"
+        ],
+        "cwd": "/app",
+        "fence": {
+          "controllerEpoch": 1,
+          "controllerOwner": {
+            "kind": "maintenanceOperation",
+            "operationId": "maintenance-00000000000000000000000000000001"
+          },
+          "controllerPurpose": "execute",
+          "environmentInstanceId": "instance"
+        },
+        "operation": "start",
+        "operationId": "1:execute",
+        "program": "/bin/bash",
+        "scope": {
+          "kind": "operation",
+          "operationId": "maintenance-00000000000000000000000000000001"
+        },
+        "timeoutMs": 5000
+      },
+      "schema": "environment.task.v1"
+    },
+    "response": {
+      "result": {
+        "earliestCursor": 0,
+        "gap": false,
+        "hasMore": false,
+        "kind": "task",
+        "nextCursor": 2,
+        "output": [
+          {
+            "cursor": 0,
+            "data": [
+              111
+            ],
+            "stream": "stdout"
+          },
+          {
+            "cursor": 1,
+            "data": [
+              107
+            ],
+            "stream": "stdout"
+          }
+        ],
+        "task": {
+          "cleanupComplete": true,
+          "exitCode": 0,
+          "operationId": "1:execute",
+          "outputComplete": true,
+          "scope": {
+            "kind": "operation",
+            "operationId": "maintenance-00000000000000000000000000000001"
+          },
+          "state": "exited",
+          "taskId": "task-da504ab20ba557fc0efc44e36d9eab19fefb4529c7ec228a0aaf4f921acbe932"
+        }
+      },
+      "schema": "environment.task.v1",
+      "status": "success"
+    }
+  },
+  "schema": "centaeris.environmentTaskContract.v1",
+  "start": {
+    "request": {
+      "request": {
+        "args": [
+          "-lc",
+          "printf ok"
+        ],
+        "cwd": "/app",
+        "fence": {
+          "controllerEpoch": 1,
+          "controllerOwner": {
+            "kind": "maintenanceOperation",
+            "operationId": "maintenance-00000000000000000000000000000001"
+          },
+          "controllerPurpose": "execute",
+          "environmentInstanceId": "instance"
+        },
+        "operation": "start",
+        "operationId": "1:execute",
+        "program": "/bin/bash",
+        "scope": {
+          "kind": "operation",
+          "operationId": "maintenance-00000000000000000000000000000001"
+        },
+        "timeoutMs": 5000
+      },
+      "schema": "environment.task.v1"
+    },
+    "response": {
+      "result": {
+        "earliestCursor": 0,
+        "gap": false,
+        "hasMore": false,
+        "kind": "task",
+        "nextCursor": 0,
+        "output": [],
+        "task": {
+          "cleanupComplete": false,
+          "exitCode": null,
+          "operationId": "1:execute",
+          "outputComplete": false,
+          "scope": {
+            "kind": "operation",
+            "operationId": "maintenance-00000000000000000000000000000001"
+          },
+          "state": "running",
+          "taskId": "task-da504ab20ba557fc0efc44e36d9eab19fefb4529c7ec228a0aaf4f921acbe932"
+        }
+      },
+      "schema": "environment.task.v1",
+      "status": "success"
+    }
+  },
+  "takeover": {
+    "request": {
+      "request": {
+        "controllerEpoch": 1,
+        "controllerOwner": {
+          "kind": "maintenanceOperation",
+          "operationId": "maintenance-00000000000000000000000000000001"
+        },
+        "controllerPurpose": "execute",
+        "environmentInstanceId": "instance",
+        "operation": "takeover"
+      },
+      "schema": "environment.task.v1"
+    },
+    "response": {
+      "result": {
+        "fence": {
+          "controllerEpoch": 1,
+          "controllerOwner": {
+            "kind": "maintenanceOperation",
+            "operationId": "maintenance-00000000000000000000000000000001"
+          },
+          "controllerPurpose": "execute",
+          "environmentInstanceId": "instance"
+        },
+        "kind": "takenOver"
+      },
+      "schema": "environment.task.v1",
+      "status": "success"
+    }
+  }
+}
