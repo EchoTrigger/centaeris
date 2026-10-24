@@ -18,6 +18,9 @@ def run(label, args, capture=False):
     print(f"==> {label}", flush=True)
     env = {**os.environ, "CARGO_BUILD_JOBS": os.environ.get("CARGO_BUILD_JOBS", "2")}
     env.setdefault("E2B_ADAPTER_TEST_PYTHON", sys.executable)
+    if args[:5] == ["uv", "run", "--frozen", "--package", "centaeris-e2b-adapter"]:
+        # Set before test discovery imports the SDK; side effects must not retry.
+        env["E2B_CONNECTION_RETRIES"] = "0"
     if args[:2] == ["docker", "compose"]:
         env["CENTAERIS_SOURCE_REVISION"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
         # Synthetic source-gate inputs only; deployments still choose each budget.

@@ -1,4 +1,6 @@
+from contextlib import redirect_stdout
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -37,6 +39,35 @@ class PortableCITests(unittest.TestCase):
                 with patch.object(ci, "run", record):
                     ci.main(stage=stage)
                 self.assertEqual(calls.count(expected), 1 if stage in ("Python", "All") else 0)
+
+    def test_adapter_gate_disables_sdk_retries_only_for_its_child_process(self):
+        config = {"services": {"document-processor": {}, "workspace-general": {},
+                  "runtime": {"depends_on": {"workspace-general": {"condition": "service_completed_successfully"}}},
+                  "material-worker": {"depends_on": {"document-processor": {"condition": "service_completed_successfully"}}}}}
+        for inherited in (None, "7", "0"):
+            with self.subTest(inherited=inherited):
+                environment = {key: value for key, value in os.environ.items()
+                               if key != "E2B_CONNECTION_RETRIES"}
+                if inherited is not None:
+                    environment["E2B_CONNECTION_RETRIES"] = inherited
+                children = []
+                def record(args, **kwargs):
+                    children.append((args, kwargs["env"]))
+                    return subprocess.CompletedProcess(args, 0, stdout=json.dumps(config))
+                with patch.dict(os.environ, environment, clear=True), \
+                        patch.object(ci.subprocess, "run", record), \
+                        patch.object(ci.subprocess, "check_output", return_value="f" * 40), \
+                        redirect_stdout(io.StringIO()):
+                    ci.main(stage="Python")
+                    self.assertTrue(dict(os.environ) == environment, "CI launch changed the host environment")
+                adapter = [env for command, env in children
+                           if "centaeris-e2b-adapter" in command]
+                self.assertEqual(len(adapter), 1)
+                self.assertEqual(adapter[0].get("E2B_CONNECTION_RETRIES"), "0")
+                others = [env for command, env in children
+                          if "centaeris-e2b-adapter" not in command]
+                self.assertTrue(others)
+                self.assertTrue(all(env.get("E2B_CONNECTION_RETRIES") == inherited for env in others))
 
     def test_workspace_harbor_runs_with_pinned_dependency_early_in_python_stage(self):
         harbor = ["uv", "run", "--no-project", "--with", "harbor==0.21.0", "python", "-B",
