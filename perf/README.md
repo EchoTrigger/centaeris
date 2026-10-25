@@ -244,3 +244,30 @@ stdout-byte measurements do not estimate physical disk or complete API cost.
 - Keep background VM activity and continuous-history growth in the report. They
   can affect medians and trends, not only maxima. No capacity/extrapolation claim
   is justified by these uncontrolled Windows runs alone.
+
+### Serial lifecycle latency with k6
+
+`k6/scenarios/main-path.js` submits one message and measures live SSE arrival of
+its first committed tool result and terminal event. `e2b-main-path.js` runs the
+bounded single-user sequence: two new sessions, three warm continuations, three
+paused continuations with free capacity, and six capacity switches. k6 owns the
+sequence, deadlines, state polling, failure rates and timing statistics.
+
+Run the suite with the pinned xk6-sse binary and `PERF_FIXTURE_URL` pointing to an
+owned loopback fixture. The fixture supplies `/config` (API URL, synthetic account
+credentials and model/workspace/agent IDs), read-only `/state?runId=...` or
+`/state?sessionId=...`, and `/finish` for the final report. Credentials remain in
+memory and process environments; do not enable HTTP debug logging. Environment
+setup and verified retirement remain the fixture's responsibility.
+
+Use the real Worker service and ASGI API, with API and Runtime connected to the
+same isolated Redis. An unavailable or mismatched event channel adds fallback
+reconciliation delay; a synchronous server can buffer asynchronous SSE. Report
+those conditions as invalid baselines rather than execution-startup cost.
+Precondition and durable-Job waits are reported separately from request-to-tool
+latency. A failed Run, tool result, stream or state check fails the experiment and
+stops further admissions; retained work still needs independent cleanup accounting.
+
+Set `K6_BINARY` to an existing pinned binary when running
+`node --test perf/tests/k6-main-path.test.mjs perf/tests/k6-e2b-main-path.test.mjs`.
+These loopback tests exercise actual k6 HTTP/SSE behavior without creating a sandbox.

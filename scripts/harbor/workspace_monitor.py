@@ -145,6 +145,8 @@ class JobProjection:
         self.event_anchor = b""
         self.sequence = 0
         self.last_observed = None
+        self.first_observed = None
+        self.last_heartbeat = None
         self.trials = {}
         self.logs = deque(maxlen=100)
         self.job_status = "unknown"
@@ -226,6 +228,11 @@ class JobProjection:
             if not member(payload["status"], STATUSES):
                 raise InvalidProjection("invalidStatus")
             self.job_status = payload["status"]
+        elif kind == "heartbeat":
+            fields(payload, {})
+            if "trialId" in value:
+                raise InvalidProjection("invalidHeartbeat")
+            self.last_heartbeat = observed
         elif kind == "log":
             fields(payload, {"message", "level"}, {"message", "level"})
             if not member(payload["level"], {"info", "warning", "error"}):
@@ -273,7 +280,10 @@ class JobProjection:
         else:
             raise InvalidProjection("unsupportedEventKind")
         self.sequence = value["sequence"]
-        self.last_observed = observed
+        if self.first_observed is None:
+            self.first_observed = observed
+        if kind != "heartbeat":
+            self.last_observed = observed
 
     def snapshot(self):
         with self.lock:
@@ -380,17 +390,29 @@ class JobProjection:
         except (InvalidProjection, OSError) as error:
             self.error = str(error) if isinstance(error, InvalidProjection) else "fileReadError"
         age = max(0, self.clock() - self.last_observed) if self.last_observed is not None else None
-        status = "invalid" if self.error else "noLiveRun" if self.job is None else "stale" if age is not None and age > STALE_SECONDS else "live" if self.sequence else "waiting"
+        health_observed = self.last_heartbeat if self.last_heartbeat is not None else self.first_observed
+        heartbeat_age = max(0, self.clock() - health_observed) if health_observed is not None else None
         trials = list(self.trials.values()) if self.job else []
+        terminal = {"completed", "failed", "cancelled"}
+        complete = (self.job is not None and self.job_status in terminal and not catching_up
+            and len(trials) == self.job["trialCount"] and all(
+                trial["status"] in terminal and trial.get("resourceHolding") == 0
+                and trial.get("cleanupStatus") == "absent" for trial in trials))
+        status = ("invalid" if self.error else "noLiveRun" if self.job is None else
+            "complete" if complete else "stale" if heartbeat_age is not None and heartbeat_age > STALE_SECONDS else
+            "live" if self.sequence else "waiting")
         slots = []
         for slot in (1, 2):
             held = [trial for trial in trials if trial.get("slot") == slot and trial.get("resourceHolding") == 1]
             slots.append({"slot": slot, "trialIds": [trial["trialId"] for trial in held]})
         exclusive = next((trial["trialId"] for trial in trials if trial.get("resourceHolding") == 1 and trial["memoryMiB"] >= 8192), None)
         outputs, output_error, output_age = self._outputs() if self.error is None else ([], "lifecycleUnavailable", None)
+        if complete and output_error == "outputStale":
+            output_error = None
         return {"schema": "centaeris.workspace_benchmark.monitor.v1", "job": self.job,
             "jobStatus": self.job_status, "monitorStatus": status, "monitorError": self.error,
-            "sequence": self.sequence, "lastObservationAgeSeconds": round(age, 1) if age is not None else None,
+            "sequence": self.sequence, "heartbeatAgeSeconds": round(heartbeat_age, 1) if heartbeat_age is not None else None,
+            "lastObservationAgeSeconds": round(age, 1) if age is not None else None,
             "trials": trials, "slots": slots, "exclusiveTrial": exclusive, "logs": list(self.logs),
             "cursorResetCount": self.resets, "readBytes": read_bytes, "catchingUp": catching_up,
             "outputs": outputs, "outputError": output_error, "outputAgeSeconds": output_age}

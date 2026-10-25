@@ -93,6 +93,23 @@ class EventsTests(unittest.TestCase):
         for line in wire.splitlines():
             json.loads(line)
 
+    def test_quiet_projection_emits_heartbeat_and_close_stops_it(self):
+        from unittest.mock import patch
+        writer=JobEvents.create(self.root,manifest())
+        emitted=threading.Event()
+        original=writer.heartbeat
+        def heartbeat():
+            original();emitted.set()
+        with patch('workspace_events.HEARTBEAT_SECONDS',.01), patch.object(writer,'heartbeat',side_effect=heartbeat):
+            sink=FailOpenProjection(writer)
+            sink.submit('job',{'status':'running'})
+            self.assertTrue(emitted.wait(1),'quiet controller must still report observer health')
+            sink.close(timeout=1)
+        records=[json.loads(line) for line in (self.root/'events.jsonl').read_text().splitlines()]
+        self.assertTrue(any(row['kind']=='heartbeat' for row in records))
+        self.assertEqual(JobProjection(self.root).snapshot()['trials'],[])
+        self.assertTrue(writer._handle.closed)
+
     def test_closed_writer_rejects_new_facts(self):
         writer = JobEvents.create(self.root, manifest())
         writer.close()

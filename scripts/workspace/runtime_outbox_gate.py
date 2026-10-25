@@ -144,10 +144,15 @@ def main():
         for name in exact_tests
     ])
     commands.append(['cargo', 'test', '--locked', '-p', 'runtime_server',
+                     'postgres_store::integration_tests::pool_state_tests', '--'])
+    commands.append(['cargo', 'test', '--locked', '-p', 'runtime_server',
                      'postgres_store::integration_tests::environment_observation_tests',
                      '--'])
     commands.append(['cargo', 'test', '--locked', '-p', 'runtime_server',
                      'postgres_store::integration_tests::provider_operation_tests',
+                     '--'])
+    commands.append(['cargo', 'test', '--locked', '-p', 'runtime_server',
+                     'postgres_store::integration_tests::provider_maintenance_tests',
                      '--'])
     names = []
     for command in commands:

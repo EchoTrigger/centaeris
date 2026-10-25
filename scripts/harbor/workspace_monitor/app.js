@@ -14,6 +14,15 @@ function node(tag, value, className) {
   return element;
 }
 function display(value) { return value === null || value === undefined ? "Not observed" : String(value); }
+function verification(row) {
+  if (row.verifierStatus === 'completed' && row.reward === 1) return 'Passed';
+  if (row.verifierStatus === 'completed' && row.reward === 0) return 'Not passed';
+  if (['running', 'notStarted'].includes(row.verifierStatus)) return 'Pending';
+  return 'No result';
+}
+function cleanup(row) {
+  return row.cleanupStatus === 'absent' && row.resourceHolding === 0 ? 'Complete' : 'Not confirmed';
+}
 function fact(label, value) { byId("facts").append(node("dt", label), node("dd", display(value))); }
 function metric(value) { return value === null || value === undefined ? "Unknown" : String(value); }
 function bytes(value) {
@@ -54,6 +63,7 @@ function renderDetails(state, rows) {
   byId("facts").replaceChildren();
   byId("selected").textContent = row ? `${row.taskId} / attempt ${row.attempt}` : "Select a task";
   if (row) {
+    fact('Verification result', verification(row));
     for (const [label, key] of [["Trial", "trialId"], ["Status", "status"], ["Phase", "phase"], ["Agent", "agentStatus"], ["Verifier", "verifierStatus"], ["Reward", "reward"], ["Session", "sessionId"], ["Agent run", "agentRunId"], ["Environment", "environmentId"], ["Instance", "instanceId"], ["Container", "containerId"], ["Cleanup", "cleanupStatus"], ["Error", "error"]]) fact(label, row[key]);
     fact("Memory", `${row.memoryMiB} MiB${row.memoryMiB >= 8192 ? " / exclusive through cleanup" : ""}`);
     fact("Holding", row.resourceHolding === undefined || row.resourceHolding === null ? null : `${row.resourceHolding} instance debit`);
@@ -91,6 +101,7 @@ function slotView(slot) {
   const task = node('h3', 'No observed trial');
   const status = node('div', '', 'muted');
   const detail = node('div', '', 'muted');
+  const outcome = node('div', '', 'muted');
   const memory = node('div', '', 'muted');
   const toolbar = node('div', undefined, 'output-toolbar');
   const note = node('span', 'Output not observed', 'muted');
@@ -103,7 +114,7 @@ function slotView(slot) {
   log.setAttribute('aria-label', `Slot ${slot} output`);
   log.setAttribute('aria-live', 'off');
   log.tabIndex = 0;
-  const view = {section, timer, task, status, detail, memory, note, follow, log,
+  const view = {section, timer, task, status, detail, outcome, memory, note, follow, log,
     trialId:null, following:true, signature:null, row:null, entries:new Map()};
   function followState(value) {
     view.following = value;
@@ -112,7 +123,7 @@ function slotView(slot) {
   }
   log.addEventListener('scroll', () => followState(log.scrollHeight-log.clientHeight-log.scrollTop<32), {passive:true});
   follow.onclick = () => { followState(true); log.scrollTop=log.scrollHeight; };
-  section.append(heading, task, status, detail, memory, toolbar, log);
+  section.append(heading, task, status, detail, outcome, memory, toolbar, log);
   byId('slots').append(section);
   slotViews.set(slot, view);
   return view;
@@ -128,11 +139,17 @@ function renderSlot(state, slot) {
     : slot.trialIds.length ? 'Resource held' : state.exclusiveTrial ? 'Exclusive task holds capacity'
     : row ? 'Last observed trial' : 'No resource holder observed';
   view.detail.textContent = row ? `${row.phase} / Agent: ${display(row.agentStatus)} / Verifier: ${display(row.verifierStatus)}` : 'Waiting for a trial assignment';
+  view.outcome.textContent = row ? `Verification: ${verification(row)} | Reward: ${display(row.reward)} | Cleanup: ${cleanup(row)}` : '';
   const memory = row && row.metrics && row.metrics.memory;
   view.memory.textContent = memory ? `Task memory: ${bytes(memory.taskCurrentBytes)} / ${bytes(memory.taskLimitBytes)}` : 'Task memory: Unknown';
   view.timer.textContent = elapsed(row, connected && state.monitorStatus==='live');
   view.note.textContent = output ? (output.error ? 'Output unavailable / last observations' : state.outputError ? 'Output observations stale or unavailable' : 'Public Workspace output')
     : state.outputError ? `Output unavailable: ${state.outputError}` : 'Output not observed';
+  if (state.monitorStatus === 'complete' && (!state.outputError || state.outputError === 'outputStale')) {
+    view.note.textContent = output
+      ? (output.error ? 'Last captured output (capture incomplete)' : 'Last captured output (task ended)')
+      : 'No output captured';
+  }
   const signature = JSON.stringify([state.job && state.job.jobId, row && row.trialId, output && output.entries, output && output.truncated]);
   if (signature===view.signature) return;
   view.signature = signature;
@@ -178,7 +195,7 @@ function render(state) {
   byId("job-status").textContent = `Job status: ${state.jobStatus}`;
   const messages = [];
   if (state.monitorError) messages.push(`Observation error: ${state.monitorError}. Job outcome remains independent.`);
-  if (state.monitorStatus === "stale") messages.push("Observations are stale. Running tasks have not been reclassified as failed.");
+  if (state.monitorStatus === "stale") messages.push("Observer heartbeat interrupted. Showing the last confirmed task state.");
   if (state.catchingUp) messages.push("Reading the next bounded event page.");
   if (state.cursorResetCount) messages.push(`Event stream replaced or truncated: projection rebuilt ${state.cursorResetCount} time(s).`);
   byId("warning").textContent = messages.join("\n");

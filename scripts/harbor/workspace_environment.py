@@ -13,6 +13,7 @@ import json
 import math
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import time
 from typing import Protocol
 import uuid
@@ -24,6 +25,7 @@ from harbor.models.trial.paths import EnvironmentPaths
 
 from workspace_agent import WorkspaceBinding, message_operation_id
 from workspace_client import WorkspaceError
+from workspace_provider import OwnedProviderEnvironment, require_storage_probe
 
 
 @dataclass(frozen=True)
@@ -129,9 +131,16 @@ class WorkspaceEnvironment(BaseEnvironment):
         expected = {"cpuMilli": self.task_env_config.cpus * 1000,
                     "memoryBytes": self.task_env_config.memory_mb * 1024**2,
                     "storageBytes": self.task_env_config.storage_mb * 1024**2}
-        resources = self.profile.get("resources", {})
-        if any(resources.get(key) != value for key, value in expected.items()):
-            raise WorkspaceError("task_resource_profile_mismatch")
+        if self.profile.get("schema") == "runtime.e2b_environment_profile.v1":
+            if (self.profile.get("workspaceInitialization") != "taskImage" or self.profile.get("lifetime") != "retained"):
+                raise WorkspaceError("task_image_profile_required")
+            # The provider profile intentionally makes no resource claims. The
+            # pinned build and fresh SDK CPU/memory facts are checked on start;
+            # df then verifies the original task's minimum available disk.
+        else:
+            resources = self.profile.get("resources", {})
+            if any(resources.get(key) != value for key, value in expected.items()):
+                raise WorkspaceError("task_resource_profile_mismatch")
         network = "disabled" if self._network_disabled else "publicInternet"
         if self.profile.get("network") != network:
             raise WorkspaceError("task_network_profile_mismatch")
@@ -159,6 +168,9 @@ class WorkspaceEnvironment(BaseEnvironment):
         return EnvironmentResourceCapabilities(cpu_limit=True, memory_limit=True)
 
     def _validate_definition(self):
+        if (self.profile.get("schema") == "runtime.e2b_environment_profile.v1"
+                and (self.task_env_config.gpus not in (None, 0) or self.task_env_config.gpu_types)):
+            raise WorkspaceError("task_gpus_unsupported")
         if not self.environment_dir.is_dir() or not (self.environment_dir.parent / "instruction.md").is_file():
             raise ValueError("pinned task environment and instruction are required")
         if any((self.environment_dir / name).exists() for name in ("docker-compose.yaml", "docker-compose.yml")):
@@ -177,15 +189,39 @@ class WorkspaceEnvironment(BaseEnvironment):
             self.workspace_event_callback(payload)
 
     def _check_owned(self, owned):
-        if (not isinstance(owned, OwnedEnvironment) or owned.session_id != self._session_id
+        provider = self.profile.get("schema") == "runtime.e2b_environment_profile.v1"
+        expected_type = OwnedProviderEnvironment if provider else OwnedEnvironment
+        if (not isinstance(owned, expected_type) or owned.session_id != self._session_id
                 or owned.environment_id != self._environment_id or owned.agent_run_id != self._agent_run_id
-                or owned.image_digest != self.profile["imageDigest"] or owned.profile_digest != self.profile_digest
-                or owned.state != "resident"):
+                or owned.profile_digest != self.profile_digest or owned.state != "resident"):
             raise WorkspaceError("prepared_environment_binding_mismatch")
-        if self._owned is not None and any(getattr(owned, key) != getattr(self._owned, key)
-                for key in ("instance_id", "container_id", "host_id", "controller_epoch")):
+        if provider:
+            try:
+                owned.require_profile(self.profile, self.task_env_config.cpus, self.task_env_config.memory_mb)
+            except ValueError:
+                raise WorkspaceError("task_resource_profile_mismatch") from None
+            identity = ("provider_target", "template_id", "build_id", "controller_epoch")
+        else:
+            if owned.image_digest != self.profile["imageDigest"]:
+                raise WorkspaceError("prepared_environment_binding_mismatch")
+            identity = ("instance_id", "container_id", "host_id", "controller_epoch")
+        if self._owned is not None and any(getattr(owned, key) != getattr(self._owned, key) for key in identity):
             raise WorkspaceError("prepared_environment_identity_changed")
         return owned
+
+    async def _verify_provider_storage(self):
+        if not isinstance(self._owned, OwnedProviderEnvironment):
+            return
+        value = await asyncio.to_thread(self.provisioner.exec, self._owned,
+            command="LC_ALL=C df -Pk -- " + shlex.quote(self.profile["workspaceRoot"]),
+            cwd=self.profile["workspaceRoot"], env={}, timeout_sec=30, user=self.profile["user"])
+        try:
+            if value.get("returnCode") != 0:
+                raise ValueError("storage command failed")
+            self._observed_provider_available_storage_bytes = require_storage_probe(
+                value.get("stdout"), self.task_env_config.storage_mb)
+        except (AttributeError, ValueError):
+            raise WorkspaceError("task_storage_available_mismatch") from None
 
     async def start(self, force_build=False):
         async with self._lifecycle_lock:
@@ -228,10 +264,15 @@ class WorkspaceEnvironment(BaseEnvironment):
             if observed is None:
                 raise WorkspaceError("environment_provision_pending")
             self._owned = self._check_owned(observed)
+            await self._verify_provider_storage()
             self.workspace_binding = WorkspaceBinding(self.workspace_id, self.agent_id,
                 self._session_id, self._environment_id, self._owned.instance_id, self.trial_id)
+            # The monitor observes the common instance identity. Provider maintenance
+            # bindings stay on the execution side of this read-only projection.
+            physical = ({} if isinstance(self._owned, OwnedProviderEnvironment)
+                else {"containerId": self._owned.container_id})
             self._notify(sessionId=self._session_id, environmentId=self._environment_id,
-                instanceId=self._owned.instance_id, containerId=self._owned.container_id,
+                instanceId=self._owned.instance_id, **physical,
                 phase="setup", status="running", resourceHolding=1)
             paths = EnvironmentPaths.for_os(self.os)
             prepared = await self.ensure_dirs([paths.agent_dir, paths.verifier_dir, paths.artifacts_dir])
@@ -329,10 +370,14 @@ class WorkspaceEnvironment(BaseEnvironment):
         await asyncio.to_thread(self.provisioner.upload_dir, self._require_owned(), source, _remote_path(target_dir))
 
     async def download_file(self, source_path, target_path):
+        if not self._setup_prepared:
+            raise WorkspaceError("workspace_setup_incomplete")
         self._require_verifier_handoff()
         await asyncio.to_thread(self.provisioner.download_file, self._require_owned(), _remote_path(source_path), Path(target_path))
 
     async def download_dir(self, source_dir, target_dir):
+        if not self._setup_prepared:
+            raise WorkspaceError("workspace_setup_incomplete")
         self._require_verifier_handoff()
         await asyncio.to_thread(self.provisioner.download_dir, self._require_owned(), _remote_path(source_dir), Path(target_dir))
 

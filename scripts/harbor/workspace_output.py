@@ -94,7 +94,7 @@ class OutputWindow:
             return  # Committed cursor is the deduplication boundary, not an unbounded ID set.
         entry = None
         if kind == "assistant_message":
-            entry = self._entry(key, "Assistant", payload.get("text"))
+            entry = self._entry(key, "Assistant", payload.get("modelMarkdown"))
         elif kind == "tool_call":
             tool = identity(payload.get("toolName"))
             entry = self._entry(key, "Tool · " + tool, json.dumps(payload.get("normalizedInput"), ensure_ascii=False))

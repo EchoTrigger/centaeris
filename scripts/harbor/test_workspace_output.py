@@ -23,7 +23,7 @@ class OutputTests(unittest.TestCase):
             "sourceSequence": sequence, "event": {"schemaVersion": "session.event.v1", "eventVersion": 1,
                 "sequence": sequence, "sessionId": "session", "agentRunId": "run", "turnId": "turn",
                 "eventId": "event-" + str(sequence), "createdAtMs": 1, "type": kind,
-                "payload": payload or {"messageId": "message", "text": "final"}}}
+                "payload": payload or {"messageId": "message", "modelMarkdown": "final"}}}
 
     def test_live_snapshots_replace_and_committed_message_seals_overlay(self):
         self.window.apply(self.live())
@@ -33,6 +33,13 @@ class OutputTests(unittest.TestCase):
         self.window.apply(self.committed())
         self.window.apply(self.live(3, "late"))
         self.assertEqual([e["text"] for e in self.window.snapshot()["entries"]], ["final"])
+
+    def test_assistant_body_does_not_mark_run_terminal(self):
+        self.window.apply(self.committed(payload={'messageId':'message','modelMarkdown':'Done','artifactRefs':[],'status':'done'}))
+        self.assertEqual(self.window.snapshot()['entries'][0]['text'],'Done')
+        self.assertFalse(self.window.terminal)
+        self.window.apply(self.committed(2,'agent_run_completed',{'status':'completed'}))
+        self.assertTrue(self.window.terminal)
 
     def test_reconnect_does_not_duplicate_committed_output(self):
         self.window.apply(self.committed())
@@ -52,7 +59,7 @@ class OutputTests(unittest.TestCase):
 
     def test_window_is_bounded_in_records_and_utf8_bytes(self):
         for i in range(1, 101):
-            self.window.apply(self.committed(i, payload={"messageId": str(i), "text": "界" * 10000}))
+            self.window.apply(self.committed(i, payload={"messageId": str(i), "modelMarkdown": "界" * 10000}))
         value = self.window.snapshot()
         self.assertLessEqual(len(value["entries"]), 40)
         self.assertLessEqual(sum(len(e["text"].encode()) for e in value["entries"]), 65536)

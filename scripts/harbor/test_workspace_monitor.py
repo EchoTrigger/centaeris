@@ -49,6 +49,74 @@ class MonitorTests(unittest.TestCase):
         with (self.root / "events.jsonl").open("a", encoding="utf-8") as output:
             output.write(json.dumps(event) + "\n")
 
+    def test_final_released_job_is_a_recorded_result_after_observation_timeout(self):
+        self.manifest.update(taskCount=1, trialCount=1, tasks=self.manifest['tasks'][:1])
+        projection = self.prepare()
+        event = self.event()
+        event['payload'].update(status='failed', phase='finished', agentStatus='failed',
+            verifierStatus='failed', resourceHolding=0, cleanupStatus='absent')
+        self.append(event)
+        self.append(self.event(2, kind='job', payload={'status': 'failed'}))
+        (self.root / 'output.json').write_text(json.dumps(self.output()), encoding='utf-8')
+        projection.clock = lambda: 1800000060
+        state = projection.snapshot()
+        self.assertEqual(state['monitorStatus'], 'complete')
+        self.assertEqual(state['jobStatus'], 'failed')
+        self.assertIsNone(state['outputError'])
+        self.assertEqual(state['trials'][0]['status'], 'failed')
+        self.assertGreater(state['lastObservationAgeSeconds'], monitor.STALE_SECONDS)
+
+    def test_terminal_job_with_active_or_unreleased_trial_still_ages_out(self):
+        self.manifest.update(taskCount=1, trialCount=1, tasks=self.manifest['tasks'][:1])
+        for status, holding, cleanup in [('running', 1, 'pending'), ('failed', 1, 'pending'),
+                                         ('failed', None, 'unknown')]:
+            with self.subTest(status=status, holding=holding):
+                projection = self.prepare()
+                (self.root / 'events.jsonl').write_text('')
+                event = self.event()
+                event['payload'].update(status=status, resourceHolding=holding, cleanupStatus=cleanup)
+                self.append(event)
+                self.append(self.event(2, kind='job', payload={'status':'failed'}))
+                projection.clock = lambda: 1800000060
+                self.assertEqual(projection.snapshot()['monitorStatus'], 'stale')
+
+    def test_served_script_matches_declared_utf8_encoding(self):
+        server = monitor.create_server(self.prepare(), port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urlopen('http://127.0.0.1:' + str(server.server_port) + '/app.js') as response:
+                self.assertEqual(response.headers.get_content_charset(), 'utf-8')
+                response.read().decode('utf-8', errors='strict')
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_heartbeat_keeps_quiet_execution_live_without_changing_trial(self):
+        projection=self.prepare()
+        self.append(self.event())
+        heartbeat=self.event(2,kind='heartbeat',payload={},observedAt='2027-01-15T08:01:00Z')
+        heartbeat.pop('trialId')
+        self.append(heartbeat)
+        projection.clock=lambda:1800000060
+        state=projection.snapshot()
+        self.assertEqual(state['monitorStatus'],'live')
+        self.assertEqual(state['lastObservationAgeSeconds'],60)
+        self.assertEqual(state['heartbeatAgeSeconds'],0)
+        self.assertEqual(state['trials'][0]['status'],'running')
+        projection.clock=lambda:1800000091
+        self.assertEqual(projection.snapshot()['monitorStatus'],'stale')
+        self.assertEqual(projection.snapshot()['trials'][0]['status'],'running')
+
+    def test_new_output_or_lifecycle_cannot_hide_stopped_heartbeat(self):
+        projection=self.prepare()
+        self.append(self.event())
+        beat=self.event(2,kind='heartbeat',payload={});beat.pop('trialId');self.append(beat)
+        self.append(self.event(3,observedAt='2027-01-15T08:01:00Z'))
+        projection.clock=lambda:1800000060
+        self.assertEqual(projection.snapshot()['monitorStatus'],'stale')
+
     def test_empty_directory_has_no_fabricated_run(self):
         state = monitor.JobProjection(self.root).snapshot()
         self.assertEqual(state["monitorStatus"], "noLiveRun")

@@ -146,6 +146,26 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(profile["resources"]["pidsLimit"], 4096)
 
 
+    def test_task_image_profile_keeps_frozen_source_original_user_and_template_build(self):
+        task_dir=self.dataset/'tasks/task-one'
+        settings=task_dir/'task.toml'
+        settings.write_text(settings.read_text().replace('[environment]','[environment]\ndocker_image="original/task:fixed"'))
+        task=Task(task_dir)
+        profile={'schema':'runtime.e2b_environment_profile.v1','provider':'e2b','providerConfigDigest':'sha256:'+'f'*64,
+            'templateRef':{'templateId':'task-template','buildId':'123e4567-e89b-12d3-a456-426614174000'},
+            'workspaceRoot':'/app','user':'root','network':'publicInternet','lifetime':'retained',
+            'timeoutSeconds':3600,'inputBudgetBytes':67108864,'workspaceInitialization':'taskImage'}
+        image={'sourceChecksum':task.checksum,'imageReference':'original/task:fixed','originalImageUser':'root',
+            'workspaceRoot':'/app','user':'root','templateRef':dict(profile['templateRef']),
+            'environmentProfile':profile,'profileDigest':'sha256:'+canonical_digest(profile)}
+        self.assertEqual(task_profile(task,image),profile)
+        for mutation in ({'sourceChecksum':'changed'},{'imageReference':'different/task:fixed'},
+                {'originalImageUser':'agent'},{'workspaceRoot':'/wrong'},{'profileDigest':'sha256:'+'a'*64},
+                {'templateRef':dict(profile['templateRef'],buildId='123e4567-e89b-12d3-a456-426614174001')}):
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):
+                task_profile(task,image|mutation)
+
+
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_batch_projects_independent_verifier_lifecycle_without_invented_scores(self):
         for scenario, expected in (('agentFailed', 'notStarted'), ('verifierInterrupted', 'unknown'),

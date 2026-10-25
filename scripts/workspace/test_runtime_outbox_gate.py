@@ -183,6 +183,41 @@ class OutboxGateTests(unittest.TestCase):
         selected = {command[5] for command in calls if '--exact' in command}
         self.assertTrue(expected.issubset(selected))
 
+    def test_provider_maintenance_and_provision_consumers_are_required_and_discovered_before_database_creation(self):
+        expected = {
+            "postgres_store::integration_tests::provider_operation_tests::e2b_runtime_tests::provision_tests::postgres_e2b_provision_fresh_create_prepares_once_and_replays_completion_without_sdk",
+            "postgres_store::integration_tests::provider_operation_tests::e2b_runtime_tests::provision_tests::postgres_e2b_provision_unknown_create_retains_responsibility_across_restart_without_sdk",
+            "postgres_store::integration_tests::provider_operation_tests::e2b_runtime_tests::provision_tests::postgres_e2b_provision_unconfirmed_workspace_preparation_is_not_a_completion_or_retry_permit",
+            "postgres_store::integration_tests::provider_operation_tests::e2b_runtime_tests::provision_tests::postgres_e2b_provision_rejects_wrong_signature_or_profile_before_launch_or_create",
+            "postgres_store::integration_tests::provider_maintenance_tests::postgres_provider_maintenance_dispatch_resolves_real_provision_target_without_native_aliases",
+            "postgres_store::integration_tests::provider_maintenance_tests::postgres_provider_maintenance_rejects_current_target_or_origin_mismatch_before_callback",
+            "postgres_store::integration_tests::provider_maintenance_tests::postgres_provider_maintenance_keeps_callback_unknown_and_post_callback_failure_distinct",
+            "postgres_store::integration_tests::provider_maintenance_tests::postgres_provider_maintenance_completion_is_exact_replayable_insert_only_and_durable",
+            "postgres_store::integration_tests::provider_maintenance_tests::postgres_provider_maintenance_only_trusted_finished_operation_creates_completion",
+            "postgres_store::integration_tests::provider_maintenance_tests::postgres_provider_maintenance_pins_authority_and_rejects_contended_provider_rows_before_callback",
+            "postgres_store::integration_tests::provider_maintenance_tests::postgres_provider_maintenance_waiting_authority_uses_the_clock_after_locks",
+            "postgres_store::integration_tests::provider_maintenance_tests::postgres_provider_maintenance_post_callback_commit_failure_is_after_dispatch_and_keeps_no_receipt",
+            "postgres_store::integration_tests::provider_maintenance_tests::postgres_provider_maintenance_rejects_wrong_configuration_before_physical_callback",
+            "postgres_store::integration_tests::provider_maintenance_tests::postgres_provider_maintenance_accepts_real_run_origin_only_after_cleanup_and_business_release",
+            "postgres_store::integration_tests::provider_maintenance_tests::postgres_provider_maintenance_provision_receipt_cannot_bypass_a_later_unfinished_run_consumer",
+            "postgres_store::integration_tests::provider_maintenance_tests::postgres_provider_maintenance_power_responsibility_blocks_until_confirmed_resume",
+            "postgres_store::integration_tests::provider_maintenance_tests::postgres_provider_maintenance_retirement_responsibility_blocks_dispatch_without_clearing_it",
+            "postgres_store::integration_tests::provider_maintenance_tests::postgres_provider_maintenance_cleanup_uses_current_fence_after_business_session_deletion",
+        }
+        self.assertTrue(expected.issubset(set(gate.required_tests())))
+        discovered = set()
+        def discover(command, **kwargs):
+            output = discovery_output(command)
+            discovered.update(gate.discovered_tests(output.stdout))
+            return output
+        driver = SimpleNamespace(connect=lambda **kwargs: (_ for _ in ()).throw(RuntimeError('discovery complete')),
+                                 sql=SimpleNamespace())
+        with patch.dict(sys.modules, {'psycopg': driver}), patch.object(gate.subprocess, 'run', discover):
+            with self.assertRaisesRegex(RuntimeError, 'discovery complete'):
+                gate.main()
+        self.assertTrue(expected.issubset(discovered))
+
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -184,3 +184,20 @@ and request scope) and `test_workspace_monitor.py`. Set
 `WORKSPACE_MONITOR_BROWSER=1`, `NODE_BINARY`, `PLAYWRIGHT_MODULE` and
 `CHROME_BINARY` to enable real-browser geometry, scroll/focus, disconnect,
 terminal-time, reload and mobile checks. They use isolated test data and no model.
+
+
+## Observation health and results
+
+The controller's projection thread emits a heartbeat every five seconds,
+independently of model output and lifecycle events. Thirty seconds without a
+heartbeat means observation is interrupted, not that a task failed. The first
+observation allows a thirty-second startup grace period. Lifecycle updates do
+not extend the heartbeat deadline. The heartbeat only confirms the observation
+thread can write; it does not prove the agent or verifier is advancing.
+
+A committed assistant message renders Core's `modelMarkdown` field. Neither a
+reply nor missing reply text establishes completion: only terminal Run events
+do so. The page separately displays Agent status, Verifier status, reward and
+cleanup. Reward 1 is Passed, reward 0 is Not passed, and missing reward has no
+inferred score. Fully terminal jobs with confirmed cleanup retain their final
+output and frozen elapsed time without requiring further heartbeats.

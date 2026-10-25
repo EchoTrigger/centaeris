@@ -132,6 +132,24 @@ def task_profile(task, image):
     resources = config.environment
     if any(type(value) is not int or value <= 0 for value in (resources.cpus, resources.memory_mb, resources.storage_mb)):
         raise ValueError("task resource declarations must be explicit")
+    if "environmentProfile" in image:
+        profile=image["environmentProfile"]
+        required={"schema","provider","providerConfigDigest","templateRef","workspaceRoot","user","network",            "lifetime","timeoutSeconds","inputBudgetBytes","workspaceInitialization"}
+        policy=config.environment.network_mode
+        network="disabled" if policy and policy.value=="no-network" else "publicInternet"
+        original=config.agent.user if config.agent.user is not None else image.get("originalImageUser")
+        if (not isinstance(profile,dict) or set(profile)!=required
+                or profile["schema"]!="runtime.e2b_environment_profile.v1" or profile["provider"]!="e2b"
+                or profile["workspaceInitialization"]!="taskImage" or profile["lifetime"]!="retained"
+                or image.get("sourceChecksum")!=task.checksum
+                or not config.environment.docker_image or image.get("imageReference")!=config.environment.docker_image
+                or profile["templateRef"]!=image.get("templateRef")
+                or image.get("profileDigest")!="sha256:"+canonical_digest(profile)
+                or profile["workspaceRoot"]!=image.get("workspaceRoot") or profile["user"]!=image.get("user")
+                or profile["user"]!=original or profile["network"]!=network
+                or policy and policy.value not in {"public","no-network"}):
+            raise ValueError("task image source or frozen provider profile mismatch")
+        return json.loads(json.dumps(profile))
     user = image["user"]
     # The image preparer resolves the task's requested agent user, falling back
     # to its original image USER. Never substitute a privileged user.

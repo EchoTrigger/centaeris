@@ -60,8 +60,8 @@ An interrupted import must resume from verified facts; a missing index must not
 turn an upgraded instance into a fresh empty service. Rollback requires a reader
 for the new index or an explicitly verified conversion with no active instance.
 
-The final real-chain gate requires at least 1000 completed commands and automatic
-AGENTS.md observations in one Run, a live environment task, controller restart,
+The final real-chain gate requires at least 1000 completed commands and explicit
+AGENTS.md reads through ordinary tools in one Run, a live environment task, controller restart,
 actual command/helper evidence and bounded live metrics. Keep this separate from
 the 100 completed cross-Run use/release sequence and isolated fault gates. A
 clearly reported cumulative-history failure does not satisfy either gate.

@@ -461,3 +461,109 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(WorkspaceEnvironment, "requires Harbor 0.21.0")
+class ProviderEnvironmentTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        EnvironmentTests.setUp(self)
+        from workspace_provider import ProviderTarget, OwnedProviderEnvironment
+        self.provider_profile={"schema":"runtime.e2b_environment_profile.v1","provider":"e2b",
+            "providerConfigDigest":"sha256:"+"f"*64,
+            "templateRef":{"templateId":"task-template","buildId":"123e4567-e89b-12d3-a456-426614174000"},
+            "workspaceRoot":"/app","user":"root","network":"publicInternet","lifetime":"retained",
+            "timeoutSeconds":3600,"inputBudgetBytes":67108864,"workspaceInitialization":"taskImage"}
+        owner=self
+        class NativeProvider(Provisioner):
+            def __init__(self, profile):
+                super().__init__(profile)
+                self.cpu_count=1
+                self.memory_mib=2048
+                self.available_kib=15000000
+            def observe_setup(self, session, environment, run=None):
+                self.calls.append(("observe",run))
+                return OwnedProviderEnvironment(session,environment,run,
+                    ProviderTarget('e2b','task-create','instance_'+'a'*64,'sandbox-task','sha256:'+'b'*64,'sha256:'+'f'*64),
+                    2,'task-template','123e4567-e89b-12d3-a456-426614174000',profile_digest(self.profile),
+                    'resident',1,self.cpu_count,self.memory_mib)
+            def exec(self, owned, **request):
+                if request['command'].startswith('LC_ALL=C df -Pk -- '):
+                    self.calls.append(('storageProbe',owned.instance_id,request))
+                    return {'returnCode':0,'stderr':'','stdout':'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/vda 20000000 1000 '+str(self.available_kib)+' 1% /\n'}
+                return super().exec(owned,**request)
+        self.provisioner=NativeProvider(self.provider_profile)
+        self.arguments.update(profile=self.provider_profile,provisioner=self.provisioner)
+
+    async def test_provider_lifecycle_reaches_monitor_through_real_event_contract(self):
+        from workspace_events import JobEvents
+        from workspace_monitor import JobProjection
+        from workspace_benchmark import _TrialProjection
+        from test_workspace_events import manifest
+        root = self.root / 'monitor'
+        class Sink:
+            def submit(inner, kind, payload, trial_id=None):
+                writer.trial(trial_id, **payload)
+        with JobEvents.create(root, manifest()) as writer:
+            projection = _TrialProjection(Sink(), 'trial', {
+                'taskId': 'regex-log', 'attempt': 1, 'status': 'running',
+                'phase': 'preparing', 'slot': 1})
+            environment = WorkspaceEnvironment(**(self.arguments | {
+                'workspace_event_callback': projection.project}))
+            await environment.start()
+            projection.project({'agentRunId': 'run', 'agentStatus': 'running', 'phase': 'agent'})
+            state = JobProjection(root).snapshot()
+            self.assertEqual(state['monitorStatus'], 'live')
+            self.assertEqual(state['trials'][0]['instanceId'], environment._owned.instance_id)
+            self.assertEqual(state['trials'][0]['agentRunId'], 'run')
+            self.provisioner.physical, self.provisioner.debit = 'absent', 0
+            await environment.stop()
+            row = JobProjection(root).snapshot()['trials'][0]
+            self.assertEqual(row['cleanupStatus'], 'absent')
+            self.assertEqual(row['resourceHolding'], 0)
+
+    async def test_provider_start_verifies_actual_resources_then_uses_original_root_app(self):
+        self.environment=WorkspaceEnvironment(**self.arguments)
+        await self.environment.start()
+        self.assertEqual(self.environment._owned.sandbox_id,'sandbox-task')
+        probes=[call for call in self.provisioner.calls if call[0]=='storageProbe']
+        self.assertEqual(len(probes),1)
+        self.assertEqual(probes[0][2]['cwd'],'/app')
+        self.assertEqual(probes[0][2]['user'],'root')
+        self.environment.bind_workspace_run('run')
+        self.assertEqual((await self.environment.exec('verifier',cwd='/app')).return_code,0)
+        self.assertTrue(all(call[1]=='instance_'+'a'*64 for call in self.provisioner.calls if call[0] in {'exec','uploadDir','storageProbe'}))
+        self.provisioner.physical,self.provisioner.debit='absent',0
+        await self.environment.stop()
+        self.assertTrue(self.allocation.released)
+
+    async def test_provider_start_rejects_actual_resource_mismatch_and_insufficient_free_disk(self):
+        for attribute,value in (('cpu_count',2),('memory_mib',1024),('available_kib',100)):
+            with self.subTest(attribute=attribute):
+                old=getattr(self.provisioner,attribute)
+                setattr(self.provisioner,attribute,value)
+                environment=WorkspaceEnvironment(**self.arguments)
+                with self.assertRaisesRegex(WorkspaceError,'task_resource_profile_mismatch|task_storage_available_mismatch'):
+                    await environment.start()
+                self.assertFalse(self.allocation.released)
+                setattr(self.provisioner,attribute,old)
+
+    async def test_failed_setup_does_not_acquire_artifact_download_authority(self):
+        self.provisioner.available_kib = 237084
+        environment = WorkspaceEnvironment(**self.arguments)
+        with self.assertRaisesRegex(WorkspaceError, 'task_storage_available_mismatch'):
+            await environment.start()
+        for operation, source in ((environment.download_dir, '/logs/agent'),
+                                  (environment.download_file, '/logs/verifier/reward.txt')):
+            with self.subTest(source=source), self.assertRaisesRegex(WorkspaceError, 'workspace_setup_incomplete'):
+                await operation(source, self.root / 'missing-artifact')
+        self.assertFalse(any(call[0] in {'download', 'downloadDir'} for call in self.provisioner.calls))
+        self.provisioner.physical, self.provisioner.debit = 'absent', 0
+        await environment.stop()
+        self.assertTrue(self.allocation.released)
+
+    async def test_provider_requested_gpu_is_explicitly_unsupported(self):
+        for options in ({'gpus':1},{'gpu_types':['example-gpu']}):
+            with self.subTest(options=options):
+                arguments=self.arguments|{'task_env_config':EnvironmentConfig(cpus=1,memory_mb=2048,storage_mb=10240,**options)}
+                with self.assertRaisesRegex(WorkspaceError,'task_gpus_unsupported'):
+                    WorkspaceEnvironment(**arguments)

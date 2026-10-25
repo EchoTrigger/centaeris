@@ -12,7 +12,7 @@ Required acceptance for this PR: Run A starts an environment task and writes
 files; A completes with immutable cleanup and release receipts; Runtime restarts;
 Run B obtains a new fence and uses the same container, instance, task and bytes.
 Stale controllers fail. Within one Run, at least 1000 sequential ordinary
-commands with automatic AGENTS.md file observations must complete while the same
+commands with explicit tool-based AGENTS.md reads must complete while the same
 environment task remains live; cumulative task history must not prevent admission.
 The 32 active-task and 64 hot-record budgets stay distinct from indexed replay
 facts and output retention, and real resource pressure remains bounded. Across

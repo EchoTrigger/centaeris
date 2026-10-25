@@ -25,9 +25,10 @@ test runs the real Core request construction through Workspace's system-skill
 configuration with zero plugins. Its offline ModelClient captures exactly one
 request and stops before any provider access. The request contains the Memory
 name, relevance/remember/update/forget description, readable SKILL.md location,
-and ordinary `read`, `edit`, `write` definitions. Only the ordinary AGENTS.md probe
-is permitted during construction: neither private Memory nor the skill body is
-loaded eagerly. This verifies discoverability, not a model's decision to use it.
+and ordinary `read`, `edit`, `write` definitions. Request construction performs no
+workspace reads, including AGENTS.md. The harness directs the model to inspect
+applicable AGENTS.md files through ordinary tools; neither private Memory nor the
+skill body is loaded eagerly. This verifies discoverability, not a model's decision to use it.
 
 Routing is owned by existing adapters: DockerExecutionHost validates the canonical
 URI, sends `filesystem-once` as the scoped Memory owner, and the hosted helper

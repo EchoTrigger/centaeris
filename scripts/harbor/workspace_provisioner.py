@@ -6,6 +6,8 @@ containers. Exec is dispatched once; uncertain external effects are not retried.
 from __future__ import annotations
 
 import hashlib
+import base64
+import binascii
 import http.client
 import json
 import math
@@ -23,6 +25,7 @@ from urllib.error import HTTPError, URLError
 
 from workspace_client import WorkspaceClient, WorkspaceError, _segment
 from workspace_environment import CleanupObservation, OwnedEnvironment
+from workspace_provider import ProviderTarget, OwnedProviderEnvironment
 
 _TRANSFER_CONTRACT = json.loads(Path(__file__).with_name("benchmark-transport.json").read_text(encoding="utf-8"))
 if (set(_TRANSFER_CONTRACT) != {"schema", "archiveBytes", "expandedBytes", "members", "metadataBytes"}
@@ -261,7 +264,7 @@ class _MaintenanceHTTP(WorkspaceClient):
             raise WorkspaceError("control_request_too_large")
         return self._send(request, timeout=timeout)
 
-    def filesystem(self, value, *, source=None, destination=None):
+    def filesystem(self, value, *, source=None, destination=None, native=False):
         header = json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode()
         if len(header) > FRAME_HEADER_LIMIT:
             raise WorkspaceError('transfer_metadata_limit_exceeded')
@@ -275,7 +278,7 @@ class _MaintenanceHTTP(WorkspaceClient):
             headers={'Content-Type': 'application/octet-stream'})
         request.data = chunks()
         request.add_header('Content-Length', str(len(prefix) + value['request']['contentLength']))
-        return self._send(request, frame_destination=destination, framed=True)
+        return self._send(request, frame_destination=destination, framed=not native)
 
     def _send(self, request, *, timeout=None, frame_destination=None, framed=False):
         request.add_header("X-Environment-Maintenance-Token", self.__maintenance_token)
@@ -412,6 +415,8 @@ class WorkspaceHTTPProvisioner:
             separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
     def _observe(self, session_id, environment_id):
+        if self._profiles.get(environment_id, {}).get('schema') == 'runtime.e2b_environment_profile.v1':
+            return self._observe_provider(session_id, environment_id)
         value = self.runtime.post("/internal/environments/observe", {
             "schema": "runtime.environment.observe.v1", "sessionId": session_id, "environmentId": environment_id})
         _fields(value, "runtime.environment.observe.result.v1", {"state", "sessionId", "environmentId",
@@ -431,6 +436,35 @@ class WorkspaceHTTPProvisioner:
         value["imageDigest"] = value["profile"]["imageDigest"]
         return value
 
+    def _observe_provider(self, session_id, environment_id):
+        value = self.runtime.post('/internal/environments/observe', {
+            'schema':'runtime.provider_environment.observe.v1','sessionId':session_id,'environmentId':environment_id})
+        _fields(value,'runtime.provider_environment.observe.result.v1',{'state','sessionId','environmentId','profile','profileDigest',
+            'controllerEpoch','controllerOwner','providerTarget','templateRef','resourceFacts','resourceHolding'})
+        if (value['sessionId']!=session_id or value['environmentId']!=environment_id
+                or value['state'] not in {'unallocated','resident','paused','destroyed','unknown'}
+                or type(value['controllerEpoch']) is not int or value['controllerEpoch']<0
+                or value['profile']!=self._profiles[environment_id] or self._digest(value['profile'])!=value['profileDigest']
+                or value['templateRef']!=value['profile']['templateRef']
+                or type(value['resourceHolding']) is not int or value['resourceHolding'] not in {0,1}):
+            raise WorkspaceError('environment_observation_invalid')
+        try:
+            if value['providerTarget'] is not None:
+                target=ProviderTarget.from_wire(value['providerTarget'])
+                if target.provider_config_digest!=value['profile']['providerConfigDigest']:
+                    raise ValueError('provider config mismatch')
+            if value['state']=='resident':
+                facts=value['resourceFacts']
+                if (not isinstance(facts,dict) or set(facts)!={'cpuCount','memoryMiB'} or value['providerTarget'] is None
+                        or value['resourceHolding']!=1 or any(type(facts[key]) is not int or facts[key]<=0 for key in facts)):
+                    raise ValueError('missing fresh resource facts')
+            elif value['resourceFacts'] is not None:
+                raise ValueError('unexpected resource facts')
+        except (TypeError,ValueError):
+            raise WorkspaceError('environment_observation_invalid') from None
+        value['physicalState']='absent' if value['state']=='destroyed' else 'present' if value['state'] in {'resident','paused'} else 'unknown'
+        return value
+
     def observe_setup(self, session_id, environment_id, agent_run_id=None):
         value = self._observe(session_id, environment_id)
         if value["state"] == "destroyed":
@@ -438,6 +472,10 @@ class WorkspaceHTTPProvisioner:
         if value["state"] != "resident":
             return None
         try:
+            if value['schema']=='runtime.provider_environment.observe.result.v1':
+                return OwnedProviderEnvironment(session_id,environment_id,agent_run_id,ProviderTarget.from_wire(value['providerTarget']),
+                    value['controllerEpoch'],value['templateRef']['templateId'],value['templateRef']['buildId'],value['profileDigest'],
+                    'resident',value['resourceHolding'],value['resourceFacts']['cpuCount'],value['resourceFacts']['memoryMiB'])
             return OwnedEnvironment(session_id, environment_id, agent_run_id, value["instanceId"],
                 value["containerId"], value["hostId"], value["controllerEpoch"], value["imageDigest"],
                 value["profileDigest"], "resident", value["resourceHolding"])
@@ -464,6 +502,27 @@ class WorkspaceHTTPProvisioner:
         if self._digest(logical) != payload['requestDigest']:
             raise WorkspaceError('provision_request_binding_mismatch')
         result = self.runtime.post('/internal/environments/provision', {'authorization': grant, 'request': logical})
+        if payload['environmentProfile']['schema']=='runtime.e2b_environment_profile.v1':
+            if result.get('status')=='pending':
+                _fields(result,'runtime.provider_environment.provision.result.v1',{'status','operationId','environmentId',
+                    'creationAttemptId','instanceId','profileDigest','dispatchState'})
+                if (result['operationId']!=operation_id or result['environmentId']!=environment_id
+                        or result['profileDigest']!=payload['environmentProfileDigest']
+                        or result['dispatchState'] not in {'prepared','dispatched','notDispatched'}):
+                    raise WorkspaceError('provision_response_binding_mismatch')
+                return None
+            _fields(result,'runtime.provider_environment.provision.result.v1',{'status','operationId','environmentId',
+                'creationAttemptId','instanceId','sandboxId','profileDigest','preparationDigest'})
+            if (result['status']!='completed' or result['operationId']!=operation_id or result['environmentId']!=environment_id
+                    or result['profileDigest']!=payload['environmentProfileDigest']
+                    or not isinstance(result['preparationDigest'],str) or re.fullmatch(r'sha256:[0-9a-f]{64}',result['preparationDigest']) is None):
+                raise WorkspaceError('provision_response_binding_mismatch')
+            self._release(grant)
+            owned=self.observe_setup(session_id,environment_id)
+            if (not isinstance(owned,OwnedProviderEnvironment) or owned.instance_id!=result['instanceId']
+                    or owned.sandbox_id!=result['sandboxId'] or owned.provider_target.creation_attempt_id!=result['creationAttemptId']):
+                raise WorkspaceError('provision_response_binding_mismatch')
+            return owned
         _fields(result, 'runtime.environment.provision.result.v1',
             {'operationId', 'environmentId', 'instanceId', 'containerId', 'profileDigest', 'status'})
         if (result['operationId'] != operation_id or result['environmentId'] != environment_id
@@ -487,7 +546,10 @@ class WorkspaceHTTPProvisioner:
 
     def _issue(self, owned, request, operation_id):
         observed = self._observe(owned.session_id, owned.environment_id)
-        if (observed['instanceId'] != owned.instance_id or observed['containerId'] != owned.container_id
+        if isinstance(owned,OwnedProviderEnvironment):
+            if (observed.get('providerTarget')!=owned.provider_target.to_wire() or observed['profileDigest']!=owned.profile_digest):
+                raise WorkspaceError('maintenance_instance_mismatch')
+        elif (observed['instanceId'] != owned.instance_id or observed['containerId'] != owned.container_id
                 or observed['hostId'] != owned.host_id or observed['profileDigest'] != owned.profile_digest):
             raise WorkspaceError('maintenance_instance_mismatch')
         grant = self.api.post(f'/internal/environments/{_segment(owned.environment_id)}/maintenance-authorizations',
@@ -495,7 +557,14 @@ class WorkspaceHTTPProvisioner:
                 'controllerPurpose': 'execute', 'expectedControllerEpoch': observed['controllerEpoch'], 'request': request})
         self._check_grant(grant, owned.environment_id, operation_id, 'task')
         payload = grant['payload']
-        if (payload.get('instanceId') != owned.instance_id or payload.get('containerId') != owned.container_id
+        if isinstance(owned,OwnedProviderEnvironment):
+            _fields(payload,'workspace.provider_environment_maintenance_authorization.v1',{'operationKind','workspaceId','sessionId',
+                'environmentId','providerTarget','profileDigest','controllerOwner','controllerEpoch','controllerLeaseDigest',
+                'controllerPurpose','requestDigest','expiresAtMs'})
+            if (payload['providerTarget']!=owned.provider_target.to_wire() or payload['profileDigest']!=owned.profile_digest
+                    or payload['requestDigest']!=self._digest(request) or payload['sessionId']!=owned.session_id):
+                raise WorkspaceError('maintenance_grant_binding_mismatch')
+        elif (payload.get('instanceId') != owned.instance_id or payload.get('containerId') != owned.container_id
                 or payload.get('profileDigest') != owned.profile_digest or payload.get('requestDigest') != self._digest(request)):
             raise WorkspaceError('maintenance_grant_binding_mismatch')
         return grant
@@ -520,6 +589,105 @@ class WorkspaceHTTPProvisioner:
             raise WorkspaceError('maintenance_task_unconfirmed')
         return value['result']
 
+    @staticmethod
+    def _provider_bytes(encoded,length):
+        if not isinstance(encoded,str) or type(length) is not int or not 0<=length<=1024*1024:
+            raise WorkspaceError('provider_maintenance_output_invalid')
+        try:
+            data=base64.b64decode(encoded,validate=True)
+        except (ValueError,binascii.Error):
+            raise WorkspaceError('provider_maintenance_output_invalid') from None
+        if len(data)!=length or base64.b64encode(data).decode()!=encoded:
+            raise WorkspaceError('provider_maintenance_output_invalid')
+        return data
+
+    def _provider_direct(self,owned,logical,operation,*,source=None):
+        grant=self._issue(owned,logical,operation)
+        body={'authorization':grant,'request':logical}
+        timeout=logical.get('timeoutMs',30000)/1000+10
+        def query():
+            if 'program' in logical:
+                return self.runtime.post('/internal/environments/maintenance/task',body,timeout=timeout)
+            return self.runtime.filesystem(body,source=source,native=True)
+        if 'program' in logical:
+            deadline=time.monotonic()+timeout
+            delay=.25
+            recoverable={'transport_unavailable','request_deadline_exceeded',
+                'provider_maintenance_environment_busy','provider_maintenance_outcome_unknown'}
+            while True:
+                try:
+                    value=query()
+                    break
+                except WorkspaceError as error:
+                    if error.code not in recoverable:raise
+                    remaining=deadline-time.monotonic()
+                    if remaining<=0:raise
+                    pause=min(delay,remaining)
+                    time.sleep(pause)
+                    timeout=remaining-pause
+                    delay=min(delay*2,5)
+                    if timeout<=0:raise
+                    # Reuse the exact signed request. The durable dispatch CAS
+                    # returns a receipt or Unknown, never a second SDK dispatch.
+        else:
+            try:
+                value=query()
+            except WorkspaceError as error:
+                if error.code!='transport_unavailable':raise
+                value=query()
+        fields={'operationId','environmentId','providerTarget','profileDigest','requestDigest','authorizationDigest',
+            'controllerEpoch','controllerLeaseDigest','output'}
+        _fields(value,'runtime.provider_environment.maintenance.completed.v1',fields)
+        payload=grant['payload']
+        expected={key:payload[key] for key in ('environmentId','providerTarget','profileDigest','requestDigest','controllerEpoch','controllerLeaseDigest')}
+        expected.update(operationId=operation,authorizationDigest=self._digest(payload))
+        if (any(value[key]!=expected[key] for key in expected) or type(value['controllerEpoch']) is not int
+                or len(json.dumps(value,ensure_ascii=False,separators=(',',':')).encode())>1024*1024
+                or not isinstance(value['output'],dict)):
+            raise WorkspaceError('provider_maintenance_output_invalid')
+        output=value['output'];kind=output.get('kind')
+        if kind=='command' and 'program' in logical:
+            if (set(output)!={'kind','exitCode','stdoutBytesBase64','stdoutByteLength','stderrBytesBase64','stderrByteLength'}
+                    or type(output['exitCode']) is not int or not -(2**31)<=output['exitCode']<2**31):
+                raise WorkspaceError('provider_maintenance_output_invalid')
+            for stream in ('stdout','stderr'):
+                self._provider_bytes(output[stream+'BytesBase64'],output[stream+'ByteLength'])
+        elif 'program' not in logical:
+            request=logical['request']
+            if kind=='filesystemFailed' and request['kind'] in {'readFile','listDirectory'}:
+                if set(output)!={'kind','code'} or output['code']!='fileNotFound':
+                    raise WorkspaceError('provider_maintenance_output_invalid')
+            elif kind=='fileWritten' and request['kind']=='writeFile':
+                if (set(output)!={'kind','byteLength','sha256'} or type(output['byteLength']) is not int
+                        or output['byteLength']!=logical['contentLength'] or output['sha256']!=logical['contentDigest']):
+                    raise WorkspaceError('provider_maintenance_output_invalid')
+            elif kind=='fileRead' and request['kind']=='readFile':
+                if set(output)!={'kind','byteLength','sha256','dataBase64'}:
+                    raise WorkspaceError('provider_maintenance_output_invalid')
+                data=self._provider_bytes(output['dataBase64'],output['byteLength'])
+                if output['byteLength']>request['maxBytes'] or output['sha256']!='sha256:'+hashlib.sha256(data).hexdigest():
+                    raise WorkspaceError('provider_maintenance_output_invalid')
+            elif kind=='directoryListed' and request['kind']=='listDirectory':
+                if set(output)!={'kind','entries'} or not isinstance(output['entries'],list) or len(output['entries'])>request['maxEntries']:
+                    raise WorkspaceError('provider_maintenance_output_invalid')
+            else:raise WorkspaceError('provider_maintenance_output_invalid')
+        else:raise WorkspaceError('provider_maintenance_output_invalid')
+        self._release(grant)
+        if kind=='filesystemFailed':
+            raise WorkspaceError('maintenance_file_not_found')
+        return output
+
+    def _provider_filesystem(self,owned,path,operation,*,source=None,destination=None):
+        length=Path(source).stat().st_size if source is not None else 0
+        if length>EXPANDED_LIMIT:raise WorkspaceError('transfer_expanded_limit_exceeded')
+        logical={'request':dict(operation,path=str(path)),'contentLength':length,
+            'contentDigest':_content_digest(source) if source is not None else 'sha256:'+hashlib.sha256(b'').hexdigest()}
+        output=self._provider_direct(owned,logical,'filesystem-'+uuid.uuid4().hex,source=source)
+        if output['kind']=='fileRead':
+            if destination is None:raise WorkspaceError('transfer_response_invalid')
+            Path(destination).write_bytes(self._provider_bytes(output['dataBase64'],output['byteLength']))
+        return output
+
     def exec(self, owned, *, command, cwd=None, env=None, timeout_sec=None, user=None):
         timeout_sec = 3600 if timeout_sec is None else timeout_sec
         if type(timeout_sec) not in {int, float} or not math.isfinite(timeout_sec) or not 0 < timeout_sec <= 3600:
@@ -542,6 +710,10 @@ class WorkspaceHTTPProvisioner:
         logical = {'program': argv[0], 'args': argv[1:], 'cwd': cwd or profile['workspaceRoot'],
             'timeoutMs': math.ceil(timeout_sec * 1000)}
         operation = 'maintenance-' + uuid.uuid4().hex
+        if isinstance(owned,OwnedProviderEnvironment):
+            output=self._provider_direct(owned,logical,operation)
+            return {'returnCode':output['exitCode'],**{stream:self._provider_bytes(output[stream+'BytesBase64'],output[stream+'ByteLength']).decode('utf-8',errors='replace')
+                for stream in ('stdout','stderr')}}
         grant = self._issue(owned, logical, operation)
         payload = grant['payload']
         fence = {'environmentInstanceId': owned.instance_id, 'controllerOwner': payload['controllerOwner'],
@@ -618,6 +790,9 @@ class WorkspaceHTTPProvisioner:
         remote = _safe_name(str(PurePosixPath(target).relative_to('/')))
         if not source.is_file() or source.stat().st_size > EXPANDED_LIMIT:
             raise WorkspaceError('transfer_expanded_limit_exceeded')
+        if isinstance(owned,OwnedProviderEnvironment):
+            self._provider_filesystem(owned,'/'+str(remote),{'kind':'writeFile'},source=source)
+            return
         self._filesystem(owned, '/' + str(remote), {'type': 'writeFile', 'content': [],
             'observedFileHash': None, 'createOnly': False}, source=source)
 
@@ -652,7 +827,10 @@ class WorkspaceHTTPProvisioner:
         descriptor, temporary = tempfile.mkstemp(prefix='.workspace-transfer-', dir=target.parent)
         os.close(descriptor)
         try:
-            self._filesystem(owned, '/' + str(remote), {'type': 'readFile', 'maxBytes': EXPANDED_LIMIT}, destination=temporary)
+            if isinstance(owned,OwnedProviderEnvironment):
+                self._provider_filesystem(owned,'/'+str(remote),{'kind':'readFile','maxBytes':(1024*1024-64*1024)//4*3},destination=temporary)
+            else:
+                self._filesystem(owned, '/' + str(remote), {'type': 'readFile', 'maxBytes': EXPANDED_LIMIT}, destination=temporary)
             _safe_local(target)
             os.replace(temporary, target)
         finally:
@@ -661,10 +839,13 @@ class WorkspaceHTTPProvisioner:
     def download_dir(self, owned, source, target):
         remote = _safe_name(str(PurePosixPath(source).relative_to('/')))
         target = _safe_local(target)
-        output = self._filesystem(owned, '/' + str(remote), {'type': 'listDirectory', 'recursive': True, 'maxEntries': MEMBER_LIMIT})
-        if not isinstance(output, dict) or set(output) != {'list_directory'}:
-            raise WorkspaceError('transfer_response_invalid')
-        listed = output['list_directory']
+        if isinstance(owned,OwnedProviderEnvironment):
+            listed=self._provider_filesystem(owned,'/'+str(remote),{'kind':'listDirectory','recursive':True,'maxEntries':min(MEMBER_LIMIT,10000)})
+        else:
+            output = self._filesystem(owned, '/' + str(remote), {'type': 'listDirectory', 'recursive': True, 'maxEntries': MEMBER_LIMIT})
+            if not isinstance(output, dict) or set(output) != {'list_directory'}:
+                raise WorkspaceError('transfer_response_invalid')
+            listed = output['list_directory']
         if not isinstance(listed, dict) or not isinstance(listed.get('entries'), list):
             raise WorkspaceError('transfer_response_invalid')
         profile = self._profiles[owned.environment_id]
@@ -704,6 +885,8 @@ class WorkspaceHTTPProvisioner:
                 self.download_file(owned, '/' + str(remote / relative), destination)
 
     def retire(self, owned, operation_id):
+        if isinstance(owned,OwnedProviderEnvironment):
+            return self._retire_provider(owned,operation_id)
         # Verifier maintenance outlives the model's execute controller. The
         # existing retire API requires the current epoch at first acceptance;
         # retain its exact request thereafter for immutable operation replay.
@@ -745,8 +928,30 @@ class WorkspaceHTTPProvisioner:
             self._accepted_retirements.add(operation_id)
             return value["status"]
 
+    def _retire_provider(self,owned,operation_id):
+        request=self._retirement_requests.get(operation_id)
+        if request is None:
+            observed=self._observe(owned.session_id,owned.environment_id)
+            if observed.get('providerTarget') not in (None,owned.provider_target.to_wire()) or observed['profileDigest']!=owned.profile_digest:
+                raise WorkspaceError('retirement_binding_mismatch')
+            if observed['state']=='destroyed' and observed['resourceHolding']==0:return 'destroyed'
+            target=owned.provider_target
+            request={'schema':'runtime.provider_environment.retire.v1','operationId':operation_id,'environmentId':owned.environment_id,
+                'creationAttemptId':target.creation_attempt_id,'sandboxId':target.sandbox_id,'providerConfigDigest':target.provider_config_digest,
+                'expectedControllerEpoch':observed['controllerEpoch'],'acknowledgeDataLoss':True}
+            self._retirement_requests[operation_id]=request
+        value=self.runtime.post('/internal/environments/retire',request)
+        _fields(value,'runtime.provider_environment.retire.result.v1',{'operationId','environmentId','creationAttemptId','sandboxId','status'})
+        if (any(value[key]!=request[key] for key in ('operationId','environmentId','creationAttemptId','sandboxId'))
+                or value['status'] not in {'pending','removed'}):raise WorkspaceError('retirement_response_invalid')
+        return 'destroyed' if value['status']=='removed' else 'pending'
+
     def observe_cleanup(self, owned):
         value = self._observe(owned.session_id, owned.environment_id)
+        if isinstance(owned,OwnedProviderEnvironment):
+            if value.get('providerTarget') not in (None,owned.provider_target.to_wire()):
+                raise WorkspaceError('cleanup_instance_mismatch')
+            return CleanupObservation(owned.environment_id,owned.instance_id,value['physicalState'],value['resourceHolding'])
         if value["instanceId"] not in {None, owned.instance_id} or value["containerId"] not in {None, owned.container_id}:
             raise WorkspaceError("cleanup_instance_mismatch")
         if value["physicalState"] == "absent" and value["state"] != "destroyed":

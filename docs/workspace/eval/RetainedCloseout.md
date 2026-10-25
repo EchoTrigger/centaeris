@@ -109,7 +109,7 @@ private tmpfs do not create a host-power-loss recovery guarantee.
    count before/after each retention boundary. Every Run must complete; a
    cumulative-history rejection does not satisfy this sequence. Separately,
    complete at least 1000 ordinary commands/internal file-operation combinations
-   within one Run, with automatic AGENTS.md reads enabled and the environment
+   within one Run, including explicit AGENTS.md reads through ordinary tools and the environment
    background task alive. Record actual command/helper identities, a real
    controller restart during that Run, active tasks <=32, hot records <=64 and
    bounded storage/output. The sample count is not a new product limit.

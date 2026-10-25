@@ -22,9 +22,18 @@ are separate work.
 Creation, perRun and retained execution, scoped Run cleanup, independent retirement,
 and explicitly requested pause/resume are implemented through the existing Core
 harness and the pinned official SDK. Automatic idle selection and demand-triggered
-resume are frozen outside this change; no background idle policy is enabled.
-The default remains `perRun`, with global / Workspace / ordinary Worker execution
-capacity 8 / 4 / 8.
+resume are implemented behind explicit opt-in configuration. The retained rotation
+scenario below has passed the public API/Worker/Core/SDK chain with two original
+instances and one running slot; default configurations start no background idle policy.
+The default remains `perRun`. Current hosted execution admission defaults to eight
+active AgentRun-step leases across replicas, with no fixed per-Workspace execution
+quota. A waiting step releases its lease; this does not limit all nonterminal Runs
+to eight. Ordinary Worker thread capacity is a separate deployment setting. Hosted
+Core tool concurrency is explicitly 64; the generic Core default remains 16, and
+tools requiring serial execution retain their shared serial permit. See
+[configuration](../workspace/reference/Configuration.md#execution-admission-and-request-capacity).
+The intended main-Agent-plus-three-subagents policy is distinct: the present
+hosted subagent batch budget is still process-wide and needs a separate correction.
 
 | Evidence | Current boundary |
 | --- | --- |
@@ -32,7 +41,8 @@ capacity 8 / 4 / 8.
 | Integrated boundary checks | Core query_loop 134; SDK 127; retained 54 plus migration/schema regressions; snapshot 86; model client 28 and configuration 4; Linux API/Worker no-VM product cases 2 pass on their identified source trees below. Source Rust/Node and hosted Rust/Web/Python passed; the final complete API run executed 1727 with zero failures/errors/skips |
 | Interrupted instrumented real-provider sample | Stopped in Run A before pause/resume with an unresolved dispatched create and no locator or settlement. After reboot the tmpfs PostgreSQL ledger is absent; its original owner record and Unknown responsibility remain preserved |
 | Identified earlier isolated comparisons | Twelve lifecycle samples compare baseline and candidate, three per scenario/build; six workspace IO samples add one per case/build. All passed with confirmed cleanup. perRun, retained execution and Run-cleanup Store subspans are measured separately |
-| Release and legacy-removal acceptance | TB2.1 replacement, automatic idle policy, combined saturation, the wider restart/failure matrix, packaged-release acceptance and historical-duty drain remain incomplete |
+| Latest retained rotation scenario | Two bootstrap Runs plus ten successor switches passed with two instances, one running slot, preserved process memory/files, queued cancellation, Runtime restart and confirmed independent retirement; see the current acceptance below |
+| Release and legacy-removal acceptance | TB2.1 replacement, combined saturation, the wider restart/failure matrix, packaged-release acceptance and historical-duty drain remain incomplete |
 
 The executable hashes, image digests, test counts and measurements below identify
 their respective builds. Historical results do not accept later source changes;
@@ -401,7 +411,8 @@ creation, use, cleanup, authorization and signature bytes are preserved; no
 historical pause is inferred. Automatic idle selection, demand-triggered resume,
 large-workload resource reclamation, physical snapshot IO and the full
 admission-versus-power race matrix remain separate acceptance boundaries. The
-ordinary 8/4/8 limits and perRun default remain unchanged.
+ordinary limits on that measured build were 8/4/8, with the perRun default. Current
+admission semantics are described in the evidence status above.
 
 The real API / Worker / Runtime / Core / SDK power fixture passed on an earlier
 explicit-power build against local Embed using SDK 2.58.0 and Runtime executable SHA-256
@@ -576,8 +587,9 @@ independent mock-provider database that was removed after the gate. These
 checks validate the identified build; they do not accept the interrupted real
 lifecycle or later source changes.
 
-Automatic idle policy remains unimplemented and frozen outside this change.
-Future work must be configurable and explicitly opt-in, with deterministic clock
+At the time of this historical interrupted sample, automatic idle policy was not
+implemented. The current opt-in implementation and product acceptance appear below.
+Its original requirements included deterministic clock
 and controlled-provider tests. Resume admission must be bounded by business
 execution capacity before queued demand can trigger power operations. The original
 sample remains blocked and has no completed stage timings. Its provider API
@@ -1153,26 +1165,31 @@ cleanup allowed the temporary owner record and probe files to be removed.
 ### Resident microVM coexistence preflight
 
 The authorized coexistence target is 100 resident managed microVM environments,
-each retaining a 50 MiB touched payload. Current defaults remain
-`EXECUTION_GLOBAL_LIMIT=8`, `EXECUTION_TENANT_LIMIT=4` and
-`WORKER_SLOT_COUNT=8`; resident environment count does not raise these limits.
+each retaining a 50 MiB touched payload. Current defaults are
+`EXECUTION_GLOBAL_LIMIT=8` and `WORKER_SLOT_COUNT=8`; resident environment count
+does not raise these limits. Execution admission no longer applies a separate
+Workspace quota. The persisted `execution_job_tenants.workspace_id` still binds
+Jobs to their business Workspace.
 
-The first two limits count only `agent_run.lifecycle` Jobs whose execution
-lease has `lease_purpose=execute` and status `leased` or `running`. The tenant
-key is the business Workspace (`execution_job_tenants.workspace_id`), shared
-across its Sessions. A Job occupies capacity from claim until it yields or leaves
-the active states; this is a lifecycle execution-lease interval, not a tool-call
-count. `WORKER_SLOT_COUNT` separately bounds ordinary Job threads per Worker
-process.
+The global limit counts only `agent_run.lifecycle` Jobs whose execution lease
+has `lease_purpose=execute` and status `leased` or `running`, including expired
+leases until reconciliation. A Job occupies capacity from claim until yield or
+terminal transition. This counts lifecycle execution steps, not every
+nonterminal AgentRun, tool call, or resident environment. `WORKER_SLOT_COUNT`
+separately bounds ordinary Job threads per Worker process.
 
-Native `subagent.run` Jobs are outside that 8/4 aggregation. The hosted native
-subagent runner currently shares a three-way batch budget across Sessions in
-each Runtime process and passes its selected policy to Core. Core does not fix
-three subagents per Session; one parent plus three children does not derive the
-Workspace limit of four. Resident environments and their CPU/memory commitments
-have separate accounting. These are current implementation semantics; how these
-limits should combine in the subsequent capacity design remains open, with no
-default change or capacity fix claimed by this clarification.
+Hosted Runtime selects tool parallelism 64 while Core's generic default stays
+16. The tool coordinator is shared by a parent and its hosted children. Tools
+requiring serial execution retain that rule, so this is not a promise of 64
+concurrent bash/write/edit operations in one environment.
+
+Native `subagent.run` Jobs remain outside the global execution-lease aggregation.
+The hosted native subagent runner currently shares a three-way batch budget
+across Sessions in each Runtime process and passes its selected policy to Core.
+That does not implement three children per Session. Resident environments and
+their CPU/memory commitments have separate accounting. Whole-AgentRun admission
+and per-parent child scheduling remain separate work; this change only removes
+the unintended Workspace execution quota and selects the supported tool ceiling.
 
 The start condition is at least 10 GiB of Linux host `MemAvailable` immediately
 before dispatch. It does not require keeping 10 GiB free after adding the load.
@@ -1498,8 +1515,7 @@ Freeze preservation policy for new Environments. Files/artifacts, Core or native
 harness session state, full memory/process snapshots and continuously online
 services have separate acceptance. Explicit full-memory requests cannot be
 silently satisfied by filesystem-only recovery. Existing signed policy and
-retention obligations retain their original meaning. When automatic idle work
-resumes, choose its window from measured pause/recovery cost and request intervals
+retention obligations retain their original meaning. For automatic idle operation, choose its window from measured pause/recovery cost and request intervals
 rather than pausing after every model/tool exchange.
 
 Harbor acceptance uses an E2B template derived from the original task environment
@@ -1948,12 +1964,14 @@ Memory-backed storage and missing mount capability are explicit errors.
 
 Only a managed-files `perRun` workspace with an empty frozen version, no inputs,
 no live context and no prior creation attempt uses deferred preparation. Core
-keeps prompt construction, instruction limits and cache identity; the host
-provides the authoritative startup-file read. Initial model context does not
-create a physical environment merely to look for `AGENTS.md`. Actual filesystem,
+keeps prompt construction, budget accounting and source boundaries. Building a
+model request performs no filesystem reads or automatic `AGENTS.md` injection.
+The harness directs the model to inspect applicable `AGENTS.md` files through
+ordinary tools and continue when absent. Actual filesystem,
 command, status and artifact demand invoke the existing signed provider factory
 once. Before exposing the host, the factory rechecks and restores the authorized
-empty workspace. Later model requests read the same live instruction file.
+empty workspace. An explicit instruction-file read uses the current live workspace;
+unread file changes do not alter the prompt or provider cache identity.
 
 Concurrent first demand shares one result. Failure, panic and Unknown are
 latched, never retried by the deferred port. Waiting callers continue checking
@@ -2045,6 +2063,375 @@ No new real-provider pause/resume timings or resource-savings conclusion is
 claimed for this build. Earlier measurements remain tied to their stated
 binaries. The legacy execution route still owns native admission, provision,
 maintenance and historical cleanup duties. Keep it until the E2B TB2.1 product
-replacement passes and those obligations drain. `perRun` and 8/4/8 remain the
-baseline; no Session API concurrency setting is added. The idle-policy skeleton
-remains frozen. Original Unknown creation responsibilities remain open.
+replacement passes and those obligations drain. `perRun` remains the default;
+current execution/tool/Worker limits are described above, with no Session API
+concurrency setting. The idle-policy skeleton remains frozen while the task
+channel and lifecycle are integrated. Original Unknown creation responsibilities
+remain open.
+
+
+## Current task-channel and scheduling work
+
+The execution route is task image to E2B template, followed by the official SDK
+command and file ports. Each task's original user, working directory and
+environment must be verified on its actual template. Inner OCI workloads and
+the experimental guest broker have been removed from the active source tree.
+
+Maintenance-owned creation, original provider identity and independent completion
+ledgers remain under review with their existing schema and authorization tests.
+The experimental guest consumer has been removed. Provider maintenance commands
+and file operations now use the official SDK through independently authorized
+production routes and durable completion facts.
+Existing Core Runs continue to use the current SDK route. The authorized ten-task
+benchmark has not started on the replacement path.
+
+A separate controlled regression confirmed that the ordinary SDK command runner
+rejects a 129th sequential command after 128 confirmed completions, with
+`e2b_command_evidence_capacity` at Start and no 129th dispatch. This is a bounded
+history-cache issue, distinct from active tool/VM capacity. The completed-output
+cache now frees hot entries while retaining bounded cold replay evidence. Review
+found a mixed-size spill selection regression, reproduced it, and verified the
+fix with all 14 capacity cases passing. Candidate selection uses bounded encoded
+size prechecks before file IO; actual write/publish failures preserve hot evidence.
+SDK lane collisions now wait within the original absolute deadline, including
+transport-close and valid provider-Unknown controls. Three independent local
+commits were validated in clean checkouts: `d89f6cf` passed 40 adapter cases;
+`7d87057` passed hosted capacity, five PostgreSQL cases, 134 Core query-loop
+cases, 12 gate guards and complete discovery of 226 required identities;
+`27ae7b2` passed 74 host cases and Runtime all-target Clippy with warnings denied. These changes do not yet establish
+automatic environment rotation. Resource waiting must preserve the same operation
+and Run continuation, rather than merely changing a terminal-failure message.
+
+The resource-management acceptance target is to yield residency after confirmed
+work/idle transitions while retaining referenced Session/task/file state, then
+activate it on demand. About 300 ms is only a reference scale for interpreting latency, not a
+performance target or acceptance threshold. Measure release, durable wake, claim, resume and first
+useful tool separately. TB2.1 has started zero of the authorized ten tasks on
+this new channel. Keep the native chain until the replacement passes and its
+historical obligations drain.
+
+
+The opt-in `RUNTIME_E2B_MAX_RUNNING_ENVIRONMENTS` admission guard accepts 1..64
+and requires a retained profile. With the option absent, the guard is disabled.
+Create dispatch and resume intent serialize their capacity check against durable
+provider facts. Dispatched Unknown creates remain charged. A positive full-pause
+ACK releases physical residency; preparing resume reserves a running slot again
+before SDK work. A full budget yields the same lifecycle Job with
+`e2b_environment_capacity_wait`, without consuming failure retries.
+
+`RUNTIME_E2B_IDLE_PAUSE_MS` enables automatic rotation with a positive idle grace
+in milliseconds and requires the explicit running budget above. It is absent by
+default, so ordinary configurations start no rotation scans. The shared HTTP
+server entry starts one policy task per Runtime instance. Each scan reads at most
+64 retained Environment candidates plus one lookahead row with a keyset cursor; each tick advances
+at most one power operation. Mature idle pauses precede resumes; equal-priority
+candidates rotate so a contended low identifier cannot monopolize a page.
+A live controller prevents idle pause. Current durable lifecycle demand triggers
+resume; cancellation and terminal facts exclude that demand.
+
+Pause ACK wakes matching capacity waiters; resume ACK wakes matching Environment
+waiters through existing durable Job wake events. A wake that arrives before
+Worker yield is consumed by that yield. A stale `capacity_released` wake cannot
+shorten a later question wait. These transitions retain the existing Job owner,
+authorization digest, retry budget, Environment identity and provider instance.
+No second Agent loop or task queue is introduced.
+
+Runtime schema migration 24 preserves existing power ACKs, dispatched Unknown
+operations and migration history. New automatic resumes persist the exact demand
+Job, Run and authorization digest. Only a still-Prepared automatic resume whose
+bound Job has a durable cancellation fact can end as `notDispatched`, under the
+Environment and Job pins. This explicit unsent terminal fact keeps its history
+row and has no provider ACK. Capacity then follows the last physical power fact;
+a new Job may request a new resume. Manual power intents and every committed
+Dispatched operation retain their existing supervision semantics. Cancellation
+after dispatch never becomes an unsent fact or a capacity refund.
+
+Automatic selection, cancellation fencing, wake ordering and release after an
+explicitly unsent resume have controlled PostgreSQL coverage. The opt-in product
+rotation fixture has also passed the twelve-Run scenario below. An unsent terminal
+fact remains distinct from a provider pause ACK.
+
+
+## Current retained rotation acceptance
+
+The latest local product sample used the original task-image template, root and
+`/app`, with one CPU and 2048 MiB per Environment. A scripted model selected four
+real guest commands per Run; external model network latency is outside this sample.
+The existing Core harness, public API admission, Worker, durable Job handling,
+Runtime and official SDK all participated.
+
+Two bootstrap Runs and ten successor switches completed: twelve successful Runs,
+two original creation attempts, one running slot, and six visits per Environment.
+The guest process counter, PID start ticks and file counter remained continuous.
+Eleven full-pause ACKs and ten restore ACKs were recorded. Every successful Run
+retained its original lifecycle Job with retryCount zero. A cancellation while
+waiting produced no model/tool execution or new creation. A Runtime restart after
+the sixth Run preserved physical identity and existing power facts. Final product
+retirement and independent provider GETs confirmed both instances absent, with
+creation, Run-use and power duties all zero. The integrated test exited zero.
+
+The separate lost-reply sample killed the real adapter after durable dispatch.
+Its Run failed, while the unknown physical creation retained its budget and
+ledger. A fresh Runtime returned `unknown` with no provider target; the original
+attempt remained dispatched without identity or settlement and was not resent.
+Its database and owner remain retained. This sample does not claim zero duties,
+and it must not be repeated just to replace an unresolved owner record. Normal
+rotation and this failure boundary are separate tests.
+
+| Observed interval | Samples | Median | Maximum |
+| --- | --- | --- | --- |
+| SDK full pause | 11 | 83.881 ms | 165.860 ms |
+| SDK restore/connect | 10 | 109.193 ms | 132.133 ms |
+| Runtime complete pause operation | 11 | 633.662 ms | 727.067 ms |
+| Runtime complete resume operation | 10 | 707.973 ms | 791.435 ms |
+| Successor Run after admission through Job completion | 10 | 7535.024 ms | 8154.565 ms |
+
+The Run interval includes queue waits, four commands, scripted model calls and
+cleanup; it is not a pause/resume-only latency. About 300 ms remains a reference
+scale, not an acceptance threshold. Nested spans overlap and must not be summed.
+The power collector has incomplete coverage (324 foreign records), despite the
+listed metrics each having the stated observed sample count. Complete power-stage
+coverage, Runtime process-ready time, provider-internal create time and correlated
+resume-to-first-tool latency remain unavailable. The latest adapter stream also
+contains unassigned operation records, so it is not complete end-to-end attribution.
+
+The whole owned-database window recorded 25,823 commits, 130 rollbacks, 6785 inserted
+rows, 1448 updated rows and 994 deleted rows. This includes fixture polling,
+cancellation and retirement. These are database counters, not SQL statement counts
+or product-only query amplification. That initial counter-only sample could not
+attribute product and fixture SQL. The scoped statement profile below supplies
+that attribution; the functional pass establishes no
+latency or database-efficiency target.
+
+Current focused validation: 23 API lifecycle guards and 137 adapter offline tests
+passed. The source Core/Runtime files match the Rust image source tree used for
+the product sample; this closeout changed the Python fixture and documentation.
+A full release gate was not rerun. TB2.1 remains zero of ten on the replacement
+Core/verifier path, and historical unknown creation duties remain open.
+
+
+## Product SQL attribution and correlated timing
+
+A follow-up local diagnostic kept the same Runtime binary, task template and
+scripted twelve-Run scenario. A separate PostgreSQL 18 instance enabled
+`pg_stat_statements` with planning statistics. SQL roles were selected at session
+startup, before Django connection initialization. In-process public Client
+requests were tagged as API work even though they ran on the fixture main thread.
+Fixture reads and observer polling used separate roles. Top-level statement counts
+exclude nested trigger statements; they are neither transaction counts nor network
+round-trip counts. Normalized SQL text and parameters were not retained.
+
+| SQL execution source | Top-level executions |
+| --- | ---: |
+| Runtime | 41687 |
+| API, including public admission and connection initialization | 4927 |
+| Fixture main-thread reads | 1412 |
+| Observer and statistics reader | 896 |
+
+Product execution accounts for 46614 of 48922 statements (95.282 percent), including
+one controlled restart, cancellation and two retirements. This sample therefore
+does not represent steady-state SQL per user message. The product's amplification
+is real; fixture polling is a small part of this window.
+
+Runtime connection management accounts for 13919 statements (33.389 percent of
+Runtime SQL): 3983 health checks, 3988 `DISCARD ALL`, 4086 search-path changes and
+1862 request-timeout settings. These operations have state-isolation and deadline
+purposes. A change needs behavior tests for those guarantees, rather than simply
+removing SQL based on its count.
+
+The rotation-candidate query executed 336 times. It spent 2710.309 ms planning and
+126.746 ms executing. Independent lifetime statistics in the diagnostic instance
+showed equal plan and call counts for that query. The current 250 ms rotation scan
+and connection/statement lifecycle repeatedly pay planning cost. An empty Runtime
+with rotation enabled still executed 52 statements in a separate 3.013-second
+control window, while observer polling executed 31. This is specific to the opt-in
+rotation configuration, not the disabled default.
+
+The raw power observation tap retained 661 validated records with zero drops.
+Ninety-one observed resume preparations had no durable operation row and ended
+in error before a successful SDK call. Each emitted prepare, advance and total
+measurements. This is control-plane retry work during the one-slot capacity wait,
+not additional provider restores: successful SDK restore count remained ten.
+Those uncommitted operation identities explain much of the strict collector's
+foreign-record count. Count them as Runtime-scoped preparation work without
+inventing Run ownership or a provider ACK.
+
+| Power interval | Pause median, 11 samples | Resume median, 10 samples |
+| --- | ---: | ---: |
+| SDK import in the new adapter process | 222.274 ms | 228.839 ms |
+| Adapter capability handshake, including import | 267.285 ms | 277.656 ms |
+| Actual SDK pause / connect | 78.627 ms | 107.616 ms |
+| Complete Runtime power operation | 527.790 ms | 597.803 ms |
+
+The handshake contains import and the Runtime interval contains these child spans;
+these rows must not be added. The current cleanup lane creates a fresh SDK process
+for each power operation. Existing adapter-process reuse is a potential latency
+improvement, with operation identity, authorization and uncertain-result isolation
+still required.
+
+Twelve timelines matched the same Linux monotonic clock domain. Each timeline
+closed from public-admit method entry to Worker observation of the successful Job
+complete response. The ten successor Runs had these medians:
+
+| Timeline boundary | Median |
+| --- | ---: |
+| Public-admit method entry to acceptance return | 99.035 ms |
+| Accepted to first Runtime step entry | 3863.178 ms |
+| Step entry to first tool receipt ready | 1178.822 ms |
+| First receipt ready to committed | 37.282 ms |
+| Receipt committed to Job-complete response observed | 2076.922 ms |
+| Admission entry to first receipt ready | 5071.741 ms |
+| Admission entry to Job-complete response observed | 7370.289 ms |
+
+Stage medians cannot be summed to obtain a median total. The waiting interval
+includes this fixture's 3000 ms idle grace plus scheduling and power work. Tool
+receipt readiness/commit are Core safe-point facts, not browser delivery. External
+model and browser-to-API network latency are excluded. The initial Runtime's
+start-method-to-ready-marker interval was 570.225 ms; the controlled restart was
+413.938 ms. Exact SDK-resume-return to first-tool correlation remains separate.
+
+The diagnostic product test passed twelve Runs and retired both instances with
+zero creation/use/power duties. This is measurement of unchanged product behavior,
+not an optimization comparison or a full release-gate run. The next bounded
+improvements should target failed capacity preparations, connection maintenance
+and repeated planning, then existing SDK-process cold starts. Preserve the same
+Job, authorization, cancellation, durable wake and Unknown responsibilities.
+
+
+### Bounded rotation and connection optimization
+
+The current candidate skips fresh automatic resume preparation when a read-only
+capacity snapshot is already full. Prepared resumes still advance so cancellation
+can be observed. Dispatch continues to acquire the existing transaction lock and
+recheck capacity; dispatched Unknown creations remain charged.
+
+Rotation scanning first reads bounded Environment/power facts and a cheap live-Job
+hint. Only a page with live work evaluates the complete authorization/cancellation/
+yield-history demand predicate. The existing dispatch-time demand pins remain the
+execution authority. This avoids planning that predicate for idle pages.
+
+Connection startup options establish the fixed `runtime,public` search path while
+preserving other URL options. `DISCARD ALL`, health checks and deadlines remain.
+Reset restores the startup namespace without another `SET`. Tests cover same-
+backend cleanup of temporary tables, prepared statements, LISTEN, advisory locks
+and session settings, including custom startup defaults.
+
+The same twelve-Run task-image acceptance passed with two creations, eleven pause
+ACKs, ten resume ACKs, cancellation, a clean-boundary restart, same-instance
+memory/file continuity and independently confirmed retirement. Its creation/use/
+power duties were 0/0/0. SQL remains top-level statement execution counts:
+
+| Measure | Previous sample | Optimized sample |
+| --- | ---: | ---: |
+| Runtime SQL | 41687 | 33492 |
+| API SQL | 4927 | 4927 |
+| Product SQL | 46614 | 38419 |
+| Search-path SQL | 4086 | 0 |
+| Uncommitted failed resume preparations | 91 | 0 |
+| Runtime server planning time | 4616.716 ms | 1874.170 ms |
+| Admission to first tool receipt ready, successor median | 5071.741 ms | 5172.343 ms |
+| Admission to Job-complete observation, successor median | 7370.289 ms | 7233.653 ms |
+
+Runtime SQL fell 19.658 percent and product SQL 17.581 percent. The raw admin-role
+count was 33497; five measurement-setup GRANT statements were excluded above.
+Fixture and observer counts were 1412 and 904. The complete successful test took
+108.001 seconds; the measured product window was 91.174 seconds. Its separate
+3-second empty-Runtime control still issued 48 Runtime SQL statements, compared
+with 52 previously. The scan interval remains 250 ms.
+
+The base candidate scan planned 340 times for 168.915 ms; the live-Job hint planned
+323 times for 75.642 ms; the full scan-demand query planned 134 times for 231.183 ms.
+Their combined planning time was 475.740 ms, versus 2710.309 ms for the previous
+combined candidate/demand query. These counts exclude separate dispatch pin queries
+and the additional capacity-count query; they are not total Runtime planning time.
+
+This is a database-amplification improvement, not evidence of lower end-to-end
+latency. The successor first-receipt median rose about 101 ms in this sample;
+Job-complete observation fell about 137 ms. A single controlled sample cannot
+establish a stable latency change. The 3000 ms idle grace remains in both samples.
+All twelve milestone timelines correlate to the same monotonic clock. Broader
+execution coverage remains incomplete because 316 process-level records are not
+attributed to Runs; none of those records is silently assigned to a Run.
+
+SDK pause/connect medians were 96.888/106.952 ms, while complete Runtime pause/
+resume medians were 576.877/617.092 ms. A fresh maintenance adapter still pays
+278.265/287.400 ms for capability handshake, including SDK import. Existing process
+reuse merits a separate bounded change: keep dispatch authorization and operation
+observation identities, drop failed transports without replay, and preserve Unknown
+on loss after send. No adapter reuse or new execution layer was added here.
+
+Current validation: fmt, Runtime all-target Clippy with warnings denied, Core
+query_loop 132 tests, Runtime ordinary suite 804 tests (373 ignored), 140 provider
+PostgreSQL tests, two session-reset PostgreSQL tests, nine Runtime-store PostgreSQL
+tests and thirteen gate-script tests passed. The 277 required PostgreSQL identities
+were discovered; discovery is not a claim that all 277 were executed. The complete
+release gate was not run.
+
+One earlier trial in this turn failed before any successful creation because the
+node hugepage pool was 512 despite the configured value of 2048. Its
+creation was dispatched without a returned locator, so that trial's owner and
+persistent database remain retained. Restoring the node and passing an independent
+sample does not settle that Unknown. The three pre-existing protected owner records
+remain byte-for-byte unchanged. The WSL boot ID matched the baseline, so a WSL
+restart is not established as the cause of the pool mismatch. These private local
+records do not enter the PR.
+
+
+### Claim contention, maintenance reuse and controlled shutdown
+
+The Worker retries an explicit HTTP 503 `runtime_busy` or `execution_claim_busy`
+from `/internal/jobs/claim` with an interruptible 100 ms exponential backoff,
+capped at one second. A successful claim or empty scan resets it. This applies
+only to rejected claims before leasing a Job; capacity waiting, execution errors
+and unresolved side effects retain their existing handling.
+
+An E2B Runtime retains at most one idle SDK adapter process for pause/resume.
+Every operation still obtains its own durable dispatch authority and verifies its
+original provider identity. Only an acknowledged result returns the process to
+the cache. Unknown replies, invalid receipts and failed ACK commits discard it
+without replay. A borrowed child does not serialize an independent operation;
+ordinary execution, control and retirement keep their separate adapter lanes.
+
+Power observations distinguish actual `adapterReuseElapsedMs` and
+`adapterRetainElapsedMs` from spawn, handshake and close. SDK timings bind to the
+exact request and power operation; late records retain their original identity.
+Warm operations do not manufacture import or handshake durations. Missing or
+conflicting observations remain incomplete rather than zero.
+
+SIGINT/SIGTERM and the acceptance fixture's stop command stop the HTTP listener
+and new rotation ticks, then await the current tick. The drain budget is twice
+the configured SDK request timeout plus ten seconds (50 seconds at the default
+20-second timeout). Expiry reports `e2b_rotation_shutdown_pending`; it does not
+abort/replay provider work or manufacture an ACK. This drains the rotation loop,
+not every accepted HTTP task. External process stop grace must cover this budget;
+the product fixture freezes a further ten-second margin at startup. Forced
+termination still requires the existing unresolved-operation supervision.
+
+Behavioral tests cover rejected-claim retry, request correlation, successful
+reuse, lost/invalid replies, failed ACK commits, and bounded rotation shutdown.
+Product latency improvement requires a same-scenario k6 comparison; these tests
+do not establish a production timing target.
+
+
+A subsequent local k6 comparison completed all fourteen Runs with two creations,
+ten pause ACKs and nine resume ACKs. Both environments retired with independent
+absence checks; creation, use and power responsibilities were all zero afterward.
+The workload used one scripted real command per Run, one running environment and
+a three-second idle grace. This is a small local comparison, not a production SLO.
+
+| Observed median | Before | After |
+| --- | ---: | ---: |
+| Complete Runtime pause | 712.736 ms | 314.442 ms |
+| Complete Runtime resume | 743.665 ms | 317.008 ms |
+| Request to first tool result, paused with free capacity | 2690 ms | 2171 ms |
+| Request to first tool result, capacity switch | 6118.5 ms | 5203 ms |
+| Request to first tool result, warm continuation | 1119 ms | 1083 ms |
+
+Five explicit `execution_claim_busy` HTTP 503 replies were observed. Their next
+claim requests started 100.2–100.3 ms later, except a consecutive rejection which
+backed off 200.2 ms. SDK pause/connect medians remained 92.105/101.664 ms. The
+power observer recorded one SDK startup/import and seventeen explicit cache hits;
+partial power-span coverage prevents treating missing records as zero. Complete
+Runtime pause/resume durations were available for all nineteen operations.
+Capacity-switch latency includes the configured idle grace. This experiment did
+not remeasure SQL statement amplification; fixture state polls are not SQL counts.

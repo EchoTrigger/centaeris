@@ -11,6 +11,9 @@ import os
 import queue
 from pathlib import Path
 import threading
+import time
+
+HEARTBEAT_SECONDS = 5
 
 from workspace_monitor import JobProjection, LINE_LIMIT, MANIFEST_LIMIT, redact
 
@@ -99,6 +102,9 @@ class JobEvents:
             self._sequence += 1
             self._bytes += len(wire)
 
+    def heartbeat(self):
+        self._append("heartbeat", {})
+
     def job(self, status):
         self._append("job", {"status": status})
 
@@ -160,8 +166,13 @@ class FailOpenProjection:
             return False
 
     def _run(self):
+        next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
+        terminal = False
         try:
             while not self._degraded.is_set():
+                if not terminal and not self._closed.is_set() and time.monotonic() >= next_heartbeat:
+                    self._writer.heartbeat()
+                    next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
                 try:
                     wire = self._queue.get(timeout=0.05)
                 except queue.Empty:
@@ -174,6 +185,7 @@ class FailOpenProjection:
                     self._writer.trial(trial_id, **payload)
                 elif kind == "job":
                     self._writer.job(payload["status"])
+                    terminal = payload["status"] in {"completed", "failed", "cancelled"}
                 elif kind == "log":
                     self._writer.log(payload["message"], level=payload["level"], trial_id=trial_id)
                 else:

@@ -83,6 +83,17 @@ unrelated processes in the instance. Until this is confirmed, Environment
 exec/upload/download operations remain blocked. Retirement releases admission only
 after physical absence and zero debit. No model attempt is resubmitted.
 
+For native provider file maintenance, a confirmed missing file or directory is a
+completed failure, not an unknown execution outcome. Runtime records
+`filesystemFailed` with `fileNotFound` only for supported read operations; API
+release still verifies the original dispatch, request, provider target and controller
+fence. The controller releases that operation before reporting
+`maintenance_file_not_found`, so independent retirement remains possible. An
+unconfirmed transport outcome keeps its responsibility, and a failed release is
+reported separately. This forward contract does not settle earlier unknown
+operations. Artifact downloads are refused before setup completes, avoiding a new
+maintenance operation for paths that setup never prepared.
+
 ## Private controller ports
 
 `BenchmarkRunner` accepts authenticated `client_factory`, independently authorized
@@ -312,3 +323,12 @@ a separate experiment.
 Local contract tests use fake services and are not physical acceptance evidence.
 The real one-task preflight and pilot must remain unstarted until the private
 bootstrap's physical gates succeed.
+
+
+Maintenance command execution uses Runtime's bounded execution capacity and the
+signed command timeout, leaving short control capacity available to heartbeats
+and cancellation. After a lost response, HTTP deadline, or an in-flight provider
+operation, the adapter queries the exact same authorized operation within its
+remaining wait budget. It never creates a replacement operation to retry a
+command. Only a validated durable completion permits maintenance release;
+unresolved outcomes retain responsibility when the wait budget expires.
