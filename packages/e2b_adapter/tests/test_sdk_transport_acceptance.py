@@ -314,7 +314,7 @@ class SdkTransportAcceptanceTests(unittest.TestCase):
                                   ("POST", "/process.Process/Start")])
                 process_calls = [entry for entry in fixture.requests if entry["path"].startswith("/process.Process/")]
                 self.assertEqual([entry["path"] for entry in process_calls], ["/process.Process/Start"])
-                self.assertEqual(process_calls[0]["body"]["process"], {"cmd": "/bin/bash", "args": ["-l", "-c", "printf raw"], "envs": {"LANG": "C"}, "cwd": "/workspace"})
+                self.assertEqual(process_calls[0]["body"]["process"], {"cmd": "/bin/bash", "args": ["-c", "printf raw"], "envs": {"LANG": "C"}, "cwd": "/workspace"})
                 self.assertFalse(process_calls[0]["body"].get("stdin", False))
                 self.assertNotIn("x-api-key", process_calls[0]["headers"])
                 self.assertEqual(process_calls[0]["headers"]["x-access-token"], "fixture-envd-access-token")

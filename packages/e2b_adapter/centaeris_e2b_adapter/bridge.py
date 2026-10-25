@@ -137,7 +137,9 @@ def _open_process_stream(url, connection, envd_version, user, process, timeout_s
 def _start_command_stream(sandbox, envd_version, payload):
     from e2b.envd.process import process_pb
 
-    process = process_pb.ProcessConfig(cmd="/bin/bash", args=["-l", "-c", payload["command"]],
+    # A login shell rewrites PATH from /etc/profile after envd applies the
+    # template and request environment. Ordinary commands preserve those inputs.
+    process = process_pb.ProcessConfig(cmd="/bin/bash", args=["-c", payload["command"]],
                                       cwd=payload.get("cwd"), envs=payload.get("envs"))
     return _open_process_stream(sandbox.envd_api_url, sandbox.connection_config, envd_version,
                                 payload.get("user"), process, payload["timeoutSeconds"])

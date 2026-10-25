@@ -81,7 +81,7 @@ class FreshAttachTests(unittest.TestCase):
             self.assertEqual([(entry["method"], entry["path"]) for entry in api.requests],
                 [("GET", "/sandboxes/sandbox-fixture")])
             process = data.requests[1]
-            self.assertEqual(process["body"]["process"], {"cmd":"/bin/bash", "args":["-l","-c","printf task-image"],
+            self.assertEqual(process["body"]["process"], {"cmd":"/bin/bash", "args":["-c","printf task-image"],
                 "cwd":"/app", "envs":{"TASK_FLAG":"preserved"}})
             self.assertEqual(process["headers"]["authorization"], "Basic " + base64.b64encode(b"root:").decode())
             self.assertEqual(detail["endAt"], deadline)
