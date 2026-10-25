@@ -5,9 +5,7 @@ use crate::postgres_store::execution_instances::{instance_id, RetainedInstanceAl
 use crate::resident_capacity::{
     declared_usage, ObservedResidentSandbox, ResidentCapacity, RESIDENT_CAPACITY_WAIT,
 };
-use centaeris_core::execution::{
-    admit_resident_resources, EnvironmentTaskOwner, ResidentResourceClaim,
-};
+use centaeris_core::execution::{admit_resident_resources, EnvironmentTaskOwner};
 use sha2::{Digest, Sha256};
 
 fn locked(
@@ -127,7 +125,7 @@ impl PostgresRuntimeStore {
             }else{
                 if tx.query_opt("SELECT operation_id FROM runtime.environment_retirements WHERE environment_id=$1",&[&b.environment_id]).map_err(|_|"provision_store_unavailable")?.is_some(){return Err("provision_environment_retired".into());}
                 let(global,tenant,used)=super::residency::used(&mut tx,host,&b.workspace_id)?;
-                if !admit_resident_resources(global,tenant,ResidentResourceClaim::fully_reserved(usage)?,limits.global,limits.tenant)?||!used.checked_add(usage)?.fits(limits.host){return Err(RESIDENT_CAPACITY_WAIT.into());}
+                if !admit_resident_resources(global,tenant,usage,limits.global,limits.tenant)?||!used.checked_add(usage)?.fits(limits.host){return Err(RESIDENT_CAPACITY_WAIT.into());}
                 let owner_json=serde_json::to_string(&owner).map_err(|_|"allocation_owner_invalid")?;
                 tx.execute("INSERT INTO runtime.execution_instances(execution_id,instance_id,environment_id,session_id,agent_run_id,host_id,authorization_digest,binding_digest,image_digest,allocation_execution_id,allocation_mode,profile_digest,allocation_owner_json) VALUES($1,$2,$3,$4,NULL,$5,$6,$7,$8,$1,'retained',$9,$10)",&[&execution,&a.instance_id,&b.environment_id,&b.session_id,&host,&a.authorization_digest,&a.binding_digest,&a.image_digest,&a.profile_digest,&owner_json]).map_err(|_|"provision_allocation_unavailable")?;
                 super::residency::insert(&mut tx,host,&execution,None,&b.workspace_id,None,"reserved",usage)?;

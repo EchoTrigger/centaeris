@@ -1,5 +1,5 @@
 //! Resident resources remain charged while execution waits. A reservation is
-//! durable before creation and is released only with durable settlement evidence.
+//! durable before creation and is released only after the host confirms absence.
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResidentResourceUsage {
@@ -7,9 +7,8 @@ pub struct ResidentResourceUsage {
     pub memory_bytes: u64,
     pub cpu_milli: u64,
     pub pids: u64,
-    /// A separate workspace-space allowance. When backed by tmpfs, its memory
-    /// is already charged to the host cgroup; do not add it to memory_bytes.
-    /// Physical storage enforcement remains a host obligation.
+    /// A separate workspace-space ceiling. It is already charged to the host's
+    /// memory cgroup and must not be added to memory_bytes a second time.
     pub workspace_bytes: u64,
 }
 
@@ -37,63 +36,21 @@ impl ResidentResourceUsage {
     }
 }
 
-/// Immutable admission terms, distinct from the host-enforced resource limits.
-/// Observed usage does not alter this commitment or release a physical holding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResidentResourceClaim {
-    limits: ResidentResourceUsage,
-    reservation: ResidentResourceUsage,
-}
-
-impl ResidentResourceClaim {
-    /// Memory and CPU commitments may be below their ceilings. CPU may be
-    /// best effort; memory must retain a positive admission commitment. Count,
-    /// PID and workspace-space ceilings remain fully reserved by this contract.
-    /// This does not configure cgroups or grant execution authority.
-    pub fn new(
-        limits: ResidentResourceUsage,
-        reservation: ResidentResourceUsage,
-    ) -> Result<Self, String> {
-        if limits.sandbox_count != 1
-            || limits.memory_bytes == 0
-            || limits.cpu_milli == 0
-            || limits.pids == 0
-            || limits.workspace_bytes == 0
-            || reservation.sandbox_count != 1
-            || reservation.memory_bytes == 0
-            || !reservation.fits(limits)
-            || reservation.pids != limits.pids
-            || reservation.workspace_bytes != limits.workspace_bytes
-        {
-            return Err("resident claim must bind bounded limits and a valid reservation".into());
-        }
-        Ok(Self {
-            limits,
-            reservation,
-        })
-    }
-
-    pub fn fully_reserved(limits: ResidentResourceUsage) -> Result<Self, String> {
-        Self::new(limits, limits)
-    }
-
-    pub fn limits(self) -> ResidentResourceUsage {
-        self.limits
-    }
-
-    pub fn reservation(self) -> ResidentResourceUsage {
-        self.reservation
-    }
-}
-
 pub fn admit_resident_resources(
     global_used: ResidentResourceUsage,
     tenant_used: ResidentResourceUsage,
-    requested: ResidentResourceClaim,
+    requested: ResidentResourceUsage,
     global_limit: ResidentResourceUsage,
     tenant_limit: ResidentResourceUsage,
 ) -> Result<bool, String> {
-    let requested = requested.reservation();
+    if requested.sandbox_count != 1
+        || requested.memory_bytes == 0
+        || requested.cpu_milli == 0
+        || requested.pids == 0
+        || requested.workspace_bytes == 0
+    {
+        return Err("resident reservation must describe one bounded sandbox".into());
+    }
     Ok(global_used.checked_add(requested)?.fits(global_limit)
         && tenant_used.checked_add(requested)?.fits(tenant_limit))
 }
@@ -112,117 +69,19 @@ mod tests {
         }
     }
 
-    fn full(limits: ResidentResourceUsage) -> ResidentResourceClaim {
-        ResidentResourceClaim::fully_reserved(limits).unwrap()
-    }
-
-    #[test]
-    fn shared_admission_charges_the_commitment_and_preserves_the_limits() {
-        let reservation = box_usage();
-        let limits = ResidentResourceUsage {
-            memory_bytes: reservation.memory_bytes * 8,
-            cpu_milli: reservation.cpu_milli * 4,
-            ..reservation
-        };
-        let claim = ResidentResourceClaim::new(limits, reservation).unwrap();
-        let budget = reservation.checked_add(reservation).unwrap();
-        assert!(admit_resident_resources(reservation, reservation, claim, budget, budget).unwrap());
-        assert_eq!(claim.limits(), limits);
-        assert_eq!(claim.reservation(), reservation);
-        assert!(!admit_resident_resources(budget, reservation, claim, budget, budget).unwrap());
-        assert!(!admit_resident_resources(reservation, budget, claim, budget, budget).unwrap());
-    }
-
-    #[test]
-    fn claims_reject_unbounded_or_inconsistent_commitments() {
-        let limits = box_usage();
-        for reservation in [
-            ResidentResourceUsage {
-                sandbox_count: 0,
-                ..limits
-            },
-            ResidentResourceUsage {
-                sandbox_count: 2,
-                ..limits
-            },
-            ResidentResourceUsage {
-                memory_bytes: 0,
-                ..limits
-            },
-            ResidentResourceUsage {
-                memory_bytes: limits.memory_bytes + 1,
-                ..limits
-            },
-            ResidentResourceUsage {
-                cpu_milli: limits.cpu_milli + 1,
-                ..limits
-            },
-            ResidentResourceUsage {
-                pids: limits.pids - 1,
-                ..limits
-            },
-            ResidentResourceUsage {
-                pids: limits.pids + 1,
-                ..limits
-            },
-            ResidentResourceUsage {
-                workspace_bytes: limits.workspace_bytes - 1,
-                ..limits
-            },
-        ] {
-            assert!(ResidentResourceClaim::new(limits, reservation).is_err());
-        }
-        for invalid_limits in [
-            ResidentResourceUsage {
-                sandbox_count: 0,
-                ..limits
-            },
-            ResidentResourceUsage {
-                sandbox_count: 2,
-                ..limits
-            },
-            ResidentResourceUsage {
-                memory_bytes: 0,
-                ..limits
-            },
-            ResidentResourceUsage {
-                cpu_milli: 0,
-                ..limits
-            },
-            ResidentResourceUsage { pids: 0, ..limits },
-            ResidentResourceUsage {
-                workspace_bytes: 0,
-                ..limits
-            },
-        ] {
-            assert!(ResidentResourceClaim::fully_reserved(invalid_limits).is_err());
-        }
-        let best_effort_cpu = ResidentResourceUsage {
-            cpu_milli: 0,
-            ..limits
-        };
-        assert_eq!(
-            ResidentResourceClaim::new(limits, best_effort_cpu)
-                .unwrap()
-                .reservation()
-                .cpu_milli,
-            0
-        );
-    }
-
     #[test]
     fn waiting_residents_keep_all_declared_resources_charged() {
         let one = box_usage();
         let two = one.checked_add(one).unwrap();
-        assert!(admit_resident_resources(one, one, full(one), two, two).unwrap());
-        assert!(!admit_resident_resources(two, one, full(one), two, two).unwrap());
-        assert!(!admit_resident_resources(one, one, full(one), two, one).unwrap());
+        assert!(admit_resident_resources(one, one, one, two, two).unwrap());
+        assert!(!admit_resident_resources(two, one, one, two, two).unwrap());
+        assert!(!admit_resident_resources(one, one, one, two, one).unwrap());
         let mut memory_full = two;
         memory_full.sandbox_count = 20;
         assert!(!admit_resident_resources(
             two,
             ResidentResourceUsage::default(),
-            full(one),
+            one,
             memory_full,
             two
         )
@@ -252,7 +111,7 @@ mod tests {
                 ..two
             },
         ] {
-            assert!(!admit_resident_resources(one, one, full(one), limit, two).unwrap());
+            assert!(!admit_resident_resources(one, one, one, limit, two).unwrap());
         }
         assert!(admit_resident_resources(
             ResidentResourceUsage {
@@ -260,7 +119,7 @@ mod tests {
                 ..one
             },
             one,
-            full(one),
+            one,
             two,
             two
         )
