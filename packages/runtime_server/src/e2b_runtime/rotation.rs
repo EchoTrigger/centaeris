@@ -136,11 +136,8 @@ impl RotationState {
             let binding = provider
                 .power_binding(&request)
                 .map_err(|_| "e2b_rotation_binding_unavailable")?;
-            let result = with_power_environment(registry, &binding, |context| {
-                provider.power_guarded(&request, true, || {
-                    *context = None;
-                    Ok(())
-                })
+            let result = with_power_environment(registry, &binding, |before_dispatch| {
+                provider.power_guarded(&request, true, before_dispatch)
             });
             if matches!(result,Ok(ref result) if result.operation_status=="acknowledged") {
                 self.idle.forget(&request.environment_id);

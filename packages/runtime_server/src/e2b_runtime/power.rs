@@ -12,7 +12,7 @@ pub(crate) fn with_power_environment(
     registry: &E2bRunRegistry,
     binding: &E2bEnvironmentBinding,
     advance: impl FnOnce(
-        &mut Option<Arc<E2bPreparedHost>>,
+        &mut (dyn FnMut() -> Result<(), String> + Send),
     ) -> Result<ProviderEnvironmentPowerResult, E2bRuntimeError>,
 ) -> Result<ProviderEnvironmentPowerResult, E2bRuntimeError> {
     let slot = registry
@@ -34,11 +34,29 @@ pub(crate) fn with_power_environment(
     let context = held.as_deref_mut().unwrap_or(&mut absent);
     // The callback invalidates this handle only when the Store supplies a fresh
     // dispatch permit. Historical ACK replay must preserve a successor's handle.
-    let result = advance(context)?;
+    let mut dispatched = false;
+    let result = advance(&mut || {
+        *context = None;
+        dispatched = true;
+        Ok(())
+    })?;
     if result.environment_id != binding.environment_id {
         return Err(E2bRuntimeError::Unknown(
             "e2b_power_result_binding_rejected",
         ));
+    }
+    if dispatched
+        && result.action == ProviderEnvironmentPowerAction::Pause
+        && result.operation_status == "acknowledged"
+    {
+        // Keep the guard, but drop this extra reference before checking that no
+        // other consumer can still acquire the old slot after its removal.
+        drop(slot);
+        if let Some(held) = held.take() {
+            registry
+                .release_paused_environment(binding, held)
+                .map_err(|_| E2bRuntimeError::Unknown("e2b_power_registry_unconfirmed"))?;
+        }
     }
     Ok(result)
 }

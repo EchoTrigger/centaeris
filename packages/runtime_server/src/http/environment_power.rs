@@ -29,11 +29,8 @@ pub(super) fn power(
         return json_error_response(503, "e2b_power_not_configured");
     };
     let result = provider.power_binding(&request).and_then(|binding| {
-        with_power_environment(&state.e2b_runs, &binding, |context| {
-            provider.power(&request, || {
-                *context = None;
-                Ok(())
-            })
+        with_power_environment(&state.e2b_runs, &binding, |before_dispatch| {
+            provider.power(&request, before_dispatch)
         })
     });
     match result {
@@ -83,11 +80,7 @@ mod tests {
     fn maintenance_without_live_slot_advances_without_allocating_ordinary_capacity() {
         let registry = E2bRunRegistry::default();
         let binding = binding();
-        with_power_environment(&registry, &binding, |context| {
-            assert!(context.is_none());
-            Ok(result())
-        })
-        .unwrap();
+        with_power_environment(&registry, &binding, |_| Ok(result())).unwrap();
         assert!(registry.existing_environment(&binding).unwrap().is_none());
     }
     #[test]
@@ -96,8 +89,7 @@ mod tests {
         let binding = binding();
         let slot = registry.environment(binding.clone()).unwrap().unwrap();
         let advanced = Cell::new(false);
-        with_power_environment(&registry, &binding, |context| {
-            assert!(context.is_none());
+        with_power_environment(&registry, &binding, |_| {
             assert!(slot.try_enter().unwrap().is_none());
             advanced.set(true);
             Ok(result())
@@ -129,5 +121,126 @@ mod tests {
         };
         assert!(with_power_environment(&registry, &foreign, |_| attempt()).is_err());
         assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn sequential_acknowledged_pauses_release_capacity_for_more_than_sixty_four_environments() {
+        let registry = E2bRunRegistry::default();
+        for index in 0..65 {
+            let binding = E2bEnvironmentBinding {
+                environment_id: format!("environment-{index}"),
+                ..binding()
+            };
+            registry
+                .environment(binding.clone())
+                .unwrap()
+                .unwrap_or_else(|| panic!("paused history blocked environment {index}"));
+            with_power_environment(&registry, &binding, |before_dispatch| {
+                before_dispatch().unwrap();
+                let mut paused = result();
+                paused.environment_id = binding.environment_id.clone();
+                Ok(paused)
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn unconfirmed_pause_preserves_the_existing_registration() {
+        for status in ["pending", "prepared", "notDispatched", "unknown"] {
+            let registry = E2bRunRegistry::default();
+            let binding = binding();
+            registry.environment(binding.clone()).unwrap().unwrap();
+            let outcome = with_power_environment(&registry, &binding, |before_dispatch| {
+                before_dispatch().unwrap();
+                if status == "unknown" {
+                    return Err(E2bRuntimeError::Unknown("lost acknowledgement"));
+                }
+                let mut paused = result();
+                paused.operation_status = status;
+                Ok(paused)
+            });
+            assert_eq!(outcome.is_err(), status == "unknown");
+            assert!(
+                registry.existing_environment(&binding).unwrap().is_some(),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn historical_pause_ack_does_not_release_an_empty_successor_registration() {
+        let registry = E2bRunRegistry::default();
+        let binding = binding();
+        registry.environment(binding.clone()).unwrap().unwrap();
+        with_power_environment(&registry, &binding, |_| Ok(result())).unwrap();
+        assert!(registry.existing_environment(&binding).unwrap().is_some());
+    }
+
+    #[test]
+    fn fresh_pause_preserves_a_prefetched_slot_until_its_other_holder_finishes() {
+        let registry = E2bRunRegistry::default();
+        let binding = binding();
+        let prefetched = registry.environment(binding.clone()).unwrap().unwrap();
+        with_power_environment(&registry, &binding, |before_dispatch| {
+            before_dispatch().unwrap();
+            Ok(result())
+        })
+        .unwrap();
+        let successor = registry.environment(binding).unwrap().unwrap();
+        let held = prefetched.try_enter().unwrap().unwrap();
+        assert!(
+            successor.try_enter().unwrap().is_none(),
+            "one environment acquired two independent guards"
+        );
+        drop(held);
+        assert!(successor.try_enter().unwrap().is_some());
+    }
+
+    #[test]
+    fn fresh_pause_preserves_a_weak_slot_that_can_be_upgraded() {
+        let registry = E2bRunRegistry::default();
+        let binding = binding();
+        let slot = registry.environment(binding.clone()).unwrap().unwrap();
+        let weak = Arc::downgrade(&slot);
+        drop(slot);
+        with_power_environment(&registry, &binding, |before_dispatch| {
+            before_dispatch().unwrap();
+            Ok(result())
+        })
+        .unwrap();
+        let original = weak
+            .upgrade()
+            .expect("weak holder retains the original registration");
+        let successor = registry.environment(binding).unwrap().unwrap();
+        let held = original.try_enter().unwrap().unwrap();
+        assert!(successor.try_enter().unwrap().is_none());
+        drop(held);
+    }
+
+    #[test]
+    fn resume_after_released_pause_uses_authority_callback_without_reserving_a_live_slot() {
+        let registry = E2bRunRegistry::default();
+        let binding = binding();
+        registry.environment(binding.clone()).unwrap().unwrap();
+        with_power_environment(&registry, &binding, |before_dispatch| {
+            before_dispatch().unwrap();
+            Ok(result())
+        })
+        .unwrap();
+        assert!(registry.existing_environment(&binding).unwrap().is_none());
+        let resumed = Cell::new(false);
+        with_power_environment(&registry, &binding, |before_dispatch| {
+            before_dispatch().unwrap();
+            resumed.set(true);
+            let mut receipt = result();
+            receipt.action = ProviderEnvironmentPowerAction::Resume;
+            receipt.requested_mode = None;
+            Ok(receipt)
+        })
+        .unwrap();
+        assert!(resumed.get());
+        assert!(registry.existing_environment(&binding).unwrap().is_none());
+        assert!(registry.environment(binding).unwrap().is_some());
     }
 }

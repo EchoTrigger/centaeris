@@ -185,6 +185,43 @@ impl<B: PartialEq, T> BoundedSlots<B, T> {
         Ok(())
     }
 
+    fn remove_empty_guarded(&self, key: &str, held: BoundSlotGuard<B, T>) -> Result<(), String> {
+        self.remove_empty_guarded_after_return(key, held, || {})
+    }
+
+    fn remove_empty_guarded_after_return(
+        &self,
+        key: &str,
+        held: BoundSlotGuard<B, T>,
+        after_return: impl FnOnce(),
+    ) -> Result<(), String> {
+        let mut slots = self
+            .slots
+            .lock()
+            .map_err(|_| "e2b_live_registry_poisoned")?;
+        let Some(current) = slots.get(key) else {
+            return Ok(());
+        };
+        if !Arc::ptr_eq(current, &held.slot) {
+            return Err("e2b_live_context_binding_rejected".into());
+        }
+        // Return the guard while the registry lock prevents new lookups. A
+        // prefetched holder may still refill it before relinquishing its Arc.
+        drop(held);
+        after_return();
+        // Unique ownership excludes strong holders and weak upgrades. Inspect
+        // the current state only after obtaining that proof, never before Drop.
+        let empty = slots
+            .get_mut(key)
+            .and_then(Arc::get_mut)
+            .and_then(|slot| slot.state.get_mut().ok())
+            .is_some_and(|state| !state.busy && !state.poisoned && state.value.is_none());
+        if empty {
+            slots.remove(key);
+        }
+        Ok(())
+    }
+
     fn remove_slot(&self, key: &str, expected: &Arc<BoundSlot<B, T>>) -> Result<(), String> {
         let mut slots = self
             .slots
@@ -263,6 +300,20 @@ impl E2bRunRegistry {
         }
         self.environments
             .remove_slot(&binding.environment_id, expected)
+    }
+
+    /// Release only local handle capacity after a fresh, acknowledged pause.
+    /// Durable ownership and any provider uncertainty remain in PostgreSQL.
+    pub(crate) fn release_paused_environment(
+        &self,
+        binding: &E2bEnvironmentBinding,
+        held: BoundSlotGuard<E2bEnvironmentBinding, Arc<E2bPreparedHost>>,
+    ) -> Result<(), String> {
+        if &held.slot.binding != binding {
+            return Err("e2b_live_context_binding_rejected".into());
+        }
+        self.environments
+            .remove_empty_guarded(&binding.environment_id, held)
     }
 
     /// Call only after the store has confirmed this Run's provider cleanup.
@@ -375,6 +426,27 @@ mod tests {
             .get_or_insert(key, environment_binding(key), 2)
             .unwrap()
             .unwrap()
+    }
+
+    #[test]
+    fn pause_release_preserves_payload_refilled_after_the_original_guard_returns() {
+        let contexts = BoundedSlots::default();
+        let prefetched = string_slot(&contexts, "environment");
+        let held = prefetched.try_enter().unwrap().unwrap();
+        contexts
+            .remove_empty_guarded_after_return("environment", held, move || {
+                *prefetched.try_enter().unwrap().unwrap() = Some("new live context".into());
+                drop(prefetched);
+            })
+            .unwrap();
+        let current = contexts
+            .get("environment", |_| true)
+            .unwrap()
+            .expect("a fresh payload must retain its original registration");
+        assert_eq!(
+            current.try_enter().unwrap().unwrap().as_deref(),
+            Some("new live context")
+        );
     }
 
     #[test]
