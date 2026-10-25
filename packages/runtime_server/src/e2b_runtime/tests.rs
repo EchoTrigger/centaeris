@@ -46,8 +46,61 @@ fn configuration_keeps_exact_provider_profile_and_selected_absolute_paths() {
     )
     .unwrap();
     assert_eq!(config.profile(), &expected);
-    assert_eq!(config.python, python.canonicalize().unwrap());
+    assert_eq!(config.python, python);
     assert_eq!(config.adapter_package_root, package.canonicalize().unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn configuration_preserves_venv_launch_alias_and_its_installed_modules() {
+    let (root, _, package) = paths();
+    let base = std::env::var_os("E2B_ADAPTER_TEST_PYTHON")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("python3"));
+    let venv = root.path().join("selected-venv");
+    let created = Command::new(base)
+        .args(["-m", "venv", "--without-pip", "--symlinks"])
+        .arg(&venv)
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let alias = venv.join("bin/python");
+    let site = Command::new(&alias)
+        .args([
+            "-I",
+            "-c",
+            "import sysconfig;print(sysconfig.get_path('purelib'))",
+        ])
+        .output()
+        .unwrap();
+    assert!(site.status.success());
+    fs::write(
+        PathBuf::from(String::from_utf8(site.stdout).unwrap().trim())
+            .join("centaeris_venv_marker.py"),
+        b"VALUE = 'selected-venv'\n",
+    )
+    .unwrap();
+    let config = E2bRuntimeConfig::new(
+        profile(),
+        configured_digest(),
+        alias,
+        package,
+        Duration::from_secs(20),
+    )
+    .unwrap();
+    let launched = Command::new(&config.python).args(["-I","-c","import json,sys,centaeris_venv_marker as marker;print(json.dumps({'prefix':sys.prefix,'marker':marker.VALUE}))"]).output().unwrap();
+    assert!(
+        launched.status.success(),
+        "configured interpreter failed: {}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    let result: Value = serde_json::from_slice(&launched.stdout).unwrap();
+    assert_eq!(result["prefix"], venv.to_string_lossy().as_ref());
+    assert_eq!(result["marker"], "selected-venv");
 }
 
 #[test]

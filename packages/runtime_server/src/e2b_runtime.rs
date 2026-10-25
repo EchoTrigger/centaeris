@@ -215,13 +215,15 @@ impl E2bRuntimeConfig {
         if !python.is_absolute() || !adapter_package_root.is_absolute() {
             return Err(E2bRuntimeError::Rejected("e2b_runtime_paths_invalid"));
         }
-        let python = python
+        // Keep the selected launch alias: resolving a venv's Python symlink
+        // changes its prefix and drops the SDK installed in that environment.
+        let canonical_python = python
             .canonicalize()
             .map_err(|_| E2bRuntimeError::Rejected("e2b_runtime_paths_invalid"))?;
         let adapter_package_root = adapter_package_root
             .canonicalize()
             .map_err(|_| E2bRuntimeError::Rejected("e2b_runtime_paths_invalid"))?;
-        if !python.is_file() || !adapter_package_root.is_dir() {
+        if !canonical_python.is_file() || !adapter_package_root.is_dir() {
             return Err(E2bRuntimeError::Rejected("e2b_runtime_paths_invalid"));
         }
         for module in [
