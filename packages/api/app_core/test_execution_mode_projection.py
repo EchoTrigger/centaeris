@@ -30,11 +30,14 @@ class ExecutionModeProjectionContractTests(SimpleTestCase):
             id="session-current", workspace_id="workspace-owned", agent_id="agent-owned",
             project_id=None, current_environment_id="environment-current",
             current_environment=environment, title="Session", origin="user", status="active",
-            deletedAt=None, isPinned=False, isUnread=False,
+            deletedAt=None, isPinned=False, isManuallyUnread=False,
+            latestAttentionSequence=0, readThroughSequence=0, attentionRevision=0,
             updatedAt=datetime(2026, 10, 23, tzinfo=timezone.utc),
         )
         with patch("app_core.agent_work_presentation.initial_input_origin", return_value=None):
-            return serialize_session(session, has_active_agent_run=False)
+            # This pure projection fixture supplies an already refreshed attention snapshot.
+            # HTTP tests below exercise the real database refresh and list query budget.
+            return serialize_session(session, has_active_agent_run=False, attention_is_current=True)
 
     def test_retained_projection_uses_frozen_profile_instead_of_process_default(self):
         selected = e2b_profile() | {"lifetime": "retained"}
