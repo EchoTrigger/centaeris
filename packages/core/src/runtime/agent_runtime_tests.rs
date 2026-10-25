@@ -5453,6 +5453,35 @@ fn model_prompt_compaction_session(session_id: &str) -> SessionStateSnapshot {
     session
 }
 
+fn retained_history_compaction_test_config(
+    store: &AgentRuntimeTestStore,
+    session: &SessionStateSnapshot,
+    user_message: &str,
+) -> AgentRuntimeConfig {
+    let mut config = AgentRuntimeConfig::default();
+    force_prompt_compaction_for_tests(&mut config);
+    config.model_context_tokens = 100_000;
+    config.enable_prompt_compaction = false;
+    let baseline = AgentRuntime::new_for_test(store.clone(), config.clone())
+        .build_generate_driver_request(
+            session.session_id.as_str(),
+            "turn-compaction-budget-fixture",
+            user_message,
+            0,
+        )
+        .expect("measure complete retained prompt");
+    SessionManager::new(store.clone())
+        .save_session(session)
+        .expect("restore history after measuring fixture budget");
+    config.enable_prompt_compaction = true;
+    // Leave room for unchanged history, while staying above the planner's
+    // pressure threshold so the hook/provider behavior is actually exercised.
+    config.model_context_tokens = baseline.context_token_estimate
+        + baseline.context_token_estimate / 8
+        + config.model_max_output_tokens;
+    config
+}
+
 fn large_context_compaction_config() -> AgentRuntimeConfig {
     AgentRuntimeConfig {
         model_context_tokens: 22_000,
@@ -7834,9 +7863,9 @@ async fn pre_compact_hook_blocks_before_model_compaction_provider_request() {
         .save_session(&session)
         .expect("save model compaction session");
 
-    let mut config = AgentRuntimeConfig::default();
-    force_prompt_compaction_for_tests(&mut config);
-    config.model_context_tokens = 12_000;
+    let user_message = "Continue after hook block.";
+    let config = retained_history_compaction_test_config(&store, &session, user_message);
+    let available_input_tokens = config.model_context_tokens - config.model_max_output_tokens;
     let hook_engine = LifecycleHookEngineV1::new(vec![LifecycleHookHandlerV1 {
         id: "pre-compact-block".to_string(),
         event: LifecycleHookEventNameV1::PreCompact,
@@ -7871,17 +7900,18 @@ async fn pre_compact_hook_blocks_before_model_compaction_provider_request() {
     };
     let driver = ModelClientGenerateDriver::new(&model_client, &config_store);
 
-    let _request = engine
+    let request = engine
         .build_generate_driver_request_with_async_driver(
             "chat-pre-compact-hook-block",
             "turn-pre-compact-hook-block",
-            "Continue after hook block.",
+            user_message,
             0,
             &driver,
         )
         .await
         .expect("build request should continue without compacting");
 
+    assert!(request.context_token_estimate <= available_input_tokens);
     assert!(
         model_client.requests().is_empty(),
         "PreCompact block must prevent summary provider call"
@@ -8002,9 +8032,9 @@ async fn model_prompt_compaction_provider_failure_does_not_fallback_to_template(
         .save_session(&session)
         .expect("save model compaction session");
 
-    let mut config = AgentRuntimeConfig::default();
-    force_prompt_compaction_for_tests(&mut config);
-    config.model_context_tokens = 12_000;
+    let user_message = "Continue despite compaction provider failure.";
+    let mut config = retained_history_compaction_test_config(&store, &session, user_message);
+    let available_input_tokens = config.model_context_tokens - config.model_max_output_tokens;
     config.prompt_compaction_summary_max_tokens = 2_000;
     let engine = AgentRuntime::new_for_test(store.clone(), config);
     let model_client =
@@ -8018,13 +8048,19 @@ async fn model_prompt_compaction_provider_failure_does_not_fallback_to_template(
         .build_generate_driver_request_with_async_driver(
             "chat-model-client-fail",
             "turn-model-client-fail",
-            "Continue despite compaction provider failure.",
+            user_message,
             0,
             &driver,
         )
         .await
         .expect("build generate request records compaction failure");
 
+    assert!(request.context_token_estimate <= available_input_tokens);
+    assert_eq!(
+        model_client.requests().len(),
+        1,
+        "summary provider was attempted once"
+    );
     let saved_session = session_manager
         .load_or_create_session("chat-model-client-fail")
         .expect("load saved session");
