@@ -34,7 +34,7 @@ fn system_skill_catalog_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/system")
 }
 
-fn workspace_skill_catalog_config_at(
+pub(crate) fn workspace_skill_catalog_config_at(
     activation: &PluginActivationSnapshotV1,
     catalog_root: &Path,
     system_skill_root: &Path,

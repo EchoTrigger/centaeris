@@ -137,9 +137,9 @@ mod tests {
         let profile = profile();
         runner
             .image_digest
-            .clone_from(&profile.legacy().unwrap().image_digest);
-        runner.resources = profile.legacy().unwrap().resources.sandbox_resources();
-        runner.network = profile.network();
+            .clone_from(&profile.image_digest);
+        runner.resources = profile.resources.sandbox_resources();
+        runner.network = profile.network;
         runner.plugin_mounts = old_mounts.clone();
         let body = create_body_with_proxy_environment(
             &runner.container_expectation(),
