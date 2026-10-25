@@ -16,6 +16,8 @@ import re
 import stat
 
 from django.core.files.storage import default_storage
+from .native_archive import archive_reference_blocks_gc
+
 from django.db import transaction
 from django.db.models import Q
 
@@ -83,7 +85,8 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
                     with transaction.atomic():
                         agent = Agent.objects.select_for_update().get(pk=session.agent_id)
                         owner = Session.objects.select_for_update().get(pk=session.id)
-                        if not _owner_reclaimable(agent, owner, session, cutoff):
+                        if (not _owner_reclaimable(agent, owner, session, cutoff)
+                                or archive_reference_blocks_gc(session.id, key, temporary=key.endswith(".tmp"))):
                             report.blocked.append(key)
                             continue
                     claim = claim_storage_key(key, "workspaceSnapshot")
@@ -99,7 +102,8 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
                     owner = Session.objects.select_for_update().only(
                         "status", "purgedAt", "workspace_id", "agent_id",
                     ).get(pk=session.id)
-                    if not _owner_reclaimable(agent, owner, session, cutoff):
+                    if (not _owner_reclaimable(agent, owner, session, cutoff)
+                                or archive_reference_blocks_gc(session.id, key, temporary=key.endswith(".tmp"))):
                         report.blocked.append(key)
                         continue
                     try:

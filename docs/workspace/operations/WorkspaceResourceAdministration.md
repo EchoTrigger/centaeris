@@ -121,3 +121,29 @@ any separate rollback plan still require explicit operational authorization.
 ## Platform workspace resource browser
 
 A platform superuser can open `/settings/workspace-resources`, select an active workspace, and manage its local models, packages and credentials through the same scoped APIs. The operator-only metadata endpoint returns workspace IDs, names and status. It does not create memberships or grant access to private Sessions, Agents or Library objects. Ordinary workspace owners and administrators cannot use this cross-workspace browser.
+
+
+## Retained deployment history
+
+Native deployments retain the released snapshot-publication and maintenance-target
+schemas (0027, 0028 and their 0031 merge) before applying 0032. Their rows, signed
+payloads, provider targets, Session history and files are archival facts; the
+native API contains no producer or resumer for those previous provider operations.
+Every snapshot-publication reference retains its bytes, including committed rows,
+and ordinary GC cannot remove them after a Session purge.
+
+`verify_native_archive`, API startup and readiness refuse unresolved publication
+responsibilities, queued/running Runs on unsupported profiles, or unreleased old
+controllers. The matching Runtime independently refuses unsettled physical,
+creation, power and cleanup duties. Both barriers must pass; a released API
+controller alone does not prove physical retirement. Preflight failures require
+an explicit responsibility-resolution plan, not a data reset or invented terminal
+state.
+
+Owners retain authenticated read access to their historical Session metadata,
+transcript and published files. Starting another Run or maintenance operation on
+an unsupported environment returns
+`environment_profile_unsupported_create_new_environment`; create a fresh native
+environment instead. The old profile and execution identities remain unchanged.
+An archived transcript still uses the existing read-projection service; this
+bridge adds no provider executor or alternate Agent loop.

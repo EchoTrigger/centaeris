@@ -20,11 +20,29 @@ class WorkspaceApplication:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
+
             async def owned_receive():
                 message = await receive()
+                if message["type"] == "lifespan.startup":
+                    from asgiref.sync import sync_to_async
+                    from app_core.native_archive import (
+                        NativeArchiveBlocked,
+                        require_native_archive_activation,
+                    )
+
+                    try:
+                        await sync_to_async(
+                            require_native_archive_activation, thread_sensitive=True
+                        )()
+                    except NativeArchiveBlocked as error:
+                        await send(
+                            {"type": "lifespan.startup.failed", "message": str(error)}
+                        )
+                        raise
                 if message["type"] == "lifespan.shutdown":
                     await self.presentation_hub.aclose()
                 return message
+
             return await self.mcp(scope, owned_receive, send)
         owned_scope = {**scope, "centaeris.presentationHub": self.presentation_hub}
         if scope.get("path") == "/internal/mcp":

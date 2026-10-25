@@ -133,8 +133,145 @@ class WorkspaceResourceMigrationTests(TransactionTestCase):
             before_binding = (
                 objects("AgentConnectorBinding").values().get(pk=binding.pk)
             )
+            # Seed released 0031 records before the forward upgrade. Historical
+            # models preserve their opaque signed facts; native code never
+            # validates these as authority for a new execution.
+            import hashlib
+            import hmac
+            import json
+            from django.db import transaction
+            from django.utils import timezone
+            from .test_native_archive_bridge import ARCHIVED_PROFILE
+
+            profile = json.loads(json.dumps(ARCHIVED_PROFILE))
+            profile_digest = (
+                "sha256:"
+                + hashlib.sha256(
+                    json.dumps(profile, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+            )
+            with transaction.atomic(using=db.alias):
+                agent = objects("Agent").create(
+                    workspace_id=workspaces[0].pk, owner_id=owner.pk, name="Archived"
+                )
+                session = objects("Session").create(
+                    workspace_id=workspaces[0].pk, owner_id=owner.pk, agent_id=agent.pk
+                )
+                environment = objects("SessionEnvironment").create(
+                    session_id=session.pk
+                )
+                objects("SessionEnvironment").filter(pk=environment.pk).update(
+                    environment_profile=profile,
+                    environment_profile_digest=profile_digest,
+                    environment_profile_operation_id="released-binding",
+                    environment_profile_bound_at=timezone.now(),
+                )
+                objects("Session").filter(pk=session.pk).update(
+                    current_environment_id=environment.pk
+                )
+                run = objects("AgentRun").create(
+                    workspace_id=workspaces[0].pk,
+                    session_id=session.pk,
+                    environment_id=environment.pk,
+                    user_id=owner.pk,
+                    modelConfig_id=model.pk,
+                    membership_ref=owner_ids[0][1],
+                    prompt="Archived",
+                    status="completed",
+                )
+                payload = {
+                    "schema": "workspace.agent_run_authorization.v4",
+                    "id": "released-authorization",
+                    "agentRunId": run.pk,
+                    "sessionId": session.pk,
+                    "workspaceId": workspaces[0].pk,
+                    "environmentId": environment.pk,
+                    "environmentProfile": profile,
+                    "environmentProfileDigest": profile_digest,
+                }
+                digest = (
+                    "sha256:"
+                    + hashlib.sha256(
+                        json.dumps(
+                            payload, sort_keys=True, separators=(",", ":")
+                        ).encode()
+                    ).hexdigest()
+                )
+                signature = (
+                    "hmac-sha256:"
+                    + hmac.new(
+                        b"synthetic-archive-fixture-key",
+                        b"workspace:agent-run-authorization:v1\0" + digest.encode(),
+                        hashlib.sha256,
+                    ).hexdigest()
+                )
+                grant = objects("AgentRunAuthorization").create(
+                    id=payload["id"],
+                    agent_run_id=run.pk,
+                    payload=payload,
+                    digest=digest,
+                    signature=signature,
+                )
+                publication = objects("WorkspaceSnapshotPublication").create(
+                    id="released-publication",
+                    session_id=session.pk,
+                    agent_run_id=run.pk,
+                    authorization_id=grant.pk,
+                    purpose="executionCheckpoint",
+                    purpose_key="a" * 64,
+                    checkpoint_id="checkpoint:released",
+                    storage_key="retained/archive.snapshot",
+                    request_digest="sha256:" + "b" * 64,
+                    generation=1,
+                    encoding="frameV1",
+                    snapshot_sha256="sha256:" + "c" * 64,
+                    snapshot_size_bytes=1,
+                    expanded_size_bytes=1,
+                    file_count=1,
+                )
+                objects("WorkspaceSnapshotPublication").filter(
+                    pk=publication.pk
+                ).update(state="staged", confirmed_at=timezone.now())
+                provider_target = {
+                    "provider": "e2b",
+                    "creationAttemptId": "released-creation",
+                    "instanceId": "instance_" + "d" * 64,
+                    "sandboxId": "released-sandbox",
+                    "verificationDigest": "sha256:" + "e" * 64,
+                    "providerConfigDigest": "sha256:" + "a" * 64,
+                }
+                operation = objects("EnvironmentMaintenanceOperation").create(
+                    operation_id="released-maintenance",
+                    workspace_id=workspaces[0].pk,
+                    session_id=session.pk,
+                    environment_id=environment.pk,
+                    provider_target=provider_target,
+                    profile_digest=profile_digest,
+                    request={"program": "true"},
+                    request_digest="sha256:" + "f" * 64,
+                    state="released",
+                    released_at=timezone.now(),
+                )
+            archived = {
+                name: objects(name).values().get(pk=record.pk)
+                for name, record in (
+                    ("Session", session),
+                    ("SessionEnvironment", environment),
+                    ("AgentRun", run),
+                    ("AgentRunAuthorization", grant),
+                    ("WorkspaceSnapshotPublication", publication),
+                    ("EnvironmentMaintenanceOperation", operation),
+                )
+            }
             executor.migrate(target)
             apps = executor.loader.project_state(target).apps
+            for name, before in archived.items():
+                self.assertEqual(
+                    objects(name)
+                    .values()
+                    .get(pk=before["id"] if "id" in before else before["operation_id"]),
+                    before,
+                )
             self.assertIsNone(objects("ModelProvider").get(pk=provider.pk).workspace_id)
             self.assertIsNone(
                 objects("McpBearerCredential").get(pk=mcp.pk).workspace_id
