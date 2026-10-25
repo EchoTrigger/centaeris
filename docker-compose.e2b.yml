@@ -1,0 +1,39 @@
+# Apply after docker-compose.yml. Provider credentials and the profile are deployment-owned.
+# Requires Docker Compose 2.24.4+ for !override; never copy a task-specific template into this file.
+# The profile must use retained lifetime and match the provider digest and immutable template build.
+# Increase stop grace above 2 * request timeout + 10 seconds when overriding the request timeout.
+services:
+  runtime:
+    stop_grace_period: ${RUNTIME_E2B_STOP_GRACE_PERIOD:-60s}
+    environment:
+      RUNTIME_EXECUTION_PROVIDER: e2b
+      RUNTIME_E2B_PROFILE_PATH: /etc/centaeris/e2b-profile.json
+      RUNTIME_E2B_PROVIDER_CONFIG_DIGEST: ${RUNTIME_E2B_PROVIDER_CONFIG_DIGEST:?Set the selected provider configuration digest}
+      RUNTIME_E2B_PYTHON: /opt/centaeris/venv/bin/python
+      RUNTIME_E2B_ADAPTER_PACKAGE_ROOT: /opt/centaeris/e2b-adapter
+      RUNTIME_E2B_REQUEST_TIMEOUT_SECONDS: ${RUNTIME_E2B_REQUEST_TIMEOUT_SECONDS:-20}
+      RUNTIME_E2B_MAX_RUNNING_ENVIRONMENTS: ${RUNTIME_E2B_MAX_RUNNING_ENVIRONMENTS:?Set the retained environment running budget}
+      RUNTIME_E2B_IDLE_PAUSE_MS: ${RUNTIME_E2B_IDLE_PAUSE_MS:?Set the retained environment idle pause interval}
+      E2B_API_KEY: ${E2B_API_KEY:?Set the E2B provider API key}
+      E2B_API_URL: ${E2B_API_URL:?Set the selected E2B control API URL}
+      E2B_SANDBOX_URL: ${E2B_SANDBOX_URL:?Set the selected E2B sandbox data URL}
+    volumes: !override
+      - type: bind
+        source: ${RUNTIME_E2B_PROFILE_PATH:?Set an absolute path to the deployment E2B profile}
+        target: /etc/centaeris/e2b-profile.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - runtime-data:/var/lib/centaeris-runtime
+      - agent-memory:/var/lib/centaeris-agent-memory
+      - type: volume
+        source: plugin-data
+        target: /opt/centaeris/plugins
+        read_only: true
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy

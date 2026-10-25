@@ -105,6 +105,7 @@ services:
       dockerfile: packages/runtime_server/Dockerfile
       labels: *release-image-labels
     environment:
+      RUNTIME_EXECUTION_PROVIDER: docker
       RUNTIME_BIND_ADDRESS: 0.0.0.0
       RUNTIME_PORT: ${RUNTIME_PORT}
       API_INTERNAL_URL: *api-internal-url

@@ -42,7 +42,7 @@ RESIDENT_HEADROOM_VARIABLES = (
 )
 
 
-def compose_config(**overrides):
+def compose_config(*, compose_files=("docker-compose.yml",), **overrides):
     values = {}
     for line in (ROOT / ".env.example").read_text().splitlines():
         key, separator, value = line.partition("=")
@@ -56,7 +56,8 @@ def compose_config(**overrides):
         path = Path(temp) / "synthetic.env"
         path.write_text("\n".join(f"{k}={v}" for k, v in values.items() if v is not None), encoding="utf-8")
         result = subprocess.run(
-            ["docker", "compose", "--env-file", str(path), "-f", str(ROOT / "docker-compose.yml"),
+            ["docker", "compose", "--env-file", str(path),
+             *[part for name in compose_files for part in ("-f", str(ROOT / name))],
              "config", "--format", "json"],
             cwd=ROOT, env=env, capture_output=True, text=True, check=True,
         )
@@ -64,6 +65,44 @@ def compose_config(**overrides):
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def test_native_compose_selects_its_execution_provider_explicitly(self):
+        self.assertEqual(compose_config()["services"]["runtime"]["environment"]["RUNTIME_EXECUTION_PROVIDER"], "docker")
+
+    def test_e2b_compose_wires_sdk_profile_and_rotation_without_native_host_access(self):
+        expected = {
+            "RUNTIME_E2B_PROFILE_PATH": "/srv/centaeris/profile.json",
+            "RUNTIME_E2B_PROVIDER_CONFIG_DIGEST": "sha256:" + "a" * 64,
+            "E2B_API_KEY": "synthetic-test-only",
+            "E2B_API_URL": "http://provider.invalid:3000",
+            "E2B_SANDBOX_URL": "http://provider.invalid:3002",
+            "RUNTIME_E2B_MAX_RUNNING_ENVIRONMENTS": "2",
+            "RUNTIME_E2B_IDLE_PAUSE_MS": "4000",
+            "RUNTIME_E2B_REQUEST_TIMEOUT_SECONDS": "20",
+        }
+        files = ("docker-compose.yml", "docker-compose.e2b.yml")
+        services = compose_config(compose_files=files, **expected)["services"]
+        runtime = services["runtime"]
+        environment = runtime["environment"]
+        self.assertEqual(environment["RUNTIME_EXECUTION_PROVIDER"], "e2b")
+        self.assertEqual(environment["RUNTIME_E2B_PROFILE_PATH"], "/etc/centaeris/e2b-profile.json")
+        for name, value in expected.items():
+            if name != "RUNTIME_E2B_PROFILE_PATH":
+                self.assertEqual(environment[name], value)
+        self.assertEqual(environment["RUNTIME_E2B_PYTHON"], "/opt/centaeris/venv/bin/python")
+        self.assertEqual(environment["RUNTIME_E2B_ADAPTER_PACKAGE_ROOT"], "/opt/centaeris/e2b-adapter")
+        mount = next(item for item in runtime["volumes"] if item["target"] == environment["RUNTIME_E2B_PROFILE_PATH"])
+        self.assertEqual((mount["type"], mount["source"], mount["read_only"]), ("bind", expected["RUNTIME_E2B_PROFILE_PATH"], True))
+        self.assertFalse(mount.get("bind", {}).get("create_host_path", False))
+        self.assertEqual(set(runtime["depends_on"]), {"api", "postgres", "redis"})
+        self.assertEqual({item["target"] for item in runtime["volumes"]}, {
+            "/etc/centaeris/e2b-profile.json", "/var/lib/centaeris-runtime",
+            "/var/lib/centaeris-agent-memory", "/opt/centaeris/plugins"})
+        self.assertEqual(runtime["stop_grace_period"], "1m0s")
+        for name in ("RUNTIME_E2B_PROFILE_PATH", "RUNTIME_E2B_PROVIDER_CONFIG_DIGEST", "E2B_API_KEY",
+                     "E2B_API_URL", "E2B_SANDBOX_URL", "RUNTIME_E2B_MAX_RUNNING_ENVIRONMENTS", "RUNTIME_E2B_IDLE_PAUSE_MS"):
+            with self.subTest(missing=name), self.assertRaises(subprocess.CalledProcessError):
+                compose_config(compose_files=files, **{**expected, name: None})
+
     def test_installed_host_helper_path_reaches_runtime_and_read_only_mount(self):
         default = compose_config()["services"]["runtime"]["environment"]
         self.assertTrue(default["ENVIRONMENT_EXECUTION_HELPER"].startswith("/"))
