@@ -1,3 +1,4 @@
+mod execution_capacity_tests;
 use centaeris_core::runtime::contracts::{CheckpointRecord, EventVisibility, RuntimeEvent};
 use centaeris_core::session::external_context::{
     ExternalContextObject, ExternalContextObjectLink, ExternalContextStorePort,
@@ -19,12 +20,12 @@ use centaeris_core::session::supplement::{
     EnqueueTurnSupplementRequest, TurnSupplementStoreError, TurnSupplementStorePort,
 };
 use centaeris_core::session::transcript::{
-    TranscriptPagePolicyV1, TranscriptPageReadRequestV1, TranscriptPatchReadRequestV1,
-    TranscriptProjectionStorePort, TRANSCRIPT_PROJECTION_VERSION_V1,
+    TRANSCRIPT_PROJECTION_VERSION_V1, TranscriptPagePolicyV1, TranscriptPageReadRequestV1,
+    TranscriptPatchReadRequestV1, TranscriptProjectionStorePort,
 };
 use centaeris_core::session::{
-    RuntimeJobLeaseFence, SequencedSessionRecord, SessionLogPort, SessionLogRecord,
-    SessionRecordType, RUNTIME_JOB_LEASE_FENCE_REJECTED, SESSION_EVENT_SCHEMA_VERSION,
+    RUNTIME_JOB_LEASE_FENCE_REJECTED, RuntimeJobLeaseFence, SESSION_EVENT_SCHEMA_VERSION,
+    SequencedSessionRecord, SessionLogPort, SessionLogRecord, SessionRecordType,
 };
 use postgres::fallible_iterator::FallibleIterator;
 use postgres::{Client, NoTls};
@@ -235,10 +236,12 @@ fn postgres_outbox_late_waiters_recover_after_ack_and_restart_across_pages() {
             20
         );
     }
-    assert!(reopened
-        .list_pending_runtime_job_outbox(256)
-        .unwrap()
-        .is_empty());
+    assert!(
+        reopened
+            .list_pending_runtime_job_outbox(256)
+            .unwrap()
+            .is_empty()
+    );
     let mut client = Client::connect(&url, NoTls).unwrap();
     let count: i64 = client.query_one("SELECT count(*) FROM runtime.runtime_events WHERE event_type='runtime_job_wake_requested'", &[]).unwrap().get(0);
     assert_eq!(
@@ -289,10 +292,12 @@ fn postgres_outbox_unacknowledged_delivery_survives_restart_and_duplicate_ack() 
             .unwrap(),
         RuntimeJobOutboxPublishDisposition::AlreadyPublished
     );
-    assert!(store
-        .list_pending_runtime_job_outbox(10)
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .list_pending_runtime_job_outbox(10)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -339,10 +344,12 @@ fn postgres_outbox_wake_during_active_waiter_survives_yield() {
         store.get_runtime_job(&id).unwrap().unwrap().run_at_ms,
         100_002
     );
-    assert!(store
-        .list_pending_runtime_job_outbox(10)
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .list_pending_runtime_job_outbox(10)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 fn test_url() -> String {
@@ -425,9 +432,10 @@ fn postgres_pre_admission_cancellation_is_durable_fenced_and_history_free() {
         "cancel-session".into(),
         "never admitted".into(),
     );
-    assert!(log
-        .commit_pre_admission_cancellation("cancel-run", "digest", &fence)
-        .is_err());
+    assert!(
+        log.commit_pre_admission_cancellation("cancel-run", "digest", &fence)
+            .is_err()
+    );
     store
         .request_agent_run_cancellation("cancel-run", "cancel-session", "digest", now)
         .unwrap();
@@ -435,12 +443,14 @@ fn postgres_pre_admission_cancellation_is_durable_fenced_and_history_free() {
         lease_owner: "stale".into(),
         ..fence.clone()
     };
-    assert!(log
-        .commit_pre_admission_cancellation("cancel-run", "digest", &stale)
-        .is_err());
-    assert!(log
-        .commit_pre_admission_cancellation("cancel-run", "wrong", &fence)
-        .is_err());
+    assert!(
+        log.commit_pre_admission_cancellation("cancel-run", "digest", &stale)
+            .is_err()
+    );
+    assert!(
+        log.commit_pre_admission_cancellation("cancel-run", "wrong", &fence)
+            .is_err()
+    );
     for _ in 0..2 {
         log.commit_pre_admission_cancellation("cancel-run", "digest", &fence)
             .unwrap();
@@ -505,9 +515,10 @@ fn postgres_pre_admission_cancellation_is_durable_fenced_and_history_free() {
         &[],
     )
     .unwrap();
-    assert!(log
-        .commit_pre_admission_cancellation("cancel-run", "digest", &fence)
-        .is_err());
+    assert!(
+        log.commit_pre_admission_cancellation("cancel-run", "digest", &fence)
+            .is_err()
+    );
 }
 
 #[test]
@@ -597,15 +608,19 @@ fn postgres_transcript_concurrent_duplicate_commit_is_idempotent() {
         .expect("a concurrent writer already satisfied the requested waterline");
     assert!(progress.caught_up);
     commit.source_high_water = "3".into();
-    assert!(store
-        .commit_transcript_projection(commit.clone())
-        .unwrap_err()
-        .contains("commitId conflict"));
+    assert!(
+        store
+            .commit_transcript_projection(commit.clone())
+            .unwrap_err()
+            .contains("commitId conflict")
+    );
     commit.commit_id = "different-commit".into();
-    assert!(store
-        .commit_transcript_projection(commit)
-        .unwrap_err()
-        .contains("sourceHighWater conflict"));
+    assert!(
+        store
+            .commit_transcript_projection(commit)
+            .unwrap_err()
+            .contains("sourceHighWater conflict")
+    );
 }
 
 #[test]
@@ -866,10 +881,12 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
     store
         .delete_session_data("session_transcript")
         .expect("delete session-derived transcript state");
-    assert!(store
-        .load_transcript_projection_head("session_transcript", "generation-1")
-        .expect("load deleted transcript head")
-        .is_none());
+    assert!(
+        store
+            .load_transcript_projection_head("session_transcript", "generation-1")
+            .expect("load deleted transcript head")
+            .is_none()
+    );
 
     let mut break_projection = Client::connect(&url, NoTls).expect("connect projection failure");
     break_projection
@@ -1128,10 +1145,12 @@ fn postgres_expired_lease_reclaim_skips_another_workers_locked_job() {
     assert_eq!(counts.get::<_, i64>(0), 3);
     assert_eq!(counts.get::<_, i64>(1), 3);
     assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_events WHERE event_type='runtime_job_lease_reclaimed'", &[]).unwrap().get::<_, i64>(0), 3);
-    assert!(first_store
-        .list_pending_runtime_job_outbox(10)
-        .unwrap()
-        .is_empty());
+    assert!(
+        first_store
+            .list_pending_runtime_job_outbox(10)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1178,14 +1197,16 @@ fn postgres_expired_lease_budget_persists_backoff_fencing_and_isolation() {
             1
         );
         assert!(claim(&store, now + 10).is_empty());
-        assert!(store
-            .complete_runtime_job(CompleteRuntimeJobRequest {
-                job_id: active.job_id,
-                lease_owner: active.lease_owner.unwrap(),
-                output_refs: vec![],
-                completed_at_ms: now + 11,
-            })
-            .is_err());
+        assert!(
+            store
+                .complete_runtime_job(CompleteRuntimeJobRequest {
+                    job_id: active.job_id,
+                    lease_owner: active.lease_owner.unwrap(),
+                    output_refs: vec![],
+                    completed_at_ms: now + 11,
+                })
+                .is_err()
+        );
         store
             .wake_runtime_job(
                 centaeris_core::session::reliability::WakeRuntimeJobRequest {
@@ -1266,12 +1287,13 @@ fn postgres_lease_budget_forward_migration_preserves_published_job_facts() {
         .map(|row| (row.get::<_, i64>(0), row.get::<_, i64>(1))).collect::<Vec<_>>();
     assert_eq!(retained_history, history);
     assert_eq!(db.query_one("SELECT lease_reclaim_count,lease_reclaim_not_before_ms FROM runtime.runtime_jobs WHERE job_id='pg-previous-job'", &[]).unwrap().get::<_, i64>(0), 0);
-    assert!(db
-        .execute(
+    assert!(
+        db.execute(
             "UPDATE runtime.runtime_jobs SET lease_reclaim_count=-1",
             &[]
         )
-        .is_err());
+        .is_err()
+    );
     drop(upgraded);
     PostgresRuntimeStore::new(&url).unwrap();
 }
@@ -1334,57 +1356,69 @@ fn postgres_same_worker_reclaim_fences_old_writes_and_result_transaction() {
         old, current,
         "each claim needs a new identity even for the same worker"
     );
-    assert!(store
-        .start_runtime_job(StartRuntimeJobRequest {
-            job_id: "job_pg_reclaim".into(),
-            lease_owner: old.clone(),
-            started_at_ms: 111
-        })
-        .is_err());
-    assert!(store
-        .renew_runtime_job_lease(RenewRuntimeJobLeaseRequest {
-            job_id: "job_pg_reclaim".into(),
-            lease_owner: old.clone(),
-            heartbeat_at_ms: 111,
-            lease_ms: 100
-        })
-        .is_err());
-    assert!(store
-        .yield_runtime_job(YieldRuntimeJobRequest {
-            job_id: "job_pg_reclaim".into(),
-            lease_owner: old.clone(),
-            yielded_at_ms: 111,
-            run_at_ms: 120,
-            transition_reason: "stale".into()
-        })
-        .is_err());
-    assert!(store
-        .fail_runtime_job(FailRuntimeJobRequest {
-            job_id: "job_pg_reclaim".into(),
-            lease_owner: old.clone(),
-            failed_at_ms: 111,
-            last_error: "stale".into(),
-            next_run_at_ms: None,
-            disposition: RuntimeJobFailureDisposition::Failed
-        })
-        .is_err());
-    assert!(store
-        .complete_runtime_job(CompleteRuntimeJobRequest {
-            job_id: "job_pg_reclaim".into(),
-            lease_owner: old.clone(),
-            output_refs: vec![],
-            completed_at_ms: 111
-        })
-        .is_err());
-    assert!(store
-        .cancel_runtime_job(CancelRuntimeJobRequest {
-            job_id: "job_pg_reclaim".into(),
-            reason: "stale".into(),
-            cancelled_at_ms: 111,
-            expected_status: None,
-            expected_lease_owner: Some(old.clone())
-        })
-        .is_err());
+    assert!(
+        store
+            .start_runtime_job(StartRuntimeJobRequest {
+                job_id: "job_pg_reclaim".into(),
+                lease_owner: old.clone(),
+                started_at_ms: 111
+            })
+            .is_err()
+    );
+    assert!(
+        store
+            .renew_runtime_job_lease(RenewRuntimeJobLeaseRequest {
+                job_id: "job_pg_reclaim".into(),
+                lease_owner: old.clone(),
+                heartbeat_at_ms: 111,
+                lease_ms: 100
+            })
+            .is_err()
+    );
+    assert!(
+        store
+            .yield_runtime_job(YieldRuntimeJobRequest {
+                job_id: "job_pg_reclaim".into(),
+                lease_owner: old.clone(),
+                yielded_at_ms: 111,
+                run_at_ms: 120,
+                transition_reason: "stale".into()
+            })
+            .is_err()
+    );
+    assert!(
+        store
+            .fail_runtime_job(FailRuntimeJobRequest {
+                job_id: "job_pg_reclaim".into(),
+                lease_owner: old.clone(),
+                failed_at_ms: 111,
+                last_error: "stale".into(),
+                next_run_at_ms: None,
+                disposition: RuntimeJobFailureDisposition::Failed
+            })
+            .is_err()
+    );
+    assert!(
+        store
+            .complete_runtime_job(CompleteRuntimeJobRequest {
+                job_id: "job_pg_reclaim".into(),
+                lease_owner: old.clone(),
+                output_refs: vec![],
+                completed_at_ms: 111
+            })
+            .is_err()
+    );
+    assert!(
+        store
+            .cancel_runtime_job(CancelRuntimeJobRequest {
+                job_id: "job_pg_reclaim".into(),
+                reason: "stale".into(),
+                cancelled_at_ms: 111,
+                expected_status: None,
+                expected_lease_owner: Some(old.clone())
+            })
+            .is_err()
+    );
     let object = ExternalContextObject {
         schema_version: "external_context.object.v1".into(),
         object_id: "old_result".into(),
@@ -1405,32 +1439,40 @@ fn postgres_same_worker_reclaim_fences_old_writes_and_result_transaction() {
         source_tool_name: "test".into(),
         linked_at_ms: 111,
     };
-    assert!(store
-        .upsert_external_context_link_and_complete_job(
-            UpsertExternalContextLinkAndCompleteJobRequest {
-                object: Some(object),
-                link: Some(link),
-                complete_job: CompleteRuntimeJobRequest {
-                    job_id: "job_pg_reclaim".into(),
-                    lease_owner: old,
-                    output_refs: vec!["old_result".into()],
-                    completed_at_ms: 111
-                },
-            }
-        )
-        .is_err());
-    assert!(store
-        .load_external_context_object("old_result")
-        .unwrap()
-        .is_none());
-    assert!(store
-        .load_external_context_object_link("session_pg", "old_result", "turn_pg", "call_pg")
-        .unwrap()
-        .is_none());
-    assert!(store
-        .list_pending_runtime_job_outbox(10)
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .upsert_external_context_link_and_complete_job(
+                UpsertExternalContextLinkAndCompleteJobRequest {
+                    object: Some(object),
+                    link: Some(link),
+                    complete_job: CompleteRuntimeJobRequest {
+                        job_id: "job_pg_reclaim".into(),
+                        lease_owner: old,
+                        output_refs: vec!["old_result".into()],
+                        completed_at_ms: 111
+                    },
+                }
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .load_external_context_object("old_result")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .load_external_context_object_link("session_pg", "old_result", "turn_pg", "call_pg")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .list_pending_runtime_job_outbox(10)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         store
             .get_runtime_job("job_pg_reclaim")
@@ -1507,15 +1549,17 @@ fn postgres_worker_cancel_checks_claim_but_user_cancel_targets_job() {
         Some("legacy_claim_identity"),
         "renewal preserves a released lease identity"
     );
-    assert!(store
-        .cancel_runtime_job(CancelRuntimeJobRequest {
-            job_id: "job_pg_cancel".into(),
-            reason: "stale worker".into(),
-            cancelled_at_ms: 101,
-            expected_status: Some(RuntimeJobStatus::Leased),
-            expected_lease_owner: Some("wrong_claim_identity".into())
-        })
-        .is_err());
+    assert!(
+        store
+            .cancel_runtime_job(CancelRuntimeJobRequest {
+                job_id: "job_pg_cancel".into(),
+                reason: "stale worker".into(),
+                cancelled_at_ms: 101,
+                expected_status: Some(RuntimeJobStatus::Leased),
+                expected_lease_owner: Some("wrong_claim_identity".into())
+            })
+            .is_err()
+    );
     assert_eq!(
         store
             .get_runtime_job("job_pg_cancel")
@@ -1645,14 +1689,16 @@ fn postgres_hosted_worker_reclaim_changes_claim_identity() {
     );
     let current = claim(&store);
     assert_ne!(old, current);
-    assert!(store
-        .complete_runtime_job(CompleteRuntimeJobRequest {
-            job_id: id.into(),
-            lease_owner: old.clone(),
-            output_refs: vec![],
-            completed_at_ms: now + 1
-        })
-        .is_err());
+    assert!(
+        store
+            .complete_runtime_job(CompleteRuntimeJobRequest {
+                job_id: id.into(),
+                lease_owner: old.clone(),
+                output_refs: vec![],
+                completed_at_ms: now + 1
+            })
+            .is_err()
+    );
     assert!(
         store
             .start_runtime_job(StartRuntimeJobRequest {
@@ -1684,8 +1730,8 @@ fn postgres_hosted_worker_reclaim_changes_claim_identity() {
 fn postgres_subagent_projection_uses_core_durable_job_binding() {
     use centaeris_core::runtime::persist_subagent_result_projection_from_scheduler_events;
     use centaeris_core::runtime::subagent::{
-        build_subagent_run_job, SubagentLifecycleStatus, SubagentRunJobRequest,
-        SubagentSchedulerEvent, SubagentSchedulerEventKind,
+        SubagentLifecycleStatus, SubagentRunJobRequest, SubagentSchedulerEvent,
+        SubagentSchedulerEventKind, build_subagent_run_job,
     };
     use centaeris_core::session::manager::SessionManager;
 
@@ -1745,19 +1791,23 @@ fn postgres_subagent_projection_uses_core_durable_job_binding() {
     let mut wrong = event.clone();
     wrong.status = SubagentLifecycleStatus::Failed;
     assert!(project("session_projection_parent", wrong).is_err());
-    assert!(SessionManager::new(store.clone())
-        .load_session("session_projection_parent")
-        .unwrap()
-        .is_none());
+    assert!(
+        SessionManager::new(store.clone())
+            .load_session("session_projection_parent")
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         project("session_projection_parent", event.clone()).unwrap(),
         1
     );
     assert_eq!(project("session_projection_parent", event).unwrap(), 0);
-    assert!(SessionManager::new(store)
-        .load_session("session_projection_parent")
-        .unwrap()
-        .is_some());
+    assert!(
+        SessionManager::new(store)
+            .load_session("session_projection_parent")
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -2059,20 +2109,26 @@ fn shared_waiter_index_contract<S: RuntimeStore + RuntimeStoreTransactionPort>(s
     store.append_event(event.clone()).unwrap();
     let mut conflicting = event.clone();
     conflicting.payload_json = "{}".into();
-    assert!(store
-        .save_wait_checkpoint(SaveWaitCheckpointRequest {
-            checkpoint: checkpoint.clone(),
-            event: conflicting.clone()
-        })
-        .is_err());
-    assert!(store
-        .load_checkpoint_by_turn(&checkpoint.session_id, &checkpoint.turn_id)
-        .unwrap()
-        .is_none());
-    assert!(store
-        .list_runtime_job_waiters(Some("source:target"), None, 256)
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .save_wait_checkpoint(SaveWaitCheckpointRequest {
+                checkpoint: checkpoint.clone(),
+                event: conflicting.clone()
+            })
+            .is_err()
+    );
+    assert!(
+        store
+            .load_checkpoint_by_turn(&checkpoint.session_id, &checkpoint.turn_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .list_runtime_job_waiters(Some("source:target"), None, 256)
+            .unwrap()
+            .is_empty()
+    );
     for _ in 0..2 {
         store
             .save_wait_checkpoint(SaveWaitCheckpointRequest {
@@ -2099,16 +2155,20 @@ fn shared_waiter_index_contract<S: RuntimeStore + RuntimeStoreTransactionPort>(s
             .len(),
         1
     );
-    assert!(store
-        .list_runtime_job_waiters(Some("source:absent"), None, 256)
-        .unwrap()
-        .is_empty());
-    assert!(store
-        .consume_wait_checkpoint(ConsumeWaitCheckpointRequest {
-            checkpoint: checkpoint.clone(),
-            events: vec![conflicting]
-        })
-        .is_err());
+    assert!(
+        store
+            .list_runtime_job_waiters(Some("source:absent"), None, 256)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .consume_wait_checkpoint(ConsumeWaitCheckpointRequest {
+                checkpoint: checkpoint.clone(),
+                events: vec![conflicting]
+            })
+            .is_err()
+    );
     assert_eq!(
         store
             .list_runtime_job_waiters(Some("source:target"), None, 256)
@@ -2125,10 +2185,12 @@ fn shared_waiter_index_contract<S: RuntimeStore + RuntimeStoreTransactionPort>(s
             events: vec![consumed],
         })
         .unwrap();
-    assert!(store
-        .list_runtime_job_waiters(None, None, 256)
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .list_runtime_job_waiters(None, None, 256)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -2394,8 +2456,8 @@ fn postgres_runtime_store_pool_checkout_is_bounded() {
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_runtime_store_discards_failed_and_panicked_leases_without_replay() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let _guard = TEST_LOCK.lock().expect("Postgres test lock");
     let url = test_url();
@@ -2455,10 +2517,12 @@ fn postgres_runtime_store_replaces_closed_idle_connection_before_operation() {
         })
         .expect("load pooled backend identity");
     let mut administrator = Client::connect(&url, NoTls).expect("connect test administrator");
-    assert!(administrator
-        .query_one("SELECT pg_terminate_backend($1)", &[&first_backend])
-        .expect("terminate pooled backend")
-        .get::<_, bool>(0));
+    assert!(
+        administrator
+            .query_one("SELECT pg_terminate_backend($1)", &[&first_backend])
+            .expect("terminate pooled backend")
+            .get::<_, bool>(0)
+    );
     std::thread::sleep(Duration::from_millis(20));
     let replacement_backend: i32 = store
         .with_client(|client| {
@@ -2594,10 +2658,12 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
             }],
         })
         .expect("atomic wait consumption");
-    assert!(store
-        .load_checkpoint_by_turn("session_pg", "turn_wait_pg")
-        .expect("wait checkpoint removed")
-        .is_none());
+    assert!(
+        store
+            .load_checkpoint_by_turn("session_pg", "turn_wait_pg")
+            .expect("wait checkpoint removed")
+            .is_none()
+    );
     assert_eq!(
         store
             .list_events("session_pg", 10, 0)
@@ -2634,13 +2700,15 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
         .remove(0)
         .lease_owner
         .unwrap();
-    assert!(store
-        .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
-            worker_id: "worker_b".to_string(),
-            ..request
-        })
-        .expect("second claim")
-        .is_empty());
+    assert!(
+        store
+            .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
+                worker_id: "worker_b".to_string(),
+                ..request
+            })
+            .expect("second claim")
+            .is_empty()
+    );
     store
         .start_runtime_job(StartRuntimeJobRequest {
             job_id: "job_pg".to_string(),
@@ -2662,14 +2730,16 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
             .expect("live lease"),
         0
     );
-    assert!(store
-        .complete_runtime_job(CompleteRuntimeJobRequest {
-            job_id: "job_pg".to_string(),
-            lease_owner: old_owner.clone(),
-            output_refs: vec![],
-            completed_at_ms: 120,
-        })
-        .is_err());
+    assert!(
+        store
+            .complete_runtime_job(CompleteRuntimeJobRequest {
+                job_id: "job_pg".to_string(),
+                lease_owner: old_owner.clone(),
+                output_refs: vec![],
+                completed_at_ms: 120,
+            })
+            .is_err()
+    );
     assert_eq!(
         store
             .reclaim_expired_runtime_job_leases(120)
@@ -2691,14 +2761,16 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
         .lease_owner
         .unwrap();
     assert_ne!(old_owner, current_owner);
-    assert!(store
-        .complete_runtime_job(CompleteRuntimeJobRequest {
-            job_id: "job_pg".to_string(),
-            lease_owner: old_owner,
-            output_refs: vec![],
-            completed_at_ms: 121,
-        })
-        .is_err());
+    assert!(
+        store
+            .complete_runtime_job(CompleteRuntimeJobRequest {
+                job_id: "job_pg".to_string(),
+                lease_owner: old_owner,
+                output_refs: vec![],
+                completed_at_ms: 121,
+            })
+            .is_err()
+    );
     store
         .complete_runtime_job(CompleteRuntimeJobRequest {
             job_id: "job_pg".to_string(),
@@ -3311,10 +3383,12 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
         RuntimeJobStatus::Running,
         "Session terminal commits before lifecycle job completion"
     );
-    assert!(store
-        .list_pending_runtime_job_outbox(10)
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .list_pending_runtime_job_outbox(10)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         crate::load_existing_terminal_state(&store, &start).unwrap(),
         Some(expected_state),
@@ -3360,24 +3434,30 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             now_ms + 15,
         )
         .unwrap();
-    assert!(store
-        .list_pending_runtime_job_outbox(10)
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .list_pending_runtime_job_outbox(10)
+            .unwrap()
+            .is_empty()
+    );
     let reopened = PostgresRuntimeStore::new(&url).unwrap();
     assert_eq!(
         crate::load_existing_terminal_state(&reopened, &start).unwrap(),
         Some(expected_state),
         "ACK and reopen remove the delivery hint, never the committed terminal"
     );
-    assert!(store
-        .list_runtime_job_waiters(Some("source:terminal_wait"), None, 10)
-        .unwrap()
-        .is_empty());
-    assert!(store
-        .load_checkpoint_by_turn(session_id, &wait.turn_id)
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .list_runtime_job_waiters(Some("source:terminal_wait"), None, 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .load_checkpoint_by_turn(session_id, &wait.turn_id)
+            .unwrap()
+            .is_none()
+    );
     for _ in 0..2 {
         store
             .repair_terminal_runtime_job_waits(session_id, agent_run_id)
@@ -3400,10 +3480,12 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
     store
         .repair_terminal_runtime_job_waits(session_id, agent_run_id)
         .unwrap();
-    assert!(store
-        .list_runtime_job_waiters(Some("source:terminal_wait"), None, 10)
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .list_runtime_job_waiters(Some("source:terminal_wait"), None, 10)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         audit
             .query_one(
@@ -3705,10 +3787,12 @@ fn exercise_model_request_storage(include_growth: bool) {
         "real PostgreSQL two-pass hydration must preserve the exact Core snapshot",
     );
     assert_eq!(streamed.source_records.len(), 2);
-    assert!(streamed
-        .source_records
-        .iter()
-        .all(|record| record.event_type != SessionRecordType::ModelRequestStarted));
+    assert!(
+        streamed
+            .source_records
+            .iter()
+            .all(|record| record.event_type != SessionRecordType::ModelRequestStarted)
+    );
 
     if !include_growth {
         return;
@@ -3794,30 +3878,38 @@ fn exercise_model_request_storage(include_growth: bool) {
     ).expect("read last compact root").get::<_, String>(0);
     let mut other_wire: serde_json::Value = serde_json::from_str(&stored_root).unwrap();
     other_wire["sessionId"] = serde_json::json!("session_other");
-    assert!(super::runtime::hydrate_session_wire_values(
-        &mut audit,
-        std::slice::from_mut(&mut other_wire)
-    )
-    .expect_err("cross-session manifest must fail")
-    .contains("missing"));
+    assert!(
+        super::runtime::hydrate_session_wire_values(
+            &mut audit,
+            std::slice::from_mut(&mut other_wire)
+        )
+        .expect_err("cross-session manifest must fail")
+        .contains("missing")
+    );
     let root: serde_json::Value = serde_json::from_str(&stored_root).unwrap();
     let digest = root["payload"]["observations"]["manifestDigest"]
         .as_str()
         .unwrap();
     let original = audit.query_one("SELECT manifest_json,manifest_bytes FROM runtime.model_observation_manifests WHERE session_id=$1 AND manifest_digest=$2", &[&session_id, &digest]).unwrap();
     audit.execute("UPDATE runtime.model_observation_manifests SET manifest_json='{}',manifest_bytes=2 WHERE session_id=$1 AND manifest_digest=$2", &[&session_id, &digest]).unwrap();
-    assert!(runtime
-        .block_on(session_log.append_session_records(agent_run_id, std::slice::from_ref(&latest)))
-        .expect_err("tampered manifest must fail")
-        .contains("digest mismatch"));
+    assert!(
+        runtime
+            .block_on(
+                session_log.append_session_records(agent_run_id, std::slice::from_ref(&latest))
+            )
+            .expect_err("tampered manifest must fail")
+            .contains("digest mismatch")
+    );
     audit.execute("UPDATE runtime.model_observation_manifests SET manifest_json=$3,manifest_bytes=$4 WHERE session_id=$1 AND manifest_digest=$2", &[&session_id, &digest, &original.get::<_, String>(0), &original.get::<_, i64>(1)]).unwrap();
     let content_digest = audit.query_one("SELECT content_digest FROM runtime.model_observation_contents WHERE session_id=$1 AND kind='system_prompt' ORDER BY first_seen_at_ms DESC LIMIT 1", &[&session_id]).unwrap().get::<_, String>(0);
     audit.execute("DELETE FROM runtime.model_observation_contents WHERE session_id=$1 AND content_digest=$2", &[&session_id, &content_digest]).unwrap();
     let next = request(2051, "after-missing-content", "unused");
-    assert!(runtime
-        .block_on(session_log.append_session_records(agent_run_id, &[next]))
-        .expect_err("new append must not silently heal missing content")
-        .contains("incomplete"));
+    assert!(
+        runtime
+            .block_on(session_log.append_session_records(agent_run_id, &[next]))
+            .expect_err("new append must not silently heal missing content")
+            .contains("incomplete")
+    );
 
     store
         .delete_session_data(session_id)
@@ -3883,7 +3975,7 @@ fn postgres_runtime_store_rejects_schema_drift() {
 fn hosted_execution_capacity_is_shared_across_replicas_and_released_on_yield() {
     let _guard = TEST_LOCK.lock().unwrap();
     let limits = crate::execution_capacity::ExecutionCapacity::from_env().unwrap();
-    assert_eq!((limits.global, limits.tenant), (8, 4));
+    assert_eq!(limits.global, 8);
     let url = test_url();
     reset_store(&url);
     let replicas = [
@@ -3903,9 +3995,11 @@ fn hosted_execution_capacity_is_shared_across_replicas_and_released_on_yield() {
                     Some(tenant),
                 )
                 .unwrap();
-            assert!(replicas[1]
-                .schedule_worker_job(ScheduleRuntimeJobRequest { job: record }, Some("other"))
-                .is_err());
+            assert!(
+                replicas[1]
+                    .schedule_worker_job(ScheduleRuntimeJobRequest { job: record }, Some("other"))
+                    .is_err()
+            );
         }
     }
     fn claim(store: &PostgresRuntimeStore, index: usize) -> Result<Vec<RuntimeJobRecord>, String> {
@@ -3944,20 +4038,6 @@ fn hosted_execution_capacity_is_shared_across_replicas_and_released_on_yield() {
         assert!(claimed.len() <= 8);
     }
     assert_eq!(claimed.len(), 8);
-    assert_eq!(
-        claimed
-            .iter()
-            .filter(|job| job.job_id.contains("_a_"))
-            .count(),
-        4
-    );
-    assert_eq!(
-        claimed
-            .iter()
-            .filter(|job| job.job_id.contains("_b_"))
-            .count(),
-        4
-    );
     let waiting = replicas[1]
         .wait_for_runtime_jobs(
             &["agent_run.lifecycle".to_string()],
@@ -4679,7 +4759,7 @@ fn postgres_transcript_old_block_encoding_generation_is_invalidated_and_reinitia
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_fenced_rewrite_tombstones_completed_dispatch_request() {
-    use centaeris_core::session::{rewrite_last_user_tail_tombstone, RewriteLastUserTailRequest};
+    use centaeris_core::session::{RewriteLastUserTailRequest, rewrite_last_user_tail_tombstone};
     use centaeris_core::tool::{DynamicToolContract, DynamicToolRegistry};
 
     let _guard = TEST_LOCK.lock().unwrap();
@@ -4769,17 +4849,19 @@ fn postgres_fenced_rewrite_tombstones_completed_dispatch_request() {
         .iter()
         .map(|item| item.event.clone())
         .collect::<Vec<_>>();
-    assert!(rewrite_last_user_tail_tombstone(
-        &existing,
-        session,
-        &user_message,
-        &user_message,
-        "turn_work_replacement",
-        "agent_run_work_replacement",
-        10,
-    )
-    .unwrap_err()
-    .contains("non-terminal AgentRun"));
+    assert!(
+        rewrite_last_user_tail_tombstone(
+            &existing,
+            session,
+            &user_message,
+            &user_message,
+            "turn_work_replacement",
+            "agent_run_work_replacement",
+            10,
+        )
+        .unwrap_err()
+        .contains("non-terminal AgentRun")
+    );
     source.extend([
         record(5, SessionRecordType::AssistantMessage, serde_json::json!({
             "messageId":tail_message,"modelMarkdown":"Dispatch request recorded.","artifactRefs":[],"status":"done"})),
@@ -4807,10 +4889,12 @@ fn postgres_fenced_rewrite_tombstones_completed_dispatch_request() {
         6
     );
     for event in &source[2..4] {
-        assert!(planned.payload["targetEventIds"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!(event.event.event_id)));
+        assert!(
+            planned.payload["targetEventIds"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(event.event.event_id))
+        );
     }
     let replacement_run = "agent_run_work_replacement";
     let replacement_log = super::PostgresSessionLog::new(
@@ -4909,7 +4993,9 @@ fn postgres_fenced_rewrite_tombstones_completed_dispatch_request() {
         "SELECT count(*) FROM public.app_core_sessionevent WHERE agent_run_id=$1 AND NOT projects_to_agent_run_stream", &[&source_run],
     ).unwrap().get(0);
     assert_eq!(inactive, 6);
-    println!("completed-dispatch-rewrite-ok: real Core planner and fenced PostgreSQL rewrite invalidate committed call/result after a terminal Final; Session lock serializes replacement");
+    println!(
+        "completed-dispatch-rewrite-ok: real Core planner and fenced PostgreSQL rewrite invalidate committed call/result after a terminal Final; Session lock serializes replacement"
+    );
 }
 
 #[test]

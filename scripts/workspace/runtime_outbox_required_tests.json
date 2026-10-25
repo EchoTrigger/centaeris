@@ -1,5 +1,5 @@
 [
-  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_queued_cancellation_is_claimable_when_workspace_execution_capacity_is_full",
+  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_queued_cancellation_is_claimable_when_one_workspace_fills_global_execution_capacity",
   "postgres_store::integration_tests::resource_lifecycle_tests::postgres_queued_cancellation_is_claimable_when_global_execution_capacity_is_full",
   "postgres_store::integration_tests::resource_lifecycle_tests::postgres_control_cancellation_completes_without_taking_foreign_environment",
   "postgres_store::integration_tests::resource_lifecycle_tests::postgres_control_leases_require_intent_bound_capacity_and_survive_reclaim_exhaustion",
@@ -118,5 +118,7 @@
   "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_capacity_signal_preserves_execution_limits_and_reclaim_embargo",
   "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_rolled_back_release_does_not_advance_capacity_wait",
   "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_capacity_wait_migration_preserves_existing_resource_and_authorization_facts",
-  "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_capacity_wait_reopen_rejects_signal_and_binding_drift"
+  "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_capacity_wait_reopen_rejects_signal_and_binding_drift",
+  "postgres_store::integration_tests::execution_capacity_tests::postgres_execution_capacity_one_workspace_uses_global_permits_with_ready_claim_agreement",
+  "postgres_store::integration_tests::execution_capacity_tests::postgres_execution_capacity_terminal_history_does_not_count_but_expired_owners_do_until_yield"
 ]

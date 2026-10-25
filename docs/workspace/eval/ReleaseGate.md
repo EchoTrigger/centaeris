@@ -200,9 +200,12 @@ drops only that database. Coverage includes acknowledged-history stability,
 unacknowledged delivery across restart, duplicate/stale acknowledgement, active
 wakes across yield, and concurrent late-waiter recovery across checkpoint pages.
 The same disposable-database gate runs the PostgreSQL shared waiter contract and
-cross-replica execution-capacity test. It pins execution limits to 8 global and 4
-per tenant for that fixture. The controller's database-isolation and non-empty
-discovery guard tests run before creating the disposable database.
+cross-replica execution-capacity tests. They pin the global execute-lease limit
+to 8 and verify that one Workspace can use all available permits, terminal
+history is excluded, and queued cancellation remains claimable at capacity.
+Worker processing slots and tool concurrency have separate limits; see
+[configuration](../reference/Configuration.md). The controller's database-isolation
+and non-empty discovery guard tests run before creating the disposable database.
 
 The Python gate uses package-wide `test*.py` discovery, not a hand-maintained
 list of API test labels. `scripts/workspace/python_test_gate.py api` runs Django's full

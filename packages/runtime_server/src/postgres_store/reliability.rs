@@ -9,21 +9,22 @@ use centaeris_core::session::reliability::{
     CreateDeadLetterDisposition, CreateDeadLetterRequest, CreateDeadLetterResult, DeadLetterRecord,
     DeadLetterReplayPolicy, DeadLetterStatus, DeadLetterStorePort, DismissDeadLetterRequest,
     FailRuntimeJobRequest, ListDeadLettersRequest, ListRuntimeJobsRequest,
-    MarkDeadLetterReplayedRequest, MarkDeadLetterReplayingRequest, ReleaseResourceClaimRequest,
+    MarkDeadLetterReplayedRequest, MarkDeadLetterReplayingRequest,
+    RUNTIME_JOB_LEASE_RECLAIM_BATCH_LIMIT, RUNTIME_JOB_TERMINAL_EVENT, ReleaseResourceClaimRequest,
     RenewRuntimeJobLeaseRequest, ReplayDeadLetterRequest, ReplayDeadLetterResult,
     ResourceClaimRecord, ResourceClaimStorePort, RuntimeJobFailureDisposition,
     RuntimeJobLeaseReclaimPolicy, RuntimeJobOutboxPort, RuntimeJobOutboxPublishDisposition,
     RuntimeJobOutboxRecord, RuntimeJobRecord, RuntimeJobStatus, RuntimeJobStorePort,
     ScheduleRuntimeJobDisposition, ScheduleRuntimeJobRequest, ScheduleRuntimeJobResult,
     StartRuntimeJobRequest, WakeRuntimeJobDisposition, WakeRuntimeJobRequest,
-    YieldRuntimeJobRequest, RUNTIME_JOB_LEASE_RECLAIM_BATCH_LIMIT, RUNTIME_JOB_TERMINAL_EVENT,
+    YieldRuntimeJobRequest,
 };
 
-use super::runtime::to_i64;
 use super::PostgresRuntimeStore;
+use super::runtime::to_i64;
 
-const JOB_COLUMNS:&str="job_id,job_kind,status,run_at_ms,lease_owner,lease_expires_at_ms,retry_count,max_retries,backoff_policy_json,idempotency_key,session_id,branch_id,checkpoint_id,payload_ref,output_refs_json,last_error,created_at_ms,updated_at_ms,heartbeat_at_ms";
-const DL_COLUMNS:&str="dead_letter_id,original_job_id,job_kind,status,session_id,branch_id,checkpoint_id,payload_ref,idempotency_key,failure_reason,last_error,attempts,first_failed_at_ms,last_failed_at_ms,replay_policy_json,replayed_job_id,dismissed_by,dismissed_reason,updated_at_ms";
+const JOB_COLUMNS: &str = "job_id,job_kind,status,run_at_ms,lease_owner,lease_expires_at_ms,retry_count,max_retries,backoff_policy_json,idempotency_key,session_id,branch_id,checkpoint_id,payload_ref,output_refs_json,last_error,created_at_ms,updated_at_ms,heartbeat_at_ms";
+const DL_COLUMNS: &str = "dead_letter_id,original_job_id,job_kind,status,session_id,branch_id,checkpoint_id,payload_ref,idempotency_key,failure_reason,last_error,attempts,first_failed_at_ms,last_failed_at_ms,replay_policy_json,replayed_job_id,dismissed_by,dismissed_reason,updated_at_ms";
 
 pub(crate) struct RuntimeJobWaitResult {
     pub(crate) ready: bool,
@@ -97,12 +98,11 @@ fn next_runtime_job(
         .query_one(
             &format!("{} SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,MIN(GREATEST({due},COALESCE(j.lease_reclaim_not_before_ms,{due})))
                 FROM runtime_jobs j LEFT JOIN execution_job_tenants t ON t.job_id=j.job_id
-                LEFT JOIN tenant_usage u ON u.workspace_id=t.workspace_id
                 WHERE j.status='queued' AND j.job_kind=ANY($1)
                 AND (j.job_kind<>'agent_run.lifecycle' OR
-                    (t.job_id IS NOT NULL AND (SELECT COUNT(*) FROM active)<$2 AND COALESCE(u.used,0)<$3 AND NOT({})))",
+                    (t.job_id IS NOT NULL AND (SELECT COUNT(*) FROM active)<$2 AND NOT({})))",
                 super::execution_capacity::ACTIVE_EXECUTIONS, super::lifecycle_control::PENDING),
-            &[&job_kinds, &(limits.global as i64), &(limits.tenant as i64)],
+            &[&job_kinds, &(limits.global as i64)],
         )
         .map_err(|error| format!("query next Postgres runtime job failed: {error}"))?;
     Ok((row.get(0), row.get(1)))

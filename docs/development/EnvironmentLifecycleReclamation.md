@@ -2,7 +2,7 @@
 
 Callers submit Agent invocations; the platform owns queuing, admission, environment reuse and reclamation. Reliable resource facts are the prerequisite for automated placement and elastic capacity supply.
 
-Queued cancellation and physical resource settlement must continue independently of ordinary execution capacity. Complete that lifecycle before making retained environments the default for ordinary Sessions. Execution limits remain eight globally, four per Workspace and eight slots per Worker process.
+Queued cancellation and physical resource settlement must continue independently of ordinary execution capacity. Complete that lifecycle before making retained environments the default for ordinary Sessions. Execution limits remain eight globally and eight slots per Worker process; workspace identity is not a separate execution quota.
 
 ## Observed gaps and expected behavior
 
@@ -43,7 +43,7 @@ The opt-in `export_owned_runsc_storage_probe_request` test exports a request fro
 
 Runtime schema 15 adds a persistent `execute/control` purpose and, for control leases, an `advance/cleanup` stage to the existing lifecycle Job. Missing historical purposes become `execute`; existing signed grants, owners and job history are preserved. The purpose and stage cannot change while the same lease owner remains current. Upgrade API, Worker and Runtime together after draining incompatible live consumers, following [Session environment upgrades](SessionEnvironments.md#persistence-and-upgrades).
 
-Ordinary ready/claim excludes Jobs with a digest-bound durable cancellation or terminal-control intent. Control ready and claim share the same server predicate: queued, due, no current owner, matching durable intent and the appropriate authoritative terminal state. Requesting `control` alone grants nothing. Execute capacity stays global 8 and Workspace 4, with eight ordinary Worker threads. Independent control threads and global control-lease budgets provide two advance and two cleanup slots. Reclaim exhaustion retains a pending control Job for investigation/retry rather than deleting its intent.
+Ordinary ready/claim excludes Jobs with a digest-bound durable cancellation or terminal-control intent. Control ready and claim share the same server predicate: queued, due, no current owner, matching durable intent and the appropriate authoritative terminal state. Requesting `control` alone grants nothing. Execute capacity stays global 8, with eight ordinary Worker threads and no per-Workspace execution quota. Independent control threads and global control-lease budgets provide two advance and two cleanup slots. Reclaim exhaustion retains a pending control Job for investigation/retry rather than deleting its intent.
 
 The control API reads the original signed Run authorization without acquiring an Environment controller. Runtime restores Core Session state and uses Core's termination operations. A never-admitted Run with no allocation or owned controller receives a durable `noEffectsForRun` fact containing its no-operation cleanup and release receipt identities. It does not acquire another Run's controller. A Run with prior Core history or an allocation cannot use that shortcut: it yields the same Job to the cleanup stage and follows existing cleanup/release authority.
 
@@ -55,7 +55,7 @@ This boundary repairs queued cancellation under ordinary execution saturation. A
 
 ## Capacity release scheduling contract
 
-The capacity-wake candidate adds Runtime schema 16 with an explicit forward migration from 15. Before attempting resident admission, the current execute owner durably registers the resource-release generation it observed. A transaction which actually deletes a resident holding advances a singleton generation and notifies `runtime_job_ready_v1`. The notification carries no permission: readiness and ordinary claim compare durable generations, then retain the existing global/Workspace execution limits, lease fencing, reclaim embargo and control exclusion. The waiting Job remains the same Job.
+The capacity-wake candidate adds Runtime schema 16 with an explicit forward migration from 15. Before attempting resident admission, the current execute owner durably registers the resource-release generation it observed. A transaction which actually deletes a resident holding advances a singleton generation and notifies `runtime_job_ready_v1`. The notification carries no permission: readiness and ordinary claim compare durable generations, then retain the existing global execution limit, lease fencing, reclaim embargo and control exclusion. The waiting Job remains the same Job.
 
 The release transaction does constant-size signaling work and does not scan or lock waiting Jobs. A release preceding yield remains visible afterward; missed notifications and Runtime restart do not erase eligibility. A new claim consumes the registration and records the release/claim timestamps; a non-capacity yield clears it. A subsequent failed admission registers the latest generation and waits for another release or the existing periodic fallback. An Unknown physical outcome does not remove its holding and supplies no release signal. Protected retained environments ending a Run keep their holding and supply no release signal either.
 
@@ -73,7 +73,7 @@ PostgreSQL [LISTEN](https://www.postgresql.org/docs/current/sql-listen.html) req
 
 ## Default lifetime change
 
-The maintainer-approved target is `retained` for ordinary Sessions after reclamation acceptance passes. Keep execution limits at eight/four/eight. Do not change previously signed grants or silently reinterpret existing persistent data. Document and test the forward upgrade policy before switching the Worker default and API-visible lifetime consistently.
+The maintainer-approved target is `retained` for ordinary Sessions after reclamation acceptance passes. Keep eight global execution permits and eight Worker slots. Do not change previously signed grants or silently reinterpret existing persistent data. Document and test the forward upgrade policy before switching the Worker default and API-visible lifetime consistently.
 
 The switch is gated on the following evidence:
 

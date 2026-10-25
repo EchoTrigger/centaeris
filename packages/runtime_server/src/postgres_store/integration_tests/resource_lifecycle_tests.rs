@@ -44,9 +44,9 @@ fn schedule_run(
     id
 }
 
-fn cancellation_at_capacity(global_full: bool) {
+fn cancellation_at_capacity(multiple_workspaces: bool) {
     let limits = crate::execution_capacity::ExecutionCapacity::from_env().unwrap();
-    assert_eq!((limits.global, limits.tenant), (8, 4));
+    assert_eq!(limits.global, 8);
     let url = test_url();
     reset_store(&url);
     let store = PostgresRuntimeStore::new(&url).unwrap();
@@ -64,14 +64,10 @@ fn cancellation_at_capacity(global_full: bool) {
         )
         .unwrap()
         .get(0);
-    let count = if global_full {
-        limits.global
-    } else {
-        limits.tenant
-    };
+    let count = limits.global;
     let mut blockers = Vec::new();
     for index in 0..count {
-        let workspace = if index < limits.tenant {
+        let workspace = if !multiple_workspaces || index % 2 == 0 {
             "workspace-a"
         } else {
             "workspace-b"
@@ -87,17 +83,19 @@ fn cancellation_at_capacity(global_full: bool) {
             .unwrap();
         blockers.push((id, lease.lease_owner));
     }
-    // An empty third Workspace isolates the global cap from the tenant cap.
-    let workspace = if global_full {
+    // Both a single Workspace and multiple Workspaces share the global cap.
+    let workspace = if multiple_workspaces {
         "workspace-c"
     } else {
         "workspace-a"
     };
     let target = schedule_run(&store, &mut db, "cancel-target", workspace);
     assert!(claim(&store, &target, now).is_empty());
-    assert!(store
-        .request_agent_run_cancellation("cancel-target", "session-cancel-target", "digest", now)
-        .unwrap());
+    assert!(
+        store
+            .request_agent_run_cancellation("cancel-target", "session-cancel-target", "digest", now)
+            .unwrap()
+    );
     assert_eq!(
         db.query_one(
             "SELECT count(*) FROM runtime.runtime_events WHERE event_id='agent_run_cancel_requested:cancel-target'",
@@ -198,7 +196,7 @@ fn cancellation_at_capacity(global_full: bool) {
 
 #[test]
 #[ignore = "requires owned disposable PostgreSQL and default execution limits"]
-fn postgres_queued_cancellation_is_claimable_when_workspace_execution_capacity_is_full() {
+fn postgres_queued_cancellation_is_claimable_when_one_workspace_fills_global_execution_capacity() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     cancellation_at_capacity(false);
 }
@@ -562,15 +560,17 @@ fn postgres_creation_attempt_forward_migration_keeps_historical_unknown_charged(
         .get::<_, i64>(0),
         1
     );
-    assert!(store
-        .prepare_retained_instance(
-            &a.request("historical-execution", &profile),
-            fixture::limits(&a),
-            || Ok(vec![]),
-            |_, _| panic!("historical unknown cannot restart preparation"),
-            |_| panic!("historical unknown cannot dispatch again"),
-        )
-        .is_err());
+    assert!(
+        store
+            .prepare_retained_instance(
+                &a.request("historical-execution", &profile),
+                fixture::limits(&a),
+                || Ok(vec![]),
+                |_, _| panic!("historical unknown cannot restart preparation"),
+                |_| panic!("historical unknown cannot dispatch again"),
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -583,15 +583,17 @@ fn postgres_pre_dispatch_settlement_and_resource_release_are_atomic() {
     let profile = a.original.environment_profile.digest().unwrap();
     db.batch_execute("CREATE FUNCTION public.reject_test_release() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected resource release failure'; END $$;
         CREATE TRIGGER reject_test_release BEFORE DELETE ON runtime.resident_sandboxes FOR EACH ROW EXECUTE FUNCTION public.reject_test_release();").unwrap();
-    assert!(store
-        .prepare_retained_instance(
-            &a.request("rollback-execution", &profile),
-            fixture::limits(&a),
-            || Ok(vec![]),
-            |_, _| Err("injected before-create failure".into()),
-            |_| panic!("failed preparation must not create"),
-        )
-        .is_err());
+    assert!(
+        store
+            .prepare_retained_instance(
+                &a.request("rollback-execution", &profile),
+                fixture::limits(&a),
+                || Ok(vec![]),
+                |_, _| Err("injected before-create failure".into()),
+                |_| panic!("failed preparation must not create"),
+            )
+            .is_err()
+    );
     assert_eq!(
         db.query_one(
             "SELECT state FROM runtime.environment_creation_attempts",
@@ -622,22 +624,24 @@ fn postgres_pre_dispatch_failure_cannot_settle_after_controller_takeover() {
     let (url, store, mut db) = fixture::setup();
     let a = fixture::run(&store, &mut db, "stale-before-create", 1);
     let profile = a.original.environment_profile.digest().unwrap();
-    assert!(store
-        .prepare_retained_instance(
-            &a.request("stale-execution", &profile),
-            fixture::limits(&a),
-            || Ok(vec![]),
-            |_, _| {
-                db.execute(
-                    "UPDATE public.app_core_sessionenvironment SET controller_epoch=2",
-                    &[],
-                )
-                .unwrap();
-                Err("injected pre-dispatch failure".into())
-            },
-            |_| panic!("a stale preparation cannot dispatch"),
-        )
-        .is_err());
+    assert!(
+        store
+            .prepare_retained_instance(
+                &a.request("stale-execution", &profile),
+                fixture::limits(&a),
+                || Ok(vec![]),
+                |_, _| {
+                    db.execute(
+                        "UPDATE public.app_core_sessionenvironment SET controller_epoch=2",
+                        &[],
+                    )
+                    .unwrap();
+                    Err("injected pre-dispatch failure".into())
+                },
+                |_| panic!("a stale preparation cannot dispatch"),
+            )
+            .is_err()
+    );
     drop(store);
     let _reopened = PostgresRuntimeStore::new(&url).unwrap();
     assert_eq!(
@@ -859,9 +863,11 @@ fn postgres_control_leases_require_intent_bound_capacity_and_survive_reclaim_exh
     assert_eq!(claim("cleanup").len(), 2);
     assert!(db.execute("UPDATE runtime.runtime_jobs SET lease_purpose='execute',lease_control_stage=NULL WHERE job_id=$1",&[&short[0].job_id]).is_err(),"an active lease cannot change its purpose");
     let owner = short[0].lease_owner.as_ref().unwrap();
-    assert!(store
-        .require_execute_lease(&short[0].job_id, owner)
-        .is_err());
+    assert!(
+        store
+            .require_execute_lease(&short[0].job_id, owner)
+            .is_err()
+    );
     assert!(
         store
             .claim_worker_jobs(ClaimDueRuntimeJobsRequest {
@@ -931,9 +937,11 @@ fn postgres_control_lease_forward_migration_preserves_active_execution_authority
     );
     let after:Vec<(i64,i64)>=db.query("SELECT version,applied_at_ms FROM runtime.schema_migrations WHERE version<15 ORDER BY version",&[]).unwrap().iter().map(|row|(row.get(0),row.get(1))).collect();
     assert_eq!(after, historical);
-    assert!(reopened
-        .require_execute_lease(&run.fence.job_id, &run.fence.lease_owner)
-        .is_ok());
+    assert!(
+        reopened
+            .require_execute_lease(&run.fence.job_id, &run.fence.lease_owner)
+            .is_ok()
+    );
     db.batch_execute(
         "ALTER TABLE runtime.runtime_jobs DROP CONSTRAINT runtime_jobs_lease_purpose_check",
     )

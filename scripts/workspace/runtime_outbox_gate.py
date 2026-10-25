@@ -52,7 +52,7 @@ def main():
            'CENTAERIS_TEST_POSTGRES_OWNERSHIP_TOKEN': ownership_token,
            'CENTAERIS_TEST_POSTGRES_URL': url, 'INTERNAL_API_TOKEN': uuid.uuid4().hex,
            'CARGO_BUILD_JOBS': '1', 'EXECUTION_GLOBAL_LIMIT': '8',
-           'EXECUTION_TENANT_LIMIT': '4', 'CENTAERIS_CAPTURE_BOUNDARY_DATABASE': url,
+           'CENTAERIS_CAPTURE_BOUNDARY_DATABASE': url,
            'CENTAERIS_PROJECTION_BOUNDARY_DATABASE': url}
     commands = [['cargo', 'test', '--locked', '-p', 'runtime_server',
                  'transcript_capture::tests::transcript_capture_second_run_requires_committed_session_sequence',
@@ -69,6 +69,8 @@ def main():
                  '--', '--exact'],
                 ['cargo', 'test', '--locked', '-p', 'runtime_server',
                  'postgres_store::integration_tests::residency_tests', '--'],
+                ['cargo', 'test', '--locked', '-p', 'runtime_server',
+                 'postgres_store::integration_tests::execution_capacity_tests', '--'],
                 ['cargo', 'test', '--locked', '-p', 'runtime_server',
                  'postgres_store::integration_tests::execution_instance_tests', '--'],
                 ['cargo', 'test', '--locked', '-p', 'runtime_server',
