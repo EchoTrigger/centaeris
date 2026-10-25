@@ -95,8 +95,8 @@ pub(crate) mod pre_admission_failure;
 pub(crate) mod provision;
 mod reliability;
 pub(crate) mod residency;
-pub(crate) mod runsc_rotation;
 mod resource_commit;
+pub(crate) mod runsc_rotation;
 mod runtime;
 pub(crate) use runtime::validate_hosted_native_input;
 mod historical_provider_schema;
@@ -587,12 +587,12 @@ mod integration_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_POSTGRES_CHECKOUT_TIMEOUT, DEFAULT_POSTGRES_CONNECT_TIMEOUT,
-        DEFAULT_POSTGRES_POOL_SIZE, PostgresConnectionPool, PostgresRuntimeStore,
-        PostgresSessionLog, postgres_config, run_postgres_blocking,
+        postgres_config, run_postgres_blocking, PostgresConnectionPool, PostgresRuntimeStore,
+        PostgresSessionLog, DEFAULT_POSTGRES_CHECKOUT_TIMEOUT, DEFAULT_POSTGRES_CONNECT_TIMEOUT,
+        DEFAULT_POSTGRES_POOL_SIZE,
     };
     use centaeris_core::session::{
-        RuntimeJobLeaseFence, SequencedSessionRecord, SessionRecordType, canonical_session_record,
+        canonical_session_record, RuntimeJobLeaseFence, SequencedSessionRecord, SessionRecordType,
     };
     use std::sync::Arc;
     use std::time::Duration;

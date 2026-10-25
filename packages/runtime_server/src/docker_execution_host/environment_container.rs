@@ -135,9 +135,7 @@ mod tests {
         let new_mounts = super::super::plugin_mounts_at(&versions[1].0, root.path()).unwrap();
         let mut runner = super::super::tests::retained_test_runner();
         let profile = profile();
-        runner
-            .image_digest
-            .clone_from(&profile.image_digest);
+        runner.image_digest.clone_from(&profile.image_digest);
         runner.resources = profile.resources.sandbox_resources();
         runner.network = profile.network;
         runner.plugin_mounts = old_mounts.clone();

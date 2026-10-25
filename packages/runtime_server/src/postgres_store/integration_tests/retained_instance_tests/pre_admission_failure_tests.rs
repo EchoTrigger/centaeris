@@ -65,14 +65,12 @@ fn postgres_pre_admission_failure_is_fenced_durable_and_blocks_history() {
     let log = store.session_log("ws_1".into(), "sess_1".into(), "probe".into());
     let mut stale = r.fence.clone();
     stale.lease_owner = "stale-owner".into();
-    assert!(
-        log.commit_pre_admission_failure(&r.original.agent_run_id, &digest, &stale)
-            .is_err()
-    );
-    assert!(
-        log.commit_pre_admission_failure(&r.original.agent_run_id, "wrong-digest", &r.fence)
-            .is_err()
-    );
+    assert!(log
+        .commit_pre_admission_failure(&r.original.agent_run_id, &digest, &stale)
+        .is_err());
+    assert!(log
+        .commit_pre_admission_failure(&r.original.agent_run_id, "wrong-digest", &r.fence)
+        .is_err());
     assert_eq!(
         db.query_one("SELECT count(*) FROM runtime.runtime_events", &[])
             .unwrap()
@@ -92,20 +90,22 @@ fn postgres_pre_admission_failure_is_fenced_durable_and_blocks_history() {
         )
         .unwrap()
         .get(0);
-    assert!(
-        has_pre_admission_failure(&mut db, "ws_1", "sess_1", &r.original.agent_run_id, &digest)
-            .unwrap()
-    );
-    assert!(
-        has_pre_admission_failure(
-            &mut db,
-            "ws_1",
-            "sess_1",
-            &r.original.agent_run_id,
-            "wrong-digest"
-        )
-        .is_err()
-    );
+    assert!(has_pre_admission_failure(
+        &mut db,
+        "ws_1",
+        "sess_1",
+        &r.original.agent_run_id,
+        &digest
+    )
+    .unwrap());
+    assert!(has_pre_admission_failure(
+        &mut db,
+        "ws_1",
+        "sess_1",
+        &r.original.agent_run_id,
+        "wrong-digest"
+    )
+    .is_err());
     db.execute(
         "UPDATE runtime.runtime_jobs SET lease_owner='renewed-owner' WHERE job_id=$1",
         &[&r.fence.job_id],
@@ -152,18 +152,16 @@ fn postgres_pre_admission_failure_is_fenced_durable_and_blocks_history() {
         )
         .unwrap_err();
     assert!(error.contains("pre-admission failure"), "{error}");
-    assert!(
-        log.commit_pre_admission_cancellation(&r.original.agent_run_id, &digest, &renewed)
-            .is_err()
-    );
-    assert!(
-        db.query_one(
+    assert!(log
+        .commit_pre_admission_cancellation(&r.original.agent_run_id, &digest, &renewed)
+        .is_err());
+    assert!(db
+        .query_one(
             "SELECT \"preAdmissionCancelledAt\" IS NULL FROM public.app_core_agentrun WHERE id=$1",
             &[&r.original.agent_run_id]
         )
         .unwrap()
-        .get::<_, bool>(0)
-    );
+        .get::<_, bool>(0));
     let original_row: serde_json::Value = serde_json::from_str(&original).unwrap();
     let payload = original_row["payload_json"].as_str().unwrap();
     let at_ms = original_row["at_ms"].as_i64().unwrap();
@@ -190,10 +188,14 @@ fn postgres_pre_admission_failure_is_fenced_durable_and_blocks_history() {
             &[&r.original.agent_run_id, &crate::postgres_store::pre_admission_failure::SCHEMA, &at_ms, &payload, &event_id]).unwrap();
     }
     db.execute("UPDATE runtime.runtime_events SET payload_json=(payload_json::jsonb || '{\"unexpected\":true}'::jsonb)::text WHERE event_id=$1", &[&event_id]).unwrap();
-    assert!(
-        has_pre_admission_failure(&mut db, "ws_1", "sess_1", &r.original.agent_run_id, &digest)
-            .is_err()
-    );
+    assert!(has_pre_admission_failure(
+        &mut db,
+        "ws_1",
+        "sess_1",
+        &r.original.agent_run_id,
+        &digest
+    )
+    .is_err());
 }
 
 #[test]
@@ -205,15 +207,13 @@ fn postgres_pre_admission_failure_rejects_admitted_or_cancelled_runs() {
     let digest = r.original.digest().unwrap();
     let log = store.session_log("ws_1".into(), "sess_1".into(), "probe".into());
     db.execute("INSERT INTO public.app_core_sessionevent VALUES('ws_1','sess_1',$1,false,'{\"type\":\"agent_run_started\"}')", &[&r.original.agent_run_id]).unwrap();
-    assert!(
-        log.commit_pre_admission_failure(&r.original.agent_run_id, &digest, &r.fence)
-            .is_err()
-    );
+    assert!(log
+        .commit_pre_admission_failure(&r.original.agent_run_id, &digest, &r.fence)
+        .is_err());
     db.batch_execute("DELETE FROM public.app_core_sessionevent; UPDATE public.app_core_agentrun SET \"preAdmissionCancelledAt\"=now()").unwrap();
-    assert!(
-        log.commit_pre_admission_failure(&r.original.agent_run_id, &digest, &r.fence)
-            .is_err()
-    );
+    assert!(log
+        .commit_pre_admission_failure(&r.original.agent_run_id, &digest, &r.fence)
+        .is_err());
     assert_eq!(
         db.query_one("SELECT count(*) FROM runtime.runtime_events", &[])
             .unwrap()
@@ -530,14 +530,13 @@ fn postgres_runsc_reused_paused_before_create_failure_closes_instance_without_ta
         }
     );
     assert_eq!(db.query_one("SELECT allocation_kind,physical_removed FROM runtime.agent_run_cleanup_receipts WHERE agent_run_id=$1", &[&cancelled.original.agent_run_id]).unwrap().get::<_,String>(0), "instance");
-    assert!(
-        !db.query_one(
+    assert!(!db
+        .query_one(
             "SELECT physical_removed FROM runtime.agent_run_cleanup_receipts WHERE agent_run_id=$1",
             &[&cancelled.original.agent_run_id]
         )
         .unwrap()
-        .get::<_, bool>(0)
-    );
+        .get::<_, bool>(0));
     assert_eq!(
         db.query_one(
             "SELECT (to_jsonb(s)-'updated_at_ms')::text FROM runtime.resident_sandboxes s",

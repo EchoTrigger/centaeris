@@ -1,8 +1,8 @@
 //! Released schema metadata only; this module cannot dispatch provider operations.
 use postgres::GenericClient;
 
-pub(in crate::postgres_store) mod schema;
 pub(in crate::postgres_store) mod power;
+pub(in crate::postgres_store) mod schema;
 
 pub(crate) const DDL: &str = r#"
 CREATE TABLE runtime.provider_environment_bindings(

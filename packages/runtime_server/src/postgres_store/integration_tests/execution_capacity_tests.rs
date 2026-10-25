@@ -97,13 +97,12 @@ fn postgres_execution_capacity_one_workspace_uses_global_permits_with_ready_clai
         "agent_run.lifecycle:same-workspace-0",
     );
     conflicting.job_kind = LIFECYCLE.into();
-    assert!(
-        one.schedule_worker_job(
+    assert!(one
+        .schedule_worker_job(
             ScheduleRuntimeJobRequest { job: conflicting },
             Some("foreign-workspace")
         )
-        .is_err()
-    );
+        .is_err());
 }
 
 #[test]

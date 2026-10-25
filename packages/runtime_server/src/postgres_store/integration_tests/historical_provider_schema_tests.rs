@@ -64,8 +64,8 @@ fn open_use(db: &mut Client) {
 }
 #[test]
 #[ignore = "requires owned disposable PostgreSQL"]
-fn postgres_native_archive_fresh_sixteen_upgrade_preserves_native_resident_and_all_version_timestamps()
- {
+fn postgres_native_archive_fresh_sixteen_upgrade_preserves_native_resident_and_all_version_timestamps(
+) {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (url, store, mut db) = native::setup();
     let run = native::run(&store, &mut db, "native-origin", 1);
@@ -113,8 +113,8 @@ fn postgres_native_archive_fresh_sixteen_upgrade_preserves_native_resident_and_a
 }
 #[test]
 #[ignore = "requires owned disposable PostgreSQL"]
-fn postgres_native_archive_reopen_preserves_removed_bound_history_without_reinterpreting_it_as_live()
- {
+fn postgres_native_archive_reopen_preserves_removed_bound_history_without_reinterpreting_it_as_live(
+) {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (url, store, mut db) = native::setup();
     seed_creation(&store, &mut db);

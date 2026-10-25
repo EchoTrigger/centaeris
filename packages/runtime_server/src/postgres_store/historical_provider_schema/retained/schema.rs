@@ -54,7 +54,15 @@ pub(crate) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
 /// populated older history without the original released authority verifier.
 /// Current version-24 histories already carry that anchor and remain untouched.
 pub(crate) fn validate_backfill(db: &mut impl GenericClient) -> Result<(), String> {
-    let populated: bool = db.query_one("SELECT EXISTS(SELECT 1 FROM runtime.provider_environment_run_uses)", &[]).map_err(|e| e.to_string())?.get(0);
-    if populated { return Err("native_schema_bridge_legacy_history_requires_original_migrator".into()); }
+    let populated: bool = db
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM runtime.provider_environment_run_uses)",
+            &[],
+        )
+        .map_err(|e| e.to_string())?
+        .get(0);
+    if populated {
+        return Err("native_schema_bridge_legacy_history_requires_original_migrator".into());
+    }
     Ok(())
 }
