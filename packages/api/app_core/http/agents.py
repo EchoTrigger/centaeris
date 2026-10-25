@@ -327,6 +327,8 @@ def list_trashed_agent_sessions(request, agent_id: str):
             "id": session.id,
         },
     )
+    from app_core.session_attention import refresh_session_attention_many
+    refresh_session_attention_many(sessions)
     running_session_ids = set(
         AgentRun.objects.filter(
             session__in=sessions,
@@ -338,6 +340,7 @@ def list_trashed_agent_sessions(request, agent_id: str):
             serialize_session(
                 session,
                 has_active_agent_run=session.id in running_session_ids,
+                attention_is_current=True,
             )
             for session in sessions
         ],
