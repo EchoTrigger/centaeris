@@ -1,5 +1,7 @@
 """Run focused Runtime PostgreSQL regressions in a fresh disposable database."""
 import os
+import argparse
+import sys
 import json
 from pathlib import Path
 import subprocess
@@ -29,13 +31,30 @@ def required_tests():
     return names
 
 
-def validate_required_tests(names):
-    missing = set(required_tests()) - set(names)
+def validate_required_tests(names, test_filter=None):
+    expected = [name for name in required_tests() if test_filter is None or test_filter in name]
+    missing = set(expected) - set(names)
     if missing:
         raise RuntimeError('Runtime PostgreSQL required tests missing: ' + ', '.join(sorted(missing)))
 
 
-def main():
+def drop_owned_database(admin, database, ownership_token, sql):
+    row = admin.execute(
+        "SELECT shobj_description(oid,'pg_database') FROM pg_database WHERE datname=%s",
+        (database,),
+    ).fetchone()
+    if row != ('centaeris-test-owner:' + ownership_token,):
+        raise RuntimeError('test database ownership changed; refusing cleanup')
+    admin.execute(sql.SQL('DROP DATABASE {} WITH (FORCE)').format(sql.Identifier(database)))
+
+
+def main(argv=()):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--test-filter', help='Run matching tests in an owned disposable database')
+    parser.add_argument('--test-executable', help='Use an already-built Rust test executable')
+    args = parser.parse_args(argv)
+    if args.test_filter is not None and not args.test_filter.strip():
+        parser.error('--test-filter must not be empty')
     import psycopg
     from psycopg import sql
 
@@ -146,6 +165,15 @@ def main():
     commands.append(['cargo', 'test', '--locked', '-p', 'runtime_server',
                      'postgres_store::integration_tests::environment_observation_tests',
                      '--'])
+    commands.extend([
+        ['cargo', 'test', '--locked', '-p', 'runtime_server',
+         'postgres_store::integration_tests::' + group, '--']
+        for group in ('runsc_rotation_tests', 'historical_provider_schema_tests')
+    ])
+    if args.test_filter is not None:
+        commands = [['cargo', 'test', '--locked', '-p', 'runtime_server', args.test_filter, '--']]
+    if args.test_executable is not None:
+        commands = [[args.test_executable, command[5], *command[7:]] for command in commands]
     names = []
     for command in commands:
         discovered = subprocess.run([*command, '--ignored', '--list'], cwd=root,
@@ -154,7 +182,7 @@ def main():
         names.extend(discovered_tests(discovered.stdout))
     if len(names) != len(set(names)):
         raise RuntimeError('Runtime PostgreSQL test discovery contains duplicates')
-    validate_required_tests(names)
+    validate_required_tests(names, args.test_filter)
     with psycopg.connect(**settings, autocommit=True) as admin:
         admin.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(database)))
         try:
@@ -167,8 +195,8 @@ def main():
                                env=env, check=True)
             print(f'Runtime PostgreSQL gate: {len(names)} discovered tests passed')
         finally:
-            admin.execute(sql.SQL('DROP DATABASE {} WITH (FORCE)').format(sql.Identifier(database)))
+            drop_owned_database(admin, database, ownership_token, sql)
 
 
 if __name__ == '__main__':
-    main()
+    main(sys.argv[1:])

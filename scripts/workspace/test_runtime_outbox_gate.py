@@ -167,5 +167,57 @@ class OutboxGateTests(unittest.TestCase):
         self.assertTrue(expected.issubset(selected))
 
 
+class ScopedOutboxGateTests(unittest.TestCase):
+    def test_scoped_compiled_runner_checks_selected_manifest_before_opening_database(self):
+        selected = [name for name in gate.required_tests() if 'runsc_rotation_tests::' in name]
+        self.assertTrue(selected)
+        calls = []
+        def discover(command, **kwargs):
+            calls.append(command)
+            self.assertEqual(command[:2], ['runtime-tests.exe', 'runsc_rotation_tests::'])
+            self.assertIn('--ignored', command)
+            self.assertIn('--list', command)
+            return SimpleNamespace(stdout=''.join(name + ': test\n' for name in selected))
+        driver = SimpleNamespace(connect=lambda **kwargs: (_ for _ in ()).throw(RuntimeError('discovery complete')), sql=SimpleNamespace())
+        with patch.dict(sys.modules, {'psycopg': driver}), patch.object(gate.subprocess, 'run', discover):
+            with self.assertRaisesRegex(RuntimeError, 'discovery complete'):
+                gate.main(['--test-filter', 'runsc_rotation_tests::', '--test-executable', 'runtime-tests.exe'])
+        self.assertEqual(len(calls), 1)
+
+    def test_scoped_runner_refuses_missing_selected_identity(self):
+        selected = [name for name in gate.required_tests() if 'runsc_rotation_tests::' in name]
+        self.assertTrue(selected)
+        driver = SimpleNamespace(connect=lambda **kwargs: self.fail('database opened before selected discovery'), sql=SimpleNamespace())
+        with patch.dict(sys.modules, {'psycopg': driver}), patch.object(gate.subprocess, 'run', return_value=SimpleNamespace(stdout=''.join(name + ': test\n' for name in selected[1:]))):
+            with self.assertRaisesRegex(RuntimeError, selected[0]):
+                gate.main(['--test-filter', 'runsc_rotation_tests::'])
+
+
+class OwnedDatabaseCleanupTests(unittest.TestCase):
+    def test_cleanup_requires_exact_database_ownership_comment(self):
+        calls = []
+        class Admin:
+            def execute(self, query, params=None):
+                calls.append((query, params))
+                return SimpleNamespace(fetchone=lambda: ('centaeris-test-owner:other-owner',))
+        with self.assertRaisesRegex(RuntimeError, 'ownership'):
+            gate.drop_owned_database(Admin(), 'test_outbox_owned', 'expected-owner', SimpleNamespace())
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1], ('test_outbox_owned',))
+
+    def test_cleanup_drops_only_the_database_with_matching_owner(self):
+        calls = []
+        class Statement:
+            def __init__(self, text): self.text = text
+            def format(self, identifier): return self.text.replace('{}', identifier)
+        class Admin:
+            def execute(self, query, params=None):
+                calls.append((query, params))
+                return SimpleNamespace(fetchone=lambda: ('centaeris-test-owner:expected-owner',))
+        sql = SimpleNamespace(SQL=Statement, Identifier=lambda name: '"' + name + '"')
+        gate.drop_owned_database(Admin(), 'test_outbox_owned', 'expected-owner', sql)
+        self.assertEqual(calls[-1], ('DROP DATABASE "test_outbox_owned" WITH (FORCE)', None))
+
+
 if __name__ == '__main__':
     unittest.main()
