@@ -1,4 +1,5 @@
 from time import perf_counter
+from functools import wraps
 import hashlib
 import json
 
@@ -25,6 +26,7 @@ from app_core.models import (
     ProviderCredential,
 )
 from app_core.runtime_client import request_model_catalog
+from app_core.workspace_resources import workspace_resource_admin
 
 from .response_schema import (
     AdminModelEnvelope,
@@ -46,6 +48,40 @@ from .serialization import (
 
 
 router = Router(tags=["model-management"], by_alias=True)
+
+
+def _model_resource_authority(action):
+    """Protect shared HTTP/service operations with current, transaction-pinned authority."""
+    @wraps(action)
+    def authorized(request, *args, **kwargs):
+        user = getattr(request, "user", None)
+        if user is None or not user.is_authenticated:
+            return Status(403, {"error": "workspace_resource_forbidden"})
+        with transaction.atomic():
+            workspace = getattr(request, "resource_workspace", None)
+            if workspace is None:
+                if not user.is_superuser:
+                    return Status(403, {"error": "workspace_resource_forbidden"})
+            else:
+                try:
+                    request.resource_workspace = workspace_resource_admin(user, workspace.pk)
+                except PermissionError:
+                    return Status(403, {"error": "workspace_resource_forbidden"})
+            return action(request, *args, **kwargs)
+    return authorized
+
+
+
+def _platform_model_authority(action):
+    """Catalog reconciliation remains an independent platform operation."""
+    @wraps(action)
+    def authorized(request, *args, **kwargs):
+        user = getattr(request, "user", None)
+        if user is None or not user.is_authenticated or not user.is_superuser:
+            return Status(403, {"error": "workspace_resource_forbidden"})
+        with transaction.atomic():
+            return action(request, *args, **kwargs)
+    return authorized
 
 
 def _catalog_templates() -> tuple[dict, dict]:
@@ -213,6 +249,7 @@ def _model_catalog_reconciliation(templates: dict, route_overrides: dict, *, loc
     auth=superuser_auth,
     response={200: ModelCatalogReconciliationEnvelope} | COMMON_ERROR_RESPONSES,
 )
+@_platform_model_authority
 def preview_model_catalog_reconciliation(request):
     templates, route_overrides = _catalog_templates()
     return _model_catalog_reconciliation(templates, route_overrides)
@@ -223,6 +260,7 @@ def preview_model_catalog_reconciliation(request):
     auth=superuser_auth,
     response={200: ModelCatalogReconciliationEnvelope} | COMMON_ERROR_RESPONSES,
 )
+@_platform_model_authority
 def apply_model_catalog_reconciliation(request, payload: ApplyModelCatalogReconciliationRequest):
     templates, route_overrides = _catalog_templates()
     with transaction.atomic():
@@ -274,6 +312,7 @@ def apply_model_catalog_reconciliation(request, payload: ApplyModelCatalogReconc
     auth=superuser_auth,
     response={200: ModelProvidersEnvelope} | COMMON_ERROR_RESPONSES,
 )
+@_model_resource_authority
 def list_model_providers(request):
     providers = ModelProvider.objects.filter(workspace=getattr(request, "resource_workspace", None), archivedAt__isnull=True).order_by("displayName", "id")
     return {"providers": [serialize_model_provider(provider) for provider in providers]}
@@ -284,6 +323,7 @@ def list_model_providers(request):
     auth=superuser_auth,
     response={200: ModelProviderTemplatesEnvelope} | COMMON_ERROR_RESPONSES,
 )
+@_model_resource_authority
 def list_model_provider_templates(request):
     templates, _ = _catalog_templates()
     return {"templates": list(templates.values())}
@@ -294,6 +334,7 @@ def list_model_provider_templates(request):
     auth=superuser_auth,
     response={201: ModelProviderEnvelope} | COMMON_ERROR_RESPONSES,
 )
+@_model_resource_authority
 def instantiate_model_provider_template(
     request,
     template_id: str,
@@ -343,6 +384,7 @@ def instantiate_model_provider_template(
     auth=superuser_auth,
     response={201: ModelProviderEnvelope} | COMMON_ERROR_RESPONSES,
 )
+@_model_resource_authority
 def create_model_provider(request, payload: CreateModelProviderRequest):
     try:
         secret = _validated_secret(payload.secret)
@@ -369,6 +411,7 @@ def create_model_provider(request, payload: CreateModelProviderRequest):
     auth=superuser_auth,
     response={200: ModelProviderEnvelope} | COMMON_ERROR_RESPONSES,
 )
+@_model_resource_authority
 def update_model_provider(request, provider_id: str, payload: UpdateModelProviderRequest):
     try:
         if not payload.model_fields_set:
@@ -410,6 +453,7 @@ def update_model_provider(request, provider_id: str, payload: UpdateModelProvide
     auth=superuser_auth,
     response={200: ModelProviderEnvelope} | COMMON_ERROR_RESPONSES,
 )
+@_model_resource_authority
 def rotate_model_provider_credential(
     request,
     provider_id: str,
@@ -443,6 +487,7 @@ def rotate_model_provider_credential(
     auth=superuser_auth,
     response={204: None, codes_4xx: ErrorResponse | RunIdsErrorResponse},
 )
+@_model_resource_authority
 def delete_model_provider(request, provider_id: str):
     with transaction.atomic():
         try:
@@ -478,6 +523,7 @@ def delete_model_provider(request, provider_id: str):
     auth=superuser_auth,
     response={200: AdminModelsEnvelope} | COMMON_ERROR_RESPONSES,
 )
+@_model_resource_authority
 def list_models(request):
     models = ModelConfig.objects.select_related("provider").filter(provider__workspace=getattr(request, "resource_workspace", None), isCurrent=True, provider__archivedAt__isnull=True).order_by("displayName", "id")
     return {"models": [serialize_admin_model(model) for model in models]}
@@ -488,6 +534,7 @@ def list_models(request):
     auth=superuser_auth,
     response={201: AdminModelEnvelope} | COMMON_ERROR_RESPONSES,
 )
+@_model_resource_authority
 def create_model(request, payload: CreateModelRequest):
     try:
         with transaction.atomic():
@@ -525,6 +572,7 @@ def create_model(request, payload: CreateModelRequest):
     auth=superuser_auth,
     response={200: AdminModelEnvelope} | COMMON_ERROR_RESPONSES,
 )
+@_model_resource_authority
 def update_model(request, model_id: str, payload: UpdateModelRequest):
     try:
         if not payload.model_fields_set:
@@ -577,6 +625,7 @@ def update_model(request, model_id: str, payload: UpdateModelRequest):
     auth=superuser_auth,
     response={204: None, codes_4xx: ErrorResponse | RunIdsErrorResponse},
 )
+@_model_resource_authority
 def delete_model(request, model_id: str):
     with transaction.atomic():
         try:
@@ -596,6 +645,7 @@ def delete_model(request, model_id: str):
     auth=superuser_auth,
     response={200: ModelTestResponse, codes_4xx: ErrorResponse},
 )
+@_model_resource_authority
 def test_model(request, model_id: str, payload: EmptyRequest | None = None):
     started_at = perf_counter()
     try:
