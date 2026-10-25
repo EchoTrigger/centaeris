@@ -19,7 +19,7 @@ const editProfile = tree => {
 
 test("dirty model/effort choices block router departures; continue retains them and discard resumes navigation", async () => {
   let writes = 0;
-  const env = environment({ request: async (path, options) => { if (options?.method === "PATCH") writes++; return path === "/api/models" ? { models: [model] } : settings; } });
+  const env = environment({ request: async (path, options) => { if (options?.method === "PATCH") writes++; return path === "/api/models?workspaceId=workspace" ? { models: [model] } : settings; } });
   const subject = renderer(AgentModelSettings, { agentId: "agent" }, env);
   await subject.settle(); assert.equal(env.blocker.shouldBlock, false);
   effort(subject.tree).onChange("low"); await subject.settle(); assert.equal(env.blocker.shouldBlock, true);
@@ -36,7 +36,7 @@ test("dirty model/effort choices block router departures; continue retains them 
 });
 
 test("reset and accepted model save release the departure guard; unsaved defaults remain guarded", async () => {
-  const env = environment({ request: async (path, options) => path === "/api/models" ? { models: [model] } : options?.method === "PATCH" ? { ...settings, thinkingMode: JSON.parse(options.body).thinkingMode } : settings });
+  const env = environment({ request: async (path, options) => path === "/api/models?workspaceId=workspace" ? { models: [model] } : options?.method === "PATCH" ? { ...settings, thinkingMode: JSON.parse(options.body).thinkingMode } : settings });
   const subject = renderer(AgentModelSettings, { agentId: "agent" }, env);
   await subject.settle(); button(subject.tree, "agentSettings.useDefault").props.onClick(); await subject.settle();
   assert.equal(env.blocker.shouldBlock, true);
@@ -46,7 +46,7 @@ test("reset and accepted model save release the departure guard; unsaved default
 });
 
 test("the real memory router preserves the dirty Agent selection on switch, close and Back until discard", async () => {
-  const env = environment({ request: async path => path === "/api/models" ? { models: [model] } : settings });
+  const env = environment({ request: async path => path === "/api/models?workspaceId=workspace" ? { models: [model] } : settings });
   const subject = renderer(AgentModelSettings, { agentId: "agent" }, env);
   await subject.settle(); effort(subject.tree).onChange("low"); await subject.settle();
   const selected = "/w/workspace/settings/agents?agentId=agent";
@@ -73,7 +73,7 @@ test("the real memory router preserves the dirty Agent selection on switch, clos
 for (const action of ["reset", "save"]) test(`${action} cancels an already blocked router departure and removes the stale leave prompt`, async () => {
   const selected = "/w/workspace/settings/agents?agentId=agent";
   const router = createMemoryRouter([{ path: "*", element: null }], { initialEntries: [selected] });
-  const env = environment({ router, request: async (path, options) => path === "/api/models" ? { models: [model] } : options?.method === "PATCH" ? { ...settings, thinkingMode: JSON.parse(options.body).thinkingMode } : settings });
+  const env = environment({ router, request: async (path, options) => path === "/api/models?workspaceId=workspace" ? { models: [model] } : options?.method === "PATCH" ? { ...settings, thinkingMode: JSON.parse(options.body).thinkingMode } : settings });
   const subject = renderer(AgentModelSettings, { agentId: "agent" }, env);
   try {
     await subject.settle(); effort(subject.tree).onChange("low"); await subject.settle();
@@ -95,7 +95,7 @@ test("dirty deletion asks before DELETE; cancel preserves draft, confirm discard
   const env = environment({ router, navigate: (path, options) => { order.push("navigate"); return router.navigate(path, options); }, request: async (path, options) => {
     requests.push([path, options?.method || "GET"]);
     if (options?.method === "DELETE") { order.push("delete"); return undefined; }
-    return path === "/api/models" ? { models: [model] } : settings;
+    return path === "/api/models?workspaceId=workspace" ? { models: [model] } : settings;
   } });
   env.revalidator.revalidate = async () => {
     order.push("revalidate"); env.agents = [];

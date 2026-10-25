@@ -276,7 +276,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     const controller = new AbortController();
     async function load() {
       try {
-        const response = await apiResponse("/api/models", { signal: controller.signal });
+        const response = await apiResponse(`/api/models?workspaceId=${encodeURIComponent(workspace.id)}`, { signal: controller.signal });
         const data = await response.json();
         if (!controller.signal.aborted) acceptModels(data.models);
       } catch {
@@ -285,7 +285,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     }
     load();
     return () => controller.abort();
-  }, [modelsVersion, acceptModels]);
+  }, [modelsVersion, acceptModels, workspace.id]);
 
   useEffect(() => {
     if (contextPanel.mode !== "filePreview" || !contextPanel.objectUrl) return undefined;
@@ -746,7 +746,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         await checkPendingOperation(true);
       } else if (errorValue?.message === "model_not_found") {
         try {
-          const response = await apiResponse("/api/models");
+          const response = await apiResponse(`/api/models?workspaceId=${encodeURIComponent(workspace.id)}`);
           const data = await response.json();
           if (isCurrentRequest()) {
             acceptModels(data.models);

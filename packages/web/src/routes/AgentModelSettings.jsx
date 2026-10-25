@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useBlocker } from "react-router";
+import { useBlocker, useRouteLoaderData } from "react-router";
 import { apiJson } from "../api";
 import { useTranslation } from "../i18n";
 import { ModelPicker, ThinkingPicker, thinkingModeLabels } from "../components/ModelSelectionPickers";
@@ -7,6 +7,7 @@ import { createAgentModelSettingsClient, groupAgentModels, parseAgentModelCatalo
 
 export default function AgentModelSettings({ agentId, onRemove, renderProfileActions }) {
   const { t } = useTranslation();
+  const workspaceId = useRouteLoaderData("workspace")?.workspace?.id;
   const client = useMemo(() => createAgentModelSettingsClient(agentId, apiJson), [agentId]);
   const [settings, setSettings] = useState(null);
   const [catalog, setCatalog] = useState([]);
@@ -27,11 +28,11 @@ export default function AgentModelSettings({ agentId, onRemove, renderProfileAct
     const controller = new AbortController(); controllerRef.current = controller;
     setLoading(true); setError(""); setSaved(false);
     try {
-      const [value, models] = await Promise.all([client.load(controller.signal), apiJson("/api/models", { signal: controller.signal }).then(parseAgentModelCatalog)]);
+      const [value, models] = await Promise.all([client.load(controller.signal), apiJson(workspaceId ? `/api/models?workspaceId=${encodeURIComponent(workspaceId)}` : "/api/models", { signal: controller.signal }).then(parseAgentModelCatalog)]);
       if (!controller.signal.aborted) { accept(value); setCatalog(models); }
     } catch { if (!controller.signal.aborted) setError("loadError"); }
     finally { if (!controller.signal.aborted) setLoading(false); }
-  }, [client, accept]);
+  }, [client, accept, workspaceId]);
   useEffect(() => { void load(); return () => controllerRef.current?.abort(); }, [load]);
   const currentModel = catalog.find(model => model.id === draft.modelConfigRef);
   const groups = useMemo(() => groupAgentModels(catalog, t("appRoute.models")), [catalog, t]);

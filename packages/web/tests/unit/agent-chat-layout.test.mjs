@@ -36,7 +36,7 @@ test("ordinary Session preview starts at navigation width and preserves intentio
   globalThis.sessionStorage = { getItem: () => null };
   context.after(() => { globalThis.window = previousWindow; globalThis.sessionStorage = previousStorage; });
   const env = environment({ location: { search: "?new=1", state: { sidebarTab: "chat" } }, request: async path => {
-    const data = path === "/api/models" ? { models: [] } : path.includes("session-projects") ? { projects: [] } : { sessions: [] };
+    const data = path === "/api/models?workspaceId=workspace" ? { models: [] } : path.includes("session-projects") ? { projects: [] } : { sessions: [] };
     return { ...data, json: async () => data };
   } });
   const subject = renderer(AppPageContent, { agentId: "agent", workspaceDraft: false, location: env.location, modelsVersion: 0 }, env);
@@ -183,7 +183,7 @@ test("ordinary Session rows retain running, unread and pin indicators and all me
   const calls = [];
   const env = environment({ location: { search: "?new=1", state: { sidebarTab: "chat" } }, request: async (path, options = {}) => {
     calls.push([path, options]);
-    const data = path === "/api/models" ? { models: [] } : path.includes("session-projects") ? { projects: [] }
+    const data = path === "/api/models?workspaceId=workspace" ? { models: [] } : path.includes("session-projects") ? { projects: [] }
       : options.method === "PATCH" ? { session: { ...item, ...JSON.parse(options.body), isManuallyUnread:JSON.parse(options.body).isUnread??item.isManuallyUnread, attentionRevision:"1" } } : { sessions: [item] };
     return { ...data, json: async () => data };
   } });
@@ -229,7 +229,7 @@ test("the Session sidebar refreshes background work without changing the open dr
   let records = [{ ...session, agentId:"agent", hasActiveAgentRun: true }];
   const env = environment({ presentation:options=>{subscription=options;return new Promise(resolve=>options.signal.addEventListener("abort",resolve,{once:true}));}, location: { search: "?new=1", state: null }, request: async path => {
     calls.push(path);
-    const data = path === "/api/models" ? { models: [] } : path.includes("session-projects") ? { projects: [] } : { sessions: records };
+    const data = path === "/api/models?workspaceId=workspace" ? { models: [] } : path.includes("session-projects") ? { projects: [] } : { sessions: records };
     return { json: async () => data };
   } });
   const subject = renderer(AppPageContent, { agentId: "agent", workspaceDraft: false, location: env.location, modelsVersion: 0 }, env);

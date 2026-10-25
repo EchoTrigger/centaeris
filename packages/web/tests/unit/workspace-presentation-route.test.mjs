@@ -28,7 +28,7 @@ async function setup(t, draft=false, navigationRead=null) {
   const calls=[]; let options;
   const env=environment({tail:page,request:async(path,request)=>{
     calls.push([path,request]);
-    if(path==="/api/models") return {json:async()=>({models:[]})};
+    if(path==="/api/models?workspaceId=workspace") return {json:async()=>({models:[]})};
     if(path.includes("session-projects")) return {json:async()=>({projects:[]})};
     if(path.endsWith("/assets")) return {json:async()=>({assets:[]})};
     if(path.endsWith("/read")) return {session:row({isUnread:false,readThroughSequence:JSON.parse(request.body).throughSequence,attentionRevision:"2"})};

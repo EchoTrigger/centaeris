@@ -44,7 +44,7 @@ function setup(context, detail, overrides = {}) {
   }, request: async path => {
     requests.push(path);
     let data;
-    if (path === "/api/models") data = { models: [] };
+    if (path === "/api/models?workspaceId=workspace") data = { models: [] };
     else if (path.includes("session-projects")) data = { projects: [] };
     else if (path.includes("/workspaces/")) data = { sessions: [session("work", origin), session("manual", null)] };
     else if (path.endsWith("/assets")) data = { assets: [] };

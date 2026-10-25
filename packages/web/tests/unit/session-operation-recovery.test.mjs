@@ -31,7 +31,7 @@ function fixture(context, request) {
   globalThis.window={location:{pathname:"/w/workspace/app"},addEventListener(){},removeEventListener(){}};
   const env=environment({tail:async()=>({schema:"transcript.page.v1",sessionId:"work",projectionVersion:"transcript.projection.v1",projectionGeneration:"generation",sourceHighWater:"1",blocks:[],olderCursor:null,hasOlder:false,resumeCursors:[{streamId:"workspace-transcript.v1",cursor:"1"}]}),request:async(path,options)=>{
     calls.push([path,options]); let value;
-    if(path==="/api/models") value={models:[{id:"model",name:"Model",provider:"test",modelName:"test"},{id:"other",name:"Other",provider:"test",modelName:"other"}]};
+    if(path==="/api/models?workspaceId=workspace") value={models:[{id:"model",name:"Model",provider:"test",modelName:"test"},{id:"other",name:"Other",provider:"test",modelName:"other"}]};
     else if(path.includes("/operations/")||options?.method==="POST") return request(path,options);
     else if(path.includes("session-projects")) value={projects:[]};
     else if(path.startsWith("/api/workspaces/")&&path.includes("/sessions")) value={sessions:[session]};
