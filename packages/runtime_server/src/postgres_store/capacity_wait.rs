@@ -142,6 +142,7 @@ pub(super) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
 
 #[cfg(test)]
 pub(super) fn restore_previous_fixture(db: &mut postgres::Client) {
+    super::historical_provider_schema::restore_empty_fixture(db);
     let version: i64 = db
         .query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
         .unwrap()

@@ -98,6 +98,7 @@ pub(crate) mod residency;
 mod resource_commit;
 mod runtime;
 pub(crate) use runtime::validate_hosted_native_input;
+mod historical_provider_schema;
 mod schema;
 mod transactions;
 mod transcript;
@@ -243,7 +244,10 @@ impl PostgresRuntimeStore {
                 limits.checkout_timeout,
             )),
         };
-        store.with_client(schema::ensure_schema)?;
+        store.with_client(|client| {
+            schema::ensure_schema(client)?;
+            historical_provider_schema::require_settled(client)
+        })?;
         Ok(store)
     }
 
@@ -297,7 +301,10 @@ impl PostgresRuntimeStore {
                 checkout_timeout,
             )),
         };
-        store.with_client(schema::ensure_schema)?;
+        store.with_client(|client| {
+            schema::ensure_schema(client)?;
+            historical_provider_schema::require_settled(client)
+        })?;
         Ok(store)
     }
 
@@ -579,12 +586,12 @@ mod integration_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        postgres_config, run_postgres_blocking, PostgresConnectionPool, PostgresRuntimeStore,
-        PostgresSessionLog, DEFAULT_POSTGRES_CHECKOUT_TIMEOUT, DEFAULT_POSTGRES_CONNECT_TIMEOUT,
-        DEFAULT_POSTGRES_POOL_SIZE,
+        DEFAULT_POSTGRES_CHECKOUT_TIMEOUT, DEFAULT_POSTGRES_CONNECT_TIMEOUT,
+        DEFAULT_POSTGRES_POOL_SIZE, PostgresConnectionPool, PostgresRuntimeStore,
+        PostgresSessionLog, postgres_config, run_postgres_blocking,
     };
     use centaeris_core::session::{
-        canonical_session_record, RuntimeJobLeaseFence, SequencedSessionRecord, SessionRecordType,
+        RuntimeJobLeaseFence, SequencedSessionRecord, SessionRecordType, canonical_session_record,
     };
     use std::sync::Arc;
     use std::time::Duration;
