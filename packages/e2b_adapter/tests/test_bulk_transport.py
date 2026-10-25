@@ -105,6 +105,30 @@ def bulk_data_fixture(data=BINARY, *, disconnect=False):
 
 
 class BulkTransferTests(unittest.TestCase):
+    def test_missing_download_is_terminal_but_upload_and_transport_errors_remain_unknown(self):
+        try:
+            from e2b.exceptions import FileNotFoundException, TimeoutException
+        except ImportError:
+            self.skipTest("requires the official E2B SDK exception types")
+        for error_type, expected in ((FileNotFoundException, "failed"), (TimeoutException, "unknown")):
+            with self.subTest(error=error_type.__name__):
+                adapter = self.adapter()
+                def fail(*args, **kwargs):
+                    raise error_type("private data token=secret")
+                self.client.sandbox.files.read = fail
+                result = adapter.handle(download_request())
+                self.assertEqual(result["outcome"], expected)
+                self.assertEqual(result["result"], {"sandboxId":"sandbox-a", "transferId":TRANSFER_ID})
+                self.assertNotIn("secret", str(result))
+                self.assertFalse(any(self.root.iterdir()))
+        adapter = self.adapter()
+        self.source()
+        def write_fail(*args, **kwargs):
+            raise FileNotFoundException("private data token=secret")
+        self.client.sandbox.files.write = write_fail
+        result = adapter.handle(upload_request())
+        self.assertEqual(result["outcome"], "unknown")
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

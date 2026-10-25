@@ -9,7 +9,7 @@ from django.db import connection
 from .environment_lifecycle import MAX_CONTROLLER_EPOCH, _translate_contention, controller_lease_digest
 from .environment_maintenance import LEASE_MS, MaintenanceError, _digest, _grant_result, _locked_environment, _now_ms
 from .environment_maintenance_authorization import PROVISION_SCHEMA, sign_provision_authorization
-from .environment_profile import environment_profile_digest
+from .environment_profile import E2B_PROFILE_SCHEMA, environment_profile_digest
 from .models import EnvironmentMaintenanceGrant, EnvironmentMaintenanceOperation
 from .plugin_catalog import plugin_activation_for_workspace, plugin_lifecycle_lock
 
@@ -44,10 +44,21 @@ def issue_provision_authorization(environment_id, body):
                 or environment_profile_digest(environment.environment_profile) != environment.environment_profile_digest):
             raise MaintenanceError('environment_profile_binding_required')
         with connection.cursor() as cursor:
-            cursor.execute('SELECT 1 FROM runtime.execution_instances WHERE environment_id=%s LIMIT 1 FOR SHARE NOWAIT',
-                [environment.pk])
-            if cursor.fetchone() is not None:
-                raise MaintenanceError('provision_allocation_exists')
+            if environment.environment_profile['schema'] == E2B_PROFILE_SCHEMA:
+                if environment.environment_profile['lifetime'] != 'retained':
+                    raise MaintenanceError('provision_provider_retained_required')
+                # Prepared and Unknown responsibilities also prevent a new
+                # operation from allocating around the original attempt.
+                for table in ('provider_creation_operations', 'provider_environment_bindings'):
+                    cursor.execute(f'SELECT 1 FROM runtime.{table} WHERE environment_id=%s LIMIT 1 FOR SHARE NOWAIT',
+                        [environment.pk])
+                    if cursor.fetchone() is not None:
+                        raise MaintenanceError('provision_allocation_exists')
+            else:
+                cursor.execute('SELECT 1 FROM runtime.execution_instances WHERE environment_id=%s LIMIT 1 FOR SHARE NOWAIT',
+                    [environment.pk])
+                if cursor.fetchone() is not None:
+                    raise MaintenanceError('provision_allocation_exists')
         if session.agent.definition_id:
             from .agent_definitions import AgentDefinitionUnavailable, published_version_for_agent
             from .models import WorkspaceMembership
@@ -95,6 +106,9 @@ def issue_provision_authorization(environment_id, body):
 
 
 def provision_completion_matches(operation, grant):
+    selected = grant.payload.get('environmentProfile')
+    if isinstance(selected, dict) and selected.get('schema') == E2B_PROFILE_SCHEMA:
+        return _provider_completion_matches(operation, grant)
     with connection.cursor() as cursor:
         cursor.execute('SELECT environment_id,session_id,workspace_id,host_id,instance_id,container_id,profile_digest,'
             'controller_epoch,controller_lease_digest,request_digest,completion_json FROM runtime.environment_provision_completions '
@@ -114,4 +128,81 @@ def provision_completion_matches(operation, grant):
         return json.loads(encoded) == {'kind': 'provisioned', 'instanceId': instance,
             'containerId': container, 'profileDigest': profile}
     except (ValueError, TypeError, RecursionError):
+        return False
+
+
+def _provider_completion_matches(operation, grant):
+    """A provider completion is useful only with its exact verified origin.
+
+    Runtime owns the insert-only preparation attestation. Its digest by itself
+    is not evidence of allocation, ownership, or successful preparation.
+    """
+    payload = grant.payload
+    try:
+        selected = operation.request['environmentProfile']
+        expected_request = {'kind': 'provisionEnvironment', **{name: payload[name] for name in
+            ('environmentProfile', 'environmentProfileDigest', 'userId', 'agentId', 'pluginActivation')}}
+        if (selected['schema'] != E2B_PROFILE_SCHEMA or selected['lifetime'] != 'retained'
+                or operation.request != expected_request or _digest(expected_request) != operation.request_digest
+                or payload['operationId'] != operation.pk
+                or (payload['environmentId'], payload['sessionId'], payload['workspaceId'],
+                    payload['environmentProfileDigest'], payload['requestDigest']) !=
+                   (operation.environment_id, operation.session_id, operation.workspace_id,
+                    operation.profile_digest, operation.request_digest)
+                or environment_profile_digest(selected) != operation.profile_digest):
+            return False
+    except (KeyError, TypeError, ValueError, RecursionError):
+        return False
+
+    receipt_fields = ('creation_attempt_id', 'environment_id', 'session_id', 'workspace_id', 'instance_id',
+        'sandbox_id', 'profile_digest', 'provider_config_digest', 'authorization_digest', 'controller_epoch',
+        'controller_lease_digest', 'request_digest', 'preparation_digest', 'recorded_at_ms')
+    creation_fields = ('environment_id', 'session_id', 'workspace_id', 'instance_id', 'verified_sandbox_id',
+        'verification_digest', 'verified_at_ms', 'authorization_digest', 'profile_digest', 'provider_config_digest',
+        'provider', 'dispatch_state', 'creation_owner_json', 'maintenance_operation_id', 'agent_run_id', 'processing_job_id')
+    columns = [f'receipt.{name} AS receipt_{name}' for name in receipt_fields]
+    columns.extend(f'creation.{name} AS creation_{name}' for name in creation_fields)
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT ' + ','.join(columns) +
+            ' FROM runtime.provider_environment_provision_completions receipt '
+            'JOIN runtime.provider_creation_operations creation ON creation.attempt_id=receipt.creation_attempt_id '
+            'JOIN runtime.provider_environment_bindings binding ON binding.creation_attempt_id=creation.attempt_id '
+            'AND binding.environment_id=receipt.environment_id '
+            'WHERE receipt.operation_id=%s FOR SHARE OF receipt,creation,binding NOWAIT', [operation.pk])
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        facts = dict(zip((column[0] for column in cursor.description), row))
+
+    expected = {'environment_id': operation.environment_id, 'session_id': operation.session_id,
+        'workspace_id': operation.workspace_id, 'profile_digest': operation.profile_digest,
+        'provider_config_digest': selected['providerConfigDigest'], 'authorization_digest': grant.digest}
+    if any(facts['receipt_' + name] != value or facts['creation_' + name] != value
+           for name, value in expected.items()):
+        return False
+    if ((facts['receipt_controller_epoch'], facts['receipt_controller_lease_digest'], facts['receipt_request_digest']) !=
+            (grant.controller_epoch, grant.controller_lease_digest, operation.request_digest)
+            or facts['creation_provider'] != 'e2b' or facts['creation_dispatch_state'] != 'dispatched'
+            or facts['creation_maintenance_operation_id'] != operation.pk
+            or facts['creation_agent_run_id'] is not None or facts['creation_processing_job_id'] is not None
+            or facts['receipt_instance_id'] != facts['creation_instance_id']
+            or not isinstance(facts['receipt_instance_id'], str)
+            or not re.fullmatch(r'instance_[0-9a-f]{64}', facts['receipt_instance_id'])
+            or facts['receipt_sandbox_id'] != facts['creation_verified_sandbox_id']):
+        return False
+    sandbox = facts['receipt_sandbox_id']
+    if not isinstance(sandbox, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,256}', sandbox):
+        return False
+    for name in ('receipt_preparation_digest', 'creation_verification_digest'):
+        if not isinstance(facts[name], str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', facts[name]):
+            return False
+    for name in ('receipt_recorded_at_ms', 'creation_verified_at_ms'):
+        if type(facts[name]) is not int or facts[name] < 0:
+            return False
+    if facts['receipt_recorded_at_ms'] < facts['creation_verified_at_ms']:
+        return False
+    try:
+        return json.loads(facts['creation_creation_owner_json']) == {
+            'kind': 'maintenanceOperation', 'operationId': operation.pk}
+    except (TypeError, ValueError, RecursionError):
         return False

@@ -1543,6 +1543,7 @@ class EnvironmentMaintenanceOperation(models.Model):
     container_id = models.CharField(max_length=64, null=True)
     host_id = models.CharField(max_length=160, null=True)
     allocation_execution_id = models.TextField(null=True)
+    provider_target = models.JSONField(null=True, default=None)
     profile_digest = models.CharField(max_length=71)
     request = models.JSONField()
     request_digest = models.CharField(max_length=71)
@@ -1556,18 +1557,26 @@ class EnvironmentMaintenanceOperation(models.Model):
             condition=models.Q(state="active", released_at__isnull=True)
                 | models.Q(state="released", released_at__isnull=False), name="maintenance_operation_state_valid"),
             models.CheckConstraint(condition=(models.Q(operation_kind='provision', instance_id__isnull=True,
-                container_id__isnull=True, host_id__isnull=True, allocation_execution_id__isnull=True)
-                | (models.Q(operation_kind='task', instance_id__isnull=False, container_id__isnull=False,
-                    host_id__isnull=False, allocation_execution_id__isnull=False)
+                container_id__isnull=True, host_id__isnull=True, allocation_execution_id__isnull=True, provider_target__isnull=True)
+                | models.Q(operation_kind='task', provider_target__isnull=False, instance_id__isnull=True,
+                    container_id__isnull=True, host_id__isnull=True, allocation_execution_id__isnull=True)
+                | (models.Q(operation_kind='task', provider_target__isnull=True, instance_id__isnull=False,
+                    container_id__isnull=False, host_id__isnull=False, allocation_execution_id__isnull=False)
                     & ~models.Q(instance_id='') & ~models.Q(container_id='') & ~models.Q(host_id='')
                     & ~models.Q(allocation_execution_id=''))), name='maintenance_operation_target_valid')]
 
     def save(self, *args, **kwargs):
+        if self.provider_target is not None:
+            from .provider_environment_maintenance_authorization import validate_provider_target
+            validate_provider_target(self.provider_target)
+            if (self.operation_kind != 'task' or any(value is not None for value in
+                    (self.instance_id, self.container_id, self.host_id, self.allocation_execution_id))):
+                raise ValueError('maintenance_operation_target_invalid')
         if self._state.adding:
             kwargs['force_insert'] = True
         else:
             fields = ("operation_kind", "workspace_id", "session_id", "environment_id", "instance_id", "container_id", "host_id",
-                      "allocation_execution_id", "profile_digest", "request", "request_digest")
+                      "allocation_execution_id", "profile_digest", "request", "request_digest", "provider_target")
             stored = type(self).objects.values(*fields).get(pk=self.pk)
             if any(stored[name] != getattr(self, name) for name in fields):
                 raise ValueError("maintenance_operation_immutable")

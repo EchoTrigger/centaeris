@@ -44,6 +44,8 @@ def remove_runtime_trigger_functions(cursor):
                  "protect_provider_creation_operation",
                  "protect_provider_run_cleanup_receipt",
                  "protect_provider_environment_binding",
+                 "protect_provider_environment_provision_completion",
+                 "protect_provider_environment_maintenance_completion",
                  "protect_retained_provider_run_use",
                  "protect_provider_environment_retirement",
                  "protect_provider_environment_power",

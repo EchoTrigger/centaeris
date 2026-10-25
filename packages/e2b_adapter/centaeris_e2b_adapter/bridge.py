@@ -7,7 +7,9 @@ from dataclasses import dataclass, field
 import importlib.metadata
 import json
 import os
+from pathlib import PurePosixPath
 import re
+import unicodedata
 from time import monotonic
 from typing import BinaryIO
 from urllib.parse import urlsplit
@@ -16,7 +18,7 @@ from uuid import UUID
 from .attach import attach_existing
 from .bulk import BulkSpool, BulkTransferError, MAX_TRANSFER_BYTES, TRANSFER_CHUNK_BYTES
 from .observations import PowerTiming, SdkTiming
-from .control import (CONTROL_HELPERS, EXPECTED_METADATA_KEYS, WORKSPACE_ROOT, WORKSPACE_USER,
+from .control import (CONTROL_HELPERS, metadata_keys, WORKSPACE_ROOT, WORKSPACE_USER,
                       ControlHelperError, start_control_helper)
 
 SDK_VERSION = "2.58.0"
@@ -48,6 +50,18 @@ def _provider_failure_code(error):
             return {409: "providerConflict", 422: "providerUnprocessable",
                     429: "providerRateLimited", 503: "providerUnavailable"}.get(status, "providerRequestFailed")
     return "providerRequestFailed"
+
+
+def _read_file_failure_code(operation, error):
+    # Only a typed, completed read failure is terminal. A missing sandbox,
+    # connection loss or an interrupted write still retains responsibility.
+    if operation not in ("readFile", "downloadFile", "listDirectory"):
+        return None
+    try:
+        from e2b.exceptions import FileNotFoundException
+    except ImportError:
+        return None
+    return "fileNotFound" if isinstance(error, FileNotFoundException) else None
 
 
 @dataclass(frozen=True)
@@ -261,7 +275,7 @@ class Adapter:
             operation = _text(value["operation"], 64)
             payload = self._validate(operation, value["payload"])
             self._check_lane(operation)
-            if operation in ("readFile", "writeFile", "uploadFile", "downloadFile", "runCommand", "waitCommand", "recoverCommand", "cancelCommand"):
+            if operation in ("readFile", "writeFile", "listDirectory", "uploadFile", "downloadFile", "runCommand", "waitCommand", "recoverCommand", "cancelCommand"):
                 if payload["sandboxId"] not in self._sandboxes:
                     raise RequestError("connectionRequired", "Explicit connect is required in this adapter process")
             known = {k: payload[k] for k in ("attemptId", "sandboxId", "pid", "transferId") if k in payload}
@@ -288,6 +302,10 @@ class Adapter:
             return self._response(request_id, "unknown", result=known, error={"code": error.code, "message": str(error)})
         except Exception as error:
             # Provider diagnostics may contain credentials, URLs or user content.
+            code = _read_file_failure_code(operation, error)
+            if code is not None:
+                return self._response(request_id, "failed", result=known,
+                    error={"code": code, "message": "The requested file or directory was not found."})
             return self._response(request_id, "unknown", result=known, error={"code": _provider_failure_code(error), "message": "The provider result is unknown; retain the operation responsibility."})
         finally:
             if transfer is not None:
@@ -303,7 +321,7 @@ class Adapter:
 
     def _check_lane(self, operation):
         allowed = {
-            "ordinary": {"capabilities", "create", "connect", "attach", "inspect", "readFile", "writeFile", "uploadFile", "downloadFile", "runCommand", "waitCommand", "recoverCommand", "cancelCommand"},
+            "ordinary": {"capabilities", "create", "connect", "attach", "inspect", "readFile", "writeFile", "listDirectory", "uploadFile", "downloadFile", "runCommand", "waitCommand", "recoverCommand", "cancelCommand"},
             "control": {"capabilities", "inspect", "invokeControlHelper"},
             "cleanup": {"capabilities", "inspect", "kill", "pause", "connect"},
         }
@@ -316,10 +334,11 @@ class Adapter:
             "create": (("attemptId", "idempotencyKey", "templateRef", "metadata", "timeoutSeconds", "allowInternetAccess", "onTimeout"), ()),
             "connect": (("sandboxId", "timeoutSeconds", "onResume", "expectedTemplateId", "expectedMetadata"), ()),
             "inspect": (("sandboxId",), ()),
-            "attach": (("sandboxId", "expectedTemplateId", "expectedMetadata", "workspaceRoot", "workspaceUser"), ()),
+            "attach": (("sandboxId", "expectedTemplateId", "expectedMetadata", "workspaceRoot", "workspaceUser"), ("includeResources",)),
             "kill": (("sandboxId",), ()),
             "pause": (("sandboxId", "mode", "expectedTemplateId", "expectedMetadata"), ()),
             "readFile": (("sandboxId", "path"), ("user", "maxBytes")),
+            "listDirectory": (("sandboxId", "path", "recursive", "maxEntries"), ("user",)),
             "writeFile": (("sandboxId", "path", "dataBase64"), ("user",)),
             "uploadFile": (("sandboxId", "path", "transferId", "byteLength", "sha256"), ("user",)),
             "downloadFile": (("sandboxId", "path", "transferId", "maxBytes"), ("user",)),
@@ -360,16 +379,36 @@ class Adapter:
                 _integer(value["byteLength"], 0, MAX_TRANSFER_BYTES)
                 if not re.fullmatch(r"[a-f0-9]{64}", _text(value["sha256"], 64)):
                     raise RequestError("invalidRequest", "Upload requires an exact lowercase SHA-256 digest")
+        if operation == "listDirectory":
+            _integer(value["maxEntries"], 1, 10000)
+            if type(value["recursive"]) is not bool:
+                raise RequestError("invalidRequest", "Directory recursion must be explicit")
+        if "includeResources" in value and type(value["includeResources"]) is not bool:
+            raise RequestError("invalidRequest", "Resource observation must be explicit")
         if operation == "invokeControlHelper":
             _choice(value["helper"], CONTROL_HELPERS)
             _integer(value["timeoutSeconds"], 1, 60)
-        if operation in ("invokeControlHelper", "attach"):
+        if operation == "invokeControlHelper":
             if value["workspaceRoot"] != WORKSPACE_ROOT or value["workspaceUser"] != WORKSPACE_USER:
                 raise RequestError("invalidRequest", "Fixed control helpers require the supported template workspace identity")
+        if operation == "attach":
+            root = _text(value["workspaceRoot"])
+            if (not root.startswith("/") or root.startswith("//") or "\\" in root
+                    or unicodedata.normalize("NFC", root) != root
+                    or any(unicodedata.category(character) == "Cc" for character in root)
+                    or ".." in root.split("/") or str(PurePosixPath(root)) != root
+                    or root == "/run/centaeris" or root.startswith("/run/centaeris/")):
+                raise RequestError("invalidRequest", "Attachment requires a canonical workspace root")
+            if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", _text(value["workspaceUser"], 32)):
+                raise RequestError("invalidRequest", "Attachment requires a canonical workload user")
         if operation in ("invokeControlHelper", "attach", "pause", "connect"):
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", _text(value["expectedTemplateId"], 128)):
                 raise RequestError("invalidRequest", "Operation requires a canonical expected template ID")
-            value["expectedMetadata"] = _strings(_object(value["expectedMetadata"], EXPECTED_METADATA_KEYS))
+            try:
+                keys = metadata_keys(value["expectedMetadata"])
+            except ValueError:
+                raise RequestError("invalidRequest", "Missing or unsupported creation metadata") from None
+            value["expectedMetadata"] = _strings(_object(value["expectedMetadata"], keys))
         if operation == "create":
             if not re.fullmatch(r"[a-z0-9-]+", _text(value["idempotencyKey"], 255)):
                 raise RequestError("invalidRequest", "Create idempotencyKey requires 1 to 255 lowercase ASCII letters, digits or hyphens")
@@ -455,8 +494,14 @@ class Adapter:
             return {"helper": payload["helper"], **_collect_command_output(handle, payload["sandboxId"], handle.pid, payload["maxOutputBytes"])}
         if operation == "attach":
             sandbox, detail = attach_existing(self.config, payload)
+            info = self._info(detail, payload["sandboxId"])
+            if payload.get("includeResources", False):
+                for number in (detail.cpu_count, detail.memory_mb):
+                    if type(number) is not int or number <= 0:
+                        raise RequestError("resourceFactsInvalid", "Fresh provider resource facts are unavailable")
+                info.update(cpuCount=detail.cpu_count, memoryMiB=detail.memory_mb)
             self._remember(sandbox, detail.envd_version)
-            return self._info(detail, payload["sandboxId"])
+            return info
         sdk = self.client.Sandbox
         if operation == "create":
             # The caller durably admits one fresh dispatch before invoking us.
@@ -508,6 +553,23 @@ class Adapter:
         user = {"user": payload["user"]} if "user" in payload else {}
         if operation in ("uploadFile", "downloadFile"):
             return transfer.execute(sandbox, self.config.request_timeout_seconds, timing)
+        if operation == "listDirectory":
+            root = PurePosixPath(payload["path"])
+            entries = sandbox.files.list(payload["path"], depth=None if payload["recursive"] else 1,
+                request_timeout=self.config.request_timeout_seconds, **user)
+            if len(entries) > payload["maxEntries"]:
+                raise RequestError("directoryLimitExceeded", "Directory exceeds the bounded entry limit")
+            output, seen = [], set()
+            for entry in entries:
+                kind = getattr(entry.type, "value", entry.type)
+                path = PurePosixPath(entry.path)
+                if (kind not in ("file", "dir") or not path.is_absolute() or str(path) != entry.path
+                        or ".." in path.parts or not path.is_relative_to(root) or path == root
+                        or entry.path in seen or type(entry.size) is not int or entry.size < 0):
+                    raise RequestError("directoryEntryInvalid", "Unsupported native directory entry")
+                seen.add(entry.path)
+                output.append({"path":entry.path, "kind":"directory" if kind=="dir" else "file", "sizeBytes":entry.size})
+            return {"sandboxId":sandbox_id, "entries":output}
         if operation == "readFile":
             data = bytearray()
             with sandbox.files.read(payload["path"], format="stream", request_timeout=self.config.request_timeout_seconds, **user) as stream:

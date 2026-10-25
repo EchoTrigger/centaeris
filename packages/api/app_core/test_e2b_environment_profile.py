@@ -20,6 +20,22 @@ def profile():
 
 
 class E2BEnvironmentProfileTests(SimpleTestCase):
+    def test_task_image_initialization_preserves_original_identity_and_is_signed(self):
+        selected = profile() | {'workspaceInitialization':'taskImage', 'workspaceRoot':'/app', 'user':'root', 'lifetime':'retained'}
+        validate_environment_profile(selected)
+        unsigned = selected.copy()
+        unsigned.pop('workspaceInitialization')
+        self.assertNotEqual(environment_profile_digest(selected), environment_profile_digest(unsigned))
+        self.assertEqual((selected['workspaceRoot'], selected['user']), ('/app', 'root'))
+
+    def test_task_image_initialization_rejects_per_run_and_aliases(self):
+        selected = profile() | {'workspaceInitialization':'taskImage', 'workspaceRoot':'/app', 'user':'root', 'lifetime':'retained'}
+        with self.assertRaisesMessage(ValueError, 'environment_profile_workspace_initialization_invalid'):
+            validate_environment_profile(selected | {'lifetime':'perRun'})
+        for unsupported in (None, 'task_image', 'native', 'sdk'):
+            with self.subTest(value=unsupported), self.assertRaises(ValueError):
+                validate_environment_profile(selected | {'workspaceInitialization':unsupported})
+
     def test_managed_workspace_initialization_uses_the_shared_explicit_profile(self):
         root = Path(__file__).resolve().parents[3] / 'tests/workspace/fixtures/e2b_environment_profile/v1'
         managed = json.loads((root / 'managed-files.json').read_text(encoding='utf-8'))

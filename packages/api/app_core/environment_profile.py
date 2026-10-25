@@ -75,11 +75,13 @@ def _validate_e2b_profile(value):
             or fields - E2B_PROFILE_FIELDS - {'workspaceInitialization'}
             or value['provider'] != 'e2b'):
         raise ValueError('environment_profile_schema_invalid')
-    if 'workspaceInitialization' in value and (
-            not isinstance(value['workspaceInitialization'], str)
-            or value['workspaceInitialization'] != 'managedFiles'
-            or value['workspaceRoot'] != '/mnt/data' or value['user'] != 'agent'):
-        raise ValueError('environment_profile_workspace_initialization_invalid')
+    if 'workspaceInitialization' in value:
+        initialization = value['workspaceInitialization']
+        if (not isinstance(initialization, str)
+                or initialization not in ('managedFiles', 'taskImage')
+                or initialization == 'managedFiles' and (value['workspaceRoot'] != '/mnt/data' or value['user'] != 'agent')
+                or initialization == 'taskImage' and value['lifetime'] != 'retained'):
+            raise ValueError('environment_profile_workspace_initialization_invalid')
     digest = value['providerConfigDigest']
     if not isinstance(digest, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', digest):
         raise ValueError('environment_profile_provider_config_invalid')

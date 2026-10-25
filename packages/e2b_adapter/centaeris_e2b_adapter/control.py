@@ -1,10 +1,30 @@
 """Read-only provider attachment for a fixed trusted template helper set."""
 
 from dataclasses import dataclass, field
+import re
 
 CONTROL_HELPERS = ("prepare-workspace", "prepare-managed-workspace", "agent-process-state", "quiesce-agent-processes")
 EXPECTED_METADATA_KEYS = ("centaerisAttemptId", "environmentId", "instanceId", "executionId", "agentRunId",
                           "sessionId", "workspaceId", "profileDigest", "authorizationDigest", "processingJobId")
+MAINTENANCE_METADATA_KEYS = tuple(key for key in EXPECTED_METADATA_KEYS
+                                  if key not in ("agentRunId", "processingJobId")) + (
+                                      "creationOwnerKind", "maintenanceOperationId")
+
+
+def metadata_keys(value):
+    """Select an exact creation provenance; never infer the current controller."""
+    if not isinstance(value, dict):
+        raise ValueError("Creation metadata requires an object")
+    if set(value) == set(EXPECTED_METADATA_KEYS):
+        return EXPECTED_METADATA_KEYS
+    if (set(value) == set(MAINTENANCE_METADATA_KEYS)
+            and value.get("creationOwnerKind") == "maintenanceOperation"
+            and isinstance(value.get("maintenanceOperationId"), str)
+            and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value["maintenanceOperationId"])):
+        return MAINTENANCE_METADATA_KEYS
+    raise ValueError("Creation metadata has an unsupported or mixed owner")
+
+
 HELPER_PATH = "/opt/centaeris/bin/execution_agent"
 WORKSPACE_ROOT = "/mnt/data"
 WORKSPACE_USER = "agent"

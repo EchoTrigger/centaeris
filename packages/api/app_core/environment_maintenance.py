@@ -80,6 +80,10 @@ def _locked_environment(environment_id):
 
 
 def _allocation(workspace, session, environment):
+    from .environment_profile import E2B_PROFILE_SCHEMA
+    if isinstance(environment.environment_profile, dict) and environment.environment_profile.get('schema') == E2B_PROFILE_SCHEMA:
+        from .provider_environment_maintenance import provider_allocation
+        return provider_allocation(workspace, session, environment)[0]
     with connection.cursor() as cursor:
         cursor.execute('SELECT execution_id FROM runtime.execution_instances '
             'WHERE environment_id=%s AND session_id=%s AND execution_id=allocation_execution_id '
@@ -117,7 +121,23 @@ def _allocation(workspace, session, environment):
 
 
 def _grant_result(grant):
-    signer = sign_provision_authorization if grant.operation.operation_kind == 'provision' else sign_maintenance_authorization
+    if grant.operation.operation_kind == 'provision':
+        signer = sign_provision_authorization
+    elif grant.operation.provider_target is not None:
+        from .provider_environment_maintenance_authorization import sign_provider_maintenance_authorization
+        operation = grant.operation
+        expected = {'workspaceId': operation.workspace_id, 'sessionId': operation.session_id,
+            'environmentId': operation.environment_id, 'providerTarget': operation.provider_target,
+            'profileDigest': operation.profile_digest,
+            'controllerOwner': {'kind': 'maintenanceOperation', 'operationId': operation.pk},
+            'controllerEpoch': grant.controller_epoch, 'controllerLeaseDigest': grant.controller_lease_digest,
+            'controllerPurpose': grant.controller_purpose, 'requestDigest': operation.request_digest,
+            'expiresAtMs': grant.expires_at_ms}
+        if not isinstance(grant.payload, dict) or any(grant.payload.get(name) != value for name, value in expected.items()):
+            raise MaintenanceError('maintenance_grant_invalid')
+        signer = sign_provider_maintenance_authorization
+    else:
+        signer = sign_maintenance_authorization
     try:
         valid = (_digest(grant.payload) == grant.digest
             and secrets.compare_digest(signer(grant.payload, settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY), grant.signature))
@@ -133,6 +153,9 @@ def _completion_matches(operation, grant):
     if operation.operation_kind == 'provision':
         from .environment_provision import provision_completion_matches
         return provision_completion_matches(operation, grant)
+    if operation.provider_target is not None:
+        from .provider_environment_maintenance import provider_completion_matches
+        return provider_completion_matches(operation, grant)
     with connection.cursor() as cursor:
         cursor.execute('SELECT environment_id,instance_id,container_id,profile_digest,controller_epoch,'
             'controller_lease_digest,request_digest,completion_json FROM runtime.environment_maintenance_completions '
@@ -144,8 +167,12 @@ def _completion_matches(operation, grant):
                 grant.controller_epoch, grant.controller_lease_digest, operation.request_digest)
     if tuple(row[:7]) != expected:
         return False
+    return _valid_task_completion(row[7])
+
+
+def _valid_task_completion(encoded):
     try:
-        completion = json.loads(row[7])
+        completion = json.loads(encoded)
         return (isinstance(completion, dict) and set(completion) == {'kind', 'taskIds', 'cleanupComplete'}
             and completion['kind'] == 'operationEnded' and completion['cleanupComplete'] is True
             and isinstance(completion['taskIds'], list)
@@ -217,7 +244,15 @@ def issue_maintenance_authorization(environment_id, body):
             'controllerOwner': {'kind': 'maintenanceOperation', 'operationId': operation.pk},
             'controllerEpoch': epoch, 'controllerLeaseDigest': lease_digest,
             'controllerPurpose': purpose, 'requestDigest': request_digest, 'expiresAtMs': deadline}
-        signature = sign_maintenance_authorization(payload, settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY)
+        if operation.provider_target is not None:
+            from .provider_environment_maintenance_authorization import SCHEMA as PROVIDER_SCHEMA, sign_provider_maintenance_authorization
+            payload.pop('instanceId')
+            payload.pop('containerId')
+            payload.update(schema=PROVIDER_SCHEMA, providerTarget=operation.provider_target)
+            signer = sign_provider_maintenance_authorization
+        else:
+            signer = sign_maintenance_authorization
+        signature = signer(payload, settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY)
         grant = EnvironmentMaintenanceGrant.objects.create(operation=operation,
             previous_controller_epoch=expected, controller_epoch=epoch, controller_lease_digest=lease_digest,
             controller_purpose=purpose, expires_at_ms=deadline, payload=payload, signature=signature)

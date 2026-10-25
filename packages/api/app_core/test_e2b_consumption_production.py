@@ -56,6 +56,18 @@ def runtime_argv(value):
     return result
 
 
+def runtime_shutdown_wait_seconds(environment):
+    # Runtime drains at most two adapter requests plus ten seconds. Allow a
+    # further ten seconds for process exit and stdout drain before forcing it.
+    try:
+        request_timeout = int(environment.get('RUNTIME_E2B_REQUEST_TIMEOUT_SECONDS', '20'))
+    except (TypeError, ValueError):
+        raise ValueError('E2B shutdown request timeout invalid') from None
+    if not 1 <= request_timeout <= 60:
+        raise ValueError('E2B shutdown request timeout invalid')
+    return request_timeout * 2 + 20
+
+
 def require_local_provider(environment):
     for name in ('E2B_API_URL', 'E2B_SANDBOX_URL'):
         try:
@@ -445,6 +457,7 @@ if os.environ.get('CENTAERIS_E2B_PRODUCT_ACCEPTANCE') == '1':
                 'AGENT_RUN_AUTHORIZATION_SIGNING_KEY': settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
                 'REDIS_URL': 'redis://127.0.0.1:1/15', 'RUNTIME_STREAM_TTL_SECONDS': '3600',
                 'RUNTIME_LIVE_STATE_TTL_SECONDS': '3600', 'NO_PROXY': '127.0.0.1,localhost,' + os.environ.get('NO_PROXY', '')}
+            self.runtime_shutdown_wait_seconds = runtime_shutdown_wait_seconds(environment)
             self.runtime_process = subprocess.Popen(self.argv, cwd=Path(__file__).resolve().parents[3], env=environment,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8')
             self.addCleanup(self.stop_runtime)
@@ -481,7 +494,8 @@ if os.environ.get('CENTAERIS_E2B_PRODUCT_ACCEPTANCE') == '1':
                 process.stdin.write('stop\n')
                 process.stdin.flush()
             try:
-                process.wait(timeout=30)
+                process.wait(timeout=getattr(self, 'runtime_shutdown_wait_seconds',
+                    runtime_shutdown_wait_seconds({})))
             finally:
                 if process.poll() is None:
                     process.terminate()

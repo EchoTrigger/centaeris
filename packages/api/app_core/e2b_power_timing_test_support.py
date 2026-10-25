@@ -15,6 +15,7 @@ from .e2b_workspace_test_support import MAX_LINE_CHARS
 _FIELDS = frozenset(("schema", "source", "phase", "operationId", "action", "metric", "value", "outcome", "atUnixMs"))
 _RUNTIME = frozenset(("runtimePowerElapsedMs", "contextDropElapsedMs", "adapterSpawnElapsedMs",
     "adapterHandshakeElapsedMs", "adapterRoundTripElapsedMs", "adapterCloseElapsedMs",
+    "adapterReuseElapsedMs", "adapterRetainElapsedMs",
     "storePrepareElapsedMs", "storeDispatchCasElapsedMs", "storeSideEffectPinsElapsedMs",
     "storeCallbackElapsedMs", "storeAckCommitElapsedMs", "storeAdvanceElapsedMs"))
 _SDK = frozenset(("sdkImportElapsedMs", "sdkClientSetupElapsedMs", "sdkIdentityGetElapsedMs",
@@ -58,13 +59,24 @@ def _unique_object(pairs):
     return result
 
 
-def _required(action, kind):
+def _required(action, kind, observed):
     if kind == "replay":
         return Counter({metric: 1 for metric in _REPLAY})
-    metrics = _RUNTIME | (_SDK - ({"sdkConnectElapsedMs", "sdkResumeVerifyGetElapsedMs"}
+    metrics = (_RUNTIME - {"adapterReuseElapsedMs", "adapterRetainElapsedMs"}) | (_SDK - ({"sdkConnectElapsedMs", "sdkResumeVerifyGetElapsedMs"}
         if action == "pause" else {"sdkPauseElapsedMs"}))
     required = Counter({metric: 1 for metric in metrics})
     required["sdkHandleElapsedMs"] = 2  # capability handshake and actual power call
+    # Only explicit successful observations can establish a cache hit/retention.
+    # Missing startup or close records alone must never imply either path.
+    if observed["adapterReuseElapsedMs"]:
+        for metric in ("adapterSpawnElapsedMs", "adapterHandshakeElapsedMs",
+                       "sdkImportElapsedMs", "sdkClientSetupElapsedMs"):
+            del required[metric]
+        required["adapterReuseElapsedMs"] = 1
+        required["sdkHandleElapsedMs"] = 1
+    if observed["adapterRetainElapsedMs"]:
+        del required["adapterCloseElapsedMs"]
+        required["adapterRetainElapsedMs"] = 1
     return required
 
 
@@ -161,8 +173,8 @@ class PowerTimingCollector:
             invocations = []
             for ordinal, invocation in enumerate(operation["invocations"], 1):
                 rows, kind = invocation["records"], invocation["kind"]
-                required = _required(operation["action"], kind)
                 observed = Counter(row["metric"] for row in rows)
+                required = _required(operation["action"], kind, observed)
                 missing = sorted(metric for metric, count in required.items() if observed[metric] < count)
                 excess = sorted(metric for metric, count in observed.items() if count > required[metric])
                 acceptable = ("ok", "replayed") if kind == "replay" else ("ok",)

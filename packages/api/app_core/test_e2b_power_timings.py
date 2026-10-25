@@ -34,6 +34,79 @@ class PowerTimingCollectorTests(SimpleTestCase):
         if close:
             self.feed(collector, operation=operation, action=action, metric="runtimePowerElapsedMs", value=values.get("runtimePowerElapsedMs", 1.0))
 
+    def cached(self, collector, *, reused, retained, omit=(), extra=(), action="pause"):
+        runtime = [metric for metric in RUNTIME if metric != "adapterCloseElapsedMs"]
+        sdk = list(SDK)
+        if reused:
+            runtime = [metric for metric in runtime if metric not in
+                       ("adapterSpawnElapsedMs", "adapterHandshakeElapsedMs")]
+            runtime.append("adapterReuseElapsedMs")
+            sdk = ["sdkIdentityGetElapsedMs", "sdkHandleElapsedMs"]
+        runtime += ["adapterRetainElapsedMs" if retained else "adapterCloseElapsedMs", "runtimePowerElapsedMs"]
+        sdk += ["sdkPauseElapsedMs"] if action == "pause" else ["sdkConnectElapsedMs", "sdkResumeVerifyGetElapsedMs"]
+        for metric in runtime + sdk + list(extra):
+            if metric not in omit:
+                self.feed(collector, metric=metric, action=action,
+                          source="sdk" if metric.startswith("sdk") else "runtime")
+
+    def test_explicit_reuse_and_retention_cover_each_actual_adapter_path(self):
+        for action in ("pause", "resume"):
+            for reused, retained in ((False, True), (True, True), (True, False), (False, False)):
+                with self.subTest(action=action, reused=reused, retained=retained):
+                    collector = PowerTimingCollector()
+                    collector.bind("pause-operation", action)
+                    self.cached(collector, reused=reused, retained=retained, action=action)
+                    report = self.report(collector)
+                    require_power_timing_coverage(report)
+                    invocation = report["operations"][0]["invocations"][0]
+                    metrics = [row["metric"] for row in invocation["records"]]
+                    self.assertEqual(metrics.count("sdkHandleElapsedMs"), 1 if reused else 2)
+                    self.assertEqual(invocation["metricCoverage"]["adapterReuseElapsedMs"],
+                                     "observed" if reused else "notObserved")
+                    self.assertEqual(invocation["metricCoverage"]["sdkImportElapsedMs"],
+                                     "notObserved" if reused else "observed")
+                    self.assertEqual(metrics.count("adapterRetainElapsedMs"), int(retained))
+                    self.assertEqual(metrics.count("adapterCloseElapsedMs"), int(not retained))
+
+    def test_missing_or_conflicting_cache_observations_never_imply_reuse_or_zero(self):
+        cases = (
+            {"omit": ("adapterReuseElapsedMs",)},
+            {"omit": ("adapterRetainElapsedMs",)},
+            {"extra": ("adapterSpawnElapsedMs",)},
+            {"extra": ("sdkImportElapsedMs",)},
+            {"extra": ("sdkHandleElapsedMs",)},
+            {"extra": ("adapterCloseElapsedMs",)},
+            {"extra": ("adapterReuseElapsedMs",)},
+            {"extra": ("adapterRetainElapsedMs",)},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes):
+                collector = PowerTimingCollector()
+                collector.bind("pause-operation", "pause")
+                self.cached(collector, reused=True, retained=True, **changes)
+                report = self.report(collector)
+                self.assertEqual(report["coverageStatus"], "incomplete")
+                with self.assertRaises(AssertionError):
+                    require_power_timing_coverage(report)
+                for metric in changes.get("omit", ()):
+                    invocation = report["operations"][0]["invocations"][0]
+                    self.assertEqual(invocation["metricCoverage"][metric], "notObserved")
+                    self.assertFalse(any(row["metric"] == metric for row in invocation["records"]))
+
+    def test_replay_cannot_masquerade_as_adapter_reuse_or_retention(self):
+        for metric in ("adapterReuseElapsedMs", "adapterRetainElapsedMs"):
+            with self.subTest(metric=metric):
+                collector = PowerTimingCollector()
+                collector.bind("pause-operation", "pause")
+                self.fresh(collector)
+                collector.bind_replay("pause-operation")
+                for required in ("storePrepareElapsedMs", "storeAdvanceElapsedMs", "runtimePowerElapsedMs"):
+                    self.feed(collector, metric=required, outcome="replayed")
+                self.feed(collector, metric=metric)
+                invocation = self.report(collector)["operations"][0]["invocations"][1]
+                self.assertEqual(invocation["excessMetrics"], [metric])
+                self.assertEqual(invocation["coverageStatus"], "incomplete")
+
     def test_observed_zero_and_missing_sdk_are_distinct_without_invented_values(self):
         collector = PowerTimingCollector()
         collector.bind("pause-operation", "pause")

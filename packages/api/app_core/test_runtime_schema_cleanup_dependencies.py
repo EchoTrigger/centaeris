@@ -54,7 +54,9 @@ class RuntimeSchemaDependencyCleanupTests(TransactionTestCase):
         succeeded = False
         names = ("protect_environment_creation_attempt", "protect_lifecycle_lease_purpose",
             "protect_provider_creation_operation", "protect_provider_run_cleanup_receipt",
-            "protect_provider_environment_binding", "protect_retained_provider_run_use",
+            "protect_provider_environment_binding", "protect_provider_environment_provision_completion",
+            "protect_provider_environment_maintenance_completion",
+            "protect_retained_provider_run_use",
             "protect_provider_environment_retirement", "protect_provider_environment_power",
             "resident_capacity_release", "resident_capacity_job_change")
         with connection.cursor() as cursor:

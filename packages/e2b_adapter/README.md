@@ -73,6 +73,7 @@ Attempt and sandbox identities retain their own broader bounded-string rules.
 | Outcome | Meaning |
 | --- | --- |
 | `succeeded` | The requested SDK operation returned its described result. |
+| `failed` | A read-only file operation received the pinned SDK's typed `FileNotFoundException`. The fixed `fileNotFound` code and original sandbox/transfer binding describe a completed failure, not a successful read. |
 | `notDispatched` | Local validation or lane admission rejected this request before an SDK operation. This is evidence only for this invocation. |
 | `unknown` | An SDK operation was attempted and the requested result is not proven. Known attempt, sandbox and PID identities are preserved when available. |
 
@@ -237,8 +238,12 @@ until its required process and retention semantics are demonstrated.
 Run isolated behavioral tests without provider credentials:
 
 ```sh
-uv run --frozen --package centaeris-e2b-adapter python -B -m unittest discover -s packages/e2b_adapter/tests -v
+E2B_CONNECTION_RETRIES=0 uv run --frozen --package centaeris-e2b-adapter python -B -m unittest discover -s packages/e2b_adapter/tests -v
 ```
 
+Start a fresh Python process with `E2B_CONNECTION_RETRIES=0` before SDK import,
+matching the adapter CLI initialization. Test discovery may otherwise import the
+SDK before an adapter exists; a pre-imported retry-enabled SDK is deliberately
+rejected. A separate subprocess regression verifies that fail-closed behavior.
 The SDK transport fixture exercises the real SDK against loopback HTTP; it does
 not establish Firecracker, filesystem, process-tree, or retention acceptance.
