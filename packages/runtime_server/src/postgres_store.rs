@@ -95,6 +95,7 @@ pub(crate) mod pre_admission_failure;
 pub(crate) mod provision;
 mod reliability;
 pub(crate) mod residency;
+pub(crate) mod runsc_rotation;
 mod resource_commit;
 mod runtime;
 pub(crate) use runtime::validate_hosted_native_input;

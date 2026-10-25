@@ -5051,3 +5051,5 @@ fn postgres_runtime_store_recovery_pages_preserve_bytes_and_fixed_watermark() {
 pub(in crate::postgres_store) fn require_owned_archive_fixture(db: &mut Client) {
     owned_database::require_owned_database(db);
 }
+
+mod runsc_rotation_tests;

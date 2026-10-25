@@ -170,13 +170,63 @@ pub(super) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
 
 /// Activation authority is independent of schema installation. Historical rows
 /// remain readable and are never settled or removed by native startup.
-pub(super) fn require_settled(_db: &mut impl GenericClient) -> Result<(), String> {
-    Ok(())
+pub(super) fn require_settled(db: &mut impl GenericClient) -> Result<(), String> {
+    // One read statement observes all obligations under the same DB snapshot.
+    // A binding is historical identity, not evidence that a sandbox is live.
+    // Only the original exact positive settlement can close physical ownership;
+    // it does not settle a creator Job, power intent, or Run cleanup for us.
+    let reason: Option<String> = db
+        .query_one(
+            r#"
+SELECT CASE
+ WHEN EXISTS(SELECT 1 FROM runtime.provider_creation_operations p WHERE (
+  p.settlement_id IS NOT NULL AND p.settlement_controller_epoch>0 AND p.settled_at_ms>=0
+  AND p.attempt_id<>'' AND p.execution_id<>'' AND p.instance_id<>'' AND p.environment_id<>''
+  AND p.session_id<>'' AND p.workspace_id<>''
+  AND ((p.settlement_kind='notDispatched' AND p.dispatch_state='notDispatched'
+        AND p.reported_sandbox_id IS NULL AND p.verified_sandbox_id IS NULL
+        AND p.verification_digest IS NULL AND p.verified_at_ms IS NULL
+        AND p.settlement_sandbox_id IS NULL)
+    OR (p.settlement_kind='removed' AND p.dispatch_state='dispatched'
+        AND p.reported_sandbox_id IS NOT NULL AND p.verified_sandbox_id=p.reported_sandbox_id
+        AND p.settlement_sandbox_id=p.verified_sandbox_id
+        AND p.verification_digest ~ '^sha256:[0-9a-f]{64}$'
+        AND p.verified_at_ms>=0 AND p.settled_at_ms>=p.verified_at_ms))
+ ) IS NOT TRUE) THEN 'native_activation_provider_creation_unsettled'
+ WHEN EXISTS(SELECT 1 FROM runtime.provider_creation_operations p
+  LEFT JOIN runtime.runtime_jobs j ON j.job_id=p.processing_job_id
+  WHERE p.processing_job_id IS NOT NULL
+   AND (j.job_id IS NULL OR j.status NOT IN('succeeded','failed','cancelled','dead_lettered'))
+ ) THEN 'native_activation_provider_creator_job_unsettled'
+ WHEN EXISTS(SELECT 1 FROM runtime.provider_environment_bindings b
+  LEFT JOIN runtime.provider_creation_operations p ON p.attempt_id=b.creation_attempt_id
+  WHERE p.attempt_id IS NULL OR p.environment_id<>b.environment_id
+ ) THEN 'native_activation_provider_binding_invalid'
+ WHEN EXISTS(SELECT 1 FROM runtime.provider_environment_power_operations o WHERE (
+  (o.dispatch_state='notDispatched' AND o.not_dispatched_at_ms IS NOT NULL)
+  OR (o.dispatch_state='dispatched' AND o.acknowledged_at_ms IS NOT NULL AND o.ack_json IS NOT NULL)
+ ) IS NOT TRUE) THEN 'native_activation_provider_power_unsettled'
+ WHEN EXISTS(SELECT 1 FROM runtime.provider_environment_run_uses u
+  LEFT JOIN runtime.provider_creation_operations p ON p.attempt_id=u.creation_attempt_id
+  WHERE (u.cleanup_receipt_id IS NOT NULL AND u.cleanup_controller_epoch>0
+   AND u.quiescence_digest ~ '^sha256:[0-9a-f]{64}$'
+   AND u.cleanup_recorded_at_ms>=u.recorded_at_ms
+   AND p.attempt_id IS NOT NULL AND p.environment_id=u.environment_id
+   AND p.settlement_kind='removed') IS NOT TRUE
+ ) THEN 'native_activation_provider_run_cleanup_unsettled'
+ ELSE NULL END
+"#,
+            &[],
+        )
+        .map_err(|e| format!("native_activation_archive_check_unavailable: {e}"))?
+        .get(0);
+    reason.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]
 pub(super) fn restore_empty_fixture(db: &mut postgres::Client) {
     super::integration_tests::require_owned_archive_fixture(db);
+    super::runsc_rotation::restore_previous_fixture(db);
     let present: bool = db
         .query_one(
             "SELECT to_regclass('runtime.provider_creation_operations') IS NOT NULL",

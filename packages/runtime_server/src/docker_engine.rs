@@ -402,6 +402,39 @@ fn start_inner(id: &str) -> Result<(), String> {
     }
 }
 
+/// Pause one already-authorized immutable container identity.
+/// The execution host must inspect the resulting state before releasing a running slot.
+pub(crate) fn pause(id: &str) -> Result<(), String> {
+    crate::observations::timed("dockerPause", || power_change(id, true))
+}
+
+/// Resume one already-authorized immutable container identity.
+/// This does not start or recreate an exited container.
+pub(crate) fn unpause(id: &str) -> Result<(), String> {
+    crate::observations::timed("dockerUnpause", || power_change(id, false))
+}
+
+fn power_change(id: &str, paused: bool) -> Result<(), String> {
+    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Docker power changes require an immutable container ID".into());
+    }
+    let engine = shared()?;
+    engine.run(MUTATION_TIMEOUT, async {
+        if paused {
+            engine
+                .docker
+                .pause_container(id)
+                .await
+                .map_err(|error| error.to_string())
+        } else {
+            engine
+                .docker
+                .unpause_container(id)
+                .await
+                .map_err(|error| error.to_string())
+        }
+    })
+}
 pub(crate) fn remove(id: &str, volumes: bool) -> Result<(), String> {
     crate::observations::timed("dockerRemove", || remove_inner(id, volumes, true))
 }
@@ -446,6 +479,19 @@ fn remove_inner(id: &str, volumes: bool, force: bool) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn power_mutations_reject_mutable_names_before_connecting_to_a_daemon() {
+        for id in [
+            "",
+            "name",
+            "short-id",
+            "not-hex-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(pause(id).is_err());
+            assert!(unpause(id).is_err());
+        }
+    }
+
     #[test]
     fn create_limit_defaults_to_two_and_rejects_invalid_values() {
         assert_eq!(parse_create_limit(None).unwrap(), 2);

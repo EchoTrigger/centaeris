@@ -105,6 +105,8 @@ services:
       dockerfile: packages/runtime_server/Dockerfile
       labels: *release-image-labels
     environment:
+      RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS: ${RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS-}
+      RUNTIME_RUNSC_IDLE_PAUSE_MS: ${RUNTIME_RUNSC_IDLE_PAUSE_MS-}
       RUNTIME_BIND_ADDRESS: 0.0.0.0
       RUNTIME_PORT: ${RUNTIME_PORT}
       API_INTERNAL_URL: *api-internal-url

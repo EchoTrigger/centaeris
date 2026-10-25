@@ -37,6 +37,7 @@ mod recovery_upload;
 mod request_capacity;
 mod resident_capacity;
 mod retained_tasks;
+mod runsc_rotation;
 #[cfg(test)]
 mod runtime_http_tests;
 mod session_delivery;
@@ -63,8 +64,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use api_model_client::{ApiModelClient, ApiModelClientConfig};
 use artifact_publication::WorkspaceArtifactPublicationPort;
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, Response, header};
+use axum::body::{to_bytes, Body};
+use axum::http::{header, Request, Response};
 use axum::response::IntoResponse;
 use bytes::Bytes;
 #[cfg(test)]
@@ -75,40 +76,40 @@ use centaeris_core::execution::{
 };
 use centaeris_core::extension::skills::{SkillEntryV1, SkillIndex};
 use centaeris_core::extension::{
-    ActivatedPluginPackageV1, PluginActivationSnapshotV1, build_plugin_activation_snapshot,
-    load_mcp_servers_file,
+    build_plugin_activation_snapshot, load_mcp_servers_file, ActivatedPluginPackageV1,
+    PluginActivationSnapshotV1,
+};
+use centaeris_core::model::prompt::PromptCompactionScopeV1;
+use centaeris_core::model::provider_polling::{
+    parse_provider_poll_payload_ref, ProviderPollingRuntimePayload, ProviderPollingSchedulerConfig,
+    ProviderPollingToolLayerResolution, ProviderPollingToolLayerResolver,
+    StoreBackedProviderPollingScheduler,
 };
 use centaeris_core::model::EmptyModelSessionConfigStore;
 use centaeris_core::model::ToolCallEnvelope;
-use centaeris_core::model::prompt::PromptCompactionScopeV1;
-use centaeris_core::model::provider_polling::{
-    ProviderPollingRuntimePayload, ProviderPollingSchedulerConfig,
-    ProviderPollingToolLayerResolution, ProviderPollingToolLayerResolver,
-    StoreBackedProviderPollingScheduler, parse_provider_poll_payload_ref,
-};
 use centaeris_core::runtime::contracts::{
-    CheckpointKindV1, CheckpointRecord, EventVisibility, RUNTIME_RECOVERY_CHECKPOINT_SCHEMA_V1,
-    RecoveryWorkspaceSnapshotV1, RuntimeAgentRunIdentityV1, RuntimeEvent,
-    RuntimeRecoveryCheckpointV1,
+    CheckpointKindV1, CheckpointRecord, EventVisibility, RecoveryWorkspaceSnapshotV1,
+    RuntimeAgentRunIdentityV1, RuntimeEvent, RuntimeRecoveryCheckpointV1,
+    RUNTIME_RECOVERY_CHECKPOINT_SCHEMA_V1,
 };
 use centaeris_core::runtime::event::RuntimeEventProjection;
 use centaeris_core::runtime::subagent::{
-    AsyncSubagentWorkerRunner, RunDueSubagentJobsRequest, SUBAGENT_RUN_JOB_KIND,
-    SubagentWorkerPoolPolicy, SubagentWorkerRunFuture, SubagentWorkerRunOutcome,
-    SubagentWorkerRunRequest, run_due_subagent_jobs_with_worker_pool_async,
-    subagent_work_packet_runtime_binding,
+    run_due_subagent_jobs_with_worker_pool_async, subagent_work_packet_runtime_binding,
+    AsyncSubagentWorkerRunner, RunDueSubagentJobsRequest, SubagentWorkerPoolPolicy,
+    SubagentWorkerRunFuture, SubagentWorkerRunOutcome, SubagentWorkerRunRequest,
+    SUBAGENT_RUN_JOB_KIND,
 };
 use centaeris_core::runtime::{
-    AgentRunInitialInput, AgentRunRequest, AgentRunResult, AgentRunStop, AgentRuntime,
-    AgentRuntimeConfig, AgentRuntimeSubagentRunnerConfig, DurableTurnControlBinding,
-    ModelClientSubagentRunner, QueryLifecycleSubagentObserver, ToolConcurrencyCoordinator,
-    ToolSafePoint, ToolSafePointCommitPort, TurnStepResult, TurnUpdate,
-    persist_subagent_result_projection_from_scheduler_events,
+    persist_subagent_result_projection_from_scheduler_events, AgentRunInitialInput,
+    AgentRunRequest, AgentRunResult, AgentRunStop, AgentRuntime, AgentRuntimeConfig,
+    AgentRuntimeSubagentRunnerConfig, DurableTurnControlBinding, ModelClientSubagentRunner,
+    QueryLifecycleSubagentObserver, ToolConcurrencyCoordinator, ToolSafePoint,
+    ToolSafePointCommitPort, TurnStepResult, TurnUpdate,
 };
 use centaeris_core::session::manager::SessionManager;
 use centaeris_core::session::reliability::{
-    AGENT_RUN_LIFECYCLE_JOB_KIND, ListRuntimeJobsRequest, RuntimeJobRecord, RuntimeJobStatus,
-    RuntimeJobStorePort, agent_run_lifecycle_job_id,
+    agent_run_lifecycle_job_id, ListRuntimeJobsRequest, RuntimeJobRecord, RuntimeJobStatus,
+    RuntimeJobStorePort, AGENT_RUN_LIFECYCLE_JOB_KIND,
 };
 use centaeris_core::session::state::CompletedTurnProjectionV1;
 use centaeris_core::session::store::{RuntimeStore, RuntimeStoreActor};
@@ -117,9 +118,9 @@ use centaeris_core::session::supplement::{
     EnqueueTurnSupplementRequest, TurnSupplementStoreError, TurnSupplementStorePort,
 };
 use centaeris_core::session::{
-    AgentRunSessionState, RUNTIME_JOB_LEASE_FENCE_REJECTED, RewriteLastUserTailRequest,
-    RuntimeJobLeaseFence, SequencedSessionRecord, SessionCommitReceipt, SessionLogPort,
-    SessionRecordType, parse_wire_record, session_record_projects_to_agent_run_stream,
+    parse_wire_record, session_record_projects_to_agent_run_stream, AgentRunSessionState,
+    RewriteLastUserTailRequest, RuntimeJobLeaseFence, SequencedSessionRecord, SessionCommitReceipt,
+    SessionLogPort, SessionRecordType, RUNTIME_JOB_LEASE_FENCE_REJECTED,
 };
 use centaeris_core::tool::inputs::{
     DeferredInputResolutionFailureKind, ResolvedInputManifest, ResolvedInputState,
@@ -133,9 +134,9 @@ use contract::{
 };
 use deferred_input_resolver::{ApiDeferredInputResolver, ApiModelInputImageResolver};
 use docker_execution_host::{
-    DockerExecutionHostRequest, DockerExecutionHostRunner, SessionWorkspaceApiError,
-    SessionWorkspaceCommitOutcome, SessionWorkspaceLease, SessionWorkspaceResolution,
-    resolve_workspace_image_digest,
+    resolve_workspace_image_digest, DockerExecutionHostRequest, DockerExecutionHostRunner,
+    SessionWorkspaceApiError, SessionWorkspaceCommitOutcome, SessionWorkspaceLease,
+    SessionWorkspaceResolution,
 };
 use file_mutation_commit::WorkspaceFileMutationCommitPort;
 use http::router as http_router;
@@ -158,6 +159,7 @@ const HTTP_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_RUN_WAITING_TRANSITION_REASONS: &[&str] = &[
     "execution_resident_capacity_wait",
+    "runsc_environment_capacity_wait",
     "execution_recovery_checkpoint_committed",
     "question_wait",
     "runtime_job_wait",
@@ -165,13 +167,13 @@ const AGENT_RUN_WAITING_TRANSITION_REASONS: &[&str] = &[
     "session_workspace_commit_unavailable",
     "session_workspace_resolve_unavailable",
 ];
-use workspace_tools::{WorkspaceArtifactToolProvider, workspace_tool_contracts};
+use workspace_tools::{workspace_tool_contracts, WorkspaceArtifactToolProvider};
 
 use agent_run_authorization::WorkspaceAgentRunAuthorization;
 use mcp::{
-    McpCredentialResolver, connect_mcp_servers, prepare_http_mcp_servers, workspace_mcp_catalog,
+    connect_mcp_servers, prepare_http_mcp_servers, workspace_mcp_catalog, McpCredentialResolver,
 };
-use skill_projection::{PLUGIN_CATALOG_ROOT, workspace_skill_catalog_config};
+use skill_projection::{workspace_skill_catalog_config, PLUGIN_CATALOG_ROOT};
 use transient_stream::{LiveTextError, TransientAgentRunStream};
 
 type ToolLayerRegistry = Arc<Mutex<HashMap<String, HostedRuntimeContext>>>;
@@ -426,29 +428,46 @@ fn main() -> Result<(), String> {
     let store = Arc::new(store);
     let job_store = Arc::new(job_store);
     DockerExecutionHostRunner::reconcile_residency(job_store.as_ref())?;
-    runtime.spawn(host_retirement::run(
-        job_store.clone(),
-        docker_execution_host::resident_host_context()?.0,
-    ));
     let tool_layers = Arc::new(Mutex::new(HashMap::<String, HostedRuntimeContext>::new()));
-    let resolver_layers = tool_layers.clone();
-    let resolver_jobs = job_store.clone();
-    let resolver: ProviderPollingToolLayerResolver = Arc::new(move |job| {
-        resolve_provider_polling_tool_layer(job, resolver_layers.as_ref(), resolver_jobs.as_ref())
-    });
-    let provider_polling = StoreBackedProviderPollingScheduler::new_with_tool_layer_resolver(
-        (*job_store).clone(),
-        resolver,
-        ProviderPollingSchedulerConfig::default(),
-    );
-    provider_polling.start()?;
-    runtime.spawn(run_hosted_subagent_worker(
-        store.clone(),
-        job_store.clone(),
-        tool_layers.clone(),
-    ));
-    execution_capacity::ExecutionCapacity::from_env()?;
-    docker_engine::create_limit_from_env()?;
+    activate_hosted_workers(
+        || {
+            execution_capacity::ExecutionCapacity::from_env()?;
+            docker_engine::create_limit_from_env()?;
+            if runsc_rotation::Config::from_env()?.is_some() {
+                let host = docker_execution_host::resident_host_context()?.0;
+                runsc_rotation::reconcile_startup(&job_store, &host)?;
+            }
+            Ok(())
+        },
+        || {
+            runtime.spawn(host_retirement::run(
+                job_store.clone(),
+                docker_execution_host::resident_host_context()?.0,
+            ));
+            let resolver_layers = tool_layers.clone();
+            let resolver_jobs = job_store.clone();
+            let resolver: ProviderPollingToolLayerResolver = Arc::new(move |job| {
+                resolve_provider_polling_tool_layer(
+                    job,
+                    resolver_layers.as_ref(),
+                    resolver_jobs.as_ref(),
+                )
+            });
+            let provider_polling =
+                StoreBackedProviderPollingScheduler::new_with_tool_layer_resolver(
+                    (*job_store).clone(),
+                    resolver,
+                    ProviderPollingSchedulerConfig::default(),
+                );
+            provider_polling.start()?;
+            runtime.spawn(run_hosted_subagent_worker(
+                store.clone(),
+                job_store.clone(),
+                tool_layers.clone(),
+            ));
+            Ok(())
+        },
+    )?;
     let state = HttpServerState {
         runtime: runtime.clone(),
         store,
@@ -458,6 +477,15 @@ fn main() -> Result<(), String> {
         request_capacity: request_capacity::RequestCapacity::from_env()?,
     };
     runtime.block_on(serve_http(listener, state))
+}
+
+// One admission boundary for every execution-capable background consumer.
+fn activate_hosted_workers(
+    reconcile: impl FnOnce() -> Result<(), String>,
+    start_workers: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    reconcile()?;
+    start_workers()
 }
 
 fn resolve_provider_polling_tool_layer(
@@ -1089,7 +1117,59 @@ async fn serve_http(
     listener: tokio::net::TcpListener,
     state: HttpServerState,
 ) -> Result<(), String> {
+    serve_http_with_shutdown(listener, state, runtime_shutdown_signal()).await
+}
+
+async fn runtime_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        if let Ok(mut terminate) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = terminate.recv() => {},
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+async fn serve_http_with_shutdown<S>(
+    listener: tokio::net::TcpListener,
+    state: HttpServerState,
+    shutdown: S,
+) -> Result<(), String>
+where
+    S: std::future::Future<Output = ()>,
+{
+    let mut rotation = if let Some(config) = runsc_rotation::Config::from_env()? {
+        let host = docker_execution_host::resident_host_context()?.0;
+        Some(runsc_rotation::RotationTask::start(
+            state.runtime.as_ref(),
+            state.job_store.clone(),
+            host,
+            config,
+        ))
+    } else {
+        None
+    };
     let router = http_router(state);
+    let result = tokio::select! {
+        result = accept_http_connections(listener, router) => result,
+        _ = shutdown => Ok(()),
+    };
+    if let Some(task) = rotation.as_mut() {
+        task.shutdown().await.map_err(str::to_owned)?;
+    }
+    result
+}
+
+async fn accept_http_connections(
+    listener: tokio::net::TcpListener,
+    router: axum::Router,
+) -> Result<(), String> {
     let connection_slots = Arc::new(Semaphore::new(MAX_HTTP_CONNECTIONS));
     loop {
         let connection_slot = connection_slots
@@ -2189,11 +2269,16 @@ fn execute_agent_run(
     }
     let docker_execution = match docker_execution {
         Ok(runner) => runner,
-        Err(error) if error == resident_capacity::RESIDENT_CAPACITY_WAIT => {
+        Err(error)
+            if matches!(
+                error.as_str(),
+                resident_capacity::RESIDENT_CAPACITY_WAIT | "runsc_environment_capacity_wait"
+            ) =>
+        {
             return Ok(AgentRunStepOutcome {
                 disposition: "waiting",
                 terminal_state: None,
-                transition_reason: resident_capacity::RESIDENT_CAPACITY_WAIT.into(),
+                transition_reason: error,
                 retry_at_ms: None,
             });
         }
@@ -6095,6 +6180,40 @@ fn agent_run_step_failure_response(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn runsc_startup_reconciliation_precedes_every_worker() {
+        let events = std::cell::RefCell::new(Vec::new());
+        super::activate_hosted_workers(
+            || {
+                events.borrow_mut().push("reconciled");
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("workers");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(*events.borrow(), ["reconciled", "workers"]);
+    }
+
+    #[test]
+    fn runsc_startup_reconciliation_failure_never_starts_workers() {
+        let started = std::cell::Cell::new(false);
+        let result = super::activate_hosted_workers(
+            || Err("physical observation unavailable".into()),
+            || {
+                started.set(true);
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err("physical observation unavailable".into()));
+        assert!(
+            !started.get(),
+            "uncertain paused residents must be charged before any worker can admit work"
+        );
+    }
+
+    #[test]
     fn retained_task_provider_matches_the_host_tool_contracts() {
         use super::*;
         struct NoDispatch;
@@ -6349,8 +6468,8 @@ mod tests {
             "session_record_commit_unavailable"
         );
     }
-    use centaeris_core::session::SessionRecordType;
     use centaeris_core::session::supplement::TurnSupplementValidationError;
+    use centaeris_core::session::SessionRecordType;
     use centaeris_core::tool::layer::ToolExecutionFact;
     use hyper::service::service_fn;
     use std::convert::Infallible;
@@ -6376,11 +6495,9 @@ mod tests {
         let response = workspace_model_catalog_response();
         assert_eq!(response["schema"], "workspace.model_catalog.result.v1");
         assert_eq!(response["catalog"]["schema"], "centaeris.model_catalog.v1");
-        assert!(
-            response["catalog"]["providers"]
-                .as_array()
-                .is_some_and(|items| !items.is_empty())
-        );
+        assert!(response["catalog"]["providers"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()));
         assert_eq!(response.as_object().expect("response object").len(), 2);
     }
 
@@ -6416,11 +6533,12 @@ mod tests {
         .expect("write MCP Plugin manifest");
         std::fs::write(package.join("mcp.json"), r#"{"schema":"mcp_servers_v1"}"#)
             .expect("write invalid MCP declaration");
-        assert!(
-            inspect_plugin_package_at(root.as_path(), format!("{staging_name}/package").as_str(),)
-                .expect_err("invalid MCP declaration")
-                .contains("parse MCP server declaration")
-        );
+        assert!(inspect_plugin_package_at(
+            root.as_path(),
+            format!("{staging_name}/package").as_str(),
+        )
+        .expect_err("invalid MCP declaration")
+        .contains("parse MCP server declaration"));
 
         std::fs::remove_dir_all(root).expect("remove Plugin inspection fixture");
     }
@@ -6586,16 +6704,14 @@ mod tests {
             "sandbox_prepare_unavailable",
             "sandbox_prepare_unavailable:detail",
         ] {
-            assert!(
-                AgentRunStepOutcome {
-                    retry_at_ms: None,
-                    disposition: "waiting",
-                    terminal_state: None,
-                    transition_reason: transition_reason.to_string(),
-                }
-                .validate()
-                .is_err()
-            );
+            assert!(AgentRunStepOutcome {
+                retry_at_ms: None,
+                disposition: "waiting",
+                terminal_state: None,
+                transition_reason: transition_reason.to_string(),
+            }
+            .validate()
+            .is_err());
         }
     }
 
@@ -6997,11 +7113,9 @@ mod tests {
             Some("send_message")
         );
         start.coordination_session_id = None;
-        assert!(
-            hosted_agent_runtime_config(&start)
-                .required_completion_tool
-                .is_none()
-        );
+        assert!(hosted_agent_runtime_config(&start)
+            .required_completion_tool
+            .is_none());
     }
 
     pub(super) fn agent_run_start() -> AgentRunStart {
@@ -7818,11 +7932,9 @@ mod tests {
                 projection
                     .begin_model_request(turn.clone(), String::new())
                     .unwrap();
-                assert!(
-                    projection
-                        .begin_model_request("premature-next".into(), String::new())
-                        .is_err()
-                );
+                assert!(projection
+                    .begin_model_request("premature-next".into(), String::new())
+                    .is_err());
                 projection.mark_tool_call(&turn).unwrap();
                 projection.push_token(&turn, "suffix").unwrap();
                 projection
@@ -7846,17 +7958,15 @@ mod tests {
                 "completed tool response allocations must retire before the next turn"
             );
             let start = agent_run_start();
-            assert!(
-                assistant_session_records(
-                    &start,
-                    &projection,
-                    None,
-                    &mut agent_run_session_state(&start),
-                    10
-                )
-                .unwrap()
-                .is_empty()
-            );
+            assert!(assistant_session_records(
+                &start,
+                &projection,
+                None,
+                &mut agent_run_session_state(&start),
+                10
+            )
+            .unwrap()
+            .is_empty());
         }
     }
 
@@ -8076,11 +8186,15 @@ mod tests {
             SessionRecordType::ProviderUsage
         );
         assert_eq!(records[0].event.payload["totalTokens"], 12);
-        assert!(
-            provider_usage_session_records(&agent_run_start, "turn_1", &usage, &mut sequence, 3,)
-                .expect("idempotent usage")
-                .is_empty()
-        );
+        assert!(provider_usage_session_records(
+            &agent_run_start,
+            "turn_1",
+            &usage,
+            &mut sequence,
+            3,
+        )
+        .expect("idempotent usage")
+        .is_empty());
     }
 
     #[test]
@@ -8191,11 +8305,15 @@ mod tests {
             .finish_model_request("turn_1")
             .expect("tool response");
 
-        assert!(
-            assistant_session_records(&agent_run_start, &assistant_text, None, &mut sequence, 1,)
-                .expect("assistant records")
-                .is_empty()
-        );
+        assert!(assistant_session_records(
+            &agent_run_start,
+            &assistant_text,
+            None,
+            &mut sequence,
+            1,
+        )
+        .expect("assistant records")
+        .is_empty());
     }
 
     #[test]
@@ -8259,17 +8377,15 @@ mod tests {
             completed[1].event.event_type,
             SessionRecordType::AgentRunCompleted
         );
-        assert!(
-            completed_session_records(
-                &agent_run_start,
-                None,
-                &AssistantTextProjection::default(),
-                &response,
-                &mut sequence,
-                2,
-            )
-            .is_err()
-        );
+        assert!(completed_session_records(
+            &agent_run_start,
+            None,
+            &AssistantTextProjection::default(),
+            &response,
+            &mut sequence,
+            2,
+        )
+        .is_err());
     }
 
     #[test]
@@ -8372,12 +8488,10 @@ mod tests {
         assert_eq!(terminal.event_type, SessionRecordType::AgentRunFailed);
         let payload = &terminal.payload;
         assert_eq!(payload["reasonType"], "task_history_capacity");
-        assert!(
-            payload["message"]
-                .as_str()
-                .unwrap()
-                .contains("existing tasks remain supervised")
-        );
+        assert!(payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("existing tasks remain supervised"));
     }
 
     #[test]
@@ -8530,11 +8644,9 @@ mod tests {
             expanded_mismatch,
             count_mismatch,
         ] {
-            assert!(
-                recovery_uses_session_workspace(&invalid, &workspace)
-                    .expect_err("mismatched baseline must never reach either download")
-                    .contains("Session workspace binding mismatch")
-            );
+            assert!(recovery_uses_session_workspace(&invalid, &workspace)
+                .expect_err("mismatched baseline must never reach either download")
+                .contains("Session workspace binding mismatch"));
         }
         let staged = RecoveryWorkspaceSnapshotV1 {
             object_ref: Some("workspaces/test/execution-checkpoints/staged.snapshot".to_string()),
@@ -8615,11 +8727,9 @@ mod tests {
             },
         };
         assert!(!workspace_generations_match(&baseline, &restarted));
-        assert!(
-            stable_workspace_generation(&baseline, restarted)
-                .token()
-                .is_none()
-        );
+        assert!(stable_workspace_generation(&baseline, restarted)
+            .token()
+            .is_none());
     }
 
     #[test]
@@ -8805,12 +8915,9 @@ mod tests {
             failed.payload["message"],
             "exceeded retry limit after 2 attempts · provider_stream_interrupted"
         );
-        assert!(
-            records
-                .iter()
-                .all(|record| record.event.payload.get("retryable")
-                    != Some(&serde_json::json!(true)))
-        );
+        assert!(records
+            .iter()
+            .all(|record| record.event.payload.get("retryable") != Some(&serde_json::json!(true))));
     }
 
     #[test]

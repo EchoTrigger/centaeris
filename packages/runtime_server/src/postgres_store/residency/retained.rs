@@ -121,6 +121,7 @@ impl PostgresRuntimeStore {
             + Send,
         prepare: impl FnOnce(&RetainedInstanceAllocation) -> Result<String, String> + Send,
     ) -> Result<RetainedInstanceAllocation, String> {
+        let rotation = crate::runsc_rotation::Config::from_env()?;
         self.with_client(|client| {
             let mut tx = client.transaction().map_err(|e| e.to_string())?;
             super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
@@ -150,8 +151,13 @@ impl PostgresRuntimeStore {
                 let (global,tenant,host)=used(&mut tx,r.host_id,r.workspace_id)?;
                 if !admit_resident_resources(global,tenant,r.resources,limits.global,limits.tenant)? || !host.checked_add(r.resources)?.fits(limits.host) { return Err(RESIDENT_CAPACITY_WAIT.into()); }
                 let a=RetainedInstanceAllocation{allocation_execution_id:r.execution_id.into(),allocation_agent_run_id:Some(b.agent_run_id.clone()),allocation_owner:centaeris_core::execution::EnvironmentTaskOwner::AgentRun{run_id:b.agent_run_id.clone()},instance_id:instance_id(r.execution_id),environment_id:b.environment_id.clone(),host_id:r.host_id.into(),image_digest:r.image_digest.into(),authorization_digest:b.agent_run_authorization_digest.clone(),binding_digest:b.digest()?,profile_digest:r.profile_digest.into(),container_id:None,reused:false};
-                associate(&mut tx,r,&a)?; insert(&mut tx,r.host_id,r.execution_id,Some(&b.agent_run_id),r.workspace_id,None,"reserved",r.resources)?; super::super::creation_attempts::reserve(&mut tx,&a)?; a
+                if let Some(config) = rotation { super::super::runsc_rotation::reserve_running(&mut tx, &super::super::runsc_rotation::RunscBinding::from(&a), config.max_running)?; } associate(&mut tx,r,&a)?; insert(&mut tx,r.host_id,r.execution_id,Some(&b.agent_run_id),r.workspace_id,None,"reserved",r.resources)?; super::super::creation_attempts::reserve(&mut tx,&a)?; a
             };
+            if a.reused {
+                if let Some(config) = rotation {
+                    super::super::runsc_rotation::reserve_running(&mut tx, &super::super::runsc_rotation::RunscBinding::from(&a), config.max_running)?;
+                }
+            }
             associate(&mut tx,r,&a)?;
             // Commit allocation + reservation before Docker. Errors and lost
             // physical acknowledgements leave the durable holding intact.
@@ -184,9 +190,13 @@ impl PostgresRuntimeStore {
             let container=prepare(&a)?;
             if container.trim().is_empty() || a.container_id.as_ref().is_some_and(|id|id!=&container) { return Err("retained physical instance reassignment rejected".into()); }
             tx.execute("UPDATE runtime.resident_sandboxes SET container_id=$3,state='resident',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND execution_id=$2", &[&r.host_id,&a.allocation_execution_id,&container]).map_err(|e|e.to_string())?;
+            if rotation.is_some() {
+                super::super::runsc_rotation::observe_running(&mut tx, &super::super::runsc_rotation::RunscBinding::from(&a), &container)?;
+            }
             tx.commit().map_err(|e|e.to_string())?; a.container_id=Some(container); Ok(a)
         });
-        if !matches!(&result,Err(error) if error==RESIDENT_CAPACITY_WAIT) {
+        if !matches!(&result,Err(error) if error==RESIDENT_CAPACITY_WAIT || error==super::super::runsc_rotation::RUNSC_CAPACITY_WAIT)
+        {
             self.with_client(|client| super::super::capacity_wait::clear(client, r.lease))?;
         }
         result

@@ -15,10 +15,11 @@ const TABLES: &[&str] = &[
 ];
 fn snapshot(db: &mut Client) -> Vec<String> {
     let mut result = Vec::new();
-    for table in TABLES
-        .iter()
-        .copied()
-        .chain(["schema_migrations", "resident_sandboxes"])
+    for table in
+        TABLES
+            .iter()
+            .copied()
+            .chain(["schema_migrations", "resident_sandboxes", "runtime_jobs"])
     {
         let sql = format!(
             "SELECT COALESCE(jsonb_agg(j ORDER BY j::text),'[]'::jsonb)::text FROM (SELECT to_jsonb(t) AS j FROM runtime.{table} t) record_rows"
@@ -99,7 +100,7 @@ fn postgres_native_archive_fresh_sixteen_upgrade_preserves_native_resident_and_a
         .map(|r| (r.get(0), r.get(1)))
         .collect();
     assert_eq!(&after[..16], before.as_slice());
-    assert_eq!(after.len(), 24);
+    assert_eq!(after.len(), 25);
     assert_eq!(
         db.query_one(
             "SELECT row_to_json(s)::text FROM runtime.resident_sandboxes s WHERE execution_id=$1",
@@ -144,7 +145,8 @@ fn postgres_native_archive_unknown_creation_blocks_activation_without_refund_or_
     db.execute("UPDATE runtime.provider_creation_operations SET dispatch_state='dispatched' WHERE attempt_id='archive-attempt'",&[]).unwrap();
     let before = snapshot(&mut db);
     assert!(
-        PostgresRuntimeStore::new(&url).is_err(),
+        PostgresRuntimeStore::new(&url).err().as_deref()
+            == Some("native_activation_provider_creation_unsettled"),
         "unsettled provider responsibility must prevent native activation"
     );
     assert_eq!(snapshot(&mut db), before);
@@ -161,7 +163,8 @@ fn postgres_native_archive_pending_power_blocks_activation_even_with_retired_bin
     remove_target(&mut db);
     let before = snapshot(&mut db);
     assert!(
-        PostgresRuntimeStore::new(&url).is_err(),
+        PostgresRuntimeStore::new(&url).err().as_deref()
+            == Some("native_activation_provider_power_unsettled"),
         "pending power must remain supervised"
     );
     assert_eq!(snapshot(&mut db), before);
@@ -177,7 +180,8 @@ fn postgres_native_archive_pending_run_cleanup_blocks_activation_after_exact_phy
     remove_target(&mut db);
     let before = snapshot(&mut db);
     assert!(
-        PostgresRuntimeStore::new(&url).is_err(),
+        PostgresRuntimeStore::new(&url).err().as_deref()
+            == Some("native_activation_provider_run_cleanup_unsettled"),
         "physical removal does not erase run cleanup responsibility"
     );
     assert_eq!(snapshot(&mut db), before);
@@ -191,7 +195,10 @@ fn postgres_native_archive_wrong_removed_sandbox_cannot_clear_an_uncertain_respo
     verify_target(&mut db);
     assert!(db.execute("UPDATE runtime.provider_creation_operations SET settlement_id='wrong-removal',settlement_kind='removed',settlement_sandbox_id='foreign-sandbox',settlement_controller_epoch=2,settled_at_ms=2 WHERE attempt_id='archive-attempt'",&[]).is_err());
     let before = snapshot(&mut db);
-    assert!(PostgresRuntimeStore::new(&url).is_err());
+    assert!(
+        PostgresRuntimeStore::new(&url).err().as_deref()
+            == Some("native_activation_provider_creation_unsettled")
+    );
     assert_eq!(snapshot(&mut db), before);
 }
 
@@ -205,7 +212,8 @@ fn postgres_native_archive_queued_creator_blocks_activation_after_exact_physical
     remove_target(&mut db);
     let before = snapshot(&mut db);
     assert!(
-        PostgresRuntimeStore::new(&url).is_err(),
+        PostgresRuntimeStore::new(&url).err().as_deref()
+            == Some("native_activation_provider_creator_job_unsettled"),
         "physical removal does not complete the original creator Job"
     );
     assert_eq!(snapshot(&mut db), before);

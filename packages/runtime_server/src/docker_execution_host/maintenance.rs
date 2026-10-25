@@ -40,6 +40,17 @@ fn launch_target(
     if resident_host_context()?.0 != target.host_id {
         return Err("maintenance_host_rejected".into());
     }
+    if crate::runsc_rotation::Config::from_env()?.is_some() {
+        let allocation = target.allocation(binding);
+        if runsc_power::set_power(
+            &allocation,
+            &target.profile,
+            runsc_power::RunscPowerAction::Resume,
+        )? != runsc_power::RunscPowerObservation::Running
+        {
+            return Err("maintenance_resume_unconfirmed".into());
+        }
+    }
     let facts = crate::docker_engine::inspect(&target.container_id)?
         .ok_or("maintenance_container_missing")?;
     if !physical_identity(&facts, binding, target) {
@@ -64,6 +75,7 @@ fn physical_identity(
     facts["Id"].as_str() == Some(&target.container_id)
         && facts["Image"].as_str() == Some(&target.image_digest)
         && facts["State"]["Running"] == true
+        && facts["State"]["Paused"] == false
         && facts["Config"]["User"].as_str() == Some(&profile.user)
         && facts["Config"]["WorkingDir"].as_str() == Some("/")
         && facts["HostConfig"]["Memory"].as_u64() == Some(profile.resources.memory_bytes)
@@ -206,6 +218,12 @@ pub(crate) fn observe_environment(
     }
     if target.holding_state.as_deref() != Some("resident") || !target.resource_holding {
         return "unknown";
+    }
+    if facts["State"]["Paused"] == true {
+        return match runsc_power::observe_power(a, &target.profile) {
+            Ok(runsc_power::RunscPowerObservation::Paused) => "paused",
+            _ => "unknown",
+        };
     }
     match crate::environment_supervisor::inspect(&a.instance_id) {
         Ok(inspection) if inspection["instanceId"].as_str() == Some(&a.instance_id) => "resident",

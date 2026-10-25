@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 24;
+const STORE_SCHEMA_VERSION: i64 = 25;
 const MAINTENANCE_COMPLETION_DDL: &str = r#"
 CREATE TABLE runtime.environment_maintenance_completions(
  operation_id text PRIMARY KEY,environment_id text NOT NULL,instance_id text NOT NULL,
@@ -20,6 +20,7 @@ const PREVIOUS_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text
 const CURRENT_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text, 'input_image'::text, 'tool_catalog'::text, 'compaction_prompt'::text, 'input_uptake'::text, 'required_completion_delivery'::text";
 
 pub(super) const RUNTIME_TABLES: &[&str] = &[
+    "runsc_environment_power",
     "provider_environment_provision_completions",
     "provider_environment_maintenance_completions",
     "provider_environment_power_operations",
@@ -88,6 +89,7 @@ const RUNTIME_INDEXES: &[&str] = &[
 const TABLE_SHAPES: &[(&str, &str)] = &[
     ("provider_environment_power_operations", "operation_id:text:NO,environment_id:text:NO,operation_sequence:bigint:NO,predecessor_operation_id:text:YES,request_digest:text:NO,request_json:text:NO,action:text:NO,dispatch_state:text:NO,recorded_at_ms:bigint:NO,dispatched_at_ms:bigint:YES,acknowledged_at_ms:bigint:YES,ack_json:text:YES"),
     ("provider_environment_bindings", "environment_id:text:NO,creation_attempt_id:text:NO,recorded_at_ms:bigint:NO"),
+    ("runsc_environment_power", super::runsc_rotation::COLUMNS),
     ("provider_environment_run_uses", "provider_use_id:text:NO,agent_run_id:text:NO,environment_id:text:NO,authorization_digest:text:NO,execution_id:text:NO,provider_use_digest:text:NO,recorded_at_ms:bigint:NO,cleanup_receipt_id:text:YES,cleanup_controller_epoch:bigint:YES,quiescence_digest:text:YES,cleanup_recorded_at_ms:bigint:YES"),
     ("provider_environment_retirements", "operation_id:text:NO,environment_id:text:NO,request_digest:text:NO,request_json:text:NO,expected_controller_epoch:bigint:NO,recorded_at_ms:bigint:NO"),
     ("provider_creation_operations", "attempt_id:text:NO,execution_id:text:NO,instance_id:text:NO,environment_id:text:NO,session_id:text:NO,workspace_id:text:NO,agent_run_id:text:NO,authorization_digest:text:NO,profile_digest:text:NO,provider:text:NO,provider_config_digest:text:NO,request_digest:text:NO,idempotency_key:text:NO,processing_job_id:text:NO,dispatch_state:text:NO,reported_sandbox_id:text:YES,recorded_at_ms:bigint:NO"),
@@ -312,6 +314,7 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         upgrade_provider_creation_owners(client)?;
         upgrade_provider_maintenance_completions(client)?;
         upgrade_cancelled_automatic_resumes(client)?;
+        upgrade_runsc_rotation(client)?;
     }
     validate_schema_version(client)?;
     validate_schema(client, CURRENT_OBSERVATION_KINDS)
@@ -494,6 +497,29 @@ fn upgrade_environment_retirements(client: &mut Client) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(11,$1)",
+        &[&now_ms()?],
+    )
+    .map_err(|e| e.to_string())?;
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn upgrade_runsc_rotation(client: &mut Client) -> Result<(), String> {
+    if schema_versions(client)? != (1..=24).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|e| e.to_string())?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|e| e.to_string())?;
+    if schema_versions(&mut tx)? != (1..=24).collect::<Vec<_>>() {
+        return Ok(());
+    }
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.batch_execute(super::runsc_rotation::DDL)
+        .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(25,$1)",
         &[&now_ms()?],
     )
     .map_err(|e| e.to_string())?;
@@ -922,6 +948,8 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.batch_execute(&super::historical_provider_schema::retained::power::automatic_resume::ddl())
         .map_err(|e| e.to_string())?;
+    tx.batch_execute(super::runsc_rotation::DDL)
+        .map_err(|e| e.to_string())?;
     for version in 1..=STORE_SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES($1, $2)",
@@ -968,12 +996,14 @@ fn validate_schema_with_resource_budgets(
     let provider_provision = provider_history && schema_versions(client)?.contains(&22);
     let provider_maintenance = provider_provision && schema_versions(client)?.contains(&23);
     let automatic_resume = provider_maintenance && schema_versions(client)?.contains(&24);
+    let runsc_rotation = automatic_resume && schema_versions(client)?.contains(&25);
     let tables = object_names(client, "BASE TABLE")?;
     let expected_tables = RUNTIME_TABLES
         .iter()
         .copied()
         .filter(|table| {
-            (provider_provision || *table != "provider_environment_provision_completions")
+            (runsc_rotation || *table != "runsc_environment_power")
+                && (provider_provision || *table != "provider_environment_provision_completions")
                 && (provider_maintenance
                     || *table != "provider_environment_maintenance_completions")
                 && (capacity_waits
@@ -1005,11 +1035,12 @@ fn validate_schema_with_resource_budgets(
         return Err(format!("Postgres runtime table set mismatch: {tables:?}"));
     }
     for (table, expected) in TABLE_SHAPES {
-        if (!capacity_waits
-            && matches!(
-                *table,
-                "resident_capacity_clock" | "resident_capacity_waiters"
-            ))
+        if (*table == "runsc_environment_power" && !runsc_rotation)
+            || (!capacity_waits
+                && matches!(
+                    *table,
+                    "resident_capacity_clock" | "resident_capacity_waiters"
+                ))
             || (*table == "provider_environment_power_operations" && !provider_power)
             || (*table == "environment_creation_attempts" && !creation_attempts)
             || (!retained_provider
@@ -1092,6 +1123,9 @@ fn validate_schema_with_resource_budgets(
                 "Postgres runtime table definition mismatch: {table}"
             ));
         }
+    }
+    if runsc_rotation {
+        super::runsc_rotation::validate(client)?;
     }
     if provider_maintenance {
         super::historical_provider_schema::maintenance::validate(client)?;
@@ -1689,7 +1723,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 24);
+        assert_eq!(STORE_SCHEMA_VERSION, 25);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",

@@ -352,3 +352,26 @@ complete Compose configuration with:
 ```powershell
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.prod.yml config
 ```
+
+
+### Native retained-memory scheduling
+
+Set both `RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS` and
+`RUNTIME_RUNSC_IDLE_PAUSE_MS` to positive values to enable automatic idle pause
+and demand resume on the native runsc backend. Unset both to disable it. The
+running-environment limit applies per Docker host. Pausing preserves the original
+container, memory and files, and every resident memory/PID/storage/count debit.
+Only an exact observed pause releases its running slot. Unknown outcomes remain
+charged; restart reconciles persisted power state before admission starts.
+
+Execution permits remain independent: `EXECUTION_GLOBAL_LIMIT=8` counts only
+execute lifecycle leases; there is no per-Workspace execution quota.
+`WORKER_SLOT_COUNT=8` limits local ordinary worker threads. Hosted tool concurrency
+is 64 while Core's existing default remains 16. Resident tenant limits are separate
+resource budgets. Control and cleanup do not consume execute permits.
+
+The native activation guard preserves released provider history and refuses
+activation while old physical, power, cleanup or creator-job responsibilities
+remain unsettled. It never interprets a timeout or missing inventory as removal.
+Historical API migrations and snapshot references must be preserved when upgrading
+previously deployed databases; see the native migration acceptance gate.

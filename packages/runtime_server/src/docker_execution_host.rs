@@ -4,6 +4,7 @@ mod maintenance;
 mod network;
 mod retained;
 mod retained_commands;
+pub(crate) mod runsc_power;
 mod snapshot_capture;
 pub(crate) use maintenance::{
     maintenance_helper, maintenance_task, observe_environment, provision_environment,
@@ -597,6 +598,15 @@ impl DockerExecutionHostRunner {
                     prepare_memory_scope(&memory_mount)?;
                     let name = self::container_name(&allocation.allocation_execution_id);
                     let physical = retained::origin_expectation(&expected, allocation, &name);
+                    if allocation.reused && crate::runsc_rotation::Config::from_env()?.is_some() {
+                        runsc_power::set_power(
+                            allocation,
+                            environment_profile
+                                .as_ref()
+                                .ok_or("environment_profile_required")?,
+                            runsc_power::RunscPowerAction::Resume,
+                        )?;
+                    }
                     ensure_container(&physical, allocation.reused || has_execution_fact)?;
                     let facts =
                         inspect_container(&name)?.ok_or("retained container disappeared")?;
@@ -2664,7 +2674,9 @@ impl ContainerFacts {
     }
 
     fn matches(&self, expected: &ContainerExpectation<'_>) -> bool {
-        self.running && self.matches_configuration(expected)
+        self.running
+            && self.raw["State"]["Paused"].as_bool() != Some(true)
+            && self.matches_configuration(expected)
     }
 
     fn matches_configuration(&self, expected: &ContainerExpectation<'_>) -> bool {

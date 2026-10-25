@@ -1,8 +1,8 @@
 //! Immutable cleanup facts. Current controller authority is checked separately.
-use super::controller_authority::{
-    verify_controller_authority, ControllerAuthorityRequest, ControllerPurpose,
-};
 use super::PostgresRuntimeStore;
+use super::controller_authority::{
+    ControllerAuthorityRequest, ControllerPurpose, verify_controller_authority,
+};
 use crate::postgres_store::controller_authority::VerifiedOriginalGrant;
 use crate::postgres_store::execution_instances::RetainedInstanceAllocation;
 use crate::resident_capacity::ObservedResidentSandbox;
@@ -130,6 +130,30 @@ impl PostgresRuntimeStore {
         &self,
         request: &CleanupAuthorityRequest<'_>,
         inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
+        cleanup: impl FnOnce(&CleanupTarget, &VerifiedOriginalGrant) -> Result<P, String> + Send,
+    ) -> Result<CleanupReceipt, String> {
+        self.with_cleanup_authority_and_power_observation(
+            request,
+            inventory,
+            |allocation, profile| {
+                use crate::docker_execution_host::runsc_power::{
+                    RunscPowerObservation, observe_power,
+                };
+                observe_power(allocation, profile)
+                    .map(|state| state == RunscPowerObservation::Paused)
+            },
+            cleanup,
+        )
+    }
+    pub(crate) fn with_cleanup_authority_and_power_observation<P: Into<CleanupPhysicalResult>>(
+        &self,
+        request: &CleanupAuthorityRequest<'_>,
+        inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
+        _observe_paused: impl FnOnce(
+            &RetainedInstanceAllocation,
+            &crate::agent_run_authorization::EnvironmentProfile,
+        ) -> Result<bool, String>
+        + Send,
         cleanup: impl FnOnce(&CleanupTarget, &VerifiedOriginalGrant) -> Result<P, String> + Send,
     ) -> Result<CleanupReceipt, String> {
         request.cleanup.clone().validate(request.signing_key)?;
@@ -435,6 +459,14 @@ fn resolve_target(
         ) != resources
     {
         return Err("cleanup_origin_binding_rejected".into());
+    }
+    // A queued Run that never acquired an execution association has no task to
+    // close in an older paused environment. Keep the original physical holding,
+    // signed origin and pause acknowledgement intact; only this Run is settled.
+    if associations.is_empty()
+        && db.query_one("SELECT EXISTS(SELECT 1 FROM runtime.runsc_environment_power WHERE environment_id=$1 AND host_id=$2 AND allocation_execution_id=$3 AND instance_id=$4 AND container_id=$5 AND state='paused')", &[&allocation.environment_id,&allocation.host_id,&allocation.allocation_execution_id,&allocation.instance_id,&allocation.container_id]).map_err(|e|e.to_string())?.get::<_,bool>(0)
+    {
+        return Ok(CleanupTarget::NeverAllocated);
     }
     Ok(CleanupTarget::Instance {
         allocation: Box::new(allocation),

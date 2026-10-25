@@ -334,3 +334,134 @@ fn postgres_maintenance_completion_requires_confirmed_operation_and_is_idempoten
     }
     assert_eq!(fact(&mut db), before);
 }
+
+fn paused_maintenance(db: &mut Client) {
+    db.batch_execute("INSERT INTO runtime.runsc_environment_power(environment_id,host_id,allocation_execution_id,instance_id,container_id,state,controller_epoch,updated_at_ms) VALUES('environment','host','origin-execution','instance_'||repeat('a',64),repeat('c',64),'paused',2,0)").unwrap();
+}
+
+#[test]
+#[ignore = "requires exclusively owned disposable PostgreSQL"]
+fn postgres_runsc_maintenance_reserves_durably_before_dispatch_and_keeps_residency() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (url, store, mut db, auth) = setup();
+    paused_maintenance(&mut db);
+    let resident: String = db
+        .query_one(
+            "SELECT row_to_json(s)::text FROM runtime.resident_sandboxes s",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    store.with_current_maintenance_with_running_limit(&auth,KEY,Some(1),|target| {
+        let mut other=Client::connect(&url,NoTls).unwrap();
+        assert_eq!(other.query_one("SELECT state FROM runtime.runsc_environment_power WHERE environment_id='environment'",&[]).unwrap().get::<_,String>(0),"resumePrepared","running slot must commit before physical dispatch");
+        assert_eq!(target.container_id,auth.payload.container_id); Ok(())
+    }).unwrap();
+    assert_eq!(
+        db.query_one("SELECT state FROM runtime.runsc_environment_power", &[])
+            .unwrap()
+            .get::<_, String>(0),
+        "running"
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT row_to_json(s)::text FROM runtime.resident_sandboxes s",
+            &[]
+        )
+        .unwrap()
+        .get::<_, String>(0),
+        resident
+    );
+}
+
+#[test]
+#[ignore = "requires exclusively owned disposable PostgreSQL"]
+fn postgres_runsc_maintenance_full_capacity_rejects_task_and_files_before_dispatch() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db, auth) = setup();
+    paused_maintenance(&mut db);
+    // This second running holding has its own exact allocation anchor. Keep
+    // production identity triggers enabled: occupancy cannot be invented by a
+    // resident-only row that never represented a retained execution.
+    db.batch_execute("INSERT INTO runtime.execution_instances(execution_id,instance_id,environment_id,session_id,agent_run_id,host_id,authorization_digest,binding_digest,image_digest,allocation_execution_id,allocation_mode,profile_digest,allocation_owner_json) SELECT 'other-execution','instance_'||repeat('e',64),'other-environment',session_id,agent_run_id,host_id,authorization_digest,binding_digest,image_digest,'other-execution',allocation_mode,profile_digest,allocation_owner_json FROM runtime.execution_instances WHERE execution_id='origin-execution';
+    INSERT INTO runtime.resident_sandboxes(host_id,execution_id,agent_run_id,workspace_id,container_id,state,memory_bytes,cpu_milli,pids,workspace_bytes,created_at_ms,updated_at_ms,instance_id,environment_id,allocation_mode,allocation_owner_json) SELECT host_id,'other-execution',agent_run_id,workspace_id,repeat('e',64),state,memory_bytes,cpu_milli,pids,workspace_bytes,created_at_ms,updated_at_ms,'instance_'||repeat('e',64),'other-environment',allocation_mode,allocation_owner_json FROM runtime.resident_sandboxes WHERE execution_id='origin-execution'").unwrap();
+    let calls = AtomicUsize::new(0);
+    let result = store.with_current_maintenance_with_running_limit(&auth, KEY, Some(1), |_| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    });
+    assert_eq!(result, Err("runsc_environment_capacity_wait".into()));
+    let result = store.with_maintenance_completion_with_running_limit(&auth, KEY, Some(1), |_| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Ok((
+            (),
+            EnvironmentTaskResult::OperationEnded {
+                task_ids: vec![],
+                cleanup_complete: true,
+            },
+        ))
+    });
+    assert_eq!(result, Err("runsc_environment_capacity_wait".into()));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        db.query_one("SELECT state FROM runtime.runsc_environment_power", &[])
+            .unwrap()
+            .get::<_, String>(0),
+        "paused"
+    );
+}
+
+#[test]
+#[ignore = "requires exclusively owned disposable PostgreSQL"]
+fn postgres_runsc_maintenance_failed_dispatch_keeps_reservation_for_reconciliation() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db, auth) = setup();
+    paused_maintenance(&mut db);
+    let result: Result<(), String> =
+        store.with_current_maintenance_with_running_limit(&auth, KEY, Some(1), |_| {
+            Err("resume reply lost".into())
+        });
+    assert_eq!(result, Err("resume reply lost".into()));
+    assert_eq!(
+        db.query_one("SELECT state FROM runtime.runsc_environment_power", &[])
+            .unwrap()
+            .get::<_, String>(0),
+        "resumePrepared",
+        "unknown physical effects must remain charged"
+    );
+    store
+        .with_current_maintenance_with_running_limit(&auth, KEY, Some(1), |_| Ok(()))
+        .unwrap();
+    assert_eq!(
+        db.query_one("SELECT state FROM runtime.runsc_environment_power", &[])
+            .unwrap()
+            .get::<_, String>(0),
+        "running"
+    );
+}
+
+#[test]
+#[ignore = "requires exclusively owned disposable PostgreSQL"]
+fn postgres_runsc_maintenance_revalidates_authority_after_durable_slot_reservation() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db, auth) = setup();
+    paused_maintenance(&mut db);
+    db.batch_execute("CREATE OR REPLACE FUNCTION public.test_runsc_revoke_on_reserve() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN UPDATE public.app_core_sessionenvironment SET controller_epoch=controller_epoch+1 WHERE id=NEW.environment_id; RETURN NEW; END; $$; DROP TRIGGER IF EXISTS test_runsc_revoke_after_reserve ON runtime.runsc_environment_power; CREATE TRIGGER test_runsc_revoke_after_reserve AFTER UPDATE ON runtime.runsc_environment_power FOR EACH ROW EXECUTE FUNCTION public.test_runsc_revoke_on_reserve();").unwrap();
+    let calls = AtomicUsize::new(0);
+    let result = store.with_current_maintenance_with_running_limit(&auth, KEY, Some(1), |_| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    });
+    let state: String = db
+        .query_one("SELECT state FROM runtime.runsc_environment_power", &[])
+        .unwrap()
+        .get(0);
+    db.batch_execute("DROP TRIGGER test_runsc_revoke_after_reserve ON runtime.runsc_environment_power; DROP FUNCTION public.test_runsc_revoke_on_reserve();").unwrap();
+    assert_eq!(result, Err("maintenance_controller_rejected".into()));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "revoked authority must not resume or launch a helper"
+    );
+    assert_eq!(state, "resumePrepared");
+}
