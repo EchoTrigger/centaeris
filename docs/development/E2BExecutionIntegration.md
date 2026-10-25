@@ -58,6 +58,10 @@ The existing AgentRun, lifecycle Job and Core loop use a
 The E2B factory creates the SDK context under the current signed controller
 and Job lease. Bounded Run and Environment registries preserve the context,
 command streams and helper-effect evidence across same-process Job yields.
+A fresh acknowledged pause releases an empty, uniquely owned local Environment
+slot. Prefetched handles, pending operations and Unknown outcomes retain their
+registration; durable ownership and provider identity remain in PostgreSQL.
+Historical pause acknowledgement replay does not release a successor slot.
 Each retained successor receives a separate Run authority and command history;
 only physical activity, helper uncertainty and the verified capture baseline
 are shared. Reclaiming a Job
@@ -97,11 +101,23 @@ An explicitly frozen `retained` profile supports successive Runs in the same
 running sandbox and independent Environment retirement, as described below.
 
 Core file operations, Bash and artifact publication use the E2B ports. HTTP MCP
-can use its existing connection path. Declared attachments, plugin skill/CLI
-file projections, lifecycle hooks and MCP stdio are rejected before provider
-creation. Environment background tasks and private memory volumes remain
-unsupported. The helper-only template does
-not imply that host files or plugin packages have been projected into it.
+can use its existing connection path. Authorized plugin packages are frozen and
+verified against Core's activation digest, then projected through the SDK files
+port before the Run becomes ready. The complete package includes referenced
+resources and CLI programs. Each successor replaces the managed plugin namespace
+from its current activation so revoked packages and command paths do not survive
+retained reuse. Plugin file reads and directory listings use bounded native SDK
+operations and verify the frozen contents; file tools reject mutations there.
+CLI directories precede the request or template PATH without replacing it.
+
+A general conversation template supplies the working directory and installed
+dependencies required by its plugins. Uploading a package does not install its
+system dependencies. Benchmark templates retain the original task image's user
+and working directory. File modes constrain the ordinary workload user; they do
+not establish protection against a root workload. E2B advertises authorized plugin
+Skills without the unsupported host-memory System Skill. Declared attachments,
+lifecycle hooks and MCP stdio remain rejected before provider creation.
+Environment background tasks and private memory volumes remain unsupported.
 
 The fixed template must include the execution helper, workload UID/GID 10001,
 `/bin/bash`, `/usr/bin/setpriv`, `/usr/bin/head` and `/usr/bin/wc`. Filesystem
