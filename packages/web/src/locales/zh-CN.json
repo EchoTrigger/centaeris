@@ -926,6 +926,7 @@
   "workProgress.hours": "{{count}}时",
   "workProgress.minutes": "{{count}}分",
   "workProgress.seconds": "{{count}}秒",
+  "appRoute.taskFailedToStart": "任务未能启动。你可以重新发送消息。",
   "appRoute.runNotAdmitted": "任务未能启动，未发送的内容已恢复到输入框，请重试。",
   "agentChat.replies": "代理 对话",
   "agentChat.noReplies": "还没有回复。",

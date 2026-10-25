@@ -89,3 +89,22 @@ test("pushed navigation opens the requested conversation while the startup HTTP 
   await tick(); await f.subject.settle();
   assert.equal(f.getOptions().sessionId, "session");
 });
+
+
+test("a failed run before execution remains visible after opening an empty conversation", async t => {
+  const f = await setup(t);
+  const emptyPage = {...page, sourceHighWater:"0", resumeCursors:[]};
+  await f.send("snapshot", {page:emptyPage});
+  const run = {agentRunId:"failed-before-execution",status:"failed",startedAt:null,completedAt:"2026-10-25T12:18:48Z"};
+  await f.send("checkpoint", {projectionGeneration:"generation",sourceHighWater:"0",agentRun:run}, "empty-failed");
+  const alerts = nodes(f.subject.tree, node => node.props.role === "alert");
+  assert.ok(alerts.some(node => node.props.children === "appRoute.taskFailedToStart"), "a persisted pre-execution failure must not look like an empty successful conversation");
+  const transcript = nodes(f.subject.tree, node => node.type.name === "TranscriptBlockList")[0];
+  assert.equal(transcript.props.running, false);
+  assert.deepEqual(transcript.props.store.getListSnapshot().blockIds, [], "failure presentation must not invent a Core message");
+  assert.equal(transcript.props.loadingHistory, false);
+  await f.send("checkpoint", {projectionGeneration:"generation",sourceHighWater:"0",agentRun:{...run,agentRunId:"next-run",status:"queued",completedAt:null}}, "empty-next");
+  assert.equal(nodes(f.subject.tree, node => node.props.role === "alert").filter(node => node.props.children === "appRoute.taskFailedToStart").length, 0);
+  await f.send("checkpoint", {projectionGeneration:"generation",sourceHighWater:"0",agentRun:{...run,agentRunId:"next-run",startedAt:"2026-10-25T12:18:49Z"}}, "started-failed");
+  assert.equal(nodes(f.subject.tree, node => node.props.role === "alert").filter(node => node.props.children === "appRoute.taskFailedToStart").length, 0, "a failure after execution starts must not be mislabeled as a startup failure");
+});

@@ -150,6 +150,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const enterStartsNewLine = useEnterStartsNewLine(user.id);
   const [error, setError] = useState("");
   const [streamIssue, setStreamIssue] = useState(null);
+  const [failedStartSessionId, setFailedStartSessionId] = useState(null);
   const [sending, setSending] = useState(false);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [attachmentPreview, setAttachmentPreview] = useState(null);
@@ -254,6 +255,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   }, []);
   const clearConversationProjection = useCallback(() => {
     setInitialInputOrigin(null);
+    setFailedStartSessionId(null);
     transcriptStore.clear();
     toolOperations.clear();
     clearTranscriptContentRangeCache();
@@ -504,6 +506,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       onCheckpoint: checkpoint => {
         if (!isCurrent() || selectedSessionId === null) return;
         const run = checkpoint.agentRun;
+        setFailedStartSessionId(run?.status === "failed" && run.startedAt === null ? selectedSessionId : null);
         if (run && ["queued", "running"].includes(run.status)) {
           updateActiveTranscriptRun(run);
           if (run.startedAt) setWorkTime(value => ({ ...value, sessionId: selectedSessionId, startedAtMs: Date.parse(run.startedAt), completedAtMs: null }));
@@ -1135,6 +1138,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       </header>
 
       <section className="workspaceChatColumn">
+        {failedStartSessionId === sessionId ? <div className="errorBanner" role="alert">{t("appRoute.taskFailedToStart")}</div> : null}
         {error ? <div className="errorBanner" role="alert">{error}
           {operations.pending() ? <button type="button" disabled={sending} onClick={() => void checkPendingOperation()}>{t("agentChat.retry")}</button> : null}
           {operationReviewLink && operationReviewLink.operationId === operations.pending()?.operationId ? <a

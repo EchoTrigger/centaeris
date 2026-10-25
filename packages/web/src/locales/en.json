@@ -926,6 +926,7 @@
   "workProgress.hours": "{{count}}h",
   "workProgress.minutes": "{{count}}m",
   "workProgress.seconds": "{{count}}s",
+  "appRoute.taskFailedToStart": "The task could not start. You can send your message again.",
   "appRoute.runNotAdmitted": "The task could not start. Your unsent message has been restored; please try again.",
   "agentChat.replies": "Agent conversation",
   "agentChat.noReplies": "No replies yet.",
