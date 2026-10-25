@@ -1,6 +1,7 @@
 //! Core execution port backed by the pinned E2B SDK transport.
 //! Command receipts are runner-local observations, never durable replay authority.
 use crate::agent_run_authorization::{EnvironmentProfile, ExecutionNetwork};
+use crate::e2b_plugin_projection::E2bPluginProjection;
 use crate::execution_recovery_policy::{DispatchActivityGuard, ExecutionActivityWitness};
 use crate::observations::{ProtectionMetric, WorkspaceProtection};
 use crate::session_workspace::snapshot::capture_cache::SnapshotCaptureCache;
@@ -15,6 +16,7 @@ use std::time::Duration;
 
 pub(crate) mod authority;
 mod command_evidence;
+mod plugin_files;
 pub(crate) mod sdk_transport;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -87,6 +89,43 @@ pub(crate) trait E2bHostTransport: Send + Sync {
         pid: i32,
         timeout: Duration,
     ) -> Result<E2bCommandOutput, E2bHostError>;
+    fn project_plugins(
+        &self,
+        _binding: &E2bSandboxBinding,
+        _projection: &E2bPluginProjection,
+    ) -> Result<(), E2bHostError> {
+        Err(E2bHostError::NotDispatched(
+            "e2b_plugin_projection_unsupported",
+        ))
+    }
+    fn read_plugin(
+        &self,
+        _binding: &E2bSandboxBinding,
+        _path: &str,
+        _max_bytes: usize,
+    ) -> Result<Vec<u8>, E2bHostError> {
+        Err(E2bHostError::NotDispatched("e2b_plugin_read_unsupported"))
+    }
+    fn list_plugin(
+        &self,
+        _binding: &E2bSandboxBinding,
+        _path: &str,
+        _recursive: bool,
+        _max_entries: usize,
+    ) -> Result<Vec<ExecutionDirectoryEntry>, E2bHostError> {
+        Err(E2bHostError::NotDispatched("e2b_plugin_list_unsupported"))
+    }
+    fn start_with_plugin_path(
+        &self,
+        binding: &E2bSandboxBinding,
+        request: &ExecutionCommandRequest,
+        directories: &[String],
+    ) -> Result<i32, E2bHostError> {
+        if !directories.is_empty() {
+            return Err(E2bHostError::NotDispatched("e2b_plugin_path_unsupported"));
+        }
+        self.start(binding, request)
+    }
     fn quiesce(&self, binding: &E2bSandboxBinding) -> Result<(), E2bHostError>;
 }
 
@@ -138,6 +177,7 @@ pub(crate) struct E2bExecutionHostRunner {
     observation_context: crate::observations::ContextSnapshot,
     commands: Mutex<HashMap<String, Arc<CommandRecord>>>,
     completed_cache: Mutex<command_evidence::CompletedCache>,
+    plugins: Mutex<Option<Arc<E2bPluginProjection>>>,
 }
 
 pub(crate) fn execution_policy_for_profile(profile: &EnvironmentProfile) -> ExecutionPolicy {
@@ -260,6 +300,7 @@ impl E2bExecutionHostRunner {
             observation_context: crate::observations::Context::snapshot(),
             commands: Mutex::new(HashMap::new()),
             completed_cache: Mutex::new(command_evidence::CompletedCache::new()),
+            plugins: Mutex::new(None),
         })
     }
 
@@ -288,7 +329,58 @@ impl E2bExecutionHostRunner {
             observation_context: crate::observations::Context::snapshot(),
             commands: Mutex::new(HashMap::new()),
             completed_cache: Mutex::new(command_evidence::CompletedCache::new()),
+            plugins: Mutex::new(None),
         })
+    }
+
+    pub(crate) fn prepare_plugins(
+        &self,
+        activation: &centaeris_core::extension::PluginActivationSnapshotV1,
+        catalog: &std::path::Path,
+    ) -> Result<(), E2bHostError> {
+        centaeris_core::extension::validate_plugin_activation_snapshot(activation)
+            .map_err(|_| E2bHostError::NotDispatched("e2b_plugin_activation_rejected"))?;
+        let mut current = self
+            .plugins
+            .lock()
+            .map_err(|_| E2bHostError::Unknown("e2b_plugin_state_unavailable"))?;
+        if let Some(current) = current.as_ref() {
+            return if current.digest == activation.digest {
+                Ok(())
+            } else {
+                Err(E2bHostError::NotDispatched("e2b_plugin_activation_changed"))
+            };
+        }
+        let projection = Arc::new(
+            E2bPluginProjection::load_at(activation, catalog)
+                .map_err(|_| E2bHostError::NotDispatched("e2b_plugin_activation_rejected"))?,
+        );
+        let _activity = self.begin_activity()?;
+        if !self.helper_effects_known() {
+            return Err(E2bHostError::Unknown("e2b_prior_helper_effects_unknown"));
+        }
+        self.environment
+            .activity
+            .invalidate_before_dispatch()
+            .map_err(|_| E2bHostError::NotDispatched("e2b_activity_unavailable"))?;
+        let result = self.dispatch(|| {
+            self.require_observed_binding(&self.transport.inspect(&self.binding)?)?;
+            self.transport.project_plugins(&self.binding, &projection)?;
+            Ok(E2bDispatchResult::Helper(Vec::new()))
+        });
+        if matches!(result, Err(E2bHostError::Unknown(_))) {
+            self.latch_unknown_helper_effects();
+        }
+        result?;
+        *current = Some(projection);
+        Ok(())
+    }
+
+    fn plugin_projection(&self) -> Result<Option<Arc<E2bPluginProjection>>, E2bHostError> {
+        self.plugins
+            .lock()
+            .map(|v| v.clone())
+            .map_err(|_| E2bHostError::Unknown("e2b_plugin_state_unavailable"))
     }
 
     fn require_closed_commands(&self) -> Result<(), E2bHostError> {
@@ -885,6 +977,11 @@ impl ExecutionHostRunner for E2bExecutionHostRunner {
                 "e2b_filesystem_path_unsupported",
             ));
         }
+        if request.model_path == crate::skill_projection::PLUGIN_CATALOG_ROOT
+            || request.model_path.starts_with("/opt/centaeris/plugins/")
+        {
+            return self.run_plugin_file_operation(&request);
+        }
         let mut input = Vec::new();
         hosted_execution::protocol::write_filesystem_request(&mut input, request)
             .map_err(|_| fs_unavailable("e2b_filesystem_request_invalid"))?;
@@ -954,8 +1051,12 @@ impl ExecutionHostRunner for E2bExecutionHostRunner {
                     "e2b_prior_helper_effects_unknown",
                 ));
             }
+            let projection = self.plugin_projection()?;
+            let directories = projection
+                .as_ref()
+                .map_or(&[][..], |p| p.command_directories.as_slice());
             self.transport
-                .start(&self.binding, &request)
+                .start_with_plugin_path(&self.binding, &request, directories)
                 .map(E2bDispatchResult::Process)
         });
         let pid = match started {

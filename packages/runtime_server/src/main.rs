@@ -21,6 +21,7 @@ mod e2b_deferred_execution;
 mod e2b_execution_host;
 #[cfg(test)]
 mod e2b_lazy_execution_tests;
+mod e2b_plugin_projection;
 mod e2b_run_registry;
 mod e2b_runtime;
 mod e2b_session_workspace;
@@ -1947,15 +1948,10 @@ fn require_e2b_product_capabilities_at(
     if !start.authorization.asset_refs.is_empty() {
         return Err("e2b_declared_inputs_unsupported".into());
     }
-    if start
-        .authorization
-        .plugin_activation
-        .packages
-        .iter()
-        .any(|package| !package.skills.is_empty() || !package.cli.is_empty())
-    {
-        return Err("e2b_plugin_file_projection_unsupported".into());
-    }
+    skill_projection::verified_plugin_package_roots_at(
+        &start.authorization.plugin_activation,
+        catalog_root,
+    )?;
     let catalog =
         mcp::workspace_mcp_catalog_at(&start.authorization.plugin_activation, catalog_root)?;
     if catalog
@@ -2014,6 +2010,12 @@ fn prepare_e2b_product_host(
         execution_id,
         environment,
     )?;
+    runner
+        .prepare_plugins(
+            &start.authorization.plugin_activation,
+            Path::new(PLUGIN_CATALOG_ROOT),
+        )
+        .map_err(|_| "e2b_plugin_projection_unconfirmed")?;
     let workspace = Arc::new(e2b_session_workspace::E2bSessionWorkspace::new(
         start.authorization.environment_profile.clone(),
         api,
@@ -2380,9 +2382,9 @@ fn execute_agent_run(
         None
     };
     let workspace_skill_catalog_config = if e2b_selected {
-        // Template-projected skills are a separate declared capability. The
-        // helper-only template must not advertise unreadable host paths.
-        centaeris_core::extension::skills::SkillCatalogLoadConfig::default()
+        skill_projection::e2b_skill_catalog_config(
+            &agent_run_start.authorization.plugin_activation,
+        )?
     } else {
         workspace_skill_catalog_config(&agent_run_start.authorization.plugin_activation)?
     };
@@ -7079,28 +7081,30 @@ mod tests {
     }
 
     #[test]
-    fn e2b_preflight_rejects_plugin_files_that_are_not_projected_into_the_template() {
+    fn e2b_preflight_accepts_verified_plugin_files_for_sdk_projection() {
         for resource in ["skills", "cli"] {
-            let root = tempfile::tempdir().unwrap();
-            std::fs::create_dir(root.path().join(".centaeris-plugin")).unwrap();
+            let catalog = tempfile::tempdir().unwrap();
+            let package = catalog.path().join("fixture");
+            std::fs::create_dir(&package).unwrap();
+            std::fs::create_dir(package.as_path().join(".centaeris-plugin")).unwrap();
             std::fs::write(
-                root.path().join(".centaeris-plugin/plugin.json"),
+                package.as_path().join(".centaeris-plugin/plugin.json"),
                 serde_json::to_vec(&json!({
                     "name":"fixture", "version":"1.0.0", "paths":{resource:["resource.txt"]},
                 }))
                 .unwrap(),
             )
             .unwrap();
-            std::fs::write(root.path().join("resource.txt"), b"fixture").unwrap();
+            std::fs::write(package.as_path().join("resource.txt"), b"fixture").unwrap();
             let mut start = agent_run_start();
             start.authorization.plugin_activation =
-                centaeris_core::extension::build_plugin_activation_snapshot(&[root
-                    .path()
-                    .to_path_buf()])
+                centaeris_core::extension::build_plugin_activation_snapshot(std::slice::from_ref(
+                    &package,
+                ))
                 .unwrap();
             assert_eq!(
-                require_e2b_product_capabilities(&start),
-                Err("e2b_plugin_file_projection_unsupported".into())
+                require_e2b_product_capabilities_at(&start, catalog.path()),
+                Ok(())
             );
         }
     }

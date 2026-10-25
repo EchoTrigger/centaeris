@@ -24,6 +24,31 @@ pub fn workspace_skill_catalog_config(
     )
 }
 
+/// Native E2B projects activated package files, without the host memory Skill.
+pub(crate) fn e2b_skill_catalog_config(
+    activation: &PluginActivationSnapshotV1,
+) -> Result<SkillCatalogLoadConfig, String> {
+    e2b_skill_catalog_config_at(
+        activation,
+        Path::new(PLUGIN_CATALOG_ROOT),
+        &system_skill_catalog_root(),
+    )
+}
+
+fn e2b_skill_catalog_config_at(
+    activation: &PluginActivationSnapshotV1,
+    catalog_root: &Path,
+    system_skill_root: &Path,
+) -> Result<SkillCatalogLoadConfig, String> {
+    let mut config =
+        workspace_skill_catalog_config_at(activation, catalog_root, system_skill_root)?;
+    config
+        .sources_config
+        .sources
+        .retain(|source| source.scope == SkillSourceScopeV1::Plugin);
+    Ok(config)
+}
+
 #[cfg(not(test))]
 fn system_skill_catalog_root() -> PathBuf {
     PathBuf::from(SYSTEM_SKILL_CATALOG_ROOT)
@@ -180,6 +205,23 @@ mod tests {
             "plugin_activation_package_mismatch"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn e2b_plugin_catalog_advertises_only_projected_package_skills() {
+        let root = temp_root();
+        let catalog = root.join("plugins");
+        let system = root.join("system-skills");
+        fs::create_dir(&catalog).unwrap();
+        write_system_skill(&system);
+        let package = catalog.join("banana");
+        write_package(&package, "valid body");
+        let activation = build_plugin_activation_snapshot(&[package]).unwrap();
+        let config = e2b_skill_catalog_config_at(&activation, &catalog, &system).unwrap();
+        let index = SkillIndex::load(config).unwrap();
+        assert_eq!(index.catalog_items().len(), 1);
+        assert_eq!(index.catalog_items()[0].name, "banana");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -40,6 +40,11 @@ struct FixtureTransport {
     helper_error: Mutex<Option<E2bHostError>>,
     prepare_response: Mutex<Vec<u8>>,
     helper_kinds: Mutex<Vec<TrustedHelperKind>>,
+    plugin_files: Mutex<BTreeMap<String, Vec<u8>>>,
+    plugin_directories: Mutex<Vec<String>>,
+    plugin_projects: AtomicUsize,
+    plugin_project_error: Mutex<Option<E2bHostError>>,
+    command_directories: Mutex<Vec<String>>,
 }
 impl FixtureTransport {
     fn new() -> Self {
@@ -74,6 +79,11 @@ impl FixtureTransport {
             helper_error: Mutex::new(None),
             prepare_response: Mutex::new(Vec::new()),
             helper_kinds: Mutex::new(Vec::new()),
+            plugin_files: Mutex::new(BTreeMap::new()),
+            plugin_directories: Mutex::new(Vec::new()),
+            plugin_projects: AtomicUsize::new(0),
+            plugin_project_error: Mutex::new(None),
+            command_directories: Mutex::new(Vec::new()),
         }
     }
 }
@@ -139,6 +149,83 @@ impl E2bHostTransport for FixtureTransport {
             stdout: vec![65, 255, 66],
             stderr: vec![0, 67],
         })
+    }
+    fn project_plugins(
+        &self,
+        _: &E2bSandboxBinding,
+        projection: &E2bPluginProjection,
+    ) -> Result<(), E2bHostError> {
+        self.plugin_projects.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = *self.plugin_project_error.lock().unwrap() {
+            return Err(error);
+        }
+        *self.plugin_files.lock().unwrap() = projection
+            .files
+            .iter()
+            .map(|(p, f)| (p.clone(), f.bytes.clone()))
+            .collect();
+        *self.plugin_directories.lock().unwrap() = projection.directories.clone();
+        Ok(())
+    }
+    fn read_plugin(
+        &self,
+        _: &E2bSandboxBinding,
+        path: &str,
+        max: usize,
+    ) -> Result<Vec<u8>, E2bHostError> {
+        let files = self.plugin_files.lock().unwrap();
+        let bytes = files
+            .get(path)
+            .ok_or(E2bHostError::Unknown("fixture_missing_plugin_file"))?;
+        assert!(bytes.len() <= max);
+        Ok(bytes.clone())
+    }
+    fn list_plugin(
+        &self,
+        _: &E2bSandboxBinding,
+        path: &str,
+        recursive: bool,
+        _: usize,
+    ) -> Result<Vec<ExecutionDirectoryEntry>, E2bHostError> {
+        let prefix = format!("{path}/");
+        let include = |p: &str| {
+            p.strip_prefix(&prefix)
+                .is_some_and(|p| recursive || !p.contains('/'))
+        };
+        let mut entries = self
+            .plugin_files
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| include(p))
+            .map(|(p, b)| ExecutionDirectoryEntry {
+                path: p.clone(),
+                kind: ExecutionDirectoryEntryKind::File,
+                size_bytes: Some(b.len() as u64),
+            })
+            .collect::<Vec<_>>();
+        entries.extend(
+            self.plugin_directories
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| include(p))
+                .map(|p| ExecutionDirectoryEntry {
+                    path: p.clone(),
+                    kind: ExecutionDirectoryEntryKind::Directory,
+                    size_bytes: Some(4096),
+                }),
+        );
+        Ok(entries)
+    }
+    fn start_with_plugin_path(
+        &self,
+        b: &E2bSandboxBinding,
+        r: &ExecutionCommandRequest,
+        dirs: &[String],
+    ) -> Result<i32, E2bHostError> {
+        *self.command_directories.lock().unwrap() = dirs.to_vec();
+        self.start(b, r)
     }
     fn quiesce(&self, _: &E2bSandboxBinding) -> Result<(), E2bHostError> {
         Ok(())
@@ -984,4 +1071,151 @@ fn task_image_profile_preserves_root_and_app_command_policy() {
             .exit_code,
         Some(7)
     );
+}
+
+fn plugin_fixture() -> (
+    tempfile::TempDir,
+    centaeris_core::extension::PluginActivationSnapshotV1,
+) {
+    let catalog = tempfile::tempdir().unwrap();
+    let package = catalog.path().join("demo");
+    std::fs::create_dir_all(package.join(".centaeris-plugin")).unwrap();
+    std::fs::create_dir_all(package.join("skills/demo")).unwrap();
+    std::fs::create_dir_all(package.join("bin")).unwrap();
+    std::fs::write(
+        package.join(".centaeris-plugin/plugin.json"),
+        br#"{"name":"demo","version":"1.0.0","paths":{"skills":["skills"],"cli":["bin/demo"]}}"#,
+    )
+    .unwrap();
+    std::fs::write(package.join("skills/demo/SKILL.md"), b"skillbody").unwrap();
+    std::fs::write(package.join("bin/demo"), b"#!/bin/sh\necho works").unwrap();
+    let activation =
+        centaeris_core::extension::build_plugin_activation_snapshot(&[package]).unwrap();
+    (catalog, activation)
+}
+fn plugin_read(runner: &E2bExecutionHostRunner) -> ExecutionFileSystemRequest {
+    let mut request = read_request(runner);
+    request.model_path = "/opt/centaeris/plugins/demo/skills/demo/SKILL.md".into();
+    request
+}
+#[test]
+fn projected_plugin_read_and_list_use_native_files_and_reject_changed_bytes_and_writes() {
+    let fixture = Arc::new(FixtureTransport::new());
+    let runner = host(fixture.clone());
+    let (catalog, activation) = plugin_fixture();
+    runner.prepare_plugins(&activation, catalog.path()).unwrap();
+    runner.prepare_plugins(&activation, catalog.path()).unwrap();
+    assert_eq!(fixture.plugin_projects.load(Ordering::SeqCst), 1);
+    let read = plugin_read(&runner);
+    let ExecutionFileSystemOutput::ReadFile(result) =
+        runner.run_file_system_operation(read.clone()).unwrap()
+    else {
+        panic!("read result");
+    };
+    assert_eq!(result.bytes, b"skillbody");
+    assert_eq!(result.identity.display_path, read.model_path);
+    assert_eq!(fixture.helpers.load(Ordering::SeqCst), 0);
+    let mut list = read.clone();
+    list.model_path = "/opt/centaeris/plugins/demo".into();
+    list.operation = ExecutionFileSystemOperation::ListDirectory {
+        recursive: false,
+        max_entries: 10,
+    };
+    let ExecutionFileSystemOutput::ListDirectory(result) =
+        runner.run_file_system_operation(list).unwrap()
+    else {
+        panic!("directory result");
+    };
+    assert_eq!(
+        result
+            .entries
+            .iter()
+            .map(|e| e.path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "/opt/centaeris/plugins/demo/.centaeris-plugin",
+            "/opt/centaeris/plugins/demo/bin",
+            "/opt/centaeris/plugins/demo/skills"
+        ]
+    );
+    let mut write = read.clone();
+    write.operation = ExecutionFileSystemOperation::WriteFile {
+        content: b"changed".to_vec(),
+        observed_file_hash: None,
+        create_only: false,
+    };
+    assert_eq!(
+        runner.run_file_system_operation(write).unwrap_err().kind,
+        ExecutionFileSystemErrorKind::PermissionDenied
+    );
+    let mut escape = read.clone();
+    escape.model_path = "/opt/centaeris/plugins/demo/../../secret".into();
+    assert_eq!(
+        runner.run_file_system_operation(escape).unwrap_err().kind,
+        ExecutionFileSystemErrorKind::PermissionDenied
+    );
+    fixture
+        .plugin_files
+        .lock()
+        .unwrap()
+        .insert(read.model_path.clone(), b"tampered!".to_vec());
+    assert!(runner.run_file_system_operation(read).is_err());
+}
+#[test]
+fn successor_reprojects_current_activation_and_removes_revoked_plugin_files_and_path() {
+    let fixture = Arc::new(FixtureTransport::new());
+    let runner = host(fixture.clone());
+    let (catalog, activation) = plugin_fixture();
+    runner.prepare_plugins(&activation, catalog.path()).unwrap();
+    runner
+        .run_host_command(Some("plugin-command"), command(&runner), None)
+        .unwrap();
+    assert_eq!(
+        *fixture.command_directories.lock().unwrap(),
+        ["/opt/centaeris/plugins/demo/bin"]
+    );
+    let successor = runner.successor(Arc::new(FixtureAuthority::new())).unwrap();
+    let empty = centaeris_core::extension::build_plugin_activation_snapshot(&[]).unwrap();
+    successor.prepare_plugins(&empty, catalog.path()).unwrap();
+    assert!(fixture.plugin_files.lock().unwrap().is_empty());
+    assert_eq!(
+        successor
+            .run_file_system_operation(plugin_read(&successor))
+            .unwrap_err()
+            .kind,
+        ExecutionFileSystemErrorKind::PermissionDenied
+    );
+    successor
+        .run_host_command(Some("revoked-command"), command(&successor), None)
+        .unwrap();
+    assert!(fixture.command_directories.lock().unwrap().is_empty());
+}
+#[test]
+fn plugin_projection_and_reads_require_current_dispatch_authority_and_unknown_blocks_commands() {
+    let fixture = Arc::new(FixtureTransport::new());
+    let authority = Arc::new(FixtureAuthority::new());
+    let runner =
+        E2bExecutionHostRunner::new(profile(), binding(), fixture.clone(), authority.clone())
+            .unwrap();
+    let (catalog, activation) = plugin_fixture();
+    authority.denied.store(true, Ordering::SeqCst);
+    assert!(runner.prepare_plugins(&activation, catalog.path()).is_err());
+    assert_eq!(fixture.plugin_projects.load(Ordering::SeqCst), 0);
+    authority.denied.store(false, Ordering::SeqCst);
+    runner.prepare_plugins(&activation, catalog.path()).unwrap();
+    authority.denied.store(true, Ordering::SeqCst);
+    assert!(runner
+        .run_file_system_operation(plugin_read(&runner))
+        .is_err());
+    let uncertain = host(fixture.clone());
+    *fixture.plugin_project_error.lock().unwrap() = Some(E2bHostError::Unknown("lost upload ACK"));
+    assert!(uncertain
+        .prepare_plugins(&activation, catalog.path())
+        .is_err());
+    assert!(!uncertain.helper_effects_known());
+    let starts = fixture.starts.load(Ordering::SeqCst);
+    assert!(uncertain
+        .run_host_command(Some("after-unknown"), command(&uncertain), None)
+        .is_err());
+    assert_eq!(fixture.starts.load(Ordering::SeqCst), starts);
 }

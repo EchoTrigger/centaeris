@@ -1000,3 +1000,87 @@ fn task_image_preparation_and_closed_run_cleanup_preserve_background_services() 
     );
     assert!(!control_log.exists());
 }
+
+#[test]
+fn plugin_projection_and_reads_use_native_sdk_binary_files_and_fixed_commands() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("native-plugin.jsonl");
+    let bytes = [0, 255, 65];
+    let process = process(&log, &bytes);
+    let transport = E2bSdkTransport::new(process.clone(), process, super::super::tests::profile());
+    let binding = super::super::tests::binding();
+    let path = "/opt/centaeris/plugins/demo/result.bin";
+    let projection = E2bPluginProjection {
+        digest: "fixture".into(),
+        files: BTreeMap::from([(
+            path.into(),
+            crate::e2b_plugin_projection::PluginFile {
+                bytes: bytes.to_vec(),
+                executable: true,
+            },
+        )]),
+        directories: vec!["/opt/centaeris/plugins/demo".into()],
+        command_directories: vec![],
+    };
+    transport.project_plugins(&binding, &projection).unwrap();
+    assert_eq!(transport.read_plugin(&binding, path, 10).unwrap(), bytes);
+    let requests = std::fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let upload = requests
+        .iter()
+        .find(|r| r["operation"] == "uploadFile")
+        .unwrap();
+    assert_eq!(upload["payload"]["path"], path);
+    assert_eq!(upload["payload"]["byteLength"], 3);
+    assert!(requests
+        .iter()
+        .any(|r| r["operation"] == "downloadFile" && r["payload"]["path"] == path));
+    assert!(requests
+        .iter()
+        .filter(|r| r["operation"] == "runCommand")
+        .all(|r| r["payload"]["user"] == "root"));
+}
+#[cfg(unix)]
+#[test]
+fn plugin_command_path_preserves_template_or_request_environment_and_quotes_arguments() {
+    let runner = super::super::tests::fixture_host();
+    let request = ExecutionCommandRequest {
+        program: "/usr/bin/printenv".into(),
+        args: vec!["PATH".into()],
+        cwd: "/mnt/data".into(),
+        env: HashMap::new(),
+        timeout_ms: 1000,
+        policy: runner.execution_policy(),
+    };
+    for base in [
+        "/opt/centaeris/venv/bin:/usr/bin:/bin",
+        "/custom/bin:/usr/bin",
+    ] {
+        let script = command_script(&request, &["/opt/centaeris/plugins/demo/bin".into()]);
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("PATH", base)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            format!("/opt/centaeris/plugins/demo/bin:{base}")
+        );
+    }
+    let request = ExecutionCommandRequest {
+        program: "/usr/bin/printf".into(),
+        args: vec!["%s".into(), "literal ' $HOME ; word".into()],
+        ..request
+    };
+    let output = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(command_script(&request, &[]))
+        .output()
+        .unwrap();
+    assert_eq!(output.stdout, b"literal ' $HOME ; word");
+}

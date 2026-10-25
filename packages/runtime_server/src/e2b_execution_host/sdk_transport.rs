@@ -404,6 +404,160 @@ impl E2bHostTransport for E2bSdkTransport {
             Duration::from_millis(request.timeout_ms),
         )
     }
+    fn start_with_plugin_path(
+        &self,
+        binding: &E2bSandboxBinding,
+        request: &ExecutionCommandRequest,
+        directories: &[String],
+    ) -> Result<i32, E2bHostError> {
+        let script = command_script(request, directories);
+        self.shell(
+            binding,
+            script,
+            self.profile.user(),
+            request
+                .cwd
+                .to_str()
+                .ok_or(E2bHostError::NotDispatched("e2b_command_cwd_invalid"))?,
+            serde_json::to_value(&request.env)
+                .map_err(|_| E2bHostError::NotDispatched("e2b_command_environment_invalid"))?,
+            Duration::from_millis(request.timeout_ms),
+        )
+    }
+    fn project_plugins(
+        &self,
+        binding: &E2bSandboxBinding,
+        projection: &E2bPluginProjection,
+    ) -> Result<(), E2bHostError> {
+        // This namespace is exclusively the Runtime's projection. Replace it for
+        // every new Run so revoked packages and stale files cannot survive reuse.
+        (|| {
+            self.completed_shell(
+                binding,
+                "rm -rf -- /opt/centaeris/plugins && install -d -m 755 -- /opt/centaeris/plugins"
+                    .into(),
+                CONTROL_TIMEOUT,
+            )?;
+            for directories in projection.directories.chunks(10) {
+                self.completed_shell(
+                    binding,
+                    format!(
+                        "install -d -m 755 -- {}",
+                        directories
+                            .iter()
+                            .map(|p| quote(p))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                    CONTROL_TIMEOUT,
+                )?;
+            }
+            for (path, file) in &projection.files {
+                self.ordinary
+                    .upload_reader(
+                        &BulkFileRequest {
+                            sandbox_id: &binding.sandbox_id,
+                            path,
+                            user: Some("root"),
+                            max_bytes: file.bytes.len() as u64,
+                            timeout: CONTROL_TIMEOUT,
+                        },
+                        &mut Cursor::new(&file.bytes),
+                    )
+                    .map_err(|_| E2bHostError::Unknown("e2b_plugin_upload_unconfirmed"))?;
+            }
+            for executable in [false, true] {
+                let paths = projection
+                    .files
+                    .iter()
+                    .filter(|(_, f)| f.executable == executable)
+                    .map(|(p, _)| p)
+                    .collect::<Vec<_>>();
+                for paths in paths.chunks(10) {
+                    self.completed_shell(
+                        binding,
+                        format!(
+                            "chmod {} -- {}",
+                            if executable { "555" } else { "444" },
+                            paths.iter().map(|p| quote(p)).collect::<Vec<_>>().join(" ")
+                        ),
+                        CONTROL_TIMEOUT,
+                    )?;
+                }
+            }
+            Ok(())
+        })()
+        .map_err(|_: E2bHostError| E2bHostError::Unknown("e2b_plugin_projection_unconfirmed"))
+    }
+    fn read_plugin(
+        &self,
+        binding: &E2bSandboxBinding,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, E2bHostError> {
+        let mut bytes = Vec::new();
+        self.ordinary
+            .download_into(
+                &BulkFileRequest {
+                    sandbox_id: &binding.sandbox_id,
+                    path,
+                    user: Some(self.profile.user()),
+                    max_bytes: max_bytes as u64,
+                    timeout: CONTROL_TIMEOUT,
+                },
+                &mut bytes,
+            )
+            .map_err(|_| E2bHostError::Unknown("e2b_plugin_download_unconfirmed"))?;
+        Ok(bytes)
+    }
+    fn list_plugin(
+        &self,
+        binding: &E2bSandboxBinding,
+        path: &str,
+        recursive: bool,
+        max_entries: usize,
+    ) -> Result<Vec<ExecutionDirectoryEntry>, E2bHostError> {
+        let result = call(
+            &self.ordinary,
+            "listDirectory",
+            json!({"sandboxId":binding.sandbox_id,"path":path,"user":self.profile.user(),"recursive":recursive,"maxEntries":max_entries}),
+            CONTROL_TIMEOUT,
+        )?;
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Listed {
+            sandbox_id: String,
+            entries: Vec<Entry>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Entry {
+            path: String,
+            kind: String,
+            size_bytes: u64,
+        }
+        let value: Listed = serde_json::from_value(result)
+            .map_err(|_| E2bHostError::Unknown("e2b_plugin_list_invalid"))?;
+        if value.sandbox_id != binding.sandbox_id || value.entries.len() > max_entries {
+            return Err(E2bHostError::Unknown("e2b_plugin_list_invalid"));
+        }
+        value
+            .entries
+            .into_iter()
+            .map(|e| {
+                let kind = match e.kind.as_str() {
+                    "file" => ExecutionDirectoryEntryKind::File,
+                    "directory" => ExecutionDirectoryEntryKind::Directory,
+                    _ => return Err(E2bHostError::Unknown("e2b_plugin_list_invalid")),
+                };
+                Ok(ExecutionDirectoryEntry {
+                    path: e.path,
+                    kind,
+                    size_bytes: Some(e.size_bytes),
+                })
+            })
+            .collect()
+    }
     fn wait(
         &self,
         binding: &E2bSandboxBinding,
@@ -515,6 +669,23 @@ fn call(
             Err(E2bHostError::Unknown("e2b_adapter_result_unknown"))
         }
     }
+}
+fn command_script(request: &ExecutionCommandRequest, directories: &[String]) -> String {
+    let mut script = String::new();
+    if !directories.is_empty() {
+        // SDK request env is applied before the shell. Preserve its PATH, or the
+        // template PATH (including its Python environment) when none was supplied.
+        script.push_str(&format!(
+            "export PATH={}:\"$PATH\"; ",
+            quote(&directories.join(":"))
+        ));
+    }
+    script.push_str(&format!("exec {}", quote(&request.program)));
+    for arg in &request.args {
+        script.push(' ');
+        script.push_str(&quote(arg));
+    }
+    script
 }
 fn seconds(timeout: Duration) -> Result<u64, E2bHostError> {
     let seconds = timeout.as_millis().div_ceil(1000);

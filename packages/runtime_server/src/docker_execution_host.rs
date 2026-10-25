@@ -258,7 +258,9 @@ fn plugin_mounts(activation: &PluginActivationSnapshotV1) -> Vec<PluginMount> {
         .collect()
 }
 
-fn plugin_command_path(activation: &PluginActivationSnapshotV1) -> Result<String, String> {
+pub(crate) fn plugin_command_directories(
+    activation: &PluginActivationSnapshotV1,
+) -> Result<Vec<String>, String> {
     let mut directories = Vec::new();
     let mut seen = HashSet::new();
     for package in &activation.packages {
@@ -278,6 +280,11 @@ fn plugin_command_path(activation: &PluginActivationSnapshotV1) -> Result<String
             }
         }
     }
+    Ok(directories)
+}
+
+fn plugin_command_path(activation: &PluginActivationSnapshotV1) -> Result<String, String> {
+    let mut directories = plugin_command_directories(activation)?;
     directories.push(BASE_COMMAND_PATH.to_string());
     Ok(directories.join(":"))
 }
