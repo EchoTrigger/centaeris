@@ -1,7 +1,8 @@
 """Bounded provider-power observations for the opt-in product fixture.
 
 Invocations are declared by the fixture, never guessed from asynchronous log
-arrival. Durations contain nested spans and are deliberately never added.
+arrival. Automatic-operation fixtures may defer validated early records until an
+explicit binding arrives. Durations contain nested spans and are never added.
 """
 from collections import Counter
 from copy import deepcopy
@@ -81,10 +82,14 @@ def _required(action, kind, observed):
 
 
 class PowerTimingCollector:
-    def __init__(self, *, max_records=256, max_operations=8, max_invocations=4):
+    def __init__(self, *, max_records=256, max_operations=8, max_invocations=4, defer_unbound=False):
         if any(type(value) is not int or not 1 <= value <= 1024
                for value in (max_records, max_operations, max_invocations)):
             raise ValueError("bounded positive power measurement limits required")
+        if type(defer_unbound) is not bool:
+            raise ValueError("late binding must be explicitly enabled or disabled")
+        self._defer_unbound = defer_unbound
+        self._unbound = {}
         self._max_records, self._max_operations, self._max_invocations = max_records, max_operations, max_invocations
         self._lock = threading.Lock()
         self._operations = {}
@@ -100,10 +105,17 @@ class PowerTimingCollector:
                 if existing["action"] != action:
                     raise ValueError("fixture power identity cannot be rebound")
                 return
-            if len(self._operations) >= self._max_operations:
+            occupied = len(self._operations) + len(self._unbound) - int(operation_id in self._unbound)
+            if occupied >= self._max_operations:
                 self._counts["droppedBindings"] += 1
                 return
-            self._operations[operation_id] = {"action": action, "invocations": [{"kind": "fresh", "records": []}]}
+            records = []
+            for row in self._unbound.pop(operation_id, []):
+                if row["action"] == action:
+                    records.append(row)
+                else:
+                    self._counts["foreignRecords"] += 1
+            self._operations[operation_id] = {"action": action, "invocations": [{"kind": "fresh", "records": records}]}
 
     def bind_replay(self, operation_id):
         with self._lock:
@@ -154,8 +166,23 @@ class PowerTimingCollector:
         if not valid:
             self._counts["rejectedRecords"] += 1
             return
-        operation = self._operations.get(event["operationId"])
-        if operation is None or operation["action"] != event["action"]:
+        operation_id = event["operationId"]
+        operation = self._operations.get(operation_id)
+        if operation is None:
+            if not self._defer_unbound:
+                self._counts["foreignRecords"] += 1
+                return
+            if ((operation_id not in self._unbound
+                    and len(self._operations) + len(self._unbound) >= self._max_operations)
+                    or self._record_count >= self._max_records):
+                self._counts["droppedRecords"] += 1
+                return
+            # This is bounded staging, not ownership. Only bind() can attach
+            # these exact-ID/action records to a declared fresh invocation.
+            self._unbound.setdefault(operation_id, []).append({"sequence": self._record_count, **event})
+            self._record_count += 1
+            return
+        if operation["action"] != event["action"]:
             self._counts["foreignRecords"] += 1
             return
         if self._record_count >= self._max_records:
@@ -167,6 +194,9 @@ class PowerTimingCollector:
     def summary(self, *, lifecycle_passed, stream_drained):
         with self._lock:
             operations, counts = deepcopy(self._operations), dict(self._counts)
+            # A report never claims unbound data. Keep the staging untouched so
+            # a later explicit bind can still resolve a provisional report.
+            counts["foreignRecords"] += sum(len(rows) for rows in self._unbound.values())
         reported = []
         all_complete = bool(operations)
         for operation_id, operation in operations.items():

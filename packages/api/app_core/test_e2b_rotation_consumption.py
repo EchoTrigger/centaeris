@@ -238,7 +238,7 @@ if rotation_acceptance_enabled(os.environ):
             self.targets = {}
             self.visits = {"A": 0, "B": 0}
             self.sessions = {}
-            self.power_observations = PowerTimingCollector(max_records=1024, max_operations=64)
+            self.power_observations = PowerTimingCollector(max_records=1024, max_operations=64, defer_unbound=True)
             factory = self.product.workspace_observation_collector
 
             def combined_collector(environment):
@@ -273,7 +273,7 @@ if rotation_acceptance_enabled(os.environ):
         # ---------- measurement helpers ----------
 
         def _bind_power_operations(self):
-            """Bind each durable power row before its dispatch records stream out."""
+            """Declare durable operation identities; early records remain bounded until binding."""
             seen = set()
             while not self._binder_stop.is_set():
                 try:

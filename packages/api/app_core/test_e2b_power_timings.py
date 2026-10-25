@@ -34,7 +34,7 @@ class PowerTimingCollectorTests(SimpleTestCase):
         if close:
             self.feed(collector, operation=operation, action=action, metric="runtimePowerElapsedMs", value=values.get("runtimePowerElapsedMs", 1.0))
 
-    def cached(self, collector, *, reused, retained, omit=(), extra=(), action="pause"):
+    def cached(self, collector, *, reused, retained, omit=(), extra=(), action="pause", operation="pause-operation"):
         runtime = [metric for metric in RUNTIME if metric != "adapterCloseElapsedMs"]
         sdk = list(SDK)
         if reused:
@@ -46,8 +46,124 @@ class PowerTimingCollectorTests(SimpleTestCase):
         sdk += ["sdkPauseElapsedMs"] if action == "pause" else ["sdkConnectElapsedMs", "sdkResumeVerifyGetElapsedMs"]
         for metric in runtime + sdk + list(extra):
             if metric not in omit:
-                self.feed(collector, metric=metric, action=action,
+                self.feed(collector, metric=metric, action=action, operation=operation,
                           source="sdk" if metric.startswith("sdk") else "runtime")
+
+    def test_late_binding_recovers_early_records_only_after_explicit_ownership(self):
+        collector = PowerTimingCollector(defer_unbound=True)
+        self.fresh(collector)
+        before = self.report(collector)
+        self.assertEqual(before["operations"], [])
+        self.assertGreater(before["foreignRecords"], 0)
+        collector.bind("pause-operation", "pause")
+        report = self.report(collector)
+        require_power_timing_coverage(report)
+        records = report["operations"][0]["invocations"][0]["records"]
+        self.assertEqual(records[0]["metric"], "storePrepareElapsedMs")
+        self.assertEqual([row["sequence"] for row in records], list(range(len(records))))
+        self.assertEqual(report["foreignRecords"], 0)
+
+    def test_late_binding_keeps_global_arrival_order_and_unknown_ids_foreign(self):
+        collector = PowerTimingCollector(defer_unbound=True)
+        self.feed(collector)
+        self.feed(collector, operation="foreign-operation")
+        collector.bind("other-operation", "pause")
+        self.feed(collector, operation="other-operation")
+        self.feed(collector, metric="storeAdvanceElapsedMs")
+        collector.bind("pause-operation", "pause")
+        self.feed(collector, metric="runtimePowerElapsedMs")
+        report = self.report(collector)
+        rows = {operation["operationId"]: operation["invocations"][0]["records"]
+                for operation in report["operations"]}
+        self.assertEqual([row["sequence"] for row in rows["pause-operation"]], [0, 3, 4])
+        self.assertEqual([row["sequence"] for row in rows["other-operation"]], [2])
+        self.assertEqual(report["foreignRecords"], 1)
+        self.assertNotIn("foreign-operation", json.dumps(report))
+        self.assertTrue(report["lossDetected"])
+
+    def test_late_binding_rejects_action_mismatch_without_relabeling_the_event(self):
+        collector = PowerTimingCollector(defer_unbound=True)
+        self.feed(collector, action="resume")
+        collector.bind("pause-operation", "pause")
+        self.fresh(collector)
+        report = self.report(collector)
+        self.assertEqual(report["foreignRecords"], 1)
+        self.assertEqual(report["coverageStatus"], "incomplete")
+        records = report["operations"][0]["invocations"][0]["records"]
+        self.assertTrue(records)
+        self.assertTrue(all(row["action"] == "pause" for row in records))
+        self.assertEqual(len(report["operations"][0]["invocations"]), 1)
+
+    def test_late_and_bound_records_share_the_same_finite_record_budget(self):
+        collector = PowerTimingCollector(max_records=2, defer_unbound=True)
+        self.feed(collector)
+        collector.bind("other-operation", "pause")
+        self.feed(collector, operation="other-operation")
+        collector.bind("pause-operation", "pause")
+        self.feed(collector, metric="runtimePowerElapsedMs")
+        report = self.report(collector)
+        self.assertEqual(report["droppedRecords"], 1)
+        records = [row for operation in report["operations"]
+                   for invocation in operation["invocations"] for row in invocation["records"]]
+        self.assertEqual(sorted(row["sequence"] for row in records), [0, 1])
+        self.assertEqual(report["foreignRecords"], 0)
+
+    def test_late_binding_reservations_also_obey_the_operation_bound(self):
+        collector = PowerTimingCollector(max_operations=1, defer_unbound=True)
+        self.feed(collector)
+        self.feed(collector, operation="other-operation")
+        collector.bind("pause-operation", "pause")
+        collector.bind("excess-operation", "pause")
+        report = self.report(collector)
+        self.assertEqual(report["droppedRecords"], 1)
+        self.assertEqual(report["droppedBindings"], 1)
+        self.assertEqual(len(report["operations"]), 1)
+        self.assertEqual(len(report["operations"][0]["invocations"][0]["records"]), 1)
+
+    def test_late_binding_is_opt_in_and_does_not_recover_undeclared_replays(self):
+        collector = PowerTimingCollector()
+        self.feed(collector)
+        collector.bind("pause-operation", "pause")
+        report = self.report(collector)
+        self.assertEqual(report["foreignRecords"], 1)
+        self.assertEqual(report["operations"][0]["invocations"][0]["records"], [])
+        deferred = PowerTimingCollector(defer_unbound=True)
+        self.fresh(deferred)
+        deferred.bind("pause-operation", "pause")
+        self.feed(deferred)
+        self.assertEqual(self.report(deferred)["operations"][0]["invocations"][0]["excessMetrics"],
+                         ["storePrepareElapsedMs"])
+
+    def test_all_sixty_seven_late_bound_power_operations_fit_the_existing_record_budget(self):
+        collector = PowerTimingCollector(max_records=1024, max_operations=128, defer_unbound=True)
+        for index in range(67):
+            operation = f"operation-{index}"
+            action = "resume" if index == 65 else "pause"
+            self.cached(collector, operation=operation, action=action,
+                        reused=index > 0, retained=True)
+            collector.bind(operation, action)
+        report = self.report(collector)
+        require_power_timing_coverage(report)
+        self.assertEqual(len(report["operations"]), 67)
+        records = [row for operation in report["operations"]
+                   for invocation in operation["invocations"] for row in invocation["records"]]
+        self.assertEqual(len(records), 943)
+        self.assertEqual([row["sequence"] for row in records], list(range(943)))
+
+    def test_deferred_records_still_require_valid_sanitized_fields_and_explicit_enablement(self):
+        collector = PowerTimingCollector(defer_unbound=True)
+        for changes in ({"authorization": "private-value"}, {"value": math.inf}, {"source": "sdk"}):
+            self.feed(collector, **changes)
+        self.feed(collector, operation="unbound-operation")
+        report = self.report(collector)
+        self.assertEqual(report["rejectedRecords"], 3)
+        self.assertEqual(report["foreignRecords"], 1)
+        self.assertEqual(report["operations"], [])
+        self.assertNotIn("private-value", json.dumps(report))
+        self.assertNotIn("unbound-operation", json.dumps(report))
+        for value in (None, "true", 1):
+            with self.assertRaises(ValueError):
+                PowerTimingCollector(defer_unbound=value)
 
     def test_explicit_reuse_and_retention_cover_each_actual_adapter_path(self):
         for action in ("pause", "resume"):
