@@ -142,9 +142,16 @@ def current_user(request):
 def available_models(request):
     from app_core.workspace_access import workspace_membership_for
     from app_core.workspace_resources import models_for_workspace
-    workspace_id=request.GET.get("workspaceId")
-    if set(request.GET)-{"workspaceId"} or (workspace_id is not None and workspace_membership_for(request.user,workspace_id) is None):
-        return Status(401, {"error":"workspace_not_found"})
+    workspace_id = request.GET.get("workspaceId")
+    delegation = getattr(request, "app_delegation", None)
+    if (
+        set(request.GET) - {"workspaceId"}
+        or (workspace_id is not None and delegation is not None
+            and workspace_id != delegation.workspace_id)
+        or (workspace_id is not None
+            and workspace_membership_for(request.user, workspace_id) is None)
+    ):
+        return Status(401, {"error": "workspace_not_found"})
     models = [
         serialize_model(model)
         for model in models_for_workspace(workspace_id).select_related("provider").filter(
