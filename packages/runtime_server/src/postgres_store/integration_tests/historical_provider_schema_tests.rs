@@ -28,10 +28,17 @@ fn snapshot(db: &mut Client) -> Vec<String> {
     result
 }
 fn seed_creation(store: &PostgresRuntimeStore, db: &mut Client) {
+    seed_creation_with_job_status(store, db, RuntimeJobStatus::Succeeded);
+}
+fn seed_creation_with_job_status(
+    store: &PostgresRuntimeStore,
+    db: &mut Client,
+    status: RuntimeJobStatus,
+) {
+    let mut record = job("archive-job", "archive-session");
+    record.status = status;
     store
-        .schedule_runtime_job(ScheduleRuntimeJobRequest {
-            job: job("archive-job", "archive-session"),
-        })
+        .schedule_runtime_job(ScheduleRuntimeJobRequest { job: record })
         .unwrap();
     let digest = format!("sha256:{}", "a".repeat(64));
     let owner = r#"{"kind":"agentRun","runId":"archive-run"}"#;
@@ -50,7 +57,7 @@ fn remove_target(db: &mut Client) {
 fn open_use(db: &mut Client) {
     let digest = format!("sha256:{}", "a".repeat(64));
     let payload=serde_json::json!({"agentRunId":"archive-run","sessionId":"archive-session","workspaceId":"archive-workspace","environmentProfileDigest":digest,"environmentProfile":{"schema":"runtime.e2b_environment_profile.v1","lifetime":"retained","providerConfigDigest":digest}}).to_string();
-    db.execute("INSERT INTO public.app_core_agentrun(id,environment_id) VALUES('archive-run','archive-environment')", &[]).unwrap();
+    db.execute("INSERT INTO public.app_core_agentrun(id,session_id,environment_id,workspace_id,user_id,membership_ref,status) VALUES('archive-run','archive-session','archive-environment','archive-workspace','archive-user','archive-member','completed')", &[]).unwrap();
     db.execute("INSERT INTO public.app_core_agentrunauthorization(agent_run_id,digest,payload,signature) VALUES('archive-run',$1,$2::text::jsonb,'archival-fixture')", &[&digest,&payload]).unwrap();
     db.execute("INSERT INTO runtime.provider_environment_run_uses(provider_use_id,agent_run_id,environment_id,authorization_digest,execution_id,provider_use_digest,recorded_at_ms,creation_attempt_id) VALUES('archive-use','archive-run','archive-environment',$1,'archive-use-execution',$1,1,'archive-attempt')", &[&digest]).unwrap();
 }
@@ -185,5 +192,21 @@ fn postgres_native_archive_wrong_removed_sandbox_cannot_clear_an_uncertain_respo
     assert!(db.execute("UPDATE runtime.provider_creation_operations SET settlement_id='wrong-removal',settlement_kind='removed',settlement_sandbox_id='foreign-sandbox',settlement_controller_epoch=2,settled_at_ms=2 WHERE attempt_id='archive-attempt'",&[]).is_err());
     let before = snapshot(&mut db);
     assert!(PostgresRuntimeStore::new(&url).is_err());
+    assert_eq!(snapshot(&mut db), before);
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_native_archive_queued_creator_blocks_activation_after_exact_physical_removal() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (url, store, mut db) = native::setup();
+    seed_creation_with_job_status(&store, &mut db, RuntimeJobStatus::Queued);
+    verify_target(&mut db);
+    remove_target(&mut db);
+    let before = snapshot(&mut db);
+    assert!(
+        PostgresRuntimeStore::new(&url).is_err(),
+        "physical removal does not complete the original creator Job"
+    );
     assert_eq!(snapshot(&mut db), before);
 }
