@@ -1,10 +1,12 @@
 """Portable Workspace CI; TEST_POSTGRES_* must select a disposable test database."""
 import argparse
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -17,7 +19,6 @@ finally:
 def run(label, args, capture=False):
     print(f"==> {label}", flush=True)
     env = {**os.environ, "CARGO_BUILD_JOBS": os.environ.get("CARGO_BUILD_JOBS", "2")}
-    env.setdefault("E2B_ADAPTER_TEST_PYTHON", sys.executable)
     if args[:2] == ["cargo", "test"]:
         # Loopback fixtures keep their local servers outside inherited proxies.
         exclusions = [entry.strip() for name in ("NO_PROXY", "no_proxy")
@@ -42,9 +43,21 @@ def run(label, args, capture=False):
         env["PATH"] = str(bash.parent) + os.pathsep + env["PATH"]
         env["CENTAERIS_TEST_BASH_PATH"] = str(bash)
         env["COMSPEC"] = str(Path(os.environ["SystemRoot"]) / "System32/cmd.exe")
-    result = subprocess.run(args, cwd=ROOT, env=env, check=True, text=True, encoding="utf-8",
-                            stdout=subprocess.PIPE if capture else None)
-    return result.stdout or ""
+    sdk_fixture = (args[:2] == ["cargo", "test"] and "runtime_server" in args
+                   or "scripts/workspace/runtime_outbox_gate.py" in args)
+    with ExitStack() as resources:
+        if sdk_fixture and "E2B_ADAPTER_TEST_PYTHON" not in env:
+            # API uv runs synchronize their own dependencies. Keep the SDK's
+            # interpreter alive in a separate environment until the gate exits.
+            sdk_environment = resources.enter_context(tempfile.TemporaryDirectory(prefix="centaeris-sdk-test-"))
+            sdk_env = {**env, "UV_PROJECT_ENVIRONMENT": sdk_environment, "E2B_CONNECTION_RETRIES": "0"}
+            env["E2B_ADAPTER_TEST_PYTHON"] = subprocess.check_output(
+                ["uv", "run", "--frozen", "--package", "centaeris-e2b-adapter", "python", "-I", "-c",
+                 "import e2b, sys; print(sys.executable)"],
+                cwd=ROOT, env=sdk_env, text=True, encoding="utf-8").strip()
+        result = subprocess.run(args, cwd=ROOT, env=env, check=True, text=True, encoding="utf-8",
+                                stdout=subprocess.PIPE if capture else None)
+        return result.stdout or ""
 
 
 def main(skip_frontend_tests=False, stage="All"):

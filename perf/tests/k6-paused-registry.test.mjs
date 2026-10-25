@@ -90,4 +90,3 @@ for (const mode of ['completed', 'waiting65', 'changedFirst', 'changedRuntime'])
     }
   });
 }
-

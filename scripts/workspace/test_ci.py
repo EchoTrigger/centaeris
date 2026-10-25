@@ -16,13 +16,67 @@ spec.loader.exec_module(ci)
 
 
 class PortableCITests(unittest.TestCase):
-    def test_sdk_transport_rust_fixtures_get_the_direct_gate_interpreter(self):
-        with patch.dict(os.environ, {key: value for key, value in os.environ.items()
-                                   if key != "E2B_ADAPTER_TEST_PYTHON"}, clear=True), \
+    def test_sdk_fixtures_get_a_locked_sdk_interpreter_in_an_isolated_environment(self):
+        targets = (["cargo", "test", "--locked", "-p", "runtime_server"],
+                   ["uv", "run", "--frozen", "--package", "api", "python",
+                    "scripts/workspace/runtime_outbox_gate.py"])
+        for args in targets:
+            with self.subTest(args=args):
+                environment = {key: value for key, value in os.environ.items()
+                               if key != "E2B_ADAPTER_TEST_PYTHON"}
+                environment["UV_PROJECT_ENVIRONMENT"] = "existing-api-environment"
+                prepared = []
+                def prepare(command, **kwargs):
+                    self.assertEqual(command[:6], ["uv", "run", "--frozen", "--package",
+                                                  "centaeris-e2b-adapter", "python"])
+                    self.assertEqual(command[6:8], ["-I", "-c"])
+                    self.assertIn("import e2b", command[-1])
+                    sdk_environment = Path(kwargs["env"]["UV_PROJECT_ENVIRONMENT"])
+                    self.assertTrue(sdk_environment.is_dir())
+                    self.assertNotEqual(str(sdk_environment), environment["UV_PROJECT_ENVIRONMENT"])
+                    prepared.append(sdk_environment)
+                    return str(sdk_environment / "sdk-python") + "\n"
+                def launch(command, **kwargs):
+                    self.assertEqual(command, args)
+                    self.assertTrue(prepared[0].is_dir())
+                    self.assertEqual(kwargs["env"]["E2B_ADAPTER_TEST_PYTHON"], str(prepared[0] / "sdk-python"))
+                    self.assertEqual(kwargs["env"]["UV_PROJECT_ENVIRONMENT"], environment["UV_PROJECT_ENVIRONMENT"])
+                    return subprocess.CompletedProcess(command, 0, stdout="")
+                with patch.dict(os.environ, environment, clear=True), \
+                        patch.object(ci.subprocess, "check_output", side_effect=prepare), \
+                        patch.object(ci.subprocess, "run", side_effect=launch):
+                    ci.run("SDK fixture", args)
+                    self.assertEqual(dict(os.environ), environment)
+                self.assertEqual(len(prepared), 1)
+                self.assertFalse(prepared[0].exists())
+
+    def test_sdk_preparation_failure_stops_before_starting_the_target(self):
+        environment = {key: value for key, value in os.environ.items()
+                       if key != "E2B_ADAPTER_TEST_PYTHON"}
+        with patch.dict(os.environ, environment, clear=True), \
+                patch.object(ci.subprocess, "check_output", side_effect=subprocess.CalledProcessError(1, "uv")), \
                 patch.object(ci.subprocess, "run") as command:
-            ci.run("Rust tests runtime_server", ["cargo", "test", "--locked", "-p", "runtime_server"])
-            self.assertEqual(command.call_args.kwargs["env"]["E2B_ADAPTER_TEST_PYTHON"], sys.executable)
-            self.assertNotIn("E2B_ADAPTER_TEST_PYTHON", os.environ)
+            with self.assertRaises(subprocess.CalledProcessError):
+                ci.run("SDK fixture", ["cargo", "test", "--locked", "-p", "runtime_server"])
+        command.assert_not_called()
+
+    def test_explicit_sdk_interpreter_is_preserved(self):
+        with patch.dict(os.environ, {"E2B_ADAPTER_TEST_PYTHON": "configured-python"}), \
+                patch.object(ci.subprocess, "check_output") as prepare, \
+                patch.object(ci.subprocess, "run") as command:
+            ci.run("SDK fixture", ["cargo", "test", "--locked", "-p", "runtime_server"])
+            self.assertEqual(command.call_args.kwargs["env"]["E2B_ADAPTER_TEST_PYTHON"], "configured-python")
+        prepare.assert_not_called()
+
+    def test_unrelated_commands_do_not_prepare_an_sdk_environment(self):
+        for args in (["cargo", "test", "--locked", "-p", "centaeris-core"],
+                     ["cargo", "check", "--locked", "-p", "runtime_server"],
+                     ["node", "--test", "example.test.mjs"]):
+            with self.subTest(args=args), \
+                    patch.object(ci.subprocess, "check_output") as prepare, \
+                    patch.object(ci.subprocess, "run"):
+                ci.run("Unrelated gate", args)
+            prepare.assert_not_called()
 
     def test_cargo_tests_keep_proxy_exceptions_and_bypass_loopback_in_both_variable_cases(self):
         cases = [
@@ -46,6 +100,7 @@ class PortableCITests(unittest.TestCase):
                 environment.update(configured)
                 before = environment.copy()
                 with patch.object(ci.os, "environ", environment), \
+                        patch.object(ci.subprocess, "check_output", return_value=sys.executable), \
                         patch.object(ci.subprocess, "run") as command, redirect_stdout(io.StringIO()):
                     ci.run("Rust tests", ["cargo", "test", "--locked", "-p", "runtime_server"])
                     self.assertTrue(environment == before, "Cargo launch changed the host environment")
@@ -65,6 +120,7 @@ class PortableCITests(unittest.TestCase):
                      ["node", "--test", "scripts/workspace/core-source.test.mjs"],
                      ["uv", "run", "--frozen", "--package", "centaeris-e2b-adapter", "python", "-m", "unittest"]):
             with self.subTest(args=args), patch.object(ci.os, "environ", environment), \
+                    patch.object(ci.subprocess, "check_output", return_value=sys.executable), \
                     patch.object(ci.subprocess, "run") as command, redirect_stdout(io.StringIO()):
                 ci.run("Unrelated gate", args)
                 self.assertTrue(environment == before, "Gate launch changed the host environment")
