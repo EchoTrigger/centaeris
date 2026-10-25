@@ -1,3 +1,4 @@
+import { frame as motionFrame, cancelFrame } from "@centaeris/frontend-foundations/motion";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 const STREAM_PRESENTATION_FRAME_MS = 1_000 / 60;
@@ -60,7 +61,7 @@ const initialPresentationText = (text: string, animate: boolean): string =>
 type StreamPresentationState = {
   shown: string;
   target: string;
-  frame: number;
+  frame: ((data: { timestamp: number }) => void) | null;
   previousFrameAt: number | null;
   fractionalGraphemes: number;
   wasLive: boolean;
@@ -86,7 +87,7 @@ export function useStreamPresentation(text: string, live: boolean) {
   const state = useRef<StreamPresentationState>({
     shown: initialPresentationText(text, animateInitially),
     target: text,
-    frame: 0,
+    frame: null,
     previousFrameAt: null,
     fractionalGraphemes: 0,
     wasLive: live,
@@ -97,8 +98,8 @@ export function useStreamPresentation(text: string, live: boolean) {
   useLayoutEffect(() => {
     const current = state.current;
     const flush = () => {
-      if (current.frame) cancelAnimationFrame(current.frame);
-      current.frame = 0;
+      if (current.frame) cancelFrame(current.frame);
+      current.frame = null;
       current.shown = text;
       current.target = text;
       current.previousFrameAt = null;
@@ -134,8 +135,8 @@ export function useStreamPresentation(text: string, live: boolean) {
       return;
     }
 
-    const tick = (now: number) => {
-      current.frame = 0;
+    const tick = ({ timestamp: now }: { timestamp: number }) => {
+      current.frame = null;
       if (!current.target.startsWith(current.shown)) {
         current.shown = current.target;
         setVisible(current.target);
@@ -159,12 +160,6 @@ export function useStreamPresentation(text: string, live: boolean) {
       current.previousFrameAt = now;
       let requestedGraphemes: number;
       if (current.terminalDeadline !== null) {
-        if (now >= current.terminalDeadline) {
-          current.shown = current.target;
-          current.terminalDeadline = null;
-          setVisible(current.shown);
-          return;
-        }
         const framesRemaining = Math.max(
           1,
           Math.ceil(
@@ -172,7 +167,11 @@ export function useStreamPresentation(text: string, live: boolean) {
               STREAM_PRESENTATION_FRAME_MS,
           ),
         );
-        requestedGraphemes = Math.max(1, Math.ceil(remaining / framesRemaining));
+        // Completion is a catch-up target, never permission to dump a large backlog.
+        requestedGraphemes = Math.min(
+          STREAM_PRESENTATION_MAX_GRAPHEMES_PER_FRAME,
+          Math.max(1, Math.ceil(remaining / framesRemaining)),
+        );
       } else {
         const targetRate = Math.min(
           STREAM_PRESENTATION_MAX_GRAPHEMES_PER_SECOND,
@@ -199,13 +198,15 @@ export function useStreamPresentation(text: string, live: boolean) {
       current.shown = current.target.slice(0, end);
       setVisible(current.shown);
       if (end < current.target.length) {
-        current.frame = requestAnimationFrame(tick);
+        current.frame = tick;
+        motionFrame.update(tick);
       } else {
         current.terminalDeadline = null;
       }
     };
     if (!current.frame) {
-      current.frame = requestAnimationFrame(tick);
+      current.frame = tick;
+      motionFrame.update(tick);
     }
   }, [available, live, text]);
 
@@ -213,8 +214,8 @@ export function useStreamPresentation(text: string, live: boolean) {
     const current = state.current;
     const flushWhenHidden = () => {
       if (!document.hidden) return;
-      if (current.frame) cancelAnimationFrame(current.frame);
-      current.frame = 0;
+      if (current.frame) cancelFrame(current.frame);
+      current.frame = null;
       current.shown = current.target;
       current.previousFrameAt = null;
       current.fractionalGraphemes = 0;
@@ -225,11 +226,11 @@ export function useStreamPresentation(text: string, live: boolean) {
     };
     if (available) document.addEventListener("visibilitychange", flushWhenHidden);
     return () => {
-      if (current.frame) cancelAnimationFrame(current.frame);
+      if (current.frame) cancelFrame(current.frame);
       if (available) document.removeEventListener("visibilitychange", flushWhenHidden);
     };
   }, [available]);
 
-  // Corrections and history never show stale content; append-only terminal text may drain briefly.
+  // Corrections and history never show stale content; completed live text drains within the same per-frame budget.
   return !available || !text.startsWith(visible) ? text : visible;
 }

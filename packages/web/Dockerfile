@@ -6,9 +6,11 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml biome.json ./
 COPY packages/ui/package.json packages/ui/package.json
 COPY packages/desktop/package.json packages/desktop/package.json
 COPY packages/web/package.json packages/web/package.json
+COPY packages/frontend-foundations packages/frontend-foundations
+COPY packages/visualization-react packages/visualization-react
 COPY packages/web packages/web
 COPY packages/code_preview_languages.json packages/code_preview_languages.json
-RUN pnpm --filter web --filter centaeris install --frozen-lockfile \
+RUN pnpm --filter web... --filter centaeris install --frozen-lockfile \
     && pnpm --filter web run build
 
 FROM nginx:1.30.4-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46

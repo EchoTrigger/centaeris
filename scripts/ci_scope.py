@@ -20,6 +20,8 @@ def select_products(paths):
         (("scripts/harbor/workspace", "scripts/harbor/test_workspace", "scripts/harbor/benchmark-transport.json",
           "scripts/harbor/full-tasks.json"), ("coreRust", "localNode", "workspacePython")),
         (("packages/runtime/", "packages/tui/", "system-skills/", "scripts/harbor/"), ("coreRust", "localNode")),
+        (("packages/visualization-react/",), ("localNode",)),
+        (("packages/frontend-foundations/",), ("localNode", "web", "docker")),
         (("packages/desktop/",), ("localNode",)),
         (("packages/ui/",), ("localNode", "web")),
         (("packages/web/",), ("web", "docker")),

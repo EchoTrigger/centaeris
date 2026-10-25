@@ -22,6 +22,10 @@ export default defineConfig({
               test: /node_modules\/(?:react|react-dom)(?:\/|$)/,
             },
             {
+              name: "vendor-visual",
+              test: /node_modules\/(?:@json-render|zod)(?:\/|$)/,
+            },
+            {
               name: "vendor",
               test: /node_modules\//,
             },

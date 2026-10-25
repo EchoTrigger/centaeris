@@ -1,3 +1,7 @@
+import { useId } from "react";
+import { Button } from "../ui/button";
+import { Textarea } from "../ui/textarea";
+import { Checkbox } from "../ui/checkbox";
 import { t } from "../../i18n";
 import type { PendingQuestionState } from "./types";
 
@@ -16,8 +20,9 @@ export function PendingQuestionPanel({
   onTextChange,
   onSubmit,
 }: PendingQuestionPanelProps) {
+  const optionsName = useId();
   return (
-    <div className="pending-request-card pending-request-drawer">
+    <div className="pending-request-card pending-request-drawer desktopPendingQuestion" role="group" aria-label="Question from agent" aria-busy={pendingQuestion.submitting}>
       <div className="pending-request-header">
         <span className="pending-request-title">{t("chatPendingPanels.waitingForMoreInformation")}</span>
         <span className="pending-request-status">{t("chatPendingPanels.awaitingAnswer")}</span>
@@ -31,19 +36,15 @@ export function PendingQuestionPanel({
             const selected = pendingQuestion.selectedOptions.includes(option);
             return (
               <label className="action-inline-selection-row" key={option}>
-                <input
-                  type={pendingQuestion.request.multiSelect ? "checkbox" : "radio"}
-                  checked={selected}
-                  onChange={() => onOptionToggle(option)}
-                  disabled={pendingQuestion.submitting}
-                />
+                {pendingQuestion.request.multiSelect ? <Checkbox checked={selected} onCheckedChange={checked => { if (checked !== selected) onOptionToggle(option); }} disabled={pendingQuestion.submitting} /> : <input type="radio" name={optionsName} checked={selected} onChange={event => { if (event.target.checked) onOptionToggle(option); }} disabled={pendingQuestion.submitting} />}
                 <span>{option}</span>
               </label>
             );
           })}
         </div>
       ) : null}
-      <textarea
+      <Textarea
+        aria-label="Additional answer"
         className="pending-request-command"
         value={pendingQuestion.answerText}
         placeholder={t("chatPendingPanels.youCanAddAWrittenAnswer")}
@@ -51,17 +52,17 @@ export function PendingQuestionPanel({
         disabled={pendingQuestion.submitting}
       />
       {pendingQuestionError.trim() ? (
-        <div className="tool-timeline-error">{pendingQuestionError.trim()}</div>
+        <div className="tool-timeline-error" role="alert">{pendingQuestionError.trim()}</div>
       ) : null}
       <div className="pending-request-actions">
-        <button
+        <Button size="sm"
           type="button"
-          className="pending-request-btn primary"
+          className="desktopQuestionSubmit"
           onClick={onSubmit}
           disabled={pendingQuestion.submitting}
         >
           {pendingQuestion.submitting ? t("chatPendingPanels.submitting") : t("chatPendingPanels.submitAnswer")}
-        </button>
+        </Button>
       </div>
     </div>
   );

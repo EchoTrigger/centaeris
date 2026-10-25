@@ -50,7 +50,6 @@ test("third-party license assembly is complete and deterministic", async () => {
       "the native Windows Runtime closure must not include the removed sandbox dependency",
     );
     for (const key of [
-      "npm:@radix-ui/react-compose-refs@1.1.2",
       "rust:rmcp@3.1.4",
       "rust:tree-sitter@0.25.10",
     ]) {
@@ -60,6 +59,21 @@ test("third-party license assembly is complete and deterministic", async () => {
         ),
         `missing audited fallback ${key}`,
       );
+    }
+    for (const relativeRoot of ["packages/ui", "packages/frontend-foundations"]) {
+      const dependencyRoot = path.join(repoRoot, relativeRoot);
+      const manifest = JSON.parse(await fs.readFile(path.join(dependencyRoot, "package.json"), "utf8"));
+      for (const [name, requested] of Object.entries(manifest.dependencies)) {
+        if (requested.startsWith("workspace:")) continue;
+        const installed = JSON.parse(await fs.readFile(
+          path.join(packageDirectory(name, dependencyRoot), "package.json"), "utf8",
+        ));
+        assert.ok(
+          index.packages.some((item) => item.ecosystem === "npm"
+            && item.name === installed.name && item.version === installed.version),
+          `Desktop production dependency is missing its license: ${installed.name}@${installed.version}`,
+        );
+      }
     }
     assert.ok(
       index.packages.some((item) => item.ecosystem === "npm"

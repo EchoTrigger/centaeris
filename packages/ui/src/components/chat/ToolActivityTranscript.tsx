@@ -78,7 +78,7 @@ const copyToolDetailText = (text: string): void => {
 };
 
 const ToolCopyButton = ({ text, label }: { text: string; label: string }) => (
-  <button type="button" className="agent-tool-copy-button" aria-label={label} title={label}
+  <button type="button" className="agent-tool-copy-button" aria-label={label}
     onClick={() => copyToolDetailText(text)}>
     <Copy size={14} aria-hidden="true" />
   </button>
@@ -346,7 +346,8 @@ const ToolOperationNode = memo(function ToolOperationNode({
     ) {
       return (
         <div
-          className={`agent-operation-group agent-tool-node ${statusClassName}`}
+          data-transcript-anchor={operationId}
+        className={`agent-operation-group agent-tool-node ${statusClassName}`}
           key={operationId}
         >
           <button
@@ -368,7 +369,8 @@ const ToolOperationNode = memo(function ToolOperationNode({
     }
     return (
       <div
-        className={`agent-operation-group agent-tool-node ${statusClassName}`}
+        data-transcript-anchor={operationId}
+      className={`agent-operation-group agent-tool-node ${statusClassName}`}
         key={operationId}
       >
         <div className="agent-operation-summary agent-tool-node-summary">
@@ -380,7 +382,8 @@ const ToolOperationNode = memo(function ToolOperationNode({
 
   return (
     <div
-      className={`agent-operation-group agent-tool-node ${statusClassName}`}
+      data-transcript-anchor={operationId}
+          className={`agent-operation-group agent-tool-node ${statusClassName}`}
       key={operationId}
     >
       <button type="button" aria-expanded={isOpen}

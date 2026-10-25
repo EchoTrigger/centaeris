@@ -299,7 +299,9 @@ const materializeBlock = (
       transcriptText,
     };
   }
-  const turn = emptyTurn(block.blockId, isLiveStatus(body.status));
+  // Durable block status records an observation, not current Run liveness.
+  // The separately restored active replay owns streaming and activity clocks.
+  const turn = emptyTurn(block.blockId, false);
   turn.projectionRunId = block.presentation?.agentRunId ?? undefined;
   if (block.presentation?.sourceType === "agent_run_started") turn.startedAtMs = block.presentation.observedAtMs;
   if (["agent_run_completed", "agent_run_failed", "agent_run_interrupted"].includes(block.presentation?.sourceType ?? "")) turn.completedAtMs = block.presentation!.observedAtMs;

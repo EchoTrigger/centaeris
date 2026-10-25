@@ -70,9 +70,7 @@ export const useSessionViewHydrationController = ({
       const hydrationControl = {
         isCancelled: () => !control.isLatest(),
         yieldToUi: waitForNextPaint,
-        onStage: control.onStage,
       };
-      control.onStage("refreshCachedSession");
       const snapshot = await buildSessionHydrationSnapshot(
         sessionId,
         hydrationControl,

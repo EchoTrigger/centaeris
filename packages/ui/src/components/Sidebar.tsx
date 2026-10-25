@@ -1,335 +1,508 @@
 import { recentWorkspaceGroups, sortSessionCatalog } from "./sidebarSessions";
-import { SidebarWorkspaceGroup } from "./SidebarWorkspaceGroup";
-import { t } from "../i18n";
-import { useRef, useState } from "react";
+import { SidebarWorkspaceGroup, type WorkspaceAction } from "./SidebarWorkspaceGroup";
+import { SortablePinnedSessions } from "./SortablePinnedSessions";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  Clock,
-  GripVertical,
-  Settings,
-
-
-  Pencil,
-  Pin,
-  Blocks,
-  SquarePen,
-  Trash2,
+	Blocks,
+	Clock,
+	LoaderCircle,
+	MoreHorizontal,
+	Pencil,
+	Pin,
+	Settings,
+	SquarePen,
+	Trash2,
 } from "lucide-react";
 import type { UiSession } from "../types/ui";
 import type {
-  WorkspaceFileTreeEntry,
-  WorkspaceInfo,
-  WorkspaceOpenMode,
+	WorkspaceFileTreeEntry,
+	WorkspaceInfo,
+	WorkspaceOpenMode,
 } from "../lib/workspaceBridge";
+import { Button } from "./ui/button";
+import { Input } from "./ui/input";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "./ui/dialog";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
+import "../styles/desktop-workbench.css";
 
 export type ResourceModalKind = "models" | "skills" | "plugins";
-
 type SidebarProps = {
-  onExpandWorkspace?: (root: string) => void;
-  onLoadMore?: (root: string) => void;
-  hasMore?: (root: string) => boolean;
-  onRenameWorkspace?: (root: string, name: string) => Promise<boolean>;
-  onRemoveWorkspace?: (root: string) => Promise<boolean>;
-  onReorderPinnedSessions?: (ids: string[]) => Promise<void>;
-  onNavigate?: (page: "schedules" | "plugins" | "settings") => void;
-  onPinSession?: (id: string, pinned: boolean) => Promise<void>;
-  collapsed?: boolean;
-  activePage?: string;
-  sessions: UiSession[];
-  currentSessionId: string | null;
-  workspaces: WorkspaceInfo[];
-  activeWorkspaceRoot: string | null;
-  runningSessionIds: Set<string>;
-  completedSessionIds: Set<string>;
-  workspaceCatalogError: { message: string; canReset: boolean } | null;
-  onNewChat: () => void;
-  onOpenWorkspace: (mode: WorkspaceOpenMode) => void;
-  onSelectWorkspace: (root: string) => void;
-  onRetryWorkspaceCatalog: () => Promise<void>;
-  onResetWorkspaceCatalog: () => Promise<void>;
-  onSelectSession: (sessionId: string) => void;
-  onRenameSession: (sessionId: string, title: string) => Promise<void>;
-  onDeleteSession: (sessionId: string) => Promise<void>;
-  onOpenResource: (kind: ResourceModalKind) => void;
-  onOpenFile: (entry: WorkspaceFileTreeEntry) => void;
+	onExpandWorkspace?: (root: string) => void;
+	onLoadMore?: (root: string) => void;
+	hasMore?: (root: string) => boolean;
+	onRenameWorkspace?: (root: string, name: string) => Promise<boolean>;
+	onRemoveWorkspace?: (root: string) => Promise<boolean>;
+	onReorderPinnedSessions?: (ids: string[]) => Promise<void>;
+	onNavigate?: (page: "schedules" | "plugins" | "settings") => void;
+	onPinSession?: (id: string, pinned: boolean) => Promise<void>;
+	collapsed?: boolean;
+	activePage?: string;
+	sessions: UiSession[];
+	currentSessionId: string | null;
+	workspaces: WorkspaceInfo[];
+	activeWorkspaceRoot: string | null;
+	runningSessionIds: Set<string>;
+	completedSessionIds: Set<string>;
+	waitingSessionIds?: ReadonlySet<string>;
+	workspaceCatalogError: { message: string; canReset: boolean } | null;
+	onNewChat: () => void;
+	onOpenWorkspace: (mode: WorkspaceOpenMode) => WorkspaceAction;
+	onSelectWorkspace: (root: string) => WorkspaceAction;
+	onRetryWorkspaceCatalog: () => Promise<void>;
+	onResetWorkspaceCatalog: () => Promise<void>;
+	onSelectSession: (sessionId: string) => void;
+	onRenameSession: (sessionId: string, title: string) => Promise<void>;
+	onDeleteSession: (sessionId: string) => Promise<void>;
+	onOpenResource: (kind: ResourceModalKind) => void;
+	onOpenFile: (entry: WorkspaceFileTreeEntry) => void;
 };
 
 export function Sidebar({
-  onExpandWorkspace, onLoadMore, hasMore, activeWorkspaceRoot,
-  onRenameWorkspace,
-  onRemoveWorkspace,
-  onReorderPinnedSessions,
-  workspaces,
-  onNavigate,
-  onPinSession,
-  collapsed = false,
-  activePage = "chat",
-  sessions,
-  currentSessionId,
-  runningSessionIds,
-  completedSessionIds,
-  workspaceCatalogError,
-  onNewChat,
-  onRetryWorkspaceCatalog,
-  onResetWorkspaceCatalog,
-  onSelectSession,
-  onRenameSession,
-  onDeleteSession,
-  onOpenResource,
+	onExpandWorkspace,
+	onLoadMore,
+	hasMore,
+	activeWorkspaceRoot,
+	onRenameWorkspace,
+	onRemoveWorkspace,
+	onReorderPinnedSessions,
+	workspaces,
+	onNavigate,
+	onPinSession,
+	collapsed = false,
+	activePage = "chat",
+	sessions,
+	currentSessionId,
+	runningSessionIds,
+	completedSessionIds,
+	waitingSessionIds,
+	workspaceCatalogError,
+	onNewChat,
+	onRetryWorkspaceCatalog,
+	onResetWorkspaceCatalog,
+	onSelectSession,
+	onRenameSession,
+	onDeleteSession,
+	onOpenResource,
 }: SidebarProps) {
-  const [renameSessionId, setRenameSessionId] = useState<string | null>(null);
-  const renameSessionIdRef = useRef<string | null>(null);
-  const [renameDraft, setRenameDraft] = useState("");
-  const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
-  const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
-  const pendingSessionIdRef = useRef<string | null>(null);
-  const [workspaceRecoveryAction, setWorkspaceRecoveryAction] = useState<"retry" | "reset" | null>(null);
-  const beginRename = (session: UiSession) => {
-    setDeleteSessionId(null);
-    renameSessionIdRef.current = session.id;
-    setRenameSessionId(session.id);
-    setRenameDraft(session.title);
-  };
-
-  const saveRename = async (sessionId: string) => {
-    if (renameSessionIdRef.current !== sessionId || pendingSessionIdRef.current) return;
-    const title = renameDraft.trim();
-    if (!title || title === sessions.find((session) => session.id === sessionId)?.title) {
-      renameSessionIdRef.current = null;
-      setRenameSessionId(null);
-      return;
-    }
-    pendingSessionIdRef.current = sessionId;
-    setPendingSessionId(sessionId);
-    try {
-      await onRenameSession(sessionId, title);
-      if (renameSessionIdRef.current === sessionId) {
-        renameSessionIdRef.current = null;
-        setRenameSessionId(null);
-      }
-    } catch {
-      return;
-    } finally {
-      pendingSessionIdRef.current = null;
-      setPendingSessionId(null);
-    }
-  };
-
-  const confirmDelete = async (sessionId: string) => {
-    if (pendingSessionId) return;
-    pendingSessionIdRef.current = sessionId;
-    setPendingSessionId(sessionId);
-    try {
-      await onDeleteSession(sessionId);
-      setDeleteSessionId(null);
-    } catch {
-      return;
-    } finally {
-      pendingSessionIdRef.current = null;
-      setPendingSessionId(null);
-    }
-  };
-
-  const pinnedSessions = sortSessionCatalog(sessions.filter(session => session.isPinned));
-  const draggedSession = useRef<string | null>(null);
-  const [reordering, setReordering] = useState(false);
-  const reorderPending = useRef(false);
-  const savePinnedOrder = async (ids: string[]) => {
-    if (!onReorderPinnedSessions || reorderPending.current) return;
-    reorderPending.current = true;
-    setReordering(true);
-    try { await onReorderPinnedSessions(ids); } catch { /* Controller reports and reconciles failed writes. */ }
-    finally { reorderPending.current = false; setReordering(false); }
-  };
-  const renderSession = (session: UiSession) => {
-
-    const isCurrent = activePage === "chat" && session.id === currentSessionId;
-    const isRunning = runningSessionIds.has(session.id);
-    const isCompleted = completedSessionIds.has(session.id);
-    const isRenaming = renameSessionId === session.id;
-    const isDeleting = deleteSessionId === session.id;
-    const isPending = pendingSessionId === session.id;
-    if (isDeleting) {
-      return (
-        <div
-          className="thinSessionRow thinSessionDeleteConfirm"
-          key={session.id}
-          role="alertdialog"
-          aria-label={`Delete ${session.title || "New chat"}?`}
-          onBlur={(event) => {
-            if (
-              !pendingSessionIdRef.current
-              && !event.currentTarget.contains(event.relatedTarget)
-            ) setDeleteSessionId(null);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Escape" && !isPending) setDeleteSessionId(null);
-          }}
-        >
-          <span>{`Delete “${session.title || "New chat"}”`}</span>
-          <button
-            type="button"
-            className="is-delete"
-            disabled={isPending}
-            onClick={() => void confirmDelete(session.id)}
-          ><Trash2 aria-hidden="true" />Delete</button>
-          <button
-            type="button"
-            autoFocus
-            disabled={isPending}
-            onClick={() => setDeleteSessionId(null)}
-          >Cancel</button>
-        </div>
-      );
-    }
-    if (isRenaming) {
-      return (
-        <form
-          className="thinSessionRow thinSessionInlineEdit"
-          key={session.id}
-          onSubmit={(event) => { event.preventDefault(); void saveRename(session.id); }}
-        >
-          <input
-            autoFocus
-            value={renameDraft}
-            disabled={isPending}
-            onChange={(event) => setRenameDraft(event.target.value)}
-            onFocus={(event) => event.currentTarget.select()}
-            onBlur={() => { void saveRename(session.id); }}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
-                event.preventDefault();
-                renameSessionIdRef.current = null;
-                setRenameSessionId(null);
-              }
-            }}
-            aria-label={t("sidebar.renameValue", { value1: session.title })}
-          />
-        </form>
-      );
-    }
-    return (
-      <div
-        className={`thinSessionRow ${isCurrent ? "is-active" : ""}`}
-        key={session.id}
-        onDragOver={event => { if (session.isPinned && draggedSession.current) event.preventDefault(); }}
-        onDrop={event => {
-          event.preventDefault();
-          const source = draggedSession.current;
-          draggedSession.current = null;
-          if (!source || !session.isPinned || source === session.id) return;
-          const bounds = event.currentTarget.getBoundingClientRect();
-          const ids = pinnedSessions.map(item => item.id).filter(id => id !== source);
-          ids.splice(ids.indexOf(session.id) + (event.clientY > bounds.top + bounds.height / 2 ? 1 : 0), 0, source);
-          void savePinnedOrder(ids);
-        }}
-      >
-        {session.isPinned && onReorderPinnedSessions && !hasMore?.("pinned") ? <button type="button" className="pinnedDragHandle" aria-label={`Reorder ${session.title}`} disabled={reordering} draggable={!reordering}
-          onDragStart={event => { draggedSession.current = session.id; event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", session.id); }}
-          onDragEnd={() => { draggedSession.current = null; }}
-          onKeyDown={event => {
-            if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-            event.preventDefault();
-            const ids = pinnedSessions.map(item => item.id);
-            const from = ids.indexOf(session.id), to = from + (event.key === "ArrowUp" ? -1 : 1);
-            if (to < 0 || to >= ids.length) return;
-            [ids[from], ids[to]] = [ids[to], ids[from]];
-            void savePinnedOrder(ids);
-          }}><GripVertical aria-hidden="true" /></button> : null}
-        <button
-          type="button"
-          className="thinSessionSelect"
-          title={session.cwd}
-          aria-current={isCurrent ? "page" : undefined}
-          onClick={() => onSelectSession(session.id)}
-        >
-          <span className={`thinSessionDot ${isRunning ? "is-running" : isCompleted || session.isUnread ? "is-unread" : ""}`} />
-          <span className="thinSessionCopy">
-            <strong>{session.title || "New chat"}</strong>
-            <small>{`${formatRelativeTime(session.updatedAt)} · ${session.messageCount} ${session.messageCount === 1 ? "msg" : "msgs"}`}</small>
-          </span>
-          {session.isPinned ? <Pin className="thinPinnedIcon" aria-hidden="true" /> : null}
-        </button>
-        <div className="thinSessionActions">
-          {onPinSession ? <button type="button" aria-label={`${session.isPinned ? "Unpin" : "Pin"} ${session.title}`} onClick={() => void onPinSession(session.id, !session.isPinned).catch(() => undefined)}><Pin aria-hidden="true" /></button> : null}
-          <button type="button" onClick={() => beginRename(session)} aria-label={t("sidebar.renameValue", { value1: session.title })}><Pencil aria-hidden="true" /></button>
-          <button
-            type="button"
-            title={t("sidebar.deleteConversation")}
-            onClick={() => { setRenameSessionId(null); setDeleteSessionId(session.id); }}
-            aria-label={t("sidebar.deleteValue", { value1: session.title })}
-          ><Trash2 aria-hidden="true" /></button>
-        </div>
-      </div>
-    );
-  };
-
-  return (
-    <aside className={`thinSidebar ${collapsed ? "is-collapsed" : ""}`} aria-label="Main navigation">
-      <nav className="appNavigation">
-        <button type="button" aria-label="New chat" title="New chat" onClick={onNewChat}><SquarePen aria-hidden="true" /><span>New chat</span></button>
-        <button type="button" aria-label="Scheduled" aria-current={activePage === "schedules" ? "page" : undefined} title="Scheduled" onClick={() => onNavigate?.("schedules")}><Clock aria-hidden="true" /><span>Scheduled</span></button>
-        <button type="button" aria-label="Plugins" aria-current={activePage === "plugins" ? "page" : undefined} title="Plugins" onClick={() => onNavigate ? onNavigate("plugins") : onOpenResource("plugins")}><Blocks aria-hidden="true" /><span>Plugins</span></button>
-      </nav>
-      <div className="sidebarExpandedContent" hidden={collapsed}>
-      {workspaceCatalogError ? (
-        <div className="thinWorkspaceError" role="alert">
-          <strong>{workspaceCatalogError.canReset ? "Workspace list is corrupted" : "Workspace list unavailable"}</strong>
-          <span>{workspaceCatalogError.canReset ? "Retry, or reset only this list after confirmation." : "Fix the file access problem, then retry."}</span>
-          <div>
-            <button
-              type="button"
-              disabled={workspaceRecoveryAction !== null}
-              onClick={() => {
-                setWorkspaceRecoveryAction("retry");
-                void onRetryWorkspaceCatalog().finally(() => setWorkspaceRecoveryAction(null));
-              }}
-            >Retry</button>
-            {workspaceCatalogError.canReset ? (
-              <button
-                type="button"
-                disabled={workspaceRecoveryAction !== null}
-                onClick={() => {
-                  setWorkspaceRecoveryAction("reset");
-                  void onResetWorkspaceCatalog().finally(() => setWorkspaceRecoveryAction(null));
-                }}
-              >Reset list…</button>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-
-      <section className="thinSessionRegion" aria-label="Pinned">
-        <div className="thinSectionHeader"><span>Pinned</span></div>
-        <div className="thinSessionList">{pinnedSessions.map(renderSession)}{hasMore?.("pinned") ? <button type="button" onClick={() => onLoadMore?.("pinned")}>Load more</button> : null}</div>
-      </section>
-      <section className="thinSessionRegion" aria-label="Recents">
-        <div className="thinSectionHeader"><span>Recents</span></div>
-        <div className="thinSessionList">{recentWorkspaceGroups(sessions, workspaces).map(group => (
-          <SidebarWorkspaceGroup key={group.root} root={group.root} name={group.name} onRename={onRenameWorkspace} onRemove={onRemoveWorkspace} onExpand={onExpandWorkspace} initiallyExpanded={!onExpandWorkspace || group.root === activeWorkspaceRoot}>
-            {group.sessions.map(renderSession)}
-            {hasMore?.(group.root) ? <button type="button" onClick={() => onLoadMore?.(group.root)}>Load more</button> : null}
-          </SidebarWorkspaceGroup>
-        ))}</div>
-      </section>
-      </div>
-      <footer className="thinSidebarFooter">
-        <button type="button" aria-label="Settings" aria-current={activePage === "settings" ? "page" : undefined} title="Settings" onClick={() => onNavigate ? onNavigate("settings") : onOpenResource("models")}><Settings aria-hidden="true" /><span>Settings</span></button>
-      </footer>
-    </aside>
-  );
+	const [sessionMenu, setSessionMenu] = useState<string | null>(null);
+	useEffect(() => { if (collapsed) setSessionMenu(null); }, [collapsed]);
+	const [dialog, setDialog] = useState<{
+		kind: "rename" | "delete";
+		session: UiSession;
+	} | null>(null);
+	const dialogContent = useRef(dialog);
+	if (dialog) dialogContent.current = dialog;
+	const currentDialog = dialogContent.current;
+	const [draft, setDraft] = useState("");
+	const [pending, setPending] = useState(false);
+	const pendingRef = useRef(false);
+	const [error, setError] = useState("");
+	const [catalogBusy, setCatalogBusy] = useState(false);
+	const menuButtons = useRef(new Map<string, HTMLButtonElement>());
+	const input = useRef<HTMLInputElement>(null);
+	const newChatButton = useRef<HTMLButtonElement>(null);
+	const execute = async (action: () => Promise<void>, close = false) => {
+		if (pendingRef.current) return;
+		pendingRef.current = true;
+		setPending(true);
+		setError("");
+		try {
+			await action();
+			if (close) setDialog(null);
+		} catch (failure) {
+			setError(failure instanceof Error ? failure.message : String(failure));
+		} finally {
+			pendingRef.current = false;
+			setPending(false);
+		}
+	};
+	const recoverCatalog = async (action: () => Promise<void>) => {
+		if (catalogBusy) return;
+		setCatalogBusy(true);
+		setError("");
+		try {
+			await action();
+		} catch (failure) {
+			setError(failure instanceof Error ? failure.message : String(failure));
+		} finally {
+			setCatalogBusy(false);
+		}
+	};
+	const pinnedSessions = sortSessionCatalog(
+		sessions.filter((session) => session.isPinned),
+	);
+	const groups = recentWorkspaceGroups(sessions, workspaces);
+	const renderSession = (session: UiSession, dragHandle?: ReactNode) => {
+		const current = activePage === "chat" && session.id === currentSessionId;
+		const running = runningSessionIds.has(session.id);
+		const unread = completedSessionIds.has(session.id) || session.isUnread;
+		const waiting = waitingSessionIds?.has(session.id) ?? false;
+		const needsAttention = waiting || (!current && unread);
+		return (
+			<div
+				className={`thinSessionRow ${current ? "is-active" : ""}`}
+				key={session.id}
+			>
+				{dragHandle}
+				<button
+					type="button"
+					className="thinSessionSelect"
+					title={session.cwd}
+					aria-current={current ? "page" : undefined}
+					onClick={() => onSelectSession(session.id)}
+				>
+					<span className="thinSessionCopy">
+						<strong>{session.title || "New chat"}</strong>
+						{!running && !needsAttention ? (
+							<small>{formatRelativeTime(session.updatedAt)}</small>
+						) : null}
+					</span>
+					{session.isPinned ? (
+						<Pin className="thinPinnedIcon" aria-hidden="true" />
+					) : null}
+					{needsAttention ? <span className="thinSessionDot is-unread" role="status" aria-label={waiting ? "Reply needed" : "Unread messages"} /> : running ? <LoaderCircle size={12} className="animate-spin motion-reduce:animate-none" role="status" aria-label="Running" /> : null}
+				</button>
+				<div className="thinSessionActions">
+					<DropdownMenu open={!collapsed && sessionMenu === session.id} onOpenChange={(open) => setSessionMenu(open ? session.id : null)}>
+						<DropdownMenuTrigger
+							render={
+								<Button
+									ref={(element) => {
+										if (element) menuButtons.current.set(session.id, element);
+										else menuButtons.current.delete(session.id);
+									}}
+									variant="ghost"
+									size="icon-sm"
+									aria-label={`Chat actions ${session.title || "New chat"}`}
+									className="desktopRowMenu"
+								/>
+							}
+						>
+							<MoreHorizontal size={16} aria-hidden="true" />
+						</DropdownMenuTrigger>
+						<DropdownMenuContent align="start">
+							{onPinSession ? (
+								<>
+									<DropdownMenuItem
+										disabled={pending}
+										aria-label={`${session.isPinned ? "Unpin" : "Pin"} ${session.title}`}
+										onClick={() =>
+											void execute(() =>
+												onPinSession(session.id, !session.isPinned),
+											)
+										}
+									>
+										<Pin size={15} aria-hidden="true" />
+										{session.isPinned ? "Unpin" : "Pin"}
+									</DropdownMenuItem>
+								</>
+							) : null}
+							<DropdownMenuItem
+								disabled={pending}
+								aria-label={`Rename ${session.title}`}
+								onClick={() => {
+									setDraft(session.title);
+									setError("");
+									setDialog({ kind: "rename", session });
+								}}
+							>
+								<Pencil size={15} aria-hidden="true" />
+								Rename
+							</DropdownMenuItem>
+							<DropdownMenuItem
+								disabled={pending}
+								variant="destructive"
+								aria-label={`Delete ${session.title}`}
+								onClick={() => {
+									setError("");
+									setDialog({ kind: "delete", session });
+								}}
+							>
+								<Trash2 size={15} aria-hidden="true" />
+								Delete
+							</DropdownMenuItem>
+						</DropdownMenuContent>
+					</DropdownMenu>
+				</div>
+			</div>
+		);
+	};
+	const navigation = [
+		{ label: "New chat", icon: SquarePen, action: onNewChat, current: false },
+		{
+			label: "Scheduled",
+			icon: Clock,
+			action: () => onNavigate?.("schedules"),
+			current: activePage === "schedules",
+		},
+		{
+			label: "Plugins",
+			icon: Blocks,
+			action: () =>
+				onNavigate ? onNavigate("plugins") : onOpenResource("plugins"),
+			current: activePage === "plugins",
+		},
+	];
+	return (
+		<aside
+			className={`thinSidebar desktopWorkbenchSidebar ${collapsed ? "is-collapsed" : ""}`}
+			aria-label="Main navigation"
+			hidden={collapsed}
+			inert={collapsed}
+		>
+			<div className="desktopSidebarBrand" hidden={collapsed}><strong>Centaeris</strong></div>
+			<nav className="appNavigation" aria-label="Application">
+				{navigation.map(({ label, icon: Icon, action, current }) => (
+					<Button
+						key={label}
+						ref={label === "New chat" ? newChatButton : undefined}
+						variant="ghost"
+						aria-label={label}
+						aria-current={current ? "page" : undefined}
+						onClick={action}
+					>
+						<Icon size={16} aria-hidden="true" />
+						<span>{label}</span>
+					</Button>
+				))}
+			</nav>
+			<div className="sidebarExpandedContent" hidden={collapsed}>
+				{workspaceCatalogError ? (
+					<div className="thinWorkspaceError" role="alert">
+						<strong>
+							{workspaceCatalogError.canReset
+								? "Workspace list is corrupted"
+								: "Workspace list unavailable"}
+						</strong>
+						<span>{workspaceCatalogError.message}</span>
+						<div>
+							<Button
+								variant="outline"
+								size="sm"
+								disabled={catalogBusy}
+								onClick={() => void recoverCatalog(onRetryWorkspaceCatalog)}
+							>
+								{catalogBusy ? (
+									<LoaderCircle className="workbenchSpinner" aria-hidden="true" />
+								) : null}
+								Retry
+							</Button>
+							{workspaceCatalogError.canReset ? (
+								<Button
+									variant="ghost"
+									size="sm"
+									disabled={catalogBusy}
+									onClick={() => void recoverCatalog(onResetWorkspaceCatalog)}
+								>
+									Reset list…
+								</Button>
+							) : null}
+						</div>
+					</div>
+				) : null}
+				{error && !dialog ? (
+					<p role="alert" className="workbenchInlineError">
+						{error}
+					</p>
+				) : null}
+				<section className="thinSessionRegion" aria-label="Pinned">
+					<div className="thinSectionHeader">
+						<span>Pinned</span>
+						{pinnedSessions.length ? (
+							<small>{pinnedSessions.length}</small>
+						) : null}
+					</div>
+					<div className="thinSessionList">
+						{onReorderPinnedSessions && !hasMore?.("pinned") ? (
+							<SortablePinnedSessions
+								sessions={pinnedSessions}
+								disabled={Boolean(dialog || pending || collapsed)}
+								onReorder={onReorderPinnedSessions}
+								renderSession={renderSession}
+							/>
+						) : (
+							pinnedSessions.map((session) => renderSession(session))
+						)}
+						{hasMore?.("pinned") ? (
+							<Button
+								variant="ghost"
+								size="sm"
+								className="desktopLoadMore"
+								onClick={() => onLoadMore?.("pinned")}
+							>
+								Load more
+							</Button>
+						) : null}
+					</div>
+				</section>
+				<section className="thinSessionRegion" aria-label="Recents">
+					<div className="thinSectionHeader">
+						<span>Recents</span>
+					</div>
+					<div className="thinSessionList">
+						{groups.map((group) => (
+							<SidebarWorkspaceGroup
+								key={group.root}
+								root={group.root}
+								name={group.name}
+								active={group.root === activeWorkspaceRoot}
+								onRename={onRenameWorkspace}
+								onRemove={onRemoveWorkspace}
+								onExpand={onExpandWorkspace}
+								navigationHidden={collapsed}
+								initiallyExpanded={
+									!onExpandWorkspace || group.root === activeWorkspaceRoot
+								}
+							>
+								{group.sessions.map((session) => renderSession(session))}
+								{hasMore?.(group.root) ? (
+									<Button
+										variant="ghost"
+										size="sm"
+										className="desktopLoadMore"
+										onClick={() => onLoadMore?.(group.root)}
+									>
+										Load more
+									</Button>
+								) : null}
+							</SidebarWorkspaceGroup>
+						))}
+					</div>
+				</section>
+			</div>
+			<footer className="thinSidebarFooter">
+				<Button
+					variant="ghost"
+					aria-label="Settings"
+					aria-current={activePage === "settings" ? "page" : undefined}
+					onClick={() => onNavigate ? onNavigate("settings") : onOpenResource("models")}
+				>
+					<Settings size={16} aria-hidden="true" />
+					<span>Settings</span>
+				</Button>
+			</footer>
+			<Dialog
+				open={Boolean(dialog)}
+				onOpenChange={(next, details) => {
+					if (pending) details.cancel();
+					else if (!next) setDialog(null);
+				}}
+			>
+				{currentDialog ? (
+					<DialogContent
+						className="workbenchDialog"
+						initialFocus={currentDialog.kind === "rename" ? input : undefined}
+						finalFocus={() =>
+							menuButtons.current.get(currentDialog.session.id) ??
+							newChatButton.current
+						}
+						showCloseButton={!pending}
+					>
+						<DialogHeader>
+							<DialogTitle>
+								{currentDialog.kind === "rename"
+									? "Rename conversation"
+									: "Delete conversation?"}
+							</DialogTitle>
+							<DialogDescription>
+								{currentDialog.kind === "rename"
+									? currentDialog.session.title
+									: `“${currentDialog.session.title || "New chat"}” will be deleted. Running work in this conversation will be stopped.`}
+							</DialogDescription>
+						</DialogHeader>
+						<form
+							onSubmit={(event) => {
+								event.preventDefault();
+								if (currentDialog.kind === "rename" && draft.trim())
+									void execute(
+										() =>
+											onRenameSession(currentDialog.session.id, draft.trim()),
+										true,
+									);
+							}}
+						>
+							{currentDialog.kind === "rename" ? (
+								<>
+									<label htmlFor="conversation-name">Conversation name</label>
+									<Input
+										ref={input}
+										id="conversation-name"
+										value={draft}
+										disabled={pending}
+										onChange={(event) => setDraft(event.target.value)}
+										onFocus={(event) => event.currentTarget.select()}
+									/>
+								</>
+							) : null}
+							{error ? (
+								<p role="alert" className="workbenchInlineError">
+									{error}
+								</p>
+							) : null}
+							<DialogFooter>
+								<Button
+									variant="outline"
+									type="button"
+									disabled={pending}
+									onClick={() => setDialog(null)}
+								>
+									Cancel
+								</Button>
+								{currentDialog.kind === "rename" ? (
+									<Button
+										type="submit"
+										disabled={
+											pending ||
+											!draft.trim() ||
+											draft.trim() === currentDialog.session.title
+										}
+									>
+										{pending ? "Saving…" : "Save"}
+									</Button>
+								) : (
+									<Button
+										variant="destructive"
+										type="button"
+										disabled={pending}
+										onClick={() =>
+											void execute(
+												() => onDeleteSession(currentDialog.session.id),
+												true,
+											)
+										}
+									>
+										{pending ? "Deleting…" : "Delete"}
+									</Button>
+								)}
+							</DialogFooter>
+						</form>
+					</DialogContent>
+				) : null}
+			</Dialog>
+		</aside>
+	);
 }
-
 const formatRelativeTime = (updatedAt?: number): string => {
-  if (!updatedAt || !Number.isFinite(updatedAt)) return "just now";
-  const elapsedMs = Math.max(0, Date.now() - updatedAt);
-  const minutes = Math.floor(elapsedMs / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  return new Date(updatedAt).toLocaleDateString();
+	if (!updatedAt || !Number.isFinite(updatedAt)) return "Just now";
+	const minutes = Math.floor(Math.max(0, Date.now() - updatedAt) / 60_000);
+	return minutes < 1
+		? "Just now"
+		: minutes < 60
+			? `${minutes}m ago`
+			: minutes < 1440
+				? `${Math.floor(minutes / 60)}h ago`
+				: `${Math.floor(minutes / 1440)}d ago`;
 };
-
 export default Sidebar;

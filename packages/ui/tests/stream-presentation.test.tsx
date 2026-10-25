@@ -15,6 +15,20 @@ let nextFrameId = 1;
 let reducedMotion = false;
 let scheduledFrames = new Map<number, FrameRequestCallback>();
 let performanceNow: ReturnType<typeof vi.spyOn> | null = null;
+let scheduledMotionFrames = new WeakMap<(data: { timestamp: number }) => void, number>();
+// Control the external frame scheduler; the text and lifecycle assertions stay real.
+vi.mock("motion", () => ({
+  frame: { update(callback: (data: { timestamp: number }) => void) {
+    const id = requestFrame(timestamp => callback({ timestamp }));
+    scheduledMotionFrames.set(callback, id);
+    return callback;
+  } },
+  cancelFrame(callback: (data: { timestamp: number }) => void) {
+    const id = scheduledMotionFrames.get(callback);
+    if (id !== undefined) cancelFrame(id);
+    scheduledMotionFrames.delete(callback);
+  },
+}));
 
 const requestFrame = (callback: FrameRequestCallback): number => {
   const frameId = nextFrameId++;
@@ -46,6 +60,7 @@ beforeEach(() => {
   nextFrameId = 1;
   reducedMotion = false;
   scheduledFrames = new Map();
+  scheduledMotionFrames = new WeakMap();
   performanceNow = vi.spyOn(globalThis.performance, "now").mockImplementation(
     () => frameNow,
   );
@@ -133,12 +148,15 @@ test("drains an append-only terminal answer instead of revealing the final batch
   });
   expect(visible).toBe(beforeTerminal);
 
-  for (let frame = 2; frame <= 14; frame += 1) {
+  let previous = beforeTerminal;
+  for (let frame = 2; frame <= 100 && visible !== target; frame += 1) {
     await runNextFrame((frame * 1_000) / 60);
     samples.push(visible);
+    expect(visible.length - previous.length).toBeLessThanOrEqual(12);
+    expect(target.startsWith(visible)).toBe(true);
+    previous = visible;
+    if (frame === 14) expect(visible).not.toBe(target);
   }
-  expect(samples.filter((sample) => sample !== target).length)
-    .toBeGreaterThanOrEqual(3);
   expect(visible).toBe(target);
 
   await act(async () => renderer?.unmount());
@@ -167,4 +185,40 @@ test("applies corrections and reduced-motion content immediately", async () => {
   });
   expect(visible).toBe("complete without animation");
   await act(async () => renderer?.unmount());
+});
+
+test("stream presentation preserves complete graphemes and cancels pending work on unmount", async () => {
+  const grapheme = "👩‍💻";
+  const target = grapheme.repeat(40);
+  let visible = "";
+  function Harness() { visible = useStreamPresentation(target, true); return <span>{visible}</span>; }
+  let renderer: ReactTestRenderer;
+  await act(async () => { renderer = create(<Harness />); });
+  expect(visible).toBe(grapheme);
+  for (let step = 1; step <= 3; step++) {
+    await runNextFrame(step * 1000 / 60);
+    expect(visible.length % grapheme.length).toBe(0);
+    expect(target.startsWith(visible)).toBe(true);
+  }
+  expect(scheduledFrames.size).toBeGreaterThan(0);
+  await act(async () => renderer.unmount());
+  expect(scheduledFrames.size).toBe(0);
+});
+
+test("hiding the document flushes complete authoritative text and clears pending presentation", async () => {
+  const target = "complete hidden answer ".repeat(50);
+  let visible = "";
+  function Harness() { visible = useStreamPresentation(target, true); return <span>{visible}</span>; }
+  let renderer: ReactTestRenderer;
+  await act(async () => { renderer = create(<Harness />); });
+  expect(visible).not.toBe(target);
+  const listener = vi.mocked(document.addEventListener).mock.calls.find(([event]) => event === "visibilitychange")?.[1];
+  expect(listener).toBeTypeOf("function");
+  await act(async () => {
+    Object.defineProperty(document, "hidden", { configurable: true, value: true });
+    (listener as () => void)();
+  });
+  expect(visible).toBe(target);
+  expect(scheduledFrames.size).toBe(0);
+  await act(async () => renderer.unmount());
 });

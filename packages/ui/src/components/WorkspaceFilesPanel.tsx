@@ -194,7 +194,7 @@ export function WorkspaceFilesPanel({
     <section className="workspaceFilesPanel">
       <header className="workspaceFilesHeader">
         <span className="workspaceFilesScope">{t("workspaceFilesPanel.allFiles")}</span>
-        <button type="button" aria-label="Refresh files" title="Refresh files" disabled={state.loading} onClick={() => setRevision(v => v + 1)}>
+        <button type="button" aria-label="Refresh files" disabled={state.loading} onClick={() => setRevision(v => v + 1)}>
           <RefreshCw className="workspaceFilesScopeIcon" aria-hidden="true" />
         </button>
         {focusedLine ? (

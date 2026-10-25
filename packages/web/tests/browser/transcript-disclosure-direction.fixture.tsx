@@ -79,6 +79,7 @@ const fixture = {
     const detail = button(kind).nextElementSibling?.getBoundingClientRect();
     return { offset: rect.top - bounds.top, viewportY: rect.top, parentLineY: button("work").getBoundingClientRect().bottom,
       headerBottom: rect.bottom - bounds.top, detailTop: detail ? detail.top - bounds.top : null, detailHeight: detail?.height ?? 0,
+      answerY: document.querySelector('[data-block-id="synthetic-answer"]')!.getBoundingClientRect().top,
       scrollTop: element.scrollTop, bottomDistance: element.scrollHeight - element.clientHeight - element.scrollTop,
       maxScroll: element.scrollHeight - element.clientHeight, expanded: button(kind).getAttribute("aria-expanded"),
       following: document.querySelector(".workspaceJumpToLatest") === null,

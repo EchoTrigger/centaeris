@@ -1,0 +1,59 @@
+@import "./desktop-chat.css";
+
+.thinAppShell, .desktopResourceDialog { --desktop-content-width: 720px; --desktop-page-inset: clamp(20px, 4vw, 64px); --desktop-page-top: 48px; --desktop-control-height: 32px; }
+.thinAppShell.is-sidebar-collapsed { grid-template-columns: 0 minmax(0, 1fr); }
+.thinAppShell > .nativeTitlebar { border: 0; background: var(--surface-variant); }
+.thinAppShell > .thinSidebarSlot { border: 0; }
+.thinSidebarSlot > .thinSidebar[hidden] { display: none; }
+.thinAppShell > .thinWorkspaceShell { border: 0; border-radius: 12px 0 0 12px; background: var(--surface-color); overflow: hidden; }
+.nativeTitlebar .nativeTitlebarSafeArea { gap: 2px; padding-inline: 8px; }
+.nativeTitlebar .desktopChromeButton { width: 28px; height: 28px; min-width: 28px; padding: 0; border: 0; border-radius: 6px; -webkit-app-region: no-drag; }
+.nativeTitlebar .desktopChromeButton svg { width: 15px; height: 15px; }
+.nativeTitlebar .applicationMenus { gap: 0; margin-left: 8px; align-items: center; }
+.nativeTitlebar .applicationMenus > button { height: 28px; padding: 0 8px; border-radius: 5px; font-size: 12px; font-weight: 400; }
+html[data-platform="win32"] .nativeTitlebar .nativeTitlebarSafeArea { padding-right: 146px; }
+html[data-platform="darwin"] .nativeTitlebar .nativeTitlebarSafeArea { padding-left: 80px; }
+.thinWorkspaceShell .desktopConversationHeader { height: 56px; flex-basis: 56px; padding: 8px 20px; border-bottom: 0; background: var(--surface-color); gap: 12px; }
+.desktopConversationIdentity { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.desktopConversationIdentity > strong { display: block; font-size: 13px; line-height: 1.4; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desktopConversationIdentity > span { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--process-text); font-size: 11px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desktopConversationIdentity > span svg { flex-shrink: 0; }
+.desktopConversationHeader .workspacePageActions { flex-shrink: 0; }
+.desktopConversationHeader .nativePanelToggle { width: 28px; height: 28px; flex-basis: 28px; border: 0; border-radius: 6px; }
+.desktopSetupState { flex: 1; min-height: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 14px; padding: 32px 24px 72px; text-align: center; }
+.desktopSetupState > svg { color: var(--process-text); }
+.desktopSetupState h1 { margin: 0; font-size: 23px; font-weight: 600; letter-spacing: -.02em; line-height: 1.4; }
+.desktopSetupState p { margin: 0; max-width: 440px; color: var(--process-text); font-size: 13px; line-height: 1.8; text-wrap: pretty; }
+.desktopSetupState > div { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 6px; }
+.desktopSetupState small { color: var(--process-text); font-size: 11px; margin-top: 3px; }
+.desktopLoadingIcon { width: 20px; height: 20px; animation: spin 1s linear infinite; }
+.thinWorkspaceShell .desktopResourcesPage { flex: 1; min-height: 0; padding: 0; gap: 0; }
+.desktopResourcesPage > .desktopResourceTabs { flex-shrink: 0; margin: var(--desktop-page-top) auto 0; height: 34px; gap: 22px; border-bottom: 0; align-self: center; width: min(calc(var(--desktop-content-width) + 2 * var(--desktop-page-inset)), 100%); padding-inline: var(--desktop-page-inset); justify-content: flex-start; }
+.desktopResourcesPage .dmPage { padding-top: 24px; }
+.desktopResourceTabs > [data-slot="tabs-trigger"] { flex: 0 0 auto; padding: 5px 2px; font-size: 13px; }
+.desktopResourcesPage > [data-slot="tabs-content"] { min-height: 0; overflow: auto; }
+.desktopHostNotice { display: flex; align-items: flex-start; gap: 8px; max-width: min(560px,calc(100vw - 40px)); border: 1px solid color-mix(in srgb,var(--error) 25%,var(--outline-variant)); background: var(--surface-color); color: var(--on-surface); border-radius: 10px; box-shadow: 0 8px 24px #0001; padding: 10px 10px 10px 14px; font-size: 12px; line-height: 1.6; }
+.desktopHostNotice > span { flex: 1; min-width: 0; overflow-wrap: anywhere; padding-top: 3px; }
+.desktopHostNotice > button { flex-shrink: 0; }
+@media (max-width: 1000px) { .thinWorkspaceShell .desktopConversationHeader { padding-inline: 14px; } }
+@media (prefers-reduced-motion: reduce) { .desktopLoadingIcon { animation: none; } }
+
+.desktopChatPanel > .thinChatColumn { position: relative; }
+.thinWorkspaceShell .desktopConversationHeader.is-welcome { position: absolute; top: 0; right: 0; left: auto; width: auto; height: 44px; padding-block: 6px; border: 0; background: transparent; }
+
+/* Pages own their headers; no phantom title row remains above management views. */
+.thinAppShell .thinWorkspaceShell { grid-template-rows: minmax(0, 1fr); }
+.thinAppShell .dmHeader h1 { margin: 0; font-size: 22px; font-weight: 500; line-height: 1.4; }
+
+.desktopResourceDialog[data-slot="dialog-content"] { display: flex; flex-direction: column; width: min(960px, calc(100vw - 48px)); max-width: none; height: min(760px, calc(100dvh - 64px)); padding: 0; gap: 0; overflow: hidden; }
+.desktopResourceDialogBody { flex: 1; min-height: 0; overflow: auto; }
+.desktopResourceDialogBody .dmHeader { padding-right: 24px; }
+.desktopResourceDialogBody .desktopModels { min-height: 0; }
+
+.desktopResourceDialogBody .desktopModelsHeading { padding-right: 28px; }
+
+@media (max-width: 760px) { .thinAppShell, .desktopResourceDialog { --desktop-page-top: 28px; --desktop-page-inset: 20px; } }
+@media (max-width: 440px) { .thinAppShell, .desktopResourceDialog { --desktop-page-inset: 16px; } }
+
+.workspacePageActions .nativePanelToggle.is-right { width:28px; height:28px; min-width:28px; flex:0 0 28px; padding:0; border:0; border-radius:6px; }
+.workspacePageActions .nativePanelToggle.is-right svg, .desktopPreviewCollapse svg { width:15px; height:15px; }

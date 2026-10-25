@@ -77,8 +77,11 @@ def environment_execution_mode(environment: SessionEnvironment) -> str:
     return profile["lifetime"] if profile["schema"] == E2B_PROFILE_SCHEMA else "perRun"
 
 
-def serialize_session(session: Session, has_active_agent_run: bool | None = None) -> dict:
+def serialize_session(session: Session, has_active_agent_run: bool | None = None, *, attention_is_current: bool = False) -> dict:
     from app_core.agent_work_presentation import initial_input_origin
+    from app_core.session_attention import refresh_session_attention, session_attention_snapshot
+    if not attention_is_current:
+        refresh_session_attention(session)
     if has_active_agent_run is None:
         has_active_agent_run = session.agent_runs.filter(
             status__in=["queued", "running"]
@@ -96,7 +99,7 @@ def serialize_session(session: Session, has_active_agent_run: bool | None = None
         "status": session.status,
         "deletedAt": session.deletedAt.isoformat() if session.deletedAt else None,
         "isPinned": session.isPinned,
-        "isUnread": session.isUnread,
+        **session_attention_snapshot(session),
         "hasActiveAgentRun": has_active_agent_run,
         "updatedAt": session.updatedAt.isoformat(),
     }

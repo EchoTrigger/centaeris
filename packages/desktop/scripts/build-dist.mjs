@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { reserveDistributionOutput } from "./distribution-output.mjs";
 import { packageDirectory } from "./package-directory.mjs";
 import { spawnSync } from "node:child_process";
 import * as ResEdit from "resedit";
@@ -15,7 +16,10 @@ const uiDist = path.join(repoRoot, "packages", "ui", "dist");
 const runtimeExecutable = runtimeArtifactPath(repoRoot, "release");
 const trayIconIco = path.join(hostRoot, "assets", "icon.ico");
 const trayIconIcns = path.join(hostRoot, "assets", "icon.icns");
-const outRoot = path.join(hostRoot, "dist");
+const externalOutput = process.env.CENTAERIS_DESKTOP_DIST_DIR;
+const outRoot = externalOutput
+  ? await reserveDistributionOutput(externalOutput)
+  : path.join(hostRoot, "dist");
 const appRoot = path.join(outRoot, "Centaeris Desktop");
 const resourcesRoot = path.join(appRoot, "resources");
 const systemSkillsSource = path.join(repoRoot, "system-skills");
@@ -57,7 +61,7 @@ await requirePath(path.join(uiDist, "index.html"), "UI dist");
 ensureReleaseRuntime();
 await requirePath(trayIconIco, "Tray icon (ico)");
 
-await fs.rm(outRoot, { recursive: true, force: true });
+if (!externalOutput) await fs.rm(outRoot, { recursive: true, force: true });
 await fs.mkdir(appRoot, { recursive: true });
 await fs.cp(electronDist, appRoot, { recursive: true });
 
@@ -170,9 +174,12 @@ async function customizeExecutable(exePath, iconPath) {
   if (versionInfos.length === 0) {
     throw new Error(`Executable has no version info: ${exePath}`);
   }
+  const manifest = JSON.parse(await fs.readFile(path.join(hostRoot, "package.json"), "utf8"));
   const executableName = path.basename(exePath);
   const productName = path.basename(exePath, path.extname(exePath));
   for (const versionInfo of versionInfos) {
+    versionInfo.setFileVersion(manifest.version);
+    versionInfo.setProductVersion(manifest.version);
     const languages = versionInfo.getAllLanguagesForStringValues();
     if (languages.length === 0) {
       throw new Error(`Executable has no version string language: ${exePath}`);

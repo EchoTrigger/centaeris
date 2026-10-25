@@ -1,0 +1,64 @@
+/* Reading surfaces stay unfilled; selection and containment keep their own roles. */
+:root[data-theme] {
+  --code-surface: transparent;
+  --code-inline-surface: var(--surface-variant);
+}
+
+/* Desktop light palette: near-white canvas, cool gray chrome and restrained blue-gray selection. */
+:root[data-theme="light"] {
+  --surface-color: #fcfdfe;
+  --surface-variant: #f3f5f8;
+  --surface-container: #e7edf4;
+  --surface-hover: color-mix(in srgb, var(--surface-variant) 60%, var(--surface-container));
+  --surface-active: var(--surface-container);
+  --on-surface: #26313e;
+  --process-text: #5d6b7b;
+  --outline: color-mix(in srgb, var(--process-text) 40%, var(--outline-variant));
+  --outline-variant: #dce3eb;
+  --solid-surface: var(--on-surface);
+  --background: 210.00 50.00% 99.22%;
+  --foreground: 212.50 24.00% 19.61%;
+  --secondary: 216.00 26.32% 96.27%;
+  --secondary-foreground: 212.50 24.00% 19.61%;
+  --muted: 216.00 26.32% 96.27%;
+  --muted-foreground: 212.00 13.89% 42.35%;
+  --accent: 212.31 37.14% 93.14%;
+  --accent-foreground: 212.50 24.00% 19.61%;
+  --border: 212.00 27.27% 89.22%;
+  --input: 212.00 27.27% 89.22%;
+}
+
+[data-slot="popover-content"].contextWindowPanel {
+  position: relative;
+  inset: auto;
+  width: min(360px, calc(100vw - 32px));
+  max-height: min(480px, 70vh);
+  overflow: auto;
+}
+
+/* Composer density suppresses the default ring; keep keyboard focus explicit. */
+[data-slot="select-trigger"].composer-chip:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="tooltip-content"], [data-slot="dialog-content"],
+  [data-slot="dialog-overlay"], [data-slot="popover-content"],
+  [data-slot="select-content"], [data-slot="dropdown-menu-content"] {
+    animation: none;
+    transition: none;
+  }
+}
+
+/* Compact action menus size to their labels, independent of the small trigger. */
+[data-slot="dropdown-menu-content"] { width: max-content; min-width: 128px; max-width: calc(100vw - 24px); border-radius: 6px; padding: 4px; }
+[data-slot="dropdown-menu-item"], [data-slot="dropdown-menu-sub-trigger"], [data-slot="dropdown-menu-checkbox-item"], [data-slot="dropdown-menu-radio-item"] { min-height: 28px; gap: 8px; border-radius: 3px; font-size: 12px; line-height: 18px; white-space: nowrap; }
+[data-slot="dropdown-menu-item"], [data-slot="dropdown-menu-sub-trigger"] { padding: 5px 8px; }
+[data-slot="dropdown-menu-content"] [role^="menuitem"] > svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+/* Regular control text keeps the desktop chrome lighter than content headings. */
+[data-slot="button"], [data-slot="dropdown-menu-item"], [data-slot="dropdown-menu-radio-item"] { font-weight: 400; }
+
+:root[data-theme="light"] { --terminal-cyan: #187480; }
+:root[data-theme="dark"] { --terminal-cyan: #82cdd4; }

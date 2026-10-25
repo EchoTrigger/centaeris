@@ -1036,7 +1036,7 @@ const main = async () => {
       .map((skill) => skill.name)
       .sort();
     if (JSON.stringify(bundledNames) !== JSON.stringify([
-      "runtime-recovery", "skill-creator", "skill-installer",
+      "inline-visualizations", "runtime-recovery", "skill-creator", "skill-installer",
     ].sort())) {
       fail(`public runtime did not load its built-in System Skills: ${bundledNames.join(", ")}`);
     }

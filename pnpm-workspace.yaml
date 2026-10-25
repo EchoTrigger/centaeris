@@ -2,12 +2,15 @@ packages:
   - packages/ui
   - packages/desktop
   - packages/web
+  - packages/visualization-react
+  - packages/frontend-foundations
 
 enablePrePostScripts: true
 storeDir: .cache/pnpm
 
 allowBuilds:
   electron: true
+  electron-winstaller: false
   fsevents: true
 
 overrides:

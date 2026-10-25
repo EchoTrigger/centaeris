@@ -134,6 +134,7 @@ class IndependentGcCollectorTests(SimpleTestCase):
         with (
             patch(f"{COMMAND}.expire_trash", return_value=TrashExpirationReport(0, 0, 0, 0)),
             patch(f"{COMMAND}.collect_note_history_gc", return_value=(0, 0)) as notes,
+            patch(f"{COMMAND}.drain_pending_changes", return_value=0) as presentation,
             patch(
                 f"{COMMAND}.collect_deleted_resource_gc",
                 return_value=DeletedResourceGcReport([], [], [], [object()] if resource_failure else []),
@@ -153,6 +154,7 @@ class IndependentGcCollectorTests(SimpleTestCase):
                 call_command("gc_deleted_resources", older_than_seconds=0, orphaned_library=True, stdout=output)
             snapshots.assert_called_once()
             notes.assert_called_once()
+            presentation.assert_called_once_with(4096)
             orphans.assert_called_once()
             self.assertIn("Cleaned orphaned library key orphan", output.getvalue())
             if not snapshot_failure:

@@ -299,3 +299,16 @@ test("reviewing ambiguous input uses a real new-tab link and consumes metadata o
   assert.deepEqual(calls, ["receipt", "receipt", "session"]);
   assert.equal(checking.pending(), null);
 });
+
+for (const name of ["TimeoutError", "AbortError"]) test(`an uncertain ${name} recovers by the original identity without resubmission`, async () => {
+  const store = storage(); const calls = []; let id;
+  const operation = client(store, async (path, options) => {
+    calls.push(options?.method || "GET");
+    if (options) { id = JSON.parse(options.body).operationId; throw new DOMException("request result is unknown", name); }
+    assert.ok(path.endsWith(id));
+    return accepted(id);
+  });
+  assert.deepEqual(await operation.submit("/submit", input), accepted(id));
+  assert.deepEqual(calls, ["POST", "GET"]);
+  assert.equal(operation.pending().operationId, id);
+});

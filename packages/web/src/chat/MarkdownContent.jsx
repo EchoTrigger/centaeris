@@ -1,3 +1,5 @@
+import { VisualMarkdown } from "@centaeris/visualization-react";
+import { renderTranscriptVisual } from "@centaeris/frontend-foundations/visualizations";
 import { useStreamPresentation } from "../useStreamPresentation";
 import { Fragment, memo, useEffect, useMemo, useRef } from "react";
 
@@ -99,7 +101,7 @@ export function updateMarkdownBlockProjection(previous, text, finalize = false) 
   };
 }
 
-export const MarkdownContent = memo(function MarkdownContent(/** @type {{ text: string }} */ { text }) {
+const OrdinaryMarkdownContent = memo(function OrdinaryMarkdownContent(/** @type {{ text: string }} */ { text }) {
   const lines = text.trim().split(/\r?\n/);
   const nodes = [];
   let index = 0;
@@ -171,8 +173,23 @@ export const MarkdownContent = memo(function MarkdownContent(/** @type {{ text: 
   return <div className="markdownContent">{nodes}</div>;
 });
 
+function renderOrdinaryMarkdown(text) {
+  return <OrdinaryMarkdownContent text={text} />;
+}
+
+export const MarkdownContent = memo(function MarkdownContent(/** @type {{ text: string, allowVisuals?: boolean, isStreaming?: boolean }} */ { text, allowVisuals = false, isStreaming = false }) {
+  return allowVisuals
+    ? <VisualMarkdown text={text} finalized={!isStreaming} renderMarkdown={renderOrdinaryMarkdown} renderVisual={renderTranscriptVisual} />
+    : <OrdinaryMarkdownContent text={text} />;
+});
+
 export const StreamingMarkdownContent = memo(function StreamingMarkdownContent({ text: sourceText, finalized = false }) {
   const text = useStreamPresentation(sourceText, !finalized);
+  const renderMarkdown = useMemo(() => (source) => <StreamingOrdinaryMarkdown text={source} finalized={finalized} />, [finalized]);
+  return <VisualMarkdown text={text} finalized={finalized} renderMarkdown={renderMarkdown} renderVisual={renderTranscriptVisual} />;
+});
+
+function StreamingOrdinaryMarkdown({ text, finalized }) {
   const committedProjection = useRef(createMarkdownBlockProjection());
   const projection = useMemo(
     () => updateMarkdownBlockProjection(
@@ -188,8 +205,8 @@ export const StreamingMarkdownContent = memo(function StreamingMarkdownContent({
   const activeText = projection.sourceText.slice(projection.sealedEnd);
   return (
     <div className="streamingMarkdownContent">
-      {projection.sealedBlocks.map((block) => <MarkdownContent key={block.id} text={block.text} />)}
-      {activeText ? <MarkdownContent key={projection.nextBlockId} text={activeText} /> : null}
+      {projection.sealedBlocks.map((block) => <OrdinaryMarkdownContent key={block.id} text={block.text} />)}
+      {activeText ? <OrdinaryMarkdownContent key={projection.nextBlockId} text={activeText} /> : null}
     </div>
   );
-});
+}

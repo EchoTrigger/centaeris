@@ -15,6 +15,12 @@ gate and inspection of its final artifacts.
 
 ## Test quality
 
+Frontend visual design uses manual appearance acceptance rather than TDD.
+Implement and iterate on layout, icons, spacing, color and typography directly.
+Focused behavioral tests still protect parsing, validation, requests, state
+transitions, streaming, recovery, accessibility interactions and content
+preservation. Do not turn visual preferences into pixel or class-name assertions.
+
 Pure declarative configuration and catalog-data updates do not require new tests
 or a red/green TDD cycle when implementation semantics stay unchanged. This
 includes model IDs, provider endpoints and protocol selections, context/output
@@ -76,6 +82,11 @@ registries, and public protocol results over source text matching. A comment
 mentioning a prohibited dependency must not be mistaken for an actual import.
 Static checks supplement behavioral coverage; they do not establish that a
 feature works merely because certain source text is absent.
+
+Web and Desktop message-scroll tests execute both controllers against the same
+anchoring, reserved-space, manual-reading, return-to-latest and reset contract.
+Host animation adapters may differ. Before replacing the former file-equality
+assertion, an ignored-pause negative control was verified to fail for both hosts.
 
 Choose UI scenarios from observable risks such as wrapping, clipping, keyboard
 navigation, zoom, localization, and layout transitions. Viewport dimensions are
@@ -140,6 +151,67 @@ Real HTTPS/ASGI tests retain coverage for ORM connection return, caller-owned
 transactions and stream cancellation. See the
 [hosted model gateway boundary](../workspace/architecture/HostedModelAdmission.md).
 
+## Web presentation delivery
+
+[Web presentation delivery](../workspace/architecture/WebPresentation.md) defines
+command acceptance, execution, applied SSE cursors, navigation snapshots and
+owner read acknowledgements. Its fault matrix distinguishes local synthetic
+coverage from production/WAF acceptance. Use an isolated synthetic PostgreSQL
+instance configured through `TEST_POSTGRES_*`, never an application database.
+
+```sh
+uv run --frozen --package api python packages/api/manage.py test \
+  app_core.test_presentation_stream app_core.test_presentation_authority \
+  app_core.test_session_attention \
+  app_core.test_session_attention_migration app_core.test_schema_wire_contract \
+  app_core.test_workspace_session_list_queries app_core.test_session_projection_concurrency \
+  --settings=api.test_settings --noinput
+pnpm --filter web exec node --test \
+  tests/unit/workspace-presentation-stream.test.mjs \
+  tests/unit/api-deadlines.test.ts tests/unit/operation-receipts.test.mjs \
+  tests/unit/session-read-state.test.ts
+```
+
+The notification migration reconstructs durable watermarks while preserving the
+ambiguous legacy unread boolean as an explicit manual choice. Migration tests
+must protect existing facts, read history and the forward-only reversal guard.
+Concurrent HTTP ACKs and repeated terminal projection must not regress read state.
+The ordinary Session-list query-growth test also protects batched discovery from
+introducing one database query per Session.
+
+The manual-unread storage rename is covered by
+`test_session_attention_characterization` and
+`test_session_manual_unread_migration`. Preserve the old field in historical
+migration fixtures; assert stored choices, read watermarks, revisions, recency
+and source facts survive the forward rename, and that writes to the renamed
+column still invalidate navigation. Automatic read ACK and explicit mark-read
+commands retain different effects. Compare generated OpenAPI plus validation and
+serialization schemas across this storage-only change.
+
+Removing a display invalidation axis must retain fresh authorization while an
+SSE producer is blocked and before prepared payloads are emitted. The migration
+coverage seeds legacy global versions and pending rows and verifies that only
+those derived rows are removed while useful scoped invalidations still work.
+
+Session listing and navigation-only SSE authorization share a fully filtered,
+unevaluated query scope. Characterization coverage preserves empty-list access,
+active-user and definition visibility checks, delegation credential versions,
+membership replacement, native branch bindings, public rejection statuses and
+request grant/branch refreshes. Cost and side-effect tests observe actual reads
+and writes: repeated authorization must not materialize navigation rows or
+advance attention projections. Actual navigation reads still refresh and return
+the complete allowed snapshot. These checks establish behavior and removed work,
+not an unmeasured latency or capacity claim.
+
+For changes limited to this authorization/list boundary, run:
+
+```sh
+uv run --frozen --package api python packages/api/manage.py test \
+  app_core.test_presentation_authority app_core.test_workspace_session_list_queries \
+  app_core.test_http_query_contract app_core.test_http_error_contract \
+  --settings=api.test_settings --noinput
+```
+
 ## Focused Core gate
 
 Rust implementation changes run at least:
@@ -185,6 +257,14 @@ On Windows use `python`. Windows distribution acceptance additionally runs
 The gate checks formatting, the Rust workspace, Clippy with warnings denied,
 focused Core and SQLite integration, all Rust tests and Desktop/UI source checks.
 Packaging and packaged-application smoke checks remain in the Windows release stage.
+
+Shared frontend primitive changes also run `pnpm --filter web run test:components`.
+These mounted React tests protect controlled model/effort choices, focus,
+dismissal, confirmation and drafts. Web retains its own page and transcript
+interaction policy. With `CHROME_BIN` pointing to a local Chromium executable,
+`pnpm --filter web run test:chat-ui` checks production styles, floating-control
+placement, transcript folding and reading position in the browser. The shared
+package has its own `typecheck` script, run by both frontend product gates.
 
 ## Test data
 

@@ -1,15 +1,13 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { X } from "lucide-react";
+import { Button } from "./ui/button";
+import { Dialog, DialogClose, DialogContent } from "./ui/dialog";
+
 export function ResourceDetailDialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
-  const ref = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    const dialog = ref.current;
-    const previous = typeof document !== "undefined" ? document.activeElement : null;
-    dialog?.showModal();
-    return () => { dialog?.close(); if (typeof HTMLElement !== "undefined" && previous instanceof HTMLElement && previous.isConnected) previous.focus(); };
-  }, []);
-  return <dialog ref={ref} className="resourceDetailDialog" aria-label={title} onCancel={event => { event.preventDefault(); onClose(); }}>
-    <button type="button" className="resourceDetailClose" aria-label="Close detail" onClick={onClose}><X size={18} /></button>
-    {children}
-  </dialog>;
+  return <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
+    <DialogContent className="resourceDetailDialog" aria-label={title} showCloseButton={false}>
+      <DialogClose render={<Button variant="ghost" size="icon-sm" className="resourceDetailClose" aria-label="Close detail" />}><X size={18} aria-hidden="true" /></DialogClose>
+      {children}
+    </DialogContent>
+  </Dialog>;
 }

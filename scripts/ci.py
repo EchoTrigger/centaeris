@@ -42,6 +42,7 @@ def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False
             ["run", "--locked", "-p", "centaeris-runtime", "--bin", "centaeris-runtime-protocol-docs", "--", "--check"],
         ):
             run(["cargo", *args])
+        run(["node", "scripts/visualization-contract.mjs", "--check"])
         run([sys.executable, "-B", "scripts/test_product_licensing.py", "--crate-payloads"])
         tree = run(["cargo", "tree", "--locked", "-p", "centaeris-core", "--edges", "normal,build,dev"], capture=True)
         if re.search(r"centaeris-runtime-sqlite|rusqlite", tree):
@@ -53,6 +54,8 @@ def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False
         run([sys.executable, "-B", "scripts/test_system_skills.py"])
         run(["node", "--test", "packages/desktop/src/systemSkills.test.mjs"])
         run([pnpm, "install", "--frozen-lockfile"])
+        run([pnpm, "--filter", "@centaeris/frontend-foundations", "run", "typecheck"])
+        run([pnpm, "--filter", "@centaeris/visualization-react", "run", "typecheck"])
         if frontend_tests:
             run([pnpm, "--filter", "centaeris-ui", "run", "gate"])
             run([pnpm, "--filter", "@centaeris/electron-host", "run", "check"])

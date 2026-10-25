@@ -194,6 +194,17 @@ class PortableCITests(unittest.TestCase):
     def test_loading_the_gate_preserves_the_hosted_test_discovery_path(self):
         self.assertEqual(sys.path, original_search_path)
 
+    def test_web_checks_shared_types_and_component_interactions(self):
+        config = {"services": {"document-processor": {}, "workspace-general": {},
+            "runtime": {"depends_on": {"workspace-general": {"condition": "service_completed_successfully"}}},
+            "material-worker": {"depends_on": {"document-processor": {"condition": "service_completed_successfully"}}}}}
+        for skip in (False, True):
+            calls = []
+            with patch.object(ci, "run", side_effect=lambda label, args, **kw: calls.append(args) or json.dumps(config)):
+                ci.main(skip, stage="Web")
+            self.assertTrue(any("@centaeris/frontend-foundations" in command and "typecheck" in command for command in calls))
+            self.assertEqual(any("test:components" in command for command in calls), not skip)
+
     def test_gate_preserves_backend_checks_and_frontend_skip_scope(self):
         for skip in (False, True):
             calls = []

@@ -1,15 +1,27 @@
+import { memo, type CSSProperties } from "react";
+import { ChevronDown } from "lucide-react";
 import { t } from "../../i18n";
-import { memo, useMemo, type CSSProperties } from "react";
-import { Check, ChevronDown, Image } from "lucide-react";
 import type {
   AgentContextUsageSummary,
   ModelThinkingMode,
   SelectableModel,
 } from "../../lib/chatBridge";
+import { Button } from "../ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
+} from "../ui/dropdown-menu";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { formatTokenCount } from "./chatRuntimeCore";
 
 export type RuntimeComposerPanel = "model" | "reasoning" | "context" | null;
-
 export type ComposerRuntimeControlsProps = {
   activePanel: RuntimeComposerPanel;
   modelRuntimeSummary: string;
@@ -19,224 +31,258 @@ export type ComposerRuntimeControlsProps = {
   reasoningEfforts: ModelThinkingMode[];
   contextUsage: AgentContextUsageSummary | null;
   runtimeConfigError: string;
-  onTogglePanel: (panel: Exclude<RuntimeComposerPanel, null>) => void;
+  onPanelChange: (panel: RuntimeComposerPanel) => void;
   onModelSelect: (model: SelectableModel) => void;
   onReasoningEffortSelect: (effort: ModelThinkingMode) => void;
 };
-
-const formatContextTokenCount = (value: number): string =>
+const modelKey = (model: SelectableModel) =>
+  JSON.stringify([model.providerId, model.model]);
+const effortLabel = (effort: string) =>
+  effort === "xhigh"
+    ? "Extra high"
+    : effort.charAt(0).toUpperCase() + effort.slice(1);
+const formatContextTokenCount = (value: number) =>
   new Intl.NumberFormat("en-US", {
     notation: "compact",
     maximumFractionDigits: 1,
-  }).format(value).toLowerCase();
+  })
+    .format(value)
+    .toLowerCase();
 
 export const ComposerRuntimeControls = memo(function ComposerRuntimeControls({
   activePanel,
-  modelRuntimeSummary,
   selectableModels,
   activeModelIndex,
   reasoningEffort,
   reasoningEfforts,
-  contextUsage,
-  runtimeConfigError,
-  onTogglePanel,
+  onPanelChange,
   onModelSelect,
   onReasoningEffortSelect,
 }: ComposerRuntimeControlsProps) {
+  const activeModel = selectableModels[activeModelIndex];
+  const reasoningLabel =
+    reasoningEffort ?? activeModel?.modelThinkingMode ?? null;
+  return (
+    <DropdownMenu
+      open={activePanel === "model" || activePanel === "reasoning"}
+      onOpenChange={(open) => onPanelChange(open ? "model" : null)}
+    >
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="ghost"
+            className="composerModelTrigger"
+            disabled={!selectableModels.length}
+            aria-label={t("composerRuntimeControls.globalModels")}
+          />
+        }
+      >
+        <span className="composerModelName">
+          {activeModel?.displayName ||
+            activeModel?.model ||
+            t("composerRuntimeControls.noModelConfigured")}
+        </span>
+        {reasoningLabel ? (
+          <span className="composerModelEffort">
+            {effortLabel(reasoningLabel)}
+          </span>
+        ) : null}
+        <ChevronDown aria-hidden="true" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        side="top"
+        align="end"
+        sideOffset={8}
+        collisionPadding={{ top: 8, left: 8, right: 152, bottom: 8 }}
+        collisionAvoidance={{ side: "none", align: "shift" }}
+        className="composerModelMenu"
+      >
+        <DropdownMenuRadioGroup
+          value={activeModel ? modelKey(activeModel) : ""}
+          onValueChange={(value) => {
+            const model = selectableModels.find(
+              (item) => modelKey(item) === value,
+            );
+            if (model) onModelSelect(model);
+          }}
+        >
+          {selectableModels.map((model) => (
+            <DropdownMenuRadioItem
+              key={modelKey(model)}
+              value={modelKey(model)}
+              className="composerModelOption"
+              aria-label={model.displayName || model.model}
+            >
+              <span>
+                <span className="composerModelOptionName">
+                  {model.displayName || model.model}
+                </span>
+                <small>{model.providerName}</small>
+              </span>
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+        {reasoningEfforts.length ? (
+          <>
+            <DropdownMenuSeparator className="composerModelSeparator" />
+            <DropdownMenuSub
+              key={activePanel === "reasoning" ? "reasoning" : "model"}
+              defaultOpen={activePanel === "reasoning"}
+            >
+              <DropdownMenuSubTrigger
+                className="composerEffortTrigger"
+                aria-label={t("composerRuntimeControls.reasoningEffort")}
+              >
+                <span>Effort</span>
+                <span className="composerEffortValue">
+                  {reasoningLabel ? effortLabel(reasoningLabel) : ""}
+                </span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent
+                aria-label={t("composerRuntimeControls.reasoningEffort")}
+                side="right"
+                align="end"
+                alignOffset={0}
+                sideOffset={6}
+                collisionPadding={8}
+                collisionAvoidance={{ side: "none", align: "shift" }}
+                className="composerEffortMenu"
+              >
+                <DropdownMenuRadioGroup
+                  value={reasoningLabel ?? ""}
+                  onValueChange={(value) => {
+                    if (reasoningEfforts.includes(value as ModelThinkingMode))
+                      onReasoningEffortSelect(value as ModelThinkingMode);
+                  }}
+                >
+                  {reasoningEfforts.map((effort) => (
+                    <DropdownMenuRadioItem key={effort} value={effort}>
+                      {effortLabel(effort)}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+          </>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+});
+
+export const ComposerContextControl = memo(function ComposerContextControl({
+  activePanel,
+  contextUsage,
+  onPanelChange,
+}: Pick<
+  ComposerRuntimeControlsProps,
+  "activePanel" | "contextUsage" | "onPanelChange"
+>) {
   const breakdown = contextUsage?.breakdown;
-  const reasoningLabel = reasoningEffort
-    ?? selectableModels[activeModelIndex]?.modelThinkingMode
-    ?? null;
   const maxContextTokens = contextUsage?.maxContextTokens ?? 0;
   const usedTokens = contextUsage?.usedTokens ?? 0;
   const usedPercentage = contextUsage?.usedPercentage ?? 0;
-  const contextSegments = breakdown ? [
-    ["Messages", breakdown.messageTokens, "messages"],
-    ["System tools", breakdown.systemToolTokens, "system-tools"],
-    ["MCP tools", breakdown.mcpToolTokens, "mcp-tools"],
-    ["System prompt", breakdown.systemPromptTokens, "system-prompt"],
-    ["Skills", breakdown.skillsTokens, "skills"],
-    ["buffer", breakdown.autoCompactBufferTokens, "buffer"],
-    ["Free space", breakdown.freeSpaceTokens, "free"],
-  ] as const : [];
-  const contextRows = contextSegments.filter(([, , kind]) => kind !== "buffer");
-  const activeModel = selectableModels[activeModelIndex];
-  const modelGroups = useMemo(() => {
-    const groups = new Map<string, {
-      providerId: string;
-      providerName: string;
-      models: SelectableModel[];
-    }>();
-    selectableModels.forEach((model) => {
-      const current = groups.get(model.providerId);
-      if (current) {
-        current.models.push(model);
-      } else {
-        groups.set(model.providerId, {
-          providerId: model.providerId,
-          providerName: model.providerName,
-          models: [model],
-        });
-      }
-    });
-    return [...groups.values()];
-  }, [selectableModels]);
-
+  const contextSegments = breakdown
+    ? ([
+        ["Messages", breakdown.messageTokens, "messages"],
+        ["System tools", breakdown.systemToolTokens, "system-tools"],
+        ["MCP tools", breakdown.mcpToolTokens, "mcp-tools"],
+        ["System prompt", breakdown.systemPromptTokens, "system-prompt"],
+        ["Skills", breakdown.skillsTokens, "skills"],
+        ["buffer", breakdown.autoCompactBufferTokens, "buffer"],
+        ["Free space", breakdown.freeSpaceTokens, "free"],
+      ] as const)
+    : [];
   return (
-    <>
-      <div className="composerMetaRow">
-        <div className="composerMetaGroup">
-          <span className="composer-chip composerImageIndicator" title={t("composerRuntimeControls.image")}>
-            <Image className="composerLucideIcon" aria-hidden="true" />
-          </span>
-          <div className={`composerPicker model-chip ${activePanel === "model" ? "is-open" : ""}`}>
-            <button
-              type="button"
-              className="composer-chip composerPickerTrigger"
-              title={modelRuntimeSummary}
-              aria-haspopup="listbox"
-              aria-expanded={activePanel === "model"}
-              onClick={() => onTogglePanel("model")}
+    <Popover
+      open={activePanel === "context"}
+      onOpenChange={(open) => onPanelChange(open ? "context" : null)}
+    >
+      <PopoverTrigger
+        className="contextWindowIndicator"
+        aria-label="Context window"
+        aria-expanded={activePanel === "context"}
+      >
+        <span
+          style={
+            { "--context-used": `${usedPercentage * 3.6}deg` } as CSSProperties
+          }
+        />
+      </PopoverTrigger>
+      <PopoverContent
+        side="top"
+        align="end"
+        sideOffset={8}
+        className="contextWindowPanel"
+        aria-label="Context window"
+      >
+        <header>
+          <span>Context window</span>
+          {contextUsage ? (
+            <strong
+              title={`${formatTokenCount(usedTokens)} / ${formatTokenCount(maxContextTokens)}`}
             >
-              <span>{activeModelIndex >= 0 ? (activeModel?.displayName || activeModel?.model) : t("composerRuntimeControls.noModelConfigured")}</span>
-              <ChevronDown className="composerLucideIcon is-chevron" aria-hidden="true" />
-            </button>
-            {activePanel === "model" ? (
-              <div className="composerPickerPanel is-model" role="listbox" aria-label={t("composerRuntimeControls.globalModels")}>
-                {modelGroups.map((group) => (
-                  <section key={group.providerId}>
-                    <p className="composerPickerGroupLabel">{group.providerName}</p>
-                    {group.models.map((configured) => {
-                      const selected = configured.providerId === activeModel?.providerId
-                        && configured.model === activeModel?.model;
-                      return (
-                        <button
-                          type="button"
-                          role="option"
-                          aria-selected={selected}
-                          className={selected ? "is-selected" : ""}
-                          key={`${configured.providerId}:${configured.model}`}
-                          onClick={() => onModelSelect(configured)}
-                        >
-                          <span className="composerPickerCheck">
-                            {selected ? <Check aria-hidden="true" /> : null}
-                          </span>
-                          <strong>{configured.displayName || configured.model}</strong>
-                        </button>
-                      );
-                    })}
-                  </section>
-                ))}
-              </div>
-            ) : null}
-          </div>
-        </div>
-        <div className="composerMetaGroup is-end">
-          {reasoningEfforts.length ? (
-            <div className={`composerPicker reasoning-chip ${activePanel === "reasoning" ? "is-open" : ""}`}>
-              <button
-                type="button"
-                className="composer-chip composerPickerTrigger"
-                aria-label={t("composerRuntimeControls.reasoningEffort")}
-                aria-haspopup="listbox"
-                aria-expanded={activePanel === "reasoning"}
-                onClick={() => onTogglePanel("reasoning")}
-              >
-                <span>{reasoningLabel}</span>
-                <ChevronDown className="composerLucideIcon is-chevron" aria-hidden="true" />
-              </button>
-              {activePanel === "reasoning" ? (
-                <div className="composerPickerPanel is-reasoning" role="listbox" aria-label={t("composerRuntimeControls.reasoningEffort")}>
-                  {reasoningEfforts.map((effort) => {
-                    const selected = effort === reasoningEffort;
-                    return (
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={selected}
-                        className={selected ? "is-selected" : ""}
-                        key={effort}
-                        onClick={() => onReasoningEffortSelect(effort)}
-                      >
-                        <span className="composerPickerCheck">
-                          {selected ? <Check aria-hidden="true" /> : null}
-                        </span>
-                        <strong>{effort}</strong>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : null}
-            </div>
-          ) : reasoningLabel ? (
-            <span className="composer-chip reasoning-chip">{reasoningLabel}</span>
+              {formatContextTokenCount(usedTokens)} /{" "}
+              {formatContextTokenCount(maxContextTokens)}
+            </strong>
           ) : null}
-          <div className={`composerPicker contextWindowPicker ${activePanel === "context" ? "is-open" : ""}`}>
-            <button
-              type="button"
-              className="contextWindowIndicator"
-              aria-label="Context window"
-              title="Context window"
-              aria-expanded={activePanel === "context"}
-              onClick={() => onTogglePanel("context")}
-            >
-              <span style={{ "--context-used": `${usedPercentage * 3.6}deg` } as CSSProperties} />
-            </button>
-            {activePanel === "context" ? (
-              <div className="contextWindowPanel">
-                <header>
-                  <span>Context window</span>
-                  <strong title={`${formatTokenCount(usedTokens)} / ${formatTokenCount(maxContextTokens)}`}>
-                    {formatContextTokenCount(usedTokens)} / {formatContextTokenCount(maxContextTokens)} ({usedPercentage}%)
-                  </strong>
-                </header>
-                <div className="contextWindowBar">
-                  {contextSegments.filter(([, tokens]) => tokens > 0).map(([label, tokens, kind]) => (
-                    <i
-                      key={label}
-                      className={`is-${kind}`}
-                      style={{ width: `${maxContextTokens ? (tokens / maxContextTokens) * 100 : 0}%` }}
-                    />
+        </header>
+        {!contextUsage ? (
+          <p className="desktopContextEmpty">No usage yet.</p>
+        ) : null}
+        {breakdown ? (
+          <>
+            <div className="contextWindowBar">
+              {contextSegments
+                .filter(([, tokens]) => tokens > 0)
+                .map(([label, tokens, kind]) => (
+                  <i
+                    key={label}
+                    className={`is-${kind}`}
+                    style={{
+                      width: `${maxContextTokens ? (tokens / maxContextTokens) * 100 : 0}%`,
+                    }}
+                  />
+                ))}
+            </div>
+            <div className="contextWindowRows">
+              {contextSegments
+                .filter(([, , kind]) => kind !== "buffer")
+                .map(([label, tokens, kind]) => (
+                  <div key={label}>
+                    <i className={`is-${kind}`} />
+                    <span>{label}</span>
+                    <strong title={formatTokenCount(tokens)}>
+                      {formatContextTokenCount(tokens)}
+                    </strong>
+                  </div>
+                ))}
+            </div>
+            {breakdown.mcpTools.length ? (
+              <details className="contextMcpTools">
+                <summary>
+                  MCP tools
+                  <span>
+                    {formatContextTokenCount(breakdown.mcpToolTokens)}
+                  </span>
+                </summary>
+                <div>
+                  {breakdown.mcpTools.map((tool) => (
+                    <p key={`${tool.providerId}:${tool.name}`}>
+                      <span title={`${tool.providerId} · ${tool.name}`}>
+                        {tool.providerId} · {tool.name}
+                      </span>
+                      <strong title={formatTokenCount(tool.tokens)}>
+                        {formatContextTokenCount(tool.tokens)}
+                      </strong>
+                    </p>
                   ))}
                 </div>
-                {breakdown ? (
-                  <>
-                    <div className="contextWindowRows">
-                      {contextRows.map(([label, tokens, kind]) => (
-                        <div key={label}>
-                          <i className={`is-${kind}`} />
-                          <span>{label}</span>
-                          <strong title={formatTokenCount(tokens)}>{formatContextTokenCount(tokens)}</strong>
-                          <small>{maxContextTokens ? ((tokens / maxContextTokens) * 100).toFixed(1) : "0.0"}%</small>
-                        </div>
-                      ))}
-                    </div>
-                    {breakdown.mcpTools.length ? (
-                      <details className="contextMcpTools">
-                        <summary>
-                          MCP tools
-                          <span>{formatContextTokenCount(breakdown.mcpToolTokens)} · {breakdown.mcpTools.length}</span>
-                        </summary>
-                        <div>
-                          {breakdown.mcpTools.map((tool) => (
-                            <p key={`${tool.providerId}:${tool.name}`}>
-                              <span title={`${tool.providerId} · ${tool.name}`}>{tool.providerId} · {tool.name}</span>
-                              <strong title={formatTokenCount(tool.tokens)}>{formatContextTokenCount(tool.tokens)}</strong>
-                            </p>
-                          ))}
-                        </div>
-                      </details>
-                    ) : null}
-                  </>
-                ) : null}
-              </div>
+              </details>
             ) : null}
-          </div>
-        </div>
-      </div>
-      {runtimeConfigError.trim() ? (
-        <div className="composer-error">{runtimeConfigError}</div>
-      ) : null}
-    </>
+          </>
+        ) : null}
+      </PopoverContent>
+    </Popover>
   );
 });

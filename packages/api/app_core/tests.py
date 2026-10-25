@@ -32,6 +32,7 @@ from .assets import (
     tombstone_stored_object,
 )
 from .http.serialization import serialize_artifact as serializeArtifact
+from .http.serialization import serialize_session
 from .model_adapter import (
     ModelProviderError,
     encrypt_credential_secret,
@@ -2143,7 +2144,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         append_started(agent_run)
         append_completed(agent_run)
         pinned.refresh_from_db()
-        self.assertTrue(pinned.isUnread)
+        self.assertTrue(serialize_session(pinned)["isUnread"])
         original_updated_at = pinned.updatedAt
         self.client.force_login(user)
 
@@ -2172,13 +2173,17 @@ class ApiVerticalSliceTests(TransactionTestCase):
                 "deletedAt": None,
                 "isPinned": True,
                 "isUnread": False,
+                "isManuallyUnread": False,
+                "attentionRevision": "2",
+                "latestAttentionSequence": "4",
+                "readThroughSequence": "4",
                 "hasActiveAgentRun": False,
                 "updatedAt": original_updated_at.isoformat(),
             },
         )
         pinned.refresh_from_db()
         self.assertEqual(pinned.updatedAt, original_updated_at)
-        self.assertFalse(pinned.isUnread)
+        self.assertFalse(pinned.isManuallyUnread)
 
         listed = self.client.get(f"/api/workspaces/{workspace.id}/sessions")
 

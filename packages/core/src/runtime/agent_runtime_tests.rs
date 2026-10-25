@@ -10527,7 +10527,6 @@ async fn prompt_compaction_generate_request_preserves_default_tool_projection() 
 
     let mut config = AgentRuntimeConfig::default();
     force_prompt_compaction_for_tests(&mut config);
-    config.model_context_tokens = 6_200;
     config.prompt_compaction_summary_max_tokens = 1_200;
     let engine = AgentRuntime::new_for_test(store.clone(), config);
     let driver = TestPromptCompactionAsyncDriver;

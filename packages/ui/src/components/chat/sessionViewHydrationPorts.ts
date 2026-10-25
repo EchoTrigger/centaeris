@@ -17,12 +17,16 @@ import type {
   PendingQuestionState,
 } from "./types";
 
+import type { SessionRequestOwner } from "./useSessionRequestOwnership";
+
 type SetMessages = (
   updater: ChatMessage[] | ((previous: ChatMessage[]) => ChatMessage[]),
 ) => void;
 
 export type HydrationViewPort = {
   currentSessionId: string;
+  captureSessionRequest: (sessionId: string) => SessionRequestOwner;
+  ownsSessionRequest: (owner: SessionRequestOwner) => boolean;
   messagesRef: RefObject<ChatMessage[]>;
   visibleSessionIdRef: RefObject<string>;
   transcriptViewRef: RefObject<DesktopTranscriptView | null>;
@@ -51,6 +55,7 @@ export type HydrationRuntimePort = {
     contextUsage: AgentContextUsageSummary | null,
   ) => void;
   resetContextUsage: (sessionId: string) => void;
+  reportRuntimeConfigError: (message: string) => void;
 };
 
 export type HydrationQuestionPort = {

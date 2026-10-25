@@ -31,6 +31,7 @@ test = true
 
 [dependencies]
 async-trait = "=0.1.89"
+pulldown-cmark = { version = "=0.13.4", default-features = false }
 schemars = { version = "=1.2.1", optional = true }
 base64.workspace = true
 centaeris-model-catalog.workspace = true

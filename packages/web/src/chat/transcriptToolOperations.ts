@@ -1,4 +1,6 @@
 import type { SessionStreamEvent, UnknownRecord } from "./streamTypes.ts";
+import type { PresentationOperation } from "./workspacePresentationProtocol.ts";
+import { canonicalTranscriptValue } from "./transcriptContract.ts";
 import { validateOperation } from "./sessionEvents.ts";
 
 const FAILED_RESULT_STATES = new Set(["failed", "denied", "aborted"]);
@@ -9,6 +11,8 @@ export type ToolOperationRecord = Readonly<{
   result: UnknownRecord | null;
   operations: readonly UnknownRecord[];
   status: "running" | "completed" | "failed";
+  previewTruncated?: boolean;
+  detailSourceEventId?: string;
 }>;
 
 export type ToolOperationSnapshot = Readonly<{
@@ -18,13 +22,13 @@ export type ToolOperationSnapshot = Readonly<{
 
 const EMPTY_SNAPSHOT: ToolOperationSnapshot = { version: 0, records: new Map() };
 
-// Event-derived operational detail (command, per-operation results, diffs).
-// The paged transcript projection intentionally omits these, so they are only
-// available for runs whose committed session events have been streamed.
+// Operational details augment the transcript projection. Both native committed
+// events and hosted presentation records retain their own protocol boundaries.
 export class TranscriptToolOperationRegistry {
   private version = 0;
   private snapshot: ToolOperationSnapshot = EMPTY_SNAPSHOT;
   private readonly records = new Map<string, ToolOperationRecord>();
+  private readonly receivedDetails = new Map<string, string>();
   private readonly listeners = new Set<() => void>();
 
   getSnapshot = () => this.snapshot;
@@ -35,14 +39,32 @@ export class TranscriptToolOperationRegistry {
   };
 
   clear() {
+    this.receivedDetails.clear();
     if (this.records.size === 0) return;
     this.records.clear();
     this.publish();
   }
 
-  applyEvent(event: SessionStreamEvent) {
-    const payload = event.payload;
-    if (event.type === "tool_call") {
+  applyPresentationDetail(detail: PresentationOperation) {
+    const canonical = canonicalTranscriptValue(detail);
+    const previous = this.receivedDetails.get(detail.sourceEventId);
+    if (previous !== undefined) {
+      if (previous !== canonical) throw new Error("conflicting presentation operation replay");
+      return;
+    }
+    this.applyPayload(detail.kind === "call" ? "tool_call" : "tool_result", {
+      callId: detail.callId, toolName: detail.toolName,
+      normalizedInput: detail.normalizedInput, resultState: detail.resultState,
+      operations: detail.operations,
+    }, detail);
+    this.receivedDetails.set(detail.sourceEventId, canonical);
+  }
+
+  applyEvent(event: SessionStreamEvent) { this.applyPayload(event.type, event.payload); }
+
+  private applyPayload(type: string, payload: UnknownRecord, detail?: PresentationOperation) {
+    const presentation = detail ? { previewTruncated: detail.previewTruncated, detailSourceEventId: detail.sourceEventId } : {};
+    if (type === "tool_call") {
       const callId = payload.callId;
       if (typeof callId !== "string" || !callId) return;
       this.records.set(callId, {
@@ -51,11 +73,12 @@ export class TranscriptToolOperationRegistry {
         result: null,
         operations: [],
         status: "running",
+        ...presentation,
       });
       this.publish();
       return;
     }
-    if (event.type === "tool_result") {
+    if (type === "tool_result") {
       const callId = payload.callId;
       if (typeof callId !== "string" || !callId) return;
       const existing = this.records.get(callId);
@@ -70,6 +93,7 @@ export class TranscriptToolOperationRegistry {
         result: { ...payload, operations },
         operations,
         status: failed ? "failed" : "completed",
+        ...presentation,
       });
       this.publish();
     }

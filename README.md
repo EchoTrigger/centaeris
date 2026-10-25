@@ -16,7 +16,7 @@ credentials, customer data and private deployment state remain external.
 
 ## Appearance
 
-Use the sun/moon button immediately to the right of the left-sidebar toggle to switch between light and dark themes. Your choice persists on this device and overrides system changes. Before your first choice, the app follows the system appearance. Replies and process headings use 14px; process details, code, and tables use 13px. Process headings and content share one gray in each theme.
+Choose System, Light, or Dark in Settings > Appearance. The preference persists on this device. Replies and process headings use 14px; process details, code, and tables use 13px. Process headings and content share one gray in each theme.
 
 ## Features
 
@@ -57,11 +57,16 @@ and Compose entries serve independently selectable products.
 
 Local product distributions currently build and verify Windows x64 artifacts:
 
+- an assisted, per-user Desktop installer named `Centaeris-Desktop-0.1.0-windows-x64-setup.exe`;
+- a portable Desktop archive named `centaeris-desktop-windows-x64.zip`;
 - a standalone TUI archive named `centaeris-windows-x64.zip`;
-- an unpacked Windows Desktop directory containing `Centaeris Desktop.exe`.
+- corresponding source named `centaeris-source.zip`.
 
-There is no supported macOS/Linux download or Windows installer yet. Source code
-may compile elsewhere, but that is not a release-platform claim.
+The first release is planned as **v0.1.0 Windows Preview**, a GitHub pre-release.
+A local candidate build does not mean a public download already exists.
+See [Windows setup](docs/getting-started/Windows.md) for installation and model configuration.
+There is no supported macOS/Linux download. Source code may compile elsewhere,
+but that is not a release-platform claim.
 
 ## Build from source
 

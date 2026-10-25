@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { ApiError, button, deferred, environment, nodes, renderer, subjectLoader, tailRefreshFixture } from "./componentHarness.mjs";
+import { ApiError, button, deferred, environment, nodes, renderer, subjectLoader } from "./componentHarness.mjs";
 
 // Public callbacks and rendered navigation, using synthetic facts only. This
 // harness characterizes behavior; it does not measure browser layout or focus.
@@ -18,15 +18,15 @@ const appLoader = subjectLoader({ extraOverrides: [
   ["../chat/operationReceipts", stub("export class OperationClient {pending(){return null;}} export const acceptedConversationReviewLink=()=>null; export const consumeReviewedOperation=()=>{}; export const loadAcceptedConversation=()=>{};")],
   ["../preferences", stub("export const useEnterStartsNewLine=()=>false; export const readModelThinkingMode=()=>''; export const readPreferredModelIdentity=()=>''; export const writeModelThinkingMode=()=>{}; export const writePreferredModelIdentity=()=>{};")],
   ["../chat/transcriptTransport", stub("export const createWorkspaceTranscriptTransport=()=>({});")],
+  ["../chat/workspacePresentationTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const streamWorkspacePresentation=options=>context.presentation?.(options)??new Promise(resolve=>options.signal.addEventListener("abort",resolve,{once:true}));`)],
   ...["../components/WorkspaceContextPanel", "../components/DocumentPreview", "../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../agent-chat/SessionAgentBreadcrumb", "../shell/ShellSidebar"].map(specifier => [specifier, stub(`export const ${specifier.split("/").at(-1)}=()=>null;`)]),
   ["../shell/HomePlane", stub("export const HomePlane=()=>null; export const HomeQuickActions=()=>null;")],
 ] });
 const { AppPageContent } = await import(await appLoader(url("../../src/routes/AppRoute.jsx")));
 const { useSessionNavigationActions } = await import(await subjectLoader()(url("../../src/shell/useSessionNavigationActions.js")));
-const { useSessionNavigationRefresh } = await import(await subjectLoader()(url("../../src/shell/useSessionNavigationRefresh.js")));
 const row = { kind: "message", cursor: "reply", message: { id: "reply", agentRunId: "run", turnId: "turn", toolCallId: "call", sourceSequence: 1, createdAtMs: 1, body: "Synthetic reply", sessionRefs: ["work"], fileRefs: [] } };
 const history = (agentId = "agent", items = [row]) => ({ schema: "agent.history.v1", agentId, sessionId: `coord-${agentId}`, items, nextCursor: "tail", newestCursor: "tail", hasMore: false });
-const session = { id: "work", workspaceId: "workspace", agentId: "worker", title: "Synthetic work", status: "active", origin: "user", isPinned: false, projectId: null, hasActiveAgentRun: false, updatedAt: "2026-10-01T00:00:00Z" };
+const session = { currentEnvironmentId:null, executionMode:null, deletedAt:null, initialInputOrigin:null, isUnread:false, isManuallyUnread:false, latestAttentionSequence:"0", readThroughSequence:"0", attentionRevision:"0", id: "work", workspaceId: "workspace", agentId: "worker", title: "Synthetic work", status: "active", origin: "user", isPinned: false, projectId: null, hasActiveAgentRun: false, updatedAt: "2026-10-01T00:00:00Z" };
 const component = (tree, name) => nodes(tree, node => node.type.name === name)[0];
 const fixture = () => environment({ request: async path => path.includes("/history") ? history() : { session } });
 
@@ -179,12 +179,12 @@ test("ordinary Session rows retain running, unread and pin indicators and all me
   globalThis.window = { addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {} };
   globalThis.sessionStorage = { getItem: () => null };
   context.after(() => { globalThis.window = previousWindow; globalThis.sessionStorage = previousStorage; });
-  const item = { ...session, isPinned: true, isUnread: true, origin: "automation", hasActiveAgentRun: true };
+  const item = { ...session, isPinned: true, isUnread: true, isManuallyUnread: true, origin: "automation", hasActiveAgentRun: true };
   const calls = [];
   const env = environment({ location: { search: "?new=1", state: { sidebarTab: "chat" } }, request: async (path, options = {}) => {
     calls.push([path, options]);
     const data = path === "/api/models" ? { models: [] } : path.includes("session-projects") ? { projects: [] }
-      : options.method === "PATCH" ? { session: { ...item, ...JSON.parse(options.body) } } : { sessions: [item] };
+      : options.method === "PATCH" ? { session: { ...item, ...JSON.parse(options.body), isManuallyUnread:JSON.parse(options.body).isUnread??item.isManuallyUnread, attentionRevision:"1" } } : { sessions: [item] };
     return { ...data, json: async () => data };
   } });
   const subject = renderer(AppPageContent, { agentId: "agent", workspaceDraft: false, location: env.location, modelsVersion: 0 }, env);
@@ -222,13 +222,12 @@ test("ordinary Session rows retain running, unread and pin indicators and all me
 });
 
 test("the Session sidebar refreshes background work without changing the open draft or rereading projects", async context => {
-  const tick = tailRefreshFixture(context);
   const previousWindow = globalThis.window;
   globalThis.window = { addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {} };
   context.after(() => { globalThis.window = previousWindow; });
-  const calls = [];
-  let records = [{ ...session, hasActiveAgentRun: true }];
-  const env = environment({ location: { search: "?new=1", state: null }, request: async path => {
+  const calls = []; let subscription;
+  let records = [{ ...session, agentId:"agent", hasActiveAgentRun: true }];
+  const env = environment({ presentation:options=>{subscription=options;return new Promise(resolve=>options.signal.addEventListener("abort",resolve,{once:true}));}, location: { search: "?new=1", state: null }, request: async path => {
     calls.push(path);
     const data = path === "/api/models" ? { models: [] } : path.includes("session-projects") ? { projects: [] } : { sessions: records };
     return { json: async () => data };
@@ -238,53 +237,26 @@ test("the Session sidebar refreshes background work without changing the open dr
     await subject.settle();
     component(subject.tree, "WorkspaceComposer").props.onDraftChange("Keep this unsent draft");
     await subject.settle();
-    records = [{ ...session, title: "Completed background work", hasActiveAgentRun: false, isUnread: true }, { ...session, id: "new-work", title: "New background work" }];
-    await tick(subject);
+    records = [{ ...session, agentId:"agent", title: "Completed background work", hasActiveAgentRun: false, isUnread: true, latestAttentionSequence:"1",attentionRevision:"1" }, { ...session, agentId:"agent", id: "new-work", title: "New background work" }];
+    await subscription.controller.acceptWithBackpressure({cursor:null,item:{schema:"workspace.presentation.v1",kind:"navigation",workspaceId:"workspace",agentId:"agent",sessionId:null,snapshotId:"background",offset:0,hasMore:false,sessions:records}});
+    await subject.settle();
     const sidebar = component(subject.tree, "ShellSidebar").props.sessionProps;
     assert.deepEqual(sidebar.sessions, records);
     assert.equal(sidebar.renderSessionRow(records[0]).props.running, false);
     assert.equal(component(subject.tree, "WorkspaceComposer").props.draft, "Keep this unsent draft");
-    assert.equal(calls.filter(path => path.includes("/sessions?")).length, 2);
+    assert.equal(calls.filter(path => path.includes("/sessions?")).length, 1, "background changes arrive on the display subscription");
     assert.equal(calls.filter(path => path.includes("session-projects")).length, 1);
     assert.equal(calls.some(path => path.includes("/transcript")), false);
   } finally { subject.unmount(); }
 });
 
-test("sidebar refresh pauses while hidden, coalesces focus events and aborts the old navigation scope", async context => {
-  const tick = tailRefreshFixture(context);
-  const previousWindow = globalThis.window; const previousDocument = globalThis.document;
-  const focus = new EventTarget(); const visibility = Object.assign(new EventTarget(), { hidden: false });
-  globalThis.window = focus; globalThis.document = visibility;
-  const pending = deferred(); const signals = [];
-  const props = { scopeKey: "first", enabled: true, onRefresh: signal => { signals.push(signal); return pending.promise; } };
-  const subject = renderer(useSessionNavigationRefresh, props, environment());
-  context.after(() => { subject.unmount(); globalThis.window = previousWindow; globalThis.document = previousDocument; });
-  await subject.settle();
-  visibility.hidden = true; visibility.dispatchEvent(new Event("visibilitychange"));
-  focus.dispatchEvent(new Event("focus")); await subject.settle();
-  assert.equal(signals.length, 0);
-  visibility.hidden = false; visibility.dispatchEvent(new Event("visibilitychange"));
-  focus.dispatchEvent(new Event("focus")); focus.dispatchEvent(new Event("focus")); await subject.settle();
-  assert.equal(signals.length, 1, "returning to the page starts only one pending request");
-  props.scopeKey = "second"; props.onRefresh = async signal => { signals.push(signal); };
-  await subject.settle();
-  assert.equal(signals[0].aborted, true);
-  pending.resolve(); await subject.settle(); await tick(subject);
-  assert.equal(signals.length, 2);
-  assert.equal(signals[1].aborted, false);
-  props.enabled = false; await subject.settle();
-  assert.equal(signals[1].aborted, true);
-  focus.dispatchEvent(new Event("focus")); await subject.settle();
-  assert.equal(signals.length, 2);
-});
-
 test("a selected unread Session is marked read before the new list commits and after an existing mutation", async () => {
   const pending = deferred(); const calls = []; const errors = [];
-  const selected = { ...session, id: "selected", isUnread: true };
+  const selected = { ...session, id: "selected", isUnread: true, isManuallyUnread: true };
   const env = environment({ request: async (path, options = {}) => {
     const metadata = JSON.parse(options.body); calls.push([path, metadata]);
     if (path.endsWith("/work")) return pending.promise;
-    return { session: { ...selected, ...metadata } };
+    return { session: { ...selected, ...metadata, isManuallyUnread:metadata.isUnread??selected.isManuallyUnread, attentionRevision:"1" } };
   } });
   const props = { scopeKey: "first", sessions: [], onChangeSessions: update => { props.sessions = update(props.sessions); }, onError: error => errors.push(error) };
   const subject = renderer(useSessionNavigationActions, props, env);
@@ -304,11 +276,11 @@ test("a selected unread Session is marked read before the new list commits and a
 });
 
 test("bot sidebar exposes the same Session metadata controls and waits for delete confirmation", async () => {
-  let item = { ...session, isPinned: true, isUnread: true, origin: "automation", hasActiveAgentRun: true };
+  let item = { ...session, isPinned: true, isUnread: true, isManuallyUnread: true, origin: "automation", hasActiveAgentRun: true };
   const calls = [];
   const env = environment({ request: async (path, options = {}) => {
     calls.push([path, options]);
-    if (options.method === "PATCH") { item = { ...item, ...JSON.parse(options.body) }; return { session: item }; }
+    if (options.method === "PATCH") { item = { ...item, ...JSON.parse(options.body), isManuallyUnread:JSON.parse(options.body).isUnread??item.isManuallyUnread, attentionRevision:String(Number(item.attentionRevision)+1) }; return { session: item }; }
     if (options.method === "DELETE") return undefined;
     return path.includes("session-projects") ? { projects: [] } : { sessions: [item] };
   } });
@@ -374,5 +346,24 @@ test("background Session deletion completes against the current conversation sel
     props.onDeleted = () => navigation.push("current conversation"); await subject.settle();
     pending.resolve({}); await deleting; await subject.settle();
     assert.deepEqual(navigation, ["current conversation"]);
+  } finally { subject.unmount(); }
+});
+
+test("pushed Agent navigation updates sessions without rereading the list or project catalog", async () => {
+  const calls = [];
+  const env = environment({ request: async path => { calls.push(path); return path.includes("session-projects") ? { projects: [] } : { sessions: [] }; } });
+  const item = { id: "work", workspaceId: "workspace", agentId: "agent", projectId: null, title: "Initial",
+    status: "active", updatedAt: "2026-10-05T00:00:00Z", hasActiveAgentRun: false };
+  const props = { children: null, activeAgent: env.agents[0], showRecentSessions: true, presentationNavigation: null };
+  const subject = renderer(ShellPage, props, env);
+  try {
+    await subject.settle();
+    assert.deepEqual(calls, ["/api/workspaces/workspace/session-projects?agentId=agent"]);
+    props.presentationNavigation = [item]; await subject.settle();
+    const sidebar = nodes(subject.tree, node => node.type.name === "ShellSidebar")[0];
+    assert.equal(sidebar.props.recentNavigation.sessions[0].title, "Initial");
+    props.presentationNavigation = [{ ...item, title: "Renamed by stream" }]; await subject.settle();
+    assert.equal(nodes(subject.tree, node => node.type.name === "ShellSidebar")[0].props.recentNavigation.sessions[0].title, "Renamed by stream");
+    assert.equal(calls.length, 1);
   } finally { subject.unmount(); }
 });

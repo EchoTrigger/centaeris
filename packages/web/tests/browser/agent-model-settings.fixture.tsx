@@ -39,6 +39,10 @@ const results: { name: string; actual: unknown; expected: unknown }[] = [];
 const check = (name: string, actual: unknown, expected: unknown) => results.push({ name, actual, expected });
 const button = (label: string) => [...document.querySelectorAll<HTMLButtonElement>("button")].find(item => item.getAttribute("aria-label") === label || item.textContent?.trim() === label)!;
 async function waitFor(read: () => boolean) { for (let attempt = 0; attempt < 100; attempt++) { if (read()) return; await new Promise(resolve => setTimeout(resolve, 30)); } throw new Error("Settings fixture did not reach expected state"); }
+
+const menuChoice = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('button[role="menuitemradio"]')]
+  .find(item => item.getAttribute("aria-label") === label || item.textContent?.trim() === label);
+
 const writes = () => requests.filter(item => item.method === "PATCH");
 try {
   await waitFor(() => Boolean(document.querySelector(".agentSettingsModelControls")));
@@ -46,15 +50,19 @@ try {
   check("global admin model catalog is not used", requests.some(item => item.path.startsWith("/api/admin/")), false);
   check("unconfigured settings never select first model", document.body.textContent!.includes(t("agentSettings.unconfigured")), true);
   check("loading settings makes no mutation", writes().length, 0);
-  document.querySelector<HTMLElement>(`summary[aria-label="${t("appRoute.aiModel")}"]`)!.click();
-  button(model.displayName).click();
+  document.querySelector<HTMLElement>(`button[aria-label="${t("appRoute.aiModel")}"]`)!.click();
+  await waitFor(() => Boolean(menuChoice(model.displayName)));
+  menuChoice(model.displayName)!.click();
+  await waitFor(() => !menuChoice(model.displayName));
   await waitFor(() => !button(t("agentRoute.saveChanges"))?.disabled);
   button(t("agentRoute.saveChanges")).click();
   await waitFor(() => document.body.textContent!.includes(t("agentSettings.saved")));
   check("save sends null for server default resolution", writes()[0].body, { schema: "agent.model_settings.update.v1", modelConfigRef: model.id, thinkingMode: null });
   check("effective server effort is displayed", document.body.textContent!.includes(t("appRoute.high")), true);
-  document.querySelector<HTMLElement>(`summary[aria-label="${t("appRoute.reasoningEffort")}"]`)!.click();
-  button(t("appRoute.low")).click();
+  document.querySelector<HTMLElement>(`button[aria-label="${t("appRoute.reasoningEffort")}"]`)!.click();
+  await waitFor(() => Boolean(menuChoice(t("appRoute.low"))));
+  menuChoice(t("appRoute.low"))!.click();
+  await waitFor(() => !menuChoice(t("appRoute.low")));
   await waitFor(() => !button(t("agentRoute.saveChanges"))?.disabled);
   button(t("agentRoute.saveChanges")).click();
   await waitFor(() => writes().length === 2 && document.body.textContent!.includes(t("agentSettings.saved")));

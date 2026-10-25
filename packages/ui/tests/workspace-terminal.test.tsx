@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { expect, test, vi } from "vitest";
 const mock = vi.hoisted(() => ({

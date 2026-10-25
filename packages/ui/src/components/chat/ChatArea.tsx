@@ -1,3 +1,4 @@
+import { ComposerPlane } from "./ComposerPlane";
 import { t } from "../../i18n";
 import {
   type CSSProperties,
@@ -27,15 +28,18 @@ import {
   type SessionReplayCursors,
 } from "../../lib/sessionViewCache";
 import { Button } from "../ui/button";
-import { Tooltip } from "../ui/tooltip";
 import { ChatComposer } from "./ChatComposer";
+import { WelcomeGreeting } from "./WelcomeGreeting";
+import { WelcomeWorkspacePicker } from "./WelcomeWorkspacePicker";
 import { PendingQuestionPanel } from "./ChatPendingPanels";
 import {
   findEditableUserMessageIndex,
   isDurableChatMessageId,
+  setTurnActivity,
 } from "./chatAreaModel";
 import {
   readAutoContinueAfterResumeWaitPreference,
+  RUNTIME_ACTIVITY_BY_PROCESS_STATE,
   sessionViewCacheStore,
 } from "./chatRuntimeModel";
 import { useChatViewStore } from "./chatViewStore";
@@ -74,17 +78,6 @@ import type {
 const COMPOSER_BOTTOM_GAP_PX = 18;
 const COMPOSER_SCROLL_GUTTER_PX = 18;
 const TRANSCRIPT_MEMORY_WARNING_BYTES = 32 * 1024 * 1024;
-
-const HYDRATION_STAGE_LABELS: Record<string, string> = {
-  fetchProjection: t("chatArea.loadingConversationProjection"),
-  reduceReplays: t("chatArea.mergingTaskReplay"),
-  reduceMessages: t("chatArea.mergingMessageHistory"),
-  finalizeSnapshot: t("chatArea.preparingRecoverySnapshot"),
-  applySnapshot: t("chatArea.applyingConversationView"),
-  refreshCachedSession: t("chatArea.validatingConversationCache"),
-  fetchDeltaReplays: t("chatArea.loadingIncrementalReplay"),
-  applyDeltaReplays: t("chatArea.applyingIncrementalReplay"),
-};
 
 type ChatViewMeta = {
   hasMessages: boolean;
@@ -149,6 +142,11 @@ const deriveChatViewMeta = (
   };
 };
 export function ChatArea({
+  newChatRevision = 0,
+  hidden = false,
+  workspaces = [],
+  onOpenWorkspace,
+  onSelectWorkspace,
   currentSession,
   currentSessionId: selectedSessionId,
   workspaceName,
@@ -165,9 +163,13 @@ export function ChatArea({
   onOpenResource,
   onSessionResolved,
   onAgentRunningChange,
+  onSessionWaitingChange,
   onSessionCompleted,
 }: ChatAreaProps) {
   const [inputValue, setInputValue] = useState("");
+  const [hasResponseStarted, setHasResponseStarted] = useState(false);
+  const awaitingFirstResponseRef = useRef(!selectedSessionId && !currentSession?.id);
+  const welcomeSessionIdRef = useRef<string | null>(null);
   const composerContainerRef = useRef<HTMLDivElement | null>(null);
   const flushAssistantTurnUpdatesRef = useRef<() => void>(() => {});
   const streamConnection = useAgentStreamConnection(
@@ -287,6 +289,15 @@ export function ChatArea({
       options: AssistantTurnCommitOptions = {},
     ) => {
       messagesRef.current = nextMessages;
+      // Optimistic user/assistant placeholders do not leave the welcome state.
+      // Observe the committed view once, including the first batched text delta.
+      if (awaitingFirstResponseRef.current && nextMessages.some(message =>
+        message.role === "assistant" && (message.turn.finalAnswer.length > 0 ||
+          message.turn.chunks.some(chunk => chunk.kind !== "guidedSupplement") || !message.turn.isStreaming),
+      )) {
+        awaitingFirstResponseRef.current = false;
+        setHasResponseStarted(true);
+      }
       if (options.assistantMessages) {
         useChatViewStore
           .getState()
@@ -462,7 +473,21 @@ export function ChatArea({
   );
   const hasVisibleConversation =
     chatViewMeta.hasMessages || Boolean(pendingQuestion);
+  const previousNewChatRevision = useRef(newChatRevision);
+  useEffect(() => {
+    if (previousNewChatRevision.current === newChatRevision) return;
+    previousNewChatRevision.current = newChatRevision;
+    setInputValue("");
+    setHasResponseStarted(false);
+    awaitingFirstResponseRef.current = true;
+    welcomeSessionIdRef.current = null;
+  }, [newChatRevision]);
+  const handleInputChange = useCallback((value: string) => {
+    setInputValue(value);
+  }, []);
   const hasSelectedSession = currentSessionId.length > 0;
+  const isWelcomeComposer = !hasResponseStarted &&
+    (!hasSelectedSession || welcomeSessionIdRef.current === currentSessionId);
   const chatViewMode: ChatViewMode = hasVisibleConversation
     ? "conversation"
     : hasSelectedSession
@@ -557,10 +582,12 @@ export function ChatArea({
     onAgentRunningChange,
   });
 
-  const { isHydratingSession, hydrationStage, reconcileTerminalAgentRun, syncError, retrySessionSync } =
+  const { isHydratingSession, reconcileTerminalAgentRun, syncError, retrySessionSync } =
     useSessionViewHydrationController({
       view: {
         currentSessionId,
+        captureSessionRequest,
+        ownsSessionRequest,
         messagesRef,
         visibleSessionIdRef,
         transcriptViewRef,
@@ -582,6 +609,7 @@ export function ChatArea({
         applyGlobalRuntimeConfig,
         applyContextUsage,
         resetContextUsage,
+        reportRuntimeConfigError: setRuntimeConfigError,
       },
       question: { setPendingQuestion, setPendingQuestionError },
       stream: {
@@ -613,6 +641,25 @@ export function ChatArea({
     scheduleTranscriptPatchRefresh,
   ]);
 
+  const observedQuestionSessionRef = useRef<string | null>(null);
+  const questionMessageId = pendingQuestion?.assistantMessageId;
+  useEffect(() => {
+    if (questionMessageId) {
+      if (!messagesRef.current.some(message => message.id === questionMessageId)) return;
+      const sessionId = getActiveStream()?.sessionId || currentSessionId;
+      if (sessionId) {
+        observedQuestionSessionRef.current = sessionId;
+        onSessionWaitingChange?.(sessionId, true);
+      }
+      return;
+    }
+    const previousSessionId = observedQuestionSessionRef.current;
+    observedQuestionSessionRef.current = null;
+    if (previousSessionId && previousSessionId === currentSessionId) {
+      onSessionWaitingChange?.(previousSessionId, false);
+    }
+  }, [currentSessionId, getActiveStream, onSessionWaitingChange, questionMessageId]);
+
   const handleLoadOlderTranscript = useCallback(() => {
     const view = transcriptViewRef.current;
     const olderCursor = view?.olderCursor;
@@ -621,9 +668,6 @@ export function ChatArea({
     }
     const expectedSessionId = view.sessionId;
     const expectedReleaseRevision = view.currentReleaseRevision;
-    const scrollElement = messagesContainerRef.current;
-    const previousScrollHeight = scrollElement?.scrollHeight ?? 0;
-    const previousScrollTop = scrollElement?.scrollTop ?? 0;
     setIsLoadingOlderTranscript(true);
     const task = loadTranscriptPage({
       sessionId: view.sessionId,
@@ -641,17 +685,6 @@ export function ChatArea({
         }
         view.applyOlderPage(page);
         syncTranscriptView();
-        requestAnimationFrame(() => {
-          if (
-            scrollElement &&
-            transcriptViewRef.current === view &&
-            visibleSessionIdRef.current === expectedSessionId
-          ) {
-            scrollElement.scrollTop =
-              previousScrollTop +
-              Math.max(0, scrollElement.scrollHeight - previousScrollHeight);
-          }
-        });
       })
       .catch((error: unknown) => {
         const detail =
@@ -667,7 +700,7 @@ export function ChatArea({
         }
       });
     olderTranscriptRequestRef.current = task;
-  }, [messagesContainerRef, syncTranscriptView]);
+  }, [syncTranscriptView]);
 
   const handleReleaseTranscriptHistory = useCallback(() => {
     const view = transcriptViewRef.current;
@@ -677,6 +710,13 @@ export function ChatArea({
     syncTranscriptView();
     requestAnimationFrame(() => handleJumpToLatest());
   }, [handleJumpToLatest, syncTranscriptView]);
+
+  const handlePromptSessionResolved = useCallback<NonNullable<ChatAreaProps["onSessionResolved"]>>((session, options) => {
+    if (options?.activate && awaitingFirstResponseRef.current) {
+      welcomeSessionIdRef.current = session.id;
+    }
+    onSessionResolved?.(session, options);
+  }, [onSessionResolved]);
 
   const {
     sendPrompt,
@@ -692,7 +732,7 @@ export function ChatArea({
       ownership: { adoptSession, captureSessionRequest, ownsSessionRequest },
       pendingResolvedSessionRef,
       preserveResolvedSessionIdRef,
-      onSessionResolved,
+      onSessionResolved: handlePromptSessionResolved,
       onAgentRunningChange,
     },
     view: {
@@ -739,13 +779,14 @@ export function ChatArea({
 
   const handleComposerAction = useCallback(() => {
     if (hasInput) {
+      if (!activeWorkspaceRoot) return;
       void sendPrompt();
       return;
     }
     if (isStreaming) {
       stopActiveAgentRun();
     }
-  }, [hasInput, isStreaming, sendPrompt, stopActiveAgentRun]);
+  }, [activeWorkspaceRoot, hasInput, isStreaming, sendPrompt, stopActiveAgentRun]);
 
   const handleEditQueuedNextPrompt = useCallback(() => {
     const prompt = takeQueuedPromptForEditing(currentSessionId);
@@ -841,8 +882,14 @@ export function ChatArea({
     void handleQuestionSubmit();
   }, [handleQuestionSubmit]);
   const handleSendAction = useCallback(() => {
-    void sendPrompt();
-  }, [sendPrompt]);
+    if (activeWorkspaceRoot) void sendPrompt();
+  }, [activeWorkspaceRoot, sendPrompt]);
+  const focusComposer = useCallback(() => {
+    requestAnimationFrame(() => {
+      const input = composerContainerRef.current?.querySelector("textarea");
+      if (input && !input.closest("[hidden]")) input.focus();
+    });
+  }, []);
   const handleModelSelect = useCallback(
     (configured: Parameters<typeof selectGlobalModel>[0]) => {
       void (async () => {
@@ -859,13 +906,23 @@ export function ChatArea({
     },
     [selectReasoningEffort],
   );
+  useEffect(() => {
+    if (!contextUsage?.isCompacting || !isStreaming) return;
+    const active = getActiveStream();
+    if (active?.sessionId !== currentSessionId) return;
+    updateAssistantTurn(active.assistantMessageId, turn =>
+      setTurnActivity(turn, RUNTIME_ACTIVITY_BY_PROCESS_STATE.compressing));
+  }, [contextUsage, currentSessionId, getActiveStream, isStreaming, updateAssistantTurn]);
+
   const handleCompactAction = useCallback(() => {
     void handleCompactContext();
   }, [handleCompactContext]);
 
   return (
     <div
-      className={`chat-container ${chatViewMode !== "welcome" ? "has-conversation" : "is-empty"}`}
+      hidden={hidden}
+      inert={hidden}
+      className={`chat-container ${chatViewMode !== "welcome" ? "has-conversation" : "is-empty"} ${chatViewMode === "welcome" && !activeWorkspaceRoot ? "is-workspace-free" : ""}`}
       style={chatContainerStyle}
     >
       {isPinnedSummaryOpen && shouldShowPinnedSummary ? (
@@ -927,12 +984,13 @@ export function ChatArea({
       {syncError && !sessionLoadError ? (
         <div className="session-sync-status" role="status">
           <span>{t("chatArea.syncPaused", { message: syncError })}</span>
-          <button type="button" onClick={retrySessionSync}>{t("chatArea.retrySync")}</button>
+          <Button variant="outline" size="sm" type="button" onClick={retrySessionSync}>{t("chatArea.retrySync")}</Button>
         </div>
       ) : null}
 
       <div
         className="chat-main"
+        style={{ marginBottom: isWelcomeComposer ? 0 : composerHeight + 12 }}
       >
         <div className="chatContentPane">
           {sessionLoadError ? (
@@ -944,14 +1002,16 @@ export function ChatArea({
               <h2>{t("chatArea.unableToLoadConversation")}</h2>
               <p>{sessionLoadError}</p>
             </section>
-          ) : chatViewMode === "welcome" ? null : chatViewMode === "restoring" ? (
+          ) : chatViewMode === "welcome" ? (
+            null
+          ) : chatViewMode === "restoring" ? (
             <div
               className="conversation-restore-section"
               data-chat-view-mode="restoring"
             >
               <span>
                 {isHydratingSession
-                  ? t("chatArea.restoringConversationValue", { value1: hydrationStage ? `：${HYDRATION_STAGE_LABELS[hydrationStage] || hydrationStage}` : "" })
+                  ? t("chatArea.loadingConversation")
                   : t("chatArea.noMessagesInThisConversationYet")}
               </span>
             </div>
@@ -970,6 +1030,7 @@ export function ChatArea({
               contentRef={messagesContentRef}
               spacerRef={messagesSpacerRef}
               onReadingIntent={pauseFollowing}
+              isFollowingLatest={isFollowingLatest}
               hasOlder={transcriptHasOlder}
               isLoadingOlder={isLoadingOlderTranscript}
               onLoadOlder={handleLoadOlderTranscript}
@@ -997,7 +1058,6 @@ export function ChatArea({
             className="jump-to-latest"
             onClick={handleJumpToLatest}
             aria-label={t("chatArea.jumpToLatest")}
-            title={t("chatArea.jumpToLatest")}
           >
             <ChevronDown aria-hidden="true" />
           </button>
@@ -1005,17 +1065,11 @@ export function ChatArea({
       </div>
 
       {!sessionLoadError ? (
-        <div
-          className={`chatBottomPlane ${chatViewMode === "welcome" ? "is-welcome" : ""}`}
-        >
-        {chatViewMode === "welcome" ? (
-          <div className="emptyChatIdentity">
-            <strong>Centaeris</strong>
-            <span>Run /help for commands</span>
-          </div>
-        ) : null}
+        <ComposerPlane welcome={isWelcomeComposer} animateDocking={hasResponseStarted && (!hasSelectedSession || welcomeSessionIdRef.current === currentSessionId)}>
         <div className="input-section">
           <div className="input-container" ref={composerContainerRef}>
+            {isWelcomeComposer ? <WelcomeGreeting /> : null}
+            {!hasSelectedSession && !hasVisibleConversation && onOpenWorkspace && onSelectWorkspace ? <WelcomeWorkspacePicker inactive={hidden} workspace={activeWorkspaceRoot ? { root: activeWorkspaceRoot, name: workspaceName } : undefined} workspaces={workspaces} onOpenWorkspace={onOpenWorkspace} onSelectWorkspace={onSelectWorkspace} onFocusComposer={focusComposer} /> : null}
             {pendingQuestion ? (
               <PendingQuestionPanel
                 pendingQuestion={pendingQuestion}
@@ -1032,36 +1086,32 @@ export function ChatArea({
                   {queuedNextPrompt.trim()}
                 </div>
                 <div className="queuedNextPromptActions">
-                  <Tooltip content={t("chatArea.edit")}>
-                    <Button
-                      type="button"
-                      variant="composerIcon"
-                      size="composerIcon"
-                      className="queuedNextPromptButton"
-                      aria-label={t("chatArea.editQueuedInput")}
-                      onClick={handleEditQueuedNextPrompt}
-                    >
-                      <Pencil
-                        className="composerLucideIcon"
-                        aria-hidden="true"
-                      />
-                    </Button>
-                  </Tooltip>
-                  <Tooltip align="end" content={t("chatArea.sendNow")}>
-                    <Button
-                      type="button"
-                      variant="composerIcon"
-                      size="composerIcon"
-                      className="queuedNextPromptButton"
-                      aria-label={t("chatArea.sendQueuedInputNow")}
-                      onClick={handleSubmitQueuedNextPromptAsSupplement}
-                    >
-                      <CornerDownLeft
-                        className="composerLucideIcon"
-                        aria-hidden="true"
-                      />
-                    </Button>
-                  </Tooltip>
+                  <Button
+                    type="button"
+                    variant="composerIcon"
+                    size="composerIcon"
+                    className="queuedNextPromptButton"
+                    aria-label={t("chatArea.editQueuedInput")}
+                    onClick={handleEditQueuedNextPrompt}
+                  >
+                    <Pencil
+                      className="composerLucideIcon"
+                      aria-hidden="true"
+                    />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="composerIcon"
+                    size="composerIcon"
+                    className="queuedNextPromptButton"
+                    aria-label={t("chatArea.sendQueuedInputNow")}
+                    onClick={handleSubmitQueuedNextPromptAsSupplement}
+                  >
+                    <CornerDownLeft
+                      className="composerLucideIcon"
+                      aria-hidden="true"
+                    />
+                  </Button>
                 </div>
               </div>
             ) : null}
@@ -1071,6 +1121,7 @@ export function ChatArea({
               inputValue={inputValue}
               isStreaming={isStreaming}
               hasInput={hasInput}
+              submitDisabled={!activeWorkspaceRoot}
               modelRuntimeSummary={modelRuntimeSummary}
               selectableModels={selectableModels}
               activeModelIndex={activeModelIndex}
@@ -1082,7 +1133,7 @@ export function ChatArea({
               isCompacting={chatViewMode === "conversation" && Boolean(
                 contextUsage?.isCompacting || isManualCompacting,
               )}
-              onInputChange={setInputValue}
+              onInputChange={handleInputChange}
               onSubmit={handleSendAction}
               onComposerAction={handleComposerAction}
               onModelSelect={handleModelSelect}
@@ -1093,7 +1144,7 @@ export function ChatArea({
             />
           </div>
         </div>
-        </div>
+        </ComposerPlane>
       ) : null}
 
     </div>

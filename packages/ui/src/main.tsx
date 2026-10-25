@@ -1,3 +1,4 @@
+import { FrontendProvider } from "@centaeris/frontend-foundations/provider";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
@@ -13,7 +14,7 @@ document.documentElement.dataset.platform = /Mac/i.test(navigator.platform)
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <AppErrorBoundary>
-      <App />
+      <FrontendProvider><App /></FrontendProvider>
     </AppErrorBoundary>
   </React.StrictMode>
 );

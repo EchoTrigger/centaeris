@@ -1,7 +1,7 @@
 from typing import Literal
 
 from ninja.responses import codes_4xx, codes_5xx
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from .schema import ErrorResponse, ModelResponse, StrictSchema
 
@@ -376,6 +376,10 @@ class SessionResponse(StrictSchema):
     deleted_at: str | None
     is_pinned: bool
     is_unread: bool
+    is_manually_unread: bool
+    attention_revision: str = Field(pattern=r"^(0|[1-9][0-9]*)$")
+    latest_attention_sequence: str = Field(pattern=r"^(0|[1-9][0-9]*)$")
+    read_through_sequence: str = Field(pattern=r"^(0|[1-9][0-9]*)$")
     has_active_agent_run: bool
     updated_at: str
 
@@ -820,3 +824,14 @@ class TranscriptTurnMetadata(StrictSchema):
 
 class TranscriptTurnMetadataResponse(StrictSchema):
     turns: list[TranscriptTurnMetadata]
+
+
+class PresentationOperationResponse(StrictSchema):
+    kind: Literal["call", "result"]
+    call_id: str
+    tool_name: str
+    normalized_input: dict[str, JsonValue] | None
+    result_state: str | None
+    operations: list[JsonValue]
+    preview_truncated: bool
+    source_event_id: str

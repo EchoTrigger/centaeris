@@ -14,6 +14,7 @@ pub(super) struct OutputPreview {
     has_more: bool,
     error: Option<String>,
     run_error: bool,
+    assistant_answer: bool,
 }
 
 const CACHE_ENTRIES: usize = 32;
@@ -57,7 +58,11 @@ pub(super) fn prepare_visible(app: &mut App, view: &TranscriptView, height: u16)
             .transcript_paging
             .as_ref()
             .and_then(|state| state.run_error_reference(key));
-        if tool.is_none() && run_error.is_none() {
+        let assistant_answer = app
+            .transcript_paging
+            .as_ref()
+            .and_then(|state| state.assistant_answer_reference(key));
+        if tool.is_none() && run_error.is_none() && assistant_answer.is_none() {
             continue;
         }
         let Some((session, generation, reference)) =
@@ -65,6 +70,7 @@ pub(super) fn prepare_visible(app: &mut App, view: &TranscriptView, height: u16)
                 state
                     .tool_output_reference(key)
                     .or(run_error.clone())
+                    .or(assistant_answer.clone())
                     .map(|reference| {
                         (
                             state.session_id().to_string(),
@@ -95,9 +101,20 @@ pub(super) fn prepare_visible(app: &mut App, view: &TranscriptView, height: u16)
             requested: "0".into(),
             has_more: false,
             error: None,
-            run_error: true,
+            run_error: run_error.is_some(),
+            assistant_answer: assistant_answer.is_some(),
         });
         detail.identity = Some((session.clone(), generation.clone(), reference.clone()));
+        if detail.assistant_answer
+            && reference.byte_length.parse::<u64>().is_ok_and(|bytes| {
+                bytes > centaeris_core::session::visualization::MAX_ANSWER_BYTES as u64
+            })
+        {
+            detail.error = Some("Answer exceeds the display byte limit".into());
+            app.output_preview.insert(key.clone(), detail);
+            invalidate_transcript_layout(app);
+            continue;
+        }
         let result = app.runtime.as_mut().ok_or_else(|| "Runtime is unavailable".to_string()).and_then(|runtime| runtime.request_async("transcript/content-range", json!({"request": {
             "schema":"transcript.content.range.read.v1", "sessionId":session,
             "projectionVersion":TRANSCRIPT_PROJECTION_VERSION_V1, "projectionGeneration":generation,
@@ -123,6 +140,7 @@ fn inline_preview(tool: &ToolTranscriptLine) -> OutputPreview {
         has_more: false,
         error: None,
         run_error: false,
+        assistant_answer: false,
     };
     if let Some(text) = &tool.full_text {
         let start = detail
@@ -197,7 +215,13 @@ fn accept_page(detail: &mut OutputPreview, value: Value) -> Result<(), String> {
     {
         return Err("Output page identity or range mismatch".into());
     }
-    if detail.run_error {
+    if detail.assistant_answer
+        && detail.content.len().saturating_add(page.content.len())
+            > centaeris_core::session::visualization::MAX_ANSWER_BYTES
+    {
+        return Err("Answer exceeds the display byte limit".into());
+    }
+    if detail.run_error || detail.assistant_answer {
         detail.content.push_str(&page.content);
     } else {
         detail.content = page.content;
@@ -208,11 +232,16 @@ fn accept_page(detail: &mut OutputPreview, value: Value) -> Result<(), String> {
 pub(super) fn poll(app: &mut App) -> bool {
     let before = app.output_preview.len();
     app.output_preview.retain(|key, detail| {
-        let exists = detail.run_error
+        let exists = detail.assistant_answer
             && app
                 .transcript_paging
                 .as_ref()
-                .is_some_and(|state| state.run_error_reference(key).is_some())
+                .is_some_and(|state| state.assistant_answer_reference(key).is_some())
+            || detail.run_error
+                && app
+                    .transcript_paging
+                    .as_ref()
+                    .is_some_and(|state| state.run_error_reference(key).is_some())
             || app.transcript.iter().any(
                 |line| matches!(line.content(), TranscriptLine::Tool(tool) if &tool.key == key),
             );
@@ -227,6 +256,7 @@ pub(super) fn poll(app: &mut App) -> bool {
                             && state
                                 .tool_output_reference(key)
                                 .or_else(|| state.run_error_reference(key))
+                                .or_else(|| state.assistant_answer_reference(key))
                                 .as_ref()
                                 == Some(reference)
                     })
@@ -254,7 +284,10 @@ pub(super) fn poll(app: &mut App) -> bool {
         .filter(|detail| detail.pending.is_some())
         .count();
     for detail in app.output_preview.values_mut().filter(|detail| {
-        detail.run_error && detail.pending.is_none() && detail.has_more && detail.error.is_none()
+        (detail.run_error || detail.assistant_answer)
+            && detail.pending.is_none()
+            && detail.has_more
+            && detail.error.is_none()
     }) {
         if pending_count >= MAX_PENDING {
             break;
@@ -282,6 +315,28 @@ pub(super) fn poll(app: &mut App) -> bool {
         invalidate_transcript_layout(app);
     }
     changed
+}
+
+pub(super) fn assistant_answer_text(app: &App, key: &str) -> Option<String> {
+    let detail = app.output_preview.get(key)?;
+    if !detail.assistant_answer {
+        return None;
+    }
+    let (session, generation, reference) = detail.identity.as_ref()?;
+    if !app.transcript_paging.as_ref().is_some_and(|state| {
+        state.session_id() == session
+            && state.projection_generation() == generation
+            && state.assistant_answer_reference(key).as_ref() == Some(reference)
+    }) {
+        return None;
+    }
+    if let Some(error) = &detail.error {
+        return Some(format!("Unable to load answer: {error}"));
+    }
+    if detail.pending.is_some() || detail.has_more {
+        return Some("Loading answer…".into());
+    }
+    Some(detail.content.clone())
 }
 
 pub(super) fn run_error_text(app: &App, key: &str) -> Option<String> {
@@ -405,6 +460,7 @@ mod tests {
             has_more: false,
             error: None,
             run_error: false,
+            assistant_answer: false,
         };
         let page = json!({"schema":"transcript.content.range.v1","sessionId":"s","projectionVersion":TRANSCRIPT_PROJECTION_VERSION_V1,
             "projectionGeneration":"g","refId":"r","revision":"1","byteLength":"4","startOffset":"0","endOffset":"3","content":"中","hasMore":true});

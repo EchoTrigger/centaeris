@@ -1,5 +1,7 @@
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { DesktopTranscriptView } from "../src/components/chat/transcriptPaging";
+import type { TranscriptPageV1 } from "../src/lib/chatBridge";
 import { AgentResultStream } from "../src/components/chat/AgentResultStream";
 import { useChatViewStore } from "../src/components/chat/chatViewStore";
 import { mapProcessStateToActivity } from "../src/components/chat/chatRuntimeCore";
@@ -79,4 +81,25 @@ test("runtime and Tachikoma eggs change presentation without changing task clock
   update({...base,agentRunId:"tachikoma-0",chunks,activity:mapProcessStateToActivity("waiting")});
   expect(renderer.root.findByProps({role:"status"}).children).toEqual(["Waiting for your input"]);
   expect(renderer.root.findAllByProps({className:"runStatusSpinner"})).toHaveLength(0);
+});
+
+// Phase records describe what happened, while the active replay owns current execution.
+test("historical running phase records do not restart Thinking clocks, including behind an active overlay", () => {
+  const page: TranscriptPageV1 = { schema:"transcript.page.v1",sessionId:"history",projectionVersion:"transcript.projection.v1",projectionGeneration:"g",sourceHighWater:"3",olderCursor:null,hasOlder:false,resumeCursors:[],blocks:[
+    {blockId:"phase",blockRevision:"1",orderKey:{sourceSequence:"1",ordinal:0},body:{kind:"notice",noticeType:"model_process_summary",content:{inlineContent:"Inspecting the project"},status:"running"}},
+    {blockId:"answer",blockRevision:"1",orderKey:{sourceSequence:"2",ordinal:0},body:{kind:"assistantText",content:{inlineContent:"Finished"},status:"completed"}},
+    {blockId:"end",blockRevision:"1",orderKey:{sourceSequence:"3",ordinal:0},body:{kind:"notice",noticeType:"run_boundary",content:{inlineContent:""},status:"completed"}},
+  ]};
+  const view=DesktopTranscriptView.open(page);
+  for (const overlay of [false,true]) {
+    const messages=view.materializeMessages(overlay);
+    act(()=>{useChatViewStore.getState().replaceMessages(messages);renderer=create(<>{messages.map(message=>message.role==="assistant"?<AgentResultStream key={message.id} turn={message.turn}/>:null)}</>);});
+    expect(renderer.root.findAllByProps({role:"status"})).toHaveLength(0);
+    expect(Object.keys(useChatViewStore.getState().runActivityByTurnId)).toEqual([]);
+    act(()=>renderer.unmount());
+  }
+  update({...base,activity:mapProcessStateToActivity("thinking")},true);
+  expect(renderer.root.findAllByProps({role:"status"})).toHaveLength(1);
+  act(()=>{vi.advanceTimersByTime(4000);});
+  expect(elapsed()).toEqual(["4s"]);
 });

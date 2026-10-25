@@ -4,6 +4,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
@@ -22,6 +23,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useTranslation } from "../i18n";
+import { apiUrl } from "../api";
 import { modelFailureDetail } from "../modelErrors";
 import { MarkdownContent } from "./MarkdownContent";
 import { reasoningPreview } from "./reasoningPreview";
@@ -96,14 +98,41 @@ function textSource(body: Record<string, unknown>) {
   };
 }
 
-function ReferencedContent({ store, reference, mode = "markdown" }: Readonly<{
-  store: TranscriptViewStore; reference: TranscriptContentRef; mode?: "markdown" | "plain";
+function ReferencedContent({ store, reference, mode = "markdown", allowVisuals = false }: Readonly<{
+  store: TranscriptViewStore; reference: TranscriptContentRef; mode?: "markdown" | "plain"; allowVisuals?: boolean;
 }>) {
   const identity = useTranscriptIdentity(store);
+  useSyncExternalStore(store.subscribePresentationContent, store.getPresentationContentVersion, store.getPresentationContentVersion);
+  const { t } = useTranslation();
+  const pushed = store.getPresentationContentSnapshot(reference);
+  const live = useSyncExternalStore(store.subscribeLive, store.getLiveSnapshot, store.getLiveSnapshot);
+  const sameReference = (blockId: string) => {
+    const body = store.getBlockSnapshot(blockId)?.body;
+    const candidate = body ? textSource(body).reference : null;
+    return candidate?.refId === reference.refId && candidate.revision === reference.revision
+      && candidate.byteLength === reference.byteLength;
+  };
+  const coveredByLive = live !== null && ((Boolean(live.text) && sameReference(live.messageId))
+    || (Boolean(live.reasoning?.text) && sameReference(live.reasoning?.blockId ?? "")));
+  const evicted = store.isPresentationContentEvicted(reference);
+  const streamedBody = useRef<HTMLDivElement>(null);
+  const retainedHeight = useRef(0);
+  useLayoutEffect(() => {
+    if (pushed !== null && streamedBody.current) retainedHeight.current = streamedBody.current.getBoundingClientRect().height;
+  }, [pushed]);
   if (!identity.sessionId || !identity.projectionGeneration) return null;
+  if (pushed !== null && !pushed.complete && coveredByLive) return null;
+  if (pushed !== null) return <div ref={streamedBody}>
+    {pushed.content ? (mode === "markdown" ? <MarkdownContent text={pushed.content} allowVisuals={allowVisuals} isStreaming={!pushed.complete} /> : pushed.content) : null}
+    {pushed.limited ? <span role="status">{t("transcriptBlockContent.contentPreviewLimited")}</span> : null}
+  </div>;
+  if (evicted) return <div style={retainedHeight.current ? { minHeight: retainedHeight.current } : undefined}>
+    <TranscriptReferencedContent sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration}
+      reference={reference} mode={mode} allowVisuals={allowVisuals} deferUntilVisible />
+  </div>;
   return <TranscriptReferencedContent
     key={`${identity.viewEpoch}:${identity.sessionId}:${identity.projectionGeneration}:${reference.refId}:${reference.revision}`}
-    sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} reference={reference} mode={mode}
+    sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} reference={reference} mode={mode} allowVisuals={allowVisuals}
   />;
 }
 
@@ -127,13 +156,13 @@ function TranscriptReasoning({ store, body }: Readonly<{
         onClick={() => setExpanded((value) => !value)}
       >
         <Brain aria-hidden="true" />
-        <span className={running ? "statusShimmer" : undefined}>{label}</span>
+        <span className={`workspaceReasoningLabel${running ? " statusShimmer" : ""}`}>{label}</span>
+        <ChevronDown className={`workspaceActivityGroupChevron ${expanded ? "isExpanded" : ""}`} aria-hidden="true" />
         {!expanded && preview ? (
           <span className="reasoningPreview" aria-hidden="true">
             <span className="reasoningPreviewText">{preview}</span>
           </span>
         ) : null}
-        <ChevronDown className={`workspaceActivityGroupChevron ${expanded ? "isExpanded" : ""}`} aria-hidden="true" />
       </button>
       <AnimatedDisclosure expanded={expanded}>
         <div className="workspaceReasoningBody" role="region" aria-label={t("reasoningBlock.thinkingContent")} tabIndex={0} ref={bodyRef}>
@@ -280,7 +309,8 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
 }>) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
-  const listViewEpoch = useTranscriptIdentity(store).viewEpoch;
+  const listIdentity = useTranscriptIdentity(store);
+  const listViewEpoch = listIdentity.viewEpoch;
   const registrySnapshot = useToolOperationsSnapshot(toolOperations);
   const managedBytes = useSyncExternalStore(
     store.subscribeManagedContent,
@@ -303,6 +333,7 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
         call: (record?.call ?? {}) as Record<string, unknown>,
         operations: (record?.operations ?? []) as readonly Record<string, unknown>[],
         outputRef: contentReference(body.outputRef),
+        detailSourceEventId: record?.previewTruncated ? opText(record.detailSourceEventId) : "",
         failed: body.status === "failed" || body.status === "interrupted",
         unconfirmed: runEnded && (body.status === "running" || body.status === "queued"),
       };
@@ -334,7 +365,7 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
     ? t("transcriptTool.resultsUnconfirmed", { count: unconfirmed })
     : formatToolGroupTitle(operations, t);
   const GroupIcon = TOOL_GROUP_ICONS[toolGroupIconCategory(operations) ?? "command"];
-  const hasDetail = entries.some((entry) => entry.operations.length > 0 || entry.outputRef !== null);
+  const hasDetail = entries.some((entry) => entry.operations.length > 0 || entry.outputRef !== null || Boolean(entry.detailSourceEventId));
   const Header = hasDetail ? "button" : "div";
   return (
     <div className="workspaceActivityGroupRecord">
@@ -386,6 +417,10 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
                 ));
               })}
             </div>
+            {listIdentity.sessionId ? entries.filter(entry => entry.detailSourceEventId).map(entry => <a key={entry.callId}
+              href={apiUrl(`/api/sessions/${encodeURIComponent(listIdentity.sessionId as string)}/presentation/operation?sourceEventId=${encodeURIComponent(entry.detailSourceEventId)}`)} download>
+              {t("libraryObjectRoute.downloadFile")}
+            </a>) : null}
           </div>
         </div>
       </AnimatedDisclosure>
@@ -442,8 +477,8 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
       <div className="workspaceTranscriptBlock workspaceTranscriptAssistant" data-block-id={block.blockId}>
         <div className="workspaceTerminalAnswer">
           {text === null
-            ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" /> : null)
-            : <MarkdownContent text={text} />}
+            ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" allowVisuals /> : null)
+            : <MarkdownContent text={text} allowVisuals isStreaming={body.status === "queued" || body.status === "running"} />}
         </div>
         {body.status !== "queued" && body.status !== "running" ? <TranscriptMessageMeta key={`${viewEpoch}:${block.blockRevision}`} answer text={text} reference={reference}
           sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} observedAtMs={block.presentation?.observedAtMs} /> : null}
@@ -467,23 +502,25 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   return (
     <div className="workspaceTranscriptBlock workspaceStageSummary" data-block-id={block.blockId}>
       {text === null
-        ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" /> : null)
-        : <MarkdownContent text={text} />}
+        ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" allowVisuals /> : null)
+        : <MarkdownContent text={text} allowVisuals />}
       {kind === "notice" && body.noticeType !== "run_boundary" ? <TranscriptMessageMeta key={`${viewEpoch}:${block.blockRevision}`} text={text} reference={reference}
         sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} observedAtMs={block.presentation?.observedAtMs} /> : null}
     </div>
   );
 });
 
-export const TranscriptLiveTail = memo(function TranscriptLiveTail({ live }: Readonly<{
+export const TranscriptLiveTail = memo(function TranscriptLiveTail({ live, mode = "all" }: Readonly<{
   live: TranscriptLiveOverlay;
+  mode?: "all" | "reasoning" | "text";
 }>) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const reasoningBodyRef = useStickToBottom<HTMLDivElement>(expanded);
-  const reasoningText = live.reasoning?.text ?? "";
+  const reasoningText = mode === "text" ? "" : live.reasoning?.text ?? "";
+  const text = mode === "reasoning" ? "" : live.text;
   const preview = reasoningText ? reasoningPreview(reasoningText) : "";
-  if (!reasoningText) return null;
+  if (!reasoningText && !text) return null;
   return (
     <div className="workspaceTranscriptLive" data-block-id={`live:${live.messageId}:reasoning`}>
       {reasoningText ? (
@@ -496,13 +533,13 @@ export const TranscriptLiveTail = memo(function TranscriptLiveTail({ live }: Rea
             onClick={() => setExpanded((value) => !value)}
           >
             <Brain aria-hidden="true" />
-            <span className="statusShimmer">{t("reasoningBlock.thinking")}</span>
+            <span className="workspaceReasoningLabel statusShimmer">{t("reasoningBlock.thinking")}</span>
+            <ChevronDown className={`workspaceActivityGroupChevron ${expanded ? "isExpanded" : ""}`} aria-hidden="true" />
             {!expanded && preview ? (
               <span className="reasoningPreview" aria-hidden="true">
                 <span className="reasoningPreviewText">{preview}</span>
               </span>
             ) : null}
-            <ChevronDown className={`workspaceActivityGroupChevron ${expanded ? "isExpanded" : ""}`} aria-hidden="true" />
           </button>
           <AnimatedDisclosure expanded={expanded}>
             <div className="workspaceReasoningBody" role="region" aria-label={t("reasoningBlock.thinkingContent")} tabIndex={0} ref={reasoningBodyRef}>
@@ -511,6 +548,9 @@ export const TranscriptLiveTail = memo(function TranscriptLiveTail({ live }: Rea
           </AnimatedDisclosure>
         </div>
       ) : null}
+      {text ? <div className="workspaceTranscriptAssistant workspaceTerminalAnswer" data-block-id={`live:${live.messageId}`}>
+        <MarkdownContent text={text} allowVisuals isStreaming />
+      </div> : null}
     </div>
   );
 });

@@ -29,7 +29,7 @@ export function useEffect(effect, dependencies) {
 }
 export const useLayoutEffect = useEffect;
 export function renderer(component, props, environment) {
-  const subject = { slots: [], setters: [], effects: [], pending: new Map(), cursor: 0, tree: null };
+  const subject = { environment, slots: [], setters: [], effects: [], pending: new Map(), cursor: 0, tree: null };
   return Object.assign(subject, {
     render() {
       active = subject; context = environment; subject.cursor = 0;
@@ -65,6 +65,7 @@ export function environment(overrides = {}) {
     agents: [{ id: "agent", workspaceId: "workspace", name: "Synthetic Agent", status: "active", avatarKind: "centaeris" }],
     location: { pathname: "/w/workspace/settings/agents", search: "?agentId=agent", state: null },
     navigations: [], revalidationCount: 0, modal: null,
+    agentPresentation: { historyRevision: "0", workRevision: "0", navigation: null, error: false, retry() {} },
     blocker: { state: "unblocked", resets: 0, proceeds: 0, reset() { this.state = "unblocked"; this.resets++; }, proceed() { this.state = "proceeding"; this.proceeds++; } },
     ...overrides,
   };
@@ -78,14 +79,11 @@ export function deferred() {
   return { promise, resolve, reject };
 }
 export class ApiError extends Error { constructor(message, status) { super(message); this.status = status; } }
-export function tailRefreshFixture(testContext) {
-  const timers = new Map(); let sequence = 0;
-  testContext.mock.method(globalThis, "setTimeout", (callback, delay) => { timers.set(++sequence, { callback, delay }); return sequence; });
-  testContext.mock.method(globalThis, "clearTimeout", id => timers.delete(id));
+export function tailRefreshFixture(_testContext) {
   return async subject => {
-    const entry = [...timers.values()].find(timer => timer.delay === 5000);
-    if (!entry) throw new Error("Expected the existing automatic history refresh");
-    entry.callback(); await subject.settle();
+    const state = subject.environment.agentPresentation;
+    state.historyRevision = String(BigInt(state.historyRevision) + 1n);
+    await subject.settle();
   };
 }
 const moduleUrl = import.meta.url;
@@ -95,6 +93,7 @@ export function subjectLoader({ realModal = false, realDocumentPreview = false, 
   const overrides = new Map([
     ["react", dataUrl(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useLayoutEffect} from ${JSON.stringify(moduleUrl)};`)],
     stub("react-router", 'export const Link=()=>null; export const useRouteLoaderData=id=>id==="authenticated"?{user:context.user}:({workspace:context.workspace,agents:context.agents}); export const useNavigate=()=>context.navigate; export const useLocation=()=>context.location; export const useRevalidator=()=>context.revalidator; export const useBlocker=value=>{context.blocker.predicate=value;context.blocker.shouldBlock=typeof value==="function"?value({currentLocation:context.location,nextLocation:context.nextLocation||{...context.location,search:"?agentId=other"}}):Boolean(value);return context.router?context.router.getBlocker("model-draft",value):context.blocker;};'),
+    stub("../agent-chat/useAgentPresentation", "export const useAgentPresentation=()=>context.agentPresentation;"),
     stub("../api", `export {ApiError} from ${JSON.stringify(moduleUrl)}; export const apiJson=(...args)=>context.request(...args); export const apiResponse=(...args)=>context.request(...args); export const clearCsrfToken=()=>{}; export const apiUrl=path=>path; export const jsonOptions=(method,value)=>({method,body:JSON.stringify(value)});`),
     stub("../components/DocumentPreview", "export const DocumentPreview=()=>null;"),
     stub("react-dom", "export const createPortal=(children)=>children;"),

@@ -12,7 +12,7 @@ const loader = subjectLoader({ extraOverrides: [
 
   ["../preferences", stub("export const useEnterStartsNewLine=()=>false; export const readModelThinkingMode=()=>''; export const readPreferredModelIdentity=()=>''; export const writeModelThinkingMode=()=>{}; export const writePreferredModelIdentity=()=>{};")],
   ["../chat/transcriptTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const createWorkspaceTranscriptTransport=()=>({loadTail:async id=>context.tail(id),loadPatches:async()=>{},loadActiveAgentRun:async()=>({agentRun:context.activeRun??null})});`)],
-  ["../chat/workspaceWebTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const streamWorkspaceAgentRun=()=>context.stream();`)],
+  ["../chat/workspacePresentationTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const streamWorkspacePresentation=options=>context.stream(options);`)],
   ...["../components/WorkspaceContextPanel", "../components/DocumentPreview", "../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../agent-chat/SessionAgentBreadcrumb", "../shell/ShellSidebar"].map(s => [s, stub(`export const ${s.split("/").at(-1)}=()=>null;`)]),
   ["../shell/HomePlane", stub("export const HomePlane=()=>null; export const HomeQuickActions=()=>null;")],
 ] });
@@ -23,20 +23,31 @@ const composer = subject => nodes(subject.tree, n => n.type.name === "WorkspaceC
 const inputBody = options => options.body instanceof FormData ? Object.fromEntries(options.body) : JSON.parse(options.body);
 const receipt = id => ({ operationId:id, command:"submitMessage", status:"accepted", sessionId:"work", agentRunId:"run", turnId:"turn" });
 function fixture(context, request) {
-  const previousWindow=globalThis.window,previousStorage=globalThis.sessionStorage;context.after(()=>{globalThis.window=previousWindow;globalThis.sessionStorage=previousStorage;});
+  const previousWindow=globalThis.window,previousDocument=globalThis.document,previousStorage=globalThis.sessionStorage;context.after(()=>{globalThis.window=previousWindow;globalThis.document=previousDocument;globalThis.sessionStorage=previousStorage;});
   const data=new Map(); globalThis.sessionStorage={getItem:k=>data.get(k)??null,setItem:(k,v)=>data.set(k,v),removeItem:k=>data.delete(k)};
   const calls=[];
+  globalThis.document={hidden:false,addEventListener(){},removeEventListener(){}};
+  const session={id:"work",workspaceId:"workspace",agentId:"agent",projectId:null,currentEnvironmentId:null,executionMode:"perRun",title:"work",origin:"user",initialInputOrigin:null,status:"active",deletedAt:null,isPinned:false,isUnread:false,hasActiveAgentRun:false,updatedAt:"2026-10-23T00:00:00Z",latestAttentionSequence:"0",readThroughSequence:"0",attentionRevision:"0",isManuallyUnread:false};
   globalThis.window={location:{pathname:"/w/workspace/app"},addEventListener(){},removeEventListener(){}};
   const env=environment({tail:async()=>({schema:"transcript.page.v1",sessionId:"work",projectionVersion:"transcript.projection.v1",projectionGeneration:"generation",sourceHighWater:"1",blocks:[],olderCursor:null,hasOlder:false,resumeCursors:[{streamId:"workspace-transcript.v1",cursor:"1"}]}),request:async(path,options)=>{
     calls.push([path,options]); let value;
     if(path==="/api/models") value={models:[{id:"model",name:"Model",provider:"test",modelName:"test"},{id:"other",name:"Other",provider:"test",modelName:"other"}]};
     else if(path.includes("/operations/")||options?.method==="POST") return request(path,options);
     else if(path.includes("session-projects")) value={projects:[]};
-    else if(path.startsWith("/api/workspaces/")&&path.includes("/sessions")) value={sessions:[{id:"work",agentId:"agent",title:"work",hasActiveAgentRun:false,status:"active"}]};
+    else if(path.startsWith("/api/workspaces/")&&path.includes("/sessions")) value={sessions:[session]};
     else if(path.endsWith("/assets")) value={assets:[]};
-    else value={session:{id:"work",workspaceId:"workspace",agentId:"agent",projectId:null,title:"work",status:"active",hasActiveAgentRun:false,initialInputOrigin:null}};
+    else value={session};
     return {...value,json:async()=>value};
   }});
+  env.stream=async options=>{
+    if(options.sessionId){
+      const page=await env.tail(options.sessionId);
+      const send=(kind,body,cursor=null)=>options.controller.acceptWithBackpressure({cursor,item:{schema:"workspace.presentation.v1",workspaceId:"workspace",agentId:"agent",sessionId:options.sessionId,kind,...body}});
+      await send("snapshot",{page});
+      await send("checkpoint",{projectionGeneration:page.projectionGeneration,sourceHighWater:page.sourceHighWater,agentRun:null},`applied:${page.sourceHighWater}`);
+    }
+    return new Promise(resolve=>options.signal.addEventListener("abort",resolve,{once:true}));
+  };
   env.response=async(...args)=>{const value=await env.request(...args);return {...value,json:async()=>value};};
   const props={agentId:"agent",workspaceDraft:true,location:{search:"",state:null},modelsVersion:0,onSessionAccepted:()=>{}};
   return {data,calls,props,subject:renderer(AppPageContent,props,env)};

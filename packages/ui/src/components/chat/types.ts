@@ -2,18 +2,23 @@ import type { DesktopTranscriptView } from "./transcriptPaging";
 import type { UiSession } from "../../types/ui";
 import type {
   AgentContextUsageSummary,
-  AgentRuntimeConfig,
   AgentStreamPayload,
   TranscriptContentRefV1,
   TranscriptPageV1,
 } from "../../lib/chatBridge";
 import type { SessionReplayCursors } from "../../lib/sessionViewCache";
 import type {
+  WorkspaceInfo,
   WorkspaceGitHubCliStatusResponse,
   WorkspaceGitStatusResponse,
 } from "../../lib/workspaceBridge";
 
 export type ChatAreaProps = {
+  newChatRevision?: number;
+  hidden?: boolean;
+  workspaces?: readonly WorkspaceInfo[];
+  onOpenWorkspace?: () => Promise<void>;
+  onSelectWorkspace?: (root: string) => Promise<void>;
   currentSession: UiSession | null;
   currentSessionId?: string | null;
   workspaceName: string;
@@ -36,6 +41,7 @@ export type ChatAreaProps = {
     options?: { activate?: boolean },
   ) => void;
   onAgentRunningChange?: (sessionId: string, isRunning: boolean) => void;
+  onSessionWaitingChange?: (sessionId: string, waiting: boolean) => void;
   onSessionCompleted?: (sessionId: string) => void;
 };
 
@@ -183,6 +189,7 @@ export type SubagentResult = {
 
 export type NarrativeChunk = {
   id: string;
+  modelText?: boolean;
   kind: "narrative";
   turnId?: string;
   text: string;
@@ -244,6 +251,7 @@ export type AssistantExecutionTurn = {
   projectionRunId?: string;
 
   liveRevision?: number;
+  textSegmentId?: string;
   id: string;
   agentRunId?: string;
   chunks: Array<
@@ -337,9 +345,6 @@ export type SessionHydrationSnapshot = {
   messages: ChatMessage[];
   transcriptPage?: TranscriptPageV1;
   transcriptHistoryMessageCount?: number;
-  runtimeConfig: AgentRuntimeConfig;
-  contextUsage: AgentContextUsageSummary | null;
-  resolvedAutoContinueAfterResumeWait: boolean | undefined;
   replayCursorsByAgentRunId: SessionReplayCursors;
   pendingQuestionRequest: PendingQuestionRequest | null;
   restoreMessageId: string | null;
@@ -375,6 +380,7 @@ export type TranscriptTextPhase = "process" | "compaction" | "streaming" | "fina
 
 export type TranscriptTextItem = {
   kind: "assistantText";
+  modelText?: boolean;
   id: string;
   phase: TranscriptTextPhase;
   text: string;

@@ -248,13 +248,13 @@ export const AgentRunRow = memo(function AgentRunRow({
       ? null
       : smoothMarkdown
         ? <StreamingMarkdownContent text={message.text} finalized={sealed} />
-        : <MarkdownContent text={message.text} />;
+        : <MarkdownContent text={message.text} allowVisuals />;
     return (
       <section className="workspaceProcessSection" data-turn-id={section.turnId} key={section.sectionId}>
         {messageVisible ? message.phase === "compaction" ? (
           <div className="workspaceCompactionMarker">{message.text}</div>
         ) : message.phase === "stage" ? (
-          <div className="workspaceStageSummary"><MarkdownContent text={message.text} /></div>
+          <div className="workspaceStageSummary"><MarkdownContent text={message.text} allowVisuals /></div>
         ) : sealed ? (
           <div className={message.phase === "final" ? "workspaceTerminalAnswer" : "workspaceStageSummary"} aria-live={message.phase === "final" ? "polite" : undefined}>
             {answerMarkdown}

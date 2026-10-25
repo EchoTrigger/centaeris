@@ -1,4 +1,5 @@
 import { t } from "./i18n";
+import { FrontendProvider } from "@centaeris/frontend-foundations/provider";
 import { createRoot } from "react-dom/client";
 import { RouterProvider } from "react-router/dom";
 import { configureApi } from "./api";
@@ -13,7 +14,7 @@ const root = createRoot(rootElement);
 loadRuntimeConfig()
   .then((config) => {
     configureApi(config);
-    root.render(<RouterProvider router={createRouter()} />);
+    root.render(<FrontendProvider iconStrokeWidth={2}><RouterProvider router={createRouter()} /></FrontendProvider>);
   })
   .catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);

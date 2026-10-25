@@ -130,9 +130,8 @@ def project_committed_agent_run(
         if expected_status is not None and status != expected_status:
             raise ValueError("runtime and Session terminal states mismatch")
         rebuild_agent_run_citation_projection(locked_agent_run)
-        if any(event.payload["type"] == "assistant_message" for event in events):
-            locked_agent_run.session.isUnread = True
-            locked_agent_run.session.save(update_fields=["isUnread"])
+        from .session_attention import refresh_session_attention
+        refresh_session_attention(locked_agent_run.session)
         locked_agent_run.status = status
         locked_agent_run.startedAt = datetime.fromtimestamp(
             events[0].payload["createdAtMs"] / 1000, tz=UTC

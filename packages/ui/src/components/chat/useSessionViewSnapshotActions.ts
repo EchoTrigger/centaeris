@@ -1,8 +1,9 @@
-import { useCallback } from "react";
-import { setTurnActivity } from "./chatAreaModel";
+import { useCallback, useRef } from "react";
+import { getAgentContextUsage, getAgentRuntimeConfig } from "../../lib/chatBridge";
 import {
   AUTO_CONTINUE_AFTER_RESUME_WAIT_KEY,
-  RUNTIME_ACTIVITY_BY_PROCESS_STATE,
+  formatExecutionError,
+  readAutoContinueAfterResumeWaitPreference,
   sessionViewCacheStore,
 } from "./chatRuntimeModel";
 import { DesktopTranscriptView } from "./transcriptPaging";
@@ -20,6 +21,8 @@ export const useSessionViewSnapshotActions = ({
   stream,
 }: SessionViewHydrationControllerOptions) => {
   const {
+    captureSessionRequest,
+    ownsSessionRequest,
     visibleSessionIdRef,
     transcriptViewRef,
     transcriptHistoryMessageCountRef,
@@ -36,9 +39,35 @@ export const useSessionViewSnapshotActions = ({
     setAutoContinueAfterResumeWait,
     applyGlobalRuntimeConfig,
     applyContextUsage,
+    reportRuntimeConfigError,
   } = runtime;
   const { setPendingQuestion, setPendingQuestionError } = question;
   const { setIsStreaming, startStreamForAssistant } = stream;
+
+  const metadataRequestIdRef = useRef(0);
+  const refreshMetadata = useCallback((sessionId: string) => {
+    const requestId = ++metadataRequestIdRef.current;
+    const owner = captureSessionRequest(sessionId);
+    const isCurrent = () => requestId === metadataRequestIdRef.current
+      && ownsSessionRequest(owner) && visibleSessionIdRef.current === sessionId;
+    // Optional reads publish independently and never gate or replace the body.
+    void getAgentRuntimeConfig().then(config => {
+      if (!isCurrent()) return;
+      applyGlobalRuntimeConfig(config);
+      const preference = typeof config.autoContinueAfterResumeWait === "boolean"
+        ? config.autoContinueAfterResumeWait : readAutoContinueAfterResumeWaitPreference();
+      setAutoContinueAfterResumeWait(preference);
+      if (typeof preference === "boolean") {
+        window.localStorage.setItem(AUTO_CONTINUE_AFTER_RESUME_WAIT_KEY, String(preference));
+      }
+    }).catch(error => { if (isCurrent()) reportRuntimeConfigError(formatExecutionError(error)); });
+    void getAgentContextUsage(sessionId).then(usage => {
+      if (isCurrent()) applyContextUsage(sessionId, usage);
+    }).catch(() => {
+      // Keep the last canonical usage boundary, as with live usage refreshes.
+    });
+  }, [applyContextUsage, applyGlobalRuntimeConfig, captureSessionRequest, ownsSessionRequest,
+    reportRuntimeConfigError, setAutoContinueAfterResumeWait, visibleSessionIdRef]);
 
   const applySessionViewSnapshot = useCallback(
     (sessionId: string, snapshot: SessionViewSnapshot) => {
@@ -71,21 +100,8 @@ export const useSessionViewSnapshotActions = ({
 
   const applyHydrationSnapshot = useCallback(
     (snapshot: SessionHydrationSnapshot, sessionId: string) => {
-      const hydratedMessages =
-        snapshot.contextUsage?.isCompacting && snapshot.activeReplay
-          ? snapshot.messages.map((message) =>
-              message.role === "assistant" &&
-              message.id === snapshot.activeReplay?.messageId
-                ? {
-                    ...message,
-                    turn: setTurnActivity(
-                      message.turn,
-                      RUNTIME_ACTIVITY_BY_PROCESS_STATE.compressing,
-                    ),
-                  }
-                : message,
-            )
-          : snapshot.messages;
+      const cached = sessionViewCacheStore.get(sessionId);
+      const hydratedMessages = snapshot.messages;
       setSessionLoadError("");
       visibleSessionIdRef.current = sessionId;
       visibleActiveReplayRef.current = snapshot.activeReplay
@@ -100,21 +116,6 @@ export const useSessionViewSnapshotActions = ({
       verifiedReplayAgentRunIdsRef.current = new Set(
         Object.keys(snapshot.replayCursorsByAgentRunId),
       );
-      setAutoContinueAfterResumeWait(
-        snapshot.resolvedAutoContinueAfterResumeWait,
-      );
-      if (
-        typeof snapshot.resolvedAutoContinueAfterResumeWait === "boolean" &&
-        typeof window !== "undefined" &&
-        window.localStorage
-      ) {
-        window.localStorage.setItem(
-          AUTO_CONTINUE_AFTER_RESUME_WAIT_KEY,
-          snapshot.resolvedAutoContinueAfterResumeWait ? "true" : "false",
-        );
-      }
-      applyGlobalRuntimeConfig(snapshot.runtimeConfig);
-      applyContextUsage(sessionId, snapshot.contextUsage);
       const transcriptView = snapshot.transcriptView ?? (snapshot.transcriptPage
         ? DesktopTranscriptView.open(snapshot.transcriptPage)
         : null);
@@ -133,18 +134,16 @@ export const useSessionViewSnapshotActions = ({
               submitting: false,
             }
           : null;
-      if (pendingQuestion) {
-        setPendingQuestion(pendingQuestion);
-      }
+      setPendingQuestion(pendingQuestion);
       sessionViewCacheStore.write({
         sessionId,
         snapshot: {
           messages: hydratedMessages,
           transcriptView,
           transcriptHistoryMessageCount: snapshot.transcriptHistoryMessageCount,
-          contextUsage: snapshot.contextUsage,
-          autoContinueAfterResumeWait:
-            snapshot.resolvedAutoContinueAfterResumeWait,
+          contextUsage: cached?.snapshot.contextUsage ?? null,
+          autoContinueAfterResumeWait: cached?.snapshot.autoContinueAfterResumeWait
+            ?? readAutoContinueAfterResumeWaitPreference(),
           pendingQuestion,
           pendingQuestionError: "",
           activeReplay: snapshot.activeReplay
@@ -167,12 +166,11 @@ export const useSessionViewSnapshotActions = ({
           snapshot.activeReplay.seedPayloads,
         );
       }
+      refreshMetadata(sessionId);
     },
     [
-      applyContextUsage,
-      applyGlobalRuntimeConfig,
+      refreshMetadata,
       replayCursorsByAgentRunIdRef,
-      setAutoContinueAfterResumeWait,
       setMessages,
       setPendingQuestion,
       setSessionLoadError,

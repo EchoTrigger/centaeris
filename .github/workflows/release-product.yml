@@ -73,6 +73,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist/release-candidate -Force | Out-Null
           if ($env:PRODUCT -eq 'desktop') {
+            node packages/desktop/scripts/build-installer.mjs --output (Join-Path $PWD 'dist/release-candidate')
+            if ($LASTEXITCODE -ne 0) { throw 'Desktop installer build failed' }
+            $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+            $installer = Join-Path $PWD "dist/release-candidate/Centaeris-Desktop-$version-windows-x64-setup.exe"
+            node packages/desktop/scripts/smoke-installer.mjs $installer
+            if ($LASTEXITCODE -ne 0) { throw 'Desktop installer acceptance failed' }
             Compress-Archive -LiteralPath 'packages/desktop/dist/Centaeris Desktop' -DestinationPath dist/release-candidate/centaeris-desktop-windows-x64.zip
           } else {
             Copy-Item -LiteralPath packages/tui/dist/centaeris-windows-x64.zip -Destination dist/release-candidate
@@ -82,7 +88,9 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: centaeris-${{ inputs.product }}-${{ github.sha }}
-          path: dist/release-candidate/*
+          path: |
+            dist/release-candidate/*.zip
+            dist/release-candidate/*-setup.exe
           if-no-files-found: error
           compression-level: 0
       - name: Publish only after explicit manual selection
@@ -97,7 +105,7 @@ jobs:
           if (-not (($runs | ConvertFrom-Json) | Where-Object conclusion -eq success)) { throw 'Required CI has not passed for this source SHA' }
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           "Source: https://github.com/EchoTrigger/centaeris/commit/$revision" | Set-Content dist/release-candidate/notes.txt
-          $assets = @(Get-ChildItem dist/release-candidate/*.zip | ForEach-Object FullName)
+          $assets = @(Get-ChildItem dist/release-candidate -File | Where-Object Extension -in '.exe', '.zip' | ForEach-Object FullName)
           gh release create "$($env:PRODUCT)-v$version" --target $revision --title "$($env:PRODUCT) $version" --notes-file dist/release-candidate/notes.txt @assets
 
   hosted-product:

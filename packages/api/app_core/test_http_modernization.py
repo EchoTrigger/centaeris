@@ -204,6 +204,7 @@ class NinjaContractTests(TestCase):
             "/api/library/{library_object_id}/preview",
             "/api/citations/{citation_id}/preview",
             "/api/sessions/{session_id}/agent-runs/{agent_run_id}/events",
+            "/api/workspaces/{workspace_id}/presentation/events",
             "/api/sessions/{session_id}/transcript",
             "/api/sessions/{session_id}/transcript/patches",
             "/api/sessions/{session_id}/transcript/active-agent-run",

@@ -64,3 +64,19 @@ test("external content accepts only credential-free HTTPS", () => {
     assert.throws(() => requireExternalHttpsUrl(url), /only supports/);
   }
 });
+
+test("installed renderer accepts equivalent URL escaping and keeps exact file trust", () => {
+  const installed = createTrustedRendererPolicy({
+    filePath: "D:/Users/CENTAERIS~1/项目's Desktop/resources/ui-dist/index.html",
+    devServerUrl: "http://127.0.0.1:5173",
+  });
+  const chromiumUrl = installed.fileUrl.replace(/%7e/giu, "~").replace(/%[a-f0-9]{2}/giu, value => value.toLowerCase());
+  assert.equal(requireTrustedRendererUrl(chromiumUrl, installed), new URL(chromiumUrl).href);
+  for (const other of [
+    chromiumUrl + "?route=chat", chromiumUrl + "#chat",
+    chromiumUrl.replace("index.html", "other.html"),
+    chromiumUrl.replace("index.html", "..%2fother.html"),
+    chromiumUrl.replace("index.html", "%252e%252e%252fother.html"),
+    chromiumUrl.replace("file:///", "file://remote/"),
+  ]) assert.throws(() => requireTrustedRendererUrl(other, installed));
+});

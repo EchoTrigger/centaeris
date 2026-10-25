@@ -1,3 +1,4 @@
+import { createPresentationContentStore, transcriptNormalContentReferences } from "./presentationContentStore.ts";
 import {
   canonicalTranscriptValue as canonical,
   cloneTranscriptValue as clone,
@@ -29,6 +30,8 @@ const transcriptByteEncoder = new TextEncoder();
 export type TranscriptViewStore = ReturnType<typeof createTranscriptViewStore>;
 
 export function createTranscriptViewStore() {
+  const presentationContent = createPresentationContentStore();
+  let presentationSnapshot: { token: object; page: import("./transcriptContract.ts").TranscriptPage } | null = null;
   let viewEpoch = 0;
   let identity: TranscriptIdentity | null = null;
   let blocks = new Map<string, TranscriptBlock>();
@@ -175,6 +178,13 @@ export function createTranscriptViewStore() {
       oldest = olderPage.blocks[0] ?? oldest;
       previousPage = olderPage;
     }
+    const pendingPresentation = presentationSnapshot;
+    if (pendingPresentation && (pendingPresentation.page.sessionId !== page.sessionId
+      || pendingPresentation.page.projectionGeneration !== page.projectionGeneration
+      || pendingPresentation.page.sourceHighWater !== page.sourceHighWater)) {
+      throw new Error("presentation snapshot publication identity changed");
+    }
+    const pushedReferences = pendingPresentation ? transcriptNormalContentReferences(pendingPresentation.page.blocks) : [];
     const nextIds = sortedIds(candidateBlocks);
     const candidateOrderOwners = indexOrders(candidateBlocks);
     const candidateNoticeHighWater = latestNoticeHighWater(candidateBlocks);
@@ -219,6 +229,9 @@ export function createTranscriptViewStore() {
       hasOlder: previousPage.hasOlder,
       appliedSourceHighWater: page.resumeCursors[0]?.cursor || "0",
     });
+    // Reference ownership is published with the blocks, before any React
+    // subscriber can mount the ordinary HTTP content reader.
+    presentationContent.reset(pushedReferences);
     setLiveSnapshot(null);
     notifyManagedContent();
     notifyList();
@@ -262,11 +275,11 @@ export function createTranscriptViewStore() {
     return true;
   }
 
-  function applyPatchPage(rawPage: unknown, expectedEpoch: number) {
+  function applyPatchPage(rawPage: unknown, expectedEpoch: number, retainPendingLive = false, replayAfterSourceHighWater?: string) {
     if (expectedEpoch !== viewEpoch || identity === null) return false;
     const page = validateTranscriptPatchPage(rawPage, {
       ...identity,
-      afterSourceHighWater: listSnapshot.appliedSourceHighWater,
+      afterSourceHighWater: replayAfterSourceHighWater ?? listSnapshot.appliedSourceHighWater,
     });
     const stagedBlocks = new Map<string, TranscriptBlock | null>();
     const stagedRevisions = new Map<string, string>();
@@ -305,7 +318,7 @@ export function createTranscriptViewStore() {
         stagedBlocks.set(item.blockId, clone(item));
         stagedRevisions.set(item.blockId, item.blockRevision);
         changed.add(item.blockId);
-        if (nextLive !== null && (
+        if (!retainPendingLive && nextLive !== null && (
           item.blockId === nextLive.messageId
           || item.blockId === nextLive.reasoning?.blockId
           || (item.body.kind === "notice"
@@ -392,9 +405,11 @@ export function createTranscriptViewStore() {
     listSnapshot = Object.freeze({
       ...listSnapshot,
       blockIds,
-      appliedSourceHighWater: page.nextSourceHighWater,
+      appliedSourceHighWater: BigInt(page.nextSourceHighWater) > BigInt(listSnapshot.appliedSourceHighWater)
+        ? page.nextSourceHighWater : listSnapshot.appliedSourceHighWater,
     });
     setLiveSnapshot(nextLive);
+    if (retainPendingLive) settlePresentationLive();
     if (stagedBlocks.size > 0) notifyManagedContent();
     if (structuralChange) notifyList();
     notifyBlocks(changed);
@@ -415,6 +430,20 @@ export function createTranscriptViewStore() {
     if (sealed) return false;
     setLiveSnapshot(next);
     return true;
+  }
+
+  function settlePresentationLive() {
+    if (liveSnapshot === null) return;
+    const available = (blockId: string) => {
+      const block = blocks.get(blockId);
+      if (!block) return false;
+      return transcriptNormalContentReferences([block]).every(reference => presentationContent.isReady(reference));
+    };
+    const text = available(liveSnapshot.messageId) ? "" : liveSnapshot.text;
+    const reasoning = liveSnapshot.reasoning && available(liveSnapshot.reasoning.blockId) ? null : liveSnapshot.reasoning;
+    if (text !== liveSnapshot.text || reasoning !== liveSnapshot.reasoning) {
+      setLiveSnapshot(text || reasoning ? { ...liveSnapshot, text, reasoning } : null);
+    }
   }
 
   function clearLiveOverlay(expectedEpoch: number) {
@@ -447,6 +476,7 @@ export function createTranscriptViewStore() {
       hasOlder: false,
       appliedSourceHighWater: "0",
     });
+    presentationContent.clear();
     setLiveSnapshot(null);
     notifyManagedContent();
     notifyList();
@@ -483,6 +513,36 @@ export function createTranscriptViewStore() {
   }
 
   return {
+    async withPresentationSnapshot(rawPage: unknown, publish: () => number | Promise<number>) {
+      const page = validateTranscriptTailPage(rawPage);
+      if (presentationSnapshot !== null) throw new Error("presentation snapshot publication is already pending");
+      const token = {};
+      presentationSnapshot = { token, page };
+      try { return await publish(); }
+      finally { if (presentationSnapshot?.token === token) presentationSnapshot = null; }
+    },
+    reservePresentationContent(expectedEpoch: number, pushedBlocks: readonly TranscriptBlock[] = []) {
+      if (expectedEpoch !== viewEpoch) return false;
+      presentationContent.reserve(transcriptNormalContentReferences(pushedBlocks));
+      presentationContent.retain(transcriptNormalContentReferences([...blocks.values()]));
+      return true;
+    },
+    preparePresentationContent(items: readonly TranscriptBlock[], expectedEpoch: number) {
+      if (expectedEpoch !== viewEpoch) return false;
+      presentationContent.reserve(transcriptNormalContentReferences(items));
+      return true;
+    },
+    applyPresentationContentRange(range: import('./transcriptContract.ts').TranscriptContentRange, expectedEpoch: number) {
+      if (expectedEpoch !== viewEpoch || identity === null) return false;
+      presentationContent.apply(range, identity, settlePresentationLive);
+      return true;
+    },
+    presentationContentReady: presentationContent.ready,
+    presentationContentBytes: presentationContent.bytes,
+    getPresentationContentSnapshot: presentationContent.get,
+    isPresentationContentEvicted: presentationContent.isEvicted,
+    getPresentationContentVersion: presentationContent.getVersion,
+    subscribePresentationContent: presentationContent.subscribe,
     openTail,
     prependPage,
     applyPatchPage,

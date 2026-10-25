@@ -1258,7 +1258,11 @@ class Session(models.Model):
     )
     purgedAt = models.DateTimeField(null=True, blank=True)
     isPinned = models.BooleanField(default=False)
-    isUnread = models.BooleanField(default=False)
+    # Explicit owner action only; automatic notification state is derived from watermarks.
+    isManuallyUnread = models.BooleanField(default=False)
+    attentionRevision = models.PositiveBigIntegerField(default=0, db_default=0)
+    latestAttentionSequence = models.PositiveBigIntegerField(default=0, db_default=0)
+    readThroughSequence = models.PositiveBigIntegerField(default=0, db_default=0)
     workspaceGeneration = models.PositiveBigIntegerField(default=0)
     workspaceStorageKey = models.CharField(max_length=1000, blank=True, default="")
     workspaceSnapshotSha256 = models.CharField(max_length=71, blank=True, default="")
@@ -3091,3 +3095,19 @@ class WorkspaceSnapshotPublication(models.Model):
             models.CheckConstraint(condition=(models.Q(state="pending", confirmed_at__isnull=True)
                 | models.Q(state__in=["staged", "committed"], confirmed_at__isnull=False)), name="snapshot_publication_confirmation_valid"),
         ]
+
+
+class PresentationChange(models.Model):
+    """Durable invalidation positions, never execution facts or delivered content."""
+    key = models.CharField(primary_key=True, max_length=192)
+    revision = models.PositiveBigIntegerField(default=0)
+
+
+class PresentationChangeOutbox(models.Model):
+    """One pending invalidation per source transaction and scoped reader key."""
+    key = models.CharField(max_length=192)
+    transactionId = models.PositiveBigIntegerField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["key", "transactionId"],
+            name="presentation_change_transaction_unique")]
