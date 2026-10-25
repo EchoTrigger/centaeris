@@ -3,6 +3,9 @@
 # The profile must use retained lifetime and match the provider digest and immutable template build.
 # Increase stop grace above 2 * request timeout + 10 seconds when overriding the request timeout.
 services:
+  worker:
+    environment:
+      AGENT_RUN_EXECUTION_MODE: retained
   runtime:
     stop_grace_period: ${RUNTIME_E2B_STOP_GRACE_PERIOD:-60s}
     environment:

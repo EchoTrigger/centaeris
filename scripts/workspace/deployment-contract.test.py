@@ -81,6 +81,7 @@ class DeploymentContractTests(unittest.TestCase):
         }
         files = ("docker-compose.yml", "docker-compose.e2b.yml")
         services = compose_config(compose_files=files, **expected)["services"]
+        self.assertEqual(services["worker"]["environment"].get("AGENT_RUN_EXECUTION_MODE"), "retained")
         runtime = services["runtime"]
         environment = runtime["environment"]
         self.assertEqual(environment["RUNTIME_EXECUTION_PROVIDER"], "e2b")

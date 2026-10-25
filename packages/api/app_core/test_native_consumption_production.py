@@ -645,7 +645,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
     def exercise_parallel_child_executions(self, controlled_claim_busy=False):
         self.parallel_children = True
         # This scenario needs two execution slots in the same hosted tenant.
-        with patch.dict(os.environ, {"EXECUTION_GLOBAL_LIMIT": "8", "EXECUTION_TENANT_LIMIT": "4"}):
+        with patch.dict(os.environ, {"EXECUTION_GLOBAL_LIMIT": "8"}):
             runtime_url = self.start_runtime()
         worker = self.load_worker(runtime_url)
         with override_settings(RUNTIME_URL=runtime_url), \
