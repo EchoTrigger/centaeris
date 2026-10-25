@@ -129,7 +129,7 @@ def update_model_settings(request, agent_id: str, payload: UpdateAgentModelSetti
             agent.model_config, agent.thinking_mode = None, ""
         else:
             try:
-                agent.model_config, agent.thinking_mode = selected_model(payload.model_config_ref, payload.thinking_mode)
+                agent.model_config, agent.thinking_mode = selected_model(payload.model_config_ref, payload.thinking_mode, workspace_id=agent.workspace_id)
             except AgentModelSettingsError as error:
                 return Status(400, {"error": str(error)})
         agent.save(update_fields=["model_config", "thinking_mode", "updatedAt"])

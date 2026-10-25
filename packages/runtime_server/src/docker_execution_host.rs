@@ -202,6 +202,7 @@ fn validate_docker_volume_name(name: &str, value: &str) -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PluginMount {
     package_name: String,
+    source_subpath: String,
     destination: String,
 }
 
@@ -263,13 +264,41 @@ fn set_private_directory_permissions(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn plugin_mounts(activation: &PluginActivationSnapshotV1) -> Vec<PluginMount> {
+fn plugin_mounts(activation: &PluginActivationSnapshotV1) -> Result<Vec<PluginMount>, String> {
+    plugin_mounts_at(
+        activation,
+        Path::new(crate::skill_projection::PLUGIN_CATALOG_ROOT),
+    )
+}
+
+fn plugin_mounts_at(
+    activation: &PluginActivationSnapshotV1,
+    catalog_root: &Path,
+) -> Result<Vec<PluginMount>, String> {
+    let roots =
+        crate::skill_projection::verified_plugin_package_roots_at(activation, catalog_root)?;
+    if roots.is_empty() {
+        return Ok(Vec::new());
+    }
+    let catalog_root = catalog_root
+        .canonicalize()
+        .map_err(|error| format!("Plugin root unavailable: {error}"))?;
     activation
         .packages
         .iter()
-        .map(|package| PluginMount {
-            package_name: package.name.clone(),
-            destination: format!("{PLUGIN_CONTAINER_ROOT}/{}", package.name),
+        .zip(roots)
+        .map(|(package, root)| {
+            let source_subpath = root
+                .strip_prefix(&catalog_root)
+                .map_err(|_| "plugin_mount_scope_rejected")?
+                .to_str()
+                .ok_or("plugin_mount_path_invalid")?
+                .replace('\\', "/");
+            Ok(PluginMount {
+                package_name: package.name.clone(),
+                source_subpath,
+                destination: format!("{PLUGIN_CONTAINER_ROOT}/{}", package.name),
+            })
         })
         .collect()
 }
@@ -461,7 +490,7 @@ impl DockerExecutionHostRunner {
                 "fresh execution required by native fixture"
             );
             validate_plugin_activation_snapshot(request.plugin_activation)?;
-            assert!(plugin_mounts(request.plugin_activation).is_empty());
+            assert!(request.plugin_activation.packages.is_empty());
             let allocation =
                 crate::native_consumption_tests::prepare_owned_allocation(&request, before_create)?;
             crate::native_consumption_tests::register_owned_run(&request.agent_run_id);
@@ -541,7 +570,7 @@ impl DockerExecutionHostRunner {
             crate::postgres_store::execution_instances::instance_id(&execution_id);
         validate_plugin_activation_snapshot(plugin_activation)?;
         let plugin_volume_name = docker_volume_name_from_environment(PLUGIN_VOLUME_NAME_ENV)?;
-        let plugin_mounts = plugin_mounts(plugin_activation);
+        let plugin_mounts = plugin_mounts(plugin_activation)?;
         let memory_mount = memory_mount(
             user_id.as_str(),
             agent_id.as_str(),
@@ -2444,6 +2473,11 @@ fn ensure_container_inner(
 ) -> Result<(), String> {
     let body = container_create_body(expected)?;
     if let Some(facts) = inspect_container(expected.name)? {
+        require_plugin_mounts_match(
+            &facts.mounts,
+            expected.plugin_volume_name,
+            expected.plugin_mounts,
+        )?;
         if !facts.matches_configuration(expected) {
             return Err("sandbox container configuration mismatch; refusing replacement".into());
         }
@@ -2710,6 +2744,18 @@ impl ContainerFacts {
     }
 }
 
+fn require_plugin_mounts_match(
+    actual: &[ContainerMountFacts],
+    volume: &str,
+    expected: &[PluginMount],
+) -> Result<(), String> {
+    if plugin_mounts_match(actual, volume, expected) {
+        Ok(())
+    } else {
+        Err("environment_plugin_version_mismatch".into())
+    }
+}
+
 fn plugin_mounts_match(
     actual: &[ContainerMountFacts],
     plugin_volume_name: &str,
@@ -2733,7 +2779,7 @@ fn plugin_mounts_match(
                     && mount
                         .volume_options
                         .as_ref()
-                        .is_some_and(|options| options.subpath == expected.package_name)
+                        .is_some_and(|options| options.subpath == expected.source_subpath)
             })
         })
 }
@@ -5288,7 +5334,11 @@ mod tests {
                 hooks: vec![],
             }],
         };
-        let mounts = plugin_mounts(&activation);
+        let mounts = vec![PluginMount {
+            package_name: "demo".into(),
+            source_subpath: "demo".into(),
+            destination: format!("{PLUGIN_CONTAINER_ROOT}/demo"),
+        }];
         assert_eq!(mounts[0].destination, "/opt/centaeris/plugins/demo");
         assert_eq!(
             plugin_command_path(&activation).expect("plugin PATH"),
@@ -5400,7 +5450,11 @@ mod tests {
             }],
         };
         let runner = Arc::new(ActivatedPluginReadRunner {
-            mounts: plugin_mounts(&activation),
+            mounts: vec![PluginMount {
+                package_name: activation.packages[0].name.clone(),
+                source_subpath: activation.packages[0].name.clone(),
+                destination: format!("{PLUGIN_CONTAINER_ROOT}/banana"),
+            }],
             reads: AtomicUsize::new(0),
         });
         let workspace = std::env::temp_dir();
@@ -6143,6 +6197,7 @@ mod tests {
             plugin_volume_name: "centaeris-workspace-plugin-data".to_string(),
             plugin_mounts: vec![PluginMount {
                 package_name: "banana".to_string(),
+                source_subpath: "banana".to_string(),
                 destination: "/opt/centaeris/plugins/banana".to_string(),
             }],
             memory_mount: MemoryMount {

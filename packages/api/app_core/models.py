@@ -550,6 +550,18 @@ class WorkspacePluginEnablement(models.Model):
         ]
 
 
+class WorkspacePluginInstallation(models.Model):
+    """A workspace pins immutable package bytes; it never replaces the platform catalog."""
+    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT, related_name="plugin_installations")
+    plugin_name = models.CharField(max_length=64)
+    package = models.JSONField()
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["workspace", "plugin_name"], name="workspace_plugin_installation_unique")]
+
+
 class WorkspaceGroup(models.Model):
     id = models.CharField(primary_key=True, max_length=64, default=new_workspace_group_id)
     workspace = models.ForeignKey(
@@ -587,6 +599,8 @@ class WorkspaceGroup(models.Model):
 
 
 class ModelProvider(models.Model):
+    # NULL is the explicit platform/shared scope preserved for released data.
+    workspace = models.ForeignKey(Workspace, null=True, blank=True, on_delete=models.PROTECT, related_name="model_providers")
     id = models.CharField(primary_key=True, max_length=64, default=new_provider_id)
     displayName = models.CharField(max_length=160)
     template_id = models.CharField(max_length=64, null=True, blank=True)
@@ -601,9 +615,10 @@ class ModelProvider(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["template_id"],
-                condition=models.Q(template_id__isnull=False, archivedAt__isnull=True),
+                condition=models.Q(template_id__isnull=False, archivedAt__isnull=True, workspace__isnull=True),
                 name="model_provider_active_template_unique",
             ),
+            models.UniqueConstraint(fields=["workspace", "template_id"], condition=models.Q(template_id__isnull=False, archivedAt__isnull=True, workspace__isnull=False), name="workspace_provider_template_unique"),
         ]
 
     def save(self, *args, **kwargs):
@@ -1054,6 +1069,7 @@ class Agent(models.Model):
 
 
 class McpBearerCredential(models.Model):
+    workspace = models.ForeignKey(Workspace, null=True, blank=True, on_delete=models.PROTECT, related_name="mcp_credentials")
     id = models.CharField(
         primary_key=True,
         max_length=64,
@@ -1082,8 +1098,10 @@ class McpBearerCredential(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["plugin_name", "credential_ref"],
+                condition=models.Q(workspace__isnull=True),
                 name="mcp_bearer_credential_plugin_ref_unique",
-            )
+            ),
+            models.UniqueConstraint(fields=["workspace", "plugin_name", "credential_ref"], condition=models.Q(workspace__isnull=False), name="workspace_mcp_credential_unique")
         ]
 
     def save(self, *args, **kwargs):
@@ -1123,8 +1141,14 @@ class AgentConnectorCredentialApproval(models.Model):
         if self.workspace_id != self.definition.workspace_id or self.plugin_name != self.credential.plugin_name:
             raise ValueError("Connector approval scope mismatch")
         if self._state.adding:
-            if self.approved_by_id != self.credential.created_by_id or not self.approved_by.is_superuser:
-                raise ValueError("Connector approval requires the credential custodian")
+            if self.credential.workspace_id is None:
+                if self.approved_by_id != self.credential.created_by_id or not self.approved_by.is_superuser:
+                    raise ValueError("Connector approval requires the credential custodian")
+            else:
+                if self.credential.workspace_id != self.workspace_id:
+                    raise ValueError("Connector credential workspace mismatch")
+                from .workspace_resources import workspace_resource_admin
+                workspace_resource_admin(self.approved_by, self.workspace_id)
             if self.credential_version != self.credential.version:
                 raise ValueError("Connector approval credential version mismatch")
         else:
@@ -1868,6 +1892,8 @@ class AgentRun(models.Model):
 
     def save(self, *args, **kwargs):
         self.agent_instructions = normalize_agent_instructions(self.agent_instructions)
+        if self.modelConfig_id and self.modelConfig.provider_id and self.modelConfig.provider.workspace_id not in (None,self.workspace_id):
+            raise ValueError("AgentRun model workspace mismatch")
         if (self.acting_app_id is None) != (self.app_delegation_id is None):
             raise ValueError("AgentRun application origin is incomplete")
         if self.app_delegation_id:

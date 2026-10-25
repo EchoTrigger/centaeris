@@ -98,14 +98,16 @@ def authorize_connector(authorization, body):
                         or approval.resource_digest != resource["resourceDigest"]):
                     raise ConnectorRejected("mcp_connector_approval_invalid")
                 credential = McpBearerCredential.objects.select_for_update().get(pk=approval.credential_id)
-                if credential.plugin_name != body["pluginName"] or credential.version != approval.credential_version:
+                if (credential.plugin_name != body["pluginName"] or (credential.workspace_id is not None and credential.credential_ref != resource["credentialRef"])
+                        or credential.workspace_id not in (None,run.workspace_id) or credential.version != approval.credential_version):
                     raise ConnectorRejected("mcp_connector_approval_invalid")
                 identity.update(binding=binding.id, approval=approval.id)
             else:
-                credential = McpBearerCredential.objects.select_for_update().filter(plugin_name=body["pluginName"],
-                    credential_ref=resource["credentialRef"]).first()
-                if credential is None:
-                    raise ConnectorRejected("mcp_bearer_credential_not_found", 404)
+                from .workspace_resources import credential_for_workspace
+                try:
+                    credential = credential_for_workspace(run.workspace_id, body["pluginName"], resource["credentialRef"], lock=True)
+                except McpBearerCredential.DoesNotExist:
+                    raise ConnectorRejected("mcp_bearer_credential_not_found", 404) from None
             identity.update(credential=credential.id, credentialVersion=credential.version)
         digest = "sha256:" + hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         if body["bindingDigest"] is not None and body["bindingDigest"] != digest:

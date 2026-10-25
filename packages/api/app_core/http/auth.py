@@ -140,9 +140,14 @@ def current_user(request):
     response={200: ModelsEnvelope, 401: ErrorResponse},
 )
 def available_models(request):
+    from app_core.workspace_access import workspace_membership_for
+    from app_core.workspace_resources import models_for_workspace
+    workspace_id=request.GET.get("workspaceId")
+    if set(request.GET)-{"workspaceId"} or (workspace_id is not None and workspace_membership_for(request.user,workspace_id) is None):
+        return Status(401, {"error":"workspace_not_found"})
     models = [
         serialize_model(model)
-        for model in ModelConfig.objects.select_related("provider").filter(
+        for model in models_for_workspace(workspace_id).select_related("provider").filter(
             enabled=True,
             isCurrent=True,
         ).filter(

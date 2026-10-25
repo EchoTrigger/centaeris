@@ -176,6 +176,8 @@ class WorkspaceHookResponse(StrictSchema):
 
 
 class WorkspacePluginResponse(StrictSchema):
+    scope: Literal["workspace", "platform"] = "platform"
+    writable: bool = False
     name: str
     display_name: str
     short_description: str

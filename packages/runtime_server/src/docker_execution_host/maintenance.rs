@@ -121,7 +121,7 @@ pub(crate) fn provision_environment(
     let profile = &binding.environment_profile;
     let helper = environment_container::helper_path()?;
     let plugin_volume = docker_volume_name_from_environment(PLUGIN_VOLUME_NAME_ENV)?;
-    let mounts = plugin_mounts(&binding.plugin_activation);
+    let mounts = plugin_mounts(&binding.plugin_activation)?;
     let memory = memory_mount(
         &binding.user_id,
         &binding.agent_id,

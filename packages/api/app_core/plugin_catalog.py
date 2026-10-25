@@ -67,16 +67,29 @@ def load_plugin_catalog_at(root: Path, *, require_packages: bool = True) -> dict
     return payload
 
 
+def plugin_package_root(package, root=None):
+    root = Path(settings.PLUGIN_CATALOG_ROOT if root is None else root).resolve(strict=True)
+    digest = package["packageDigest"]
+    from .runtime_contract import require_sha256
+    require_sha256("packageDigest", digest)
+    validate_lower_kebab("plugin name", package["name"])
+    immutable = root / ".packages" / digest[7:] / package["name"]
+    candidate = immutable if immutable.exists() else root / package["name"]
+    current = candidate
+    while current != root:
+        if current.is_symlink():
+            raise ValueError("plugin package symlink rejected")
+        current = current.parent
+    if not candidate.resolve(strict=True).is_relative_to(root):
+        raise ValueError("plugin package escaped catalog")
+    return candidate
+
+
 def load_plugin_interfaces(catalog: dict, root: Path | None = None) -> dict[str, dict]:
     catalog_root = Path(settings.PLUGIN_CATALOG_ROOT) if root is None else root
     interfaces = {}
     for package in catalog["packages"]:
-        path = (
-            catalog_root
-            / package["name"]
-            / ".centaeris-plugin"
-            / "plugin.json"
-        )
+        path = plugin_package_root(package, catalog_root) / ".centaeris-plugin" / "plugin.json"
         try:
             manifest = json.loads(_read_plugin_metadata(path, MAX_PLUGIN_METADATA_BYTES).decode("utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -113,7 +126,7 @@ def load_plugin_interfaces(catalog: dict, root: Path | None = None) -> dict[str,
 def _verified_mcp_documents(package: dict) -> list[tuple[dict, dict]]:
     """Read management-only credential identities, not executable tool contracts."""
     root = Path(settings.PLUGIN_CATALOG_ROOT).resolve(strict=True)
-    package_root = root / package["name"]
+    package_root = plugin_package_root(package, root)
     documents = []
     remaining_bytes = MAX_PLUGIN_METADATA_BYTES
     for resource in package["mcpServers"]:
@@ -179,7 +192,8 @@ def load_plugin_connector_resources(package: dict) -> list[dict]:
 
 
 def plugin_activation_for_workspace(workspace) -> dict:
-    catalog = load_plugin_catalog()
+    from .workspace_plugins import workspace_plugin_catalog
+    catalog = workspace_plugin_catalog(workspace)
     enabled = set(
         workspace.pluginEnablements.values_list("pluginName", flat=True)
     )

@@ -104,7 +104,13 @@ pub(crate) fn verified_plugin_package_roots_at(
         activation
             .packages
             .iter()
-            .map(|package| package_root(catalog_root.as_path(), package.name.as_str()))
+            .map(|package| {
+                package_root(
+                    catalog_root.as_path(),
+                    package.name.as_str(),
+                    package.package_digest.as_str(),
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?
     };
     let actual = build_plugin_activation_snapshot(package_roots.as_slice())?;
@@ -114,14 +120,50 @@ pub(crate) fn verified_plugin_package_roots_at(
     Ok(package_roots)
 }
 
-fn package_root(catalog_root: &Path, package_name: &str) -> Result<PathBuf, String> {
-    let root = catalog_root
-        .join(package_name)
-        .canonicalize()
-        .map_err(|error| {
-            format!("canonicalize activated Plugin package failed {package_name}: {error}")
-        })?;
-    if root.parent() != Some(catalog_root) {
+fn package_root(
+    catalog_root: &Path,
+    package_name: &str,
+    package_digest: &str,
+) -> Result<PathBuf, String> {
+    // The activation is already validated. Tenant packages use their immutable
+    // digest; the released platform layout remains the explicit shared source.
+    let digest = package_digest
+        .strip_prefix("sha256:")
+        .ok_or("plugin_package_digest_invalid")?;
+    let immutable = catalog_root
+        .join(".packages")
+        .join(digest)
+        .join(package_name);
+    for path in [
+        catalog_root.join(".packages"),
+        catalog_root.join(".packages").join(digest),
+        immutable.clone(),
+    ] {
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err("plugin_package_symlink_rejected".into())
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("inspect Plugin package failed: {error}")),
+        }
+    }
+    let candidate = if immutable.exists() {
+        immutable
+    } else {
+        catalog_root.join(package_name)
+    };
+    let root = candidate.canonicalize().map_err(|error| {
+        format!("canonicalize activated Plugin package failed {package_name}: {error}")
+    })?;
+    if !root.starts_with(catalog_root)
+        || (root.parent() != Some(catalog_root)
+            && root
+                != catalog_root
+                    .join(".packages")
+                    .join(digest)
+                    .join(package_name))
+    {
         return Err(format!(
             "activated Plugin package escaped catalog: {package_name}"
         ));
@@ -199,6 +241,32 @@ mod tests {
         let index = SkillIndex::load(config).expect("skill index");
         assert_eq!(index.catalog_items().len(), 1);
         assert_eq!(index.catalog_items()[0].name, "memory");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn immutable_package_digest_resolves_independent_workspace_versions() {
+        let root = temp_root();
+        let catalog = root.join("plugins");
+        fs::create_dir_all(&catalog).unwrap();
+        let staged = root.join("candidate");
+        write_package(&staged, "Workspace private skill bytes.");
+        let activation = build_plugin_activation_snapshot(std::slice::from_ref(&staged)).unwrap();
+        let hash = activation.packages[0]
+            .package_digest
+            .strip_prefix("sha256:")
+            .unwrap();
+        let immutable = catalog.join(".packages").join(hash).join("banana");
+        fs::create_dir_all(immutable.parent().unwrap()).unwrap();
+        fs::rename(&staged, &immutable).unwrap();
+        write_package(&catalog.join("banana"), "Platform shared skill bytes.");
+        let roots = verified_plugin_package_roots_at(&activation, &catalog).unwrap();
+        assert_eq!(roots, vec![immutable.canonicalize().unwrap()]);
+        fs::write(immutable.join("skills/banana/SKILL.md"), skill("tampered")).unwrap();
+        assert_eq!(
+            verified_plugin_package_roots_at(&activation, &catalog).unwrap_err(),
+            "plugin_activation_package_mismatch"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

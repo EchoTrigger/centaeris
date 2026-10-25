@@ -44,7 +44,7 @@ pub(super) fn create_body_with_proxy_environment(
     if let centaeris_core::execution::EnvironmentTaskOwner::AgentRun { run_id } = &owner {
         labels["centaeris.agent_run_id"] = serde_json::json!(run_id);
     }
-    let mut mounts=expected.plugin_mounts.iter().map(|mount|serde_json::json!({"Type":"volume","Source":expected.plugin_volume_name,"Target":mount.destination,"ReadOnly":true,"VolumeOptions":{"Subpath":mount.package_name}})).collect::<Vec<_>>();
+    let mut mounts=expected.plugin_mounts.iter().map(|mount|serde_json::json!({"Type":"volume","Source":expected.plugin_volume_name,"Target":mount.destination,"ReadOnly":true,"VolumeOptions":{"Subpath":mount.source_subpath}})).collect::<Vec<_>>();
     mounts.push(serde_json::json!({"Type":"bind","Source":helper_path,"Target":HELPER_DESTINATION,"ReadOnly":true}));
     let mut body = serde_json::json!({
         "Image":profile.image_digest, "Labels":labels, "User":profile.user,
@@ -103,6 +103,92 @@ mod tests {
                 storage_bytes: 10 * 1024 * 1024 * 1024,
             },
         }
+    }
+
+    #[test]
+    fn private_package_versions_mount_exact_digest_and_refuse_existing_version_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let mut versions = Vec::new();
+        for version in ["1.0.0", "2.0.0"] {
+            let staged = root.path().join(version);
+            fs::create_dir_all(staged.join(".centaeris-plugin")).unwrap();
+            fs::write(
+                staged.join(".centaeris-plugin/plugin.json"),
+                serde_json::json!({"name":"banana","version":version,"paths":{}}).to_string(),
+            )
+            .unwrap();
+            let activation = centaeris_core::extension::build_plugin_activation_snapshot(
+                std::slice::from_ref(&staged),
+            )
+            .unwrap();
+            let hash = activation.packages[0]
+                .package_digest
+                .strip_prefix("sha256:")
+                .unwrap();
+            let pinned = root.path().join(".packages").join(hash).join("banana");
+            fs::create_dir_all(pinned.parent().unwrap()).unwrap();
+            fs::rename(staged, &pinned).unwrap();
+            let subpath = format!(".packages/{hash}/banana");
+            versions.push((activation, subpath));
+        }
+        let old_mounts = super::super::plugin_mounts_at(&versions[0].0, root.path()).unwrap();
+        let new_mounts = super::super::plugin_mounts_at(&versions[1].0, root.path()).unwrap();
+        let mut runner = super::super::tests::retained_test_runner();
+        let profile = profile();
+        runner
+            .image_digest
+            .clone_from(&profile.legacy().unwrap().image_digest);
+        runner.resources = profile.legacy().unwrap().resources.sandbox_resources();
+        runner.network = profile.network();
+        runner.plugin_mounts = old_mounts.clone();
+        let body = create_body_with_proxy_environment(
+            &runner.container_expectation(),
+            &profile,
+            "/srv/helpers/execution_agent",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            body["HostConfig"]["Mounts"][0]["VolumeOptions"]["Subpath"],
+            versions[0].1
+        );
+        assert_eq!(
+            body["HostConfig"]["Mounts"][0]["Target"],
+            "/opt/centaeris/plugins/banana"
+        );
+        assert_eq!(body["HostConfig"]["Mounts"][0]["ReadOnly"], true);
+        let observed: Vec<super::super::ContainerMountFacts> =
+            serde_json::from_value(body["HostConfig"]["Mounts"].clone()).unwrap();
+        super::super::require_plugin_mounts_match(
+            &observed,
+            &runner.plugin_volume_name,
+            &old_mounts,
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::require_plugin_mounts_match(
+                &observed,
+                &runner.plugin_volume_name,
+                &new_mounts
+            )
+            .unwrap_err(),
+            "environment_plugin_version_mismatch"
+        );
+        // A fresh environment uses V2. The existing V1 request and its bytes are
+        // unchanged; rejection never invokes replacement or container mutation.
+        runner.plugin_mounts = new_mounts;
+        let fresh = create_body_with_proxy_environment(
+            &runner.container_expectation(),
+            &profile,
+            "/srv/helpers/execution_agent",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            fresh["HostConfig"]["Mounts"][0]["VolumeOptions"]["Subpath"],
+            versions[1].1
+        );
+        assert!(root.path().join(&versions[0].1).is_dir());
     }
 
     #[test]

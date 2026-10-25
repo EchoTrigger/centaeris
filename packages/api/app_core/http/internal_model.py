@@ -183,6 +183,9 @@ def _validate_model_run(body):
             status=409,
         )
     run = authorization.agent_run
+    from app_core.workspace_resources import models_for_workspace
+    if not models_for_workspace(run.workspace_id).filter(pk=run.modelConfig_id).exists():
+        return JsonResponse({"error":"model_workspace_rejected"},status=409)
     job_id = f"agent_run.lifecycle:{run.pk}"
     with connection.cursor() as cursor:
         cursor.execute("SELECT 1 FROM runtime.runtime_jobs WHERE job_id=%s "

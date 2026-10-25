@@ -37,6 +37,7 @@ from app_core.models import (
     McpBearerCredential,
     Workspace,
     WorkspacePluginEnablement,
+    WorkspacePluginInstallation,
     validate_thinking_mode,
 )
 from app_core.plugin_catalog import (
@@ -113,6 +114,9 @@ from .serialization import (
     serialize_workspace,
 )
 
+
+from app_core.workspace_plugins import workspace_plugin_catalog
+from app_core.workspace_resources import models_for_workspace
 
 logger = logging.getLogger(__name__)
 router = Router(tags=["workspaces-sessions"], by_alias=True)
@@ -259,11 +263,11 @@ def list_workspaces(request):
     response={200: WorkspacePluginsEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def list_workspace_plugins(request, workspace_id: str):
-    workspace = _workspace_for_user(request.user, workspace_id)
+    workspace = _plugin_workspace_for_user(request.user, workspace_id)
     if workspace is None:
         return Status(404, {"error": "workspace_not_found"})
     try:
-        catalog = load_plugin_catalog(require_packages=False)
+        catalog = workspace_plugin_catalog(workspace, require_packages=False)
     except ValueError:
         logger.exception("Release Plugin catalog is invalid")
         return Status(503, {"error": "plugin_catalog_invalid"})
@@ -275,7 +279,7 @@ def list_workspace_plugins(request, workspace_id: str):
         return Status(409, {"error": "workspace_plugin_enablement_invalid"})
     return {
         "plugins": [
-            _workspace_plugin(package, package["name"] in enabled)
+            _workspace_plugin(package, package["name"] in enabled, workspace=workspace)
             for package in catalog["packages"]
         ]
     }
@@ -287,18 +291,18 @@ def list_workspace_plugins(request, workspace_id: str):
     response={200: WorkspacePluginEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def get_workspace_plugin(request, workspace_id: str, plugin_name: str):
-    workspace = _workspace_for_user(request.user, workspace_id)
+    workspace = _plugin_workspace_for_user(request.user, workspace_id)
     if workspace is None:
         return Status(404, {"error": "workspace_not_found"})
     try:
-        catalog = load_plugin_catalog(require_packages=False)
+        catalog = workspace_plugin_catalog(workspace, require_packages=False)
     except ValueError:
         return Status(503, {"error": "plugin_catalog_invalid"})
     package = next((item for item in catalog["packages"] if item["name"] == plugin_name), None)
     if package is None:
         return Status(404, {"error": "plugin_not_found"})
     enabled = workspace.pluginEnablements.filter(pluginName=plugin_name).exists()
-    return {"plugin": _workspace_plugin(package, enabled, inspect=True)}
+    return {"plugin": _workspace_plugin(package, enabled, inspect=True, workspace=workspace)}
 
 
 @router.patch(
@@ -306,13 +310,14 @@ def get_workspace_plugin(request, workspace_id: str, plugin_name: str):
     auth=session_auth,
     response={200: WorkspacePluginEnvelope} | COMMON_ERROR_RESPONSES,
 )
+@transaction.atomic
 def set_workspace_plugin_enabled(
     request,
     workspace_id: str,
     plugin_name: str,
     payload: PluginEnablementRequest,
 ):
-    workspace = _workspace_for_user(
+    workspace = _plugin_workspace_for_user(
         request.user,
         workspace_id,
         allowed_roles=WORKSPACE_ADMIN_ROLES,
@@ -320,7 +325,7 @@ def set_workspace_plugin_enabled(
     if workspace is None:
         return Status(404, {"error": "workspace_not_found"})
     try:
-        catalog = load_plugin_catalog(require_packages=False)
+        catalog = workspace_plugin_catalog(workspace, require_packages=False)
         package = next(
             (
                 item
@@ -334,13 +339,13 @@ def set_workspace_plugin_enabled(
         return Status(503, {"error": "plugin_catalog_invalid"})
     if package is None:
         return Status(404, {"error": "plugin_not_found"})
-    plugin = _workspace_plugin(package, payload.enabled, inspect=payload.enabled)
+    plugin = _workspace_plugin(package, payload.enabled, inspect=payload.enabled, workspace=workspace)
     if payload.enabled and plugin["errors"]:
         return Status(409, {"error": "workspace_plugin_unavailable"})
     with plugin_lifecycle_lock():
         try:
             current = next((
-                item for item in load_plugin_catalog(require_packages=False)["packages"]
+                item for item in workspace_plugin_catalog(workspace, require_packages=False)["packages"]
                 if item["name"] == plugin_name
             ), None)
         except ValueError:
@@ -1268,7 +1273,7 @@ def create_session_message(
     except HostedOperationError as error:
         return Status(error.status, {"error": error.code})
     try:
-        model = ModelConfig.objects.get(
+        model = models_for_workspace(workspace_id).get(
             id=payload.model_config_ref,
             enabled=True,
             isCurrent=True,
@@ -1652,6 +1657,19 @@ def cancel_agent_run(request, session_id: str, agent_run_id: str):
     )
 
 
+def _plugin_workspace_for_user(user, workspace_id, *, allowed_roles=None):
+    # This explicit resource boundary does not alter generic membership lookup.
+    if allowed_roles == WORKSPACE_ADMIN_ROLES:
+        from app_core.workspace_resources import workspace_resource_admin
+        try:
+            return workspace_resource_admin(user, workspace_id)
+        except PermissionError:
+            return None
+    if user.is_authenticated and user.is_superuser:
+        return Workspace.objects.filter(pk=workspace_id, status="active").first()
+    return _workspace_for_user(user, workspace_id)
+
+
 def _workspace_for_user(
     user,
     workspace_id: str,
@@ -1732,7 +1750,7 @@ def _workspace_hooks(catalog: dict) -> dict[str, list[dict]]:
     return by_name
 
 
-def _workspace_plugin(package: dict, enabled: bool, *, inspect: bool = False) -> dict:
+def _workspace_plugin(package: dict, enabled: bool, *, inspect: bool = False, workspace=None) -> dict:
     catalog = {
         "schema": "plugin_activation_snapshot_v1",
         "digest": activation_digest([package]),
@@ -1754,7 +1772,7 @@ def _workspace_plugin(package: dict, enabled: bool, *, inspect: bool = False) ->
             logger.exception("Plugin credential metadata is unavailable: %s", package["name"])
             errors.append("plugin_credentials_unavailable")
     if inspect and "plugin_manifest_invalid" not in errors:
-        configured = set(McpBearerCredential.objects.values_list("plugin_name", "credential_ref"))
+        configured = set(McpBearerCredential.objects.filter(Q(workspace=workspace)|Q(workspace__isnull=True)).values_list("plugin_name", "credential_ref"))
         for field, contribution, loader, code in (
             (
                 "mcpServers",
@@ -1780,6 +1798,8 @@ def _workspace_plugin(package: dict, enabled: bool, *, inspect: bool = False) ->
             except (OSError, RuntimeError, ValueError, KeyError, TypeError):
                 logger.exception("Plugin inspection failed: %s %s", package["name"], field)
                 errors.append(code)
+    local = workspace is not None and WorkspacePluginInstallation.objects.filter(workspace=workspace,plugin_name=package["name"]).exists()
+    plugin.update(scope="workspace" if local else "platform",writable=local)
     return plugin
 
 

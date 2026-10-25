@@ -487,7 +487,7 @@ impl crate::http::agent_runs::retained_cleanup::RetainedCleanupHost
         }
         validate_plugin_activation_snapshot(&origin.plugin_activation)?;
         let plugin_volume_name = docker_volume_name_from_environment(PLUGIN_VOLUME_NAME_ENV)?;
-        let mounts = plugin_mounts(&origin.plugin_activation);
+        let mounts = plugin_mounts(&origin.plugin_activation)?;
         let name = container_name(&self.allocation.allocation_execution_id);
         let helper = environment_container::helper_path()?;
         let expected = ContainerExpectation {
