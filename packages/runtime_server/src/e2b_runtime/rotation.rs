@@ -10,6 +10,9 @@ use crate::postgres_store::provider_operations::retained::{
 };
 use idle::policy::{IdleEnvironmentVersion, IdlePausePolicy};
 
+mod lifecycle;
+pub(crate) use lifecycle::RotationTask;
+
 const SCAN_INTERVAL: Duration = Duration::from_millis(250);
 
 struct RotationState {
@@ -77,10 +80,20 @@ impl RotationState {
         candidates: &[idle::RotationCandidate],
         now_ms: i64,
         config: &str,
+        resume_capacity_available: bool,
     ) -> Result<Option<ProviderEnvironmentPowerRequest>, String> {
         let mut choices = Vec::new();
         for candidate in candidates {
             if let Some(request) = self.choose(candidate, now_ms, config)? {
+                let existing = candidate
+                    .latest
+                    .as_ref()
+                    .is_some_and(|previous| previous.request.operation_id == request.operation_id);
+                // This snapshot only suppresses new, certainly full-budget attempts.
+                // A prepared reservation must still advance or observe cancellation.
+                if request.action == Action::Resume && !existing && !resume_capacity_available {
+                    continue;
+                }
                 choices.push(request);
             }
         }
@@ -107,11 +120,13 @@ impl RotationState {
             &provider.config.provider_config_digest,
             &digest,
             self.cursor.as_deref(),
+            provider.config.running_limit,
         )?;
         let chosen = self.choose_page(
             &page.candidates,
             page.now_ms,
             &provider.config.provider_config_digest,
+            page.resume_capacity_available,
         )?;
         self.cursor = page.next;
         if self.cursor.is_none() {
@@ -137,37 +152,19 @@ impl RotationState {
     }
 }
 
-pub(crate) async fn run(provider: Arc<E2bRuntime>, registry: Arc<E2bRunRegistry>) {
-    let Some(timeout) = provider.config.idle_pause_timeout else {
-        return;
-    };
-    let Ok(mut state) = RotationState::new(timeout) else {
-        return;
-    };
-    let mut interval = tokio::time::interval(SCAN_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        interval.tick().await;
-        let current = provider.clone();
-        let slots = registry.clone();
-        match tokio::task::spawn_blocking(move || {
-            let result = state.tick(&current, &slots);
-            (state, result)
-        })
-        .await
-        {
-            Ok((next, result)) => {
-                state = next;
-                if result.is_err() {
-                    eprintln!("e2b_rotation_observation_unavailable");
-                }
-            }
-            Err(_) => {
-                eprintln!("e2b_rotation_worker_unavailable");
-                return;
-            }
-        }
-    }
+pub(crate) fn start(
+    provider: Arc<E2bRuntime>,
+    registry: Arc<E2bRunRegistry>,
+    runtime: &tokio::runtime::Runtime,
+) -> Option<RotationTask> {
+    let timeout = provider.config.idle_pause_timeout?;
+    let state = RotationState::new(timeout).ok()?;
+    Some(RotationTask::spawn(
+        runtime,
+        state,
+        move |state| state.tick(&provider, &registry),
+        SCAN_INTERVAL,
+    ))
 }
 
 #[cfg(test)]
@@ -295,7 +292,7 @@ mod fairness_tests {
         let mut running = candidate();
         running.environment_id = "z-idle-running".into();
         let first = state
-            .choose_page(&[waiting, running], 1000, "config")
+            .choose_page(&[waiting, running], 1000, "config", true)
             .unwrap()
             .unwrap();
         assert_eq!(first.action, Action::Resume);
@@ -311,7 +308,7 @@ mod fairness_tests {
         let mut running = candidate();
         running.environment_id = "z-idle-running".into();
         let ready = state
-            .choose_page(&[waiting, running], 1100, "config")
+            .choose_page(&[waiting, running], 1100, "config", true)
             .unwrap()
             .unwrap();
         assert_eq!(ready.action, Action::Pause);
@@ -328,18 +325,72 @@ mod fairness_tests {
             })
             .collect();
         assert!(state
-            .choose_page(&candidates, 1000, "config")
+            .choose_page(&candidates, 1000, "config", true)
             .unwrap()
             .is_none());
         let first = state
-            .choose_page(&candidates, 1001, "config")
+            .choose_page(&candidates, 1001, "config", true)
             .unwrap()
             .unwrap();
         let second = state
-            .choose_page(&candidates, 1002, "config")
+            .choose_page(&candidates, 1002, "config", true)
             .unwrap()
             .unwrap();
         assert_eq!(first.environment_id, "environment-000");
         assert_eq!(second.environment_id, "environment-001");
+    }
+}
+
+#[cfg(test)]
+mod capacity_selection_tests {
+    use super::tests::{candidate, previous};
+    use super::*;
+
+    #[test]
+    fn full_running_budget_skips_new_resume_until_capacity_returns() {
+        let mut state = RotationState::new(Duration::from_millis(100)).unwrap();
+        let mut waiting = candidate();
+        waiting.has_demand = true;
+        waiting.latest = Some(previous(
+            &waiting,
+            Action::Pause,
+            Dispatch::Dispatched,
+            true,
+        ));
+        for now in (1000..5000).step_by(250) {
+            assert!(
+                state
+                    .choose_page(std::slice::from_ref(&waiting), now, "config", false)
+                    .unwrap()
+                    .is_none(),
+                "a full budget must not prepare another fresh resume on every scan"
+            );
+        }
+        let chosen = state
+            .choose_page(std::slice::from_ref(&waiting), 5000, "config", true)
+            .unwrap()
+            .expect("capacity release must admit the waiting demand");
+        assert_eq!(chosen.action, Action::Resume);
+        assert_eq!(
+            chosen.predecessor_operation_id.as_deref(),
+            Some("power-current")
+        );
+    }
+
+    #[test]
+    fn full_budget_still_revisits_prepared_resume_for_cancellation() {
+        let mut state = RotationState::new(Duration::from_millis(100)).unwrap();
+        let mut waiting = candidate();
+        waiting.latest = Some(previous(
+            &waiting,
+            Action::Resume,
+            Dispatch::Prepared,
+            false,
+        ));
+        let chosen = state
+            .choose_page(&[waiting], 1000, "config", false)
+            .unwrap()
+            .expect("the existing reservation must still be supervised");
+        assert_eq!(chosen.operation_id, "power-current");
     }
 }

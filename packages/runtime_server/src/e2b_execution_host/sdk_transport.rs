@@ -511,7 +511,9 @@ fn call(
         AdapterOutcome::NotDispatched => {
             Err(E2bHostError::NotDispatched("e2b_adapter_not_dispatched"))
         }
-        AdapterOutcome::Unknown => Err(E2bHostError::Unknown("e2b_adapter_result_unknown")),
+        AdapterOutcome::Failed | AdapterOutcome::Unknown => {
+            Err(E2bHostError::Unknown("e2b_adapter_result_unknown"))
+        }
     }
 }
 fn seconds(timeout: Duration) -> Result<u64, E2bHostError> {

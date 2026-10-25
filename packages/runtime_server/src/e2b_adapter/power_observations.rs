@@ -2,8 +2,140 @@
 use crate::observations::power::PowerObservation;
 use std::io::Read;
 
-pub(super) fn start_reader(
+use serde::Deserialize;
+use serde_json::Value;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
+const MAX_BOUND_REQUESTS: usize = 64;
+const MAX_POWER_RECORDS_PER_REQUEST: usize = 64;
+
+struct Binding {
+    request: String,
+    operation: String,
     observation: Option<PowerObservation>,
+    records: usize,
+}
+#[derive(Default)]
+struct BindingState {
+    requests: VecDeque<Binding>,
+    startup_records: usize,
+}
+/// A finite history permits late stderr to retain its original operation.
+/// Observation locks never wait on a provider caller or a diagnostic reader.
+pub(super) struct PowerBindings {
+    initial: Option<PowerObservation>,
+    state: Mutex<BindingState>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TimingIdentity {
+    schema: String,
+    stage: String,
+    request_id: Value,
+    operation: Value,
+    value: f64,
+    outcome: String,
+}
+impl PowerBindings {
+    pub(super) fn new(initial: Option<PowerObservation>) -> Self {
+        Self {
+            initial,
+            state: Mutex::new(BindingState::default()),
+        }
+    }
+    pub(super) fn bind_default(&self, request: &str, operation: &str) {
+        if let Some(observation) = &self.initial {
+            self.bind(request, operation, observation.clone());
+        }
+    }
+    pub(super) fn bind(&self, request: &str, operation: &str, observation: PowerObservation) {
+        if !observation.is_enabled()
+            || request.is_empty()
+            || request.len() > 128
+            || !matches!(operation, "pause" | "connect" | "capabilities")
+        {
+            return;
+        }
+        let Ok(mut state) = self.state.try_lock() else {
+            return;
+        };
+        if let Some(previous) = state
+            .requests
+            .iter_mut()
+            .find(|entry| entry.request == request)
+        {
+            // A repeated wire ID makes late receipt ownership ambiguous. Keep
+            // the tombstone rather than assigning either receipt to a new scope.
+            previous.observation = None;
+            return;
+        }
+        if state.requests.len() == MAX_BOUND_REQUESTS {
+            state.requests.pop_front();
+        }
+        state.requests.push_back(Binding {
+            request: request.into(),
+            operation: operation.into(),
+            observation: Some(observation),
+            records: 0,
+        });
+    }
+    pub(super) fn forward(&self, line: &[u8]) {
+        if line.len() > 2048 {
+            return;
+        }
+        let Ok(timing) = serde_json::from_slice::<TimingIdentity>(line) else {
+            return;
+        };
+        if timing.schema != "runtime.e2b.power_timing.v1"
+            || !timing.value.is_finite()
+            || timing.value < 0.0
+            || !matches!(timing.outcome.as_str(), "ok" | "error")
+        {
+            return;
+        }
+        let observation = {
+            let Ok(mut state) = self.state.try_lock() else {
+                return;
+            };
+            if timing.request_id.is_null()
+                && timing.operation.is_null()
+                && matches!(timing.stage.as_str(), "sdkImport" | "sdkClientSetup")
+            {
+                if state.startup_records == MAX_POWER_RECORDS_PER_REQUEST {
+                    return;
+                }
+                state.startup_records += 1;
+                self.initial.clone()
+            } else {
+                let (Some(request), Some(operation)) =
+                    (timing.request_id.as_str(), timing.operation.as_str())
+                else {
+                    return;
+                };
+                let Some(binding) = state
+                    .requests
+                    .iter_mut()
+                    .find(|entry| entry.request == request && entry.operation == operation)
+                else {
+                    return;
+                };
+                if binding.records == MAX_POWER_RECORDS_PER_REQUEST {
+                    return;
+                }
+                binding.records += 1;
+                binding.observation.clone()
+            }
+        };
+        // No IO, logger lock or formatting occurs while holding the bindings.
+        if let Some(observation) = observation {
+            observation.forward_sdk_line(line);
+        }
+    }
+}
+
+pub(super) fn start_reader(
+    bindings: Arc<PowerBindings>,
     context: crate::observations::ContextSnapshot,
 ) -> Option<std::sync::mpsc::SyncSender<std::process::ChildStderr>> {
     let (send, receive) = std::sync::mpsc::sync_channel(1);
@@ -12,7 +144,7 @@ pub(super) fn start_reader(
         .spawn(move || {
             let _context = crate::observations::Context::enter_if_absent(&context);
             if let Ok(reader) = receive.recv() {
-                drain_optional(reader, observation.as_ref());
+                drain_optional(reader, &bindings);
             }
         })
         .ok()
@@ -20,13 +152,14 @@ pub(super) fn start_reader(
 }
 #[cfg(test)]
 pub(super) fn drain(reader: impl Read, observation: &PowerObservation) {
-    drain_optional(reader, Some(observation));
+    let bindings = PowerBindings::new(Some(observation.clone()));
+    bindings.bind("request-1", "pause", observation.clone());
+    drain_optional(reader, &bindings);
 }
-fn drain_optional(mut reader: impl Read, observation: Option<&PowerObservation>) {
+fn drain_optional(mut reader: impl Read, bindings: &PowerBindings) {
     let mut buffer = [0u8; 4096];
     let mut line = Vec::with_capacity(2048);
     let mut oversized = false;
-    let mut power_candidates = 0usize;
     let mut sdk_records = 0u64;
     let mut sdk_dropped = 0u64;
     loop {
@@ -39,12 +172,7 @@ fn drain_optional(mut reader: impl Read, observation: Option<&PowerObservation>)
         for &byte in &buffer[..count] {
             if byte == b'\n' {
                 if !oversized {
-                    if power_candidates < 64 {
-                        if let Some(observation) = observation {
-                            observation.forward_sdk_line(&line);
-                        }
-                        power_candidates += 1;
-                    }
+                    bindings.forward(&line);
                     if crate::observations::sdk::forward_sdk_line(&line, sdk_records < 2048) {
                         if sdk_records < 2048 {
                             sdk_records += 1;
@@ -74,6 +202,137 @@ mod tests {
     use crate::observations::power::capture_power_observations;
     use serde_json::json;
     use std::io::Cursor;
+
+    #[test]
+    fn reused_power_requests_keep_their_exact_operation_and_late_receipt_binding() {
+        let (_, records) = capture_power_observations(|| {
+            let first = PowerObservation::new("power-first", "pause");
+            let bindings = PowerBindings::new(Some(first.clone()));
+            bindings.bind("request-first", "pause", first);
+            bindings.bind(
+                "request-next",
+                "pause",
+                PowerObservation::new("power-next", "pause"),
+            );
+            let line = |request: &str| {
+                json!({"schema":"runtime.e2b.power_timing.v1", "stage":"sdkPause",
+                "value":1.0,"outcome":"ok","requestId":request,"operation":"pause"})
+                .to_string()
+            };
+            bindings.forward(line("request-next").as_bytes());
+            bindings.forward(line("request-first").as_bytes());
+            bindings.forward(line("unbound-request").as_bytes());
+        });
+        assert_eq!(
+            records.len(),
+            2,
+            "unbound SDK lines cannot gain an operation identity"
+        );
+        assert_eq!(records[0]["operationId"], "power-next");
+        assert_eq!(records[1]["operationId"], "power-first");
+    }
+
+    fn power_line(request: &str, operation: &str, stage: &str) -> Vec<u8> {
+        serde_json::to_vec(
+            &json!({"schema":"runtime.e2b.power_timing.v1", "stage":stage,
+            "value":1.0,"outcome":"ok","requestId":request,"operation":operation}),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn request_binding_rejects_wrong_operation_and_ambiguous_reused_ids() {
+        let (_, records) = capture_power_observations(|| {
+            let bindings = PowerBindings::new(None);
+            bindings.bind(
+                "unique",
+                "pause",
+                PowerObservation::new("pause-owner", "pause"),
+            );
+            bindings.forward(&power_line("unique", "connect", "sdkConnect"));
+            bindings.forward(&power_line("unique", "pause", "sdkPause"));
+            bindings.bind(
+                "unique",
+                "pause",
+                PowerObservation::new("new-owner", "pause"),
+            );
+            bindings.forward(&power_line("unique", "pause", "sdkPause"));
+        });
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["operationId"], "pause-owner");
+    }
+
+    #[test]
+    fn startup_is_owned_once_and_request_limits_do_not_exhaust_a_reused_process() {
+        let (_, records) = capture_power_observations(|| {
+            let bindings =
+                PowerBindings::new(Some(PowerObservation::new("startup-owner", "pause")));
+            let startup = json!({"schema":"runtime.e2b.power_timing.v1", "stage":"sdkImport",
+                "value":2.0,"outcome":"ok","requestId":null,"operation":null})
+            .to_string();
+            for index in 0..70 {
+                let id = format!("request-{index}");
+                bindings.bind(
+                    &id,
+                    "pause",
+                    PowerObservation::new(&format!("power-{index}"), "pause"),
+                );
+                bindings.forward(&power_line(&id, "pause", "sdkPause"));
+            }
+            bindings.forward(startup.as_bytes());
+            // An evicted binding is unavailable, not rebound to the latest owner.
+            bindings.forward(&power_line("request-0", "pause", "sdkPause"));
+        });
+        assert_eq!(records.len(), 71);
+        assert_eq!(records[69]["operationId"], "power-69");
+        assert_eq!(records[70]["operationId"], "startup-owner");
+        assert_eq!(records[70]["metric"], "sdkImportElapsedMs");
+    }
+
+    #[test]
+    fn per_request_diagnostic_budget_is_independent() {
+        let (_, records) = capture_power_observations(|| {
+            let bindings = PowerBindings::new(None);
+            for id in ["first", "second"] {
+                bindings.bind(id, "pause", PowerObservation::new(id, "pause"));
+                for _ in 0..100 {
+                    bindings.forward(&power_line(id, "pause", "sdkPause"));
+                }
+            }
+        });
+        assert_eq!(records.len(), 128);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|row| row["operationId"] == "second")
+                .count(),
+            64
+        );
+    }
+
+    #[test]
+    fn diagnostic_contention_cannot_block_registration_or_business_progress() {
+        let (_, records) = capture_power_observations(|| {
+            let bindings = PowerBindings::new(None);
+            let held = bindings.state.lock().unwrap();
+            bindings.bind(
+                "blocked",
+                "pause",
+                PowerObservation::new("not-bound", "pause"),
+            );
+            bindings.forward(&power_line("blocked", "pause", "sdkPause"));
+            drop(held);
+            bindings.forward(&power_line("blocked", "pause", "sdkPause"));
+            bindings.bind(
+                "next",
+                "pause",
+                PowerObservation::new("next-owner", "pause"),
+            );
+            bindings.forward(&power_line("next", "pause", "sdkPause"));
+        });
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["operationId"], "next-owner");
+    }
 
     fn valid_line() -> String {
         json!({"schema":"runtime.e2b.power_timing.v1","stage":"sdkPause","value":5.0,

@@ -23,6 +23,11 @@ pub(crate) enum NativeEntryKind {
     Directory,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum NativeFilesystemFailureCode {
+    FileNotFound,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -30,6 +35,9 @@ pub(crate) enum NativeEntryKind {
     deny_unknown_fields
 )]
 pub(crate) enum DirectOutput {
+    FilesystemFailed {
+        code: NativeFilesystemFailureCode,
+    },
     Command {
         exit_code: i32,
         stdout_bytes_base64: String,
@@ -128,6 +136,7 @@ impl DirectCompletion {
             Ok(raw)
         };
         match &self.output {
+            DirectOutput::FilesystemFailed { .. } => {}
             DirectOutput::Command {
                 stdout_bytes_base64,
                 stdout_byte_length,
@@ -212,6 +221,34 @@ fn expected_dispatch(auth: &ProviderMaintenanceAuthorization) -> Result<Value, S
         "authorizationDigest":b.digest()?,"controllerEpoch":b.controller_epoch,"controllerLeaseDigest":b.controller_lease_digest}),
     )
 }
+
+fn require_failure_request(
+    tx: &mut postgres::Transaction<'_>,
+    completion: &DirectCompletion,
+) -> Result<(), String> {
+    if !matches!(completion.output, DirectOutput::FilesystemFailed { .. }) {
+        return Ok(());
+    }
+    let request: Value = tx.query_opt(
+        "SELECT request::text FROM public.app_core_environmentmaintenanceoperation WHERE operation_id=$1 FOR SHARE",
+        &[&completion.operation_id],
+    ).map_err(|_| "provider_direct_request_unavailable")?
+        .ok_or("provider_direct_request_missing")?
+        .get::<_, String>(0)
+        .parse().map_err(|_| "provider_direct_request_invalid")?;
+    if request.get("program").is_some()
+        || !matches!(
+            request
+                .get("request")
+                .and_then(|value| value.get("kind"))
+                .and_then(Value::as_str),
+            Some("readFile" | "listDirectory")
+        )
+    {
+        return Err("provider_direct_failure_request_rejected".into());
+    }
+    Ok(())
+}
 fn event(
     tx: &mut postgres::Transaction<'_>,
     id: &str,
@@ -270,6 +307,7 @@ fn completed(
     let completion: DirectCompletion =
         serde_json::from_value(payload).map_err(|_| "provider_direct_completion_invalid")?;
     completion.validate_for(auth)?;
+    require_failure_request(tx, &completion)?;
     Ok(Some(completion))
 }
 fn reject_task_completion(
@@ -345,6 +383,7 @@ impl PostgresRuntimeStore {
             super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
             locked_target(&mut tx, auth, key, configured_digest)?;
             let b = &auth.payload;
+            require_failure_request(&mut tx, completion)?;
             let operation = operation_id(b)?;
             reject_task_completion(&mut tx, operation)?;
             let (at, stored) = event(

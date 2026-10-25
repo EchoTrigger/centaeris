@@ -128,7 +128,20 @@ fn tool_contract(tool_name: &str) -> (&'static str, &'static str, Value, bool) {
         ),
         "bash" => (
             "process.exec",
-            "Run one Bash command in the current working directory. Default to foreground commands; the result returns after the foreground shell exits and inherited stdout/stderr become idle. When the host provides a managed background-task tool, use it for a development server that must continue after this command or Run. Otherwise, background child survival depends on the host: it may terminate descendants when the foreground command exits. Do not background builds, tests, installs, git commands, or one-shot scripts. Background children remain OS/shell-owned: they have no Runtime task, recovery, stop handle, terminal projection, or output reference. The ExecutionHost always enforces its configured sandbox policy. The default timeout is 60000 ms; set timeout_ms explicitly for longer foreground commands, up to 3600000 ms.",
+            concat!(
+                "Run one Bash command in the current working directory. Default to foreground commands; ",
+                "the result returns after the foreground shell exits and inherited stdout/stderr become idle. ",
+                "When the host provides a managed background-task tool, use it for a development server that must continue after this command or Run. ",
+                "Otherwise, background child survival depends on the host: it may terminate descendants when the foreground command exits. ",
+                "If the host supports retained services, redirect stdin, stdout and stderr for the entire background command or group. ",
+                "A background compound command such as `cd directory && server &` can keep the tool's output pipes open even after the foreground shell exits. ",
+                "Example: set WORKSPACE to the working directory, SERVICE to the service executable and SERVICE_LOG to its log path, then run:\n",
+                "```bash\n(cd \"$WORKSPACE\" && exec nohup \"$SERVICE\") </dev/null >\"$SERVICE_LOG\" 2>&1 &\n```\n",
+                "Check readiness in a separate foreground command. Do not background builds, tests, installs, git commands, or one-shot scripts. ",
+                "Background children remain OS/shell-owned: they have no Runtime task, recovery, stop handle, terminal projection, or output reference. ",
+                "The ExecutionHost always enforces its configured sandbox policy. The default timeout is 60000 ms; ",
+                "set timeout_ms explicitly for longer foreground commands, up to 3600000 ms."
+            ),
             json!({
                 "type": "object",
                 "properties": {
@@ -387,3 +400,6 @@ mod tests {
         assert!(bash.summary.contains("default timeout is 60000 ms"));
     }
 }
+
+#[cfg(all(test, unix))]
+mod service_launch_tests;

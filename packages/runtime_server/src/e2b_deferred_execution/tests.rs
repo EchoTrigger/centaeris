@@ -637,11 +637,10 @@ impl ModelClient for ReadThenFinishModel {
             } else {
                 let created = self.creates.load(Ordering::SeqCst);
                 assert!(created <= 1);
-                let result = request
-                    .prepared_prompt
-                    .messages
-                    .iter()
-                    .find(|message| message.tool_call_id.as_deref() == Some("deferred-core-read"));
+                let result =
+                    request.prepared_prompt.messages.iter().find(|message| {
+                        message.tool_call_id.as_deref() == Some("deferred-core-read")
+                    });
                 assert!(
                     result.is_some(),
                     "the dispatched read's outcome must enter the next model context"

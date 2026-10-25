@@ -1,11 +1,12 @@
 //! Independently authorized synchronous native SDK commands/files.
 //! Dispatch responsibility is durable before an SDK callback; no PID is a task.
 use super::*;
-use crate::e2b_adapter::bulk::BulkFileRequest;
+use crate::e2b_adapter::bulk::{BulkFileRequest, BulkTransferError};
 use crate::e2b_execution_host::E2bHostTransport;
 use crate::environment_authorization::provider_maintenance::ProviderMaintenanceAuthorization;
 use crate::postgres_store::provider_maintenance::direct::{
     DirectCompletion, DirectDispatchState, DirectOutput, NativeDirectoryEntry,
+    NativeFilesystemFailureCode,
 };
 use base64::Engine;
 use centaeris_core::execution::ExecutionCommandRequest;
@@ -207,20 +208,28 @@ fn execute_native(
             }
             NativeFileOperation::ReadFile { path, max_bytes } => {
                 let mut bytes = Vec::new();
-                let receipt = process
-                    .download_into(
-                        &BulkFileRequest {
-                            sandbox_id: &binding.sandbox_id,
-                            path,
-                            user: Some(profile.user()),
-                            max_bytes: *max_bytes,
-                            timeout: request_timeout,
-                        },
-                        &mut bytes,
-                    )
-                    .map_err(|_| {
-                        E2bHostError::Unknown("provider_maintenance_file_read_unconfirmed")
-                    })?;
+                let receipt = match process.download_into(
+                    &BulkFileRequest {
+                        sandbox_id: &binding.sandbox_id,
+                        path,
+                        user: Some(profile.user()),
+                        max_bytes: *max_bytes,
+                        timeout: request_timeout,
+                    },
+                    &mut bytes,
+                ) {
+                    Ok(receipt) => receipt,
+                    Err(BulkTransferError::FileNotFound) => {
+                        return Ok(DirectOutput::FilesystemFailed {
+                            code: NativeFilesystemFailureCode::FileNotFound,
+                        })
+                    }
+                    Err(_) => {
+                        return Err(E2bHostError::Unknown(
+                            "provider_maintenance_file_read_unconfirmed",
+                        ))
+                    }
+                };
                 Ok(DirectOutput::FileRead {
                     byte_length: receipt.byte_length,
                     sha256: format!("sha256:{}", receipt.sha256),
@@ -243,6 +252,17 @@ fn execute_native(
                     .map_err(|_| {
                         E2bHostError::Unknown("provider_maintenance_file_list_unconfirmed")
                     })?;
+                if response.outcome == AdapterOutcome::Failed
+                    && response.result.as_ref() == Some(&json!({"sandboxId":binding.sandbox_id}))
+                    && response
+                        .error
+                        .as_ref()
+                        .is_some_and(|error| error.code == "fileNotFound")
+                {
+                    return Ok(DirectOutput::FilesystemFailed {
+                        code: NativeFilesystemFailureCode::FileNotFound,
+                    });
+                }
                 if response.outcome != AdapterOutcome::Succeeded {
                     return Err(E2bHostError::Unknown(
                         "provider_maintenance_file_list_unconfirmed",

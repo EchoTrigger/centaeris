@@ -101,7 +101,8 @@ impl E2bRuntime {
             // The Store commits intent and a fresh dispatch CAS before this callback.
             // Historical ACKs and Unknown replays cannot invalidate a newer Run's
             // context or enter the provider. No creator/successor Job is borrowed.
-            self.store
+            let result = self
+                .store
                 .advance_provider_environment_power_guarded(
                     request,
                     &self.config.provider_config_digest,
@@ -124,9 +125,24 @@ impl E2bRuntime {
                         )
                     },
                 )
-                .map_err(|_| E2bRuntimeError::Unknown("e2b_power_unconfirmed"))
+                .map_err(|_| E2bRuntimeError::Unknown("e2b_power_unconfirmed"));
+            finish_power_lane(lane, result)
         })
     }
+}
+
+// Store success can still represent a dispatched operation whose receipt is unknown.
+fn finish_power_lane(
+    mut lane: cleanup::CleanupLane<'_>,
+    result: Result<ProviderEnvironmentPowerResult, E2bRuntimeError>,
+) -> Result<ProviderEnvironmentPowerResult, E2bRuntimeError> {
+    if result
+        .as_ref()
+        .is_ok_and(|result| result.operation_status == "acknowledged")
+    {
+        lane.allow_reuse();
+    }
+    result
 }
 
 #[derive(Deserialize)]
@@ -213,6 +229,7 @@ fn dispatch_power(
 
 #[cfg(test)]
 mod tests {
+    mod reuse_tests;
     use super::*;
     use std::cell::Cell;
 

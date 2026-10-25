@@ -35,6 +35,8 @@ pub(crate) enum PowerMetric {
     AdapterHandshake,
     AdapterRoundTrip,
     AdapterClose,
+    AdapterReuse,
+    AdapterRetain,
     SdkImport,
     SdkClientSetup,
     SdkIdentityGet,
@@ -67,6 +69,8 @@ impl PowerMetric {
             Self::AdapterHandshake => "adapterHandshakeElapsedMs",
             Self::AdapterRoundTrip => "adapterRoundTripElapsedMs",
             Self::AdapterClose => "adapterCloseElapsedMs",
+            Self::AdapterReuse => "adapterReuseElapsedMs",
+            Self::AdapterRetain => "adapterRetainElapsedMs",
             Self::SdkImport => "sdkImportElapsedMs",
             Self::SdkClientSetup => "sdkClientSetupElapsedMs",
             Self::SdkIdentityGet => "sdkIdentityGetElapsedMs",
@@ -252,7 +256,7 @@ impl PowerObservation {
             }
             _ => return,
         };
-        // The explicitly bound child observer owns correlation. SDK request IDs,
+        // The exact request binding router owns correlation. SDK request IDs,
         // provider operation strings and all diagnostic content stay off this log.
         self.record("sdk", metric, timing.value, outcome);
     }
@@ -333,6 +337,8 @@ mod tests {
             (PowerMetric::AdapterHandshake, "adapterHandshakeElapsedMs"),
             (PowerMetric::AdapterRoundTrip, "adapterRoundTripElapsedMs"),
             (PowerMetric::AdapterClose, "adapterCloseElapsedMs"),
+            (PowerMetric::AdapterReuse, "adapterReuseElapsedMs"),
+            (PowerMetric::AdapterRetain, "adapterRetainElapsedMs"),
             (PowerMetric::SdkImport, "sdkImportElapsedMs"),
             (PowerMetric::SdkClientSetup, "sdkClientSetupElapsedMs"),
             (PowerMetric::SdkIdentityGet, "sdkIdentityGetElapsedMs"),

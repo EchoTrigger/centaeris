@@ -500,7 +500,13 @@ fn main() -> Result<(), String> {
         model_admission,
         request_capacity: request_capacity::RequestCapacity::from_env()?,
     };
-    runtime.block_on(serve_http(listener, state))
+    let result = runtime.block_on(serve_http(listener, state));
+    // A blocking provider callback can outlive the bounded shutdown wait. Do not
+    // turn dropping the executor into an unbounded second wait or invent an ACK.
+    if let Ok(runtime) = Arc::try_unwrap(runtime) {
+        runtime.shutdown_timeout(Duration::ZERO);
+    }
+    result
 }
 
 fn resolve_provider_polling_tool_layer(
@@ -1157,14 +1163,62 @@ impl RuntimeExecutionProfile {
     }
 }
 
+async fn runtime_shutdown_signal() -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|_| "runtime shutdown signal unavailable".to_string())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.map_err(|_| "runtime shutdown signal unavailable".to_string()),
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|_| "runtime shutdown signal unavailable".to_string())
+    }
+}
+
 async fn serve_http(
     listener: tokio::net::TcpListener,
     state: HttpServerState,
 ) -> Result<(), String> {
-    if let Some(provider) = state.e2b_runtime.as_ref() {
-        provider.start_rotation(state.runtime.as_ref(), state.e2b_runs.clone());
-    }
+    serve_http_with_shutdown(listener, state, runtime_shutdown_signal()).await
+}
+
+async fn serve_http_with_shutdown<F>(
+    listener: tokio::net::TcpListener,
+    state: HttpServerState,
+    shutdown: F,
+) -> Result<(), String>
+where
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    let mut rotation = state.e2b_runtime.as_ref().and_then(|provider| {
+        provider
+            .start_rotation(state.runtime.as_ref(), state.e2b_runs.clone())
+            .map(|task| (task, provider.rotation_shutdown_timeout()))
+    });
     let router = http_router(state);
+    // Dropping the losing accept future closes the listener before draining
+    // rotation. Already-dispatched work retains its original authority.
+    let result = tokio::select! {
+        result = accept_http_connections(listener, router) => result,
+        result = shutdown => result,
+    };
+    if let Some((task, timeout)) = rotation.as_mut() {
+        task.shutdown(*timeout).await.map_err(str::to_owned)?;
+    }
+    result
+}
+
+async fn accept_http_connections(
+    listener: tokio::net::TcpListener,
+    router: axum::Router,
+) -> Result<(), String> {
     let connection_slots = Arc::new(Semaphore::new(MAX_HTTP_CONNECTIONS));
     loop {
         let connection_slot = connection_slots

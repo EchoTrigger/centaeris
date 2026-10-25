@@ -31,6 +31,7 @@ pub enum AdapterFailure {
 #[serde(rename_all = "camelCase")]
 pub enum AdapterOutcome {
     Succeeded,
+    Failed,
     NotDispatched,
     Unknown,
 }
@@ -209,6 +210,7 @@ pub struct AdapterProcess {
     streams: AdapterLane<Streams>,
     closed: AtomicBool,
     observation_context: crate::observations::ContextSnapshot,
+    power_bindings: std::sync::Arc<power_observations::PowerBindings>,
 }
 
 impl AdapterProcess {
@@ -228,8 +230,14 @@ impl AdapterProcess {
         observation: Option<crate::observations::power::PowerObservation>,
     ) -> Result<Self, String> {
         let observation = observation.filter(|value| value.is_enabled());
-        let diagnostics = if observation.is_some() || crate::observations::enabled() {
-            power_observations::start_reader(observation, crate::observations::Context::snapshot())
+        let observe_power = observation.is_some();
+        let power_bindings =
+            std::sync::Arc::new(power_observations::PowerBindings::new(observation));
+        let diagnostics = if observe_power || crate::observations::enabled() {
+            power_observations::start_reader(
+                power_bindings.clone(),
+                crate::observations::Context::snapshot(),
+            )
         } else {
             None
         };
@@ -308,6 +316,7 @@ impl AdapterProcess {
             }),
             closed: AtomicBool::new(false),
             observation_context: crate::observations::Context::snapshot(),
+            power_bindings,
         })
     }
 
@@ -323,7 +332,7 @@ impl AdapterProcess {
         } else {
             Instant::now().checked_add(timeout)
         };
-        self.call_deadline(request_id, operation, payload, deadline)
+        self.call_deadline(request_id, operation, payload, deadline, None)
     }
 
     pub(super) fn call_before(
@@ -333,7 +342,24 @@ impl AdapterProcess {
         payload: Value,
         deadline: Instant,
     ) -> Result<AdapterResponse, AdapterFailure> {
-        self.call_deadline(request_id, operation, payload, Some(deadline))
+        self.call_deadline(request_id, operation, payload, Some(deadline), None)
+    }
+
+    pub(super) fn call_before_observed(
+        &self,
+        request_id: &str,
+        operation: &str,
+        payload: Value,
+        deadline: Instant,
+        observation: crate::observations::power::PowerObservation,
+    ) -> Result<AdapterResponse, AdapterFailure> {
+        self.call_deadline(
+            request_id,
+            operation,
+            payload,
+            Some(deadline),
+            Some(observation),
+        )
     }
 
     fn call_deadline(
@@ -342,6 +368,7 @@ impl AdapterProcess {
         operation: &str,
         payload: Value,
         deadline: Option<Instant>,
+        observation: Option<crate::observations::power::PowerObservation>,
     ) -> Result<AdapterResponse, AdapterFailure> {
         let _context = crate::observations::Context::enter_if_absent(&self.observation_context);
         let mut span = if crate::observations::enabled() {
@@ -349,7 +376,7 @@ impl AdapterProcess {
         } else {
             None
         };
-        let response = self.call_inner(request_id, operation, payload, deadline);
+        let response = self.call_inner(request_id, operation, payload, deadline, observation);
         if let Some(span) = &mut span {
             span.finished(
                 matches!(&response, Ok(value) if value.outcome == AdapterOutcome::Succeeded),
@@ -364,6 +391,7 @@ impl AdapterProcess {
         operation: &str,
         payload: Value,
         deadline: Option<Instant>,
+        observation: Option<crate::observations::power::PowerObservation>,
     ) -> Result<AdapterResponse, AdapterFailure> {
         let deadline = deadline.ok_or(AdapterFailure::NotDispatched("adapter_request_invalid"))?;
         if !valid_text(request_id, 128) || !valid_text(operation, 64) || !payload.is_object() {
@@ -402,6 +430,12 @@ impl AdapterProcess {
                 "adapter_deadline_before_dispatch",
             ));
         }
+        // Bind only after queue admission and local validation, before the SDK
+        // can emit diagnostics. This optional observer never grants dispatch.
+        match observation {
+            Some(observation) => self.power_bindings.bind(request_id, operation, observation),
+            None => self.power_bindings.bind_default(request_id, operation),
+        }
         // The dedicated writer prevents a full stdin pipe bypassing the deadline.
         streams
             .requests
@@ -425,6 +459,14 @@ impl AdapterProcess {
                 || value.request_id != request_id
                 || match value.outcome {
                     AdapterOutcome::Succeeded => value.result.is_none() || value.error.is_some(),
+                    AdapterOutcome::Failed => {
+                        !matches!(operation, "readFile" | "downloadFile" | "listDirectory")
+                            || value.result.is_none()
+                            || value
+                                .error
+                                .as_ref()
+                                .is_none_or(|error| error.code != "fileNotFound")
+                    }
                     AdapterOutcome::NotDispatched | AdapterOutcome::Unknown => {
                         value.error.is_none()
                     }
@@ -439,6 +481,18 @@ impl AdapterProcess {
             self.close();
         }
         response
+    }
+
+    /// A pre-dispatch cache check, not a promise that a future call will succeed.
+    /// A process can still exit after this check; sent calls retain Unknown semantics.
+    pub(crate) fn is_running(&self) -> bool {
+        if self.closed.load(Ordering::Acquire) {
+            return false;
+        }
+        self.child
+            .lock()
+            .ok()
+            .is_some_and(|mut child| matches!(child.try_wait(), Ok(None)))
     }
 
     pub fn close(&self) {

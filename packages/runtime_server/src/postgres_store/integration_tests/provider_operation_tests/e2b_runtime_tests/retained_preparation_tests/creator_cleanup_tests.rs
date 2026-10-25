@@ -241,6 +241,31 @@ fn postgres_e2b_retained_cleanup_without_original_context_preserves_open_consume
     );
     assert!(db.query_one("SELECT cleanup_receipt_id IS NULL FROM runtime.provider_environment_run_uses WHERE provider_use_id=$1",
         &[&original.provider_use_id]).unwrap().get::<_,bool>(0));
+    drop(host);
+    let target = &original.target;
+    let retirement = ProviderEnvironmentRetirementRequest {
+        schema: "runtime.provider_environment.retire.v1".into(),
+        operation_id: "retire-lost-consumer".into(),
+        environment_id: target.identity.environment_id.clone(),
+        creation_attempt_id: target.identity.attempt_id.clone(),
+        sandbox_id: target.sandbox_id.clone(),
+        provider_config_digest: CONFIG.into(),
+        expected_controller_epoch: 2,
+        acknowledge_data_loss: true,
+    };
+    assert_eq!(runtime.retire(&retirement).unwrap().status, "removed");
+    let after_removal = launcher.requests().len();
+    let receipt = runtime
+        .cleanup_retained(&run.authority(ControllerPurpose::Cleanup), None)
+        .unwrap();
+    assert!(
+        matches!(receipt, ProviderRunCleanupReceipt::RetainedProvider(ref value) if value.cleanup_complete)
+    );
+    assert_eq!(
+        launcher.requests().len(),
+        after_removal,
+        "exact durable absence closes a lost host without any SDK or command replay"
+    );
 }
 
 #[test]

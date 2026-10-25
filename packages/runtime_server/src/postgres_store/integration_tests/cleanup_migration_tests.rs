@@ -122,7 +122,7 @@ fn postgres_cleanup_migration_fresh_store_creates_receipt_table() {
     );
     assert_eq!(
         history(&mut db).iter().map(|row| row.0).collect::<Vec<_>>(),
-        (1..=21).collect::<Vec<_>>()
+        (1..=24).collect::<Vec<_>>()
     );
 }
 
@@ -146,7 +146,7 @@ fn postgres_cleanup_migration_preserves_allocations_resources_and_receipts_on_re
     assert_eq!(&migrated_history[..9], before_history.as_slice());
     assert_eq!(
         migrated_history.iter().map(|row| row.0).collect::<Vec<_>>(),
-        (1..=21).collect::<Vec<_>>()
+        (1..=24).collect::<Vec<_>>()
     );
     assert_eq!(migrated_history[9].0, 10);
 

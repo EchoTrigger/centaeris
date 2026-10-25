@@ -1,10 +1,11 @@
 //! Provider cleanup uses the existing per-operation authority and settlement facts.
 use super::*;
-use crate::observations::power::{PowerMetric, PowerObservation};
+use crate::observations::power::{PowerMetric, PowerObservation, PowerOutcome};
 use crate::postgres_store::provider_operations::cleanup::{
     ProviderRemovalEvidence, ProviderSandboxObservation,
 };
 use std::collections::BTreeMap;
+use std::time::Instant;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +113,7 @@ pub(super) struct CleanupLane<'a> {
     runtime: &'a E2bRuntime,
     process: Option<Arc<SpoolingAdapterProcess>>,
     observation: Option<PowerObservation>,
+    reusable: bool,
 }
 
 impl CleanupLane<'_> {
@@ -120,6 +122,7 @@ impl CleanupLane<'_> {
             runtime,
             process: None,
             observation: None,
+            reusable: false,
         }
     }
 
@@ -131,7 +134,12 @@ impl CleanupLane<'_> {
             runtime,
             process: None,
             observation: Some(observation),
+            reusable: false,
         }
+    }
+
+    pub(super) fn allow_reuse(&mut self) {
+        self.reusable = true;
     }
 
     fn call(&mut self, operation: &str, sandbox_id: &str) -> Result<Value, String> {
@@ -144,6 +152,19 @@ impl CleanupLane<'_> {
         payload: Value,
     ) -> Result<Value, String> {
         let observation = self.observation.clone();
+        if self.process.is_none() {
+            if let Some(value) = &observation {
+                let started = Instant::now();
+                self.process = self.runtime.power_adapter.take();
+                if self.process.is_some() {
+                    value.elapsed(
+                        PowerMetric::AdapterReuse,
+                        started.elapsed(),
+                        PowerOutcome::Ok,
+                    );
+                }
+            }
+        }
         if self.process.is_none() {
             let launch = || match &observation {
                 Some(value) => self.runtime.launcher.launch_observed(
@@ -176,17 +197,27 @@ impl CleanupLane<'_> {
             self.process = Some(process);
         }
         let call = || {
-            let response = self
+            let process = self
                 .process
                 .as_ref()
-                .ok_or("e2b_cleanup_adapter_unavailable")?
-                .call(
-                    &Uuid::new_v4().to_string(),
+                .ok_or("e2b_cleanup_adapter_unavailable")?;
+            let request_id = Uuid::new_v4().to_string();
+            let response = match &observation {
+                Some(value) => process.call_observed(
+                    &request_id,
                     operation,
                     payload,
                     self.runtime.config.request_timeout,
-                )
-                .map_err(|_| "e2b_cleanup_provider_result_unknown".to_string())?;
+                    value.clone(),
+                ),
+                None => process.call(
+                    &request_id,
+                    operation,
+                    payload,
+                    self.runtime.config.request_timeout,
+                ),
+            }
+            .map_err(|_| "e2b_cleanup_provider_result_unknown".to_string())?;
             if response.outcome != AdapterOutcome::Succeeded {
                 return Err("e2b_cleanup_provider_result_unknown".into());
             }
@@ -243,6 +274,22 @@ impl CleanupLane<'_> {
 impl Drop for CleanupLane<'_> {
     fn drop(&mut self) {
         if let Some(process) = self.process.take() {
+            if self.reusable {
+                if let Some(observation) = &self.observation {
+                    let started = Instant::now();
+                    let retained = self.runtime.power_adapter.put(process);
+                    observation.elapsed(
+                        if retained {
+                            PowerMetric::AdapterRetain
+                        } else {
+                            PowerMetric::AdapterClose
+                        },
+                        started.elapsed(),
+                        PowerOutcome::Ok,
+                    );
+                    return;
+                }
+            }
             match &self.observation {
                 Some(observation) => {
                     let _: Result<(), std::convert::Infallible> =

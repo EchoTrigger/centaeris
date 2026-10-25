@@ -232,38 +232,19 @@ fn postgres_retained_provider_retirement_rejects_unbound_persisted_target_digest
 
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
-fn postgres_retained_provider_retirement_rejects_active_controller_and_unclosed_consumers() {
+fn postgres_retained_provider_retirement_rejects_running_consumers_even_if_controller_released() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_, store, mut db) = retained::setup();
-    let (mut a, _, use_a) = candidate(&store, &mut db);
+    let (_, _, _) = candidate(&store, &mut db);
     assert!(store
         .retire_provider_environment(&retirement_request(1), CONFIG, |_| panic!(
-            "active controller cannot retire"
+            "running controller cannot retire"
         ))
         .is_err());
-    terminal(&mut db, &mut a);
-    db.batch_execute("UPDATE public.app_core_sessionenvironment SET controller_released=true")
-        .unwrap();
+    db.batch_execute("UPDATE public.app_core_sessionenvironment SET controller_released=true; UPDATE public.app_core_agentrun SET status='failed'").unwrap();
     assert!(store
-        .retire_provider_environment(&retirement_request(2), CONFIG, |_| panic!(
-            "unclosed Run effects cannot retire"
-        ))
-        .is_err());
-    db.batch_execute("UPDATE public.app_core_sessionenvironment SET controller_released=false")
-        .unwrap();
-    store
-        .confirm_retained_provider_run_cleanup(
-            &a.authority(ControllerPurpose::Cleanup),
-            &use_a,
-            CONFIG,
-            |v| Ok(proof(v, 2)),
-        )
-        .unwrap();
-    db.batch_execute("UPDATE public.app_core_sessionenvironment SET controller_released=true")
-        .unwrap();
-    assert!(store
-        .retire_provider_environment(&retirement_request(2), CONFIG, |_| panic!(
-            "missing business release cannot retire"
+        .retire_provider_environment(&retirement_request(1), CONFIG, |_| panic!(
+            "presentation status and released controller do not prove Core termination"
         ))
         .is_err());
     assert_eq!(facts(&mut db), (0, true));
@@ -426,4 +407,77 @@ fn postgres_retained_provider_retirement_closes_all_successor_uses_without_creat
         "removed"
     );
     assert_eq!(db.query_one("SELECT count(*) FROM runtime.provider_environment_run_uses WHERE cleanup_receipt_id IS NOT NULL",&[]).unwrap().get::<_,i64>(0),2);
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_retained_provider_terminal_unknown_effects_close_only_after_exact_retirement() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (url, store, mut db) = retained::setup();
+    let (mut run, _, use_) = candidate(&store, &mut db);
+    terminal(&mut db, &mut run);
+    let request = retirement_request(2);
+    let pending = store
+        .retire_provider_environment(&request, CONFIG, |_| Err("lost delete reply".into()))
+        .unwrap();
+    assert_eq!(pending.status, "pending");
+    assert_eq!(facts(&mut db), (1, true));
+    assert!(store
+        .confirm_retained_provider_run_cleanup(
+            &run.authority(ControllerPurpose::Cleanup),
+            &use_,
+            CONFIG,
+            |_| panic!("pending retirement cannot reconstruct lost command evidence")
+        )
+        .is_err());
+    assert!(store
+        .with_retained_provider_execution_dispatch(
+            &run.authority(ControllerPurpose::Execute),
+            &use_,
+            CONFIG,
+            |_| -> Result<(), String> { panic!("retirement must fence execution") }
+        )
+        .is_err());
+    let reopened = PostgresRuntimeStore::new(&url).unwrap();
+    let removed = reopened
+        .retire_provider_environment(&request, CONFIG, |target| {
+            assert_eq!(target, &use_.target);
+            Ok(ProviderRemovalEvidence::NotFound {
+                sandbox_id: target.sandbox_id.clone(),
+            })
+        })
+        .unwrap();
+    assert_eq!(removed.status, "removed");
+    assert_eq!(facts(&mut db), (1, false));
+    let receipt = reopened
+        .confirm_retained_provider_run_cleanup(
+            &run.authority(ControllerPurpose::Cleanup),
+            &use_,
+            CONFIG,
+            |_| panic!("confirmed physical absence needs no original command stream"),
+        )
+        .unwrap();
+    assert!(receipt.cleanup_complete);
+    assert_eq!(receipt.scope, "runEffectsOnly");
+    assert_eq!(receipt.provider_use_id, use_.provider_use_id);
+    assert_eq!(
+        reopened
+            .confirm_retained_provider_run_cleanup(
+                &run.authority(ControllerPurpose::Cleanup),
+                &use_,
+                CONFIG,
+                |_| panic!("receipt replay must not call provider")
+            )
+            .unwrap(),
+        receipt
+    );
+    release(&mut db, &run);
+    assert_eq!(
+        reopened
+            .retire_provider_environment(&request, CONFIG, |_| panic!(
+                "retirement replay must not repeat delete"
+            ))
+            .unwrap(),
+        removed
+    );
 }

@@ -28,6 +28,8 @@ RUNTIME_JOB_WAIT_RECHECK_MS = 5 * 60 * 1000
 JOB_WAIT_MS = 20_000
 JOB_WAIT_HTTP_TIMEOUT_SECONDS = 25
 JOB_WAIT_FAILURE_BACKOFF_SECONDS = 1
+JOB_CLAIM_BUSY_INITIAL_BACKOFF_SECONDS = 0.1
+JOB_CLAIM_BUSY_MAX_BACKOFF_SECONDS = 1
 OUTBOX_POLL_INTERVAL_SECONDS = 1
 RECONCILE_INTERVAL_SECONDS = 5
 CONTROL_PAGE_LIMIT = 100
@@ -44,6 +46,7 @@ if not 1 <= WORKER_SLOT_COUNT <= 16:
 AGENT_RUN_WAITING_TRANSITION_REASONS = {
     "execution_resident_capacity_wait",
     "e2b_live_context_capacity_wait",
+    "e2b_environment_capacity_wait",
     "e2b_environment_already_active",
     "e2b_step_already_active",
     "execution_recovery_checkpoint_committed",
@@ -1321,9 +1324,11 @@ def run_job_loop(slot_index, stopped):
 
 
 def _run_job_loop(slot_index, stopped):
+    claim_busy_delay = JOB_CLAIM_BUSY_INITIAL_BACKOFF_SECONDS
     while not stopped.is_set():
         try:
             worked = execute_next_job(slot_index)
+            claim_busy_delay = JOB_CLAIM_BUSY_INITIAL_BACKOFF_SECONDS
             if not worked:
                 wait_for_jobs()
         except Exception as error:
@@ -1332,7 +1337,18 @@ def _run_job_loop(slot_index, stopped):
                 file=sys.stderr,
                 flush=True,
             )
-            delay = 5 if str(error) in {"runtime_busy", "execution_claim_busy"} else JOB_WAIT_FAILURE_BACKOFF_SECONDS
+            known_busy = str(error) in {"runtime_busy", "execution_claim_busy"}
+            if (isinstance(error, DependencyUnavailable) and error.http_status == 503
+                    and getattr(error, "route", None) == "/internal/jobs/claim" and known_busy):
+                # These explicit rejections precede the lease. A due Job makes
+                # long polling immediately ready even while the claim lock is
+                # busy, so retain a bounded, interruptible contention delay.
+                delay = claim_busy_delay
+                claim_busy_delay = min(claim_busy_delay * 2, JOB_CLAIM_BUSY_MAX_BACKOFF_SECONDS)
+            else:
+                # A failed execution/unknown response is not a rejected claim.
+                delay = 5 if known_busy else JOB_WAIT_FAILURE_BACKOFF_SECONDS
+                claim_busy_delay = JOB_CLAIM_BUSY_INITIAL_BACKOFF_SECONDS
             with observations.measure("backoff", requestedMs=delay * 1000,
                     route=getattr(error, "route", None),
                     errorCode=str(error) if str(error) in {"runtime_busy", "execution_claim_busy"} else "other"):

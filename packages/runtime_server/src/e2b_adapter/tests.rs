@@ -663,3 +663,46 @@ fn expired_fifo_head_does_not_pin_the_next_unsent_sdk_call() {
     assert_eq!(next.request_id, "next");
     assert_eq!(next.result.unwrap()["sequence"], 2);
 }
+
+#[test]
+fn reused_adapter_registers_each_power_request_before_dispatch_without_restarting() {
+    use crate::observations::power::{capture_power_observations, PowerObservation};
+    let (process_ids, records) = capture_power_observations(|| {
+        let adapter = AdapterProcess::spawn_observed(
+            fixture("echo"),
+            PowerObservation::new("first", "pause"),
+        )
+        .unwrap();
+        let mut process_ids = Vec::new();
+        for (request, operation, owner, action) in [
+            ("pause-request", "pause", "first", "pause"),
+            ("resume-request", "connect", "second", "resume"),
+        ] {
+            let response = adapter
+                .call_before_observed(
+                    request,
+                    operation,
+                    json!({}),
+                    Instant::now() + Duration::from_secs(10),
+                    PowerObservation::new(owner, action),
+                )
+                .unwrap();
+            process_ids.push(response.result.unwrap()["process"].clone());
+        }
+        // Model a delayed stderr reader after both real IPC calls returned.
+        for (request, operation, stage) in [
+            ("resume-request", "connect", "sdkConnect"),
+            ("pause-request", "pause", "sdkPause"),
+        ] {
+            let line = json!({"schema":"runtime.e2b.power_timing.v1", "stage":stage,
+                "requestId":request,"operation":operation,"value":1.0,"outcome":"ok"})
+            .to_string();
+            adapter.power_bindings.forward(line.as_bytes());
+        }
+        process_ids
+    });
+    assert_eq!(process_ids[0], process_ids[1]);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["operationId"], "second");
+    assert_eq!(records[1]["operationId"], "first");
+}

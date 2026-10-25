@@ -223,9 +223,11 @@ fn postgres_capacity_signal_preserves_execution_limits_and_reclaim_embargo() {
     assert!(!ready(), "release cannot grant a ninth execution");
     assert!(claim_waiter(&store, &waiting, now(&mut db)).is_empty());
     yield_until(&store, &fillers[3], now(&mut db), "question_wait");
-    assert!(!ready(), "release cannot grant a fifth workspace execution");
-    assert!(claim_waiter(&store, &waiting, now(&mut db)).is_empty());
-    yield_until(&store, &fillers[0], now(&mut db), "question_wait");
+    assert!(
+        ready(),
+        "a released global permit allows a fifth execution in the same workspace"
+    );
+    // Keep the waiter queued so reclaim backoff is tested with capacity available.
     db.execute(
         "UPDATE runtime.runtime_jobs SET lease_reclaim_not_before_ms=$2 WHERE job_id=$1",
         &[

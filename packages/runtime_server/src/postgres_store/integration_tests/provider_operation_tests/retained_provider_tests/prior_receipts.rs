@@ -205,3 +205,37 @@ fn postgres_retained_provider_maintenance_handoff_requires_all_consumers_cleanup
     release(&mut db, &b);
     require_maintenance_handoff(&mut db, &use_b.target).unwrap();
 }
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_retained_provider_invalid_prior_receipt_use_or_quiescence_blocks_retirement() {
+    use crate::postgres_store::provider_operations::retained::retirement::ProviderEnvironmentRetirementRequest;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for kind in 0..3 {
+        let (store, mut db, _) = invalid_prior(kind);
+        let request = ProviderEnvironmentRetirementRequest {
+            schema: "runtime.provider_environment.retire.v1".into(),
+            operation_id: "reject-invalid-receipt".into(),
+            environment_id: "environment".into(),
+            creation_attempt_id: "retained-attempt".into(),
+            sandbox_id: "retained-sandbox".into(),
+            provider_config_digest: CONFIG.into(),
+            expected_controller_epoch: 2,
+            acknowledge_data_loss: true,
+        };
+        assert!(store
+            .retire_provider_environment(&request, CONFIG, |_| panic!(
+                "invalid consumer proof cannot authorize deletion: {kind}"
+            ))
+            .is_err());
+        assert_eq!(
+            db.query_one(
+                "SELECT count(*) FROM runtime.provider_environment_retirements",
+                &[]
+            )
+            .unwrap()
+            .get::<_, i64>(0),
+            0
+        );
+    }
+}

@@ -41,7 +41,7 @@ impl E2bRuntime {
     ) -> Result<ProviderEnvironmentRetirementResult, E2bRuntimeError> {
         let binding = self.retirement_binding(request)?;
         // The Store's durable intent, immutable verified target and current
-        // released-Environment pins authorize this exact physical callback.
+        // Environment pins authorize this exact physical callback.
         // Replaying a settled retirement never launches the cleanup adapter.
         let mut lane = cleanup::CleanupLane::new(self);
         self.store

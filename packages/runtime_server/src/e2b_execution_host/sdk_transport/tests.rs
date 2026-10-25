@@ -28,6 +28,13 @@ root=Path(os.environ['E2B_ADAPTER_SPOOL_ROOT']); log=Path(sys.argv[1]); output=b
 for sequence, line in enumerate(sys.stdin, 1):
  request=json.loads(line); p=request['payload']; op=request['operation']
  with log.open('a',encoding='utf-8') as stream:stream.write(json.dumps(request)+'\n')
+ if op in ('downloadFile','listDirectory') and mode.startswith('nativeFile'):
+  result={key:p[key] for key in ('sandboxId','transferId') if key in p}
+  if mode=='nativeFileWrongTarget':result['sandboxId']='other-sandbox'
+  print(json.dumps({'schema':'runtime.e2b.adapter.response.v1','requestId':request['requestId'],
+   'outcome':'unknown' if mode=='nativeFileUnknown' else 'failed','result':result,
+   'error':{'code':'unrecognized' if mode=='nativeFileUnknownCode' else 'fileNotFound','message':'bounded file failure'}}),flush=True)
+  continue
  failure_at={'mkdirUnknown':1,'uploadUnknown':3,'executeUnknown':4,'waitUnknown':5,'downloadUnknown':6,'cleanupUnknown':7,'controlUnknown':1}.get(mode)
  if sequence==failure_at:
   print(json.dumps({'schema':'runtime.e2b.adapter.response.v1','requestId':request['requestId'],'outcome':'unknown','error':{'code':'fixtureUnknown','message':'private diagnostic /secret/path token=hidden'}}),flush=True)

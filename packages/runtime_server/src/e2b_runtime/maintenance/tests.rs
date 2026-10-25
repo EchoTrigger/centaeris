@@ -22,6 +22,77 @@ fn binding() -> E2bSandboxBinding {
     crate::e2b_execution_host::tests::binding()
 }
 #[test]
+fn native_file_failure_matches_shared_completion_contract_and_rejects_unknown_codes() {
+    let fixture: Value = serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/workspace/fixtures/provider_environment_maintenance_completion/v1/file-not-found.json"))).unwrap();
+    let request: DirectRequest = serde_json::from_value(fixture["request"].clone()).unwrap();
+    let auth = auth(&request);
+    let completion = DirectCompletion::new(
+        &auth,
+        serde_json::from_value(fixture["output"].clone()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(completion).unwrap()["output"],
+        fixture["output"]
+    );
+    assert!(serde_json::from_value::<DirectOutput>(
+        json!({"kind":"filesystemFailed","code":"unknown"})
+    )
+    .is_err());
+    assert!(serde_json::from_value::<DirectOutput>(
+        json!({"kind":"filesystemFailed","code":"fileNotFound","message":"private"})
+    )
+    .is_err());
+}
+#[test]
+fn native_file_not_found_is_a_completed_failure_while_uncertain_or_unbound_errors_remain_unknown() {
+    for operation in [
+        NativeFileOperation::ReadFile {
+            path: "/missing".into(),
+            max_bytes: 1024,
+        },
+        NativeFileOperation::ListDirectory {
+            path: "/missing".into(),
+            recursive: true,
+            max_entries: 100,
+        },
+    ] {
+        for mode in [
+            "nativeFileNotFound",
+            "nativeFileUnknown",
+            "nativeFileWrongTarget",
+            "nativeFileUnknownCode",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let log = temp.path().join("ordinary.jsonl");
+            let process = process_with_capture_outcome(&log, &[], mode);
+            let request = DirectRequest::Filesystem(NativeFileFrame {
+                request: operation.clone(),
+                content_length: 0,
+                content_digest: format!("sha256:{:x}", Sha256::digest([])),
+            });
+            let result = execute_native(
+                process,
+                &profile(),
+                &binding(),
+                &request,
+                &[],
+                Duration::from_secs(20),
+            );
+            if mode == "nativeFileNotFound" {
+                assert_eq!(
+                    serde_json::to_value(result.unwrap()).unwrap(),
+                    json!({"kind":"filesystemFailed","code":"fileNotFound"})
+                );
+            } else {
+                assert!(result.is_err(), "{mode} must retain responsibility");
+            }
+            assert_eq!(requests(&log).len(), 2, "no SDK retry for {mode}");
+        }
+    }
+}
+
+#[test]
 fn native_maintenance_command_preserves_root_cwd_argv_deadline_and_full_output_bytes() {
     let temp = tempfile::tempdir().unwrap();
     let log = temp.path().join("ordinary.jsonl");

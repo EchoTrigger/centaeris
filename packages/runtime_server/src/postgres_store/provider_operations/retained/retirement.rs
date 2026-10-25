@@ -121,7 +121,7 @@ fn lock_idle_target(
     request: &ProviderEnvironmentRetirementRequest,
     configured_digest: &str,
 ) -> Result<ProviderVerifiedTarget, String> {
-    let target = lock_idle_maintenance_target(
+    let target = lock_maintenance_target(
         tx,
         &IdleProviderEnvironmentTarget {
             environment_id: &request.environment_id,
@@ -131,6 +131,7 @@ fn lock_idle_target(
             expected_controller_epoch: request.expected_controller_epoch,
         },
         configured_digest,
+        MaintenanceTargetPolicy::RetireTerminal,
     )?;
     super::power::require_retirement_allowed(tx, &request.environment_id)?;
     Ok(target)
@@ -149,12 +150,58 @@ pub(super) fn lock_idle_maintenance_target(
     request: &IdleProviderEnvironmentTarget<'_>,
     configured_digest: &str,
 ) -> Result<ProviderVerifiedTarget, String> {
+    lock_maintenance_target(
+        tx,
+        request,
+        configured_digest,
+        MaintenanceTargetPolicy::Idle,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MaintenanceTargetPolicy {
+    Idle,
+    RetireTerminal,
+}
+
+fn require_terminal_consumer(
+    tx: &mut postgres::Transaction<'_>,
+    environment: &str,
+    run: &str,
+) -> Result<(), String> {
+    let terminal = tx.query_opt(
+        "SELECT EXISTS(SELECT 1 FROM public.app_core_sessionevent e WHERE e.workspace_id=r.workspace_id AND e.session_id=r.session_id AND e.agent_run_id=r.id AND e.session_level=false AND e.payload->>'type' IN('agent_run_completed','agent_run_failed','agent_run_interrupted')) FROM public.app_core_agentrun r WHERE r.id=$1 AND r.environment_id=$2 FOR SHARE OF r",
+        &[&run, &environment],
+    ).map_err(|e| e.to_string())?;
+    if !terminal.is_some_and(|row| row.get::<_, bool>(0)) {
+        return Err("provider_environment_retirement_consumer_not_terminal".into());
+    }
+    Ok(())
+}
+
+fn lock_maintenance_target(
+    tx: &mut postgres::Transaction<'_>,
+    request: &IdleProviderEnvironmentTarget<'_>,
+    configured_digest: &str,
+    policy: MaintenanceTargetPolicy,
+) -> Result<ProviderVerifiedTarget, String> {
     let env = tx.query_opt(
-        "SELECT session_id,controller_epoch,controller_released,environment_profile::text,environment_profile_digest FROM public.app_core_sessionenvironment WHERE id=$1 FOR UPDATE",
+        "SELECT session_id,controller_epoch,controller_released,environment_profile::text,environment_profile_digest,controller_run_id FROM public.app_core_sessionenvironment WHERE id=$1 FOR UPDATE",
         &[&request.environment_id],
     ).map_err(|e| e.to_string())?.ok_or("provider_environment_retirement_environment_missing")?;
-    if env.get::<_, i64>(1) != request.expected_controller_epoch || !env.get::<_, bool>(2) {
+    if env.get::<_, i64>(1) != request.expected_controller_epoch {
         return Err("provider_environment_retirement_controller_rejected".into());
+    }
+    if !env.get::<_, bool>(2) {
+        if policy == MaintenanceTargetPolicy::Idle {
+            return Err("provider_environment_retirement_controller_rejected".into());
+        }
+        // An unreleased maintenance operation is never a terminal Run. Core's
+        // committed terminal fact fences Execute even while cleanup is pending.
+        let run = env
+            .get::<_, Option<String>>(5)
+            .ok_or("provider_environment_retirement_controller_rejected")?;
+        require_terminal_consumer(tx, request.environment_id, &run)?;
     }
     let frozen: EnvironmentProfile = serde_json::from_str(
         &env.get::<_, Option<String>>(3)
@@ -191,20 +238,38 @@ pub(super) fn lock_idle_maintenance_target(
     ).map_err(|e| e.to_string())?;
     for row in consumers {
         let run: String = row.get(0);
-        let receipt = receipts::load_receipt(tx, &run)?
-            .ok_or("provider_environment_retirement_consumer_pending")?;
-        if receipt.environment_id != request.environment_id
-            || receipt.profile_digest != frozen_digest
-            || receipt.provider_config_digest != configured_digest
-        {
-            return Err("provider_environment_retirement_consumer_rejected".into());
+        let receipt = receipts::load_receipt(tx, &run)?;
+        if let Some(receipt) = &receipt {
+            if receipt.environment_id != request.environment_id
+                || receipt.profile_digest != frozen_digest
+                || receipt.provider_config_digest != configured_digest
+            {
+                return Err("provider_environment_retirement_consumer_rejected".into());
+            }
+            let released: bool = tx.query_one(
+                "SELECT EXISTS(SELECT 1 FROM public.app_core_agentrunenvironmentrelease WHERE agent_run_id=$1 AND environment_id=$2 AND authorization_digest=$3 AND controller_epoch>=$4 AND controller_epoch<=$5)",
+                &[&run,&request.environment_id,&receipt.authorization_digest,&receipt.controller_epoch,&request.expected_controller_epoch],
+            ).map_err(|e| e.to_string())?.get(0);
+            if released {
+                continue;
+            }
         }
-        let released: bool = tx.query_one(
-            "SELECT EXISTS(SELECT 1 FROM public.app_core_agentrunenvironmentrelease WHERE agent_run_id=$1 AND environment_id=$2 AND authorization_digest=$3 AND controller_epoch>=$4 AND controller_epoch<=$5)",
-            &[&run,&request.environment_id,&receipt.authorization_digest,&receipt.controller_epoch,&request.expected_controller_epoch],
-        ).map_err(|e| e.to_string())?.get(0);
-        if !released {
-            return Err("provider_environment_retirement_release_pending".into());
+        if policy == MaintenanceTargetPolicy::RetireTerminal {
+            // Missing cleanup/release may be closed only by destroying its own
+            // exact target. Existing receipts above remain fully validated.
+            require_terminal_consumer(tx, request.environment_id, &run)?;
+            let use_ =
+                load_use(tx, &run)?.ok_or("provider_environment_retirement_consumer_missing")?;
+            if use_.target != target {
+                return Err("provider_environment_retirement_consumer_rejected".into());
+            }
+        } else {
+            return Err(if receipt.is_some() {
+                "provider_environment_retirement_release_pending"
+            } else {
+                "provider_environment_retirement_consumer_pending"
+            }
+            .into());
         }
     }
     Ok(target)
@@ -263,4 +328,33 @@ fn result(
         sandbox_id: request.sandbox_id.clone(),
         status,
     }
+}
+
+/// Positive absence comes only from the original immutable retirement and its
+/// exact typed provider settlement, never from a restart or an empty inventory.
+pub(super) fn confirmed_removal(
+    db: &mut impl GenericClient,
+    target: &ProviderVerifiedTarget,
+) -> Result<bool, String> {
+    let Some(row) = db.query_opt(
+        "SELECT request_json FROM runtime.provider_environment_retirements WHERE environment_id=$1 FOR SHARE",
+        &[&target.identity.environment_id],
+    ).map_err(|e| e.to_string())? else { return Ok(false) };
+    let body: String = row.get(0);
+    let request: ProviderEnvironmentRetirementRequest = serde_json::from_str(&body)
+        .map_err(|_| "provider_environment_retirement_intent_invalid")?;
+    request.validate()?;
+    let digest = fact_digest(
+        "runtime:provider-environment-retirement:v1\0",
+        &serde_json::to_value(&request).map_err(|e| e.to_string())?,
+    )?;
+    if request.environment_id != target.identity.environment_id
+        || request.creation_attempt_id != target.identity.attempt_id
+        || request.sandbox_id != target.sandbox_id
+        || request.provider_config_digest != target.identity.provider_config_digest
+        || !require_matching_intent(db, &request, &body, &digest)?
+    {
+        return Err("provider_environment_retirement_target_rejected".into());
+    }
+    already_removed(db, &request)
 }

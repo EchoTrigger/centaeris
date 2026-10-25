@@ -78,7 +78,11 @@ fn e2b_consumption_production_server() {
         request_capacity: request_capacity::RequestCapacity::from_env()
             .unwrap_or_else(|_| panic!("E2B product request capacity invalid")),
     };
-    let server = runtime.spawn(serve_http(listener, state));
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = runtime.spawn(serve_http_with_shutdown(listener, state, async move {
+        let _ = stopped.await;
+        Ok(())
+    }));
     println!("e2b-product-ready:http://{address}");
     io::stdout().flush().unwrap();
     if let Some(command) = io::stdin().lock().lines().next() {
@@ -87,10 +91,14 @@ fn e2b_consumption_production_server() {
             "unsupported E2B product control command"
         );
     }
-    server.abort();
-    runtime.block_on(async {
-        let _ = server.await;
-    });
+    let _ = stop.send(());
+    let result = runtime.block_on(server);
+    if let Ok(runtime) = Arc::try_unwrap(runtime) {
+        runtime.shutdown_timeout(Duration::ZERO);
+    }
+    result
+        .expect("E2B product server task failed")
+        .expect("E2B product shutdown has unconfirmed in-flight work");
 }
 
 #[cfg(target_os = "linux")]

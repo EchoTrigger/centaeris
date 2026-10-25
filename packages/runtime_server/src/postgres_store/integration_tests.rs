@@ -1,3 +1,4 @@
+mod pool_state_tests;
 use centaeris_core::runtime::contracts::{CheckpointRecord, EventVisibility, RuntimeEvent};
 use centaeris_core::session::external_context::{
     ExternalContextObject, ExternalContextObjectLink, ExternalContextStorePort,

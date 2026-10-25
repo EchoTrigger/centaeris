@@ -385,6 +385,13 @@ fn require_current_use_with_target_lookup(
         return Err("retained_provider_use_authority_rejected".into());
     }
     require_target_scope(&grant, authority, &value.target)?;
+    if authority.purpose == ControllerPurpose::Cleanup
+        && retirement::confirmed_removal(tx, &value.target)?
+    {
+        // The current Cleanup grant still pins the terminal Run and its exact
+        // use. Physical absence closes effects without resurrecting execution.
+        return Ok(grant);
+    }
     reject_retirement(tx, &value.target.identity.environment_id)?;
     require_open_target(tx, &value.target)?;
     Ok(grant)
@@ -578,7 +585,7 @@ pub(crate) fn settle_environment_removed(
     {
         return Err("retained_provider_retirement_target_rejected".into());
     }
-    let allowed:bool=db.query_one("SELECT EXISTS(SELECT 1 FROM runtime.provider_environment_retirements r JOIN public.app_core_sessionenvironment e ON e.id=r.environment_id WHERE r.environment_id=$1 AND r.expected_controller_epoch=$2 AND e.controller_epoch=$2 AND e.controller_released)",&[&target.identity.environment_id,&controller_epoch]).map_err(|e|e.to_string())?.get(0);
+    let allowed:bool=db.query_one("SELECT EXISTS(SELECT 1 FROM runtime.provider_environment_retirements r JOIN public.app_core_sessionenvironment e ON e.id=r.environment_id WHERE r.environment_id=$1 AND r.expected_controller_epoch=$2 AND e.controller_epoch=$2)",&[&target.identity.environment_id,&controller_epoch]).map_err(|e|e.to_string())?.get(0);
     if !allowed {
         return Err("retained_provider_retirement_authority_rejected".into());
     }

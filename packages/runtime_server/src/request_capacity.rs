@@ -62,7 +62,6 @@ impl RequestCapacity {
                     | "/internal/jobs/yield"
                     | "/internal/jobs/complete"
                     | "/internal/jobs/heartbeat"
-                    | "/internal/environments/maintenance/task"
                     | "/internal/environments/observe"
                     | "/internal/agent-runs/cleanup-receipt"
             ))
@@ -77,10 +76,15 @@ impl RequestCapacity {
             );
         // A step can contain long tools and provider streams. Its lifetime is
         // governed by the execution lease/cancellation protocol, not a short RPC timer.
-        // Benchmark exec authenticates maintenance authority, validates its
-        // per-operation deadline, and retains this ordinary slot until it exits.
-        let execution =
-            method == "POST" && matches!(path, "/agent-runs/step" | "/internal/benchmark/exec");
+        // Maintenance commands authenticate their authority and validate the
+        // per-operation deadline, retaining this ordinary slot until they exit.
+        let execution = method == "POST"
+            && matches!(
+                path,
+                "/agent-runs/step"
+                    | "/internal/benchmark/exec"
+                    | "/internal/environments/maintenance/task"
+            );
         RequestLane {
             slots: if cleanup {
                 self.cleanup.clone()

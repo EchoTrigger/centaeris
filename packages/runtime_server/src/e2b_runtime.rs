@@ -30,6 +30,7 @@ mod cleanup;
 pub(crate) mod maintenance;
 pub(crate) mod observation;
 mod power;
+mod power_adapter;
 pub(crate) use power::with_power_environment;
 mod provision;
 mod retained;
@@ -299,6 +300,7 @@ pub(crate) struct E2bRuntime {
     config: E2bRuntimeConfig,
     launcher: Arc<dyn E2bAdapterLauncher>,
     rotation_started: AtomicBool,
+    power_adapter: power_adapter::PowerAdapterCache,
 }
 
 impl E2bRuntime {
@@ -308,6 +310,7 @@ impl E2bRuntime {
             config,
             launcher: Arc::new(InstalledAdapterLauncher),
             rotation_started: AtomicBool::new(false),
+            power_adapter: power_adapter::PowerAdapterCache::default(),
         }
     }
 
@@ -322,6 +325,7 @@ impl E2bRuntime {
             config,
             launcher,
             rotation_started: AtomicBool::new(false),
+            power_adapter: power_adapter::PowerAdapterCache::default(),
         }
     }
 
@@ -329,14 +333,19 @@ impl E2bRuntime {
         self: &Arc<Self>,
         runtime: &tokio::runtime::Runtime,
         registry: Arc<crate::e2b_run_registry::E2bRunRegistry>,
-    ) -> bool {
+    ) -> Option<rotation::RotationTask> {
         if self.config.idle_pause_timeout.is_none()
             || self.rotation_started.swap(true, Ordering::AcqRel)
         {
-            return false;
+            return None;
         }
-        runtime.spawn(rotation::run(self.clone(), registry));
-        true
+        rotation::start(self.clone(), registry, runtime)
+    }
+
+    /// Allow the in-flight capabilities handshake and provider call their existing
+    /// request deadlines, plus bounded bookkeeping. Expiry never settles a duty.
+    pub(crate) fn rotation_shutdown_timeout(&self) -> Duration {
+        self.config.request_timeout.saturating_mul(2) + Duration::from_secs(10)
     }
 
     pub(crate) fn attempt_key(

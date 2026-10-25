@@ -46,6 +46,7 @@ pub struct TransferReceipt {
 pub enum BulkTransferError {
     NotDispatched(&'static str),
     Unknown(&'static str),
+    FileNotFound,
 }
 
 /// Owns its SDK child and spool together. No process handle or spool path escapes.
@@ -103,6 +104,28 @@ impl SpoolingAdapterProcess {
         payload: Value,
         timeout: Duration,
     ) -> Result<AdapterResponse, AdapterFailure> {
+        self.call_with_observation(request_id, operation, payload, timeout, None)
+    }
+
+    pub(crate) fn call_observed(
+        &self,
+        request_id: &str,
+        operation: &str,
+        payload: Value,
+        timeout: Duration,
+        observation: crate::observations::power::PowerObservation,
+    ) -> Result<AdapterResponse, AdapterFailure> {
+        self.call_with_observation(request_id, operation, payload, timeout, Some(observation))
+    }
+
+    fn call_with_observation(
+        &self,
+        request_id: &str,
+        operation: &str,
+        payload: Value,
+        timeout: Duration,
+        observation: Option<crate::observations::power::PowerObservation>,
+    ) -> Result<AdapterResponse, AdapterFailure> {
         if matches!(operation, "uploadFile" | "downloadFile") {
             return Err(AdapterFailure::NotDispatched("bulk_stream_api_required"));
         }
@@ -115,9 +138,18 @@ impl SpoolingAdapterProcess {
         let _context =
             crate::observations::Context::enter_if_absent(&self.process.observation_context);
         let _lane = self.lane.acquire(deadline, "e2bAdapterSpoolQueueWait")?;
-        let response = self
-            .process
-            .call_before(request_id, operation, payload, deadline);
+        let response = match observation {
+            Some(observation) => self.process.call_before_observed(
+                request_id,
+                operation,
+                payload,
+                deadline,
+                observation,
+            ),
+            None => self
+                .process
+                .call_before(request_id, operation, payload, deadline),
+        };
         if matches!(response, Err(AdapterFailure::Unknown(_))) {
             // A failed transport closes the physical lane. Reject queued local
             // staging before returning this permit; provider Unknown responses
@@ -232,6 +264,10 @@ impl SpoolingAdapterProcess {
             Ok(receipt)
         });
         self.finish_transfer(&path, owned, result)
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        self.process.is_running()
     }
 
     pub fn close(&self) -> Result<(), BulkTransferError> {
@@ -403,6 +439,19 @@ fn response_receipt(
         AdapterFailure::Unknown(code) => BulkTransferError::Unknown(code),
     })?;
     match response.outcome {
+        AdapterOutcome::Failed => {
+            if response.request_id == transfer_id
+                && response.result.as_ref()
+                    == Some(&json!({"sandboxId":request.sandbox_id,"transferId":transfer_id}))
+                && response
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| error.code == "fileNotFound")
+            {
+                return Err(BulkTransferError::FileNotFound);
+            }
+            return Err(BulkTransferError::Unknown("bulk_failure_binding_rejected"));
+        }
         AdapterOutcome::NotDispatched => {
             return Err(BulkTransferError::NotDispatched("bulk_adapter_rejected"))
         }

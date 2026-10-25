@@ -61,6 +61,89 @@ pub(crate) fn stored_request(
 }
 
 #[test]
+fn runtime_http_maintenance_command_outlives_short_control_deadline() {
+    if env::var("TEST_MAINTENANCE_COMMAND_DEADLINE").as_deref() != Ok("1") {
+        let output = std::process::Command::new(env::current_exe().unwrap())
+            .args(["--exact", "runtime_http_tests::runtime_http_maintenance_command_outlives_short_control_deadline", "--nocapture"])
+            .env("TEST_MAINTENANCE_COMMAND_DEADLINE", "1")
+            .env("INTERNAL_API_TOKEN", "synthetic-http-token")
+            .env("ENVIRONMENT_MAINTENANCE_TOKEN", "synthetic-maintenance-token-for-http-test")
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    runtime.block_on(async {
+        let mut state = http_state(runtime.clone());
+        state.request_capacity =
+            request_capacity::RequestCapacity::for_http_tests(Duration::from_millis(50));
+        let ordinary = state
+            .request_capacity
+            .lane("POST", "/agent-runs/step")
+            .slots;
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(dispatch_http_operation(
+            State(state.clone()),
+            Request::builder()
+                .method("POST")
+                .uri("/internal/environments/maintenance/task")
+                .header("x-internal-token", "synthetic-http-token")
+                .header(
+                    "x-environment-maintenance-token",
+                    "synthetic-maintenance-token-for-http-test",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            move |_, _| {
+                entered.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                Ok(http_response(200, "text/plain", b"verified".to_vec()))
+            },
+        ));
+        entered_rx.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let ordinary_held = ordinary.clone().try_acquire_owned().is_err();
+        let heartbeat = dispatch_http_operation(
+            State(state),
+            Request::builder()
+                .method("POST")
+                .uri("/internal/jobs/heartbeat")
+                .body(Body::empty())
+                .unwrap(),
+            |_, _| Ok(http_response(200, "text/plain", b"alive".to_vec())),
+        )
+        .await;
+        release.send(()).unwrap();
+        let response = task.await.unwrap();
+        assert_eq!(
+            response.status(),
+            200,
+            "command must use its signed execution timeout"
+        );
+        assert_eq!(
+            heartbeat.status(),
+            200,
+            "long commands must not consume short control capacity"
+        );
+        assert!(
+            ordinary_held,
+            "execution remains bounded by ordinary capacity"
+        );
+        assert_eq!(
+            to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
+            b"verified"
+        );
+        assert!(ordinary.try_acquire_owned().is_ok());
+    });
+}
+
+#[test]
 fn runtime_http_timeout_and_disconnect_hold_capacity_until_blocking_work_exits() {
     let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
     runtime.block_on(async {
@@ -518,5 +601,33 @@ fn runtime_http_error_response_crosses_hyper_with_retry_headers() {
         assert!(headers.contains("\r\nretry-after: 5"));
         assert!(headers.contains("\r\ncontent-type: application/json"));
         assert_eq!(body, r#"{"error":"runtime_busy"}"#);
+    });
+}
+
+#[test]
+fn controlled_service_shutdown_closes_the_listener_without_aborting_the_task() {
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    runtime.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let service = tokio::spawn(serve_http_with_shutdown(
+            listener,
+            http_state(runtime.clone()),
+            async move {
+                stopped
+                    .await
+                    .map_err(|_| "shutdown sender missing".to_string())
+            },
+        ));
+        stop.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), service)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(())
+        );
+        assert!(tokio::net::TcpStream::connect(address).await.is_err());
     });
 }

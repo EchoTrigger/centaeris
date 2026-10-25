@@ -17,6 +17,7 @@ pub(crate) struct RotationPage {
     pub candidates: Vec<RotationCandidate>,
     pub next: Option<String>,
     pub now_ms: i64,
+    pub resume_capacity_available: bool,
 }
 
 // The existing lifecycle Job carries both durable waiting and cancellation.
@@ -51,12 +52,17 @@ impl PostgresRuntimeStore {
         config: &str,
         profile_digest: &str,
         after: Option<&str>,
+        running_limit: Option<u32>,
     ) -> Result<RotationPage, String> {
         self.cleanup_view().with_client(|db| {
-            let demand=format!("EXISTS(SELECT 1 FROM {} WHERE r.environment_id=e.id AND {})",demand_from(),demand_predicate());
-            let rows=db.query(&format!("SELECT e.id,e.controller_epoch,c.attempt_id,c.verified_sandbox_id,p.operation_id,p.environment_id,p.operation_sequence,p.predecessor_operation_id,p.request_digest,p.request_json,p.action,p.dispatch_state,p.ack_json,p.automatic_demand_json,p.not_dispatched_at_ms,{demand},(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint FROM runtime.provider_environment_bindings b JOIN runtime.provider_creation_operations c ON c.attempt_id=b.creation_attempt_id AND c.environment_id=b.environment_id JOIN public.app_core_sessionenvironment e ON e.id=b.environment_id LEFT JOIN LATERAL (SELECT * FROM runtime.provider_environment_power_operations p WHERE p.environment_id=e.id ORDER BY p.operation_sequence DESC LIMIT 1) p ON true WHERE c.provider_config_digest=$1 AND c.profile_digest=$2 AND e.environment_profile_digest=$2 AND c.dispatch_state='dispatched' AND c.verified_sandbox_id IS NOT NULL AND c.settlement_id IS NULL AND e.controller_released=true AND NOT EXISTS(SELECT 1 FROM runtime.provider_environment_retirements d WHERE d.environment_id=e.id) AND ($3::text IS NULL OR e.id>$3) ORDER BY e.id LIMIT $4"),&[&config,&profile_digest,&after,&((PAGE_SIZE+1) as i64)]).map_err(|e|e.to_string())?;
+            super::super::capacity::validate_limit(running_limit)?;
+            let resume_capacity_available = match running_limit {
+                Some(limit) => super::super::capacity::active_count(db, config)? < i64::from(limit),
+                None => true,
+            };
+            let rows=db.query("SELECT e.id,e.controller_epoch,c.attempt_id,c.verified_sandbox_id,p.operation_id,p.environment_id,p.operation_sequence,p.predecessor_operation_id,p.request_digest,p.request_json,p.action,p.dispatch_state,p.ack_json,p.automatic_demand_json,p.not_dispatched_at_ms,(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint FROM runtime.provider_environment_bindings b JOIN runtime.provider_creation_operations c ON c.attempt_id=b.creation_attempt_id AND c.environment_id=b.environment_id JOIN public.app_core_sessionenvironment e ON e.id=b.environment_id LEFT JOIN LATERAL (SELECT * FROM runtime.provider_environment_power_operations p WHERE p.environment_id=e.id ORDER BY p.operation_sequence DESC LIMIT 1) p ON true WHERE c.provider_config_digest=$1 AND c.profile_digest=$2 AND e.environment_profile_digest=$2 AND c.dispatch_state='dispatched' AND c.verified_sandbox_id IS NOT NULL AND c.settlement_id IS NULL AND e.controller_released=true AND NOT EXISTS(SELECT 1 FROM runtime.provider_environment_retirements d WHERE d.environment_id=e.id) AND ($3::text IS NULL OR e.id>$3) ORDER BY e.id LIMIT $4",&[&config,&profile_digest,&after,&((PAGE_SIZE+1) as i64)]).map_err(|e|e.to_string())?;
             let more=rows.len()>PAGE_SIZE;
-            let now_ms=rows.first().map(|row|row.get(16)).unwrap_or(crate::now_ms()?);
+            let now_ms=rows.first().map(|row|row.get(15)).unwrap_or(crate::now_ms()?);
             let mut candidates=Vec::new();
             for row in rows.into_iter().take(PAGE_SIZE) {
                 let environment_id:String=row.get(0);
@@ -64,10 +70,25 @@ impl PostgresRuntimeStore {
                 if latest.as_ref().is_some_and(|value|value.request.environment_id!=environment_id || value.request.creation_attempt_id!=row.get::<_,String>(2) || value.request.sandbox_id!=row.get::<_,String>(3) || value.request.provider_config_digest!=config) {
                     return Err("provider_rotation_power_binding_rejected".into());
                 }
-                candidates.push(RotationCandidate {environment_id,controller_epoch:row.get(1),creation_attempt_id:row.get(2),sandbox_id:row.get(3),latest,has_demand:row.get(15)});
+                candidates.push(RotationCandidate {environment_id,controller_epoch:row.get(1),creation_attempt_id:row.get(2),sandbox_id:row.get(3),latest,has_demand:false});
+            }
+            let ids: Vec<_> = candidates.iter().map(|candidate| candidate.environment_id.clone()).collect();
+            if !ids.is_empty() {
+                // A cheap live-Job hint avoids planning the full authorization and
+                // wait-history predicate for pages with no work. It never grants
+                // execution; the full predicate and dispatch pins remain authoritative.
+                let live: Vec<String> = db.query("SELECT DISTINCT r.environment_id FROM public.app_core_agentrun r JOIN runtime.runtime_jobs j ON j.job_id='agent_run.lifecycle:'||r.id WHERE r.environment_id=ANY($1::text[]) AND r.status IN('queued','running') AND j.job_kind='agent_run.lifecycle' AND j.status IN('queued','leased','running')", &[&ids])
+                    .map_err(|error| error.to_string())?.into_iter().map(|row| row.get(0)).collect();
+                if !live.is_empty() {
+                    let demanding: std::collections::BTreeSet<String> = db.query(&format!("SELECT DISTINCT r.environment_id FROM {} JOIN public.app_core_sessionenvironment e ON e.id=r.environment_id WHERE r.environment_id=ANY($1::text[]) AND {}", demand_from(), demand_predicate()), &[&live])
+                        .map_err(|error| error.to_string())?.into_iter().map(|row| row.get(0)).collect();
+                    for candidate in &mut candidates {
+                        candidate.has_demand = demanding.contains(&candidate.environment_id);
+                    }
+                }
             }
             let next=more.then(||candidates.last().expect("nonempty bounded page").environment_id.clone());
-            Ok(RotationPage {candidates,next,now_ms})
+            Ok(RotationPage {candidates,next,now_ms,resume_capacity_available})
         })
     }
 }

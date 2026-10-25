@@ -975,7 +975,7 @@ fn postgres_provider_rotation_current_demand_excludes_accepted_cancellation_befo
         .unwrap();
     let (job, _) = rotation_waiter(&store, &mut db, &a, "rotation-waiter");
     let page = store
-        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None)
+        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None, None)
         .unwrap();
     assert_eq!(page.candidates.len(), 1);
     assert!(page.candidates[0].has_demand);
@@ -994,7 +994,7 @@ fn postgres_provider_rotation_current_demand_excludes_accepted_cancellation_befo
         )
         .unwrap();
     let fresh = store
-        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None)
+        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None, None)
         .unwrap();
     assert!(!fresh.candidates[0].has_demand);
     let mut sends = 0;
@@ -1039,7 +1039,7 @@ fn postgres_provider_rotation_cancelled_prepared_resume_records_not_dispatched_w
         .unwrap();
     rotation_waiter(&store, &mut db, &a, "rotation-waiter");
     let page = store
-        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None)
+        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None, None)
         .unwrap();
     let resume = crate::postgres_store::provider_operations::retained::idle::request(
         &page.candidates[0],
@@ -1245,7 +1245,7 @@ fn postgres_provider_rotation_cancelled_unsent_resume_does_not_block_other_envir
         .unwrap();
     rotation_waiter(&store, &mut db, &a, "rotation-waiter");
     let page = store
-        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None)
+        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None, None)
         .unwrap();
     let resume = crate::postgres_store::provider_operations::retained::idle::request(
         &page.candidates[0],
@@ -1365,7 +1365,7 @@ fn postgres_provider_rotation_new_demand_resumes_after_cancelled_unsent_intent()
         .unwrap();
     rotation_waiter(&store, &mut db, &a, "rotation-waiter");
     let page = store
-        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None)
+        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None, None)
         .unwrap();
     let cancelled = crate::postgres_store::provider_operations::retained::idle::request(
         &page.candidates[0],
@@ -1395,7 +1395,7 @@ fn postgres_provider_rotation_new_demand_resumes_after_cancelled_unsent_intent()
     assert_eq!(cancelled_sends, 0);
     rotation_waiter(&store, &mut db, &a, "fresh-waiter");
     let page = store
-        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None)
+        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None, None)
         .unwrap();
     let resume = crate::postgres_store::provider_operations::retained::idle::request(
         &page.candidates[0],
@@ -1457,7 +1457,7 @@ fn postgres_provider_rotation_cancel_after_dispatch_keeps_unknown_responsibility
         .unwrap();
     rotation_waiter(&store, &mut db, &a, "rotation-waiter");
     let page = store
-        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None)
+        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None, None)
         .unwrap();
     let resume = crate::postgres_store::provider_operations::retained::idle::request(
         &page.candidates[0],
@@ -1571,7 +1571,7 @@ fn postgres_provider_rotation_cancel_acceptance_waits_for_sdk_dispatch_job_pin()
         .unwrap();
     rotation_waiter(&store, &mut db, &a, "rotation-waiter");
     let page = store
-        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None)
+        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None, None)
         .unwrap();
     let resume = crate::postgres_store::provider_operations::retained::idle::request(
         &page.candidates[0],
@@ -1667,7 +1667,7 @@ fn postgres_provider_rotation_unsent_termination_wakes_existing_capacity_wait() 
         .unwrap();
     rotation_waiter(&store, &mut db, &a, "rotation-waiter");
     let page = store
-        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None)
+        .provider_rotation_candidates(CONFIG, &a.original.environment_profile_digest, None, None)
         .unwrap();
     let resume = crate::postgres_store::provider_operations::retained::idle::request(
         &page.candidates[0],
@@ -1764,5 +1764,118 @@ fn postgres_provider_environment_observation_preserves_verified_target_without_n
             .unwrap()
             .get::<_, i64>(0),
         0
+    );
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_provider_rotation_idle_scan_avoids_authorization_locks_without_live_demand() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (url, store, mut db) = retained::setup();
+    let (mut a, _, use_a) = candidate(&store, &mut db);
+    close_run(&store, &mut db, &mut a, &use_a);
+    let mut blocker = Client::connect(&url, NoTls).unwrap();
+    blocker
+        .batch_execute(
+            "BEGIN; LOCK TABLE public.app_core_agentrunauthorization IN ACCESS EXCLUSIVE MODE",
+        )
+        .unwrap();
+    let result = {
+        let _deadline = crate::postgres_store::RequestDeadline::enter(Some(
+            std::time::Instant::now() + std::time::Duration::from_millis(300),
+        ));
+        store.provider_rotation_candidates(
+            CONFIG,
+            &a.original.environment_profile_digest,
+            None,
+            None,
+        )
+    };
+    blocker.batch_execute("ROLLBACK").unwrap();
+    let page = result
+        .expect("an idle page with no queued work must not wait on unrelated authorization locks");
+    assert_eq!(page.candidates.len(), 1);
+    assert!(!page.candidates[0].has_demand);
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_provider_rotation_capacity_hint_keeps_unknown_charged_and_rechecks_stale_capacity() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_, store, mut db) = retained::setup();
+    let (mut a, _, use_a) = candidate(&store, &mut db);
+    close_run(&store, &mut db, &mut a, &use_a);
+    assert!(
+        !store
+            .provider_rotation_candidates(
+                CONFIG,
+                &a.original.environment_profile_digest,
+                None,
+                Some(1)
+            )
+            .unwrap()
+            .resume_capacity_available
+    );
+    store
+        .advance_provider_environment_power(
+            &request("hint-pause", Action::Pause, None, 2),
+            CONFIG,
+            |_, request| Ok(ack(request)),
+        )
+        .unwrap();
+    rotation_waiter(&store, &mut db, &a, "hint-waiter");
+    let page = store
+        .provider_rotation_candidates(
+            CONFIG,
+            &a.original.environment_profile_digest,
+            None,
+            Some(1),
+        )
+        .unwrap();
+    assert!(page.resume_capacity_available);
+    assert!(page.candidates[0].has_demand);
+    let stale_resume = crate::postgres_store::provider_operations::retained::idle::request(
+        &page.candidates[0],
+        CONFIG,
+        Action::Resume,
+    );
+    let other = capacity_creation_waiter(&store, &mut db, &a);
+    let creation = store
+        .provider_creation_operation("capacity-create")
+        .unwrap()
+        .unwrap();
+    store
+        .dispatch_provider_creation_limited(
+            &other.authority(ControllerPurpose::Execute),
+            &creation.identity,
+            Some(1),
+        )
+        .unwrap();
+    assert!(
+        store
+            .prepare_provider_environment_power_guarded(&stale_resume, CONFIG, Some(1), true)
+            .is_err(),
+        "a stale positive snapshot must not bypass transactional admission"
+    );
+    assert!(store
+        .provider_environment_power_operation(&stale_resume.operation_id)
+        .unwrap()
+        .is_none());
+    let unknown = store
+        .provider_creation_operation("capacity-create")
+        .unwrap()
+        .unwrap();
+    assert!(unknown.reported_sandbox_id.is_none());
+    assert!(
+        !store
+            .provider_rotation_candidates(
+                CONFIG,
+                &a.original.environment_profile_digest,
+                None,
+                Some(1)
+            )
+            .unwrap()
+            .resume_capacity_available,
+        "a dispatched creation without a locator retains its running budget"
     );
 }

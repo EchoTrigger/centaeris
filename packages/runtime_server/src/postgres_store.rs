@@ -522,26 +522,27 @@ fn postgres_config(
         .map_err(|error| format!("parse Postgres runtime database URL failed: {error}"))?;
     config.connect_timeout(connect_timeout);
     config.application_name(application_name);
+    // DISCARD ALL restores connection startup defaults. Establish the fixed
+    // namespace there so returning a healthy lease needs no extra SET round trip.
+    let options = match config.get_options() {
+        Some(options) => format!("{options} -c search_path=runtime,public"),
+        None => "-c search_path=runtime,public".to_string(),
+    };
+    config.options(&options);
     Ok(config)
 }
 
 fn connect(config: &postgres::Config) -> Result<Client, String> {
-    let mut client = config
+    config
         .connect(NoTls)
-        .map_err(|error| format!("connect Postgres runtime store failed: {error}"))?;
-    client
-        .batch_execute("SET search_path TO runtime, public")
-        .map_err(|error| format!("set Postgres runtime search_path failed: {error}"))?;
-    Ok(client)
+        .map_err(|error| format!("connect Postgres runtime store failed: {error}"))
 }
 
 fn reset_connection(client: &mut Client) -> Result<(), String> {
     client
         .simple_query("DISCARD ALL")
-        .map_err(|error| format!("discard Postgres runtime connection state failed: {error}"))?;
-    client
-        .batch_execute("SET search_path TO runtime, public")
-        .map_err(|error| format!("restore Postgres runtime search_path failed: {error}"))
+        .map(|_| ())
+        .map_err(|error| format!("discard Postgres runtime connection state failed: {error}"))
 }
 
 pub(crate) fn run_postgres_blocking<T: Send>(

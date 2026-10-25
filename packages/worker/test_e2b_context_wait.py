@@ -6,6 +6,7 @@ from test_worker import lifecycle_fixture, worker
 
 
 E2B_CONTEXT_WAIT_REASONS = (
+    "e2b_environment_capacity_wait",
     "e2b_live_context_capacity_wait",
     "e2b_environment_already_active",
     "e2b_step_already_active",

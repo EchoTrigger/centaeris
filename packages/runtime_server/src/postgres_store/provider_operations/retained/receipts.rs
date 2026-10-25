@@ -127,7 +127,21 @@ impl PostgresRuntimeStore {
                     observation.timed(DispatchMetric::Commit, || tx.commit().map_err(|e| e.to_string()))?;
                     return Ok(receipt);
                 }
-                let proof = observation.callback(|| quiesce(value))?;
+                let proof = if retirement::confirmed_removal(&mut tx, &value.target)? {
+                    // Independent maintenance has positively removed this exact
+                    // sandbox. The missing original streams are no longer needed
+                    // to prove that this Run cannot leave live sandbox effects.
+                    RetainedProviderQuiescence {
+                        agent_run_id: value.agent_run_id.clone(),
+                        execution_id: value.execution_id.clone(),
+                        instance_id: value.target.identity.instance_id.clone(),
+                        sandbox_id: value.target.sandbox_id.clone(),
+                        controller_epoch: grant.controller_epoch,
+                        quiescent: true,
+                    }
+                } else {
+                    observation.callback(|| quiesce(value))?
+                };
                 // This post-callback transaction stage includes receipt SQL;
                 // commitElapsedMs below remains the existing tx.commit alone.
                 let receipt = observation.timed(DispatchMetric::AuthorityAfter, || {
