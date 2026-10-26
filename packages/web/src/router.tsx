@@ -29,6 +29,7 @@ export type AgentSummary = {
   description: string;
   instructions: string;
   avatarKind: "centaeris" | "banana";
+  avatarUrl: string | null;
   status: "active" | "deleted";
   deletedAt: string | null;
   createdAt: string;

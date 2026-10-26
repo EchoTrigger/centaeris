@@ -1,12 +1,15 @@
+import re
 from typing import Literal
 
 from django.db import transaction
 from django.db.models import Q
+from django.http import HttpResponse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from ninja import Router, Status
 from pydantic import Field, field_validator
 
+from app_core.agent_avatars import normalize_avatar
 from app_core.agent_identity import (
     normalize_agent_description,
     normalize_agent_instructions,
@@ -174,7 +177,7 @@ def get_coordination_session(request, agent_id: str):
     return _coordination_response(binding)
 
 
-class CreateAgentRequest(StrictSchema):
+class AgentProfileFields(StrictSchema):
     name: str
     description: str = ""
     instructions: str = ""
@@ -196,7 +199,7 @@ class CreateAgentRequest(StrictSchema):
         return normalize_agent_instructions(value)
 
 
-class UpdateAgentRequest(StrictSchema):
+class AgentProfileUpdate(StrictSchema):
     name: str | None = None
     description: str | None = None
     instructions: str | None = None
@@ -218,6 +221,14 @@ class UpdateAgentRequest(StrictSchema):
         return None if value is None else normalize_agent_instructions(value)
 
 
+class CreateAgentRequest(AgentProfileFields):
+    avatar_data_base64: str | None = None
+
+
+class UpdateAgentRequest(AgentProfileUpdate):
+    avatar_data_base64: str | None = None
+
+
 @router.get(
     "/workspaces/{workspace_id}/agents",
     auth=usage_auth("assistant:use"),
@@ -231,7 +242,7 @@ def list_agents(request, workspace_id: str):
         workspace_id=workspace_id,
         owner=request.user,
         status="active",
-    ).select_related("definition__published_version").order_by("createdAt", "id")
+    ).select_related("definition__published_version").defer("avatar_image").order_by("createdAt", "id")
     if request.app_delegation is not None:
         agents = agents.filter(definition_id=request.app_delegation.definition_id)
         if request.app_delegation.agent_id is not None:
@@ -253,6 +264,10 @@ def create_agent(request, workspace_id: str, payload: CreateAgentRequest):
         membership = locked_workspace_membership_for(request.user, workspace_id)
         if membership is None:
             return Status(404, {"error": "workspace_not_found"})
+        try:
+            avatar_image, avatar_digest = normalize_avatar(payload.avatar_data_base64)
+        except ValueError as error:
+            return Status(400, {"error": str(error)})
         agent = Agent.objects.create(
             workspace=membership.workspace,
             owner=request.user,
@@ -260,6 +275,8 @@ def create_agent(request, workspace_id: str, payload: CreateAgentRequest):
             description=payload.description,
             instructions=payload.instructions,
             avatar_kind=payload.avatar_kind,
+            avatar_image=avatar_image,
+            avatar_digest=avatar_digest,
         )
     return Status(201, {"agent": serialize_agent(agent)})
 
@@ -275,6 +292,24 @@ def get_agent(request, agent_id: str):
     if agent is None or agent.status != "active":
         return Status(404, {"error": "agent_not_found"})
     return {"agent": serialize_agent(agent)}
+
+
+@router.get("/agents/{agent_id}/avatar", auth=session_auth, response={200: None} | COMMON_ERROR_RESPONSES)
+def get_agent_avatar(request, agent_id: str):
+    if not valid_query_fields(request.GET, {"v"}, required={"v"}):
+        return Status(400, {"error": "agent_avatar_request_invalid"})
+    version = request.GET["v"]
+    if re.fullmatch(r"[0-9a-f]{64}", version) is None:
+        return Status(400, {"error": "agent_avatar_request_invalid"})
+    agent = _owned_agent(request.user, agent_id)
+    if (agent is None or agent.status != "active" or agent.purgedAt is not None
+            or agent.definition_id is not None or agent.is_business_instance
+            or not agent.avatar_digest or version != agent.avatar_digest):
+        return Status(404, {"error": "agent_not_found"})
+    response = HttpResponse(bytes(agent.avatar_image), content_type="image/png")
+    response["Cache-Control"] = "private, no-store"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 @router.get(
@@ -353,7 +388,7 @@ def list_trashed_agent_sessions(request, agent_id: str):
 )
 def update_agent(request, agent_id: str, payload: UpdateAgentRequest):
     fields = payload.model_fields_set
-    if not fields or any(getattr(payload, field) is None for field in fields):
+    if not fields or any(getattr(payload, field) is None for field in fields if field != "avatar_data_base64"):
         return Status(400, {"error": "agent_invalid"})
     with transaction.atomic():
         agent = _owned_agent(request.user, agent_id, lock=True)
@@ -361,13 +396,24 @@ def update_agent(request, agent_id: str, payload: UpdateAgentRequest):
             return Status(404, {"error": "agent_not_found"})
         if agent.status == "deleted":
             return Status(410, {"error": "agent_deleted"})
-        if branch_for_agent(agent.pk) is not None:
+        if agent.is_business_instance or branch_for_agent(agent.pk) is not None:
             return Status(409, {"error": "agent_business_configuration_managed"})
         if agent.definition_id is not None:
             return Status(409, {"error": "agent_configuration_managed"})
-        if all(getattr(agent, field) == getattr(payload, field) for field in fields):
+        avatar_change = None
+        if "avatar_data_base64" in fields:
+            try:
+                avatar_change = normalize_avatar(payload.avatar_data_base64)
+            except ValueError as error:
+                return Status(400, {"error": str(error)})
+        ordinary_fields = fields - {"avatar_data_base64"}
+        if (all(getattr(agent, field) == getattr(payload, field) for field in ordinary_fields)
+                and (avatar_change is None or agent.avatar_digest == avatar_change[1])):
             return Status(409, {"error": "agent_unchanged"})
         update_fields = []
+        if avatar_change is not None:
+            agent.avatar_image, agent.avatar_digest = avatar_change
+            update_fields.extend(["avatar_image", "avatar_digest"])
         if "name" in fields:
             agent.name = payload.name
             update_fields.append("name")
@@ -445,7 +491,9 @@ def permanently_delete_agent(request, agent_id: str):
         if agent.purgedAt is not None:
             return Status(410, {"error": "agent_purged"})
         agent.purgedAt = timezone.now()
-        agent.save(update_fields=["purgedAt", "updatedAt"])
+        agent.avatar_image = None
+        agent.avatar_digest = ""
+        agent.save(update_fields=["purgedAt", "avatar_image", "avatar_digest", "updatedAt"])
     return {"deleted": True}
 
 

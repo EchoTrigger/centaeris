@@ -250,6 +250,7 @@ class AgentResponse(StrictSchema):
     description: str
     instructions: str
     avatar_kind: Literal["centaeris", "banana"]
+    avatar_url: str | None
     status: Literal["active", "deleted"]
     deleted_at: str | None
     created_at: str

@@ -982,6 +982,8 @@ class Agent(models.Model):
     description = models.CharField(max_length=128, blank=True, default="")
     instructions = models.TextField(blank=True, default="")
     avatar_kind = models.CharField(max_length=16, default="centaeris")
+    avatar_image = models.BinaryField(null=True, blank=True, editable=False)
+    avatar_digest = models.CharField(max_length=64, blank=True, default="", editable=False)
     status = models.CharField(max_length=16, default="active")
     model_config = models.ForeignKey(ModelConfig, on_delete=models.PROTECT, null=True, blank=True, related_name="configured_agents")
     thinking_mode = models.CharField(max_length=64, blank=True, default="")
@@ -1003,6 +1005,11 @@ class Agent(models.Model):
                 condition=models.Q(is_business_instance=False), name="agent_definition_owner_unique"),
             models.CheckConstraint(condition=models.Q(model_config__isnull=False) | models.Q(thinking_mode=""),
                 name="agent_unconfigured_model_no_effort"),
+            models.CheckConstraint(
+                condition=(models.Q(avatar_image__isnull=True, avatar_digest="")
+                    | (models.Q(avatar_image__isnull=False) & ~models.Q(avatar_digest=""))),
+                name="agent_avatar_image_consistent",
+            ),
             models.CheckConstraint(
                 condition=models.Q(avatar_kind__in=("centaeris", "banana")),
                 name="agent_avatar_kind_valid",
@@ -1036,6 +1043,8 @@ class Agent(models.Model):
         self.description = normalize_agent_description(self.description)
         self.instructions = normalize_agent_instructions(self.instructions)
         require_enum("Agent.avatar_kind", self.avatar_kind, {"centaeris", "banana"})
+        if (self.definition_id is not None or self.is_business_instance) and self.avatar_digest:
+            raise ValueError("Agent managed configuration cannot have a private avatar")
         require_enum("Agent.status", self.status, {"active", "deleted"})
         if (
             (self.status == "active")
