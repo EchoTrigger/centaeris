@@ -1,5 +1,5 @@
 import { agentAvatarSrc } from "./agentAvatar";
-export function AgentMark({ agent, className = "", previewSrc }) {
+export function AgentMark({ agent, className = "", previewSrc = "" }) {
   if (!agent || !["centaeris", "banana"].includes(agent.avatarKind)) {
     throw new Error("Agent avatarKind is invalid");
   }
