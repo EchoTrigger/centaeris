@@ -222,10 +222,6 @@ fn postgres_capacity_signal_preserves_execution_limits_and_reclaim_embargo() {
     };
     assert!(!ready(), "release cannot grant a ninth execution");
     assert!(claim_waiter(&store, &waiting, now(&mut db)).is_empty());
-    yield_until(&store, &fillers[3], now(&mut db), "question_wait");
-    assert!(!ready(), "release cannot grant a fifth workspace execution");
-    assert!(claim_waiter(&store, &waiting, now(&mut db)).is_empty());
-    yield_until(&store, &fillers[0], now(&mut db), "question_wait");
     db.execute(
         "UPDATE runtime.runtime_jobs SET lease_reclaim_not_before_ms=$2 WHERE job_id=$1",
         &[
@@ -234,6 +230,9 @@ fn postgres_capacity_signal_preserves_execution_limits_and_reclaim_embargo() {
         ],
     )
     .unwrap();
+    // A foreign Workspace frees the eighth global slot. The waiting Run
+    // still cannot claim it until its independent reclaim embargo expires.
+    yield_until(&store, &fillers[3], now(&mut db), "question_wait");
     assert!(!ready(), "release cannot bypass lease-reclaim backoff");
     assert!(claim_waiter(&store, &waiting, now(&mut db)).is_empty());
     db.execute(
@@ -241,7 +240,10 @@ fn postgres_capacity_signal_preserves_execution_limits_and_reclaim_embargo() {
         &[&waiting.job],
     )
     .unwrap();
-    assert!(ready());
+    assert!(
+        ready(),
+        "a fifth Workspace execution must be allowed while a global slot is free"
+    );
     assert_eq!(claim_waiter(&store, &waiting, now(&mut db)).len(), 1);
 }
 
