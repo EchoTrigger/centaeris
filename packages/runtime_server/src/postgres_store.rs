@@ -99,7 +99,6 @@ mod resource_commit;
 pub(crate) mod runsc_rotation;
 mod runtime;
 pub(crate) use runtime::validate_hosted_native_input;
-mod historical_provider_schema;
 mod schema;
 mod transactions;
 mod transcript;
@@ -245,10 +244,7 @@ impl PostgresRuntimeStore {
                 limits.checkout_timeout,
             )),
         };
-        store.with_client(|client| {
-            schema::ensure_schema(client)?;
-            historical_provider_schema::require_settled(client)
-        })?;
+        store.with_client(schema::ensure_schema)?;
         Ok(store)
     }
 
@@ -302,10 +298,7 @@ impl PostgresRuntimeStore {
                 checkout_timeout,
             )),
         };
-        store.with_client(|client| {
-            schema::ensure_schema(client)?;
-            historical_provider_schema::require_settled(client)
-        })?;
+        store.with_client(schema::ensure_schema)?;
         Ok(store)
     }
 

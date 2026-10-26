@@ -649,7 +649,7 @@ fn postgres_completion_delivery_upgrade_preserves_records_and_accepts_core_obser
     ).map_err(|error| error.to_string())).unwrap();
     let before = legacy_retained_rows(&f);
     let upgraded = PostgresRuntimeStore::new(&test_url()).unwrap();
-    assert_eq!(observation_versions(&f), (1..=25).collect::<Vec<_>>());
+    assert_eq!(observation_versions(&f), (1..=17).collect::<Vec<_>>());
     assert_eq!(legacy_retained_rows(&f), before);
     upgraded.with_client(|db| db.execute(
         "INSERT INTO runtime.model_observation_contents VALUES($1,$2,'required_completion_delivery','{}',2,1)",
@@ -693,7 +693,7 @@ fn postgres_current_schema_reopen_retains_sealed_wait_handoff() {
     append(&mut f).unwrap();
     let before = retained_rows(&f);
     let reopened = PostgresRuntimeStore::new(&test_url()).unwrap();
-    assert_eq!(observation_versions(&f), (1..=25).collect::<Vec<_>>());
+    assert_eq!(observation_versions(&f), (1..=17).collect::<Vec<_>>());
     assert_eq!(retained_rows(&f), before);
     assert_eq!(
         reopened

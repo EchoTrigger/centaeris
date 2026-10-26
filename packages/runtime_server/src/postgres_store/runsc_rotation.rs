@@ -383,9 +383,10 @@ pub(super) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
 }
 #[cfg(test)]
 pub(in crate::postgres_store) fn restore_previous_fixture(db: &mut postgres::Client) {
+    super::integration_tests::require_owned_migration_fixture(db);
     let exists: bool = db
         .query_one(
-            "SELECT EXISTS(SELECT 1 FROM runtime.schema_migrations WHERE version=25)",
+            "SELECT EXISTS(SELECT 1 FROM runtime.schema_migrations WHERE version=17)",
             &[],
         )
         .expect("inspect runsc fixture schema")
@@ -401,6 +402,6 @@ pub(in crate::postgres_store) fn restore_previous_fixture(db: &mut postgres::Cli
         "cannot discard runsc power responsibility"
     );
     let mut tx = db.transaction().expect("begin runsc fixture downgrade");
-    tx.batch_execute("LOCK TABLE runtime.schema_migrations,runtime.runsc_environment_power IN ACCESS EXCLUSIVE MODE; DROP TABLE runtime.runsc_environment_power; DELETE FROM runtime.schema_migrations WHERE version=25;").expect("restore empty released schema fixture");
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations,runtime.runsc_environment_power IN ACCESS EXCLUSIVE MODE; DROP TABLE runtime.runsc_environment_power; DELETE FROM runtime.schema_migrations WHERE version=17;").expect("restore empty native capacity schema fixture");
     tx.commit().expect("commit empty fixture restoration");
 }
