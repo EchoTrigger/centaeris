@@ -33,3 +33,15 @@ test('missing or malformed target fails before network access', () => {
     assert.deepEqual(calls, []);
   }
 });
+
+test('rolling workload reuses the specified session and pre-generated operation identity', () => {
+  const { context } = common(configured); let submitted;
+  context.http.request = (method, url, body) => {
+    submitted = { method, url, payload: JSON.parse(body) };
+    return { status: 202, json() { return { sessionId: 'retained-session', agentRunId: 'run-owned' }; } };
+  };
+  context.startRun({}, 'csrf', 'workspace-owned', 'agent-owned', 'model-tools', 'fixed work',
+    { sessionId: 'retained-session', operationId: 'a'.repeat(32), sampleId: 'b'.repeat(32) });
+  assert.ok(submitted.url.endsWith('/sessions/retained-session/messages'));
+  assert.equal(submitted.payload.operationId, 'a'.repeat(32));
+});

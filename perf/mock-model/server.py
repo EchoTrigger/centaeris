@@ -24,8 +24,14 @@ import json
 import os
 import ssl
 import shlex
+import importlib.util
+from pathlib import Path
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+_workload_spec = importlib.util.spec_from_file_location('perf_fixed_workload', Path(__file__).with_name('fixed_workload.py'))
+_fixed_workload = importlib.util.module_from_spec(_workload_spec)
+_workload_spec.loader.exec_module(_fixed_workload)
 
 TOOL_NAME = os.environ.get("MOCK_TOOL_NAME", "bash")
 TOOL_ARGS = os.environ.get("MOCK_TOOL_ARGS", '{"command":"echo perf"}')
@@ -308,7 +314,21 @@ class Handler(BaseHTTPRequestHandler):
         waiting_parent = waiting_role == "parent"
         waiting_child = waiting_role == "child"
         waiting_phase, waiting_ref = self.waiting_phase(request) if waiting_parent else (None, None)
-        if model == "perf-file-workload":
+        if model == "perf-fixed-workload":
+            current_input = request.get("input", [])
+            latest_user_index = max((index for index, item in enumerate(current_input)
+                                     if isinstance(item, dict) and item.get("role") == "user"
+                                     and item.get("type") in (None, "message")), default=-1)
+            tool_rounds = sum(1 for item in current_input[latest_user_index + 1:]
+                              if isinstance(item, dict) and item.get("type") == "function_call_output")
+            sample = _fixed_workload.sample_from_text(self.latest_user_text(request))
+            if tool_rounds == 0:
+                items, usage = self.emit_named_function_call("bash", {"command": _fixed_workload.command_for(sample), "timeout_ms": 300000})
+            elif tool_rounds == 1:
+                items, usage = self.emit_named_function_call("publish_artifact", {"path": "/mnt/data/" + _fixed_workload.FILENAME})
+            else:
+                items, usage = self.emit_final(response_id, "perf-instant")
+        elif model == "perf-file-workload":
             # The mock requests tools; only the real bash/provider path creates
             # bytes or publishes an artifact. K6 independently downloads them.
             if tool_rounds == 0:

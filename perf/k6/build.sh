@@ -11,6 +11,6 @@ MSYS_NO_PATHCONV=1 docker run --rm \
   -e "XK6_SSE_MODULE=$XK6_SSE_MODULE" -e "XK6_SSE_VERSION=$XK6_SSE_VERSION" \
   "$GO_IMAGE" bash -ceu '
     go install go.k6.io/xk6@"$XK6_VERSION"
-    GOOS=windows GOARCH=amd64 CGO_ENABLED=0 "$(go env GOPATH)/bin/xk6" build "$K6_VERSION" \
+    GOOS=windows GOARCH=amd64 CGO_ENABLED=0 env -u K6_VERSION "$(go env GOPATH)/bin/xk6" build "$K6_VERSION" \
       --with "$XK6_SSE_MODULE@$XK6_SSE_VERSION" --output /out/k6.exe
   '

@@ -76,17 +76,22 @@ export function configuredTarget(profile) {
 }
 
 // 发消息（sessionId=new 即创建会话并启动 run），返回 {sessionId, agentRunId}
-export function startRun(store, csrf, workspaceId, agentId, modelId, text) {
-  const operationId = Array.from(new Uint8Array(crypto.randomBytes(16)),
-    (byte) => byte.toString(16).padStart(2, '0')).join('');
+export function startRun(store, csrf, workspaceId, agentId, modelId, text, options = {}) {
+  const operationId = options.operationId === undefined ? Array.from(new Uint8Array(crypto.randomBytes(16)),
+    (byte) => byte.toString(16).padStart(2, '0')).join('') : options.operationId;
+  const sessionId = options.sessionId === undefined ? 'new' : options.sessionId;
+  const validId = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value);
+  if (!validId(operationId) || !validId(sessionId)) throw new Error('explicit Run operation/session invalid');
   const res = request('POST',
-    `/api/workspaces/${workspaceId}/sessions/new/messages`, store,
+    `/api/workspaces/${workspaceId}/sessions/${encodeURIComponent(sessionId)}/messages`, store,
     { operationId, agentId,
       text: text || 'Perf load.', attachmentRefs: [], modelConfigRef: modelId },
     csrf, { type: 'post_message' });
   if (res.status !== 202) throw new Error(`message failed: ${res.status}`);
   const body = res.json();
-  return { sessionId: body.sessionId, agentRunId: body.agentRunId };
+  if (!validId(body.sessionId) || !validId(body.agentRunId)
+      || (sessionId !== 'new' && body.sessionId !== sessionId)) throw new Error('admitted Run binding invalid');
+  return { sessionId: body.sessionId, agentRunId: body.agentRunId, operationId, sampleId: options.sampleId };
 }
 
 export function committedEvent(item, sessionId, agentRunId) {
@@ -209,4 +214,13 @@ export function verifyPublishedArtifact(store, result, sessionId, agentRunId, ex
   if (sha256 !== expected.sha256) throw new Error('artifact download hash mismatch');
   return { artifactRef: fact.artifactRef, publicationId: fact.publicationId, toolCallId: fact.toolCallId,
     sizeBytes: expected.sizeBytes, sha256, downloadMs: Date.now() - started };
+}
+
+export function verifyFixedCommand(result, expectedSha256) {
+  const calls = result.events.filter(event => event.type === 'tool_call' && event.payload.toolName === 'bash');
+  if (typeof expectedSha256 !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(expectedSha256) || calls.length !== 1
+      || typeof calls[0].payload.normalizedInput?.command !== 'string'
+      || 'sha256:' + crypto.sha256(calls[0].payload.normalizedInput.command, 'hex') !== expectedSha256) {
+    throw new Error('fixed workload command digest mismatch');
+  }
 }

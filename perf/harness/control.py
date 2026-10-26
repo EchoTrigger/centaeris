@@ -342,7 +342,14 @@ class Stack:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['init', 'check', 'build', 'up', 'slots', 'smoke', 'sample', 'load', 'stop'])
+    parser.add_argument('action', choices=['init', 'check', 'build', 'up', 'slots', 'smoke', 'sample', 'load', 'stop', 'workload'])
+    parser.add_argument('--fixture', type=Path, help='Prepared owned native perf fixture outside source; workload mode only')
+    parser.add_argument('--output', type=Path, help='New external workload result directory')
+    parser.add_argument('--k6-binary', type=Path, help='Existing pinned Linux K6 binary')
+    parser.add_argument('--environments', type=int, default=4)
+    parser.add_argument('--iterations', type=int, default=3)
+    parser.add_argument('--timeout', type=int, default=900)
+    parser.add_argument('--between-run-ms', type=int, default=0)
     parser.add_argument('--slots', type=int)
     parser.add_argument('--experiment-id')
     parser.add_argument('--seconds', type=int, default=1)
@@ -350,6 +357,16 @@ def main():
     parser.add_argument('--oci-runtime', choices=['runsc', 'runc'],
                         help='Explicit sandbox runtime for init; runc supports hosts without runsc.')
     args = parser.parse_args()
+    if args.action == 'workload':
+        if not args.fixture or not args.output or not args.k6_binary:
+            parser.error('workload requires --fixture, --output and --k6-binary')
+        if __package__:
+            from .fixture_workload import run as run_workload
+        else:
+            from fixture_workload import run as run_workload
+        report = run_workload(args.fixture, args.output, args.k6_binary, environments=args.environments, iterations=args.iterations, timeout=args.timeout, between_run_ms=args.between_run_ms)
+        print(json.dumps(report))
+        return
     if args.oci_runtime is not None and args.action != 'init':
         parser.error('--oci-runtime only applies to init; it does not change an existing stack')
     if args.action == 'init':
