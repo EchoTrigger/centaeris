@@ -3,7 +3,7 @@
 import execution from 'k6/execution';
 import { sleep } from 'k6';
 import { Trend, Rate, Counter } from 'k6/metrics';
-import { configuredTarget, login, startRun, waitForTerminal, verifyToolRun, verifyFixedCommand, verifyPublishedArtifact } from './common.js';
+import { configuredTarget, login, startRun, waitForTerminalObserved as waitForTerminal, verifyToolRun, verifyFixedCommand, verifyPublishedArtifact } from './common.js';
 
 const environmentCount = Number(__ENV.PERF_ENVIRONMENT_COUNT || 4);
 const iterations = Number(__ENV.PERF_RUNS_PER_ENVIRONMENT || 3);
@@ -23,6 +23,7 @@ const failures = new Rate('multi_environment_sample_failed');
 const verified = new Counter('multi_environment_samples_verified');
 const admissionTime = new Trend('multi_environment_admission_ms', true);
 const terminalTime = new Trend('multi_environment_terminal_ms', true);
+const firstToolResultTime = new Trend('multi_environment_first_successful_tool_result_ms', true);
 const downloadTime = new Trend('multi_environment_artifact_download_ms', true);
 const verifiedTime = new Trend('multi_environment_verified_ms', true);
 let currentSession = 'new';
@@ -69,15 +70,20 @@ export default function (data) {
     stage = 'tools';
     const tools = verifyToolRun(result, admitted.sessionId, admitted.agentRunId);
     verifyFixedCommand(result, sample.expectedCommandSha256);
+    if (!Number.isFinite(result.firstSuccessfulToolResultObservedAtMs)
+        || result.firstSuccessfulToolResultObservedAtMs < started) throw new Error('successful tool receive time missing');
+    const firstSuccessfulToolResultMs = result.firstSuccessfulToolResultObservedAtMs - started;
     stage = 'artifact';
     const artifact = verifyPublishedArtifact(data.store, result, admitted.sessionId, admitted.agentRunId, sample.expectedArtifact);
+    firstToolResultTime.add(firstSuccessfulToolResultMs);
     downloadTime.add(artifact.downloadMs); verifiedTime.add(Date.now() - started);
     failures.add(0); verified.add(1);
     record('verified', sample, data, admitted, { toolCount: tools.toolCount, artifact,
-      elapsedMs: Date.now() - started, firstEventObserved: false });
+      elapsedMs: Date.now() - started, firstSuccessfulToolResultMs,
+      firstEventObserved: Number.isFinite(result.firstCommittedEventObservedAtMs) });
     if (execution.vu.iterationInScenario < iterations - 1 && betweenRunMs > 0) sleep(betweenRunMs / 1000);
   } catch (_) {
     previousFailed = true; failures.add(1);
-    record('failed', sample, data, admitted, { errorCode: 'workload_' + stage + '_failed', firstEventObserved: false });
+    record('failed', sample, data, admitted, { errorCode: 'workload_' + stage + '_failed', firstEventObserved: null });
   }
 }

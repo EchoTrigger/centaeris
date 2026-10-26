@@ -1,6 +1,7 @@
 """Run existing K6 workloads against one already-owned native fixture; no deployment."""
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -152,8 +153,14 @@ def validate_records(records, fixture):
     if len(accepted) != len(samples) or len(verified) != len(samples) or any(
             record['phase'] in ('failed', 'notSubmitted') for record in records):
         raise ValueError('K6 workload did not verify all planned samples')
+    measured = [record['firstSuccessfulToolResultMs'] for record in verified.values()
+                if 'firstSuccessfulToolResultMs' in record]
+    if any(type(value) not in (int, float) or not math.isfinite(value) or value < 0 for value in measured):
+        raise ValueError('actual finite client tool receive times required')
+    timing = {'source': 'k6SseReceive', 'valuesMs': measured} if len(measured) == len(samples) else 'notObserved'
     return {'plannedSamples': len(samples), 'acceptedSamples': len(accepted), 'verifiedSamples': len(verified),
-            'acceptedRunIds': sorted(record['agentRunId'] for record in accepted.values())}
+            'acceptedRunIds': sorted(record['agentRunId'] for record in accepted.values()),
+            'firstSuccessfulToolResultLatency': timing}
 
 
 def run(fixture_path, output, binary, *, environments=4, iterations=3, timeout=900, between_run_ms=0, initial_stagger_ms=0):

@@ -1,6 +1,7 @@
 // k6 场景共享助手：手动 cookie 管理（Secure cookie 在 http 上需显式回发）、
 // 登录、provider/model 幂等创建、发消息、轮询终态。
 import http from 'k6/http';
+import sse from 'k6/x/sse';
 import crypto from 'k6/crypto';
 import { sleep } from 'k6';
 
@@ -131,6 +132,41 @@ export function waitForTerminal(store, csrf, sessionId, agentRunId, timeoutSecon
   }
   if (status) return { status, elapsedMs: Date.now() - started, events };
   throw new Error('terminal stream ended without a terminal event');
+}
+
+// Receive-time measurements use live callbacks; buffered terminal responses cannot provide them.
+export function waitForTerminalObserved(store, csrf, sessionId, agentRunId, timeoutSeconds = 120) {
+  const started = Date.now(), events = [], calls = new Map();
+  const terminals = { agent_run_completed: 'completed', agent_run_failed: 'failed', agent_run_interrupted: 'interrupted' };
+  let status, invalid = false;
+  let firstCommittedEventObservedAtMs = null, firstSuccessfulToolResultObservedAtMs = null;
+  const response = sse.open(`${API}/api/sessions/${sessionId}/agent-runs/${agentRunId}/events`, {
+    headers: { Cookie: cookieHeader(store), Accept: 'text/event-stream' },
+    timeout: `${timeoutSeconds}s`, tags: { type: 'terminal_events' },
+  }, connection => {
+    connection.on('event', item => {
+      try {
+        const event = committedEvent(JSON.parse(item.data), sessionId, agentRunId);
+        if (!event) return;
+        const observed = Date.now();
+        if (firstCommittedEventObservedAtMs === null) firstCommittedEventObservedAtMs = observed;
+        if (status) throw new Error('event after terminal');
+        events.push(event);
+        if (event.type === 'tool_call') calls.set(event.payload?.callId, event.payload?.toolName);
+        if (event.type === 'tool_result' && firstSuccessfulToolResultObservedAtMs === null
+            && typeof event.payload?.callId === 'string' && calls.get(event.payload.callId) === 'bash'
+            && event.payload.toolName === 'bash'
+            && ['successWithOutput', 'successNoOutput'].includes(event.payload.resultState)) {
+          firstSuccessfulToolResultObservedAtMs = observed;
+        }
+        if (terminals[event.type]) { status = terminals[event.type]; connection.close(); }
+      } catch (_) { invalid = true; connection.close(); }
+    });
+    connection.on('error', () => { if (!status) invalid = true; connection.close(); });
+  });
+  if (invalid || response?.status !== 200 || !status) throw new Error('Run event stream incomplete or invalid');
+  return { status, elapsedMs: Date.now() - started, events,
+    firstCommittedEventObservedAtMs, firstSuccessfulToolResultObservedAtMs };
 }
 
 // Completion and tool success are independent facts.

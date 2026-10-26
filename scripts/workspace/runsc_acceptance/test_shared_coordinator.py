@@ -60,7 +60,8 @@ class SharedCoordinatorTests(unittest.TestCase):
             records = [{'phase': 'accepted', 'agentRunId': f'run-{e}-{i}', 'sessionId': f'session-{e}'} for e in range(environments) for i in range(3)]
             (output / 'run-records.jsonl').write_text(''.join(json.dumps(record) + '\n' for record in records))
             calls.append(('k6',))
-            return {'status': 'clientVerified', 'verifiedSamples': 12, 'wallTimeMs': 1000, 'betweenRunMs': 6000}
+            return {'status': 'clientVerified', 'verifiedSamples': environments * 3, 'wallTimeMs': 1000, 'betweenRunMs': 6000,
+                    'firstSuccessfulToolResultLatency': {'source': 'k6SseReceive', 'valuesMs': [125] * (environments * 3)}}
         dependencies = {'driver': Driver, 'observer': Observer, 'workload': workload}
         options = {'environments': environments}
         if model_wait_ms: options['model_wait_ms'] = model_wait_ms
@@ -76,6 +77,7 @@ class SharedCoordinatorTests(unittest.TestCase):
             self.assertEqual(sum(call[0] == 'retire' for call in calls), 4)
             self.assertLess(calls.index(('stop',)), next(i for i, call in enumerate(calls) if call[0] == 'retire'))
             self.assertEqual(report['memoryContinuity'], 'notObserved')
+            self.assertEqual(report['clientFirstToolLatency'], {'source': 'k6SseReceive', 'valuesMs': [125] * 12})
     def test_unobserved_overlap_preserves_responsibility_and_stops_observer(self):
         with tempfile.TemporaryDirectory() as name:
             calls, execute = self.invoke(Path(name), overlap='notObserved')

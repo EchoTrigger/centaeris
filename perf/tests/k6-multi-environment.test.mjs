@@ -22,7 +22,7 @@ for (const initialStaggerMs of [0, 1250]) test(`stagger ${initialStaggerMs}: fou
         requests.push({ vu, text, admittedAtMs: clock, ...options });
         return { sessionId: `session-${vu}`, agentRunId: 'run-' + options.sampleId, operationId: options.operationId };
       },
-      waitForTerminal: () => ({ status: 'completed', events: [] }), verifyToolRun: () => ({ toolCount: 2 }),
+      waitForTerminal: () => ({ status: 'completed', events: [], firstSuccessfulToolResultObservedAtMs: clock, firstCommittedEventObservedAtMs: clock }), verifyToolRun: () => ({ toolCount: 2 }),
       verifyFixedCommand() {}, verifyPublishedArtifact: () => ({ downloadMs: 1, artifactRef: 'artifact:owned' }),
     });
     let source = fs.readFileSync(new URL('../k6/scenarios/multi-environment-workload.js', import.meta.url), 'utf8')
@@ -36,6 +36,7 @@ for (const initialStaggerMs of [0, 1250]) test(`stagger ${initialStaggerMs}: fou
   assert.equal(requests.length, 12); assert.equal(new Set(requests.map(row => row.sampleId)).size, 12);
   for (let vu = 1; vu <= 4; vu += 1) assert.deepEqual(requests.filter(row => row.vu === vu).map(row => row.sessionId), ['new', `session-${vu}`, `session-${vu}`]);
   assert.equal(records.filter(row => row.phase === 'verified').length, 12);
+  assert.ok(records.filter(row => row.phase === 'verified').every(row => row.firstSuccessfulToolResultMs === 0 && row.firstEventObserved === true));
   const expectedSleeps = Array.from({ length: 4 }, (_, i) => [...(i && initialStaggerMs ? [i * initialStaggerMs / 1000] : []), 5, 5]).flat();
   assert.deepEqual(sleeps, expectedSleeps, 'one initial stagger plus two between-Run gaps per VU');
   for (let vu = 1; vu <= 4; vu += 1) assert.deepEqual(requests.filter(row => row.vu === vu).map(row => row.admittedAtMs), [0, 5000, 10000].map(value => value + (vu - 1) * initialStaggerMs));

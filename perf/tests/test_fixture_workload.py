@@ -49,6 +49,24 @@ class ExistingFixtureWorkloadTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'distinct.*Run'):
                 module.validate_records(records,fixture)
 
+    def test_client_tool_latency_requires_actual_finite_receive_time_for_every_verified_run(self):
+        module=self.load()
+        with tempfile.TemporaryDirectory() as folder:
+            fixture=self.fixture(folder);records=[]
+            for index,sample in enumerate(module.prepared_samples(fixture)):
+                binding={'schema':'workspace.perf.run.sample.v1','sampleId':sample['sampleId'],'operationId':sample['operationId'],
+                         'workspaceId':fixture['workspaceId'],'modelConfigRef':'model-owned','sessionId':'session-'+str(index),'agentRunId':'run-'+str(index)}
+                records.extend([{**binding,'phase':'accepted'},{**binding,'phase':'verified','artifact':sample['expectedArtifact'],
+                    'firstSuccessfulToolResultMs':index+0.5}])
+            measured=module.validate_records(records,fixture)['firstSuccessfulToolResultLatency']
+            self.assertEqual(measured['source'],'k6SseReceive')
+            self.assertEqual(measured['valuesMs'],[index+0.5 for index in range(12)])
+            for invalid in (True,-1,float('nan'),float('inf'),'100'):
+                records[-1]['firstSuccessfulToolResultMs']=invalid
+                with self.subTest(invalid=invalid),self.assertRaises(ValueError):module.validate_records(records,fixture)
+            records[-1].pop('firstSuccessfulToolResultMs')
+            self.assertEqual(module.validate_records(records,fixture)['firstSuccessfulToolResultLatency'],'notObserved')
+
     def test_console_record_accepts_only_the_json_log_protocol(self):
         module=self.load()
         self.assertIsNone(module.console_record('ordinary K6 progress'))

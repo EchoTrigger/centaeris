@@ -83,6 +83,7 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
         client = dependencies['workload'](private_path, result / 'k6', k6binary,
                     environments=environments, iterations=iterations, timeout=900, between_run_ms=between_run_ms, initial_stagger_ms=initial_stagger_ms)
         report['client'] = client
+        report['clientFirstToolLatency'] = client.get('firstSuccessfulToolResultLatency', 'notObserved')
         if client.get('status') != 'clientVerified':
             raise RuntimeError('K6 did not verify the full workload')
         records = [json.loads(line) for line in (result / 'k6/run-records.jsonl').read_text().splitlines() if line]
