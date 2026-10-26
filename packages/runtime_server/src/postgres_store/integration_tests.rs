@@ -2722,7 +2722,7 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
     assert_eq!(outbox_generation, 0);
     let tables = audit
         .query(
-            "SELECT table_name FROM information_schema.tables WHERE table_schema='runtime'",
+            "SELECT table_name FROM information_schema.tables WHERE table_schema='runtime' AND table_type='BASE TABLE'",
             &[],
         )
         .expect("tables");
