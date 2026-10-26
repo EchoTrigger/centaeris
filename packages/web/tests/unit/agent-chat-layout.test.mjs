@@ -367,3 +367,19 @@ test("pushed Agent navigation updates sessions without rereading the list or pro
     assert.equal(calls.length, 1);
   } finally { subject.unmount(); }
 });
+for (const view of [
+  { name: "workspace welcome", workspaceDraft: true, search: "" },
+  { name: "new Agent conversation", workspaceDraft: false, search: "?new=1" },
+  { name: "existing Agent Session", workspaceDraft: false, search: "?sessionId=work" },
+]) test(`${view.name} presents its actual Agent identity without selecting the first directory entry`, context => {
+  const previousWindow = globalThis.window; const previousStorage = globalThis.sessionStorage;
+  globalThis.window = { innerWidth: 1280, addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {} };
+  globalThis.sessionStorage = { getItem: () => null };
+  context.after(() => { globalThis.window = previousWindow; globalThis.sessionStorage = previousStorage; });
+  const env = environment(); const selected = { ...env.agents[0], id: "selected", name: "Navigator" }; env.agents.push(selected);
+  const subject = renderer(AppPageContent, { agentId: selected.id, workspaceDraft: view.workspaceDraft, location: { search: view.search, state: null }, modelsVersion: 0 }, env);
+  try {
+    subject.render();
+    assert.equal(component(subject.tree, "AgentDocumentIdentity")?.props.agent, selected, "the rendered page hands its actual Agent to the browser identity component");
+  } finally { subject.unmount(); }
+});

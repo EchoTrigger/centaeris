@@ -15,6 +15,7 @@ export function HomePlane({ agent }) {
   return (
     <div className="shHome" aria-label={t("homePlane.home")}>
       <AgentMark className="shHomeAvatar" agent={agent} />
+      <h1>{agent.name}</h1>
     </div>
   );
 }

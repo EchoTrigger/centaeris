@@ -2,6 +2,7 @@ import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import { configureApi } from "../../src/api";
 import { AgentDocumentIdentity } from "../../src/shell/useAgentDocumentIdentity";
+import { HomePlane } from "../../src/shell/HomePlane";
 
 configureApi({ apiBaseUrl: location.origin });
 if (new URLSearchParams(location.search).has("withoutIcon")) document.querySelector('link[rel="icon"]')!.remove();
@@ -11,6 +12,7 @@ function Fixture() {
   const [agent, setAgent] = useState<typeof first | null>(null);
   const [overlay, setOverlay] = useState<typeof first | null>(null);
   return <><AgentDocumentIdentity agent={agent} />{overlay ? <AgentDocumentIdentity agent={overlay} /> : null}
+    {agent ? <HomePlane agent={agent} /> : null}
     <button type="button" onClick={() => setAgent(first)}>First Agent</button>
     <button type="button" onClick={() => setAgent(second)}>Second Agent</button>
     <button type="button" onClick={() => setAgent(value => value && { ...value, name: "Renamed researcher" })}>Rename Agent</button>

@@ -31,22 +31,23 @@ test("Agent tab follows saved name and avatar, rejects stale image completion an
         await waitFor(() => evaluate("Boolean(document.querySelector('button'))"), "identity controls");
         const original = await identity();
         await click("First Agent");
-        assert.deepEqual(await identity(), { title: "Researcher · Centaeris", icons: [{ href: "/centaeris-mark.png", type: "image/png" }], apple: "/centaeris-mark.png" });
-        await click("Rename Agent"); assert.equal((await identity()).title, "Renamed researcher · Centaeris");
+        assert.deepEqual(await identity(), { title: "Researcher", icons: [{ href: "/centaeris-mark.png", type: "image/png" }], apple: "/centaeris-mark.png" });
+        assert.equal(await evaluate("document.querySelector('h1')?.textContent"), "Researcher", "the welcome view names the Agent rather than the platform");
+        await click("Rename Agent"); assert.equal((await identity()).title, "Renamed researcher");
         await click("Custom avatar");
         await waitFor(async () => (await identity()).icons[0]?.href.endsWith("?v=valid"), "saved custom avatar");
         assert.equal((await identity()).icons.length, 1, "using a custom avatar does not add duplicate favicon links");
         await click("Broken avatar");
         await waitFor(async () => (await identity()).icons[0]?.href === "/centaeris-mark.png", "failed custom avatar fallback");
         await click("Slow avatar"); await click("Second Agent");
-        assert.equal((await identity()).title, "Builder · Centaeris");
+        assert.equal((await identity()).title, "Builder");
         await new Promise(resolve => setTimeout(resolve, 350));
         assert.equal((await identity()).icons[0].href, "/agent-avatar-banana.png", "a prior Agent's late image never replaces the current Agent's favicon");
         await click("Leave Agent"); assert.deepEqual(await identity(), original, "leaving restores the original title, favicon and unrelated touch icon");
         await click("First Agent"); await click("New page mounts"); await click("New page unmounts");
-        assert.equal((await identity()).title, "Researcher · Centaeris", "closing an overlaid page restores the still active Agent beneath it");
+        assert.equal((await identity()).title, "Researcher", "closing an overlaid page restores the still active Agent beneath it");
         await click("New page mounts"); await click("Leave Agent");
-        assert.equal((await identity()).title, "Builder · Centaeris", "an old page cleanup cannot overwrite the newly mounted Agent");
+        assert.equal((await identity()).title, "Builder", "an old page cleanup cannot overwrite the newly mounted Agent");
         await click("New page unmounts"); assert.deepEqual(await identity(), original);
       });
     }

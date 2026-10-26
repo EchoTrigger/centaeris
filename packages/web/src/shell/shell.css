@@ -258,7 +258,7 @@
 }
 .shHomeAvatar { width: 64px; height: 64px; }
 .shHomeAvatar svg { width: 28px; }
-.shHome h1 { margin: 8px 0 0; color: var(--on-surface); font-size: 27px; font-weight: 650; letter-spacing: -.02em; }
+.shHome h1 { max-width: 100%; overflow-wrap: anywhere; margin: 8px 0 0; color: var(--on-surface); font-size: 27px; font-weight: 650; letter-spacing: -.02em; }
 .shHome p { margin: 0; color: var(--process-text); font-size: 13px; }
 .shQuickActions { display: flex; flex-wrap: wrap; grid-row: 3; justify-content: center; gap: 24px; margin: 14px auto 0; color: var(--process-text); }
 .shQuickAction {

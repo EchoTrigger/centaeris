@@ -55,7 +55,7 @@ export function useAgentDocumentIdentity(agent: Identity | null) {
     if (!name || !kind || typeof document === "undefined") return undefined;
     const identity = { name, avatarKind: kind, avatarUrl };
     const fallback = builtinAgentAvatarSrc(kind);
-    const lease = claim(document, { title: `${name} · Centaeris`, src: fallback });
+    const lease = claim(document, { title: name, src: fallback });
     const source = agentAvatarSrc(identity);
     let image: HTMLImageElement | undefined;
     if (source !== fallback) {
