@@ -239,7 +239,16 @@ fn run_command_with_input(
             timeout_ms: request.timeout_ms,
         }
     };
-    let first = rpc(first_request).map_err(|reason| {
+    let first = if !recovering {
+        if let Some(probe) = cancellation_probe {
+            super::admission_wait::start(|| rpc(first_request.clone()), probe, std::thread::sleep)
+        } else {
+            rpc(first_request)
+        }
+    } else {
+        rpc(first_request)
+    }
+    .map_err(|reason| {
         if recovering {
             unknown(reason)
         } else {
@@ -652,6 +661,62 @@ mod tests {
             ExecutionError::CapacityRejected {
                 stage: ExecutionOperationStage::Start,
                 reason: "task_history_capacity".into()
+            }
+        );
+    }
+
+    #[test]
+    fn hosted_foreground_capacity_wait_retries_only_the_identical_unaccepted_start() {
+        let mut requests = Vec::new();
+        let probe = || Ok(None);
+        let output = run_command(
+            &fence(),
+            "tool-1",
+            command(),
+            Some(&probe),
+            "/usr/bin:/bin",
+            |request| {
+                requests.push(serde_json::to_value(&request).unwrap());
+                assert!(matches!(request, EnvironmentTaskRequest::Start { .. }));
+                if requests.len() < 4 {
+                    Err("task_capacity".into())
+                } else {
+                    Ok(finished(false))
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(output.process.stdout, "hello");
+        assert_eq!(requests.len(), 4);
+        assert!(
+            requests.iter().all(|request| request == &requests[0]),
+            "all parameters, fence and operation identity must remain original"
+        );
+    }
+
+    #[test]
+    fn hosted_foreground_capacity_wait_observes_cancel_without_input_or_second_start() {
+        let mut starts = 0;
+        let probe = || Ok(Some("agent_run_cancel_requested".into()));
+        let error = run_command(
+            &fence(),
+            "tool-1",
+            command(),
+            Some(&probe),
+            "/bin",
+            |request| {
+                starts += 1;
+                assert!(matches!(request, EnvironmentTaskRequest::Start { .. }));
+                Err("task_capacity".into())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(starts, 1);
+        assert_eq!(
+            error,
+            ExecutionError::OperationIndeterminate {
+                stage: ExecutionOperationStage::Start,
+                reason: "agent_run_cancel_requested".into()
             }
         );
     }

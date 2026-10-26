@@ -404,6 +404,16 @@ fn cached_execution_control_reason(
     Ok(reason)
 }
 
+fn fresh_execution_control_reason(
+    cache: &Mutex<Option<(Instant, Option<String>)>>,
+    probe: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
+    *cache.lock().map_err(|_| {
+        "run_execution_control_probe_failed:execution control cache lock poisoned"
+    })? = None;
+    probe()
+}
+
 fn main() -> Result<(), String> {
     DockerExecutionHostRunner::validate_host()?;
     let execution_profile = Arc::new(RuntimeExecutionProfile {
@@ -1931,9 +1941,10 @@ fn execute_agent_run(
     let cancellation_agent_run_id = agent_run_start.agent_run_id.clone();
     let cancellation_lifecycle_job_id = lifecycle_job_id.clone();
     let cancellation_lifecycle_lease_owner = lifecycle_lease_owner.clone();
-    let cancellation_probe_cache = Mutex::new(None);
+    let cancellation_probe_cache = Arc::new(Mutex::new(None));
+    let cached_cancellation_probe = cancellation_probe_cache.clone();
     let cancellation_probe: Arc<ExecutionCancellationProbe> = Arc::new(move || {
-        cached_execution_control_reason(&cancellation_probe_cache, || {
+        cached_execution_control_reason(&cached_cancellation_probe, || {
             let now =
                 now_ms().map_err(|error| format!("run_execution_control_probe_failed:{error}"))?;
             let state = cancellation_job_store
@@ -3787,7 +3798,9 @@ fn execute_agent_run(
             );
         }
     }
-    let cancellation_reason = cancellation_probe.as_ref()()?;
+    let cancellation_reason = fresh_execution_control_reason(&cancellation_probe_cache, || {
+        cancellation_probe.as_ref()()
+    })?;
     if cancellation_reason.as_deref() == Some("agent_run_lifecycle_lease_lost") {
         return Err("agent_run_lifecycle_lease_lost".to_string());
     }
@@ -7878,6 +7891,37 @@ mod tests {
         assert_eq!(cached_execution_control_reason(&cache, load), Ok(None));
         assert_eq!(cached_execution_control_reason(&cache, load), Ok(None));
         assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn helper_cancel_or_lease_loss_is_fresh_before_a_failed_core_result_can_terminalize() {
+        for stop in [
+            "agent_run_cancel_requested",
+            "agent_run_lifecycle_lease_lost",
+        ] {
+            let cache = Mutex::new(None);
+            assert_eq!(
+                cached_execution_control_reason(&cache, || Ok(None)),
+                Ok(None)
+            );
+            let reason = fresh_execution_control_reason(&cache, || {
+                cached_execution_control_reason(&cache, || Ok(Some(stop.into())))
+            })
+            .unwrap();
+            assert_eq!(reason.as_deref(), Some(stop));
+        }
+    }
+
+    #[test]
+    fn fresh_control_failure_never_becomes_an_empty_cancellation_reason() {
+        let cache = Mutex::new(None);
+        cached_execution_control_reason(&cache, || Ok(None)).unwrap();
+        let result = fresh_execution_control_reason(&cache, || {
+            cached_execution_control_reason(&cache, || {
+                Err("run_execution_control_probe_failed:offline".into())
+            })
+        });
+        assert!(result.is_err());
     }
 
     #[test]

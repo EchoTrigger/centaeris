@@ -422,6 +422,11 @@ pub(super) fn step(
             tool_layers.clone(),
         )
     });
+    if let Ok(Err(error)) = &execution {
+        if let Some(response) = execution_control_failure_response(&agent_run_id, error) {
+            return response;
+        }
+    }
     let outcome = match execution {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(error)) if error == "agent_run_lifecycle_lease_lost" => {
@@ -511,6 +516,26 @@ pub(super) fn step(
     step_response(&agent_run_id, outcome)
 }
 
+fn execution_control_failure_response(
+    agent_run_id: &str,
+    error: &str,
+) -> Option<Result<Response<Body>, String>> {
+    error
+        .starts_with("run_execution_control_probe_failed:")
+        .then(|| {
+            agent_run_step_failure_response(
+                agent_run_id,
+                "execution_control_unavailable",
+                true,
+                "execution_control_unavailable",
+            )
+            .map(|mut response| {
+                *response.status_mut() = axum::http::StatusCode::SERVICE_UNAVAILABLE;
+                response
+            })
+        })
+}
+
 fn step_response(
     agent_run_id: &str,
     outcome: AgentRunStepOutcome,
@@ -534,6 +559,28 @@ fn step_response(
 #[cfg(test)]
 mod cleanup_receipt_http_tests {
     use super::*;
+    #[test]
+    fn unavailable_fresh_control_returns_retryable_503_before_terminalization() {
+        let response = execution_control_failure_response(
+            "run-a",
+            "run_execution_control_probe_failed:offline",
+        )
+        .expect("a control uncertainty must bypass terminalization")
+        .unwrap();
+        assert_eq!(response.status(), 503);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let bytes = runtime
+            .block_on(axum::body::to_bytes(response.into_body(), 4096))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["retryable"], true);
+        assert_eq!(value["failureClass"], "execution_control_unavailable");
+        assert!(execution_control_failure_response(
+            "run-a",
+            "private error mentions run_execution_control_probe_failed:offline"
+        )
+        .is_none());
+    }
     #[test]
     fn current_step_response_matches_the_worker_contract() {
         let response = step_response(

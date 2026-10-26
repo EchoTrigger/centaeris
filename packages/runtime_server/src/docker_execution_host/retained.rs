@@ -261,19 +261,47 @@ impl DockerExecutionHostRunner {
         request: &hosted_execution::host_supervisor::HostHelperRequest,
         input: &mut (impl Read + Seek + Send),
     ) -> Result<EnvironmentTaskSnapshot, String> {
-        let mut error = "environment_helper_start_unknown".to_owned();
-        for _ in 0..2 {
+        let attempt = || {
             input
                 .rewind()
                 .map_err(|_| "environment_helper_input_unavailable")?;
-            match self.with_supervisor_target(|target| {
+            self.with_supervisor_target(|target| {
                 crate::environment_supervisor::helper_start(target, request.clone(), input)
-            }) {
-                Ok(task) => return Ok(task),
-                Err(e) => error = e,
-            }
+            })
+        };
+        if request.fence.controller_purpose != EnvironmentTaskControllerPurpose::Execute {
+            return {
+                let mut attempt = attempt;
+                attempt()
+            };
         }
-        Err(error)
+        super::admission_wait::start(
+            attempt,
+            || {
+                let store = self
+                    .resident_store
+                    .as_ref()
+                    .ok_or("retained control store missing")?;
+                let lease = self
+                    .resident_lease
+                    .as_ref()
+                    .ok_or("retained control lease missing")?;
+                let state = store.agent_run_execution_control_state(
+                    &self.agent_run_id,
+                    &lease.job_id,
+                    &lease.lease_owner,
+                    crate::now_ms()?,
+                )?;
+                Ok(if state.cancellation_requested {
+                    Some("agent_run_cancel_requested".into())
+                } else if !state.lifecycle_lease_current {
+                    Some("agent_run_lifecycle_lease_lost".into())
+                } else {
+                    None
+                })
+            },
+            thread::sleep,
+        )
     }
     fn finish_helper_current(
         &self,

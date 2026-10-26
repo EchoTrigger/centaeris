@@ -1,3 +1,4 @@
+mod admission_wait;
 mod environment;
 mod environment_container;
 mod maintenance;
