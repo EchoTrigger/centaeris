@@ -31,21 +31,23 @@ export default function OperatorWorkspaceResources({ isSuperuser }) {
 
   if (!isSuperuser) return null;
   const workspace = workspaces?.find(item => item.id === selectedId && item.status === "active");
-  return <section className="capabilitySettings">
+  return <section className="capabilitySettings operatorWorkspaceResources">
     <header><h1>{t("workspaceResources.platformWorkspaces")}</h1><p>{t("workspaceResources.operatorHint")}</p></header>
-    {failed ? <div role="alert">{t("workspaceResources.loadFailed")} <button type="button" onClick={loadWorkspaces}>{t("workspaceResources.retry")}</button></div> : null}
-    <label>{t("workspaceResources.selectWorkspace")}
-      <select value={selectedId} disabled={workspaces === null} onChange={event => setSelectedId(event.target.value)}>
-        <option value="">{t("workspaceResources.selectWorkspace")}</option>
-        {(workspaces || []).map(item => <option key={item.id} value={item.id} disabled={item.status !== "active"}>{item.name} ({item.status})</option>)}
-      </select>
-    </label>
-    {workspace ? <>
-      <div role="group" aria-label={t("workspaceResources.platformWorkspaces")}>
-        <button type="button" aria-pressed={panel === "models"} onClick={() => setPanel("models")}>{t("workspaceResources.models")}</button>
-        <button type="button" aria-pressed={panel === "plugins"} onClick={() => setPanel("plugins")}>{t("workspaceResources.plugins")}</button>
-      </div>
+    <div className="operatorResourceControls">
+      {failed ? <div className="capabilitySettingsError" role="alert">{t("workspaceResources.loadFailed")} <button className="pluginEnableButton" type="button" onClick={loadWorkspaces}>{t("workspaceResources.retry")}</button></div> : null}
+      <label className="workspaceModelsField"><span>{t("workspaceResources.selectWorkspace")}</span>
+        <select value={selectedId} disabled={workspaces === null} onChange={event => setSelectedId(event.target.value)}>
+          <option value="">{t("workspaceResources.selectWorkspace")}</option>
+          {(workspaces || []).map(item => <option key={item.id} value={item.id} disabled={item.status !== "active"}>{item.name} ({item.status})</option>)}
+        </select>
+      </label>
+      {workspace ? <div className="operatorResourceTabs" role="group" aria-label={t("workspaceResources.platformWorkspaces")}>
+          <button type="button" aria-pressed={panel === "models"} onClick={() => setPanel("models")}>{t("workspaceResources.models")}</button>
+          <button type="button" aria-pressed={panel === "plugins"} onClick={() => setPanel("plugins")}>{t("workspaceResources.plugins")}</button>
+        </div> : null}
+    </div>
+    {workspace ? <div className={`operatorResourcePanel is${panel === "models" ? "Models" : "Plugins"}`} role="region" aria-label={t(`workspaceResources.${panel}`)}>
       {panel === "models" ? <ModelSettings key={`${workspace.id}:models`} workspace={workspace} onClose={() => setSelectedId("")} onModelsChanged={() => undefined} /> : <PluginSettings key={`${workspace.id}:plugins`} workspace={workspace} isSuperuser />}
-    </> : null}
+    </div> : null}
   </section>;
 }

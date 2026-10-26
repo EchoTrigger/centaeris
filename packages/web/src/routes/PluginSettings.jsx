@@ -218,8 +218,8 @@ export default function PluginSettings({ workspace, isSuperuser }) {
 
   return (
     <div className="pluginSettings">
-      {canManage ? <div className="globalPluginUpload"><input ref={uploadInputRef} type="file" accept=".zip,application/zip" aria-label={t("workspaceResources.choosePackage")} disabled={Boolean(busyPlugin)} onChange={(event) => upload(event.target.files?.[0])} /><button type="button" disabled={Boolean(busyPlugin)} onClick={() => uploadInputRef.current?.click()}><Upload aria-hidden="true" />{t("workspaceResources.uploadPackage")}</button><small>{t("workspaceResources.skillPackageHint")}</small><small>{t("workspaceResources.environmentVersionHint")}</small></div> : null}
-      {notice ? <p role="status">{notice}</p> : null}
+      {canManage ? <div className="globalPluginUpload pluginPackageUpload"><input ref={uploadInputRef} type="file" accept=".zip,application/zip" aria-label={t("workspaceResources.choosePackage")} disabled={Boolean(busyPlugin)} onChange={(event) => upload(event.target.files?.[0])} /><button type="button" disabled={Boolean(busyPlugin)} onClick={() => uploadInputRef.current?.click()}><Upload aria-hidden="true" />{t("workspaceResources.uploadPackage")}</button><small>{t("workspaceResources.skillPackageHint")}</small><small>{t("workspaceResources.environmentVersionHint")}</small></div> : null}
+      {notice ? <p className="globalPluginNotice" role="status">{notice}</p> : null}
       {error ? <div className="capabilitySettingsError" role="alert">{t("pluginSettings.unableToLoadPlugin")}{error}</div> : null}
       {canManage && credentialError ? <div className="capabilitySettingsError" role="alert">{t("pluginSettings.credentialActionFailed")}{credentialError} <button className="pluginEnableButton" type="button" disabled={Boolean(busyCredential)} onClick={() => setCredentialRevision((value) => value + 1)}>{t("pluginSettings.reloadCredentials")}</button></div> : null}
       {plugins === null && !error ? <div className="capabilitySettingsEmpty">{t("pluginSettings.loadingPlugins")}</div> : null}
@@ -255,7 +255,7 @@ export default function PluginSettings({ workspace, isSuperuser }) {
                 <section className="pluginSettingsSection" aria-labelledby={`${detailId}-general-heading`}>
                   <h3 id={`${detailId}-general-heading`}>{t("pluginSettings.general")}</h3>
                   {plugin.scope === "platform" ? <p>{t("workspaceResources.sharedReadOnly")}</p> : null}
-                  {canManage && plugin.scope === "workspace" && plugin.writable !== false ? <button type="button" disabled={Boolean(busyPlugin)} onClick={() => setRemovePlugin(plugin)}>{t("globalPluginSettings.remove")}</button> : null}
+                  {canManage && plugin.scope === "workspace" && plugin.writable !== false ? <button className="pluginEnableButton is-danger" type="button" disabled={Boolean(busyPlugin)} onClick={() => setRemovePlugin(plugin)}>{t("globalPluginSettings.remove")}</button> : null}
                   <div className="pluginSettingsProperty">
                     <strong>{t("pluginSettings.capabilities")}</strong>
                     <p>{plugin.capabilities.length ? plugin.capabilities.join("、") : t("pluginSettings.notDeclared")}</p>
