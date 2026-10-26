@@ -9,6 +9,7 @@ import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from runsc_acceptance.workload_budget import workload_budget
 
 def validate_run_facts(rows, environments, iterations):
     if (type(environments) is not int or not 1 <= environments <= 64
@@ -53,6 +54,7 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
             or initial_stagger_ms*(environments-1)>120000
             or type(expected_working) is not int or not 1<=expected_working<=environments):
         raise ValueError('bounded shared wait, initial stagger and overlap threshold required')
+    budget = workload_budget(environments, iterations, run_terminal_timeout_seconds, between_run_ms, initial_stagger_ms)
     dependencies = dependencies or _dependencies()
     fixture, result = Path(fixture), Path(result)
     driver = dependencies['driver'](fixture, result, expected_running_limit=environments)
@@ -61,7 +63,7 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
         raise RuntimeError('shared fixture environment count mismatch')
     report = {'schema': 'runsc.shared.workload.acceptance.v1', 'status': 'failedPreserved',
               'sourceRevision': driver.manifest['sourceRevision'], 'environments': environments,
-              'iterations': iterations, 'runTerminalTimeoutSeconds':run_terminal_timeout_seconds, 'workUnits': work_units, 'betweenRunMs': between_run_ms,
+              'budgets': budget, 'iterations': iterations, 'runTerminalTimeoutSeconds':run_terminal_timeout_seconds, 'workUnits': work_units, 'betweenRunMs': between_run_ms,
               'modelWaitMs':model_wait_ms,'initialStaggerMs':initial_stagger_ms,
               'initialStaggerTotalMs':initial_stagger_ms*(environments-1),'expectedWorkingEnvironments':expected_working,
               'memoryContinuity': 'notObserved', 'clientFirstToolLatency': 'notObserved',
@@ -83,7 +85,7 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
     try:
         observer.start(); started = True
         client = dependencies['workload'](private_path, result / 'k6', k6binary,
-                    environments=environments, iterations=iterations, timeout=900, between_run_ms=between_run_ms, initial_stagger_ms=initial_stagger_ms, run_terminal_timeout_seconds=run_terminal_timeout_seconds)
+                    environments=environments, iterations=iterations, timeout=budget['k6ProcessSeconds'], between_run_ms=between_run_ms, initial_stagger_ms=initial_stagger_ms, run_terminal_timeout_seconds=run_terminal_timeout_seconds)
         report['client'] = client
         report['clientFirstToolLatency'] = client.get('firstSuccessfulToolResultLatency', 'notObserved')
         if client.get('status') != 'clientVerified':

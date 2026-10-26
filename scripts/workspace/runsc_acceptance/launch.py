@@ -4,6 +4,7 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from runsc_acceptance.daemon import PrivateDocker,command
 from runsc_acceptance.isolation import verify_owner
+from runsc_acceptance.workload_budget import workload_budget
 
 def static_helper(path):
     data=path.read_bytes()
@@ -140,7 +141,9 @@ def main():
     if not args.shared_workload and (args.model_wait_ms or args.initial_stagger_ms or args.expected_working_environments is not None or args.run_terminal_timeout_seconds!=120 or args.between_run_ms!=6000):parser.error('workload timing and overlap parameters require shared mode')
     shared=[]
     if args.shared_workload:
-        try:shared=shared_arguments(args.environment_count,args.model_wait_ms,args.initial_stagger_ms,args.expected_working_environments)
+        try:
+            shared=shared_arguments(args.environment_count,args.model_wait_ms,args.initial_stagger_ms,args.expected_working_environments)
+            budget=workload_budget(args.environment_count,args.iterations,args.run_terminal_timeout_seconds,args.between_run_ms,args.initial_stagger_ms)
         except ValueError as error:parser.error(str(error))
     if args.shared_workload and (args.k6_binary is None or not 2 <= args.environment_count <= 64
             or not 1 <= args.iterations <= 20 or not 1 <= args.work_units <= 1000000):
@@ -203,10 +206,10 @@ def main():
             except Exception:
                 if time.monotonic()>end:raise RuntimeError('owned API readiness failed')
                 time.sleep(.3)
-        docker.record(status='product-twelve-runs');print(json.dumps({'phase':'product-twelve-runs'}),flush=True)
+        docker.record(status='product-twelve-runs');print(json.dumps({'phase':'product-twelve-runs', **({'budgets':budget} if args.shared_workload else {})}),flush=True)
         if args.shared_workload:
             output=call(['python3','-B',str(tools/'shared_workload.py'),'--fixture',str(fixture),'--result',str(root/'results'),
-                '--k6-binary',str(args.k6_binary),'--environment-count',str(args.environment_count),'--iterations',str(args.iterations),'--work-units',str(args.work_units),'--run-terminal-timeout-seconds',str(args.run_terminal_timeout_seconds),'--between-run-ms',str(args.between_run_ms)]+shared,1800)
+                '--k6-binary',str(args.k6_binary),'--environment-count',str(args.environment_count),'--iterations',str(args.iterations),'--work-units',str(args.work_units),'--run-terminal-timeout-seconds',str(args.run_terminal_timeout_seconds),'--between-run-ms',str(args.between_run_ms)]+shared,budget['coordinatorSeconds'])
         else:
             output=call(['python3','-B',str(source/'scripts/workspace/runsc_rotation_acceptance.py'),'--fixture',str(fixture),'--result',str(root/'results'),'--acknowledge-fixture-retirement'],1800)
         # Successful product retirement has removed both managed workloads.

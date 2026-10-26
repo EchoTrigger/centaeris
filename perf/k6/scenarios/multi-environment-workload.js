@@ -15,6 +15,15 @@ if (!Number.isInteger(initialStaggerMs) || initialStaggerMs < 0 || initialStagge
     || initialStaggerMs * (environmentCount - 1) > 120000) throw new Error('bounded initial workload stagger required');
 const betweenRunMs = Number(__ENV.PERF_BETWEEN_RUN_MS || 0);
 if (!Number.isInteger(betweenRunMs) || betweenRunMs < 0 || betweenRunMs > 60000) throw new Error('bounded between-Run gap required');
+// The Python launcher computes the complete plan once; k6 only consumes its
+// scenario options. Missing, unknown and unbounded budget fields fail before admission.
+let budget;
+try { budget = JSON.parse(__ENV.PERF_K6_BUDGET); } catch (_) { throw new Error('explicit bounded k6 budget required'); }
+if (!budget || Array.isArray(budget) || typeof budget !== 'object'
+    || Object.keys(budget).sort().join(',') !== 'gracefulStopSeconds,scenarioSeconds,setupSeconds'
+    || Object.values(budget).some(value => !Number.isInteger(value) || value < 1 || value > 14400)) {
+  throw new Error('explicit bounded k6 budget required');
+}
 const samples = JSON.parse(open(__ENV.PERF_SAMPLES_PATH));
 if (!Number.isInteger(environmentCount) || environmentCount < 1 || environmentCount > 64 || !Number.isInteger(iterations) || iterations < 1 || iterations > 20
     || !Array.isArray(samples) || samples.length !== environmentCount * iterations
@@ -33,8 +42,9 @@ let currentSession = 'new';
 let previousFailed = false;
 
 export const options = {
+  setupTimeout: `${budget.setupSeconds}s`,
   scenarios: { environmentWork: { executor: 'per-vu-iterations', vus: environmentCount, iterations,
-    maxDuration: '10m', exec: 'default' } },
+    maxDuration: `${budget.scenarioSeconds}s`, gracefulStop: `${budget.gracefulStopSeconds}s`, exec: 'default' } },
   thresholds: { multi_environment_sample_failed: ['rate<0.01'] },
 };
 

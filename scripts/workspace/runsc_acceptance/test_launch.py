@@ -69,4 +69,34 @@ class BetweenRunArgumentTests(unittest.TestCase):
   for value in ('-1','60001','NaN','1.5'):
    with self.assertRaises(ValueError):launch.between_run_delay(value)
 
+class WorkloadBudgetTests(unittest.TestCase):
+ def test_four_by_three_has_a_derived_budget_for_every_existing_serial_phase(self):
+  budget=launch.workload_budget(4,3,300,30000,0)
+  self.assertEqual(budget['k6'],{'scenarioSeconds':1230,'setupSeconds':180,'gracefulStopSeconds':30})
+  self.assertEqual(budget['k6ProcessSeconds'],1465)
+  self.assertEqual(budget['completedReadbackSeconds'],12*181)
+  self.assertEqual(budget['finalPauseSeconds'],4*241)
+  self.assertEqual(budget['retirementSeconds'],4*391)
+  self.assertEqual(budget['coordinatorSeconds'],6560)
+  self.assertEqual(budget['limitSeconds'],14400)
+ def test_eight_environment_stagger_is_budgeted_without_lowering_overlap_or_run_count(self):
+  budget=launch.workload_budget(8,3,300,30000,3000)
+  self.assertEqual(budget['k6']['scenarioSeconds'],1251)
+  self.assertEqual(budget['coordinatorSeconds'],11281)
+ def test_launcher_rejects_the_total_budget_before_reading_fixture_or_k6(self):
+  import subprocess,sys
+  with tempfile.TemporaryDirectory() as directory:
+   absent=Path(directory)/'not-created'
+   command=[sys.executable,str(Path(__file__).with_name('launch.py')),'--root',str(absent),'--source',str(absent),
+    '--shared-workload','--execute','--environment-count','64','--iterations','20','--work-units','100000',
+    '--run-terminal-timeout-seconds','600','--between-run-ms','60000','--k6-binary',str(absent)]
+   for name in ('api','worker','runtime','general','postgres','redis'):command+=['--'+name+'-image','not-loaded']
+   result=subprocess.run(command,capture_output=True,text=True,timeout=10)
+   self.assertEqual(result.returncode,2)
+   self.assertIn('four-hour',result.stderr)
+   self.assertFalse(absent.exists())
+ def test_excessive_combination_rejects_before_linux_fixture_or_k6_is_loaded(self):
+  with self.assertRaisesRegex(ValueError,'four.hour'):
+   launch.workload_budget(64,20,600,60000,0)
+
 if __name__=='__main__':unittest.main()

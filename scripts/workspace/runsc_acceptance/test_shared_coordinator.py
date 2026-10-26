@@ -53,7 +53,7 @@ class SharedCoordinatorTests(unittest.TestCase):
             self.assertEqual(len(private['samples']), environments * 3)
             self.assertEqual({sample['workUnits'] for sample in private['samples']}, {2000})
             self.assertEqual(options['between_run_ms'], 6000)
-            self.assertEqual(options['timeout'],900)
+            self.assertEqual(options['timeout'],module.workload_budget(environments,3,run_terminal_timeout_seconds,6000,initial_stagger_ms)['k6ProcessSeconds'])
             self.assertEqual(options['run_terminal_timeout_seconds'],run_terminal_timeout_seconds)
             if initial_stagger_ms: self.assertEqual(options['initial_stagger_ms'], initial_stagger_ms)
             self.assertEqual(set(private['samples'][0]), {'sampleId', 'operationId', 'workUnits'})
@@ -130,11 +130,19 @@ class SharedCoordinatorTests(unittest.TestCase):
             with self.subTest(options=options),self.assertRaises(ValueError):
                 module.run(Path('absent'),Path('absent-result'),Path('absent-k6'),**options)
 
+    def test_excessive_total_budget_rejects_before_loading_any_fixture_dependency(self):
+        from unittest.mock import patch
+        with patch.object(module,'_dependencies',side_effect=AssertionError('fixture must not load')):
+            with self.assertRaisesRegex(ValueError,'four-hour'):
+                module.run(Path('absent'),Path('absent-result'),Path('absent-k6'),environments=64,iterations=20,
+                    run_terminal_timeout_seconds=600,between_run_ms=60000)
+
     def test_long_stream_deadline_is_explicit_without_reducing_three_rounds_or_four_way_overlap(self):
         with tempfile.TemporaryDirectory() as directory:
             calls,execute=self.invoke(Path(directory),run_terminal_timeout_seconds=300)
             report=execute()
             self.assertEqual(report['runTerminalTimeoutSeconds'],300)
+            self.assertEqual(report['budgets'],module.workload_budget(4,3,300,6000,0))
             self.assertEqual(report['iterations'],3)
             self.assertEqual(report['expectedWorkingEnvironments'],4)
             self.assertEqual(report['completedRuns'],12)

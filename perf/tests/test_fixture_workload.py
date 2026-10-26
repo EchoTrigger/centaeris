@@ -100,4 +100,47 @@ class ExistingFixtureWorkloadTests(unittest.TestCase):
                 with self.assertRaises(ValueError):module.k6_command(fixture,folder,'/k6',environments=4,iterations=3,run_terminal_timeout_seconds=value)
                 with self.assertRaises(ValueError):module.run('/not-read',folder,'/k6',run_terminal_timeout_seconds=value)
 
+    def test_k6_options_receive_the_same_explicit_budget_as_the_parent_process(self):
+        module=self.load()
+        with tempfile.TemporaryDirectory() as folder:
+            _,environment=module.k6_command(self.fixture(folder),folder,'/k6',environments=4,iterations=3,
+                between_run_ms=30000,run_terminal_timeout_seconds=300)
+            self.assertEqual(json.loads(environment['PERF_K6_BUDGET']),
+                {'scenarioSeconds':1230,'setupSeconds':180,'gracefulStopSeconds':30})
+
+    def test_python_budget_drives_actual_javascript_scenario_options(self):
+        import subprocess
+        module=self.load()
+        code = r"""const fs=require('node:fs'),vm=require('node:vm');
+const environment=JSON.parse(process.argv[2]);
+const count=Number(environment.PERF_ENVIRONMENT_COUNT)*Number(environment.PERF_RUNS_PER_ENVIRONMENT);
+const samples=Array.from({length:count},(_,i)=>({sampleId:'sample-'+i,operationId:'operation-'+i}));
+class Metric {add(){}}
+const context=vm.createContext({__ENV:environment,open:()=>JSON.stringify(samples),Trend:Metric,Rate:Metric,Counter:Metric});
+const source=fs.readFileSync(process.argv[1],'utf8').replace(/^import .*;\r?\n/gm,'').replace('export default function (data)','function workload(data)').replace(/export /g,'');
+vm.runInContext(source+';globalThis.result=options;',context);
+process.stdout.write(JSON.stringify(context.result));"""
+        with tempfile.TemporaryDirectory() as folder:
+            for environments,stagger in [(4,0),(8,3000)]:
+                _,environment=module.k6_command(self.fixture(folder),folder,'/k6',environments=environments,iterations=3,
+                    between_run_ms=30000,initial_stagger_ms=stagger,run_terminal_timeout_seconds=300)
+                safe={key:value for key,value in environment.items() if key in
+                    {'PERF_K6_BUDGET','PERF_ENVIRONMENT_COUNT','PERF_RUNS_PER_ENVIRONMENT','PERF_RUN_TERMINAL_TIMEOUT_SECONDS',
+                     'PERF_INITIAL_STAGGER_MS','PERF_BETWEEN_RUN_MS'}}
+                result=subprocess.run(['node','-e',code,str(SOURCE.parents[1]/'k6/scenarios/multi-environment-workload.js'),json.dumps(safe)],
+                    capture_output=True,text=True,check=True,timeout=10)
+                options=json.loads(result.stdout)
+                scenario=options['scenarios']['environmentWork']
+                self.assertEqual((scenario['vus'],scenario['iterations']),(environments,3))
+                self.assertEqual(options['setupTimeout'],'180s')
+                self.assertEqual(scenario['gracefulStop'],'30s')
+                self.assertEqual(scenario['maxDuration'],str(1230+7*stagger//1000)+'s')
+
+    def test_undersized_or_excessive_process_budget_is_rejected_before_fixture_access(self):
+        module=self.load()
+        for timeout in (900,1466,14401):
+            with self.subTest(timeout=timeout),self.assertRaisesRegex(ValueError,'process.*budget'):
+                module.run('/not-read','/not-created','/not-run',environments=4,iterations=3,
+                    between_run_ms=30000,run_terminal_timeout_seconds=300,timeout=timeout)
+
 if __name__=='__main__':unittest.main()

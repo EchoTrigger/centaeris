@@ -17,6 +17,7 @@ def _module(name, path):
 
 
 fixed_workload = _module('perf_fixed_workload', ROOT / 'perf/mock-model/fixed_workload.py')
+workload_budget = _module('perf_workload_budget', ROOT / 'scripts/workspace/runsc_acceptance/workload_budget.py').workload_budget
 
 
 def _external(path):
@@ -98,13 +99,14 @@ def k6_command(fixture, output, binary, *, environments, iterations, between_run
         raise ValueError('bounded initial workload stagger required')
     if type(between_run_ms) is not int or not 0 <= between_run_ms <= 60000:
         raise ValueError('bounded between-Run gap required')
+    budget = workload_budget(environments, iterations, run_terminal_timeout_seconds, between_run_ms, initial_stagger_ms)
     allowed = {'PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA'}
     environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
     environment.update(API_BASE=fixture['apiBase'], PERF_WORKSPACE_ID=fixture['workspaceId'],
                        PERF_AGENT_ID=fixture['agentId'], PERF_MODEL_REFS=json.dumps(fixture['modelRefs']),
                        PERF_ADMIN_EMAIL=fixture['account']['email'], PERF_ADMIN_PASSWORD=fixture['account']['password'],
                        PERF_SAMPLES_PATH=str(Path(output) / 'samples.json'), PERF_ENVIRONMENT_COUNT=str(environments),
-                       PERF_RUNS_PER_ENVIRONMENT=str(iterations), PERF_BETWEEN_RUN_MS=str(between_run_ms), PERF_INITIAL_STAGGER_MS=str(initial_stagger_ms), PERF_RUN_TERMINAL_TIMEOUT_SECONDS=str(run_terminal_timeout_seconds), K6_NO_USAGE_REPORT='true')
+                       PERF_K6_BUDGET=json.dumps(budget['k6']), PERF_RUNS_PER_ENVIRONMENT=str(iterations), PERF_BETWEEN_RUN_MS=str(between_run_ms), PERF_INITIAL_STAGGER_MS=str(initial_stagger_ms), PERF_RUN_TERMINAL_TIMEOUT_SECONDS=str(run_terminal_timeout_seconds), K6_NO_USAGE_REPORT='true')
     command = [str(binary), '--log-format', 'json', 'run', '--summary-export', str(Path(output) / 'k6-summary.json'),
                str(ROOT / 'perf/k6/scenarios/multi-environment-workload.js')]
     return command, environment
@@ -165,15 +167,18 @@ def validate_records(records, fixture):
             'firstSuccessfulToolResultLatency': timing}
 
 
-def run(fixture_path, output, binary, *, environments=4, iterations=3, timeout=900, between_run_ms=0, initial_stagger_ms=0, run_terminal_timeout_seconds=120):
+def run(fixture_path, output, binary, *, environments=4, iterations=3, timeout=None, between_run_ms=0, initial_stagger_ms=0, run_terminal_timeout_seconds=120):
     import queue
     import subprocess
     import threading
     import time
     if type(run_terminal_timeout_seconds) is not int or not 1 <= run_terminal_timeout_seconds <= 600:
         raise ValueError('bounded per-Run terminal timeout required')
-    if type(timeout) is not int or not 10 <= timeout <= 1200:
-        raise ValueError('bounded K6 process deadline required')
+    budget = workload_budget(environments, iterations, run_terminal_timeout_seconds, between_run_ms, initial_stagger_ms)
+    if timeout is None:
+        timeout = budget['k6ProcessSeconds']
+    if type(timeout) is not int or timeout != budget['k6ProcessSeconds']:
+        raise ValueError('K6 process budget must equal the recorded derived budget')
     fixture = read_fixture(fixture_path, environments=environments, iterations=iterations)
     output = _external(output)
     binary = Path(binary).resolve(strict=True)
@@ -184,7 +189,7 @@ def run(fixture_path, output, binary, *, environments=4, iterations=3, timeout=9
     samples = prepared_samples(fixture)
     (output / 'samples.json').write_text(json.dumps(samples, indent=2), encoding='utf-8')
     manifest = {key: fixture[key] for key in ('apiBase', 'workspaceId', 'agentId', 'modelRefs')}
-    manifest.update(schema='workspace.perf.workload.v1', environments=environments, iterations=iterations,
+    manifest.update(schema='workspace.perf.workload.v1', budgets=budget, environments=environments, iterations=iterations,
                     sourceRevision=fixture['native']['sourceRevision'], project=fixture['native']['project'], betweenRunMs=between_run_ms,
                     initialStaggerMs=initial_stagger_ms, runTerminalTimeoutSeconds=run_terminal_timeout_seconds, modelWaitMs=fixture['native'].get('modelWaitMs', 0))
     (output / 'manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
