@@ -35,5 +35,7 @@ def remove_runtime_trigger_functions(cursor):
                  "verify_resident_allocation", "protect_environment_retirement",
                  "protect_environment_maintenance_completion",
                  "protect_agent_run_cleanup_receipt",
-                 "protect_environment_provision_completion"):
+                 "protect_environment_provision_completion",
+                 "protect_environment_creation_attempt", "protect_lifecycle_lease_purpose",
+                 "resident_capacity_release", "resident_capacity_job_change"):
         cursor.execute("DROP FUNCTION IF EXISTS runtime." + name + "()")

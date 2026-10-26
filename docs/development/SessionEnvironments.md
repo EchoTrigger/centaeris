@@ -43,6 +43,30 @@ authority before a host operation. Teardown receives cleanup authority rather
 than reconstructing a start request. Cancel and supplement carry the original
 signed Run identity; they do not need authority to execute in the environment.
 
+## Controller contention and delivery recovery
+
+Lifecycle authorization shares the Workspace and original membership rows with
+Runtime's authorization readers. Session, environment, Run and grant mutations
+retain exclusive locks. Lifecycle row-lock acquisition uses NOWAIT; only confirmed
+PostgreSQL lock contention becomes `environment_controller_busy`, after the
+transaction has rolled back. Runtime retains its authorization locks through the
+physical operation, including protection against non-key status and role changes.
+
+An exact controller busy/owned response makes the Worker yield the same Job at
+initial resolution, after Core terminal, and during cleanup or release. Yield
+preserves the Run binding and does not increment failure retries. A committed
+Core terminal remains terminal; a later claim resumes cleanup rather than stepping
+the model again. Authorization rejection and unknown transport outcomes do not
+become controller contention.
+
+A yield request freezes its identity before delivery. If its acknowledgement is
+lost, the Worker makes a bounded recovery attempt with the identical request
+within the last confirmed lease window. Only a successful acknowledgement confirms
+delivery; a queued-state observation alone does not. The old owner stops on lease
+loss or unconfirmed handoff and does not synthesize a Run failure. Any unresolved
+lease follows the existing independent lease-reclaim policy. The initial queue
+expiry policy remains independent of both failure retries and lease reclamation.
+
 ## Allocation and host execution
 
 Core selects execution IDs and owns Run/recovery semantics.
