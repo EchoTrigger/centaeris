@@ -3,9 +3,12 @@ from collections import Counter
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 import time
 import uuid
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 def validate_run_facts(rows, environments, iterations):
     if (type(environments) is not int or not 1 <= environments <= 64

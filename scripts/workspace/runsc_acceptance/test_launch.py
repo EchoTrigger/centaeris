@@ -21,4 +21,39 @@ class SharedArgumentTests(unittest.TestCase):
  def test_invalid_shared_budgets_reject_before_launch(self):
   for values in ((8,120001,0,None),(8,0,20000,None),(8,0,0,9),(8,0,0,0)):
    with self.subTest(values=values),self.assertRaises(ValueError):launch.shared_arguments(*values)
+class FailureDiagnosticTests(unittest.TestCase):
+ def test_failed_process_keeps_one_bounded_private_redacted_diagnostic(self):
+  import json,os,stat,sys
+  with tempfile.TemporaryDirectory() as directory:
+   root=Path(directory);(root/'fixture').mkdir()
+   known='synthetic-only-value-4938';other='another-fixture-value-6549'
+   (root/'fixture/synthetic.env').write_text('INTERNAL_API_TOKEN='+known+'\nCONFIG_VALUE='+other+'\n')
+   diagnostic=root/'launch-step-failure.json';diagnostic.write_text('obsolete failure detail')
+   program='import sys;print("x"*20000);print("last safe context");print('+repr(known)+');print('+repr(other)+');print("PASSWORD unlisted-private-value");sys.stderr.write("safe trace\\n"+'+repr(known)+');sys.exit(7)'
+   with self.assertRaisesRegex(RuntimeError,'owned fixture step failed') as raised:
+    launch.run_step([sys.executable,'-c',program],root=root,timeout=5,capture_bytes=4096,diagnostic_bytes=1024)
+   data=diagnostic.read_text();value=json.loads(data)
+   self.assertNotIn(known,data);self.assertNotIn(other,data);self.assertNotIn('unlisted-private-value',data)
+   self.assertNotIn('obsolete failure detail',data);self.assertNotIn(known,str(raised.exception))
+   self.assertIn('last safe context',value['stdout']);self.assertIn('safe trace',value['stderr'])
+   self.assertEqual(value['returnCode'],7);self.assertTrue(value['stdoutTruncated'])
+   self.assertLess(diagnostic.stat().st_size,4000)
+   self.assertEqual(list(root.glob('*failure*.json')),[diagnostic])
+   if os.name=='posix':self.assertEqual(stat.S_IMODE(diagnostic.stat().st_mode),0o600)
+ def test_success_returns_stdout_without_persisting_process_output(self):
+  import sys
+  with tempfile.TemporaryDirectory() as directory:
+   root=Path(directory)
+   self.assertEqual(launch.run_step([sys.executable,'-c','print("bounded result")'],root=root,timeout=5),'bounded result\n')
+   self.assertFalse((root/'launch-step-failure.json').exists())
+ def test_timeout_is_bounded_and_does_not_expose_command_arguments(self):
+  import json,sys
+  with tempfile.TemporaryDirectory() as directory:
+   root=Path(directory);(root/'fixture').mkdir();known='timeout-private-value-9281'
+   (root/'fixture/synthetic.env').write_text('INTERNAL_API_TOKEN='+known+'\n')
+   with self.assertRaisesRegex(RuntimeError,'owned fixture step failed') as raised:
+    launch.run_step([sys.executable,'-c','import time;time.sleep(10)',known],root=root,timeout=.1)
+   report=json.loads((root/'launch-step-failure.json').read_text())
+   self.assertEqual(report['failureType'],'timeout');self.assertNotIn(known,str(raised.exception))
+
 if __name__=='__main__':unittest.main()

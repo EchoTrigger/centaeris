@@ -20,4 +20,18 @@ class SharedWorkloadTests(unittest.TestCase):
  def test_missing_or_duplicate_runs_are_rejected(self):
   for rows in (self.rows()[:-1],self.rows()+[self.rows()[0]]):
    with self.assertRaises(ValueError):module.validate_run_facts(rows,4,3)
+class DirectCliBootstrapTests(unittest.TestCase):
+ def test_real_driver_reaches_owner_guard_from_direct_cli(self):
+  import json,os,subprocess,sys,tempfile
+  with tempfile.TemporaryDirectory() as directory:
+   root=Path(directory);fixture=root/'fixture';fixture.mkdir();owner=root/'owner.json'
+   owner.write_text(json.dumps({'privateContainerdVerified':False}))
+   project='retainedaccept'+'a'*10
+   (fixture/'manifest.json').write_text(json.dumps({'project':project,'isolationOwner':str(owner)}))
+   (fixture/'compose.json').write_text(json.dumps({'name':project}))
+   environment={key:value for key,value in os.environ.items() if key!='PYTHONPATH'}
+   result=subprocess.run([sys.executable,str(Path(__file__).with_name('shared_workload.py')),'--fixture',str(fixture),'--result',str(root/'result'),'--k6-binary',str(root/'not-executed')],cwd=root,env=environment,capture_output=True,text=True,timeout=15)
+   self.assertNotEqual(result.returncode,0)
+   self.assertIn('private transport and raw OCI root must be observed first',result.stderr)
+
 if __name__=='__main__':unittest.main()

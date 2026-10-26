@@ -1,5 +1,5 @@
 """Launch one owned native runsc product gate inside a private network namespace."""
-import argparse,hashlib,json,os,struct,subprocess,sys,time,urllib.request
+import argparse,hashlib,json,os,re,struct,subprocess,sys,threading,time,urllib.request,urllib.parse
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from runsc_acceptance.daemon import PrivateDocker,command
@@ -22,6 +22,88 @@ def shared_arguments(environments, model_wait_ms=0, initial_stagger_ms=0, expect
             or type(expected) is not int or not 1<=expected<=environments):
         raise ValueError('bounded shared model wait, initial stagger and working threshold required')
     return ['--model-wait-ms',str(model_wait_ms),'--initial-stagger-ms',str(initial_stagger_ms),'--expected-working-environments',str(expected)]
+
+
+def _fixture_values(root):
+    path=Path(root)/'fixture/synthetic.env'
+    if not path.is_file():return set()
+    values={line.split('=',1)[1] for line in path.read_text(encoding='utf-8').splitlines() if '=' in line and line.split('=',1)[1]}
+    return {variant for value in values for variant in (value,json.dumps(value,ensure_ascii=False)[1:-1],json.dumps(value)[1:-1],urllib.parse.quote(value,safe='')) if variant}
+
+
+def _redacted_output(data,truncated,values,limit):
+    if truncated:data=data.partition(b'\n')[2]
+    # A partial last line may contain only part of a secret after termination.
+    if data and not data.endswith(b'\n'):data=data.rpartition(b'\n')[0]
+    text=data.decode('utf-8','replace')
+    lines=[]
+    for line in text.splitlines():
+        if re.search(r'password|secret|token|authorization|api[_ -]?key|private[_ -]?key|credential|cookie|bearer',line,re.I):
+            lines.append('[credential-bearing line suppressed]');continue
+        for value in sorted(values,key=len,reverse=True):line=line.replace(value,'[redacted]')
+        lines.append(line)
+    return '\n'.join(lines).encode('utf-8')[-limit:].decode('utf-8','replace')
+
+
+def _failure_diagnostic(root,failure_type,return_code,outputs,truncated,limit):
+    values=_fixture_values(root)
+    record={'schema':'runsc.acceptance.step_failure.v1','failureType':failure_type,'returnCode':return_code,
+            'stdout':_redacted_output(outputs[0],truncated[0],values,limit),
+            'stderr':_redacted_output(outputs[1],truncated[1],values,limit),
+            'stdoutTruncated':truncated[0],'stderrTruncated':truncated[1]}
+    path=Path(root)/'launch-step-failure.json'
+    descriptor=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|getattr(os,'O_NOFOLLOW',0),0o600)
+    try:
+        if os.name=='posix':os.fchmod(descriptor,0o600)
+        with os.fdopen(descriptor,'w',encoding='utf-8') as stream:
+            descriptor=None;json.dump(record,stream,ensure_ascii=False,indent=2)
+    finally:
+        if descriptor is not None:os.close(descriptor)
+
+
+def run_step(argv,*,root,env=None,timeout=120,input=None,capture_bytes=262144,diagnostic_bytes=16384):
+    """Capture bounded tails in memory; only one redacted failure is persisted."""
+    if not 1<=capture_bytes<=1048576 or not 1<=diagnostic_bytes<=32768:raise ValueError('bounded step output required')
+    outputs=[bytearray(),bytearray()];truncated=[False,False];read_errors=[];readers=[];process=None;failure='process_error'
+    def consume(stream,index):
+        try:
+            while True:
+                chunk=stream.read(4096)
+                if not chunk:break
+                outputs[index].extend(chunk)
+                if len(outputs[index])>capture_bytes:
+                    del outputs[index][:-capture_bytes];truncated[index]=True
+        except Exception:read_errors.append(index)
+        finally:stream.close()
+    try:
+        process=subprocess.Popen(argv,env=env,stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        for index,stream in enumerate((process.stdout,process.stderr)):
+            reader=threading.Thread(target=consume,args=(stream,index),daemon=True);reader.start();readers.append(reader)
+        if input is not None:
+            def write_input():
+                try:process.stdin.write(input.encode('utf-8'));process.stdin.flush()
+                except (BrokenPipeError,OSError):pass
+                finally:process.stdin.close()
+            writer=threading.Thread(target=write_input,daemon=True);writer.start();readers.append(writer)
+        try:process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            failure='timeout';process.terminate()
+            try:process.wait(timeout=10)
+            except subprocess.TimeoutExpired:process.kill();process.wait(timeout=10)
+        for reader in readers:reader.join(timeout=5)
+        if failure=='timeout':raise RuntimeError('step deadline')
+        if read_errors or any(reader.is_alive() for reader in readers):failure='capture_error';raise RuntimeError('step capture')
+        if process.returncode:failure='exit';raise RuntimeError('step exit')
+        if any(truncated):failure='output_limit';raise RuntimeError('step output bound')
+        return outputs[0].decode('utf-8','strict').replace('\r\n','\n').replace('\r','\n')
+    except Exception:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:process.wait(timeout=10)
+            except subprocess.TimeoutExpired:process.kill();process.wait(timeout=10)
+        for reader in readers:reader.join(timeout=5)
+        _failure_diagnostic(root,failure,process.returncode if process is not None else None,outputs,truncated,diagnostic_bytes)
+        raise RuntimeError('owned fixture step failed; see launch-step-failure.json') from None
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -74,9 +156,7 @@ def main():
         env={**os.environ,'DOCKER_HOST':'unix://'+str(root/'docker.sock'),'DOCKER_BUILDKIT':'0','NO_PROXY':'127.0.0.1,localhost,::1','no_proxy':'127.0.0.1,localhost,::1'}
         if args.git_dir:env.update(GIT_DIR=str(args.git_dir.resolve()),GIT_WORK_TREE=str(source))
         def call(argv,timeout=120,input=None):
-            p=subprocess.run(argv,env=env,input=input,text=True,capture_output=True,timeout=timeout)
-            if p.returncode:raise RuntimeError('owned fixture step failed: '+argv[0]+'; private diagnostics suppressed')
-            return p.stdout
+            return run_step(argv,root=root,env=env,input=input,timeout=timeout)
         tools=source/'scripts/workspace/runsc_acceptance';fixture=root/'fixture'
         argv=['python3','-B',str(tools/'prepare.py'),'--source',str(source),'--bins',str(bins),'--revision',build['sourceRevision'],'--build-manifest',str(manifest),'--tls-dir',str(tls),'--output',str(fixture),'--runsc-rotation','--isolation-owner',str(root/'owner.json'),'--docker-socket',str(root/'docker.sock'),'--host-socket-directory',str(root/'host'),'--api-port',str(args.api_port),'--runtime-port',str(args.runtime_port)]
         if args.shared_workload:argv+=['--shared-workload','--environment-count',str(args.environment_count)]+shared
