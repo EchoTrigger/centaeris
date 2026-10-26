@@ -56,12 +56,14 @@ checks. Removing a local installation disables that workspace's enablement;
 it does not remove a shared platform package or another workspace's installation.
 Package content remains immutable for existing signed references.
 
-An existing retained environment keeps its original mounted package version,
-including while paused. Updating the installation does not replace the original
+For workspace-local installations, an existing retained environment keeps its
+original mounted package version, including while paused. Updating the installation does not replace the original
 container or discard its memory. A Run requesting a different package version
 in that environment must be rejected explicitly; start a new environment or
 conversation to use the updated package. Retirement of the old environment is a
-separate lifecycle action.
+separate lifecycle action. This immutable-version guarantee covers workspace-local
+installations. Legacy platform catalog replacement retains its existing maintenance
+boundary and is not covered by workspace-local version continuity.
 
 ## Credentials
 
