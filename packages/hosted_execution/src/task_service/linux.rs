@@ -1257,6 +1257,14 @@ fn supervise(
     m.live.remove(&id);
 }
 
+/// Outcome of an idle-only physical operation under this instance's admission fence.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IdleEnvironmentOperation<T> {
+    Completed(T),
+    NotIdle,
+    Unknown,
+}
+
 /// A manager is always bound to a physically attested native target.
 pub(crate) struct NativeManager {
     manager: Arc<Mutex<Manager>>,
@@ -1325,8 +1333,72 @@ impl NativeManager {
         &self,
         request: EnvironmentTaskRequest,
     ) -> Result<EnvironmentTaskResult, String> {
+        // Trusted helpers already hold this same fence before entering Manager.
+        // Query, input receipts and termination retain their independent control path.
+        let _admission = if matches!(&request, EnvironmentTaskRequest::Start { .. }) {
+            Some(
+                self.helper_admission
+                    .lock()
+                    .map_err(|_| "task_service_failed")?,
+            )
+        } else {
+            None
+        };
         Manager::handle(&self.manager, request)
     }
+
+    /// Keep every new Start/helper outside the idle check and physical callback.
+    /// The caller verifies physical identity and records authoritative power facts.
+    /// This gate creates no paused marker and does not change task deadlines.
+    pub(crate) fn with_idle_environment_operation<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<IdleEnvironmentOperation<T>, String> {
+        let _admission = match self.helper_admission.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Ok(IdleEnvironmentOperation::NotIdle)
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Ok(IdleEnvironmentOperation::Unknown)
+            }
+        };
+        let manager = match self.manager.lock() {
+            Ok(manager) => manager,
+            Err(_) => return Ok(IdleEnvironmentOperation::Unknown),
+        };
+        if manager.journal.poisoned
+            || manager.journal.takeover_pending
+            || manager.container_absent
+            || manager.stop_reaper
+            || manager
+                .journal
+                .receipts
+                .values()
+                .any(|receipt| receipt.result.is_none())
+            || manager.journal.tasks.values().any(|record| {
+                record.snapshot.state == EnvironmentTaskState::Unknown
+                    && !record.snapshot.cleanup_complete
+            })
+        {
+            return Ok(IdleEnvironmentOperation::Unknown);
+        }
+        if !manager.live.is_empty()
+            || manager.drain_workers.load(Ordering::Acquire) != 0
+            || manager
+                .journal
+                .tasks
+                .values()
+                .any(|record| !record.snapshot.cleanup_complete || !record.snapshot.output_complete)
+        {
+            return Ok(IdleEnvironmentOperation::NotIdle);
+        }
+        // Preserve query/termination and reconciliation while the bounded physical
+        // operation runs. Only execution admission remains fenced per instance.
+        drop(manager);
+        operation().map(IdleEnvironmentOperation::Completed)
+    }
+
     pub(crate) fn inspection(&self) -> Result<serde_json::Value, String> {
         let _guard = self.manager.lock().map_err(|_| "task_service_failed")?;
         store::inspection(&self.control, &self.output)
