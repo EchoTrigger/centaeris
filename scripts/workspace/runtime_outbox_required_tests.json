@@ -122,6 +122,7 @@
   "postgres_store::integration_tests::execution_capacity_tests::postgres_execution_capacity_one_workspace_uses_global_permits_with_ready_claim_agreement",
   "postgres_store::integration_tests::execution_capacity_tests::postgres_execution_capacity_terminal_history_does_not_count_but_expired_owners_do_until_yield",
   "postgres_store::integration_tests::runsc_rotation_tests::postgres_runsc_completed_pause_releases_only_running_capacity",
+  "postgres_store::integration_tests::runsc_rotation_tests::postgres_runsc_yield_preserves_waiter_until_confirmed_pause_wakes_claim",
   "postgres_store::integration_tests::runsc_rotation_tests::postgres_runsc_unknown_pause_keeps_running_charge_and_is_reconcilable",
   "postgres_store::integration_tests::runsc_rotation_tests::postgres_runsc_pause_rechecks_controller_and_demand_before_dispatch",
   "postgres_store::integration_tests::runsc_rotation_tests::postgres_runsc_unregistered_residency_and_uncertain_resume_are_charged",

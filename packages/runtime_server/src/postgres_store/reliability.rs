@@ -241,7 +241,9 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
             {
                 return Err(format!("yield runtime job lease mismatch or expired: {}", r.job_id));
             }
-            if r.transition_reason != crate::resident_capacity::RESIDENT_CAPACITY_WAIT {
+            if r.transition_reason != crate::resident_capacity::RESIDENT_CAPACITY_WAIT
+                && r.transition_reason != super::runsc_rotation::RUNSC_CAPACITY_WAIT
+            {
                 super::capacity_wait::clear(&mut tx,&centaeris_core::session::RuntimeJobLeaseFence {
                     job_id:r.job_id.clone(), job_kind:"agent_run.lifecycle".into(),lease_owner:r.lease_owner.clone()
                 })?;

@@ -427,3 +427,163 @@ fn postgres_runsc_stop_after_one_observation_preserves_unobserved_pause_debits()
     assert_eq!(untouched, 1, "unobserved responsibility stays charged");
     assert_eq!(runsc_rotation::running_count(&mut db, "host").unwrap(), 1);
 }
+
+#[test]
+#[ignore = "requires explicitly owned disposable PostgreSQL database"]
+fn postgres_runsc_yield_preserves_waiter_until_confirmed_pause_wakes_claim() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (url, store, mut db, run, _binding) = retained();
+    db.execute(
+        "UPDATE public.app_core_agentrun SET status='completed' WHERE id=$1",
+        &[&run.original.agent_run_id],
+    )
+    .unwrap();
+    db.batch_execute("UPDATE public.app_core_sessionenvironment SET controller_released=true")
+        .unwrap();
+    store.runsc_idle_candidates("host", None, 1).unwrap();
+    db.batch_execute("UPDATE runtime.runsc_environment_power SET idle_since_ms=0")
+        .unwrap();
+    let candidate = store
+        .runsc_idle_candidates("host", None, 1)
+        .unwrap()
+        .candidates
+        .remove(0);
+    let resident_before: String = db
+        .query_one(
+            "SELECT row_to_json(s)::text FROM runtime.resident_sandboxes s",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    let allocation_before: String = db
+        .query_one(
+            "SELECT row_to_json(i)::text FROM runtime.execution_instances i",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+
+    let job_id = "agent_run.lifecycle:running-slot-waiter";
+    let owner = "running-slot-wait-owner";
+    let mut waiting = job(job_id, job_id);
+    waiting.job_kind = "agent_run.lifecycle".into();
+    waiting.status = RuntimeJobStatus::Running;
+    waiting.lease_owner = Some(owner.into());
+    waiting.lease_expires_at_ms = Some(4_000_000_000_000);
+    waiting.session_id = Some("waiting-session".into());
+    waiting.retry_count = 2;
+    waiting.max_retries = 10;
+    store
+        .schedule_worker_job(ScheduleRuntimeJobRequest { job: waiting }, Some("ws_1"))
+        .unwrap();
+    let fence = RuntimeJobLeaseFence {
+        job_id: job_id.into(),
+        job_kind: "agent_run.lifecycle".into(),
+        lease_owner: owner.into(),
+    };
+    // The retained admission path durably registers this before it attempts
+    // running-slot reservation; a full slot must not discard the registration.
+    let mut tx = db.transaction().unwrap();
+    crate::postgres_store::capacity_wait::register(&mut tx, &fence).unwrap();
+    tx.commit().unwrap();
+    let mut tx = db.transaction().unwrap();
+    assert_eq!(
+        runsc_rotation::reserve_running(
+            &mut tx,
+            &RunscBinding {
+                environment_id: "waiting-environment".into(),
+                host_id: "host".into(),
+                allocation_execution_id: "waiting-allocation".into(),
+                instance_id: "waiting-instance".into(),
+                container_id: None,
+            },
+            1
+        )
+        .unwrap_err(),
+        RUNSC_CAPACITY_WAIT
+    );
+    tx.rollback().unwrap();
+    let now = |db: &mut Client| -> i64 {
+        db.query_one(
+            "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+            &[],
+        )
+        .unwrap()
+        .get(0)
+    };
+    let yielded_at = now(&mut db);
+    let future_retry = yielded_at + 1_800_000;
+    store
+        .yield_runtime_job(YieldRuntimeJobRequest {
+            job_id: job_id.into(),
+            lease_owner: owner.into(),
+            yielded_at_ms: yielded_at,
+            run_at_ms: future_retry,
+            transition_reason: RUNSC_CAPACITY_WAIT.into(),
+        })
+        .unwrap();
+    let claim = |store: &PostgresRuntimeStore, at| {
+        store
+            .claim_worker_jobs(ClaimDueRuntimeJobsRequest {
+                now_ms: at,
+                worker_id: "running-slot-wake-observer".into(),
+                job_id: Some(job_id.into()),
+                job_kind: Some("agent_run.lifecycle".into()),
+                session_id: None,
+                limit: 1,
+                lease_ms: 60_000,
+            })
+            .unwrap()
+    };
+    assert!(
+        claim(&store, now(&mut db)).is_empty(),
+        "yield alone cannot grant running capacity"
+    );
+    store
+        .with_runsc_idle_pause(&candidate, |_, _| Ok(()))
+        .unwrap();
+    assert_eq!(runsc_rotation::running_count(&mut db, "host").unwrap(), 0);
+    drop(store);
+    let reopened = PostgresRuntimeStore::new(&url).unwrap();
+    let claimed_at = now(&mut db);
+    assert!(claimed_at < future_retry);
+    let claimed = claim(&reopened, claimed_at);
+    assert_eq!(
+        claimed.len(),
+        1,
+        "confirmed pause must wake a yielded runsc capacity waiter before its future retry"
+    );
+    assert_eq!(claimed[0].retry_count, 2);
+    assert_eq!(claimed[0].max_retries, 10);
+    assert_ne!(claimed[0].lease_owner.as_deref(), Some(owner));
+    assert!(
+        claim(&reopened, now(&mut db)).is_empty(),
+        "a wake grants only one current execution owner"
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT row_to_json(s)::text FROM runtime.resident_sandboxes s",
+            &[]
+        )
+        .unwrap()
+        .get::<_, String>(0),
+        resident_before
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT row_to_json(i)::text FROM runtime.execution_instances i",
+            &[]
+        )
+        .unwrap()
+        .get::<_, String>(0),
+        allocation_before
+    );
+    let evidence: serde_json::Value = serde_json::from_str(&db.query_one(
+        "SELECT payload_json FROM runtime.runtime_events WHERE task_id=$1 AND event_type='runtime.resident_capacity.claimed.v1'", &[&job_id]
+    ).unwrap().get::<_, String>(0)).unwrap();
+    assert_eq!(evidence["generation"], 1);
+    assert_eq!(
+        evidence["leaseOwner"].as_str(),
+        claimed[0].lease_owner.as_deref()
+    );
+}
