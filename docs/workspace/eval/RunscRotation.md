@@ -62,6 +62,40 @@ The deterministic model requests actual tool work: two CPU worker processes,
 a file write and artifact publication. K6 independently downloads each artifact
 and checks its sample-specific size and hash. A completed Run alone does not pass.
 
+The shared launcher derives one bounded timing plan before starting the fixture.
+`budgets` is recorded in the launch progress, shared report and K6 manifest/client
+report. It does not change work units, environment overlap, rolling Run creation,
+terminal deadlines or the per-item completion/pause/retirement checks.
+
+For `E` environments, `I` Runs per environment, terminal deadline `T` seconds,
+between-Run gap `G` milliseconds and initial stagger `S` milliseconds, the K6
+scenario budget is `I * (T + 60 + 30) + ceil(((E - 1) * S + (I - 1) * G) / 1000)`.
+Admission uses the [K6 HTTP default of 60 seconds](https://grafana.com/docs/k6/latest/javascript-api/k6-http/params/);
+artifact downloads already use an explicit 30-second timeout. Model waiting and
+physical work remain inside `T`. Setup covers the existing three login requests
+at 60 seconds each; the scenario explicitly retains the existing 30-second
+[graceful stop](https://grafana.com/docs/k6/latest/using-k6/scenarios/concepts/graceful-stop/).
+The K6 process also reserves 25 seconds for initialization, summary and exit,
+matching the existing terminate/kill/reader cleanup bounds.
+
+The outer shared step preserves serial readbacks and adds their existing limits:
+270 seconds for driver initialization (three 60-second commands and three
+30-second HTTP requests), `E * I * 181` seconds for completed-Run readbacks,
+60 seconds for durable timing, `E * 241` for final pause, and `E * 391` for
+retirement. These bounds include the last observation beyond each polling
+window: status command 60 seconds; pause SQL and inspect 120 seconds; retirement
+HTTP and durable readback 90 seconds plus inventory/proof commands 120 seconds.
+Each polling bound rounds up its existing 200-ms sleep. Observer stop/finally
+retry adds 30 seconds, K6 failure cleanup adds 25, and outer capture adds 10.
+
+For four environments and three Runs, `T=300`, `G=30000`, `S=0` gives a
+1230-second scenario, 1465-second K6 process and 6560-second outer step. Eight
+environments with the same settings and a 3000-ms stagger give 1251, 1486 and
+11281 seconds respectively. The complete outer plan must fit four hours;
+excessive combinations fail before fixture loading or workload admission.
+These are worst-case ceilings, not intended runtimes. The first failed client,
+product or physical acceptance check still stops and preserves responsibility.
+
 Required evidence includes all of the following:
 
 - Four environments with overlapping active tasks and positive CPU counter deltas,
