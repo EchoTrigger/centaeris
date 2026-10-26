@@ -192,3 +192,52 @@ fn changed_physical_identity_after_mutation_is_not_an_acknowledgement() {
     let mut docker = io(vec![facts(&a, &p, false), after]);
     assert!(set_power_with(&mut docker, &a, &p, RunscPowerAction::Pause).is_err());
 }
+
+#[test]
+fn idle_pause_preserves_busy_and_unknown_without_direct_power_mutations() {
+    for outcome in [
+        IdlePauseOutcome::Busy,
+        IdlePauseOutcome::Unknown {
+            reason: "task_state_unknown".into(),
+        },
+    ] {
+        let (a, p) = fixture();
+        let mut docker = io(vec![facts(&a, &p, false)]);
+        let actual = pause_if_idle_with(&mut docker, &a, &p, |target| {
+            assert_eq!(target.container_id, a.container_id.clone().unwrap());
+            assert_eq!(target.environment_instance_id, a.instance_id);
+            Ok(outcome.clone())
+        })
+        .unwrap();
+        assert_eq!(actual, outcome);
+        assert!(docker.mutations.is_empty());
+    }
+}
+
+#[test]
+fn idle_pause_requires_the_same_container_to_be_observed_paused_after_host_ack() {
+    let (a, p) = fixture();
+    let mut docker = io(vec![facts(&a, &p, false), facts(&a, &p, false)]);
+    assert_eq!(
+        pause_if_idle_with(&mut docker, &a, &p, |_| Ok(IdlePauseOutcome::Paused)),
+        Err("runsc_idle_pause_not_observed".into())
+    );
+    let mut docker = io(vec![facts(&a, &p, false), facts(&a, &p, true)]);
+    assert_eq!(
+        pause_if_idle_with(&mut docker, &a, &p, |_| Ok(IdlePauseOutcome::Paused)),
+        Ok(IdlePauseOutcome::Paused)
+    );
+}
+
+#[test]
+fn idle_pause_transport_loss_keeps_the_outcome_uncertain() {
+    let (a, p) = fixture();
+    let mut docker = io(vec![facts(&a, &p, false)]);
+    assert_eq!(
+        pause_if_idle_with(&mut docker, &a, &p, |_| Err(
+            "environment_host_transport_unavailable".into()
+        )),
+        Err("environment_host_transport_unavailable".into())
+    );
+    assert!(docker.mutations.is_empty());
+}

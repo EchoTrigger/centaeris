@@ -1,6 +1,7 @@
 //! Observe and change only one durably pinned, already-created runsc environment.
 use super::*;
 use crate::postgres_store::execution_instances::RetainedInstanceAllocation;
+use hosted_execution::host_supervisor::{HostLaunchTarget, IdlePauseOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunscPowerAction {
@@ -54,7 +55,52 @@ pub(crate) fn set_power(
     profile: &EnvironmentProfile,
     action: RunscPowerAction,
 ) -> Result<RunscPowerObservation, String> {
+    if action == RunscPowerAction::Pause {
+        return match pause_if_idle(allocation, profile)? {
+            IdlePauseOutcome::Paused => Ok(RunscPowerObservation::Paused),
+            IdlePauseOutcome::Busy => Err("runsc_idle_pause_busy".into()),
+            IdlePauseOutcome::Unknown { .. } => Err("runsc_idle_pause_unknown".into()),
+        };
+    }
     set_power_with(&mut DockerPowerIo, allocation, profile, action)
+}
+
+/// The host pins task admission and drain state atomically with physical pause.
+pub(crate) fn pause_if_idle(
+    allocation: &RetainedInstanceAllocation,
+    profile: &EnvironmentProfile,
+) -> Result<IdlePauseOutcome, String> {
+    pause_if_idle_with(
+        &mut DockerPowerIo,
+        allocation,
+        profile,
+        crate::environment_supervisor::pause_if_idle,
+    )
+}
+
+fn pause_if_idle_with(
+    io: &mut impl PowerIo,
+    allocation: &RetainedInstanceAllocation,
+    profile: &EnvironmentProfile,
+    pause: impl FnOnce(HostLaunchTarget) -> Result<IdlePauseOutcome, String>,
+) -> Result<IdlePauseOutcome, String> {
+    let id = validate_target(io, allocation, profile)?;
+    if observe_with(io, id, allocation, profile)? == RunscPowerObservation::Paused {
+        return Ok(IdlePauseOutcome::Paused);
+    }
+    let outcome = pause(HostLaunchTarget {
+        environment_instance_id: allocation.instance_id.clone(),
+        container_id: id.into(),
+        environment_id: allocation.environment_id.clone(),
+        profile_digest: allocation.profile_digest.clone(),
+        image_digest: allocation.image_digest.clone(),
+    })?;
+    if outcome == IdlePauseOutcome::Paused
+        && observe_with(io, id, allocation, profile)? != RunscPowerObservation::Paused
+    {
+        return Err("runsc_idle_pause_not_observed".into());
+    }
+    Ok(outcome)
 }
 
 fn validate_target<'a>(

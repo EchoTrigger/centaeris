@@ -112,11 +112,29 @@ impl PostgresRuntimeStore {
             Ok(result)
         })
     }
+    #[cfg(test)]
     pub(crate) fn prepare_retained_instance(
         &self,
         r: &RetainedInstanceRequest<'_>,
         limits: ResidentCapacity,
         inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
+        before_create: impl FnOnce(&mut Client, &RetainedInstanceAllocation) -> Result<(), String>
+            + Send,
+        prepare: impl FnOnce(&RetainedInstanceAllocation) -> Result<String, String> + Send,
+    ) -> Result<RetainedInstanceAllocation, String> {
+        self.prepare_retained_instance_with_inventory(
+            r,
+            limits,
+            || inventory().map(crate::resident_capacity::ResidentInventory::declarations),
+            before_create,
+            prepare,
+        )
+    }
+    pub(crate) fn prepare_retained_instance_with_inventory(
+        &self,
+        r: &RetainedInstanceRequest<'_>,
+        limits: ResidentCapacity,
+        inventory: impl FnOnce() -> Result<crate::resident_capacity::ResidentInventory, String> + Send,
         before_create: impl FnOnce(&mut Client, &RetainedInstanceAllocation) -> Result<(), String>
             + Send,
         prepare: impl FnOnce(&RetainedInstanceAllocation) -> Result<String, String> + Send,
@@ -130,7 +148,7 @@ impl PostgresRuntimeStore {
             tx.commit().map_err(|e| e.to_string())
         })?;
         let result = self.with_client(|client| {
-            let lock=lock_host(client)?; let physical=inventory()?; reconcile(lock.0,r.host_id,&physical)?;
+            let lock=lock_host(client)?; let inventory=inventory()?; let physical=inventory.sandboxes; let shared=inventory.shared; reconcile(lock.0,r.host_id,&physical)?;
             let mut tx=lock.0.transaction().map_err(|e|e.to_string())?;
             super::super::resource_commit::require_durable_resource_commit(&mut tx)?; verify_controller(&mut tx,r)?;
             let b=&r.environment_authorization.payload;
@@ -141,6 +159,14 @@ impl PostgresRuntimeStore {
             let mut a=if let Some(row)=holding {
                 let origin:String=row.get(0); let mut a=allocation(&mut tx,&origin)?;
                 if row.get::<_,String>(1)!=r.host_id || row.get::<_,String>(2)!=r.workspace_id || usage(&row,5)?!=r.resources || a.image_digest!=r.image_digest || a.profile_digest!=r.profile_digest { return Err("retained allocation configuration mismatch".into()); }
+                if let Some(sample) = shared.as_ref() {
+                    sample.ensure_fresh(r.host_id)?;
+                    // Reuse allocates no new environment and reserves no predicted growth.
+                    // Existing tasks remain supervised while new Run demand waits.
+                    if sample.available_memory_bytes < sample.memory_headroom_bytes {
+                        return Err(RESIDENT_CAPACITY_WAIT.into());
+                    }
+                }
                 a.container_id=row.get(3); a.reused=true;
                 if row.get::<_,String>(4)!="resident" || a.container_id.is_none() || !physical.iter().any(|s|s.execution_id==origin && s.allocation_owner==a.allocation_owner && Some(&s.container_id)==a.container_id.as_ref()) { return Err("retained allocation outcome uncertain; creation blocked".into()); } a
             } else {
@@ -148,8 +174,19 @@ impl PostgresRuntimeStore {
                 // Cold recovery requires a separately authorized restore path;
                 // a new Run/execution cannot impersonate same-instance continuity.
                 if tx.query_opt("SELECT 1 FROM runtime.execution_instances i WHERE execution_id=$1 OR (environment_id=$2 AND allocation_mode='retained' AND NOT EXISTS(SELECT 1 FROM runtime.environment_creation_attempts a WHERE a.allocation_execution_id=i.allocation_execution_id AND a.state='notDispatched') AND NOT($3 AND EXISTS(SELECT 1 FROM runtime.agent_run_cleanup_receipts c WHERE c.instance_id=i.instance_id AND c.environment_id=i.environment_id AND c.cleanup_complete AND c.physical_removed)))", &[&r.execution_id,&b.environment_id,&(b.execution_mode=="perRun")]).map_err(|e|e.to_string())?.is_some() { return Err("execution_environment_lost:retained_allocation_missing".into()); }
-                let (global,tenant,host)=used(&mut tx,r.host_id,r.workspace_id)?;
-                if !admit_resident_resources(global,tenant,r.resources,limits.global,limits.tenant)? || !host.checked_add(r.resources)?.fits(limits.host) { return Err(RESIDENT_CAPACITY_WAIT.into()); }
+                let admitted = if let Some(sample) = shared.as_ref() {
+                    let (global_used, tenant_used, host_used, pending_memory) = used_shared(&mut tx, r.host_id, r.workspace_id, sample)?;
+                    crate::shared_resident_admission::admits(&crate::shared_resident_admission::Admission {
+                        global_used, tenant_used, host_used, requested: r.resources, limits,
+                        host_available_bytes: sample.available_memory_bytes,
+                        host_headroom_bytes: sample.memory_headroom_bytes,
+                        unobserved_host_memory_bytes: pending_memory,
+                    })?
+                } else {
+                    let (global, tenant, host) = used(&mut tx, r.host_id, r.workspace_id)?;
+                    admit_resident_resources(global, tenant, r.resources, limits.global, limits.tenant)? && host.checked_add(r.resources)?.fits(limits.host)
+                };
+                if !admitted { return Err(RESIDENT_CAPACITY_WAIT.into()); }
                 let a=RetainedInstanceAllocation{allocation_execution_id:r.execution_id.into(),allocation_agent_run_id:Some(b.agent_run_id.clone()),allocation_owner:centaeris_core::execution::EnvironmentTaskOwner::AgentRun{run_id:b.agent_run_id.clone()},instance_id:instance_id(r.execution_id),environment_id:b.environment_id.clone(),host_id:r.host_id.into(),image_digest:r.image_digest.into(),authorization_digest:b.agent_run_authorization_digest.clone(),binding_digest:b.digest()?,profile_digest:r.profile_digest.into(),container_id:None,reused:false};
                 if let Some(config) = rotation { super::super::runsc_rotation::reserve_running(&mut tx, &super::super::runsc_rotation::RunscBinding::from(&a), config.max_running)?; } associate(&mut tx,r,&a)?; insert(&mut tx,r.host_id,r.execution_id,Some(&b.agent_run_id),r.workspace_id,None,"reserved",r.resources)?; super::super::creation_attempts::reserve(&mut tx,&a)?; a
             };
@@ -158,6 +195,8 @@ impl PostgresRuntimeStore {
                     super::super::runsc_rotation::reserve_running(&mut tx, &super::super::runsc_rotation::RunscBinding::from(&a), config.max_running)?;
                 }
             }
+            // Controller or running-slot row waits must not extend the sample's lease.
+            if let Some(sample) = shared.as_ref() { sample.ensure_fresh(r.host_id)?; }
             associate(&mut tx,r,&a)?;
             // Commit allocation + reservation before Docker. Errors and lost
             // physical acknowledgements leave the durable holding intact.

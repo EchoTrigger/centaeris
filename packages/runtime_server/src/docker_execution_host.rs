@@ -5,6 +5,7 @@ mod network;
 mod retained;
 mod retained_commands;
 pub(crate) mod runsc_power;
+pub(crate) mod shared_inventory;
 mod snapshot_capture;
 pub(crate) use maintenance::{
     maintenance_helper, maintenance_task, observe_environment, provision_environment,
@@ -618,10 +619,10 @@ impl DockerExecutionHostRunner {
                 resources: declared_usage(resources),
                 lease: &lease,
             };
-            let allocation = resident_store.prepare_retained_instance(
+            let allocation = resident_store.prepare_retained_instance_with_inventory(
                 &request,
                 resident_limits,
-                observed_resident_sandboxes,
+                || shared_inventory::collect(&resident_host_id),
                 |client, _| before_create(client),
                 |allocation| {
                     prepare_memory_scope(&memory_mount)?;

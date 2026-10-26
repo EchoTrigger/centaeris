@@ -209,6 +209,28 @@ fn connection() -> Result<Box<dyn HostStream>, String> {
 fn send(request: HostSupervisorRequest) -> Result<HostSupervisorResult, String> {
     exchange(&mut *connection()?, request)
 }
+/// Fetch a bounded sample over the existing trusted host channel.
+pub(crate) fn observe_resources(
+    host: &str,
+    targets: &[HostLaunchTarget],
+) -> Result<hosted_execution::host_supervisor::resources::HostResourceObservation, String> {
+    observe_resources_with(host, targets, send)
+}
+fn observe_resources_with(
+    host: &str,
+    targets: &[HostLaunchTarget],
+    transport: impl FnOnce(HostSupervisorRequest) -> Result<HostSupervisorResult, String>,
+) -> Result<hosted_execution::host_supervisor::resources::HostResourceObservation, String> {
+    hosted_execution::host_supervisor::resources::validate_resource_request(host, targets)?;
+    match transport(HostSupervisorRequest::ObserveResources {
+        expected_host_id: host.into(),
+        targets: targets.to_vec(),
+    })? {
+        HostSupervisorResult::ResourceObservation { observation } => Ok(*observation),
+        _ => Err("environment_host_resources_unconfirmed".into()),
+    }
+}
+
 fn register(target: &HostLaunchTarget) -> Result<(), String> {
     match send(HostSupervisorRequest::Register {
         target: target.clone(),
@@ -428,6 +450,28 @@ pub(crate) fn inspect(instance: &str) -> Result<serde_json::Value, String> {
     }
 }
 
+pub(crate) fn pause_if_idle(
+    target: HostLaunchTarget,
+) -> Result<hosted_execution::host_supervisor::IdlePauseOutcome, String> {
+    pause_if_idle_with(target, send)
+}
+
+fn pause_if_idle_with(
+    target: HostLaunchTarget,
+    transport: impl FnOnce(HostSupervisorRequest) -> Result<HostSupervisorResult, String>,
+) -> Result<hosted_execution::host_supervisor::IdlePauseOutcome, String> {
+    target.validate()?;
+    match transport(HostSupervisorRequest::PauseIfIdle {
+        target: target.clone(),
+    })? {
+        HostSupervisorResult::IdlePause {
+            target: actual,
+            outcome,
+        } if actual == target => Ok(outcome),
+        _ => Err("environment_host_idle_pause_unconfirmed".into()),
+    }
+}
+
 pub(crate) fn retire(target: HostLaunchTarget) -> Result<(), String> {
     retire_with(target, send)
 }
@@ -515,6 +559,53 @@ mod tests {
             image_digest: format!("sha256:{}", "d".repeat(64)),
         }
     }
+    #[test]
+    fn idle_pause_requires_exact_target_and_preserves_typed_non_success() {
+        use hosted_execution::host_supervisor::IdlePauseOutcome;
+        let expected = target();
+        for outcome in [
+            IdlePauseOutcome::Paused,
+            IdlePauseOutcome::Busy,
+            IdlePauseOutcome::Unknown {
+                reason: "task_state_unknown".into(),
+            },
+        ] {
+            let actual = pause_if_idle_with(expected.clone(), |request| {
+                let HostSupervisorRequest::PauseIfIdle { target } = request else {
+                    panic!("idle pause must use the admission-fenced host operation")
+                };
+                assert_eq!(target, expected);
+                Ok(HostSupervisorResult::IdlePause {
+                    target,
+                    outcome: outcome.clone(),
+                })
+            })
+            .unwrap();
+            assert_eq!(actual, outcome);
+        }
+        let mut foreign = expected.clone();
+        foreign.container_id = "e".repeat(64);
+        assert_eq!(
+            pause_if_idle_with(expected.clone(), |_| Ok(HostSupervisorResult::IdlePause {
+                target: foreign,
+                outcome: IdlePauseOutcome::Paused
+            })),
+            Err("environment_host_idle_pause_unconfirmed".into())
+        );
+        assert_eq!(
+            pause_if_idle_with(expected.clone(), |_| Ok(HostSupervisorResult::Registered {
+                target: expected.clone()
+            })),
+            Err("environment_host_idle_pause_unconfirmed".into())
+        );
+        assert_eq!(
+            pause_if_idle_with(expected, |_| Err(
+                "environment_host_transport_unavailable".into()
+            )),
+            Err("environment_host_transport_unavailable".into())
+        );
+    }
+
     #[test]
     fn host_retirement_requires_exact_ack_without_registering_absent_container() {
         let expected = target();
@@ -755,5 +846,45 @@ mod tests {
             &mut Vec::new()
         )
         .is_err());
+    }
+    #[test]
+    fn resource_observation_uses_exact_host_and_targets_without_registering_work() {
+        let targets = vec![target()];
+        let error = observe_resources_with("host", &targets, |request| {
+            match request {
+                HostSupervisorRequest::ObserveResources {
+                    expected_host_id,
+                    targets: actual,
+                } => {
+                    assert_eq!(expected_host_id, "host");
+                    assert_eq!(actual, targets);
+                }
+                _ => panic!("observation must not register, start, or mutate an environment"),
+            }
+            Err("observed_transport_failure".into())
+        })
+        .unwrap_err();
+        assert_eq!(error, "observed_transport_failure");
+    }
+    #[test]
+    fn resource_observation_rejects_invalid_inventory_before_transport() {
+        let mut calls = 0;
+        assert!(observe_resources_with("", &[], |_| {
+            calls += 1;
+            Err("must_not_send".into())
+        })
+        .is_err());
+        assert_eq!(calls, 0);
+    }
+    #[test]
+    fn resource_observation_rejects_unrelated_success_response() {
+        let t = target();
+        assert_eq!(
+            observe_resources_with("host", std::slice::from_ref(&t), |_| {
+                Ok(HostSupervisorResult::Registered { target: t.clone() })
+            })
+            .unwrap_err(),
+            "environment_host_resources_unconfirmed"
+        );
     }
 }

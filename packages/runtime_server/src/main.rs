@@ -36,13 +36,12 @@ mod recovery_read;
 mod recovery_upload;
 mod request_capacity;
 mod resident_capacity;
-#[cfg(test)]
-mod shared_resident_admission;
 mod retained_tasks;
 mod runsc_rotation;
 #[cfg(test)]
 mod runtime_http_tests;
 mod session_delivery;
+mod shared_resident_admission;
 mod skill_projection;
 mod terminal_subagents;
 mod transcript_capture;
@@ -435,6 +434,10 @@ fn main() -> Result<(), String> {
         || {
             execution_capacity::ExecutionCapacity::from_env()?;
             docker_engine::create_limit_from_env()?;
+            if shared_resident_admission::enabled()? {
+                let host = docker_execution_host::resident_host_context()?.0;
+                docker_execution_host::shared_inventory::collect(&host)?;
+            }
             if runsc_rotation::Config::from_env()?.is_some() {
                 let host = docker_execution_host::resident_host_context()?.0;
                 runsc_rotation::reconcile_startup(&job_store, &host)?;

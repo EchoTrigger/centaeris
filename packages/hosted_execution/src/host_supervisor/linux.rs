@@ -1,6 +1,8 @@
 use super::*;
 use crate::task_service::linux::{launcher::OciTarget, HelperBinary, NativeManager};
 mod helpers;
+mod idle_pause;
+mod resource_sampler;
 mod retirement;
 use sha2::{Digest, Sha256};
 use std::{
@@ -194,10 +196,35 @@ pub(crate) fn start_time(pid: u32) -> Result<u64, String> {
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| "host_target_unknown".into())
 }
+#[derive(Clone, Copy)]
+enum AttestationPower {
+    Running,
+    Live,
+}
 fn attest(
     config: &HostSupervisorConfig,
     target: &HostLaunchTarget,
 ) -> Result<Registration, String> {
+    attest_with_power(config, target, AttestationPower::Running)
+}
+fn attest_observation(
+    config: &HostSupervisorConfig,
+    target: &HostLaunchTarget,
+) -> Result<Registration, String> {
+    attest_with_power(config, target, AttestationPower::Live)
+}
+fn attest_with_power(
+    config: &HostSupervisorConfig,
+    target: &HostLaunchTarget,
+    power: AttestationPower,
+) -> Result<Registration, String> {
+    attest_power(config, target, power).map(|(registration, _)| registration)
+}
+fn attest_power(
+    config: &HostSupervisorConfig,
+    target: &HostLaunchTarget,
+    power: AttestationPower,
+) -> Result<(Registration, bool), String> {
     target.validate()?;
     let endpoint = format!("unix://{}", config.docker_socket);
     let values = command_json(
@@ -278,9 +305,17 @@ fn attest(
             &target.container_id,
         ],
     )?;
-    if state["id"] != target.container_id || state["pid"] != pid || state["status"] != "running" {
+    let live = state["status"] == "running"
+        || (matches!(power, AttestationPower::Live) && state["status"] == "paused");
+    if state["id"] != target.container_id || state["pid"] != pid || !live {
         return Err("host_runtime_identity_rejected".into());
     }
+    let paused = idle_pause::confirmed_power(
+        value["State"]["Paused"]
+            .as_bool()
+            .ok_or("host_power_unknown")?,
+        state["status"].as_str(),
+    )?;
     let bundle = state["bundle"]
         .as_str()
         .filter(|p| absolute_path(p))
@@ -348,18 +383,21 @@ fn attest(
         return Err("host_target_cgroup_rejected".into());
     }
     let init_start_time = start_time(pid)?;
-    Ok(Registration {
-        target: target.clone(),
-        init_pid: pid,
-        init_start_time,
-        bundle: bundle.into(),
-        cgroup,
-        spec_digest: format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(&spec).map_err(|_| "host_state_invalid")?)
-        ),
-        process,
-    })
+    Ok((
+        Registration {
+            target: target.clone(),
+            init_pid: pid,
+            init_start_time,
+            bundle: bundle.into(),
+            cgroup,
+            spec_digest: format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&spec).map_err(|_| "host_state_invalid")?)
+            ),
+            process,
+        },
+        paused,
+    ))
 }
 
 struct Host {
@@ -495,6 +533,20 @@ impl Host {
     fn handle(&self, envelope: HostSupervisorEnvelope) -> Result<HostSupervisorResult, String> {
         envelope.validate()?;
         match envelope.request {
+            HostSupervisorRequest::ObserveResources {
+                expected_host_id,
+                targets,
+            } => Ok(HostSupervisorResult::ResourceObservation {
+                observation: Box::new(resource_sampler::observe(
+                    &self.config,
+                    &expected_host_id,
+                    &targets,
+                )?),
+            }),
+            HostSupervisorRequest::PauseIfIdle { target } => {
+                let outcome = self.pause_if_idle(&target)?;
+                Ok(HostSupervisorResult::IdlePause { target, outcome })
+            }
             HostSupervisorRequest::Register { target } => {
                 self.manager(&target)?;
                 Ok(HostSupervisorResult::Registered { target })

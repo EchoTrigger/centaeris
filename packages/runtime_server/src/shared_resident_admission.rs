@@ -68,12 +68,38 @@ pub(crate) fn admits(r: &Admission) -> Result<bool, String> {
         .checked_add(r.unobserved_host_memory_bytes)
         .and_then(|value| value.checked_add(r.requested.memory_bytes))
         .ok_or("shared resident host memory accounting overflow")?;
-    Ok(
-        fits_shared(r.global_used.checked_add(r.requested)?, r.limits.global)
-            && fits_shared(r.tenant_used.checked_add(r.requested)?, r.limits.tenant)
-            && fits_shared(r.host_used.checked_add(r.requested)?, r.limits.host)
-            && r.host_available_bytes >= required_available,
-    )
+    let cpu_ceiling = r
+        .limits
+        .global
+        .cpu_milli
+        .min(r.limits.tenant.cpu_milli)
+        .min(r.limits.host.cpu_milli);
+    Ok(r.requested.cpu_milli <= cpu_ceiling
+        && fits_shared(r.global_used.checked_add(r.requested)?, r.limits.global)
+        && fits_shared(r.tenant_used.checked_add(r.requested)?, r.limits.tenant)
+        && fits_shared(r.host_used.checked_add(r.requested)?, r.limits.host)
+        && r.host_available_bytes >= required_available)
+}
+
+pub(crate) fn enabled() -> Result<bool, String> {
+    enabled_from_lookup(|name| std::env::var(name).ok())
+}
+fn enabled_from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<bool, String> {
+    match get("RUNTIME_NATIVE_SHARED_ADMISSION").as_deref() {
+        None | Some("0") => Ok(false),
+        Some("1") => {
+            if get("RUNTIME_EXECUTION_PROVIDER")
+                .as_deref()
+                .unwrap_or("docker")
+                != "docker"
+                || get("OCI_RUNTIME").as_deref().unwrap_or("runsc") != "runsc"
+            {
+                return Err("native_shared_admission_backend_invalid".into());
+            }
+            Ok(true)
+        }
+        Some(_) => Err("native_shared_admission_config_invalid".into()),
+    }
 }
 
 #[cfg(test)]
@@ -201,5 +227,30 @@ mod tests {
         m.pids_current = 1;
         m.memory_current_bytes = u64::MAX;
         assert!(charge(declaration(), Some(m)).is_err());
+    }
+    #[test]
+    fn shared_admission_is_explicit_and_rejects_invalid_or_foreign_backend_config() {
+        let lookup = |flag: Option<&str>, provider: &str, runtime: &str| {
+            enabled_from_lookup(|name| match name {
+                "RUNTIME_NATIVE_SHARED_ADMISSION" => flag.map(str::to_owned),
+                "RUNTIME_EXECUTION_PROVIDER" => Some(provider.into()),
+                "OCI_RUNTIME" => Some(runtime.into()),
+                _ => None,
+            })
+        };
+        assert!(!lookup(None, "docker", "runsc").unwrap());
+        assert!(!lookup(Some("0"), "docker", "runsc").unwrap());
+        assert!(lookup(Some("1"), "docker", "runsc").unwrap());
+        for value in ["", "true", "yes", "2", " 1"] {
+            assert!(lookup(Some(value), "docker", "runsc").is_err());
+        }
+        assert!(lookup(Some("1"), "e2b", "runsc").is_err());
+        assert!(lookup(Some("1"), "docker", "runc").is_err());
+    }
+    #[test]
+    fn cpu_sharing_never_allows_a_single_request_above_host_ceiling() {
+        let mut r = request(Default::default());
+        r.requested.cpu_milli = 9000;
+        assert!(!admits(&r).unwrap());
     }
 }

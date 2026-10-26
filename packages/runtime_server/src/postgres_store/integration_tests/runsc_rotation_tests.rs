@@ -1,6 +1,7 @@
 use super::retained_instance_tests as fixture;
 use super::*;
 use crate::postgres_store::runsc_rotation::{self, RunscBinding, RUNSC_CAPACITY_WAIT};
+use hosted_execution::host_supervisor::IdlePauseOutcome;
 use std::sync::{Arc, Mutex};
 
 fn retained() -> (
@@ -53,7 +54,7 @@ fn postgres_runsc_completed_pause_releases_only_running_capacity() {
         .with_runsc_idle_pause(&candidate, |allocation, profile| {
             assert_eq!(allocation.container_id, binding.container_id);
             assert!(profile.validate().is_ok());
-            Ok(())
+            Ok(IdlePauseOutcome::Paused)
         })
         .unwrap();
     assert_eq!(
@@ -127,7 +128,7 @@ fn postgres_runsc_unknown_pause_keeps_running_charge_and_is_reconcilable() {
         .candidates
         .remove(0);
     reopened
-        .with_runsc_idle_pause(&candidate, |_, _| Ok(()))
+        .with_runsc_idle_pause(&candidate, |_, _| Ok(IdlePauseOutcome::Paused))
         .unwrap();
     assert_eq!(runsc_rotation::running_count(&mut db, "host").unwrap(), 0);
     let mut tx = db.transaction().unwrap();
@@ -285,7 +286,7 @@ fn postgres_runsc_paused_reconciliation_charges_unknown_and_preserves_memory() {
         .candidates
         .remove(0);
     store
-        .with_runsc_idle_pause(&candidate, |_, _| Ok(()))
+        .with_runsc_idle_pause(&candidate, |_, _| Ok(IdlePauseOutcome::Paused))
         .unwrap();
     let resident = db
         .query_one(
@@ -540,7 +541,7 @@ fn postgres_runsc_yield_preserves_waiter_until_confirmed_pause_wakes_claim() {
         "yield alone cannot grant running capacity"
     );
     store
-        .with_runsc_idle_pause(&candidate, |_, _| Ok(()))
+        .with_runsc_idle_pause(&candidate, |_, _| Ok(IdlePauseOutcome::Paused))
         .unwrap();
     assert_eq!(runsc_rotation::running_count(&mut db, "host").unwrap(), 0);
     drop(store);
@@ -585,5 +586,113 @@ fn postgres_runsc_yield_preserves_waiter_until_confirmed_pause_wakes_claim() {
     assert_eq!(
         evidence["leaseOwner"].as_str(),
         claimed[0].lease_owner.as_deref()
+    );
+}
+
+#[test]
+#[ignore = "requires explicitly owned disposable PostgreSQL database"]
+fn postgres_runsc_known_busy_pause_restores_running_and_restarts_idle_interval() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db, run, _binding) = retained();
+    db.execute(
+        "UPDATE public.app_core_agentrun SET status='completed' WHERE id=$1",
+        &[&run.original.agent_run_id],
+    )
+    .unwrap();
+    db.batch_execute("UPDATE public.app_core_sessionenvironment SET controller_released=true")
+        .unwrap();
+    store.runsc_idle_candidates("host", None, 1).unwrap();
+    db.batch_execute("UPDATE runtime.runsc_environment_power SET idle_since_ms=0")
+        .unwrap();
+    let candidate = store
+        .runsc_idle_candidates("host", None, 1)
+        .unwrap()
+        .candidates
+        .remove(0);
+    let generation: i64 = db
+        .query_one(
+            "SELECT generation FROM runtime.resident_capacity_clock",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    let result = store.with_runsc_idle_pause(&candidate, |_, _| Ok(IdlePauseOutcome::Busy));
+    let row = db
+        .query_one(
+            "SELECT state,idle_since_ms FROM runtime.runsc_environment_power",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        row.get::<_, String>(0),
+        "running",
+        "a known refusal to pause must not retain an ambiguous dispatched pause"
+    );
+    assert_eq!(
+        row.get::<_, Option<i64>>(1),
+        None,
+        "background activity restarts the continuous idle interval"
+    );
+    assert!(result.is_ok());
+    assert_eq!(runsc_rotation::running_count(&mut db, "host").unwrap(), 1);
+    assert_eq!(
+        db.query_one(
+            "SELECT generation FROM runtime.resident_capacity_clock",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        generation,
+        "busy must not announce freed running capacity"
+    );
+    assert!(store
+        .runsc_idle_candidates("host", None, 1000)
+        .unwrap()
+        .candidates
+        .is_empty());
+}
+
+#[test]
+#[ignore = "requires explicitly owned disposable PostgreSQL database"]
+fn postgres_runsc_typed_unknown_pause_keeps_dispatched_responsibility() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db, run, _binding) = retained();
+    db.execute(
+        "UPDATE public.app_core_agentrun SET status='completed' WHERE id=$1",
+        &[&run.original.agent_run_id],
+    )
+    .unwrap();
+    db.batch_execute("UPDATE public.app_core_sessionenvironment SET controller_released=true")
+        .unwrap();
+    store.runsc_idle_candidates("host", None, 1).unwrap();
+    db.batch_execute("UPDATE runtime.runsc_environment_power SET idle_since_ms=0")
+        .unwrap();
+    let candidate = store
+        .runsc_idle_candidates("host", None, 1)
+        .unwrap()
+        .candidates
+        .remove(0);
+    assert!(store
+        .with_runsc_idle_pause(&candidate, |_, _| Ok(IdlePauseOutcome::Unknown {
+            reason: "task_state_unknown".into()
+        }))
+        .is_err());
+    let row = db
+        .query_one(
+            "SELECT state,idle_since_ms FROM runtime.runsc_environment_power",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(row.get::<_, String>(0), "pauseDispatched");
+    assert_eq!(row.get::<_, Option<i64>>(1), Some(0));
+    assert_eq!(runsc_rotation::running_count(&mut db, "host").unwrap(), 1);
+    assert_eq!(
+        db.query_one(
+            "SELECT generation FROM runtime.resident_capacity_clock",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0
     );
 }

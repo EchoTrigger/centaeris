@@ -3,6 +3,7 @@
 use super::execution_instances::RetainedInstanceAllocation;
 use super::PostgresRuntimeStore;
 use crate::agent_run_authorization::EnvironmentProfile;
+use hosted_execution::host_supervisor::IdlePauseOutcome;
 use postgres::{GenericClient, Row};
 
 pub(crate) const RUNSC_CAPACITY_WAIT: &str = "runsc_environment_capacity_wait";
@@ -228,11 +229,14 @@ impl PostgresRuntimeStore {
     }
 
     /// Persist conservative dispatch, then re-pin authority through the host call.
-    /// Callback success must mean the original container is observed paused.
+    /// Only a positive pause observation releases a running slot. Busy restarts idle detection.
     pub(crate) fn with_runsc_idle_pause(
         &self,
         candidate: &RunscRotationCandidate,
-        pause: impl FnOnce(&RetainedInstanceAllocation, &EnvironmentProfile) -> Result<(), String>
+        pause: impl FnOnce(
+                &RetainedInstanceAllocation,
+                &EnvironmentProfile,
+            ) -> Result<IdlePauseOutcome, String>
             + Send,
     ) -> Result<(), String> {
         self.cleanup_view().with_client(|db| {
@@ -249,7 +253,14 @@ impl PostgresRuntimeStore {
             super::resource_commit::require_durable_resource_commit(&mut tx)?;
             pin_idle(&mut tx,candidate)?;
             if power_state(&mut tx,&b)?.as_deref()!=Some("pauseDispatched") {return Err("runsc_pause_dispatch_changed".into());}
-            pause(&candidate.allocation,&candidate.profile)?;
+            match pause(&candidate.allocation,&candidate.profile)? {
+                IdlePauseOutcome::Busy => {
+                    tx.execute("UPDATE runtime.runsc_environment_power SET state='running',idle_since_ms=NULL,updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE environment_id=$1", &[&b.environment_id]).map_err(|e|e.to_string())?;
+                    return tx.commit().map_err(|e|e.to_string());
+                }
+                IdlePauseOutcome::Unknown { .. } => return Err("runsc_idle_pause_unknown".into()),
+                IdlePauseOutcome::Paused => {}
+            }
             tx.execute("UPDATE runtime.runsc_environment_power SET state='paused',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE environment_id=$1",&[&b.environment_id]).map_err(|e|e.to_string())?;
             tx.execute("UPDATE runtime.resident_capacity_clock SET generation=generation+1,changed_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE singleton",&[]).map_err(|e|e.to_string())?;
             tx.query_one("SELECT pg_notify('runtime_job_ready_v1','')",&[]).map_err(|e|e.to_string())?;

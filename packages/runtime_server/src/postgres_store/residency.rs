@@ -224,6 +224,58 @@ pub(super) fn used(
     Ok((global, tenant_used, host_used))
 }
 
+/// Recompute an admission view without rewriting any durable resource declaration.
+fn used_shared(
+    client: &mut impl GenericClient,
+    host_id: &str,
+    tenant: &str,
+    sample: &crate::resident_capacity::SharedHostInventory,
+) -> Result<
+    (
+        ResidentResourceUsage,
+        ResidentResourceUsage,
+        ResidentResourceUsage,
+        u64,
+    ),
+    String,
+> {
+    sample.ensure_fresh(host_id)?;
+    let rows = client.query("SELECT host_id,workspace_id,memory_bytes,cpu_milli,pids,workspace_bytes,container_id,state FROM runtime.resident_sandboxes", &[])
+        .map_err(|error| format!("load shared resident declarations failed: {error}"))?;
+    let mut global = ResidentResourceUsage::default();
+    let mut tenant_used = ResidentResourceUsage::default();
+    let mut host_used = ResidentResourceUsage::default();
+    let mut unobserved_host_memory = 0u64;
+    for row in rows {
+        let declared = usage(&row, 2)?;
+        let on_host = row.get::<_, String>(0) == host_id;
+        let confirmed = row.get::<_, String>(7) == "resident";
+        let observed = if on_host && confirmed {
+            row.get::<_, Option<String>>(6)
+                .as_ref()
+                .and_then(|id| sample.measured_by_container.get(id))
+                .copied()
+        } else {
+            None
+        };
+        let resources = crate::shared_resident_admission::charge(declared, observed)?;
+        global = global.checked_add(resources)?;
+        if on_host {
+            host_used = host_used.checked_add(resources)?;
+            if observed.is_none() {
+                unobserved_host_memory = unobserved_host_memory
+                    .checked_add(declared.memory_bytes)
+                    .ok_or("shared unknown creation memory overflow")?;
+            }
+        }
+        if row.get::<_, String>(1) == tenant {
+            tenant_used = tenant_used.checked_add(resources)?;
+        }
+    }
+    sample.ensure_fresh(host_id)?;
+    Ok((global, tenant_used, host_used, unobserved_host_memory))
+}
+
 // Persist the complete ownership and resource declaration in one reservation.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn insert(

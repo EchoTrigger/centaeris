@@ -151,10 +151,10 @@ fn is_stopping(stopping: &tokio::sync::watch::Receiver<bool>) -> bool {
     *stopping.borrow() || stopping.has_changed().is_err()
 }
 
-fn pause_if_active(
+fn pause_if_active<T>(
     stopping: &tokio::sync::watch::Receiver<bool>,
-    action: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
+    action: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     if is_stopping(stopping) {
         return Err("runsc_rotation_stopping".into());
     }
@@ -175,9 +175,7 @@ fn tick(
     config: Config,
     stopping: &tokio::sync::watch::Receiver<bool>,
 ) -> Result<Tick, String> {
-    use crate::docker_execution_host::runsc_power::{
-        set_power, RunscPowerAction, RunscPowerObservation,
-    };
+    use crate::docker_execution_host::runsc_power::{pause_if_idle, RunscPowerObservation};
     let observed = store.reconcile_runsc_paused_until(
         host,
         after,
@@ -210,12 +208,7 @@ fn tick(
         next.last = Some(candidate.allocation.environment_id.clone());
         next.pending |= store
             .with_runsc_idle_pause(&candidate, |allocation, profile| {
-                pause_if_active(stopping, || {
-                    match set_power(allocation, profile, RunscPowerAction::Pause)? {
-                        RunscPowerObservation::Paused => Ok(()),
-                        RunscPowerObservation::Running => Err("runsc_pause_not_observed".into()),
-                    }
-                })
+                pause_if_active(stopping, || pause_if_idle(allocation, profile))
             })
             .is_err();
     }
@@ -240,7 +233,7 @@ mod tests {
     fn runsc_closed_rotation_owner_never_starts_a_new_pause() {
         let (stop, stopping) = tokio::sync::watch::channel(false);
         drop(stop);
-        let result = super::pause_if_active(&stopping, || panic!("rotation owner is gone"));
+        let result = super::pause_if_active::<()>(&stopping, || panic!("rotation owner is gone"));
         assert_eq!(result, Err("runsc_rotation_stopping".into()));
     }
 
@@ -253,7 +246,7 @@ mod tests {
         });
         assert_eq!(result, Ok(()));
         assert_eq!(
-            super::pause_if_active(&stopping, || panic!("second pause after stop")),
+            super::pause_if_active::<()>(&stopping, || panic!("second pause after stop")),
             Err("runsc_rotation_stopping".into())
         );
     }
