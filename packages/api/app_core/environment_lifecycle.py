@@ -1,8 +1,9 @@
 """Business controller authority, never physical instance liveness.
 
 Lock order is Workspace → original membership → Session → Environment → Run →
-original grant → lifecycle job. The final job lock uses FOR SHARE NOWAIT to avoid
-waiting on a job holder that may itself be waiting for Session.
+original grant → lifecycle job. Read-only Workspace/membership authorization uses
+FOR SHARE; mutable controller bindings remain exclusive. Every lock uses NOWAIT
+so contention rolls back the complete transaction before returning retryable busy.
 The job lock only pins existing authority; this module never creates a lease.
 Callers must not enter with partial locks acquired in a different order.
 Public authority operations require an outermost transaction: they return only
@@ -45,13 +46,20 @@ def _authority(environment):
 def _locked_binding(run_id, lease_owner, *, acquiring, lease_purpose=None):
     controller_lease_digest(lease_owner)
     initial = AgentRun.objects.only("session_id", "environment_id", "workspace_id", "membership_ref", "user_id").get(pk=run_id)
-    workspace = Workspace.objects.select_for_update().get(pk=initial.workspace_id)
-    member = WorkspaceMembership.objects.select_for_update().filter(pk=initial.membership_ref,
-        workspace_id=initial.workspace_id, user_id=initial.user_id, role__in=("owner", "admin", "member")).first()
-    session = Session.objects.select_for_update(of=("self",)).get(pk=initial.session_id)
-    environment = SessionEnvironment.objects.select_for_update().get(pk=initial.environment_id)
-    run = AgentRun.objects.select_for_update(of=("self",)).select_related("session__agent").get(pk=run_id)
-    grant = AgentRunAuthorization.objects.select_for_update().get(agent_run_id=run_id)
+    # SHARE also conflicts with non-key status/role updates, while allowing
+    # physical operations in other Sessions to retain their authorization locks.
+    workspace = next(iter(Workspace.objects.raw(
+        "SELECT * FROM app_core_workspace WHERE id=%s FOR SHARE NOWAIT", [initial.workspace_id])), None)
+    if workspace is None:
+        raise Workspace.DoesNotExist("controller Workspace missing")
+    member = next(iter(WorkspaceMembership.objects.raw(
+        "SELECT * FROM app_core_workspacemembership WHERE id=%s AND workspace_id=%s "
+        "AND user_id=%s AND role IN ('owner','admin','member') FOR SHARE NOWAIT",
+        [initial.membership_ref, initial.workspace_id, initial.user_id])), None)
+    session = Session.objects.select_for_update(of=("self",), nowait=True).get(pk=initial.session_id)
+    environment = SessionEnvironment.objects.select_for_update(nowait=True).get(pk=initial.environment_id)
+    run = AgentRun.objects.select_for_update(of=("self",), nowait=True).select_related("session__agent").get(pk=run_id)
+    grant = AgentRunAuthorization.objects.select_for_update(nowait=True).get(agent_run_id=run_id)
     if (run.session_id != session.pk or run.environment_id != environment.pk
             or environment.session_id != session.pk or run.workspace_id != workspace.pk):
         raise ValueError("environment_controller_binding_invalid")
