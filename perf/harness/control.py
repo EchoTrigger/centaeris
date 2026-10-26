@@ -207,7 +207,7 @@ def load(stack, output, rate, seconds):
            'PERF_ADMIN_PASSWORD': stack.values['BOOTSTRAP_SUPERADMIN_PASSWORD'],
            'RATE': str(rate), 'DURATION': f'{seconds}s', 'VERBOSE': '1'}
     command = [str(binary), 'run', '--summary-export', str(output / 'k6-summary.json'),
-               str(ROOT / 'perf/k6/scenarios/s2-runs.js')]
+               str(ROOT / 'perf/k6/scenarios/run-arrival-load.js')]
     failures = []
     private = [value for key, value in stack.values.items() if any(word in key for word in ("PASSWORD", "SECRET", "TOKEN", "KEY"))]
     started = time.monotonic()
@@ -260,7 +260,7 @@ def load(stack, output, rate, seconds):
             f'FROM app_core_agentrun WHERE id IN ({ids}) ORDER BY "createdAt") t'))
         (output / 'runs.json').write_text(json.dumps(rows, indent=2), encoding='utf-8')
         k6_summary = json.loads((output / 'k6-summary.json').read_text(encoding='utf-8'))
-        account_runs(accepted, rows, k6_summary['metrics']['s2_runs_accepted']['count'])
+        account_runs(accepted, rows, k6_summary['metrics']['run_arrival_runs_accepted']['count'])
     except Exception as error:
         failures.append(failure_record('accounting', error, private))
     summary = summarize_runs(rows)

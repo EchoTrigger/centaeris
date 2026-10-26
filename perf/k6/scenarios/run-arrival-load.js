@@ -1,31 +1,31 @@
-// S2：并发 AgentRun 编排吞吐（open model）。
+// Run到达负载：并发 AgentRun 编排吞吐（open model）。
 // 以恒定到达率创建新 run（instant mock，秒级完成），不挂观察流。
 // 目标：找编排层的容量拐点——响应延迟增长、错误率上升、队列积压。
 //
-//   k6 run -e RATE=60 -e DURATION=3m scenarios/s2-runs.js
+//   k6 run -e RATE=60 -e DURATION=3m scenarios/run-arrival-load.js
 //   RATE = 每分钟创建多少个 run（arrival rate，不是用户数）
 import { Trend, Counter, Rate } from 'k6/metrics';
 import { sleep } from 'k6';
 import { login, ensureProviderAndModels, firstWorkspaceId, firstAgentId, startRun } from './common.js';
 
-const createLatency = new Trend('s2_create_latency_ms', true);
-const runAccepted = new Counter('s2_runs_accepted');
-const createErrors = new Rate('s2_create_errors');
+const createLatency = new Trend('run_arrival_admission_latency_ms', true);
+const runAccepted = new Counter('run_arrival_runs_accepted');
+const createErrors = new Rate('run_arrival_admission_errors');
 
 export const options = {
   scenarios: {
-    runs: {
+    runArrivals: {
       executor: 'constant-arrival-rate',
       rate: Number(__ENV.RATE || 30),
       timeUnit: '1m',
       duration: __ENV.DURATION || '2m',
       preAllocatedVUs: Number(__ENV.VUS || 50),
       maxVUs: Number(__ENV.MAX_VUS || 300),
-      exec: 'createRun',
+      exec: 'admitRun',
     },
   },
   thresholds: {
-    's2_create_errors': ['rate<0.01'],
+    'run_arrival_admission_errors': ['rate<0.01'],
     'http_req_duration{type:post_message}': ['p(95)<5000'],
   },
   systemTags: ['status', 'type'],
@@ -39,7 +39,7 @@ export function setup() {
   return { store, csrf, workspaceId, agentId, modelId: models['perf-instant'] };
 }
 
-export function createRun(data) {
+export function admitRun(data) {
   try {
     const started = Date.now();
     const { sessionId, agentRunId } = startRun(data.store, data.csrf, data.workspaceId, data.agentId, data.modelId);

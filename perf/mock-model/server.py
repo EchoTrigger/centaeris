@@ -11,13 +11,13 @@
 profile 由 model 名后缀决定：
   *instant    立即吐完（纯编排极限）
   *paced      固定 TTFT 300ms + 20 chunk × 50ms（真实流式生命周期）
-  *marathon   第二次请求起 TTFT 500ms + 长 chunk 流（默认 300×1s，供 S1 挂观察者）
-  *toolstorm  连续 4 轮 function_call（bash）再收尾（供 S4 沙箱 exec 风暴）
+  *marathon   第二次请求起 TTFT 500ms + 长 chunk 流（默认 300×1s，供事件流负载挂观察者）
+  *toolstorm  连续 4 轮 function_call（bash）再收尾（供工具执行负载）
 
 行为脚本（无状态、按请求内容判定）：
   input 里没有 function_call_output → 返回 function_call
   input 里有 function_call_output   → 按 profile 决定续调或收尾
-usage 形状为标准 OpenAI Responses 结构，字段路径以 B1 冒烟实测为准。
+usage 形状为标准 OpenAI Responses 结构，字段路径以单Run冒烟实测为准。
 """
 
 import json

@@ -1,4 +1,4 @@
-"""B1 引导脚本：从零登录到一次 mock 支撑的完整 AgentRun。
+"""单Run引导脚本：从零登录到一次 mock 支撑的完整 AgentRun。
 
 流程：CSRF → 登录 → 建 provider(mock) → 建模型(perf-instant) →
      找 workspace/agent → 发消息(sessionId=new) → 订阅 SSE 到终态。

@@ -1,31 +1,31 @@
-// S1b：SSE churn/重连。观察者反复连接-短持-断开-重连，
-// 测重连后首事件延迟（含回放突发）、连接错误率。
+// 事件流重连：SSE churn/重连。观察者反复连接-短持-断开-重连，
+// 测重连后连接就绪延迟（open回调，缺少open时记录首个事件）、连接错误率。
 // 这打的是连接池获取/释放、redis lane 交接与回放路径。
 //
-//   k6 run -e CHURN_RATE=20 -e DURATION=2m -e HOLD=5 scenarios/s1b-churn.js
+//   k6 run -e CHURN_RATE=20 -e DURATION=2m -e HOLD=5 scenarios/event-stream-reconnect.js
 import { Trend, Counter } from 'k6/metrics';
 import { sleep } from 'k6';
 import sse from 'k6/x/sse';
 import { login, ensureProviderAndModels, firstWorkspaceId, firstAgentId, startRun } from './common.js';
 
-const reconnectTTFE = new Trend('s1b_reconnect_ttfte_ms', true);
-const connErrors = new Counter('s1b_connection_errors');
-const eventsSeen = new Counter('s1b_events_seen');
+const reconnectOpen = new Trend('event_stream_reconnect_open_ms', true);
+const connErrors = new Counter('event_stream_reconnect_errors');
+const eventsSeen = new Counter('event_stream_reconnect_events_seen');
 
 export const options = {
   scenarios: {
-    churn: {
+    eventReconnects: {
       executor: 'constant-arrival-rate',
       rate: Number(__ENV.CHURN_RATE || 20),
       timeUnit: '1m',
       duration: __ENV.DURATION || '2m',
       preAllocatedVUs: Number(__ENV.VUS || 20),
       maxVUs: Number(__ENV.MAX_VUS || 60),
-      exec: 'churnConnect',
+      exec: 'reconnectEvents',
     },
   },
   thresholds: {
-    's1b_reconnect_ttfte_ms': ['p(95)<500'],
+    'event_stream_reconnect_open_ms': ['p(95)<500'],
   },
 };
 
@@ -42,26 +42,26 @@ export function setup() {
   return { store, runs };
 }
 
-export function churnConnect(data) {
+export function reconnectEvents(data) {
   const target = data.runs[Math.floor(Math.random() * data.runs.length)];
   const cookie = Object.entries(data.store).map(([k, v]) => `${k}=${v}`).join('; ');
   const opened = Date.now();
-  let firstAt = 0;
+  let readyAt = 0;
 
   sse.open(
     `${__ENV.API_BASE || 'http://localhost:18000'}/api/sessions/${target.sessionId}/agent-runs/${target.agentRunId}/events`,
     { headers: { Cookie: cookie } },
     function (connection) {
       connection.on('open', function () {
-        if (!firstAt) {
-          firstAt = Date.now();
-          reconnectTTFE.add(firstAt - opened);
+        if (!readyAt) {
+          readyAt = Date.now();
+          reconnectOpen.add(readyAt - opened);
         }
       });
       connection.on('event', function (event) {
-        if (!firstAt) {
-          firstAt = Date.now();
-          reconnectTTFE.add(firstAt - opened);
+        if (!readyAt) {
+          readyAt = Date.now();
+          reconnectOpen.add(readyAt - opened);
         }
         eventsSeen.add(1);
       });

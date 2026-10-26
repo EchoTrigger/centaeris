@@ -23,20 +23,20 @@ test('replayed terminals are exact and the stream request has an overall timeout
 });
 
 test('each submitted run contributes a success or failure rate sample', () => {
-  const source = fs.readFileSync(new URL('../k6/scenarios/s2-runs.js', import.meta.url), 'utf8')
+  const source = fs.readFileSync(new URL('../k6/scenarios/run-arrival-load.js', import.meta.url), 'utf8')
     .replace(/^import .*;\r?\n/gm, '').replace(/export /g, '');
   for (const failed of [false, true]) {
     const samples = [];
-    class Metric { constructor(name) { this.name = name; } add(value) { if (this.name === 's2_create_errors') samples.push(value); } }
+    class Metric { constructor(name) { this.name = name; } add(value) { if (this.name === 'run_arrival_admission_errors') samples.push(value); } }
     const context = vm.createContext({ Trend: Metric, Counter: Metric, Rate: Metric, __ENV: {},
       startRun() { if (failed) throw new Error('fixture failure'); return { sessionId: 's', agentRunId: 'r' }; } });
-    vm.runInContext(source + '\ncreateRun({});', context);
+    vm.runInContext(source + '\nadmitRun({});', context);
     assert.deepEqual(samples, [failed ? 1 : 0]);
   }
 });
 
-test('real K6 rejects actual S2 submission errors without a scenario system tag', async (context) => {
-  const binary = fileURLToPath(new URL(`../k6/bin/k6${process.platform === 'win32' ? '.exe' : ''}`, import.meta.url));
+test('real K6 rejects actual Run admission errors without a scenario system tag', async (context) => {
+  const binary = process.env.CENTAERIS_K6_BINARY || fileURLToPath(new URL(`../k6/bin/k6${process.platform === 'win32' ? '.exe' : ''}`, import.meta.url));
   if (!fs.existsSync(binary)) return context.skip('Build the pinned local K6 binary to exercise threshold enforcement');
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'centaeris-k6-threshold-'));
   context.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
@@ -53,10 +53,10 @@ test('real K6 rejects actual S2 submission errors without a scenario system tag'
   context.after(() => new Promise(resolve => server.close(resolve)));
   const script = path.join(temporary, 'fixture.js');
   const summary = path.join(temporary, 'summary.json');
-  const subject = pathToFileURL(fileURLToPath(new URL('../k6/scenarios/s2-runs.js', import.meta.url))).href;
-  fs.writeFileSync(script, `import { options as sourceOptions, createRun } from ${JSON.stringify(subject)};
+  const subject = pathToFileURL(fileURLToPath(new URL('../k6/scenarios/run-arrival-load.js', import.meta.url))).href;
+  fs.writeFileSync(script, `import { options as sourceOptions, admitRun } from ${JSON.stringify(subject)};
 export const options = { ...sourceOptions, scenarios: { runs: { executor: 'shared-iterations', vus: 1, iterations: 4, exec: 'fixtureRun' } } };
-export function fixtureRun() { createRun({ store: {}, csrf: 'fixture', workspaceId: 'fixture', agentId: 'fixture', modelId: 'fixture' }); }
+export function fixtureRun() { admitRun({ store: {}, csrf: 'fixture', workspaceId: 'fixture', agentId: 'fixture', modelId: 'fixture' }); }
 `);
   const result = await new Promise((resolve, reject) => {
     const child = spawn(binary, ['run', '--summary-export', summary, script], {
@@ -71,7 +71,7 @@ export function fixtureRun() { createRun({ store: {}, csrf: 'fixture', workspace
   });
   assert.equal(requests, 4);
   const metrics = JSON.parse(fs.readFileSync(summary, 'utf8')).metrics;
-  assert.equal(metrics.s2_create_errors.value, 0.5, 'The real scenario must record both rejected submissions');
+  assert.equal(metrics.run_arrival_admission_errors.value, 0.5, 'The real scenario must record both rejected submissions');
   assert.notEqual(result.code, 0, `Actual 50% submission errors must fail the K6 run: ${result.output}`);
-  assert.equal(metrics.s2_create_errors.thresholds['rate<0.01'], true, 'The threshold must evaluate the actual error-rate series');
+  assert.equal(metrics.run_arrival_admission_errors.thresholds['rate<0.01'], true, 'The threshold must evaluate the actual error-rate series');
 });

@@ -95,7 +95,26 @@ The controller's smoke requires a completed run. It does not establish throughpu
 capacity, fairness, restart recovery, or historical-cost independence. Run failures
 must remain visible; cancellation must not count as successful draining.
 
+## K6 scenarios
+
+| Capability | Entrypoint |
+| --- | --- |
+| Single Run smoke | `k6/scenarios/run-smoke.js` |
+| Event stream load | `k6/scenarios/event-stream-load.js` |
+| Event stream reconnect | `k6/scenarios/event-stream-reconnect.js` |
+| Run arrival load | `k6/scenarios/run-arrival-load.js` |
+| Tool execution load | `k6/scenarios/tool-execution-load.js` |
+| Mixed workload soak | `k6/scenarios/mixed-workload-soak.js` |
+
+The event stream readiness metrics currently measure the open callback, with a
+first-event fallback when open was not observed. Their names do not claim actual
+first-event latency. Arrival rates, deadlines and workload behavior are unchanged
+by the capability names.
+
 ## Tests
+
+Set `CENTAERIS_K6_BINARY` to an existing pinned K6 binary when running the Node
+metric tests; no binary needs to be copied into the checkout.
 
 For the separate bounded native runsc process-recovery experiment, see
 [Durable execution probe](../docs/workspace/eval/DurableExecutionProbe.md).
