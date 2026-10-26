@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 import { runBrowser, waitFor } from "./browserHarness.mjs";
 
-const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j6VQAAAAASUVORK5CYII=", "base64");
+const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==", "base64");
 
 test("avatar file selection previews locally and saves atomically with name, persisted mark and browser tab", async () => {
   const server = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), server: { host: "127.0.0.1", port: 0, strictPort: false },
@@ -23,6 +23,29 @@ test("avatar file selection previews locally and saves atomically with name, per
     await runBrowser(`${server.resolvedUrls.local[0]}tests/browser/agent-avatar-editor.html`, { width: 1280 }, profile, async ({ evaluate, frame, send }) => {
       const click = async label => { await evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent?.trim()===${JSON.stringify(label)} || button.getAttribute('aria-label')===${JSON.stringify(label)}).click()`); await frame(); };
       const writes = () => evaluate("avatarEditorFixture.requests.filter(request=>request.method==='PATCH')");
+      const assertThemeTransparency = async selector => {
+        for (const theme of ["light", "dark"]) {
+          const appearance = await evaluate(`(() => {
+            document.documentElement.dataset.theme=${JSON.stringify(theme)};
+            const image=document.querySelector(${JSON.stringify(selector)});
+            const canvas=document.createElement('canvas');canvas.width=canvas.height=1;
+            const context=canvas.getContext('2d');context.drawImage(image,0,0,1,1);
+            const mark=image.parentElement;
+            const host=image.closest('[data-saved-agent]');
+            if(host) host.style.background='var(--surface-variant)';
+            const paintedBackground=element=>{
+              for(let node=element;node;node=node.parentElement){
+                const color=getComputedStyle(node).backgroundColor;
+                if(color!=='transparent' && color!=='rgba(0, 0, 0, 0)')return color;
+              }
+              return 'transparent';
+            };
+            return {alpha:context.getImageData(0,0,1,1).data[3],backingMatchesPanel:paintedBackground(mark)===paintedBackground(mark.parentElement)};
+          })()`);
+          assert.deepEqual(appearance, {alpha:0,backingMatchesPanel:true}, `${theme} transparent avatars match their containing panel`);
+        }
+        await evaluate("document.documentElement.dataset.theme='light'");
+      };
       const chooseFile = async () => {
         const { root } = await send("DOM.getDocument", { depth: 0 });
         const { nodeId } = await send("DOM.querySelector", { nodeId: root.nodeId, selector: 'input[type="file"]' });
@@ -31,6 +54,8 @@ test("avatar file selection previews locally and saves atomically with name, per
       };
       await waitFor(() => evaluate("document.title==='Private Agent · Centaeris'"), "initial saved identity");
       await click("Edit profile"); await chooseFile();
+      await waitFor(() => evaluate("document.querySelector('[role=dialog] .shAgentHeroMark img')?.complete"), "transparent preview decoded");
+      await assertThemeTransparency("[role=dialog] .shAgentHeroMark img");
       assert.equal(await evaluate("document.title"), "Private Agent · Centaeris", "unsaved image/name drafts do not change the saved tab identity");
       const name = await evaluate("(() => { const input=document.querySelector('input[name=agentName]'); input.focus(); input.select(); return true; })()");
       assert.equal(name, true); await send("Input.insertText", { text: "Uploaded portrait Agent" }); await frame();
@@ -44,6 +69,7 @@ test("avatar file selection previews locally and saves atomically with name, per
       const saved = await writes(); assert.equal(saved.length, 1); assert.equal(saved[0].path, "/api/agents/fixture-agent");
       assert.deepEqual(saved[0].body, { name: "Uploaded portrait Agent", description: "Synthetic avatar editor", instructions: "Keep the existing instructions.", avatarKind: "centaeris", avatarDataBase64: png.toString("base64") });
       assert.equal(await evaluate("document.querySelector('[data-saved-agent] img').getAttribute('src').endsWith('?v=saved')"), true);
+      await assertThemeTransparency("[data-saved-agent] img");
       await click("Edit profile");
       assert.equal(await evaluate("document.querySelector('[role=dialog] .shAgentHeroMark img').getAttribute('src').endsWith('?v=saved')"), true, "reopening uses the persisted image rather than a stale file preview");
       await click("Restore default"); await click("Save profile");

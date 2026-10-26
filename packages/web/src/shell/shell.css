@@ -465,7 +465,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shDeletedPage { width: min(720px, calc(100% - 64px)); margin: 0 auto; padding: 100px 0; }
 .shDeletedPage h1 { margin: 0; font-size: 44px; }
 
-.shAgentMark { display: inline-grid; place-items: center; overflow: hidden; border-radius: 9px !important; background: var(--primary-color); }
+.shAgentMark { display: inline-grid; place-items: center; overflow: hidden; border-radius: 9px !important; background: transparent; }
 .shAgentMark img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .workspaceConversationBreadcrumb a { color: var(--on-surface); font-weight: 600; text-decoration: none; }
 .shAgentTopbar > a { margin-left: auto; color: var(--primary-color); text-decoration: none; }
