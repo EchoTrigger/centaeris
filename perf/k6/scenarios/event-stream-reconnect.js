@@ -1,14 +1,15 @@
 // 事件流重连：SSE churn/重连。观察者反复连接-短持-断开-重连，
-// 测重连后连接就绪延迟（open回调，缺少open时记录首个事件）、连接错误率。
+// 连接open与首个实际事件分别计时，另记录连接错误。
 // 这打的是连接池获取/释放、redis lane 交接与回放路径。
 //
 //   k6 run -e CHURN_RATE=20 -e DURATION=2m -e HOLD=5 scenarios/event-stream-reconnect.js
 import { Trend, Counter } from 'k6/metrics';
 import { sleep } from 'k6';
 import sse from 'k6/x/sse';
-import { login, ensureProviderAndModels, firstWorkspaceId, firstAgentId, startRun } from './common.js';
+import { login, configuredTarget, startRun, committedEvent } from './common.js';
 
 const reconnectOpen = new Trend('event_stream_reconnect_open_ms', true);
+const firstEvent = new Trend('event_stream_reconnect_first_event_ms', true);
 const connErrors = new Counter('event_stream_reconnect_errors');
 const eventsSeen = new Counter('event_stream_reconnect_events_seen');
 
@@ -30,14 +31,12 @@ export const options = {
 };
 
 export function setup() {
+  const { workspaceId, agentId, modelId } = configuredTarget('long');
   const { store, csrf } = login();
-  const models = ensureProviderAndModels(store, csrf);
-  const workspaceId = firstWorkspaceId(store, csrf);
-  const agentId = firstAgentId(store, csrf, workspaceId);
   const runs = [];
   const count = Number(__ENV.MARATHON_RUNS || 3);
   for (let i = 0; i < count; i += 1) {
-    runs.push(startRun(store, csrf, workspaceId, agentId, models['perf-marathon'], `Churn target ${i}.`));
+    runs.push(startRun(store, csrf, workspaceId, agentId, modelId, `Churn target ${i}.`));
   }
   return { store, runs };
 }
@@ -47,6 +46,7 @@ export function reconnectEvents(data) {
   const cookie = Object.entries(data.store).map(([k, v]) => `${k}=${v}`).join('; ');
   const opened = Date.now();
   let readyAt = 0;
+  let sawEvent = false;
 
   sse.open(
     `${__ENV.API_BASE || 'http://localhost:18000'}/api/sessions/${target.sessionId}/agent-runs/${target.agentRunId}/events`,
@@ -59,10 +59,8 @@ export function reconnectEvents(data) {
         }
       });
       connection.on('event', function (event) {
-        if (!readyAt) {
-          readyAt = Date.now();
-          reconnectOpen.add(readyAt - opened);
-        }
+        committedEvent(JSON.parse(event.data), target.sessionId, target.agentRunId);
+        if (!sawEvent) { sawEvent = true; firstEvent.add(Date.now() - opened); }
         eventsSeen.add(1);
       });
       connection.on('error', function () {

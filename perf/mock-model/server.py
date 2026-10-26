@@ -308,7 +308,16 @@ class Handler(BaseHTTPRequestHandler):
         waiting_parent = waiting_role == "parent"
         waiting_child = waiting_role == "child"
         waiting_phase, waiting_ref = self.waiting_phase(request) if waiting_parent else (None, None)
-        if model.endswith("transcript-capture"):
+        if model == "perf-file-workload":
+            # The mock requests tools; only the real bash/provider path creates
+            # bytes or publishes an artifact. K6 independently downloads them.
+            if tool_rounds == 0:
+                items, usage = self.emit_function_call(response_id)
+            elif tool_rounds == 1:
+                items, usage = self.emit_named_function_call("publish_artifact", {"path": "/mnt/data/perf-result.bin"})
+            else:
+                items, usage = self.emit_final(response_id, "perf-instant")
+        elif model.endswith("transcript-capture"):
             command = capture_command(tool_rounds)
             if command is None:
                 items, usage = self.emit_final(response_id, "perf-instant")

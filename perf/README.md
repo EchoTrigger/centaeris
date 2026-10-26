@@ -106,15 +106,44 @@ must remain visible; cancellation must not count as successful draining.
 | Tool execution load | `k6/scenarios/tool-execution-load.js` |
 | Mixed workload soak | `k6/scenarios/mixed-workload-soak.js` |
 
-The event stream readiness metrics currently measure the open callback, with a
-first-event fallback when open was not observed. Their names do not claim actual
-first-event latency. Arrival rates, deadlines and workload behavior are unchanged
-by the capability names.
+Event stream connection-open and first actual event have separate millisecond
+Trends. Committed frames use the real API `session.stream.item.v1` contract and
+must match the requested Run/session. Run and artifact timings are milliseconds.
+
+Every K6 workload requires `API_BASE`, `PERF_WORKSPACE_ID`, `PERF_AGENT_ID` and
+`PERF_MODEL_REFS` (JSON object with `short`, `tools` and/or `long` model IDs).
+Only models needed by that scenario are required. There is no first-workspace
+selection and the K6 workloads never create global providers or models. Prepare
+workspace-local providers/models through the existing workspace management APIs.
+Keep fixture state, credentials and results outside the source checkout.
+
+`run-smoke.js` and `tool-execution-load.js` additionally require
+`PERF_ARTIFACT_EXPECTATION`, a JSON object containing exactly `filename`,
+`sizeBytes` and `sha256` (`sha256:` plus 64 lowercase hex digits). The expectation
+comes from the fixed external workload input, never from model output. The mock
+`perf-file-workload` profile requests the configured real Bash command, then
+`publish_artifact({path: "/mnt/data/perf-result.bin"})`, then finishes. Configure
+its Bash command to create the expected file; the mock does not create bytes.
+
+Completion requires paired successful tool calls/results, at least one actual
+Bash result, the publication fact bound by `toolCallId`, and a public artifact
+download whose bytes match the external size/hash. Changed downloaded bytes,
+missing publication, a failed tool or another Run's event fail the sample even
+when the model emits `agent_run_completed`. Every smoke attempt records a
+success/failure sample so an uncaught JavaScript error cannot silently exit K6
+successfully with an empty checks series.
+
+These checks establish client/contract behavior until run against a real owned
+product fixture. Unit HTTP fixtures do not establish product acceptance,
+physical concurrency, cleanup or retirement.
 
 ## Tests
 
-Set `CENTAERIS_K6_BINARY` to an existing pinned K6 binary when running the Node
-metric tests; no binary needs to be copied into the checkout.
+Set `CENTAERIS_K6_BINARY` to an existing pinned K6 binary and
+`CENTAERIS_TEST_PYTHON` to a Python interpreter when running the Node tests.
+The stream fixtures execute the real API's pure committed-item producer.
+No binary needs to be copied into the checkout. Real K6 tests use only bounded
+local synthetic HTTP servers and leave no product resources running.
 
 For the separate bounded native runsc process-recovery experiment, see
 [Durable execution probe](../docs/workspace/eval/DurableExecutionProbe.md).

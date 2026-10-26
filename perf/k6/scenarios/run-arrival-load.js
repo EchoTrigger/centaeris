@@ -6,7 +6,7 @@
 //   RATE = 每分钟创建多少个 run（arrival rate，不是用户数）
 import { Trend, Counter, Rate } from 'k6/metrics';
 import { sleep } from 'k6';
-import { login, ensureProviderAndModels, firstWorkspaceId, firstAgentId, startRun } from './common.js';
+import { login, configuredTarget, startRun } from './common.js';
 
 const createLatency = new Trend('run_arrival_admission_latency_ms', true);
 const runAccepted = new Counter('run_arrival_runs_accepted');
@@ -32,11 +32,9 @@ export const options = {
 };
 
 export function setup() {
+  const { workspaceId, agentId, modelId } = configuredTarget('short');
   const { store, csrf } = login();
-  const models = ensureProviderAndModels(store, csrf);
-  const workspaceId = firstWorkspaceId(store, csrf);
-  const agentId = firstAgentId(store, csrf, workspaceId);
-  return { store, csrf, workspaceId, agentId, modelId: models['perf-instant'] };
+  return { store, csrf, workspaceId, agentId, modelId };
 }
 
 export function admitRun(data) {

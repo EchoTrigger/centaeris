@@ -3,7 +3,7 @@
 // marathon 会占住执行槽 ~5 分钟：负载类资源竞争正是要观察的现象。
 //   k6 run scenarios/mixed-workload-soak.js
 import { sleep } from 'k6';
-import { login, ensureProviderAndModels, firstWorkspaceId, firstAgentId, startRun } from './common.js';
+import { login, configuredTarget, startRun } from './common.js';
 
 const SOAK_HOURS = __ENV.SOAK_HOURS || '4';
 const DURATION = `${SOAK_HOURS}h`;
@@ -26,27 +26,28 @@ export const options = {
 };
 
 export function setup() {
+  const short = configuredTarget('short');
+  const tools = configuredTarget('tools');
+  const long = configuredTarget('long');
   const { store, csrf } = login();
-  const models = ensureProviderAndModels(store, csrf);
-  const workspaceId = firstWorkspaceId(store, csrf);
-  const agentId = firstAgentId(store, csrf, workspaceId);
-  return { store, csrf, workspaceId, agentId, models };
+  return { store, csrf, workspaceId: short.workspaceId, agentId: short.agentId,
+    models: { short: short.modelId, tools: tools.modelId, long: long.modelId } };
 }
 
 export function admitShortRun(data) {
   try {
-    startRun(data.store, data.csrf, data.workspaceId, data.agentId, data.models['perf-instant']);
+    startRun(data.store, data.csrf, data.workspaceId, data.agentId, data.models.short);
   } catch (_) { /* 浸泡期错误由计数与 DB 终态统计呈现 */ }
 }
 
 export function admitToolRun(data) {
   try {
-    startRun(data.store, data.csrf, data.workspaceId, data.agentId, data.models['perf-toolstorm']);
+    startRun(data.store, data.csrf, data.workspaceId, data.agentId, data.models.tools);
   } catch (_) { /* 同上 */ }
 }
 
 export function admitLongRun(data) {
   try {
-    startRun(data.store, data.csrf, data.workspaceId, data.agentId, data.models['perf-marathon']);
+    startRun(data.store, data.csrf, data.workspaceId, data.agentId, data.models.long);
   } catch (_) { /* 同上 */ }
 }

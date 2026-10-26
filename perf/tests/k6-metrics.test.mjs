@@ -1,3 +1,4 @@
+import { committedItems } from './session-stream-fixtures.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -15,7 +16,7 @@ test('replayed terminals are exact and the stream request has an overall timeout
     const context = vm.createContext({ __ENV: {}, Date, http: { get(url, options) {
       assert.ok(url.endsWith('/sessions/s/agent-runs/r/events'));
       assert.equal(options.timeout, '120s');
-      return { status: 200, body: ': heartbeat\n\ndata: ' + JSON.stringify({ event: { type: 'agent_run_' + status } }) + '\n\n' };
+      return { status: 200, body: ': heartbeat\n\ndata: ' + JSON.stringify(committedItems([{ type: 'agent_run_' + status, agentRunId: 'r', sessionId: 's', eventId: 'event-1', sequence: 1 }])[0]) + '\n\n' };
     } } });
     const result = vm.runInContext(source + '\nwaitForTerminal({}, "csrf", "s", "r", 120)', context);
     assert.equal(result.status, status);
@@ -74,4 +75,13 @@ export function fixtureRun() { admitRun({ store: {}, csrf: 'fixture', workspaceI
   assert.equal(metrics.run_arrival_admission_errors.value, 0.5, 'The real scenario must record both rejected submissions');
   assert.notEqual(result.code, 0, `Actual 50% submission errors must fail the K6 run: ${result.output}`);
   assert.equal(metrics.run_arrival_admission_errors.thresholds['rate<0.01'], true, 'The threshold must evaluate the actual error-rate series');
+});
+
+test('foreign committed stream frames cannot supply another Run terminal', () => {
+  const source = fs.readFileSync(new URL('../k6/scenarios/common.js', import.meta.url), 'utf8')
+    .replace(/^import .*;\r?\n/gm, '').replace(/export /g, '');
+  const item = { schema: 'session.stream.item.v1', kind: 'committed', agentRunId: 'foreign', sourceSequence: 1,
+    event: { type: 'agent_run_completed', agentRunId: 'foreign', sessionId: 's', sequence: 1, eventId: 'event-1' } };
+  const context = vm.createContext({ __ENV: {}, Date, http: { get() { return { status: 200, body: 'data: ' + JSON.stringify(item) + '\n\n' }; } } });
+  assert.throws(() => vm.runInContext(source + '\nwaitForTerminal({}, "csrf", "s", "r", 120)', context), /stream.*binding/);
 });

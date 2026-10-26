@@ -21,14 +21,17 @@ function scenario(capability, { failed = false } = {}) {
       assert.ok(Object.values(checks).every(predicate => predicate(value)));
     },
     login: () => ({ store: { sessionid: 'owned' }, csrf: 'csrf' }),
-    ensureProviderAndModels: () => ({ 'perf-instant': 'instant', 'perf-toolstorm': 'tools', 'perf-marathon': 'long' }),
-    firstWorkspaceId: () => 'workspace', firstAgentId: () => 'agent', request() {},
+    configuredTarget: profile => ({ workspaceId: 'workspace', agentId: 'agent', modelId: { short: 'instant', tools: 'tools', long: 'long' }[profile] }), request() {},
     startRun(...args) {
       admissions.push(args);
       if (failed) throw new Error('admission failure');
       return { sessionId: 'session', agentRunId: `run-${admissions.length}` };
     },
     waitForTerminal(...args) { waits.push(args); return { status: failed ? 'failed' : 'completed', events: [] }; },
+    artifactExpectation() { return {}; },
+    verifyPublishedArtifact() { return { downloadMs: 7 }; },
+    committedEvent(item) { return item.event; },
+    verifyToolRun(result) { if (result.status !== 'completed') throw new Error('tool failed'); return { toolCount: 1 }; },
     sleep(seconds) { sleeps.push(seconds); },
     sse: { open(url, options, configure) {
       const handlers = {};
@@ -101,4 +104,26 @@ test('mixed soak preserves three independent arrival streams and model selection
   for (const config of configs) { assert.equal(config.duration, '4h'); s.context[config.exec](setup); }
   assert.deepEqual(s.admissions.map(args => args[4]), ['instant', 'tools', 'long']);
   assert.equal(s.waits.length, 0);
+});
+
+test('time Trends record milliseconds rather than seconds interpreted as milliseconds', () => {
+  const smoke = scenario('smoke'); smoke.context.smokeIteration();
+  assert.equal(smoke.metrics.find(metric => metric.name === 'run_smoke_duration_ms').values[0], 20);
+  const tools = scenario('tools'); const setup = tools.context.setup();
+  tools.context[Object.values(tools.options.scenarios)[0].exec](setup);
+  assert.equal(tools.metrics.find(metric => metric.name === 'tool_execution_run_duration_ms').values[0], 20);
+});
+
+test('tool failure Rate includes successful attempts in its denominator', () => {
+  const tools = scenario('tools'); const setup = tools.context.setup();
+  tools.context[Object.values(tools.options.scenarios)[0].exec](setup);
+  assert.deepEqual(tools.metrics.find(metric => metric.name === 'tool_execution_run_failed').values, [0]);
+});
+
+test('connection-open and first actual event have separate timing samples', () => {
+  for (const [capability, metricName] of [['stream', 'event_stream_first_event_ms'], ['reconnect', 'event_stream_reconnect_first_event_ms']]) {
+    const s = scenario(capability); const config = Object.values(s.options.scenarios)[0];
+    s.context[config.exec](s.context.setup());
+    assert.equal(s.metrics.find(metric => metric.name === metricName)?.values[0], 40);
+  }
 });
