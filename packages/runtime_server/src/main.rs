@@ -36,6 +36,8 @@ mod recovery_read;
 mod recovery_upload;
 mod request_capacity;
 mod resident_capacity;
+#[cfg(test)]
+mod shared_resident_admission;
 mod retained_tasks;
 mod runsc_rotation;
 #[cfg(test)]
