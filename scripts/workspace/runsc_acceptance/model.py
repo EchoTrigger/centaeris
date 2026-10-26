@@ -15,7 +15,7 @@ class Handler(BaseHTTPRequestHandler):
             request=json.loads(self.rfile.read(size));call=next_call(request)
             if call and call[0] not in {tool['function']['name'] for tool in request.get('tools',[])}:
                 raise ValueError('required actual tool is not advertised')
-        except (ValueError,KeyError,TypeError):self.send_error(422,'native acceptance model contract failed');return
+        except (RuntimeError,ValueError,KeyError,TypeError):self.send_error(422,'native acceptance model contract failed');return
         response_id='chatcmpl-'+uuid.uuid4().hex
         if call:
             name,arguments=call

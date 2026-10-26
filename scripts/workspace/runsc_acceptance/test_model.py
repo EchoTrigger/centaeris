@@ -15,11 +15,15 @@ class NativeModelTests(unittest.TestCase):
   with self.request(payload) as response:value=json.load(response)
   call=value['choices'][0]['message']['tool_calls'][0]
   self.assertEqual(call['function']['name'],'background_task_start');self.assertEqual(json.loads(call['function']['arguments'])['program'],'python3')
- def test_later_run_streams_only_client_tool_and_terminal_done(self):
-  payload={'messages':[{'role':'user','content':'RUNSC_ROTATION '+'a'*32+' A 2'}],'tools':[{'function':{'name':'bash'}}],'stream':True}
+ def test_later_holder_run_streams_actual_task_start(self):
+  payload={'messages':[{'role':'user','content':'RUNSC_ROTATION '+'a'*32+' A 2'}],'tools':[{'function':{'name':'background_task_start'}}],'stream':True}
   with self.request(payload) as response:body=response.read().decode()
   records=[line[6:] for line in body.splitlines() if line.startswith('data: ')]
-  self.assertEqual(records[-1],'[DONE]');first=json.loads(records[0]);self.assertEqual(first['choices'][0]['delta']['tool_calls'][0]['function']['name'],'bash')
+  self.assertEqual(records[-1],'[DONE]');first=json.loads(records[0]);self.assertEqual(first['choices'][0]['delta']['tool_calls'][0]['function']['name'],'background_task_start')
+ def test_failed_actual_tool_result_returns_bounded_contract_error(self):
+  payload={'messages':[{'role':'user','content':'RUNSC_ROTATION_BLOCK '+'a'*32+' A'},{'role':'tool','content':json.dumps({'schema':'background_task.result.v1','state':'unknown','taskId':'owned'})}],'tools':[]}
+  with self.assertRaises(urllib.error.HTTPError) as context:self.request(payload)
+  self.assertEqual(context.exception.code,422)
  def test_unadvertised_tool_is_rejected_before_response(self):
   payload={'messages':[{'role':'user','content':'RUNSC_ROTATION '+'a'*32+' A 0'}],'tools':[{'function':{'name':'bash'}}]}
   with self.assertRaises(urllib.error.HTTPError) as context:self.request(payload)

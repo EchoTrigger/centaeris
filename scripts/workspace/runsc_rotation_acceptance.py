@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import uuid
 
@@ -110,14 +111,30 @@ def extract_oracle(text):
     return value
 
 
+def task_result(message, *, running=False, cleaned=False):
+    try:
+        value = json.loads(_text(message))
+        if (value.get('schema') != 'background_task.result.v1'
+                or not isinstance(value.get('taskId'), str) or not value['taskId']
+                or (running and value.get('state') != 'running')
+                or (cleaned and (value.get('state') != 'exited'
+                                 or value.get('cleanupComplete') is not True))):
+            raise ValueError('task state')
+        return value
+    except (ValueError, TypeError, AttributeError) as error:
+        raise RuntimeError('actual started task or completed cleanup response missing') from error
+
+
 def next_rotation_call(request, progress=None):
     messages = request['messages']
     last = max(i for i, item in enumerate(messages) if item.get('role') == 'user')
     marker = _text(messages[last])
     replies = [item for item in messages[last + 1:] if item.get('role') == 'tool']
-    block = BLOCK.fullmatch(marker)
-    if block:
-        return ('bash', {'command': 'sleep 120', 'timeout_ms': 180000}) if not replies else None
+    if BLOCK.fullmatch(marker):
+        if not replies:
+            return 'background_task_start', {'program': 'sleep', 'args': ['1'], 'timeout_ms': 5000}
+        task_result(replies[0], running=True)
+        return ('bash', {'command': 'sleep 120', 'timeout_ms': 180000}) if len(replies) == 1 else None
     match = MARKER.fullmatch(marker)
     if match is None:
         raise ValueError('unsupported rotation prompt')
@@ -129,12 +146,24 @@ def next_rotation_call(request, progress=None):
     if setup and not replies:
         argv = memory_oracle_server(tag, label)
         return 'background_task_start', {'program': argv[0], 'args': argv[1:], 'cwd': '/mnt/data', 'timeout_ms': 14700000}
-    if len(replies) == int(setup):
-        command = memory_oracle_client(tag, label, index)
-        if index == 4:
-            command = 'sleep 15; ' + command
-        return 'bash', {'command': command, 'timeout_ms': 30000}
-    if len(replies) != 1 + int(setup):
+    if setup:
+        task_result(replies[0], running=True)
+    offset = int(setup)
+    if label == 'A':
+        if len(replies) == offset:
+            return 'background_task_start', {'program': 'sleep', 'args': ['10'], 'timeout_ms': 20000}
+        held = task_result(replies[offset], running=True)
+        if len(replies) == offset + 1:
+            return 'bash', {'command': 'sleep 15', 'timeout_ms': 30000}
+        if len(replies) == offset + 2:
+            return 'background_task_query', {'task_id': held['taskId']}
+        cleaned = task_result(replies[offset + 2], cleaned=True)
+        if cleaned['taskId'] != held['taskId']:
+            raise RuntimeError('holder cleanup belongs to another task')
+        offset += 3
+    if len(replies) == offset:
+        return 'bash', {'command': memory_oracle_client(tag, label, index), 'timeout_ms': 30000}
+    if len(replies) != offset + 1:
         raise ValueError('unexpected rotation tool count')
     oracle = extract_oracle(_text(replies[-1]))
     if oracle.get('challenge') != f'{tag}-{label}-{index}':
@@ -164,12 +193,17 @@ def validate_evidence(evidence):
             if (row['runtime'] != 'runsc' or row['running'] is not True or row['paused'] is not True or row['powerState'] != 'paused'
                     or row['runningReservations'] != 0):
                 raise RuntimeError('idle pause lacks matching physical and durable acknowledgement')
-            if row['residentCount'] != (1 if index == 0 else 2) or row['residentMemoryBytes'] <= 0:
+            if (row['residentCount'] not in ((1, 2) if index == 0 else (2,))
+                    or row['residentMemoryBytes'] <= 0):
                 raise RuntimeError('paused memory/resident responsibility was released')
-            if index == 1:
+            if index == 0 and row['residentCount'] == 2:
                 memory_total = row['residentMemoryBytes']
-                if memory_total <= runs[0]['residentMemoryBytes']:
+            elif index == 1:
+                if memory_total is None and row['residentMemoryBytes'] <= runs[0]['residentMemoryBytes']:
                     raise RuntimeError('second environment has no resident memory charge')
+                if memory_total is not None and row['residentMemoryBytes'] != memory_total:
+                    raise RuntimeError('resident memory charge changed during rotation')
+                memory_total = row['residentMemoryBytes']
             elif index > 1 and row['residentMemoryBytes'] != memory_total:
                 raise RuntimeError('resident memory charge changed during rotation')
             pids=row['pids']
@@ -193,18 +227,37 @@ def validate_evidence(evidence):
             baselines[label] = identity
         if baselines['A'][1:4] == baselines['B'][1:4] or baselines['A'][4] == baselines['B'][4]:
             raise RuntimeError('two independent environments required')
-        wakeup = evidence['wakeup']
-        if (wakeup['waitingRunId'] != runs[5]['agentRunId'] or wakeup['waitObserved'] is not True
-                or wakeup['waitingPaused'] is not True or wakeup['runningReservations'] != 1
-                or wakeup['completedWithoutReadmission'] is not True):
-            raise RuntimeError('capacity release did not wake the original queued demand')
+        waves = evidence.get('waves', [])
+        if len(waves) != 6:
+            raise RuntimeError('six concurrent waves with durable capacity waits required')
+        for number, wave in enumerate(waves):
+            waiting = wave['waiting']
+            claim = wave['claim']
+            if (wave['holderRunId'] != runs[number * 2]['agentRunId']
+                    or wave['waitingRunId'] != runs[number * 2 + 1]['agentRunId']
+                    or wave['holderStarted'] is not True or wave['overlapObserved'] is not True
+                    or wave['holderRunStatusAtWait'] != 'running'
+                    or waiting['jobStatus'] != 'queued' or waiting['registered'] is not True
+                    or waiting['transitionReason'] != 'runsc_environment_capacity_wait'
+                    or waiting['runningReservations'] != 1
+                    or waiting['successfulCommands'] != 0
+                    or claim['jobId'] != waiting['jobId']
+                    or claim['generation'] <= waiting['observedGeneration']
+                    or not waiting['yieldedAtMs'] <= claim['releaseRecordedAtMs'] <= claim['claimedAtMs'] < waiting['runAtMs']):
+                raise RuntimeError('capacity release did not wake the original concurrent demand before fallback')
+        counts = evidence['mainRunCounts']
+        if counts != {'accepted': 12, 'completed': 12, 'validated': 12}:
+            raise RuntimeError('main Run counts must remain separate from cancellation Runs')
         restart = evidence['restart']
         if (restart['performed'] is not True or restart['beforeRuntimeStartedAt'] == restart['afterRuntimeStartedAt']
                 or set(restart['preservedContainers']) != {runs[0]['containerId'], runs[1]['containerId']}):
             raise RuntimeError('Runtime restart did not preserve both exact containers')
         cancellation = evidence['cancellation']
         if (cancellation['queuedRunStatus'] != 'cancelled' or cancellation['holderRunStatus'] != 'cancelled'
-                or cancellation['queuedSuccessfulCommands'] != 0 or cancellation['runningReservationsAfter'] != 0):
+                or cancellation['queuedSuccessfulCommands'] != 0 or cancellation['runningReservationsAfter'] != 0
+                or cancellation['holderStarted'] is not True
+                or cancellation['queuedCleanupComplete'] is not True or cancellation['holderCleanupComplete'] is not True
+                or cancellation['queuedReleaseReceiptCount'] != 1 or cancellation['holderReleaseReceiptCount'] != 1):
             raise RuntimeError('queued cancellation did not release demand safely')
         retired = evidence['retirements']
         if len(retired) != 2 or {r['environmentId'] for r in retired} != {runs[0]['environmentId'], runs[1]['environmentId']}:
@@ -387,6 +440,54 @@ with transaction.atomic():
             row['oracle'] = oracles[0]
         return row
 
+    def wait_snapshot(self, admitted):
+        # A first queued Run has no resident yet. Observe its durable demand,
+        # never infer waiting from the other environment's physical pause.
+        code = r'''import json
+from django.conf import settings
+from django.db import connection,transaction
+from app_core.models import AgentRun,SessionEvent
+assert settings.DATABASES['default']['NAME']=='retained_acceptance'
+with transaction.atomic():
+ with connection.cursor() as c:
+  c.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+  run=AgentRun.objects.get(pk=RUN)
+  job='agent_run.lifecycle:'+run.pk
+  c.execute('SELECT status FROM runtime.runtime_jobs WHERE job_id=%s',[job]);row=c.fetchone()
+  c.execute('SELECT observed_generation FROM runtime.resident_capacity_waiters WHERE job_id=%s',[job]);waiter=c.fetchone()
+  c.execute("SELECT payload_json FROM runtime.runtime_events WHERE task_id=%s AND event_type='runtime_job_yielded' ORDER BY at_ms DESC,event_id DESC LIMIT 1",[job]);yielded=c.fetchone()
+  c.execute("SELECT payload_json FROM runtime.runtime_events WHERE task_id=%s AND event_type='runtime.resident_capacity.claimed.v1' ORDER BY at_ms DESC,event_id DESC LIMIT 1",[job]);claimed=c.fetchone()
+  c.execute("SELECT count(*) FROM runtime.resident_sandboxes r WHERE r.allocation_mode='retained' AND NOT EXISTS (SELECT 1 FROM runtime.runsc_environment_power p WHERE p.environment_id=r.environment_id AND p.host_id=r.host_id AND p.instance_id=r.instance_id AND p.container_id=r.container_id AND p.allocation_execution_id=r.execution_id AND p.state='paused')");running=c.fetchone()[0]
+  outputs=[e['payload'] for e in SessionEvent.objects.filter(agent_run=run,session_level=False,payload__type='tool_result').order_by('agent_run_sequence').values_list('payload',flat=True)]
+  starts=[]
+  for event in outputs:
+   if event.get('toolName')=='background_task_start' and event.get('resultState') in ('successWithOutput','successNoOutput'):
+    try:task=json.loads(event.get('modelContent',''))
+    except (TypeError,ValueError):continue
+    if task.get('schema')=='background_task.result.v1' and task.get('state')=='running' and task.get('taskId'):starts.append(task['taskId'])
+  value={'jobId':job,'jobStatus':row[0] if row else None,'runStatus':run.status,'registered':waiter is not None,'observedGeneration':waiter[0] if waiter else None,'runningReservations':running,'startedTaskIds':starts,'successfulCommands':sum(e.get('toolName')=='bash' and e.get('resultState') in ('successWithOutput','successNoOutput') for e in outputs),'claim':json.loads(claimed[0]) if claimed else None}
+  if yielded:value.update(json.loads(yielded[0]))
+  print(json.dumps(value))
+'''.replace('RUN', repr(admitted['agentRunId']))
+        value = self.sql(code)
+        if value['runningReservations'] > 1:
+            raise RuntimeError('one-slot running budget exceeded')
+        return value
+
+    def holder_started(self, admitted, expected_starts):
+        return self.wait(lambda: self.wait_snapshot(admitted),
+                         lambda row: row['runStatus'] == 'running'
+                         and row['runningReservations'] == 1
+                         and len(row['startedTaskIds']) == expected_starts,
+                         'actual started holder task')
+
+    def queued_wait(self, admitted):
+        return self.wait(lambda: self.wait_snapshot(admitted),
+                         lambda row: row['jobStatus'] == 'queued' and row['registered']
+                         and row.get('transitionReason') == 'runsc_environment_capacity_wait'
+                         and row['runningReservations'] == 1 and row['successfulCommands'] == 0,
+                         'durable original demand waiting for the running slot', timeout=12)
+
     def paused(self, label, admitted):
         return self.wait(lambda: self.observe(label, admitted),
                          lambda row: row['powerState'] == 'paused' and row['paused'] and row['runningReservations'] == 0,
@@ -414,21 +515,61 @@ with transaction.atomic():
 
     def cancellation(self):
         holder = self.admit('A', 'RUNSC_ROTATION_BLOCK ' + self.tag + ' A')
-        self.wait(lambda: self.status(holder), lambda row: row['runStatus'] == 'running' and row['highestRunSequence'] > 0,
-                  'holder Run admission')
-        self.wait(lambda: self.observe('A', holder), lambda row: not row['paused'] and row['runningReservations'] == 1,
-                  'holder running-slot reservation')
+        self.holder_started(holder, 1)
         queued = self.admit('B', f'RUNSC_ROTATION {self.tag} B 11')
+        self.queued_wait(queued)
         self.http(f"/api/sessions/{queued['sessionId']}/agent-runs/{queued['agentRunId']}/cancel", {})
-        cancelled = self.wait(lambda: self.status(queued), lambda row: row['runStatus'] == 'cancelled', 'queued cancellation')
+        done = lambda row: row['runStatus'] == 'cancelled' and row['cleanupComplete'] and row['releaseReceiptCount'] == 1
+        cancelled = self.wait(lambda: self.status(queued), done, 'queued cancellation cleanup and release')
         queued_observation = self.observe('B', queued)
         if 'oracle' in queued_observation or queued_observation['successfulCommands'] != 0:
             raise RuntimeError('cancelled queued Run executed the oracle')
         self.http(f"/api/sessions/{holder['sessionId']}/agent-runs/{holder['agentRunId']}/cancel", {})
-        held = self.wait(lambda: self.status(holder), lambda row: row['runStatus'] == 'cancelled', 'holder cancellation')
+        held = self.wait(lambda: self.status(holder), done, 'holder cancellation cleanup and release')
         after = self.paused('A', holder)
         return {'queuedRunStatus': cancelled['runStatus'], 'queuedSuccessfulCommands': queued_observation['successfulCommands'],
-                'holderRunStatus': held['runStatus'], 'runningReservationsAfter': after['runningReservations']}
+                'holderRunStatus': held['runStatus'], 'runningReservationsAfter': after['runningReservations'],
+                'holderStarted': True, 'queuedCleanupComplete': cancelled['cleanupComplete'],
+                'holderCleanupComplete': held['cleanupComplete'],
+                'queuedReleaseReceiptCount': cancelled['releaseReceiptCount'],
+                'holderReleaseReceiptCount': held['releaseReceiptCount']}
+
+    def retirement_readback(self, body):
+        code = r'''import json
+from django.db import connection,transaction
+with transaction.atomic():
+ with connection.cursor() as c:
+  c.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+  c.execute('SELECT request_json,state FROM runtime.environment_retirements WHERE operation_id=%s',[OPERATION])
+  row=c.fetchone()
+  print(json.dumps({'request':json.loads(row[0]),'status':row[1]} if row else {}))
+'''.replace('OPERATION', repr(body['operationId']))
+        result = self.sql(code)
+        if not result:
+            return None
+        if result['request'] != body or result['status'] not in ('pending', 'destroyed'):
+            raise RuntimeError('retirement durable operation identity mismatch')
+        return {key: body[key] for key in ('operationId', 'environmentId', 'instanceId')} | {'status': result['status']}
+
+    def retirement_request(self, request, body):
+        def invoke():
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    value = json.load(response)
+            except urllib.error.HTTPError as error:
+                code = error.code
+                error.close()
+                if code not in (409, 503, 504):
+                    raise RuntimeError('product retirement HTTP failure: ' + str(code)) from None
+                value = self.retirement_readback(body)
+                if code == 409 and value is None:
+                    raise RuntimeError('retirement conflict without matching durable operation') from None
+                return value or {'status': 'unknown'}
+            if any(value.get(key) != body[key] for key in ('operationId', 'environmentId', 'instanceId')):
+                raise RuntimeError('retirement response identity mismatch')
+            return value
+        return self.wait(invoke, lambda value: value.get('status') == 'destroyed',
+                         'exact environment retirement convergence', timeout=180)
 
     def retire(self, row):
         body = {'schema': 'runtime.environment.retire.v1', 'operationId': 'rotation-retire-' + uuid.uuid4().hex,
@@ -438,12 +579,8 @@ with transaction.atomic():
             data=json.dumps(body).encode(), headers={'Content-Type': 'application/json',
                 'x-internal-token': self.private['INTERNAL_API_TOKEN'],
                 'x-environment-maintenance-token': self.private['ENVIRONMENT_MAINTENANCE_TOKEN']})
-        def invoke():
-            with urllib.request.urlopen(request, timeout=60) as response:
-                return json.load(response)
-        result = self.wait(invoke, lambda value: value.get('status') == 'destroyed', 'exact environment retirement')
-        if any(result.get(key) != body[key] for key in ('operationId', 'environmentId', 'instanceId')):
-            raise RuntimeError('retirement response identity mismatch')
+        (self.result / ('retirement-' + row['environmentId'] + '.json')).write_text(json.dumps(body, indent=2))
+        result = self.retirement_request(request, body)
         inventory = self.command(self.docker + ['ps', '-aq', '--no-trunc']).splitlines()
         code = r'''import json
 from django.db import connection,transaction
@@ -461,46 +598,61 @@ with transaction.atomic():
                 'containerAbsent': row['containerId'] not in inventory, **proof}
 
     def run(self):
-        evidence = {'schema': SCHEMA, 'sourceRevision': self.manifest['sourceRevision'], 'runningLimit': 1, 'runs': []}
+        evidence = {'schema': SCHEMA, 'sourceRevision': self.manifest['sourceRevision'], 'runningLimit': 1,
+                    'runs': [], 'admissions': [], 'waves': [],
+                    'mainRunCounts': {'accepted': 0, 'completed': 0, 'validated': 0}}
+        def persist():
+            (self.result / 'observations.json').write_text(json.dumps(evidence, indent=2))
+        def admit_main(label, index):
+            admitted = self.admit(label, f'RUNSC_ROTATION {self.tag} {label} {index}')
+            evidence['admissions'].append({'index': index, 'label': label, **admitted})
+            evidence['mainRunCounts']['accepted'] += 1
+            persist()
+            return admitted
         try:
-            index = 0
-            while index < 12:
-                pending = []
-                label = 'A' if index % 2 == 0 else 'B'
-                admitted = self.admit(label, f'RUNSC_ROTATION {self.tag} {label} {index}')
-                pending.append((index, label, admitted))
-                if index == 4:
-                    self.wait(lambda: self.observe('A', admitted),
-                              lambda row: not row['paused'] and row['runningReservations'] == 1,
-                              'busy environment holding the only running slot')
-                    queued = self.admit('B', f'RUNSC_ROTATION {self.tag} B 5')
-                    waiting = self.wait(lambda: self.observe('B', queued),
-                                        lambda row: row['paused'] and row['powerState'] == 'paused'
-                                        and row['runningReservations'] == 1 and 'oracle' not in row,
-                                        'queued original demand behind the busy environment', timeout=10)
-                    pending.append((5, 'B', queued))
-                    evidence['wakeup'] = {'waitingRunId': queued['agentRunId'], 'waitObserved': True,
-                                          'waitingPaused': waiting['paused'],
-                                          'runningReservations': waiting['runningReservations'],
-                                          'completedWithoutReadmission': False}
-                statuses = [(number, name, run, self.completed(run)) for number, name, run in pending]
-                for number, name, run, status in statuses:
-                    row = {**self.paused(name, run), **status}
+            for wave_number in range(6):
+                index = wave_number * 2
+                holder = admit_main('A', index)
+                self.holder_started(holder, 2 if index == 0 else 1)
+                waiting_run = admit_main('B', index + 1)
+                waiting = self.queued_wait(waiting_run)
+                holder_status = self.status(holder)
+                if holder_status['runStatus'] != 'running':
+                    raise RuntimeError('main Runs did not overlap while queued behind the holder')
+                wave = {'holderRunId': holder['agentRunId'], 'waitingRunId': waiting_run['agentRunId'],
+                        'holderStarted': True, 'overlapObserved': True,
+                        'holderRunStatusAtWait': holder_status['runStatus'], 'waiting': waiting}
+                evidence['waves'].append(wave)
+                persist()
+                for number, label, admitted in ((index, 'A', holder), (index + 1, 'B', waiting_run)):
+                    status = self.completed(admitted)
+                    evidence['mainRunCounts']['completed'] += 1
+                    # Keep each successful peer even when the other peer fails.
+                    (self.result / f'completed-{number:02d}.json').write_text(json.dumps(status, indent=2))
+                    persist()
+                    row = {**self.paused(label, admitted), **status}
                     evidence['runs'].append(row)
-                    self.last[name] = row
+                    evidence['mainRunCounts']['validated'] += 1
+                    self.last[label] = row
                     (self.result / f'run-{number:02d}.json').write_text(json.dumps(row, indent=2))
-                if index == 3:
+                    persist()
+                wave['claim'] = self.wait_snapshot(waiting_run)['claim']
+                persist()
+                if wave_number == 1:
                     evidence['cancellation'] = self.cancellation()
-                if index == 4:
-                    evidence['wakeup']['completedWithoutReadmission'] = True
+                    persist()
+                if wave_number == 2:
                     evidence['restart'] = self.restart()
-                index += len(pending)
-            evidence['retirements'] = [self.retire(row) for row in self.last.values()]
+                    persist()
+            evidence['retirements'] = []
+            for row in self.last.values():
+                evidence['retirements'].append(self.retire(row))
+                persist()
             summary = validate_evidence(evidence)
             (self.result / 'summary.json').write_text(json.dumps(summary, indent=2))
             return summary
         finally:
-            (self.result / 'observations.json').write_text(json.dumps(evidence, indent=2))
+            persist()
 
 
 def main():

@@ -92,28 +92,42 @@ in-memory nonce, fresh challenge proofs and actual file hashes. The exact
 runtime version, arguments, namespace and observed OCI root are recorded.
 A stopped/replaced process or failed raw probe prevents product admission.
 
-The product gate then requires **12 completed main Runs**, alternating A/B:
+The product gate requires **six waves of two in-flight main Runs**, alternating
+A/B, for **12 completed main Runs** with one running slot:
 
 - The first Run in each environment starts its persistent memory oracle.
   Later Runs only query that original process. File hashes are reread from the
   actual file for each challenge, not cached in the oracle's memory.
 - Every idle state has matching physical Docker `Paused=true` and durable
   `paused` facts. Running reservations reach zero while resident charges remain.
-- The sixth main Run is admitted once while the fifth holds the only running
-  slot; the original demand completes after capacity becomes available.
-- Two additional cancellation Runs prove queued demand executes no command and
-  cancelling the holder leaves both original environments available.
-- The exact fixture Runtime is restarted with both containers paused. Later
+- Every wave starts A, observes a successful background-task response in the
+  `running` state, then admits B while A holds the slot. The short holder task
+  finishes and its cleanup is queried before the memory probe. B must have a
+  durable queued yield with `runsc_environment_capacity_wait` and a registered
+  generation waiter. Its original job must be claimed after a capacity release,
+  before the recorded timer fallback; a paused container alone is insufficient.
+- After wave two, two additional cancellation Runs prove queued demand executes
+  no command and cancelling the holder leaves both original environments
+  available. Actual holder start, cleanup receipts and API releases are required;
+  these Runs are excluded from the 12 main Runs.
+- After wave three, the exact fixture Runtime is restarted with both containers
+  paused. Later
   product Runs prove the same in-memory oracles survived.
-- Product retirement confirms exact container absence, released resident
-  holdings and preserved execution history for both environments.
+- After wave six, product retirement confirms exact container absence, released
+  resident holdings and preserved execution history for both environments.
+  Transient HTTP 503/504 or a matching pending 409 retain the same operation ID
+  and use bounded readback of the exact durable request. An unmatched conflict
+  fails; a timeout never refunds the resident charge.
 
 While paused, observations use read-only SQL and Docker inspect, never task
 RPCs into frozen workloads. PostgreSQL `SUM(bigint)` values are normalized to
 exact integers; fractional values are rejected and large values are never
 converted through floating point.
 
-`results/observations.json` contains collected facts. `summary.json` is written
+`results/observations.json` keeps accepted, completed and validated main-Run
+counts separate. Each completed peer and its later validated observation are
+saved immediately, so failure of the other peer cannot erase its result.
+`summary.json` is written
 only after all checks pass. Successful retirement allows only the owned
 services/processes to stop. Data stays in the explicit validation root for
 review and subsequent operator disposal. On failure, `owner.json` records the

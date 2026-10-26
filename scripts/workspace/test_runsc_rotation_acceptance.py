@@ -29,10 +29,21 @@ def sample(label, index):
             'containerId': ('1' if label == 'A' else '2') * 64, 'runStatus': 'completed',
             'coreTerminalType': 'agent_run_completed', 'releaseReceiptCount': 1,
             'cleanupComplete': True, 'runtime': 'runsc', 'running': True, 'paused': True, 'powerState': 'paused',
-            'runningReservations': 0, 'residentCount': 1 if index == 0 else 2,
-            'residentMemoryBytes': 256 if index == 0 else 512,
+            'runningReservations': 0, 'residentCount': 2,
+            'residentMemoryBytes': 512,
             'residentPids':512,'pids':{'current':67,'max':512,'eventsMax':0},
             'oracle': oracle(label, index)}
+
+
+def wave(number):
+    return {'holderRunId': f'run-{number * 2}', 'waitingRunId': f'run-{number * 2 + 1}',
+            'holderStarted': True, 'overlapObserved': True, 'holderRunStatusAtWait': 'running',
+            'waiting': {'jobId': f'job-{number}', 'jobStatus': 'queued', 'registered': True,
+                        'transitionReason': 'runsc_environment_capacity_wait', 'runningReservations': 1,
+                        'successfulCommands': 0, 'observedGeneration': number, 'yieldedAtMs': 1000,
+                        'runAtMs': 31000},
+            'claim': {'jobId': f'job-{number}', 'generation': number + 1,
+                      'releaseRecordedAtMs': 1100, 'claimedAtMs': 1200}}
 
 
 class RotationEvidenceTests(unittest.TestCase):
@@ -40,18 +51,126 @@ class RotationEvidenceTests(unittest.TestCase):
         runs = [sample('A' if i % 2 == 0 else 'B', i) for i in range(12)]
         return {'schema': 'runsc.rotation.acceptance.v1', 'sourceRevision': 'a' * 40,
                 'runningLimit': 1, 'runs': runs,
-                'wakeup': {'waitingRunId': 'run-5', 'waitObserved': True, 'waitingPaused': True,
-                           'runningReservations': 1, 'completedWithoutReadmission': True},
+                'waves': [wave(i) for i in range(6)],
+                'mainRunCounts': {'accepted': 12, 'completed': 12, 'validated': 12},
                 'restart': {'performed': True, 'beforeRuntimeStartedAt': 'old', 'afterRuntimeStartedAt': 'new',
                             'preservedContainers': [runs[0]['containerId'], runs[1]['containerId']]},
                 'cancellation': {'queuedRunStatus': 'cancelled', 'queuedSuccessfulCommands': 0,
-                                 'holderRunStatus': 'cancelled', 'runningReservationsAfter': 0},
+                                 'holderRunStatus': 'cancelled', 'runningReservationsAfter': 0,
+                                 'holderStarted': True, 'queuedCleanupComplete': True, 'holderCleanupComplete': True,
+                                 'queuedReleaseReceiptCount': 1, 'holderReleaseReceiptCount': 1},
                 'retirements': [{'environmentId': f'env-{label}', 'status': 'destroyed',
                                  'containerAbsent': True, 'residentHoldingCount': 0, 'historyPreserved': True}
                                 for label in ('A', 'B')]}
 
+    def test_every_pair_requires_durable_wait_and_release_driven_claim(self):
+        data = self.evidence()
+        data['waves'] = []
+        with self.assertRaisesRegex(RuntimeError, 'six concurrent waves'):
+            rotation.validate_evidence(data)
+
+    def test_holder_requires_started_task_response_before_blocking(self):
+        request = {'messages': [{'role': 'user', 'content': 'RUNSC_ROTATION_BLOCK ' + 'a' * 32 + ' A'}]}
+        name, arguments = rotation.next_rotation_call(request)
+        self.assertEqual(name, 'background_task_start')
+        self.assertEqual(arguments['program'], 'sleep')
+        request['messages'].append({'role': 'tool', 'content': json.dumps({
+            'schema': 'background_task.result.v1', 'taskId': 'holder', 'state': 'unknown'})})
+        with self.assertRaisesRegex(RuntimeError, 'started task'):
+            rotation.next_rotation_call(request)
+
+    def test_retirement_timeout_and_pending_conflict_converge_using_one_operation(self):
+        import io
+        import urllib.error
+        driver = object.__new__(rotation.FixtureDriver)
+        body = {'operationId': 'owned-op', 'environmentId': 'env-A', 'instanceId': 'instance-A'}
+        pending = {**body, 'status': 'pending'}
+        destroyed = {**body, 'status': 'destroyed'}
+        driver.retirement_readback = Mock(side_effect=[pending, destroyed])
+        driver.wait = lambda observe, predicate, description, timeout=120: next(
+            value for value in (observe(), observe()) if predicate(value))
+        request = rotation.urllib.request.Request('http://127.0.0.1/retire', data=json.dumps(body).encode())
+        with patch.object(rotation.urllib.request, 'urlopen', side_effect=[
+                urllib.error.HTTPError(request.full_url, 504, 'pending', {}, io.BytesIO(b'{}')),
+                urllib.error.HTTPError(request.full_url, 409, 'pending', {}, io.BytesIO(b'{}'))]) as invoke:
+            self.assertEqual(driver.retirement_request(request, body), destroyed)
+        self.assertEqual(invoke.call_count, 2)
+        self.assertTrue(all(call.args[0] is request for call in invoke.call_args_list))
+
     def test_twelve_alternating_runs_require_memory_and_exact_identity(self):
         self.assertEqual(rotation.validate_evidence(self.evidence())['completedRuns'], 12)
+
+    def test_first_pause_may_precede_or_follow_second_resident_creation(self):
+        data = self.evidence()
+        data['runs'][0].update(residentCount=1, residentMemoryBytes=256)
+        self.assertEqual(rotation.validate_evidence(data)['completedRuns'], 12)
+        data['runs'][1]['residentMemoryBytes'] = 256
+        with self.assertRaisesRegex(RuntimeError, 'second environment'):
+            rotation.validate_evidence(data)
+
+    def test_each_wave_requires_registered_wait_and_claim_before_timer(self):
+        for field, value in [('registered', False), ('jobStatus', 'running'),
+                             ('transitionReason', 'execution_resident_capacity_wait'),
+                             ('runningReservations', 0), ('successfulCommands', 1)]:
+            data = self.evidence()
+            data['waves'][4]['waiting'][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(RuntimeError, 'original concurrent demand'):
+                rotation.validate_evidence(data)
+        for field, value in [('jobId', 'other-job'), ('generation', 4),
+                             ('releaseRecordedAtMs', 999), ('claimedAtMs', 31000)]:
+            data = self.evidence()
+            data['waves'][4]['claim'][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(RuntimeError, 'original concurrent demand'):
+                rotation.validate_evidence(data)
+
+    def test_cancellation_admission_without_cleanup_and_release_cannot_pass(self):
+        for field in ('holderStarted', 'queuedCleanupComplete', 'holderCleanupComplete',
+                      'queuedReleaseReceiptCount', 'holderReleaseReceiptCount'):
+            data = self.evidence()
+            data['cancellation'][field] = False if field.endswith('Complete') or field == 'holderStarted' else 0
+            with self.subTest(field=field), self.assertRaisesRegex(RuntimeError, 'cancellation'):
+                rotation.validate_evidence(data)
+
+    def test_actual_holder_response_and_cleanup_precede_memory_probe(self):
+        request = {'messages': [{'role': 'user', 'content': 'RUNSC_ROTATION ' + 'a' * 32 + ' A 2'}]}
+        name, _ = rotation.next_rotation_call(request)
+        self.assertEqual(name, 'background_task_start')
+        started = {'schema': 'background_task.result.v1', 'taskId': 'short-holder', 'state': 'running'}
+        request['messages'].append({'role': 'tool', 'content': json.dumps(started)})
+        self.assertEqual(rotation.next_rotation_call(request)[0], 'bash')
+        request['messages'].append({'role': 'tool', 'content': 'sleep ended'})
+        self.assertEqual(rotation.next_rotation_call(request), ('background_task_query', {'task_id': 'short-holder'}))
+        request['messages'].append({'role': 'tool', 'content': json.dumps({**started, 'state': 'exited', 'cleanupComplete': False})})
+        with self.assertRaisesRegex(RuntimeError, 'completed cleanup'):
+            rotation.next_rotation_call(request)
+        request['messages'][-1]['content'] = json.dumps({**started, 'state': 'exited', 'cleanupComplete': True})
+        name, args = rotation.next_rotation_call(request)
+        self.assertEqual(name, 'bash')
+        self.assertIn('RUNSC_ROTATION_ORACLE', args['command'])
+
+    def test_queued_wait_requires_durable_registration_even_without_resident(self):
+        driver = object.__new__(rotation.FixtureDriver)
+        row = wave(0)['waiting']
+        driver.wait_snapshot = Mock(return_value={**row, 'registered': False})
+        def wait(observe, predicate, description, timeout=120):
+            self.assertFalse(predicate(observe()))
+            driver.wait_snapshot.return_value = row
+            self.assertTrue(predicate(observe()))
+            return row
+        driver.wait = wait
+        self.assertEqual(driver.queued_wait({'agentRunId': 'run-1'}), row)
+
+    def test_retirement_conflict_without_original_durable_request_stops(self):
+        import io
+        import urllib.error
+        driver = object.__new__(rotation.FixtureDriver)
+        driver.retirement_readback = Mock(return_value=None)
+        driver.wait = lambda observe, predicate, description, timeout=120: observe()
+        request = rotation.urllib.request.Request('http://127.0.0.1/retire', data=b'{}')
+        with patch.object(rotation.urllib.request, 'urlopen', side_effect=urllib.error.HTTPError(
+                request.full_url, 409, 'conflict', {}, io.BytesIO(b'{}'))):
+            with self.assertRaisesRegex(RuntimeError, 'without matching durable operation'):
+                driver.retirement_request(request, {})
 
     def test_new_process_or_new_nonce_cannot_pass_as_resume(self):
         for field, value in [('pid', 77), ('startTicks', 999), ('nonce', 'e' * 64)]:
@@ -88,7 +207,7 @@ class RotationEvidenceTests(unittest.TestCase):
             with self.subTest(field=field),self.assertRaises(RuntimeError):rotation.validate_evidence(data)
 
     def test_missing_restart_cancellation_or_retirement_is_not_complete(self):
-        for field in ('restart', 'cancellation', 'retirements', 'wakeup'):
+        for field in ('restart', 'cancellation', 'retirements', 'waves', 'mainRunCounts'):
             data = self.evidence()
             del data[field]
             with self.subTest(field=field), self.assertRaises(RuntimeError):
@@ -99,7 +218,7 @@ class RotationEvidenceTests(unittest.TestCase):
         self.assertEqual(rotation.next_rotation_call(initial)[0], 'background_task_start')
         subsequent = {'messages': [{'role': 'user', 'content': 'RUNSC_ROTATION ' + 'a' * 32 + ' A 2'}]}
         call = rotation.next_rotation_call(subsequent)
-        self.assertEqual(call[0], 'bash')
+        self.assertEqual(call[0], 'background_task_start')
 
     def test_product_driver_admits_exactly_twelve_runs_and_only_retires_after_lifecycle_checks(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -114,7 +233,7 @@ class RotationEvidenceTests(unittest.TestCase):
                 sequence.append(('admit', index))
                 return {'agentRunId': f'run-{index}', 'sessionId': 'session-' + label}
             driver.admit = Mock(side_effect=admit)
-            driver.completed = Mock(side_effect=lambda run: sample('A' if int(run['agentRunId'][4:]) % 2 == 0 else 'B', int(run['agentRunId'][4:])))
+            driver.completed = Mock(side_effect=lambda run: sequence.append(('completed', int(run['agentRunId'][4:]))) or sample('A' if int(run['agentRunId'][4:]) % 2 == 0 else 'B', int(run['agentRunId'][4:])))
             driver.paused = Mock(side_effect=lambda label, run: sample(label, int(run['agentRunId'][4:])))
             def observe(label, run):
                 row = sample(label, int(run['agentRunId'][4:]))
@@ -123,6 +242,10 @@ class RotationEvidenceTests(unittest.TestCase):
                 row.pop('oracle')
                 return row
             driver.observe = Mock(side_effect=observe)
+            driver.status = Mock(return_value={'runStatus': 'running'})
+            driver.holder_started = Mock()
+            driver.queued_wait = Mock(side_effect=lambda run: wave(int(run['agentRunId'][4:]) // 2)['waiting'])
+            driver.wait_snapshot = Mock(side_effect=lambda run: {'claim': wave(int(run['agentRunId'][4:]) // 2)['claim']})
             def wait(observe_fn, predicate, description, timeout=120):
                 value = observe_fn()
                 self.assertTrue(predicate(value), description)
@@ -137,6 +260,10 @@ class RotationEvidenceTests(unittest.TestCase):
             driver.retire = Mock(side_effect=retire)
             self.assertEqual(driver.run()['status'], 'passed')
             self.assertEqual(driver.admit.call_count, 12)
+            self.assertEqual(driver.holder_started.call_count, 6)
+            self.assertEqual(driver.queued_wait.call_count, 6)
+            for index in range(0, 12, 2):
+                self.assertLess(sequence.index(('admit', index + 1)), sequence.index(('completed', index)))
             self.assertLess(sequence.index(('admit', 3)), sequence.index(('cancellation',)))
             self.assertLess(sequence.index(('restart',)), sequence.index(('admit', 6)))
             self.assertGreater(sequence.index(('retire', 'A')), sequence.index(('admit', 11)))
@@ -157,12 +284,17 @@ class RotationEvidenceTests(unittest.TestCase):
                                                  RuntimeError('observed failure')])
             driver.paused = Mock(side_effect=lambda label, run: sample(label, int(run['agentRunId'].split('-')[1])))
             driver.retire = Mock()
+            driver.status = Mock(return_value={'runStatus': 'running'})
+            driver.holder_started = Mock()
+            driver.queued_wait = Mock(return_value=wave(0)['waiting'])
             with self.assertRaisesRegex(RuntimeError, 'observed failure'):
                 driver.run()
             driver.retire.assert_not_called()
             self.assertFalse((Path(folder) / 'summary.json').exists())
             retained = json.loads((Path(folder) / 'observations.json').read_text())
             self.assertEqual(len(retained['runs']), 1)
+            self.assertEqual(retained['mainRunCounts'], {'accepted': 2, 'completed': 1, 'validated': 1})
+            self.assertTrue((Path(folder) / 'completed-00.json').exists())
 
     def test_fresh_challenge_and_counter_are_both_required(self):
         for changed in ('challenge', 'counter'):
