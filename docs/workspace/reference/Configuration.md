@@ -245,6 +245,9 @@ waiting defers execution until resources become available.
 
 `SANDBOX_MEMORY_BYTES`, `SANDBOX_CPU_MILLI`, `SANDBOX_PIDS_LIMIT`, and
 `SANDBOX_DATA_TMPFS_BYTES` define the authorized AgentRun profile.
+The deployment example sets new environments to 4 GiB of memory and 2000 CPU
+milli (two cores). These are upper bounds. Existing signed environment profiles
+keep their original resource limits.
 Compose and the material Worker default `OCI_RUNTIME` to `runsc`. Install and
 register gVisor on the Docker host before using that profile. Hosts without
 gVisor, including local Docker Desktop test environments, must explicitly set

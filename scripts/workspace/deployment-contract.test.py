@@ -311,8 +311,8 @@ sys.stdout.write(re.sub(pattern,replace,text))
         for service in ("api", "api-init"):
             with self.subTest(service=service):
                 environment = services[service]["environment"]
-                self.assertEqual(environment["SANDBOX_CPU_MILLI"], "4000")
-                self.assertEqual(environment["SANDBOX_MEMORY_BYTES"], "8589934592")
+                self.assertEqual(environment["SANDBOX_CPU_MILLI"], "2000")
+                self.assertEqual(environment["SANDBOX_MEMORY_BYTES"], "4294967296")
 
     def test_worker_slot_configuration_reaches_container(self):
         self.assertEqual(compose_config()["services"]["worker"]["environment"]["WORKER_SLOT_COUNT"], "8")
