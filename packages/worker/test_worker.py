@@ -553,6 +553,35 @@ class WorkerContractTests(unittest.TestCase):
         )
         complete_job.assert_not_called()
 
+    def test_runsc_capacity_wait_yields_same_job_without_terminal_transition(self):
+        job, start = lifecycle_fixture()
+        reason = "runsc_environment_capacity_wait"
+        waiting = {"schema": "runtime.agent_run.step.result.v1",
+                   "agentRunId": start["agentRunId"], "disposition": "waiting",
+                   "terminalState": None, "transitionReason": reason}
+        transitions = []
+
+        def api_request(path, body, *_args):
+            if path.endswith("/resolve"):
+                return {"schema": "runtime.agent_run_lifecycle.resolved.v1",
+                        "disposition": "ready", "agentRunStart": start}
+            self.assertTrue(path.endswith("/transition"))
+            transitions.append((body["state"], body["transitionReason"]))
+            return {"agentRunId": start["agentRunId"], "state": body["state"]}
+
+        with (patch.object(worker, "api_request", side_effect=api_request),
+              patch.object(worker, "agent_run_step_request", return_value=waiting),
+              patch.object(worker, "now_ms", return_value=1_000_000),
+              patch.object(worker, "yield_job") as yielded,
+              patch.object(worker, "complete_job") as completed):
+            self.assertFalse(worker.execute_agent_run_lifecycle_job(
+                job, "worker:test-owner", lambda: None))
+        yielded.assert_called_once_with(job["jobId"], "worker:test-owner",
+            1_000_000 + worker.AGENT_RUN_LIFECYCLE_RECHECK_MS, reason)
+        completed.assert_not_called()
+        self.assertEqual(transitions, [
+            ("running", "agent_run_lifecycle_step_started"), ("running", reason)])
+
     def test_agent_run_lifecycle_accepts_all_canonical_waiting_reasons(self):
         for transition_reason in sorted(worker.AGENT_RUN_WAITING_TRANSITION_REASONS):
             with self.subTest(transition_reason=transition_reason):
