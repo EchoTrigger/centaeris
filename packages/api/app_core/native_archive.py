@@ -39,12 +39,17 @@ def require_native_archive_activation():
         try:
             require_native_environment_profile(environment.environment_profile)
         except NativeArchiveBlocked:
-            if (
-                not environment.controller_released
-                or AgentRun.objects.filter(
-                    environment=environment, status__in=("queued", "running")
-                ).exists()
-            ):
+            active = AgentRun.objects.filter(
+                environment=environment, status__in=("queued", "running")
+            ).exists()
+            if not environment.controller_released and not active:
+                from .native_archive_preallocation import (
+                    archived_preallocation_is_unused,
+                )
+
+                if archived_preallocation_is_unused(environment.pk):
+                    continue
+            if not environment.controller_released or active:
                 raise NativeArchiveBlocked(
                     "native_activation_blocked_unsettled_archived_environments"
                 ) from None
