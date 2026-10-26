@@ -90,7 +90,9 @@ def prepared_samples(fixture):
     return samples
 
 
-def k6_command(fixture, output, binary, *, environments, iterations, between_run_ms=0, initial_stagger_ms=0):
+def k6_command(fixture, output, binary, *, environments, iterations, between_run_ms=0, initial_stagger_ms=0, run_terminal_timeout_seconds=120):
+    if type(run_terminal_timeout_seconds) is not int or not 1 <= run_terminal_timeout_seconds <= 600:
+        raise ValueError('bounded per-Run terminal timeout required')
     if (type(initial_stagger_ms) is not int or not 0 <= initial_stagger_ms <= 120000
             or initial_stagger_ms * (environments - 1) > 120000):
         raise ValueError('bounded initial workload stagger required')
@@ -102,7 +104,7 @@ def k6_command(fixture, output, binary, *, environments, iterations, between_run
                        PERF_AGENT_ID=fixture['agentId'], PERF_MODEL_REFS=json.dumps(fixture['modelRefs']),
                        PERF_ADMIN_EMAIL=fixture['account']['email'], PERF_ADMIN_PASSWORD=fixture['account']['password'],
                        PERF_SAMPLES_PATH=str(Path(output) / 'samples.json'), PERF_ENVIRONMENT_COUNT=str(environments),
-                       PERF_RUNS_PER_ENVIRONMENT=str(iterations), PERF_BETWEEN_RUN_MS=str(between_run_ms), PERF_INITIAL_STAGGER_MS=str(initial_stagger_ms), K6_NO_USAGE_REPORT='true')
+                       PERF_RUNS_PER_ENVIRONMENT=str(iterations), PERF_BETWEEN_RUN_MS=str(between_run_ms), PERF_INITIAL_STAGGER_MS=str(initial_stagger_ms), PERF_RUN_TERMINAL_TIMEOUT_SECONDS=str(run_terminal_timeout_seconds), K6_NO_USAGE_REPORT='true')
     command = [str(binary), '--log-format', 'json', 'run', '--summary-export', str(Path(output) / 'k6-summary.json'),
                str(ROOT / 'perf/k6/scenarios/multi-environment-workload.js')]
     return command, environment
@@ -163,11 +165,13 @@ def validate_records(records, fixture):
             'firstSuccessfulToolResultLatency': timing}
 
 
-def run(fixture_path, output, binary, *, environments=4, iterations=3, timeout=900, between_run_ms=0, initial_stagger_ms=0):
+def run(fixture_path, output, binary, *, environments=4, iterations=3, timeout=900, between_run_ms=0, initial_stagger_ms=0, run_terminal_timeout_seconds=120):
     import queue
     import subprocess
     import threading
     import time
+    if type(run_terminal_timeout_seconds) is not int or not 1 <= run_terminal_timeout_seconds <= 600:
+        raise ValueError('bounded per-Run terminal timeout required')
     if type(timeout) is not int or not 10 <= timeout <= 1200:
         raise ValueError('bounded K6 process deadline required')
     fixture = read_fixture(fixture_path, environments=environments, iterations=iterations)
@@ -182,9 +186,9 @@ def run(fixture_path, output, binary, *, environments=4, iterations=3, timeout=9
     manifest = {key: fixture[key] for key in ('apiBase', 'workspaceId', 'agentId', 'modelRefs')}
     manifest.update(schema='workspace.perf.workload.v1', environments=environments, iterations=iterations,
                     sourceRevision=fixture['native']['sourceRevision'], project=fixture['native']['project'], betweenRunMs=between_run_ms,
-                    initialStaggerMs=initial_stagger_ms, modelWaitMs=fixture['native'].get('modelWaitMs', 0))
+                    initialStaggerMs=initial_stagger_ms, runTerminalTimeoutSeconds=run_terminal_timeout_seconds, modelWaitMs=fixture['native'].get('modelWaitMs', 0))
     (output / 'manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
-    command, environment = k6_command(fixture, output, binary, environments=environments, iterations=iterations, between_run_ms=between_run_ms, initial_stagger_ms=initial_stagger_ms)
+    command, environment = k6_command(fixture, output, binary, environments=environments, iterations=iterations, between_run_ms=between_run_ms, initial_stagger_ms=initial_stagger_ms, run_terminal_timeout_seconds=run_terminal_timeout_seconds)
     started = time.monotonic()
     process = subprocess.Popen(command, env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, encoding='utf-8')

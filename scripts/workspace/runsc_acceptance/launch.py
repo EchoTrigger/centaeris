@@ -105,6 +105,22 @@ def run_step(argv,*,root,env=None,timeout=120,input=None,capture_bytes=262144,di
         _failure_diagnostic(root,failure,process.returncode if process is not None else None,outputs,truncated,diagnostic_bytes)
         raise RuntimeError('owned fixture step failed; see launch-step-failure.json') from None
 
+
+def terminal_timeout(value):
+    if type(value) not in (str,int):raise ValueError('bounded per-Run terminal timeout required')
+    seconds=int(value)
+    if not 1<=seconds<=600:raise ValueError('bounded per-Run terminal timeout required')
+    return seconds
+
+
+
+def between_run_delay(value):
+    if type(value) not in (str,int):raise ValueError('bounded between-Run gap required')
+    milliseconds=int(value)
+    if not 0<=milliseconds<=60000:raise ValueError('bounded between-Run gap required')
+    return milliseconds
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root',required=True,type=Path);parser.add_argument('--source',required=True,type=Path);parser.add_argument('--git-dir',type=Path)
@@ -115,11 +131,13 @@ def main():
     parser.add_argument('--work-units',type=int,default=2000)
     parser.add_argument('--model-wait-ms',type=int,default=0)
     parser.add_argument('--initial-stagger-ms',type=int,default=0)
+    parser.add_argument('--run-terminal-timeout-seconds',type=terminal_timeout,default=120)
+    parser.add_argument('--between-run-ms',type=between_run_delay,default=6000)
     parser.add_argument('--expected-working-environments',type=int)
     parser.add_argument('--k6-binary',type=Path)
     for name in ('api','worker','runtime','general','postgres','redis'):parser.add_argument('--'+name+'-image',required=True)
     args=parser.parse_args()
-    if not args.shared_workload and (args.model_wait_ms or args.initial_stagger_ms or args.expected_working_environments is not None):parser.error('workload timing and overlap parameters require shared mode')
+    if not args.shared_workload and (args.model_wait_ms or args.initial_stagger_ms or args.expected_working_environments is not None or args.run_terminal_timeout_seconds!=120 or args.between_run_ms!=6000):parser.error('workload timing and overlap parameters require shared mode')
     shared=[]
     if args.shared_workload:
         try:shared=shared_arguments(args.environment_count,args.model_wait_ms,args.initial_stagger_ms,args.expected_working_environments)
@@ -188,7 +206,7 @@ def main():
         docker.record(status='product-twelve-runs');print(json.dumps({'phase':'product-twelve-runs'}),flush=True)
         if args.shared_workload:
             output=call(['python3','-B',str(tools/'shared_workload.py'),'--fixture',str(fixture),'--result',str(root/'results'),
-                '--k6-binary',str(args.k6_binary),'--environment-count',str(args.environment_count),'--iterations',str(args.iterations),'--work-units',str(args.work_units)]+shared,1800)
+                '--k6-binary',str(args.k6_binary),'--environment-count',str(args.environment_count),'--iterations',str(args.iterations),'--work-units',str(args.work_units),'--run-terminal-timeout-seconds',str(args.run_terminal_timeout_seconds),'--between-run-ms',str(args.between_run_ms)]+shared,1800)
         else:
             output=call(['python3','-B',str(source/'scripts/workspace/runsc_rotation_acceptance.py'),'--fixture',str(fixture),'--result',str(root/'results'),'--acknowledge-fixture-retirement'],1800)
         # Successful product retirement has removed both managed workloads.

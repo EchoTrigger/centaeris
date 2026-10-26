@@ -30,7 +30,7 @@ class DirectCliBootstrapTests(unittest.TestCase):
    (fixture/'manifest.json').write_text(json.dumps({'project':project,'isolationOwner':str(owner)}))
    (fixture/'compose.json').write_text(json.dumps({'name':project}))
    environment={key:value for key,value in os.environ.items() if key!='PYTHONPATH'}
-   result=subprocess.run([sys.executable,str(Path(__file__).with_name('shared_workload.py')),'--fixture',str(fixture),'--result',str(root/'result'),'--k6-binary',str(root/'not-executed')],cwd=root,env=environment,capture_output=True,text=True,timeout=15)
+   result=subprocess.run([sys.executable,str(Path(__file__).with_name('shared_workload.py')),'--fixture',str(fixture),'--result',str(root/'result'),'--k6-binary',str(root/'not-executed'),'--run-terminal-timeout-seconds','300'],cwd=root,env=environment,capture_output=True,text=True,timeout=15)
    self.assertNotEqual(result.returncode,0)
    self.assertIn('private transport and raw OCI root must be observed first',result.stderr)
 

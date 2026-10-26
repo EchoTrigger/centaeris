@@ -56,4 +56,17 @@ class FailureDiagnosticTests(unittest.TestCase):
    report=json.loads((root/'launch-step-failure.json').read_text())
    self.assertEqual(report['failureType'],'timeout');self.assertNotIn(known,str(raised.exception))
 
+class StreamDeadlineArgumentTests(unittest.TestCase):
+ def test_default_and_explicit_stream_deadlines_are_bounded(self):
+  self.assertEqual(launch.terminal_timeout('120'),120)
+  self.assertEqual(launch.terminal_timeout('300'),300)
+  for value in ('0','-1','601','NaN','1.5'):
+   with self.assertRaises(ValueError):launch.terminal_timeout(value)
+
+class BetweenRunArgumentTests(unittest.TestCase):
+ def test_private_pause_probe_gap_remains_explicit_and_bounded(self):
+  for value in ('0','6000','30000','60000'):self.assertEqual(launch.between_run_delay(value),int(value))
+  for value in ('-1','60001','NaN','1.5'):
+   with self.assertRaises(ValueError):launch.between_run_delay(value)
+
 if __name__=='__main__':unittest.main()

@@ -5,6 +5,9 @@ import { sleep } from 'k6';
 import { Trend, Rate, Counter } from 'k6/metrics';
 import { configuredTarget, login, startRun, waitForTerminalObserved as waitForTerminal, verifyToolRun, verifyFixedCommand, verifyPublishedArtifact } from './common.js';
 
+const runTerminalTimeoutSeconds = Number(__ENV.PERF_RUN_TERMINAL_TIMEOUT_SECONDS ?? 120);
+if (!Number.isInteger(runTerminalTimeoutSeconds) || runTerminalTimeoutSeconds < 1 || runTerminalTimeoutSeconds > 600) throw new Error('bounded per-Run terminal timeout required');
+
 const environmentCount = Number(__ENV.PERF_ENVIRONMENT_COUNT || 4);
 const iterations = Number(__ENV.PERF_RUNS_PER_ENVIRONMENT || 3);
 const initialStaggerMs = Number(__ENV.PERF_INITIAL_STAGGER_MS || 0);
@@ -65,7 +68,7 @@ export default function (data) {
     admissionTime.add(Date.now() - started);
     record('accepted', sample, data, admitted);
     stage = 'terminal';
-    const result = waitForTerminal(data.store, data.csrf, admitted.sessionId, admitted.agentRunId, 120);
+    const result = waitForTerminal(data.store, data.csrf, admitted.sessionId, admitted.agentRunId, runTerminalTimeoutSeconds);
     terminalTime.add(Date.now() - started);
     stage = 'tools';
     const tools = verifyToolRun(result, admitted.sessionId, admitted.agentRunId);

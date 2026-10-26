@@ -15,7 +15,7 @@ module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 
 
 class SharedCoordinatorTests(unittest.TestCase):
-    def invoke(self, root, *, overlap='verified', bad_run=False, bad_retirement=False, resumed=None, environments=4, working=None, model_wait_ms=0, initial_stagger_ms=0, expected_working_environments=None):
+    def invoke(self, root, *, overlap='verified', bad_run=False, bad_retirement=False, resumed=None, environments=4, working=None, model_wait_ms=0, initial_stagger_ms=0, expected_working_environments=None, run_terminal_timeout_seconds=120):
         resumed = environments if resumed is None else resumed
         working = environments if working is None else working
         fixture = root / 'fixture'; fixture.mkdir()
@@ -53,6 +53,8 @@ class SharedCoordinatorTests(unittest.TestCase):
             self.assertEqual(len(private['samples']), environments * 3)
             self.assertEqual({sample['workUnits'] for sample in private['samples']}, {2000})
             self.assertEqual(options['between_run_ms'], 6000)
+            self.assertEqual(options['timeout'],900)
+            self.assertEqual(options['run_terminal_timeout_seconds'],run_terminal_timeout_seconds)
             if initial_stagger_ms: self.assertEqual(options['initial_stagger_ms'], initial_stagger_ms)
             self.assertEqual(set(private['samples'][0]), {'sampleId', 'operationId', 'workUnits'})
             if os_name_is_posix(): self.assertEqual(path.stat().st_mode & 0o777, 0o600)
@@ -63,7 +65,7 @@ class SharedCoordinatorTests(unittest.TestCase):
             return {'status': 'clientVerified', 'verifiedSamples': environments * 3, 'wallTimeMs': 1000, 'betweenRunMs': 6000,
                     'firstSuccessfulToolResultLatency': {'source': 'k6SseReceive', 'valuesMs': [125] * (environments * 3)}}
         dependencies = {'driver': Driver, 'observer': Observer, 'workload': workload}
-        options = {'environments': environments}
+        options = {'environments': environments,'run_terminal_timeout_seconds':run_terminal_timeout_seconds}
         if model_wait_ms: options['model_wait_ms'] = model_wait_ms
         if initial_stagger_ms: options['initial_stagger_ms'] = initial_stagger_ms
         if expected_working_environments is not None: options['expected_working_environments'] = expected_working_environments
@@ -127,6 +129,15 @@ class SharedCoordinatorTests(unittest.TestCase):
         for options in ({'model_wait_ms':120001},{'model_wait_ms':-1},{'initial_stagger_ms':20000,'environments':8},{'expected_working_environments':9,'environments':8},{'expected_working_environments':0}):
             with self.subTest(options=options),self.assertRaises(ValueError):
                 module.run(Path('absent'),Path('absent-result'),Path('absent-k6'),**options)
+
+    def test_long_stream_deadline_is_explicit_without_reducing_three_rounds_or_four_way_overlap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            calls,execute=self.invoke(Path(directory),run_terminal_timeout_seconds=300)
+            report=execute()
+            self.assertEqual(report['runTerminalTimeoutSeconds'],300)
+            self.assertEqual(report['iterations'],3)
+            self.assertEqual(report['expectedWorkingEnvironments'],4)
+            self.assertEqual(report['completedRuns'],12)
 
 
 def os_name_is_posix():

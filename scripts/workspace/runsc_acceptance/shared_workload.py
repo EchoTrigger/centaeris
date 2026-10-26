@@ -39,7 +39,9 @@ def validate_run_facts(rows, environments, iterations):
 
 def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2000,
         between_run_ms=6000, model_wait_ms=0, initial_stagger_ms=0,
-        expected_working_environments=None, dependencies=None):
+        expected_working_environments=None, run_terminal_timeout_seconds=120, dependencies=None):
+    if type(run_terminal_timeout_seconds) is not int or not 1 <= run_terminal_timeout_seconds <= 600:
+        raise ValueError('bounded per-Run terminal timeout required')
     if (type(environments) is not int or not 2 <= environments <= 64
             or type(iterations) is not int or not 1 <= iterations <= 20
             or type(work_units) is not int or not 1 <= work_units <= 1000000
@@ -59,7 +61,7 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
         raise RuntimeError('shared fixture environment count mismatch')
     report = {'schema': 'runsc.shared.workload.acceptance.v1', 'status': 'failedPreserved',
               'sourceRevision': driver.manifest['sourceRevision'], 'environments': environments,
-              'iterations': iterations, 'workUnits': work_units, 'betweenRunMs': between_run_ms,
+              'iterations': iterations, 'runTerminalTimeoutSeconds':run_terminal_timeout_seconds, 'workUnits': work_units, 'betweenRunMs': between_run_ms,
               'modelWaitMs':model_wait_ms,'initialStaggerMs':initial_stagger_ms,
               'initialStaggerTotalMs':initial_stagger_ms*(environments-1),'expectedWorkingEnvironments':expected_working,
               'memoryContinuity': 'notObserved', 'clientFirstToolLatency': 'notObserved',
@@ -81,7 +83,7 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
     try:
         observer.start(); started = True
         client = dependencies['workload'](private_path, result / 'k6', k6binary,
-                    environments=environments, iterations=iterations, timeout=900, between_run_ms=between_run_ms, initial_stagger_ms=initial_stagger_ms)
+                    environments=environments, iterations=iterations, timeout=900, between_run_ms=between_run_ms, initial_stagger_ms=initial_stagger_ms, run_terminal_timeout_seconds=run_terminal_timeout_seconds)
         report['client'] = client
         report['clientFirstToolLatency'] = client.get('firstSuccessfulToolResultLatency', 'notObserved')
         if client.get('status') != 'clientVerified':
@@ -224,12 +226,13 @@ def main():
     parser.add_argument('--between-run-ms', type=int, default=6000)
     parser.add_argument('--model-wait-ms', type=int, default=0)
     parser.add_argument('--initial-stagger-ms', type=int, default=0)
+    parser.add_argument('--run-terminal-timeout-seconds', type=int, default=120)
     parser.add_argument('--expected-working-environments', type=int)
     args = parser.parse_args()
     report = run(args.fixture, args.result, args.k6_binary, environments=args.environment_count,
                  iterations=args.iterations, work_units=args.work_units, between_run_ms=args.between_run_ms,
                  model_wait_ms=args.model_wait_ms,initial_stagger_ms=args.initial_stagger_ms,
-                 expected_working_environments=args.expected_working_environments)
+                 expected_working_environments=args.expected_working_environments,run_terminal_timeout_seconds=args.run_terminal_timeout_seconds)
     print(json.dumps(report))
 
 
