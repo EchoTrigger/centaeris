@@ -67,7 +67,7 @@ def main():
             RESIDENT_GLOBAL_MEMORY_BYTES=str(12*1024**3),RESIDENT_TENANT_MEMORY_BYTES=str((12 if args.environment_count>=8 else 8)*1024**3),
             RESIDENT_GLOBAL_CPU_MILLI='8000',RESIDENT_TENANT_CPU_MILLI='4000',
             RESIDENT_GLOBAL_WORKSPACE_BYTES=storage,RESIDENT_TENANT_WORKSPACE_BYTES=storage,
-            CENTAERIS_ACCEPTANCE_SHARED_WORKLOAD='1')
+            CENTAERIS_ACCEPTANCE_SHARED_WORKLOAD='1',WORKSPACE_PERF_OBSERVATIONS='1')
         pem=tls/'model.pem';pem.write_bytes((tls/'model.crt').read_bytes()+(tls/'model.key').read_bytes());pem.chmod(0o600)
     env['DATABASE_URL']=f"postgresql://{env['POSTGRES_USER']}:{env['POSTGRES_PASSWORD']}@postgres:5432/{env['POSTGRES_DB']}"
     def private_file(name,values):
