@@ -57,7 +57,9 @@ class ExecutionReplacementBoundaryTests(unittest.TestCase):
                 result = step_result
             elif path == "/internal/jobs/fail":
                 result = {"disposition": "retry_scheduled"}
-            elif path in {"/internal/jobs/start", "/internal/jobs/yield"}:
+            elif path == "/internal/jobs/yield":
+                result = {"ok": True, "runAtMs": body["runAtMs"], "transitionReason": body["transitionReason"]}
+            elif path == "/internal/jobs/start":
                 result = {}
             else:
                 self.fail(f"Unexpected call during a single claimed attempt: {path}")

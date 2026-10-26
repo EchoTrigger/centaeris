@@ -39,7 +39,9 @@ class ControlLifecycleTests(unittest.TestCase):
                             raise RuntimeError("cleanup_unavailable")
                         return {"schema": "runtime.agent_run.teardown.result.v1", "agentRunId": "agent_run_1",
                             "status": "cleanupConfirmed", "cleanupReceiptId": "cleanup:fixture"}
-                    if path in {"/internal/jobs/control/start", "/internal/jobs/yield", "/internal/jobs/complete"}:
+                    if path == "/internal/jobs/yield":
+                        return {"ok": True, "runAtMs": body["runAtMs"], "transitionReason": body["transitionReason"]}
+                    if path in {"/internal/jobs/control/start", "/internal/jobs/complete"}:
                         return {"ok": True}
                     self.fail("unexpected Runtime call: " + path)
 

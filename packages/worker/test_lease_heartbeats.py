@@ -147,6 +147,8 @@ class LeaseHeartbeatTests(unittest.TestCase):
                         return {"ok": True}
                     terminal_started.set()
                     self.assertFalse(renew_during_terminal.wait(1.1), "terminal handoff cannot overlap heartbeat")
+                    if path.endswith("/yield"):
+                        return {"ok": True, "runAtMs": body["runAtMs"], "transitionReason": body["transitionReason"]}
                     return {"ok": True}
                 with patch.object(worker, "LEASE_MS", 1000), patch.object(worker, "runtime_request", side_effect=request):
                     with worker.lease_heartbeats("job-1", "synthetic-owner"):
