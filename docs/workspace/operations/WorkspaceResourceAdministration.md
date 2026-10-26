@@ -7,6 +7,16 @@ an administrator creates an `admin` membership and does not change that flag.
 The role is read from the current membership on each authorized request, so a
 new invitation does not depend on stale browser or login-session role flags.
 
+## Role origins
+
+This release provides no local self-registration/signup endpoint. Accepting a
+workspace invitation creates an ordinary user account when needed and assigns
+that workspace's invitation role (`admin` or `member`); it does not create an
+owner membership or set `is_superuser`. The explicit `bootstrap_superadmin`
+command creates the platform operator and the Default workspace's owner
+membership. Ownership transfer remains a current-owner operation with password
+reauthentication.
+
 ## Management boundary
 
 | Capability | Workspace owner/admin | Workspace member | Platform operator |
@@ -54,7 +64,7 @@ administrators to package management. Reupload
 updates the workspace installation after package validation and active-run
 checks. Removing a local installation disables that workspace's enablement;
 it does not remove a shared platform package or another workspace's installation.
-Package content remains immutable for existing signed references.
+Workspace-local package content remains immutable for existing signed references.
 
 For workspace-local installations, an existing retained environment keeps its
 original mounted package version, including while paused. Updating the installation does not replace the original
@@ -149,3 +159,19 @@ an unsupported environment returns
 environment instead. The old profile and execution identities remain unchanged.
 An archived transcript still uses the existing read-projection service; this
 bridge adds no provider executor or alternate Agent loop.
+
+
+A narrow read-only eligibility check also permits a known historical environment
+whose unreleased controller refers to a durably recorded failure before Session
+admission, when its original signed grant and canonical terminal lifecycle Job
+match and all physical-intent, allocation, holding, snapshot and active-lease
+checks prove no product-managed effects. This relies on the historical producer's
+mandatory durable creation journal before physical dispatch. Stop legacy API,
+Worker and Runtime/provider writers before evaluating eligibility and keep them
+stopped through native activation. A missing ledger, unknown schema, invalid
+signature, conflicting history or any effect record continues to block activation.
+
+Eligibility preserves the old controller flag, epoch, owner, Job, dead letter and
+failure record. It creates no cleanup or release receipt and grants no right to
+execute or clean up the unsupported old profile. The independent Runtime physical
+responsibility checks remain required.
