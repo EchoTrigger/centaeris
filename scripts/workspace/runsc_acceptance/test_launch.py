@@ -14,4 +14,11 @@ class StaticHelperTests(unittest.TestCase):
    with self.subTest(data=data[:6]),tempfile.TemporaryDirectory() as tmp:
     path=Path(tmp)/'helper';path.write_bytes(data)
     with self.assertRaises(RuntimeError):launch.static_helper(path)
+class SharedArgumentTests(unittest.TestCase):
+ def test_sparse_eight_parameters_are_forwarded_explicitly(self):
+  self.assertEqual(launch.shared_arguments(8,400,125,2),['--model-wait-ms','400','--initial-stagger-ms','125','--expected-working-environments','2'])
+  self.assertEqual(launch.shared_arguments(4),['--model-wait-ms','0','--initial-stagger-ms','0','--expected-working-environments','4'])
+ def test_invalid_shared_budgets_reject_before_launch(self):
+  for values in ((8,120001,0,None),(8,0,20000,None),(8,0,0,9),(8,0,0,0)):
+   with self.subTest(values=values),self.assertRaises(ValueError):launch.shared_arguments(*values)
 if __name__=='__main__':unittest.main()

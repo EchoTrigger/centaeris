@@ -9,6 +9,9 @@ def main():
         parser.add_argument('--'+name,required=True,type=Path)
     parser.add_argument('--shared-workload',action='store_true')
     parser.add_argument('--environment-count',type=int,default=4)
+    parser.add_argument('--model-wait-ms',type=int,default=0)
+    parser.add_argument('--initial-stagger-ms',type=int,default=0)
+    parser.add_argument('--expected-working-environments',type=int)
     parser.add_argument('--revision',required=True)
     parser.add_argument('--docker-socket',required=True)
     parser.add_argument('--host-socket-directory',required=True)
@@ -19,6 +22,11 @@ def main():
     for name in ('api','worker','runtime','general','postgres','redis'):parser.add_argument('--'+name+'-image',required=True)
     args=parser.parse_args()
     if not 1 <= args.environment_count <= 64:parser.error('environment count must be between 1 and 64')
+    if not args.shared_workload and (args.model_wait_ms or args.initial_stagger_ms or args.expected_working_environments is not None):parser.error('workload timing and overlap parameters require shared mode')
+    if (not 0<=args.model_wait_ms<=120000 or not 0<=args.initial_stagger_ms<=120000
+            or args.initial_stagger_ms*(args.environment_count-1)>120000):parser.error('shared workload wait and total initial stagger must be bounded by 120000ms')
+    expected_working=args.environment_count if args.expected_working_environments is None else args.expected_working_environments
+    if not 1<=expected_working<=args.environment_count:parser.error('working threshold must be between 1 and the environment count')
     for value in (args.docker_socket,args.host_socket_directory):
         if not value.startswith('/') or '..' in value.split('/') or any(c.isspace() for c in value) or ':' in value or '\\' in value:
             parser.error('dedicated canonical Linux paths required')
@@ -56,7 +64,7 @@ def main():
         env.update(SANDBOX_MEMORY_BYTES=str(4*1024**3),SANDBOX_CPU_MILLI='2000',SANDBOX_DATA_TMPFS_BYTES=str(4*1024**3),
             WORKER_SLOT_COUNT=count,EXECUTION_GLOBAL_LIMIT=count,RESIDENT_GLOBAL_COUNT=count,RESIDENT_TENANT_COUNT=count,
             RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS=count,RUNTIME_NATIVE_SHARED_ADMISSION='1',
-            RESIDENT_GLOBAL_MEMORY_BYTES=str(12*1024**3),RESIDENT_TENANT_MEMORY_BYTES=str(8*1024**3),
+            RESIDENT_GLOBAL_MEMORY_BYTES=str(12*1024**3),RESIDENT_TENANT_MEMORY_BYTES=str((12 if args.environment_count>=8 else 8)*1024**3),
             RESIDENT_GLOBAL_CPU_MILLI='8000',RESIDENT_TENANT_CPU_MILLI='4000',
             RESIDENT_GLOBAL_WORKSPACE_BYTES=storage,RESIDENT_TENANT_WORKSPACE_BYTES=storage,
             CENTAERIS_ACCEPTANCE_SHARED_WORKLOAD='1')
@@ -80,6 +88,7 @@ def main():
         for filename in ('server.py','fixed_workload.py'):
             if not (scripts/filename).is_file():raise RuntimeError('fixed workload model source missing')
         services['model']['command']=['/app/.venv/bin/python','/harness/server.py']
+        services['model']['environment']['MOCK_FIXED_MODEL_WAIT_MS']=str(args.model_wait_ms)
         services['model']['volumes']=[f'{scripts/"server.py"}:/harness/server.py:ro',f'{scripts/"fixed_workload.py"}:/harness/fixed_workload.py:ro',f'{tls/"model.pem"}:/opt/mock/tls.pem:ro']
     services['catalog-init']={**services['api'],'profiles':['setup'],'command':['/app/.venv/bin/python','manage.py','initialize_plugin_catalog'],'volumes':[v.replace('plugins:/opt/centaeris/plugins:ro','plugins:/opt/centaeris/plugins:rw') for v in services['api']['volumes']]};services['catalog-init'].pop('ports')
     for service in services.values():service.update(restart='no',labels={'centaeris.acceptance.project':project},mem_limit='512m',cpus='1',pids_limit=128)
@@ -87,6 +96,6 @@ def main():
     (root/'compose.json').write_text(json.dumps({'name':project,'services':services,'volumes':volumes},indent=2))
     image=root/'general-image';image.mkdir();shutil.copyfile(bins/'execution_agent',image/'execution_agent');(image/'execution_agent').chmod(0o755)
     (image/'Dockerfile').write_text('FROM '+images['general']['id']+'\nCOPY execution_agent /opt/centaeris/bin/\n')
-    (root/'manifest.json').write_text(json.dumps({'project':project,'sourceRevision':sha,'source':str(source),'binaryDirectory':str(bins),'binarySha256':hashes,'buildManifest':build,'images':images,'apiPort':args.api_port,'runtimePort':args.runtime_port,'runscRotation':True,'sharedWorkload':({'environmentCount':args.environment_count,'idlePauseMs':3000,'capMemoryBytes':4*1024**3,'capCpuMilli':2000} if args.shared_workload else None),'dockerSocket':args.docker_socket,'hostSocketDirectory':args.host_socket_directory,'isolationOwner':str(args.isolation_owner.resolve()),'status':'prepared-not-started'},indent=2))
+    (root/'manifest.json').write_text(json.dumps({'project':project,'sourceRevision':sha,'source':str(source),'binaryDirectory':str(bins),'binarySha256':hashes,'buildManifest':build,'images':images,'apiPort':args.api_port,'runtimePort':args.runtime_port,'runscRotation':True,'sharedWorkload':({'environmentCount':args.environment_count,'idlePauseMs':3000,'capMemoryBytes':4*1024**3,'capCpuMilli':2000,'modelWaitMs':args.model_wait_ms,'initialStaggerMs':args.initial_stagger_ms,'expectedWorkingEnvironments':expected_working,'workspaceMemoryBudgetBytes':int(env['RESIDENT_TENANT_MEMORY_BYTES'])} if args.shared_workload else None),'dockerSocket':args.docker_socket,'hostSocketDirectory':args.host_socket_directory,'isolationOwner':str(args.isolation_owner.resolve()),'status':'prepared-not-started'},indent=2))
     print(json.dumps({'project':project,'sourceRevision':sha,'status':'prepared-not-started'}))
 if __name__=='__main__':main()

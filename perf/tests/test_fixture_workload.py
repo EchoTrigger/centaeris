@@ -21,7 +21,8 @@ class ExistingFixtureWorkloadTests(unittest.TestCase):
             path=Path(folder)/'perf-fixture.json';path.write_text(json.dumps(self.fixture(folder)));path.chmod(0o600)
             native={'apiBase':'http://127.0.0.1:18083','project':'retainedaccept'+'a'*10,'sourceRevision':'b'*40}
             with patch.object(module,'verify_native_fixture',return_value=native):value=module.read_fixture(path,environments=4,iterations=3)
-            command,environment=module.k6_command(value,Path(folder)/'out',Path('/existing/k6'),environments=4,iterations=3)
+            command,environment=module.k6_command(value,Path(folder)/'out',Path('/existing/k6'),environments=4,iterations=3,initial_stagger_ms=2000)
+            self.assertEqual(environment['PERF_INITIAL_STAGGER_MS'],'2000')
             self.assertNotIn('not-for-output',' '.join(command));self.assertEqual(environment['PERF_ADMIN_PASSWORD'],'not-for-output')
             self.assertNotIn('INTERNAL_API_TOKEN',environment);self.assertEqual(environment['PERF_WORKSPACE_ID'],'workspace-owned')
             self.assertEqual(environment['PERF_SAMPLES_PATH'],str(Path(folder)/'out/samples.json'))
@@ -64,5 +65,12 @@ class ExistingFixtureWorkloadTests(unittest.TestCase):
             native={'apiBase':'http://127.0.0.1:18083','project':'retainedaccept'+'a'*10,'sourceRevision':'b'*40}
             with patch.object(module,'verify_native_fixture',return_value=native):
                 self.assertEqual(len(module.read_fixture(path,environments=20,iterations=3)['samples']),60)
+
+    def test_initial_stagger_cannot_exceed_bounded_total_start_delay(self):
+        module=self.load()
+        with tempfile.TemporaryDirectory() as folder:
+            fixture=self.fixture(folder)
+            for value in (-1,120001,20000):
+                with self.assertRaises(ValueError):module.k6_command(fixture,folder,'/k6',environments=8,iterations=3,initial_stagger_ms=value)
 
 if __name__=='__main__':unittest.main()

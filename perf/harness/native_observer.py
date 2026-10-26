@@ -37,7 +37,10 @@ def _working(sample):
     return result
 
 
-def summarize(samples, expected_environments):
+def summarize(samples, expected_environments, *, expected_working_environments=None):
+    working_target = expected_environments if expected_working_environments is None else expected_working_environments
+    if type(working_target) is not int or not 1 <= working_target <= expected_environments:
+        raise ValueError('working environment target must be within inventory count')
     peak=0;streak=0;longest=0;previous=None;previous_work={};common=set();reasons=set();paused=set();resumed=set();seen_paused=set()
     for sample in samples:
         if sample.get('state')=='unknown':
@@ -59,22 +62,25 @@ def summarize(samples, expected_environments):
                 old=previous_work.get(environment)
                 if old and old[0]==identity and cpu-old[1]>=100000:working.add(environment)
         peak=max(peak,len(working))
-        if len(working)>=expected_environments:
+        if len(working)>=working_target:
             overlap=common & working
-            if streak and len(overlap)>=expected_environments:streak+=1;common=overlap
+            if streak and len(overlap)>=working_target:streak+=1;common=overlap
             else:streak=1;common=working
         else:streak=0;common=set()
         longest=max(longest,streak);previous=host;previous_work=work
-    return {'physicalOverlap':'verified' if longest>=2 else 'notObserved','peakWorkingEnvironments':peak,
+    return {'expectedEnvironments':expected_environments,'expectedWorkingEnvironments':working_target,
+            'physicalOverlap':'verified' if longest>=2 else 'notObserved','peakWorkingEnvironments':peak,
             'consecutiveWorkingIntervals':longest,'unknownReasons':sorted(reasons),'sampleCount':len(samples),
             'pausedEnvironmentInstances':len(paused),'resumedEnvironmentInstances':len(resumed)}
 
 
 class NativeObserver:
     """One-second sampling in an already-owned netns. stop always joins its thread."""
-    def __init__(self,native_manifest,output,expected_environments):
+    def __init__(self,native_manifest,output,expected_environments,*,expected_working_environments=None):
         if type(expected_environments) is not int or not 1<=expected_environments<=64:raise ValueError('expected environment count must be 1..64')
         self.manifest=Path(native_manifest);self.output=Path(output);self.expected=expected_environments
+        self.expected_working=expected_environments if expected_working_environments is None else expected_working_environments
+        if type(self.expected_working) is not int or not 1<=self.expected_working<=expected_environments:raise ValueError('working environment target must be within inventory count')
         self.samples=[];self._stop=threading.Event();self._thread=None
 
     def _docker(self,args,deadline):
@@ -168,4 +174,4 @@ class NativeObserver:
         if self._thread is None:raise RuntimeError('observer not started')
         self._stop.set();self._thread.join(timeout=15)
         if self._thread.is_alive():raise RuntimeError('observer thread remains active')
-        return summarize(self.samples,self.expected)
+        return summarize(self.samples,self.expected,expected_working_environments=self.expected_working)

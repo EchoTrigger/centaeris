@@ -15,7 +15,9 @@ module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 
 
 class SharedCoordinatorTests(unittest.TestCase):
-    def invoke(self, root, *, overlap='verified', bad_run=False, bad_retirement=False, resumed=4):
+    def invoke(self, root, *, overlap='verified', bad_run=False, bad_retirement=False, resumed=None, environments=4, working=None, model_wait_ms=0, initial_stagger_ms=0, expected_working_environments=None):
+        resumed = environments if resumed is None else resumed
+        working = environments if working is None else working
         fixture = root / 'fixture'; fixture.mkdir()
         (fixture / 'manifest.json').write_text('{}')
         calls = []
@@ -23,7 +25,7 @@ class SharedCoordinatorTests(unittest.TestCase):
             def __init__(self, fixture, result, *, expected_running_limit):
                 self.result = result; result.mkdir(); self.base = 'http://127.0.0.1:18083'
                 self.seed = {'email': 'fixture@example.invalid', 'password': 'private-fixture-password', 'workspaceId': 'workspace-a', 'agentId': 'agent-a', 'modelConfigRef': 'model-a'}
-                self.manifest = {'sharedWorkload': {'environmentCount': 4}, 'sourceRevision': 'abc'}
+                self.manifest = {'sharedWorkload': {'environmentCount': environments, 'modelWaitMs': model_wait_ms}, 'sourceRevision': 'abc'}
                 calls.append(('driver', expected_running_limit))
             def completed(self, record):
                 calls.append(('completed', record['agentRunId']))
@@ -40,26 +42,31 @@ class SharedCoordinatorTests(unittest.TestCase):
                 calls.append(('retire', row['environmentId']))
                 return {'environmentId': row['environmentId'], 'status': 'destroyed', 'containerAbsent': not bad_retirement, 'residentHoldingCount': 0, 'historyPreserved': True}
         class Observer:
-            def __init__(self, manifest, output, expected_environments): calls.append(('observer', expected_environments))
+            def __init__(self, manifest, output, expected_environments, *, expected_working_environments=None): calls.append(('observer', expected_environments, expected_working_environments))
             def start(self): calls.append(('start',))
             def stop(self):
                 calls.append(('stop',))
-                return {'physicalOverlap': overlap, 'peakWorkingEnvironments': 4,
-                        'pausedEnvironmentInstances': 4, 'resumedEnvironmentInstances': resumed}
+                return {'physicalOverlap': overlap, 'peakWorkingEnvironments': working,
+                        'pausedEnvironmentInstances': environments, 'resumedEnvironmentInstances': resumed}
         def workload(path, output, binary, **options):
             private = json.loads(path.read_text())
-            self.assertEqual(len(private['samples']), 12)
+            self.assertEqual(len(private['samples']), environments * 3)
             self.assertEqual({sample['workUnits'] for sample in private['samples']}, {2000})
             self.assertEqual(options['between_run_ms'], 6000)
+            if initial_stagger_ms: self.assertEqual(options['initial_stagger_ms'], initial_stagger_ms)
             self.assertEqual(set(private['samples'][0]), {'sampleId', 'operationId', 'workUnits'})
             if os_name_is_posix(): self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             output.mkdir()
-            records = [{'phase': 'accepted', 'agentRunId': f'run-{e}-{i}', 'sessionId': f'session-{e}'} for e in range(4) for i in range(3)]
+            records = [{'phase': 'accepted', 'agentRunId': f'run-{e}-{i}', 'sessionId': f'session-{e}'} for e in range(environments) for i in range(3)]
             (output / 'run-records.jsonl').write_text(''.join(json.dumps(record) + '\n' for record in records))
             calls.append(('k6',))
             return {'status': 'clientVerified', 'verifiedSamples': 12, 'wallTimeMs': 1000, 'betweenRunMs': 6000}
         dependencies = {'driver': Driver, 'observer': Observer, 'workload': workload}
-        return calls, lambda: module.run(fixture, root / 'result', root / 'k6', dependencies=dependencies)
+        options = {'environments': environments}
+        if model_wait_ms: options['model_wait_ms'] = model_wait_ms
+        if initial_stagger_ms: options['initial_stagger_ms'] = initial_stagger_ms
+        if expected_working_environments is not None: options['expected_working_environments'] = expected_working_environments
+        return calls, lambda: module.run(fixture, root / 'result', root / 'k6', dependencies=dependencies, **options)
 
     def test_k6_is_only_admitter_and_retirement_follows_all_real_completion_facts(self):
         with tempfile.TemporaryDirectory() as name:
@@ -89,6 +96,35 @@ class SharedCoordinatorTests(unittest.TestCase):
             calls, execute = self.invoke(Path(name), resumed=3)
             with self.assertRaises(RuntimeError): execute()
             self.assertFalse(any(call[0] == 'retire' for call in calls))
+
+
+    def test_sparse_eight_reports_two_working_threshold_but_verifies_all_eight_lifecycles(self):
+        with tempfile.TemporaryDirectory() as name:
+            calls,execute=self.invoke(Path(name),environments=8,working=2,model_wait_ms=400,initial_stagger_ms=125,expected_working_environments=2)
+            report=execute()
+            self.assertEqual(report['status'],'passed')
+            self.assertEqual(report['environments'],8)
+            self.assertEqual(report['expectedWorkingEnvironments'],2)
+            self.assertEqual(report['native']['peakWorkingEnvironments'],2)
+            self.assertEqual(report['modelWaitMs'],400)
+            self.assertEqual(report['initialStaggerMs'],125)
+            self.assertEqual(report['completedRuns'],24)
+            self.assertEqual(report['sameInstanceEnvironments'],8)
+            self.assertEqual(report['cleanupCompleteRuns'],24)
+            self.assertEqual(sum(call[0]=='retire' for call in calls),8)
+            self.assertIn(('observer',8,2),calls)
+
+    def test_sparse_threshold_does_not_reduce_pause_resume_or_durable_requirements(self):
+        for options in ({'resumed':7},{'bad_run':True},{'working':1}):
+            with self.subTest(options=options),tempfile.TemporaryDirectory() as name:
+                calls,execute=self.invoke(Path(name),environments=8,expected_working_environments=2,**options)
+                with self.assertRaises((ValueError,RuntimeError)):execute()
+                self.assertFalse(any(call[0]=='retire' for call in calls))
+
+    def test_shared_workload_rejects_unbounded_wait_stagger_and_invalid_overlap_before_loading(self):
+        for options in ({'model_wait_ms':120001},{'model_wait_ms':-1},{'initial_stagger_ms':20000,'environments':8},{'expected_working_environments':9,'environments':8},{'expected_working_environments':0}):
+            with self.subTest(options=options),self.assertRaises(ValueError):
+                module.run(Path('absent'),Path('absent-result'),Path('absent-k6'),**options)
 
 
 def os_name_is_posix():
@@ -131,7 +167,7 @@ class FixtureRunningLimitTests(unittest.TestCase):
 
 
 class DurableTimingTests(unittest.TestCase):
-    def test_durable_times_keep_cleanup_release_and_first_client_tool_distinct(self):
+    def report(self, events=None):
         utc = datetime.timezone.utc
         at = lambda millis: datetime.datetime.fromtimestamp(millis / 1000, utc)
         run = types.SimpleNamespace(id='run-a', createdAt=at(1000), startedAt=at(1100), completedAt=at(1800))
@@ -142,6 +178,28 @@ class DurableTimingTests(unittest.TestCase):
             def values_list(self, *values, **options): return self
             def first(self): return self.value
             def __iter__(self): return iter(self.value)
+        def field(row, name):
+            value=row
+            for key in name.split('__'):value=value.get(key) if isinstance(value,dict) else getattr(value,key,None)
+            return value
+        class Events:
+            def __init__(self, rows):self.rows=rows
+            def filter(self, **values):
+                def matches(row):
+                    for key,value in values.items():
+                        if key.endswith('__in'):
+                            if field(row,key[:-4]) not in value:return False
+                        elif field(row,key)!=value:return False
+                    return True
+                return Events([row for row in self.rows if matches(row)])
+            def order_by(self, *values):return Events(sorted(self.rows,key=lambda row:tuple(field(row,key) for key in values)))
+            def values_list(self, *values, flat=False):
+                rows=[tuple(field(row,key) for key in values) for row in self.rows]
+                return Values([row[0] for row in rows] if flat else rows)
+        class Values(Query):
+            def first(self):return self.value[0] if self.value else None
+        if events is None:events=[(1,1150,'agent_run_execution_started',{}),(2,1200,'tool_call',{'callId':'call-a','toolName':'bash'}),(3,1400,'tool_result',{'callId':'call-a','toolName':'bash','resultState':'successWithOutput','modelContent':'private-command-content'})]
+        rows=[{'agent_run':run,'session_level':False,'agent_run_sequence':seq,'createdAtMs':at_ms,'payload':{'type':kind,'payload':payload}} for seq,at_ms,kind,payload in events]
         class Cursor:
             def __enter__(self): return self
             def __exit__(self, *args): return False
@@ -152,13 +210,15 @@ class DurableTimingTests(unittest.TestCase):
                    'django.db': types.SimpleNamespace(transaction=types.SimpleNamespace(atomic=contextlib.nullcontext), connection=types.SimpleNamespace(cursor=Cursor)),
                    'app_core.models': types.SimpleNamespace(AgentRun=types.SimpleNamespace(objects=Query([run])),
                         AgentRunEnvironmentRelease=types.SimpleNamespace(objects=Query(at(1850))),
-                        SessionEvent=types.SimpleNamespace(objects=Query(1200)))}
+                        SessionEvent=types.SimpleNamespace(objects=Events(rows)))}
         def sql(code):
             output = io.StringIO()
             with patch.dict(sys.modules, modules), contextlib.redirect_stdout(output): exec(code, {})
             return json.loads(output.getvalue())
-        report = module._durable_timing(types.SimpleNamespace(sql=sql), [{'agentRunId': 'run-a'}])
-        row = report['rows'][0]
+        return module._durable_timing(types.SimpleNamespace(sql=sql), [{'agentRunId': 'run-a'}])
+
+    def test_durable_times_keep_cleanup_release_and_first_client_tool_distinct(self):
+        report=self.report();row=report['rows'][0]
         self.assertEqual(row['runWallTimeMs'], 700)
         self.assertEqual(row['durableFirstBashCallAtMs'], 1200)
         self.assertEqual(row['businessReleaseAtMs'], 1850)
@@ -168,6 +228,27 @@ class DurableTimingTests(unittest.TestCase):
         self.assertEqual(report['releaseToClaimMs'], [30])
         self.assertEqual(report['capacityClaims'][0]['agentRunId'], 'run-a')
         self.assertNotIn('leaseOwner', report['capacityClaims'][0])
+
+    def test_committed_execution_fact_to_successful_result_uses_matching_call_id(self):
+        events=[(1,1150,'agent_run_execution_started',{}),(2,1200,'tool_call',{'callId':'call-a','toolName':'bash'}),
+                (3,1250,'tool_result',{'callId':'unrelated','toolName':'bash','resultState':'successWithOutput'}),
+                (4,1300,'tool_result',{'callId':'call-a','toolName':'bash','resultState':'error'}),
+                (5,1400,'tool_result',{'callId':'call-a','toolName':'bash','resultState':'successNoOutput','modelContent':'private-command-content'})]
+        report=self.report(events);row=report['rows'][0]
+        self.assertEqual(row['durableExecutionFactCreatedAtMs'],1150)
+        self.assertEqual(row['durableFirstSuccessfulToolResultCreatedAtMs'],1400)
+        self.assertEqual(row['executionFactToFirstToolResultMs'],250)
+        self.assertNotIn('private-command-content',json.dumps(report))
+        self.assertEqual(report['resumeToFirstToolLatency'],'notObserved')
+
+    def test_unconfirmed_event_shape_never_invents_result_time(self):
+        for result in ({'toolName':'bash','resultState':'successWithOutput'},
+                       {'callId':'call-a','toolName':'read','resultState':'successWithOutput'},
+                       {'callId':'call-a','toolName':'bash','resultState':'error'}):
+            with self.subTest(result=result):
+                row=self.report([(1,1150,'agent_run_execution_started',{}),(2,1200,'tool_call',{'callId':'call-a','toolName':'bash'}),(3,1400,'tool_result',result)])['rows'][0]
+                self.assertIsNone(row['durableFirstSuccessfulToolResultCreatedAtMs'])
+                self.assertIsNone(row['executionFactToFirstToolResultMs'])
 
 
 if __name__ == '__main__': unittest.main()

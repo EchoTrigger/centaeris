@@ -35,20 +35,30 @@ def validate_run_facts(rows, environments, iterations):
 
 
 def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2000,
-        between_run_ms=6000, dependencies=None):
+        between_run_ms=6000, model_wait_ms=0, initial_stagger_ms=0,
+        expected_working_environments=None, dependencies=None):
     if (type(environments) is not int or not 2 <= environments <= 64
             or type(iterations) is not int or not 1 <= iterations <= 20
             or type(work_units) is not int or not 1 <= work_units <= 1000000
             or type(between_run_ms) is not int or not 0 <= between_run_ms <= 60000):
         raise ValueError('bounded explicit shared workload required')
+    expected_working = environments if expected_working_environments is None else expected_working_environments
+    if (type(model_wait_ms) is not int or not 0<=model_wait_ms<=120000
+            or type(initial_stagger_ms) is not int or not 0<=initial_stagger_ms<=120000
+            or initial_stagger_ms*(environments-1)>120000
+            or type(expected_working) is not int or not 1<=expected_working<=environments):
+        raise ValueError('bounded shared wait, initial stagger and overlap threshold required')
     dependencies = dependencies or _dependencies()
     fixture, result = Path(fixture), Path(result)
     driver = dependencies['driver'](fixture, result, expected_running_limit=environments)
-    if driver.manifest.get('sharedWorkload', {}).get('environmentCount') != environments:
+    if (driver.manifest.get('sharedWorkload', {}).get('environmentCount') != environments
+            or driver.manifest.get('sharedWorkload', {}).get('modelWaitMs',0) != model_wait_ms):
         raise RuntimeError('shared fixture environment count mismatch')
     report = {'schema': 'runsc.shared.workload.acceptance.v1', 'status': 'failedPreserved',
               'sourceRevision': driver.manifest['sourceRevision'], 'environments': environments,
               'iterations': iterations, 'workUnits': work_units, 'betweenRunMs': between_run_ms,
+              'modelWaitMs':model_wait_ms,'initialStaggerMs':initial_stagger_ms,
+              'initialStaggerTotalMs':initial_stagger_ms*(environments-1),'expectedWorkingEnvironments':expected_working,
               'memoryContinuity': 'notObserved', 'clientFirstToolLatency': 'notObserved',
               'resumeToFirstToolLatency': 'notObserved', 'durableTiming': 'notObserved',
               'retirement': [], 'responsibility': 'preserved'}
@@ -62,13 +72,13 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
     descriptor = os.open(private_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, 'w') as stream:
         json.dump(private, stream)
-    observer = dependencies['observer'](fixture / 'manifest.json', result / 'native-observations.jsonl', environments)
+    observer = dependencies['observer'](fixture / 'manifest.json', result / 'native-observations.jsonl', environments, expected_working_environments=expected_working)
     started, stopped = False, False
     began = time.monotonic()
     try:
         observer.start(); started = True
         client = dependencies['workload'](private_path, result / 'k6', k6binary,
-                    environments=environments, iterations=iterations, timeout=900, between_run_ms=between_run_ms)
+                    environments=environments, iterations=iterations, timeout=900, between_run_ms=between_run_ms, initial_stagger_ms=initial_stagger_ms)
         report['client'] = client
         if client.get('status') != 'clientVerified':
             raise RuntimeError('K6 did not verify the full workload')
@@ -86,8 +96,8 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
                  for index, record in enumerate(last.values())]
         report['native'] = observer.stop(); stopped = True
         if (report['native'].get('physicalOverlap') != 'verified'
-                or report['native'].get('peakWorkingEnvironments', 0) < environments):
-            raise RuntimeError('all planned environments were not observed doing real work concurrently')
+                or report['native'].get('peakWorkingEnvironments', 0) < expected_working):
+            raise RuntimeError('explicit working-environment overlap threshold was not observed')
         if iterations > 1 and (report['native'].get('pausedEnvironmentInstances', 0) < environments
                 or report['native'].get('resumedEnvironmentInstances', 0) < environments):
             raise RuntimeError('every original environment must be physically observed paused and resumed')
@@ -143,9 +153,21 @@ with transaction.atomic():
   rows=[]
   for run in AgentRun.objects.filter(pk__in=RUN_IDS).order_by('createdAt'):
    first=SessionEvent.objects.filter(agent_run=run,session_level=False,payload__type='tool_call',payload__payload__toolName='bash').order_by('agent_run_sequence').values_list('createdAtMs',flat=True).first()
+   execution_fact=SessionEvent.objects.filter(agent_run=run,session_level=False,payload__type='agent_run_execution_started').order_by('agent_run_sequence').values_list('createdAtMs',flat=True).first()
+   execution_fact=execution_fact if type(execution_fact) is int and execution_fact>=0 else None
+   calls={}
+   for call_id,tool_name,sequence,created in SessionEvent.objects.filter(agent_run=run,session_level=False,payload__type='tool_call').order_by('agent_run_sequence').values_list('payload__payload__callId','payload__payload__toolName','agent_run_sequence','createdAtMs'):
+    if isinstance(call_id,str) and call_id and isinstance(tool_name,str) and tool_name and type(sequence) is int and type(created) is int and created>=0:
+     calls[call_id]=(tool_name,sequence,created) if call_id not in calls else None
+   first_successful_result=None
+   for call_id,tool_name,sequence,created in SessionEvent.objects.filter(agent_run=run,session_level=False,payload__type='tool_result',payload__payload__resultState__in=['successWithOutput','successNoOutput']).order_by('agent_run_sequence').values_list('payload__payload__callId','payload__payload__toolName','agent_run_sequence','createdAtMs'):
+    call=calls.get(call_id) if isinstance(call_id,str) else None
+    if call and call[0]==tool_name and type(sequence) is int and call[1]<sequence and type(created) is int and created>=call[2]:
+     first_successful_result=created;break
+   execution_to_result=(first_successful_result-execution_fact if execution_fact is not None and first_successful_result is not None and first_successful_result>=execution_fact else None)
    release=AgentRunEnvironmentRelease.objects.filter(agent_run=run).values_list('recorded_at',flat=True).first()
    cursor.execute('SELECT recorded_at_ms FROM runtime.agent_run_cleanup_receipts WHERE agent_run_id=%s AND cleanup_complete',[run.id]);cleanup=cursor.fetchone()
-   rows.append({'agentRunId':run.id,'createdAtMs':millis(run.createdAt),'startedAtMs':millis(run.startedAt),'completedAtMs':millis(run.completedAt),'durableFirstBashCallAtMs':first,'businessReleaseAtMs':millis(release),'cleanupReceiptAtMs':cleanup[0] if cleanup else None,'runWallTimeMs':millis(run.completedAt)-millis(run.startedAt) if run.startedAt and run.completedAt else None})
+   rows.append({'agentRunId':run.id,'createdAtMs':millis(run.createdAt),'startedAtMs':millis(run.startedAt),'completedAtMs':millis(run.completedAt),'durableFirstBashCallAtMs':first,'durableExecutionFactCreatedAtMs':execution_fact,'durableFirstSuccessfulToolResultCreatedAtMs':first_successful_result,'executionFactToFirstToolResultMs':execution_to_result,'businessReleaseAtMs':millis(release),'cleanupReceiptAtMs':cleanup[0] if cleanup else None,'runWallTimeMs':millis(run.completedAt)-millis(run.startedAt) if run.startedAt and run.completedAt else None})
   jobs={('agent_run.lifecycle:'+run_id):run_id for run_id in RUN_IDS}
   cursor.execute('SELECT task_id,payload_json FROM runtime.runtime_events WHERE task_id=ANY(%s) AND event_type=%s ORDER BY at_ms,event_id',[list(jobs),'runtime.resident_capacity.claimed.v1'])
   claims=[]
@@ -155,7 +177,7 @@ with transaction.atomic():
    if (event.get('jobId')!=job_id or job_id not in jobs or type(released) is not int or type(claimed) is not int or not 0<=released<=claimed):
     raise RuntimeError('capacity claim timing identity invalid')
    claims.append({'agentRunId':jobs[job_id],'jobId':job_id,'generation':event.get('generation'),'releaseRecordedAtMs':released,'claimedAtMs':claimed,'releaseToClaimMs':claimed-released})
-  print(json.dumps({'schema':'runsc.shared.durable_timing.v1','rows':rows,'capacityClaims':claims,'releaseToClaimMs':[event['releaseToClaimMs'] for event in claims] if claims else 'notObserved','clientFirstToolLatency':'notObserved','resumeToFirstToolLatency':'notObserved'}))
+  print(json.dumps({'schema':'runsc.shared.durable_timing.v1','toolTimingBasis':'committedSessionEvent.createdAtMs','rows':rows,'capacityClaims':claims,'releaseToClaimMs':[event['releaseToClaimMs'] for event in claims] if claims else 'notObserved','clientFirstToolLatency':'notObserved','resumeToFirstToolLatency':'notObserved'}))
 '''.replace('RUN_IDS', repr([record['agentRunId'] for record in admitted]))
     return driver.sql(code)
 
@@ -170,9 +192,14 @@ def main():
     parser.add_argument('--iterations', type=int, default=3)
     parser.add_argument('--work-units', type=int, default=2000)
     parser.add_argument('--between-run-ms', type=int, default=6000)
+    parser.add_argument('--model-wait-ms', type=int, default=0)
+    parser.add_argument('--initial-stagger-ms', type=int, default=0)
+    parser.add_argument('--expected-working-environments', type=int)
     args = parser.parse_args()
     report = run(args.fixture, args.result, args.k6_binary, environments=args.environment_count,
-                 iterations=args.iterations, work_units=args.work_units, between_run_ms=args.between_run_ms)
+                 iterations=args.iterations, work_units=args.work_units, between_run_ms=args.between_run_ms,
+                 model_wait_ms=args.model_wait_ms,initial_stagger_ms=args.initial_stagger_ms,
+                 expected_working_environments=args.expected_working_environments)
     print(json.dumps(report))
 
 

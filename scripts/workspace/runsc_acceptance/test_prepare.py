@@ -40,6 +40,22 @@ class PreparationTests(unittest.TestCase):
    self.assertEqual(config['services']['model']['command'],['/app/.venv/bin/python','/harness/server.py'])
    self.assertEqual(manifest['sharedWorkload']['environmentCount'],4)
    self.assertEqual((root/'tls/model.pem').read_text(),'synthetic fixture certificatesynthetic fixture certificate')
+ def test_sparse_eight_keeps_full_caps_and_records_model_wait_stagger_and_overlap(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);argv=self.fixture(root)+['--shared-workload','--environment-count','8','--model-wait-ms','400','--initial-stagger-ms','125','--expected-working-environments','2']
+   model=root/'source/perf/mock-model';model.mkdir(parents=True)
+   for name in ('server.py','fixed_workload.py'):(model/name).write_text('# deterministic test input')
+   with patch.object(sys,'argv',argv),patch.object(prepare,'verify_owner',return_value={'root':'/run/owned'}),patch.object(prepare.subprocess,'run',side_effect=self.outputs()),patch('builtins.print'):prepare.main()
+   config=json.loads((root/'result/compose.json').read_text());manifest=json.loads((root/'result/manifest.json').read_text());env=dict(v.split('=',1) for v in (root/'result/synthetic.env').read_text().splitlines())
+   self.assertEqual(config['services']['model']['environment']['MOCK_FIXED_MODEL_WAIT_MS'],'400')
+   self.assertEqual(manifest['sharedWorkload']['modelWaitMs'],400)
+   self.assertEqual(manifest['sharedWorkload']['initialStaggerMs'],125)
+   self.assertEqual(manifest['sharedWorkload']['expectedWorkingEnvironments'],2)
+   self.assertEqual(manifest['sharedWorkload']['environmentCount'],8)
+   self.assertEqual(env['RESIDENT_TENANT_MEMORY_BYTES'],str(12*1024**3))
+   self.assertEqual(env['RESIDENT_GLOBAL_MEMORY_BYTES'],str(12*1024**3))
+   self.assertEqual(env['SANDBOX_MEMORY_BYTES'],str(4*1024**3));self.assertEqual(env['SANDBOX_CPU_MILLI'],'2000')
+   self.assertEqual(env['RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS'],'8')
  def test_unverified_isolation_rejects_before_any_docker_or_file_mutation(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);argv=self.fixture(root)

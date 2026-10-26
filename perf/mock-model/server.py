@@ -322,7 +322,12 @@ class Handler(BaseHTTPRequestHandler):
             tool_rounds = sum(1 for item in current_input[latest_user_index + 1:]
                               if isinstance(item, dict) and item.get("type") == "function_call_output")
             sample = _fixed_workload.sample_from_text(self.latest_user_text(request))
+            model_wait_ms = int(os.environ.get("MOCK_FIXED_MODEL_WAIT_MS", "0"))
+            if not 0 <= model_wait_ms <= 120000:
+                raise ValueError("fixed model wait must be between 0 and 120000 milliseconds")
             if tool_rounds == 0:
+                if model_wait_ms:
+                    time.sleep(model_wait_ms / 1000)
                 items, usage = self.emit_named_function_call("bash", {"command": _fixed_workload.command_for(sample), "timeout_ms": 300000})
             elif tool_rounds == 1:
                 items, usage = self.emit_named_function_call("publish_artifact", {"path": "/mnt/data/" + _fixed_workload.FILENAME})

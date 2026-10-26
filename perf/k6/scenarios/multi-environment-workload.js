@@ -7,6 +7,9 @@ import { configuredTarget, login, startRun, waitForTerminal, verifyToolRun, veri
 
 const environmentCount = Number(__ENV.PERF_ENVIRONMENT_COUNT || 4);
 const iterations = Number(__ENV.PERF_RUNS_PER_ENVIRONMENT || 3);
+const initialStaggerMs = Number(__ENV.PERF_INITIAL_STAGGER_MS || 0);
+if (!Number.isInteger(initialStaggerMs) || initialStaggerMs < 0 || initialStaggerMs > 120000
+    || initialStaggerMs * (environmentCount - 1) > 120000) throw new Error('bounded initial workload stagger required');
 const betweenRunMs = Number(__ENV.PERF_BETWEEN_RUN_MS || 0);
 if (!Number.isInteger(betweenRunMs) || betweenRunMs < 0 || betweenRunMs > 60000) throw new Error('bounded between-Run gap required');
 const samples = JSON.parse(open(__ENV.PERF_SAMPLES_PATH));
@@ -47,6 +50,9 @@ export default function (data) {
   const sample = samples[index];
   if (!sample) throw new Error('rolling sample identity unavailable');
   if (previousFailed) { failures.add(1); record('notSubmitted', sample, data, null, { errorCode: 'previous_sample_failed' }); return; }
+  if (execution.vu.iterationInScenario === 0 && initialStaggerMs > 0 && execution.vu.idInTest > 1) {
+    sleep((execution.vu.idInTest - 1) * initialStaggerMs / 1000);
+  }
   const started = Date.now();
   let admitted; let stage = 'admission';
   try {

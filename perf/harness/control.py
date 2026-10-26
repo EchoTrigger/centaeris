@@ -350,6 +350,7 @@ def main():
     parser.add_argument('--iterations', type=int, default=3)
     parser.add_argument('--timeout', type=int, default=900)
     parser.add_argument('--between-run-ms', type=int, default=0)
+    parser.add_argument('--initial-stagger-ms', type=int, default=0)
     parser.add_argument('--slots', type=int)
     parser.add_argument('--experiment-id')
     parser.add_argument('--seconds', type=int, default=1)
@@ -364,7 +365,7 @@ def main():
             from .fixture_workload import run as run_workload
         else:
             from fixture_workload import run as run_workload
-        report = run_workload(args.fixture, args.output, args.k6_binary, environments=args.environments, iterations=args.iterations, timeout=args.timeout, between_run_ms=args.between_run_ms)
+        report = run_workload(args.fixture, args.output, args.k6_binary, environments=args.environments, iterations=args.iterations, timeout=args.timeout, between_run_ms=args.between_run_ms, initial_stagger_ms=args.initial_stagger_ms)
         print(json.dumps(report))
         return
     if args.oci_runtime is not None and args.action != 'init':

@@ -37,20 +37,25 @@ class FixedWorkloadTests(unittest.TestCase):
         self.assertNotEqual(first['sha256'], second['sha256'])
 
 class FixedWorkloadHandlerTests(unittest.TestCase):
-    def request(self, rounds):
+    def request(self, rounds, *, model_wait_ms=None, waits=None, sample_id=None):
         import io
         import json
         source=Path(__file__).resolve().parents[1]/'mock-model/server.py'
         spec=importlib.util.spec_from_file_location('fixed_handler',source)
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-        sample={'sampleId':'a'*32,'operationId':'b'*32,'workUnits':2}
+        sample={'sampleId':sample_id or 'a'*32,'operationId':'b'*32,'workUnits':2}
         previous=[{'role':'user','content':'previous sample'}, {'type':'function_call_output','call_id':'old-bash','output':'old'}, {'type':'function_call_output','call_id':'old-publish','output':'old'}]
         current=[{'role':'user','content':'PERF_FIXED_WORKLOAD '+json.dumps(sample)}]+[{'type':'function_call_output','call_id':f'current-{i}','output':'ok'} for i in range(rounds)]
         body=json.dumps({'model':'perf-fixed-workload','stream':True,'input':previous+current}).encode()
         handler=object.__new__(module.Handler);handler.path='/v1/responses';handler.headers={'content-length':str(len(body))}
         handler.rfile=io.BytesIO(body);handler.wfile=io.BytesIO()
         handler.send_response=lambda *args:None;handler.send_header=lambda *args:None;handler.end_headers=lambda:None
-        handler.do_POST()
+        from unittest.mock import patch
+        def observe_model_wait(seconds):
+            self.assertNotIn(b'response.output_item.added',handler.wfile.getvalue(), 'model wait must precede tool intent')
+            if waits is not None:waits.append(seconds)
+        with patch.dict(module.os.environ, {'MOCK_FIXED_MODEL_WAIT_MS':str(0 if model_wait_ms is None else model_wait_ms)}), patch.object(module.time, 'sleep', side_effect=observe_model_wait):
+            handler.do_POST()
         events=[json.loads(line[6:]) for line in handler.wfile.getvalue().decode().splitlines() if line.startswith('data: ')]
         return module,sample,events[-1]['response']['output'][0]
 
@@ -61,5 +66,19 @@ class FixedWorkloadHandlerTests(unittest.TestCase):
         self.assertEqual(json.loads(item['arguments'])['command'],module._fixed_workload.command_for(sample))
         self.assertEqual(self.request(1)[2].get('name'),'publish_artifact')
         self.assertEqual(self.request(2)[2]['type'],'message')
+
+    def test_model_wait_occurs_once_before_each_rolling_runs_first_bash(self):
+        waits=[]
+        for sample_id in ('a'*32,'c'*32):
+            self.assertEqual(self.request(0,model_wait_ms=18000,waits=waits,sample_id=sample_id)[2].get('name'),'bash')
+            self.assertEqual(self.request(1,model_wait_ms=18000,waits=waits,sample_id=sample_id)[2].get('name'),'publish_artifact')
+            self.assertEqual(self.request(2,model_wait_ms=18000,waits=waits,sample_id=sample_id)[2]['type'],'message')
+        self.assertEqual(waits,[18.0,18.0])
+        self.request(0,waits=waits)
+        self.assertEqual(waits,[18.0,18.0],'default zero must not delay model or tool')
+
+    def test_model_wait_has_an_explicit_upper_bound(self):
+        for value in (-1,120001,'invalid'):
+            with self.assertRaises(ValueError):self.request(0,model_wait_ms=value,waits=[])
 
 if __name__ == '__main__': unittest.main()

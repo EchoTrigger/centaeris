@@ -47,6 +47,18 @@ class NativeObservationTests(unittest.TestCase):
         report=module.summarize(samples,4)
         self.assertEqual(report['physicalOverlap'],'notObserved');self.assertIn('resource_probe_failed',report['unknownReasons'])
 
+    def test_sparse_gate_distinguishes_inventory_from_observed_working_target(self):
+        module=self.subject();samples=[self.sample(i) for i in range(3)]
+        for sample in samples:
+            for index in (2,3):sample['states'][str(index)*64]['inspection']['activeTasks']=0
+        report=module.summarize(samples,4,expected_working_environments=2)
+        self.assertEqual(report['physicalOverlap'],'verified')
+        self.assertEqual(report['expectedEnvironments'],4)
+        self.assertEqual(report['expectedWorkingEnvironments'],2)
+        self.assertEqual(report['peakWorkingEnvironments'],2)
+        for target in (0,5):
+            with self.assertRaises(ValueError):module.NativeObserver('/manifest','/output',4,expected_working_environments=target)
+
 class NativeCollectorPausedTests(unittest.TestCase):
     def test_paused_container_is_sampled_without_requesting_running_task_inspection(self):
         import threading
