@@ -11,25 +11,74 @@ use crate::resident_capacity::{ObservedResidentSandbox, ResidentCapacity, RESIDE
 // This session lock spans a committed reservation and the bounded Docker
 // mutation. A SQL transaction alone could roll back after Docker committed.
 // All managed create/remove paths use this lock; contention yields admission.
-struct ResidentHostLock<'a>(&'a mut Client);
+struct ResidentHostLock<'a>(&'a mut Client, String);
+mod preparation_wait;
 
 impl Drop for ResidentHostLock<'_> {
     fn drop(&mut self) {
-        if let Err(error) = self.0.query_one("SELECT pg_advisory_unlock(731946,3)", &[]) {
-            eprintln!("resident host admission unlock failed: {error}");
+        match self.0.query_one("SELECT pg_advisory_unlock(731946,3)", &[]) {
+            Ok(row) if row.get::<_, bool>(0) => {
+                // Eligibility changes without refunding any resident or unknown creation.
+                // A failed notification leaves the existing durable timed retry intact.
+                if let Err(error) = preparation_wait::signal(self.0, &self.1) {
+                    eprintln!("host preparation wake unavailable: {error}");
+                }
+            }
+            _ => eprintln!("resident host admission unlock unavailable"),
         }
     }
 }
 
-fn lock_host(client: &mut Client) -> Result<ResidentHostLock<'_>, String> {
-    if !client
+fn try_lock_host(client: &mut Client) -> Result<bool, String> {
+    client
         .query_one("SELECT pg_try_advisory_lock(731946,3)", &[])
-        .map_err(|error| format!("resident host lock failed: {error}"))?
-        .get::<_, bool>(0)
-    {
+        .map(|row| row.get(0))
+        .map_err(|error| format!("resident host lock failed: {error}"))
+}
+
+fn lock_host<'a>(client: &'a mut Client, host_id: &str) -> Result<ResidentHostLock<'a>, String> {
+    if !try_lock_host(client)? {
         return Err(RESIDENT_CAPACITY_WAIT.into());
     }
-    Ok(ResidentHostLock(client))
+    Ok(ResidentHostLock(client, host_id.into()))
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_PREPARATION_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A bounded test seam for release between the first refusal and durable registration.
+#[cfg(test)]
+pub(super) fn before_preparation_wait_registration(hook: impl FnOnce() + 'static) {
+    BEFORE_PREPARATION_WAIT.with(|pending| {
+        assert!(pending.borrow().is_none());
+        *pending.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+fn lock_host_for_run<'a>(
+    client: &'a mut Client,
+    host_id: &str,
+    fence: &RuntimeJobLeaseFence,
+) -> Result<ResidentHostLock<'a>, String> {
+    if !try_lock_host(client)? {
+        #[cfg(test)]
+        BEFORE_PREPARATION_WAIT.with(|pending| {
+            if let Some(hook) = pending.borrow_mut().take() {
+                hook();
+            }
+        });
+        preparation_wait::register(client, host_id, fence)?;
+        // The previous owner may have unlocked before the wait fact committed.
+        // Recheck after registration instead of relying on a lost notification.
+        if !try_lock_host(client)? {
+            return Err(crate::resident_capacity::HOST_PREPARATION_WAIT.into());
+        }
+    }
+    let lock = ResidentHostLock(client, host_id.into());
+    preparation_wait::clear(lock.0, fence)?;
+    Ok(lock)
 }
 
 pub(super) fn with_host_inventory<T>(
@@ -38,7 +87,7 @@ pub(super) fn with_host_inventory<T>(
     inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String>,
     operation: impl FnOnce(&mut Client, &[ObservedResidentSandbox]) -> Result<T, String>,
 ) -> Result<T, String> {
-    let lock = lock_host(client)?;
+    let lock = lock_host(client, host_id)?;
     let physical = inventory()?;
     reconcile(lock.0, host_id, &physical)?;
     operation(lock.0, &physical)
@@ -51,7 +100,7 @@ impl PostgresRuntimeStore {
         inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
     ) -> Result<(), String> {
         self.with_client(|client| {
-            let lock = lock_host(client)?;
+            let lock = lock_host(client, host_id)?;
             reconcile(lock.0, host_id, &inventory()?)
         })
     }
@@ -129,7 +178,7 @@ impl PostgresRuntimeStore {
         inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
     ) -> Result<(), String> {
         self.with_client(|client| {
-            let lock = lock_host(client)?;
+            let lock = lock_host(client, host_id)?;
             let mut tx = lock.0.transaction().map_err(|error| error.to_string())?;
             super::resource_commit::require_durable_resource_commit(&mut tx)?;
             reject_retained_legacy(&mut tx, agent_run_id, execution_id)?;

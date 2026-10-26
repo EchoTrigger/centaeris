@@ -160,6 +160,7 @@ const HTTP_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_RUN_WAITING_TRANSITION_REASONS: &[&str] = &[
     "execution_resident_capacity_wait",
+    "execution_host_preparation_wait",
     "runsc_environment_capacity_wait",
     "execution_recovery_checkpoint_committed",
     "question_wait",
@@ -2288,7 +2289,9 @@ fn execute_agent_run(
         Err(error)
             if matches!(
                 error.as_str(),
-                resident_capacity::RESIDENT_CAPACITY_WAIT | "runsc_environment_capacity_wait"
+                resident_capacity::RESIDENT_CAPACITY_WAIT
+                    | resident_capacity::HOST_PREPARATION_WAIT
+                    | "runsc_environment_capacity_wait"
             ) =>
         {
             return Ok(AgentRunStepOutcome {

@@ -104,7 +104,7 @@ impl PostgresRuntimeStore {
         request.validate()?;
         let body = serde_json::to_string(request).map_err(|e| e.to_string())?;
         self.with_execution_control_client_error(|client| {
-            let lock = lock_host(client)?;
+            let lock = lock_host(client, &request.host_id)?;
             let mut tx = lock.0.transaction().map_err(|e| e.to_string())?;
             super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
             // Match controller authority's lock order at the Environment boundary.

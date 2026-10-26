@@ -148,7 +148,7 @@ impl PostgresRuntimeStore {
             tx.commit().map_err(|e| e.to_string())
         })?;
         let result = self.with_client(|client| {
-            let lock=lock_host(client)?; let inventory=inventory()?; let physical=inventory.sandboxes; let shared=inventory.shared; reconcile(lock.0,r.host_id,&physical)?;
+            let lock=lock_host_for_run(client,r.host_id,r.lease)?; let inventory=inventory()?; let physical=inventory.sandboxes; let shared=inventory.shared; reconcile(lock.0,r.host_id,&physical)?;
             let mut tx=lock.0.transaction().map_err(|e|e.to_string())?;
             super::super::resource_commit::require_durable_resource_commit(&mut tx)?; verify_controller(&mut tx,r)?;
             let b=&r.environment_authorization.payload;
@@ -234,7 +234,7 @@ impl PostgresRuntimeStore {
             }
             tx.commit().map_err(|e|e.to_string())?; a.container_id=Some(container); Ok(a)
         });
-        if !matches!(&result,Err(error) if error==RESIDENT_CAPACITY_WAIT || error==super::super::runsc_rotation::RUNSC_CAPACITY_WAIT)
+        if !matches!(&result,Err(error) if error==RESIDENT_CAPACITY_WAIT || error==crate::resident_capacity::HOST_PREPARATION_WAIT || error==super::super::runsc_rotation::RUNSC_CAPACITY_WAIT)
         {
             self.with_client(|client| super::super::capacity_wait::clear(client, r.lease))?;
         }

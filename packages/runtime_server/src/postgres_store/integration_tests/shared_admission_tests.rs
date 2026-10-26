@@ -520,3 +520,571 @@ fn postgres_low_host_headroom_blocks_new_run_reuse_without_changing_original_ins
         1
     );
 }
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_host_preparation_unlock_wakes_original_job_without_resource_release() {
+    use centaeris_core::session::reliability::{
+        ClaimDueRuntimeJobsRequest, RuntimeJobStorePort, YieldRuntimeJobRequest,
+    };
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (url, store, mut db) = fixture::setup();
+    let run = run_scoped(
+        &store,
+        &mut db,
+        "host-preparation-wait-run",
+        "host-preparation-wait-session",
+        "host-preparation-wait-environment",
+        profile(),
+    );
+    let (entered, held) = std::sync::mpsc::channel();
+    let (release, finish) = std::sync::mpsc::channel();
+    let owner = store.clone();
+    let holder = std::thread::spawn(move || {
+        owner.reconcile_resident_sandboxes("host", move || {
+            entered.send(()).unwrap();
+            finish
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .map_err(|_| "owned host preparation barrier timed out")?;
+            Ok(Vec::new())
+        })
+    });
+    held.recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let digest = run.original.environment_profile.digest().unwrap();
+    let rejected = store
+        .prepare_retained_instance_with_inventory(
+            &run.request("host-preparation-wait-execution", &digest),
+            shared_limits(),
+            || panic!("a competing preparation cannot inspect physical inventory"),
+            |_, _| panic!("a competing preparation cannot publish execution"),
+            |_| panic!("a competing preparation cannot dispatch creation"),
+        )
+        .unwrap_err();
+    let now = |db: &mut Client| {
+        db.query_one(
+            "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+            &[],
+        )
+        .unwrap()
+        .get::<_, i64>(0)
+    };
+    let yielded = now(&mut db);
+    let future = yielded + 1_800_000;
+    store
+        .yield_runtime_job(YieldRuntimeJobRequest {
+            job_id: run.fence.job_id.clone(),
+            lease_owner: run.fence.lease_owner.clone(),
+            yielded_at_ms: yielded,
+            run_at_ms: future,
+            transition_reason: rejected.clone(),
+        })
+        .unwrap();
+    let request = || ClaimDueRuntimeJobsRequest {
+        now_ms: now(&mut Client::connect(&url, super::NoTls).unwrap()),
+        worker_id: "host-preparation-claim-observer".into(),
+        job_id: Some(run.fence.job_id.clone()),
+        job_kind: Some("agent_run.lifecycle".into()),
+        session_id: None,
+        limit: 1,
+        lease_ms: 60_000,
+    };
+    assert!(store.claim_worker_jobs(request()).unwrap().is_empty());
+    release.send(()).unwrap();
+    holder.join().unwrap().unwrap();
+    let reopened = PostgresRuntimeStore::new(&url).unwrap();
+    let claimed = reopened.claim_worker_jobs(request()).unwrap();
+    assert_eq!(claimed.len(),1,"host preparation unlock must make the original waiter eligible without a pause or resource release");
+    assert_eq!(claimed[0].job_id, run.fence.job_id);
+    assert_eq!(claimed[0].retry_count, 0);
+    assert!(now(&mut db) < future);
+    assert_eq!(rejected, "execution_host_preparation_wait");
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.execution_instances", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+}
+
+fn hold_host_preparation(
+    store: &PostgresRuntimeStore,
+) -> (
+    std::sync::mpsc::Sender<()>,
+    std::thread::JoinHandle<Result<(), String>>,
+) {
+    hold_host_preparation_with_inventory(store, Vec::new())
+}
+
+fn hold_host_preparation_with_inventory(
+    store: &PostgresRuntimeStore,
+    inventory: Vec<ObservedResidentSandbox>,
+) -> (
+    std::sync::mpsc::Sender<()>,
+    std::thread::JoinHandle<Result<(), String>>,
+) {
+    let (entered, held) = std::sync::mpsc::channel();
+    let (release, finish) = std::sync::mpsc::channel();
+    let owner = store.clone();
+    let holder = std::thread::spawn(move || {
+        owner.reconcile_resident_sandboxes("host", move || {
+            entered.send(()).unwrap();
+            finish
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .map_err(|_| "owned preparation hold timed out")?;
+            Ok(inventory)
+        })
+    });
+    held.recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    (release, holder)
+}
+fn preparation_now(db: &mut Client) -> i64 {
+    db.query_one(
+        "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+        &[],
+    )
+    .unwrap()
+    .get(0)
+}
+fn preparation_claim(
+    store: &PostgresRuntimeStore,
+    db: &mut Client,
+    run: &fixture::Run,
+) -> Vec<centaeris_core::session::reliability::RuntimeJobRecord> {
+    store
+        .claim_worker_jobs(
+            centaeris_core::session::reliability::ClaimDueRuntimeJobsRequest {
+                now_ms: preparation_now(db),
+                worker_id: "preparation-wake-observer".into(),
+                job_id: Some(run.fence.job_id.clone()),
+                job_kind: Some("agent_run.lifecycle".into()),
+                session_id: None,
+                limit: 1,
+                lease_ms: 60_000,
+            },
+        )
+        .unwrap()
+}
+fn preparation_yield(
+    store: &PostgresRuntimeStore,
+    db: &mut Client,
+    run: &fixture::Run,
+    reason: &str,
+) {
+    use centaeris_core::session::reliability::RuntimeJobStorePort;
+    let now = preparation_now(db);
+    store
+        .yield_runtime_job(
+            centaeris_core::session::reliability::YieldRuntimeJobRequest {
+                job_id: run.fence.job_id.clone(),
+                lease_owner: run.fence.lease_owner.clone(),
+                yielded_at_ms: now,
+                run_at_ms: now + 1_800_000,
+                transition_reason: reason.into(),
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_preparation_unlock_before_registration_rechecks_instead_of_losing_wake() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let run = run_scoped(
+        &store,
+        &mut db,
+        "registration-race-run",
+        "registration-race-session",
+        "registration-race-environment",
+        profile(),
+    );
+    let (release, holder) = hold_host_preparation(&store);
+    crate::postgres_store::residency::before_preparation_wait_registration(move || {
+        release.send(()).unwrap();
+        holder.join().unwrap().unwrap();
+    });
+    let digest = run.original.environment_profile.digest().unwrap();
+    let dispatched = std::sync::atomic::AtomicUsize::new(0);
+    let result = store
+        .prepare_retained_instance_with_inventory(
+            &run.request("registration-race-execution", &digest),
+            shared_limits(),
+            || Ok(ResidentInventory::declarations(Vec::new())),
+            |_, _| Ok(()),
+            |_| {
+                dispatched.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok("registration-race-container".into())
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        result.container_id.as_deref(),
+        Some("registration-race-container")
+    );
+    assert_eq!(dispatched.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.resident_capacity_waiters",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT generation FROM runtime.resident_capacity_clock",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0,
+        "an acquired requester must not wake itself"
+    );
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_preparation_unlock_before_yield_is_durable_and_contention_fact_is_idempotent() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let run = run_scoped(
+        &store,
+        &mut db,
+        "yield-race-run",
+        "yield-race-session",
+        "yield-race-environment",
+        profile(),
+    );
+    let (release, holder) = hold_host_preparation(&store);
+    let digest = run.original.environment_profile.digest().unwrap();
+    for _ in 0..2 {
+        let reason = store
+            .prepare_retained_instance_with_inventory(
+                &run.request("yield-race-execution", &digest),
+                shared_limits(),
+                || panic!("busy cannot collect"),
+                |_, _| panic!("busy cannot publish"),
+                |_| panic!("busy cannot create"),
+            )
+            .unwrap_err();
+        assert_eq!(reason, crate::resident_capacity::HOST_PREPARATION_WAIT);
+    }
+    assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_events WHERE event_type='runtime.host_preparation.waiting.v1'",&[]).unwrap().get::<_,i64>(0),1);
+    release.send(()).unwrap();
+    holder.join().unwrap().unwrap();
+    preparation_yield(
+        &store,
+        &mut db,
+        &run,
+        crate::resident_capacity::HOST_PREPARATION_WAIT,
+    );
+    let claim = preparation_claim(&store, &mut db, &run);
+    assert_eq!(claim.len(), 1);
+    assert_eq!(claim[0].retry_count, 0);
+    let evidence:serde_json::Value=serde_json::from_str(&db.query_one("SELECT payload_json FROM runtime.runtime_events WHERE event_type='runtime.host_preparation.available.v1'",&[]).unwrap().get::<_,String>(0)).unwrap();
+    assert_eq!(evidence["hostId"], "host");
+    assert_eq!(
+        evidence["generation"].as_i64(),
+        Some(
+            db.query_one(
+                "SELECT generation FROM runtime.resident_capacity_clock",
+                &[]
+            )
+            .unwrap()
+            .get::<_, i64>(0)
+        )
+    );
+    assert!(evidence["availableAtMs"].as_i64().is_some());
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_preparation_wake_excludes_cancelled_withdrawn_and_fenced_waiters() {
+    use centaeris_core::session::reliability::{CancelRuntimeJobRequest, RuntimeJobStorePort};
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for condition in ["cancelled", "withdrawn", "fenced"] {
+        let (_url, store, mut db) = fixture::setup();
+        let run = run_scoped(
+            &store,
+            &mut db,
+            "stale-wait-run",
+            "stale-wait-session",
+            "stale-wait-environment",
+            profile(),
+        );
+        let (release, holder) = hold_host_preparation(&store);
+        let digest = run.original.environment_profile.digest().unwrap();
+        let request = run.request("stale-wait-execution", &digest);
+        let reason = store
+            .prepare_retained_instance_with_inventory(
+                &request,
+                shared_limits(),
+                || panic!("busy cannot collect"),
+                |_, _| panic!("busy cannot publish"),
+                |_| panic!("busy cannot create"),
+            )
+            .unwrap_err();
+        assert_eq!(reason, crate::resident_capacity::HOST_PREPARATION_WAIT);
+        match condition {
+            "cancelled" => {
+                let now = preparation_now(&mut db);
+                store
+                    .cancel_runtime_job(CancelRuntimeJobRequest {
+                        expected_lease_owner: Some(run.fence.lease_owner.clone()),
+                        job_id: run.fence.job_id.clone(),
+                        reason: "cancelled by owned test".into(),
+                        cancelled_at_ms: now,
+                        expected_status: Some(RuntimeJobStatus::Running),
+                    })
+                    .unwrap();
+            }
+            "withdrawn" => {
+                crate::postgres_store::capacity_wait::clear(&mut db, &run.fence).unwrap()
+            }
+            "fenced" => {
+                db.execute("UPDATE runtime.runtime_jobs SET lease_owner='superseding-owner' WHERE job_id=$1",&[&run.fence.job_id]).unwrap();
+            }
+            _ => preparation_yield(&store, &mut db, &run, &reason),
+        }
+        release.send(()).unwrap();
+        holder.join().unwrap().unwrap();
+        assert_eq!(
+            db.query_one(
+                "SELECT generation FROM runtime.resident_capacity_clock",
+                &[]
+            )
+            .unwrap()
+            .get::<_, i64>(0),
+            0,
+            "{condition} cannot cause a preparation wake"
+        );
+        assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_events WHERE event_type='runtime.host_preparation.available.v1'",&[]).unwrap().get::<_,i64>(0),0);
+        assert_eq!(
+            db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+                .unwrap()
+                .get::<_, i64>(0),
+            0
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_real_resident_pressure_does_not_wake_itself_on_preparation_unlock() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let origin = fixture::run(&store, &mut db, "pressure-origin", 1);
+    let physical = Arc::new(Mutex::new(Vec::new()));
+    fixture::prepare(&store, &origin, "pressure-origin-execution", &physical).unwrap();
+    let run = run_scoped(
+        &store,
+        &mut db,
+        "pressure-demand",
+        "pressure-session",
+        "pressure-environment",
+        origin.original.environment_profile.clone(),
+    );
+    let digest = run.original.environment_profile.digest().unwrap();
+    let before = db
+        .query_one(
+            "SELECT generation FROM runtime.resident_capacity_clock",
+            &[],
+        )
+        .unwrap()
+        .get::<_, i64>(0);
+    let reason = store
+        .prepare_retained_instance_with_inventory(
+            &run.request("pressure-demand-execution", &digest),
+            fixture::limits(&origin),
+            || {
+                Ok(ResidentInventory::declarations(
+                    physical.lock().unwrap().clone(),
+                ))
+            },
+            |_, _| panic!("full cannot publish"),
+            |_| panic!("full cannot create"),
+        )
+        .unwrap_err();
+    assert_eq!(reason, crate::resident_capacity::RESIDENT_CAPACITY_WAIT);
+    preparation_yield(&store, &mut db, &run, &reason);
+    assert!(preparation_claim(&store, &mut db, &run).is_empty());
+    assert_eq!(
+        db.query_one(
+            "SELECT generation FROM runtime.resident_capacity_clock",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        before
+    );
+    assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_events WHERE event_type IN('runtime.host_preparation.waiting.v1','runtime.host_preparation.available.v1')",&[]).unwrap().get::<_,i64>(0),0);
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.resident_sandboxes WHERE state='resident'",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        1
+    );
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_global_preparation_unlock_wakes_legitimate_waiter_on_another_host() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let run = run_scoped(
+        &store,
+        &mut db,
+        "other-host-run",
+        "other-host-session",
+        "other-host-environment",
+        profile(),
+    );
+    let (release, holder) = hold_host_preparation(&store);
+    let digest = run.original.environment_profile.digest().unwrap();
+    let mut request = run.request("other-host-execution", &digest);
+    request.host_id = "other-host";
+    let reason = store
+        .prepare_retained_instance_with_inventory(
+            &request,
+            shared_limits(),
+            || panic!("busy cannot collect"),
+            |_, _| panic!("busy cannot publish"),
+            |_| panic!("busy cannot create"),
+        )
+        .unwrap_err();
+    preparation_yield(&store, &mut db, &run, &reason);
+    release.send(()).unwrap();
+    holder.join().unwrap().unwrap();
+    assert_eq!(preparation_claim(&store, &mut db, &run).len(), 1);
+    let evidence:serde_json::Value=serde_json::from_str(&db.query_one("SELECT payload_json FROM runtime.runtime_events WHERE event_type='runtime.host_preparation.available.v1'",&[]).unwrap().get::<_,String>(0)).unwrap();
+    assert_eq!(evidence["hostId"], "host");
+    assert_eq!(evidence["scope"], "globalPreparation");
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_mixed_preparation_and_pressure_wake_rechecks_budget_without_self_loop() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let origin = fixture::run(&store, &mut db, "mixed-origin", 1);
+    let physical = Arc::new(Mutex::new(Vec::new()));
+    fixture::prepare(&store, &origin, "mixed-origin-execution", &physical).unwrap();
+    let mut pressure = run_scoped(
+        &store,
+        &mut db,
+        "mixed-pressure",
+        "mixed-pressure-session",
+        "mixed-pressure-environment",
+        origin.original.environment_profile.clone(),
+    );
+    let digest = pressure.original.environment_profile.digest().unwrap();
+    let try_pressure = |run: &fixture::Run| {
+        store.prepare_retained_instance_with_inventory(
+            &run.request("mixed-pressure-execution", &digest),
+            fixture::limits(&origin),
+            || {
+                Ok(ResidentInventory::declarations(
+                    physical.lock().unwrap().clone(),
+                ))
+            },
+            |_, _| panic!("pressure cannot publish"),
+            |_| panic!("pressure cannot create"),
+        )
+    };
+    let reason = try_pressure(&pressure).unwrap_err();
+    assert_eq!(reason, crate::resident_capacity::RESIDENT_CAPACITY_WAIT);
+    preparation_yield(&store, &mut db, &pressure, &reason);
+    let waiting = run_scoped(
+        &store,
+        &mut db,
+        "mixed-preparation",
+        "mixed-preparation-session",
+        "mixed-preparation-environment",
+        profile(),
+    );
+    let (release, holder) =
+        hold_host_preparation_with_inventory(&store, physical.lock().unwrap().clone());
+    let waiting_digest = waiting.original.environment_profile.digest().unwrap();
+    let reason = store
+        .prepare_retained_instance_with_inventory(
+            &waiting.request("mixed-preparation-execution", &waiting_digest),
+            shared_limits(),
+            || panic!("busy cannot collect"),
+            |_, _| panic!("busy cannot publish"),
+            |_| panic!("busy cannot create"),
+        )
+        .unwrap_err();
+    preparation_yield(&store, &mut db, &waiting, &reason);
+    release.send(()).unwrap();
+    holder.join().unwrap().unwrap();
+    assert_eq!(preparation_claim(&store, &mut db, &waiting).len(), 1);
+    let claim = preparation_claim(&store, &mut db, &pressure);
+    assert_eq!(
+        claim.len(),
+        1,
+        "global readiness may ask a pressure waiter to recheck; it grants no resident budget"
+    );
+    pressure.fence.lease_owner = claim[0].lease_owner.clone().unwrap();
+    let mut binding = pressure.grant.payload.clone();
+    let controller = binding.controller.as_mut().unwrap();
+    controller.controller_epoch += 1;
+    let mut hash = Sha256::new();
+    hash.update(b"workspace:environment-controller-lease:v1\0");
+    hash.update(pressure.fence.lease_owner.as_bytes());
+    controller.controller_lease_digest = format!("sha256:{:x}", hash.finalize());
+    db.execute("UPDATE public.app_core_sessionenvironment SET controller_epoch=$2,controller_lease_owner=$3 WHERE id=$1",&[&binding.environment_id,&controller.controller_epoch,&pressure.fence.lease_owner]).unwrap();
+    pressure.grant = fixture::sign(binding);
+    let before = db
+        .query_one(
+            "SELECT generation FROM runtime.resident_capacity_clock",
+            &[],
+        )
+        .unwrap()
+        .get::<_, i64>(0);
+    let reason = try_pressure(&pressure).unwrap_err();
+    assert_eq!(reason, crate::resident_capacity::RESIDENT_CAPACITY_WAIT);
+    preparation_yield(&store, &mut db, &pressure, &reason);
+    assert!(preparation_claim(&store, &mut db, &pressure).is_empty());
+    assert_eq!(
+        db.query_one(
+            "SELECT generation FROM runtime.resident_capacity_clock",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        before
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.resident_sandboxes WHERE state='resident'",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.execution_instances", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
+}

@@ -3,6 +3,7 @@ use centaeris_core::execution::ResidentResourceUsage;
 use crate::agent_run_authorization::SandboxResources;
 
 pub(crate) const RESIDENT_CAPACITY_WAIT: &str = "execution_resident_capacity_wait";
+pub(crate) const HOST_PREPARATION_WAIT: &str = "execution_host_preparation_wait";
 
 #[derive(Clone, Copy)]
 pub(crate) struct ResidentCapacity {

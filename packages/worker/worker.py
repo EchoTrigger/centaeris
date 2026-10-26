@@ -24,6 +24,7 @@ if AGENT_RUN_EXECUTION_MODE not in {"perRun", "retained"}:
     raise ValueError("AGENT_RUN_EXECUTION_MODE must be perRun or retained")
 LEASE_MS = int(os.environ.get("WORKER_LEASE_MS", "60000"))
 AGENT_RUN_LIFECYCLE_RECHECK_MS = int(os.environ.get("AGENT_RUN_LIFECYCLE_RECHECK_MS", "30000"))
+ENVIRONMENT_CONTROLLER_RECHECK_MS = 1000
 RUNTIME_JOB_WAIT_RECHECK_MS = 5 * 60 * 1000
 JOB_WAIT_MS = 20_000
 JOB_WAIT_HTTP_TIMEOUT_SECONDS = 25
@@ -42,6 +43,7 @@ except ValueError:
 if not 1 <= WORKER_SLOT_COUNT <= 16:
     raise ValueError("WORKER_SLOT_COUNT must be an integer between 1 and 16")
 AGENT_RUN_WAITING_TRANSITION_REASONS = {
+    "execution_host_preparation_wait",
     "execution_resident_capacity_wait",
     "runsc_environment_capacity_wait",
     "execution_recovery_checkpoint_committed",
@@ -556,7 +558,19 @@ def agent_run_lifecycle_binding(job):
 
 def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
     agent_run_id, digest = agent_run_lifecycle_binding(job)
-    resolved = resolve_agent_run_lifecycle(job, lease_owner, agent_run_id, digest)
+    try:
+        resolved = resolve_agent_run_lifecycle(job, lease_owner, agent_run_id, digest)
+    except RuntimeError as error:
+        # Another Run may have committed its Core terminal while its cleanup
+        # still owns this Environment. Keep that authority until real release.
+        if getattr(error, "http_status", None) != 409 or getattr(error, "http_error_code", None) not in {
+            "environment_controller_owned", "environment_controller_busy",
+        }:
+            raise
+        require_healthy_lease()
+        yield_job(job["jobId"], lease_owner, now_ms() + ENVIRONMENT_CONTROLLER_RECHECK_MS,
+                  "environment_controller_wait")
+        return False
     if resolved["disposition"] in {"terminal", "released"}:
         require_healthy_lease()
         finish_environment_agent_run(job, lease_owner, agent_run_id, digest, resolved, require_healthy_lease)
