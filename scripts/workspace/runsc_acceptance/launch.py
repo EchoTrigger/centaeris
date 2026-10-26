@@ -16,8 +16,20 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root',required=True,type=Path);parser.add_argument('--source',required=True,type=Path);parser.add_argument('--git-dir',type=Path)
     parser.add_argument('--api-port',type=int,default=18083);parser.add_argument('--runtime-port',type=int,default=19003);parser.add_argument('--execute',action='store_true')
+    parser.add_argument('--shared-workload',action='store_true')
+    parser.add_argument('--environment-count',type=int,default=4)
+    parser.add_argument('--iterations',type=int,default=3)
+    parser.add_argument('--work-units',type=int,default=2000)
+    parser.add_argument('--k6-binary',type=Path)
     for name in ('api','worker','runtime','general','postgres','redis'):parser.add_argument('--'+name+'-image',required=True)
     args=parser.parse_args()
+    if args.shared_workload and (args.k6_binary is None or not 2 <= args.environment_count <= 64
+            or not 1 <= args.iterations <= 20 or not 1 <= args.work_units <= 1000000):
+        parser.error('shared workload requires Linux k6 and bounded environment/iteration/work counts')
+    if args.shared_workload:
+        args.k6_binary=args.k6_binary.resolve(strict=True)
+        with args.k6_binary.open('rb') as stream:
+            if stream.read(6)!=b'\x7fELF\x02\x01':parser.error('shared workload requires Linux ELF64 k6')
     if not args.execute:parser.error('explicit --execute required for an owned disposable fixture')
     if os.name!='posix' or os.geteuid()!=0 or Path('/proc/self/ns/net').stat().st_ino==Path('/proc/1/ns/net').stat().st_ino:raise RuntimeError('run under Linux root unshare --net')
     if args.root.is_symlink():raise RuntimeError('owned root symlink rejected')
@@ -48,6 +60,7 @@ def main():
             return p.stdout
         tools=source/'scripts/workspace/runsc_acceptance';fixture=root/'fixture'
         argv=['python3','-B',str(tools/'prepare.py'),'--source',str(source),'--bins',str(bins),'--revision',build['sourceRevision'],'--build-manifest',str(manifest),'--tls-dir',str(tls),'--output',str(fixture),'--runsc-rotation','--isolation-owner',str(root/'owner.json'),'--docker-socket',str(root/'docker.sock'),'--host-socket-directory',str(root/'host'),'--api-port',str(args.api_port),'--runtime-port',str(args.runtime_port)]
+        if args.shared_workload:argv+=['--shared-workload','--environment-count',str(args.environment_count)]
         for name,image in images.items():argv+=['--'+name+'-image',image]
         call(argv);config=json.loads((fixture/'compose.json').read_text());docker.record(project=config['name'],sourceRevision=build['sourceRevision'])
         # The containing network namespace has no uplink. A non-internal bridge
@@ -74,7 +87,11 @@ def main():
                 if time.monotonic()>end:raise RuntimeError('owned API readiness failed')
                 time.sleep(.3)
         docker.record(status='product-twelve-runs');print(json.dumps({'phase':'product-twelve-runs'}),flush=True)
-        output=call(['python3','-B',str(source/'scripts/workspace/runsc_rotation_acceptance.py'),'--fixture',str(fixture),'--result',str(root/'results'),'--acknowledge-fixture-retirement'],1800)
+        if args.shared_workload:
+            output=call(['python3','-B',str(tools/'shared_workload.py'),'--fixture',str(fixture),'--result',str(root/'results'),
+                '--k6-binary',str(args.k6_binary),'--environment-count',str(args.environment_count),'--iterations',str(args.iterations),'--work-units',str(args.work_units)],1800)
+        else:
+            output=call(['python3','-B',str(source/'scripts/workspace/runsc_rotation_acceptance.py'),'--fixture',str(fixture),'--result',str(root/'results'),'--acknowledge-fixture-retirement'],1800)
         # Successful product retirement has removed both managed workloads.
         # Stop only this recorded supervisor and isolated process pair.
         if docker.run('ps','-aq','--filter','label=centaeris.managed=true').strip():raise RuntimeError('completed gate still has physical responsibility')

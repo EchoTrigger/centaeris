@@ -20,6 +20,7 @@ assert os.environ.get('AGENT_RUN_EXECUTION_MODE') == 'retained'
 assert not Workspace.objects.exists(), 'refusing to seed an existing workspace database'
 output = Path(settings.MEDIA_ROOT) / 'acceptance-seed.json'
 assert not output.exists(), 'refusing to replace fixture credentials'
+shared = os.environ.get('CENTAERIS_ACCEPTANCE_SHARED_WORKLOAD') == '1'
 email = 'retained-' + secrets.token_hex(8) + '@fixture.invalid'
 password = secrets.token_urlsafe(40)
 with transaction.atomic():
@@ -27,12 +28,12 @@ with transaction.atomic():
     workspace = Workspace.objects.create(name='Retained isolated acceptance', createdBy=user)
     WorkspaceMembership.objects.create(workspace=workspace, user=user, role='owner')
     provider = ModelProvider.objects.create(workspace=workspace, displayName='Owned deterministic fixture',
-        api='openai-completions', apiBase='https://model:8080/v1')
+        api=('openai-responses' if shared else 'openai-completions'), apiBase=('https://model:9999/v1' if shared else 'https://model:8080/v1'))
     ProviderCredential.objects.create(provider=provider, displayName='Synthetic fixture only',
         encryptedSecret=encrypt_credential_secret(secrets.token_urlsafe(40)),
         createdBy=user, updatedBy=user)
     model = ModelConfig.objects.create(provider=provider, displayName='Deterministic acceptance',
-        modelName='retained-acceptance', contextTokens=131072, maxOutputTokens=4096)
+        modelName=('perf-fixed-workload' if shared else 'retained-acceptance'), contextTokens=131072, maxOutputTokens=4096)
     agent = Agent.objects.create(workspace=workspace, owner=user, name='Acceptance task runner',
         instructions='Follow the acceptance prompt and invoke only the requested tools.',
         model_config=model)

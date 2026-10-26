@@ -274,7 +274,12 @@ def validate_evidence(evidence):
 
 
 class FixtureDriver:
-    def __init__(self, fixture, result_directory):
+    expected_running_limit = 1
+
+    def __init__(self, fixture, result_directory, *, expected_running_limit=1):
+        if type(expected_running_limit) is not int or not 1 <= expected_running_limit <= 64:
+            raise ValueError('bounded fixture running limit required')
+        self.expected_running_limit = expected_running_limit
         self.root = fixture.resolve(strict=True)
         self.manifest = json.loads((self.root / 'manifest.json').read_text())
         self.compose = self.root / 'compose.json'
@@ -291,9 +296,13 @@ class FixtureDriver:
         self.private = dict(line.split('=', 1) for line in (self.root / 'synthetic.env').read_text().splitlines() if line)
         runtime_env = {**self.private, **config['services']['runtime'].get('environment', {})}
         if (runtime_env.get('OCI_RUNTIME') != 'runsc'
-                or runtime_env.get('RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS') != '1'
+                or runtime_env.get('RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS') != str(expected_running_limit)
                 or int(runtime_env.get('RUNTIME_RUNSC_IDLE_PAUSE_MS', '0')) <= 0):
-            raise RuntimeError('fixture must explicitly select runsc, Docker, one running slot and automatic pause')
+            raise RuntimeError('fixture must explicitly select runsc, its expected running limit and automatic pause')
+        if expected_running_limit != 1 and (
+                runtime_env.get('RUNTIME_NATIVE_SHARED_ADMISSION') != '1'
+                or (self.manifest.get('sharedWorkload') or {}).get('environmentCount') != expected_running_limit):
+            raise RuntimeError('shared fixture admission and environment count mismatch')
         socket_mounts = [value.split(':/var/run/docker.sock')[0] for value in config['services']['runtime']['volumes']
                          if isinstance(value, str) and ':/var/run/docker.sock' in value]
         if len(socket_mounts) != 1 or not socket_mounts[0].startswith('/'):
@@ -429,8 +438,8 @@ with transaction.atomic():
                 or labels.get('centaeris.instance_id') != row['instanceId']):
             raise RuntimeError('observed container labels do not match durable identity')
         row['pids']=self.pid_metrics(row['containerId'],physical['Pid'],row['residentPids'])
-        if row['runningReservations'] > 1:
-            raise RuntimeError('one-slot running budget exceeded')
+        if row['runningReservations'] > self.expected_running_limit:
+            raise RuntimeError('fixture running budget exceeded')
         oracles = [extract_oracle(output) for output in row.pop('outputs') if 'RUNSC_ROTATION_ORACLE ' in output]
         row.update(label=label, agentRunId=admitted['agentRunId'], sessionId=admitted['sessionId'],
                    runtime=runtime, paused=physical['Paused'], running=physical['Running'])
@@ -470,8 +479,8 @@ with transaction.atomic():
   print(json.dumps(value))
 '''.replace('RUN', repr(admitted['agentRunId']))
         value = self.sql(code)
-        if value['runningReservations'] > 1:
-            raise RuntimeError('one-slot running budget exceeded')
+        if value['runningReservations'] > self.expected_running_limit:
+            raise RuntimeError('fixture running budget exceeded')
         return value
 
     def holder_started(self, admitted, expected_starts):
