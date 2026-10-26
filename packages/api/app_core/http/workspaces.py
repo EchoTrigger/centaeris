@@ -29,7 +29,6 @@ from app_core.models import (
     AgentCoordinationSession,
     Artifact,
     Session,
-    SessionEnvironment,
     SessionProject,
     ModelConfig,
     SessionAssetLink,
@@ -1327,12 +1326,6 @@ def create_session_message(
             return Status(404, {"error": "session_not_found"})
         if requested_session.agent.status == "deleted":
             return Status(410, {"error": "agent_deleted"})
-    if session_id != "new":
-        from ..native_archive import NativeArchiveBlocked, require_native_environment_profile
-        try:
-            require_native_environment_profile(requested_session.current_environment.environment_profile)
-        except NativeArchiveBlocked as error:
-            return Status(409, {"error": str(error)})
     try:
         published_version_for_agent(
             requested_agent if session_id == "new" else requested_session.agent, membership,
@@ -1432,11 +1425,6 @@ def create_session_message(
                     )
                 except Session.DoesNotExist:
                     return Status(404, {"error": "session_not_found"})
-                environment = SessionEnvironment.objects.select_for_update().get(pk=session.current_environment_id)
-                try:
-                    require_native_environment_profile(environment.environment_profile)
-                except NativeArchiveBlocked as error:
-                    raise AgentSessionCreationError(409, str(error)) from None
                 if session.agent.status == "deleted":
                     return Status(410, {"error": "agent_deleted"})
                 if payload.agent_id is not None and payload.agent_id != session.agent_id:

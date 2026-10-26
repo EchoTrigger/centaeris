@@ -1571,7 +1571,6 @@ class EnvironmentMaintenanceOperation(models.Model):
     container_id = models.CharField(max_length=64, null=True)
     host_id = models.CharField(max_length=160, null=True)
     allocation_execution_id = models.TextField(null=True)
-    provider_target = models.JSONField(null=True, default=None)
     profile_digest = models.CharField(max_length=71)
     request = models.JSONField()
     request_digest = models.CharField(max_length=71)
@@ -1585,22 +1584,18 @@ class EnvironmentMaintenanceOperation(models.Model):
             condition=models.Q(state="active", released_at__isnull=True)
                 | models.Q(state="released", released_at__isnull=False), name="maintenance_operation_state_valid"),
             models.CheckConstraint(condition=(models.Q(operation_kind='provision', instance_id__isnull=True,
-                container_id__isnull=True, host_id__isnull=True, allocation_execution_id__isnull=True, provider_target__isnull=True)
-                | models.Q(operation_kind='task', provider_target__isnull=False, instance_id__isnull=True,
-                    container_id__isnull=True, host_id__isnull=True, allocation_execution_id__isnull=True)
-                | (models.Q(operation_kind='task', provider_target__isnull=True, instance_id__isnull=False,
-                    container_id__isnull=False, host_id__isnull=False, allocation_execution_id__isnull=False)
+                container_id__isnull=True, host_id__isnull=True, allocation_execution_id__isnull=True)
+                | (models.Q(operation_kind='task', instance_id__isnull=False, container_id__isnull=False,
+                    host_id__isnull=False, allocation_execution_id__isnull=False)
                     & ~models.Q(instance_id='') & ~models.Q(container_id='') & ~models.Q(host_id='')
                     & ~models.Q(allocation_execution_id=''))), name='maintenance_operation_target_valid')]
 
     def save(self, *args, **kwargs):
-        if self.provider_target is not None:
-            raise ValueError("archived_provider_target_read_only")
         if self._state.adding:
             kwargs['force_insert'] = True
         else:
             fields = ("operation_kind", "workspace_id", "session_id", "environment_id", "instance_id", "container_id", "host_id",
-                      "allocation_execution_id", "profile_digest", "request", "request_digest", "provider_target")
+                      "allocation_execution_id", "profile_digest", "request", "request_digest")
             stored = type(self).objects.values(*fields).get(pk=self.pk)
             if any(stored[name] != getattr(self, name) for name in fields):
                 raise ValueError("maintenance_operation_immutable")
@@ -3102,55 +3097,3 @@ class PresentationChangeOutbox(models.Model):
     class Meta:
         constraints = [models.UniqueConstraint(fields=["key", "transactionId"],
             name="presentation_change_transaction_unique")]
-
-
-class ArchivedPublicationQuerySet(models.QuerySet):
-    def update(self, **kwargs):
-        raise ValueError("archived_publication_read_only")
-
-    def delete(self):
-        raise ValueError("archived_publication_read_only")
-
-    def bulk_create(self, *args, **kwargs):
-        raise ValueError("archived_publication_read_only")
-
-    def bulk_update(self, *args, **kwargs):
-        raise ValueError("archived_publication_read_only")
-
-
-class WorkspaceSnapshotPublication(models.Model):
-    """Durable write responsibility, distinct from recovery permission or GC authority."""
-    objects = ArchivedPublicationQuerySet.as_manager()
-    id = models.CharField(primary_key=True, max_length=96)
-    session = models.ForeignKey(Session, on_delete=models.PROTECT, related_name="snapshot_publications")
-    agent_run = models.ForeignKey(AgentRun, on_delete=models.PROTECT, related_name="snapshot_publications")
-    authorization = models.ForeignKey(AgentRunAuthorization, on_delete=models.PROTECT, related_name="snapshot_publications")
-    purpose = models.CharField(max_length=32)
-    purpose_key = models.CharField(max_length=64)
-    checkpoint_id = models.TextField(blank=True, default="")
-    storage_key = models.CharField(max_length=1000, blank=True, default="", db_index=True)
-    request_digest = models.CharField(max_length=71)
-    generation = models.PositiveBigIntegerField()
-    encoding = models.CharField(max_length=16)
-    snapshot_sha256 = models.CharField(max_length=71, blank=True, default="")
-    snapshot_size_bytes = models.PositiveBigIntegerField()
-    expanded_size_bytes = models.PositiveBigIntegerField()
-    file_count = models.PositiveIntegerField()
-    state = models.CharField(max_length=16, default="pending")
-    created_at = models.DateTimeField(auto_now_add=True)
-    confirmed_at = models.DateTimeField(null=True, default=None)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["agent_run", "purpose", "purpose_key"], name="unique_snapshot_publication_purpose"),
-            models.CheckConstraint(condition=models.Q(purpose__in=["sessionCommit", "executionCheckpoint"]), name="snapshot_publication_purpose_valid"),
-            models.CheckConstraint(condition=models.Q(encoding="frameV1"), name="snapshot_publication_encoding_valid"),
-            models.CheckConstraint(condition=(models.Q(state="pending", confirmed_at__isnull=True)
-                | models.Q(state__in=["staged", "committed"], confirmed_at__isnull=False)), name="snapshot_publication_confirmation_valid"),
-        ]
-
-    def save(self, *args, **kwargs):
-        raise ValueError("archived_publication_read_only")
-
-    def delete(self, *args, **kwargs):
-        raise ValueError("archived_publication_read_only")

@@ -91,8 +91,6 @@ def _translate_contention(operation):
 def _acquire_controller(run_id, lease_owner, purpose):
     def acquire():
         run, environment = _locked_binding(run_id, lease_owner, acquiring=purpose == "execute", lease_purpose="execute" if purpose == "execute" else None)
-        from .native_archive import require_native_environment_profile
-        require_native_environment_profile(environment.environment_profile)
         if purpose == "execute":
             from .session_event import committed_session_terminal_state
             if committed_session_terminal_state(run) is not None:

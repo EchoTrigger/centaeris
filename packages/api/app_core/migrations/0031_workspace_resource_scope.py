@@ -12,7 +12,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('app_core', '0031_merge_lifecycle_and_presentation'),
+        ('app_core', '0030_session_manual_unread'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

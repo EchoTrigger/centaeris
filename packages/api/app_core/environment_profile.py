@@ -74,8 +74,6 @@ def freeze_run_environment_profile(agent_run, image_digest):
         environment = SessionEnvironment.objects.select_for_update().get(pk=agent_run.environment_id)
         if session.current_environment_id != environment.pk or environment.session_id != session.pk:
             raise ValueError('environment_profile_binding_invalid')
-        from .native_archive import require_native_environment_profile
-        require_native_environment_profile(environment.environment_profile)
         if environment.environment_profile is None:
             if AgentRun.objects.filter(environment=environment).exclude(pk=agent_run.pk).exists():
                 raise ValueError('environment_profile_history_unavailable')

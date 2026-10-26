@@ -87,7 +87,7 @@ management. Audit records describe the action without secret values.
 
 ## Forward migration
 
-`0032_workspace_resource_scope` follows `0031_merge_lifecycle_and_presentation`.
+`0031_workspace_resource_scope` follows the published `0030_session_manual_unread`.
 It adds nullable workspace ownership to model providers and MCP credentials,
 adds explicit workspace Plugin installation bindings, and introduces uniqueness
 constraints for the platform and workspace scopes.
@@ -117,7 +117,7 @@ clearing or production execution command.
 
 ## Coordinated deployment boundary
 
-Apply schema migration 0032 and switch the matching API, Worker, and Runtime
+Apply schema migration 0031 and switch the matching API, Worker, and Runtime
 consumers together. Drain the old API and Worker consumers before enabling any
 workspace-local credential writes. Older scope-unaware lookups such as
 `filter(plugin_name=..., credential_ref=...).first()` can select a newly created
@@ -134,44 +134,6 @@ any separate rollback plan still require explicit operational authorization.
 
 A platform superuser can open `/settings/workspace-resources`, select an active workspace, and manage its local models, packages and credentials through the same scoped APIs. The operator-only metadata endpoint returns workspace IDs, names and status. It does not create memberships or grant access to private Sessions, Agents or Library objects. Ordinary workspace owners and administrators cannot use this cross-workspace browser.
 
-
-## Retained deployment history
-
-Native deployments retain the released snapshot-publication and maintenance-target
-schemas (0027, 0028 and their 0031 merge) before applying 0032. Their rows, signed
-payloads, provider targets, Session history and files are archival facts; the
-native API contains no producer or resumer for those previous provider operations.
-Every snapshot-publication reference retains its bytes, including committed rows,
-and ordinary GC cannot remove them after a Session purge.
-
-`verify_native_archive`, API startup and readiness refuse unresolved publication
-responsibilities, queued/running Runs on unsupported profiles, or unreleased old
-controllers. The matching Runtime independently refuses unsettled physical,
-creation, power and cleanup duties. Both barriers must pass; a released API
-controller alone does not prove physical retirement. Preflight failures require
-an explicit responsibility-resolution plan, not a data reset or invented terminal
-state.
-
-Owners retain authenticated read access to their historical Session metadata,
-transcript and published files. Starting another Run or maintenance operation on
-an unsupported environment returns
-`environment_profile_unsupported_create_new_environment`; create a fresh native
-environment instead. The old profile and execution identities remain unchanged.
-An archived transcript still uses the existing read-projection service; this
-bridge adds no provider executor or alternate Agent loop.
-
-
-A narrow read-only eligibility check also permits a known historical environment
-whose unreleased controller refers to a durably recorded failure before Session
-admission, when its original signed grant and canonical terminal lifecycle Job
-match and all physical-intent, allocation, holding, snapshot and active-lease
-checks prove no product-managed effects. This relies on the historical producer's
-mandatory durable creation journal before physical dispatch. Stop legacy API,
-Worker and Runtime/provider writers before evaluating eligibility and keep them
-stopped through native activation. A missing ledger, unknown schema, invalid
-signature, conflicting history or any effect record continues to block activation.
-
-Eligibility preserves the old controller flag, epoch, owner, Job, dead letter and
-failure record. It creates no cleanup or release receipt and grants no right to
-execute or clean up the unsupported old profile. The independent Runtime physical
-responsibility checks remain required.
+Experimental E2B databases are outside this released-schema migration path.
+Keep their data intact and validate a separate, bounded import into a native
+database before changing a deployment that used the experimental branch.

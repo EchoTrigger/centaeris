@@ -76,11 +76,6 @@ def _locked_environment(environment_id):
     environment = SessionEnvironment.objects.select_for_update().get(pk=environment_id)
     if environment.session_id != session.pk or session.workspace_id != workspace.pk:
         raise MaintenanceError('maintenance_environment_binding_invalid')
-    from .native_archive import NativeArchiveBlocked, require_native_environment_profile
-    try:
-        require_native_environment_profile(environment.environment_profile)
-    except NativeArchiveBlocked as error:
-        raise MaintenanceError(str(error)) from None
     return workspace, session, environment
 
 

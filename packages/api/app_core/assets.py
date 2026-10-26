@@ -257,9 +257,6 @@ def delete_stored_object(storage_key: str) -> None:
 def delete_stored_object_for_gc(storage_key: str) -> None:
     if not storage_key:
         raise ValueError("GC storage resource key is empty")
-    from .native_archive import archived_storage_key_is_referenced
-    if archived_storage_key_is_referenced(storage_key):
-        raise ValueError("storage_object_retained_by_archived_publication")
     if not default_storage.exists(storage_key):
         return
     default_storage.delete(storage_key)
