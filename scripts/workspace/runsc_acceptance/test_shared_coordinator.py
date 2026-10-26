@@ -169,7 +169,7 @@ class FixtureRunningLimitTests(unittest.TestCase):
 
 
 class DurableTimingTests(unittest.TestCase):
-    def report(self, events=None):
+    def report(self, events=None, *, availability=None, claim=None):
         utc = datetime.timezone.utc
         at = lambda millis: datetime.datetime.fromtimestamp(millis / 1000, utc)
         run = types.SimpleNamespace(id='run-a', createdAt=at(1000), startedAt=at(1100), completedAt=at(1800))
@@ -202,12 +202,23 @@ class DurableTimingTests(unittest.TestCase):
             def first(self):return self.value[0] if self.value else None
         if events is None:events=[(1,1150,'agent_run_execution_started',{}),(2,1200,'tool_call',{'callId':'call-a','toolName':'bash'}),(3,1400,'tool_result',{'callId':'call-a','toolName':'bash','resultState':'successWithOutput','modelContent':'private-command-content'})]
         rows=[{'agent_run':run,'session_level':False,'agent_run_sequence':seq,'createdAtMs':at_ms,'payload':{'type':kind,'payload':payload}} for seq,at_ms,kind,payload in events]
+        claim = claim if claim is not None else {'schema':'runtime.resident_capacity.claimed.v1','jobId':'agent_run.lifecycle:run-a','generation':2,'releaseRecordedAtMs':1050,'claimedAtMs':1080,'leaseOwner':'private-authority-not-exported'}
+        availability = availability or []
         class Cursor:
             def __enter__(self): return self
             def __exit__(self, *args): return False
-            def execute(self, sql, parameters=None): pass
-            def fetchone(self): return (1900,)
-            def fetchall(self): return [('agent_run.lifecycle:run-a', json.dumps({'jobId': 'agent_run.lifecycle:run-a', 'generation': 2, 'releaseRecordedAtMs': 1050, 'claimedAtMs': 1080, 'leaseOwner': 'private-authority-not-exported'}))]
+            def execute(self, sql, parameters=None):
+                if parameters is None:self.kind='setup'
+                elif parameters == ['run-a']:self.kind='cleanup'
+                elif len(parameters)>1 and parameters[1]=='runtime.resident_capacity.claimed.v1':self.kind='claims'
+                elif parameters[0]=='runtime.host_preparation.available.v1':self.kind='availability'
+                else:raise AssertionError('unexpected timing query')
+            def fetchone(self):
+                assert self.kind=='cleanup';return (1900,)
+            def fetchall(self):
+                if self.kind=='claims':return [('agent_run.lifecycle:run-a', json.dumps(claim))]
+                if self.kind=='availability':return availability
+                raise AssertionError('unexpected timing result query')
         modules = {'django.conf': types.SimpleNamespace(settings=types.SimpleNamespace(DATABASES={'default': {'NAME': 'retained_acceptance'}})),
                    'django.db': types.SimpleNamespace(transaction=types.SimpleNamespace(atomic=contextlib.nullcontext), connection=types.SimpleNamespace(cursor=Cursor)),
                    'app_core.models': types.SimpleNamespace(AgentRun=types.SimpleNamespace(objects=Query([run])),
@@ -252,5 +263,38 @@ class DurableTimingTests(unittest.TestCase):
                 self.assertIsNone(row['durableFirstSuccessfulToolResultCreatedAtMs'])
                 self.assertIsNone(row['executionFactToFirstToolResultMs'])
 
+
+    def preparation_fact(self, **changed):
+        fact={'schema':'runtime.host_preparation.available.v1','scope':'globalPreparation','hostId':'unlocking-host','generation':2,'availableAtMs':1050}
+        fact.update(changed)
+        return ('host_preparation_available:2','unlocking-host',1050,json.dumps(fact))
+
+    def test_host_preparation_unlock_is_not_reported_as_physical_resource_release(self):
+        report=self.report(availability=[self.preparation_fact()])
+        self.assertEqual(report['hostPreparationToClaimMs'],[30])
+        self.assertEqual(report['releaseToClaimMs'],'notObserved')
+        row=report['capacityClaims'][0]
+        self.assertEqual(row['wakeSource'],'hostPreparation')
+        self.assertEqual(row['hostId'],'unlocking-host')
+        self.assertEqual(row['hostPreparationToClaimMs'],30)
+        self.assertNotIn('releaseToClaimMs',row)
+
+    def test_physical_release_without_preparation_fact_keeps_release_timing(self):
+        report=self.report()
+        self.assertEqual(report['hostPreparationToClaimMs'],'notObserved')
+        self.assertEqual(report['releaseToClaimMs'],[30])
+        self.assertEqual(report['capacityClaims'][0]['wakeSource'],'physicalRelease')
+
+    def test_preparation_availability_requires_exact_generation_identity_and_time(self):
+        invalid=[self.preparation_fact(availableAtMs=1051),self.preparation_fact(hostId=''),
+                 self.preparation_fact(generation=3),self.preparation_fact(scope='hostLocal'),
+                 self.preparation_fact(schema='unsupported')]
+        correct=self.preparation_fact()
+        invalid.extend([('wrong-event',*correct[1:]),(correct[0],'other-host',*correct[2:]),(correct[0],correct[1],1049,correct[3])])
+        for fact in invalid:
+            with self.subTest(fact=fact),self.assertRaisesRegex(RuntimeError,'preparation availability'):
+                self.report(availability=[fact])
+        with self.assertRaisesRegex(RuntimeError,'preparation availability'):
+            self.report(availability=[correct,correct])
 
 if __name__ == '__main__': unittest.main()

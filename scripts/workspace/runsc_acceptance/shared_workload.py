@@ -174,14 +174,40 @@ with transaction.atomic():
    rows.append({'agentRunId':run.id,'createdAtMs':millis(run.createdAt),'startedAtMs':millis(run.startedAt),'completedAtMs':millis(run.completedAt),'durableFirstBashCallAtMs':first,'durableExecutionFactCreatedAtMs':execution_fact,'durableFirstSuccessfulToolResultCreatedAtMs':first_successful_result,'executionFactToFirstToolResultMs':execution_to_result,'businessReleaseAtMs':millis(release),'cleanupReceiptAtMs':cleanup[0] if cleanup else None,'runWallTimeMs':millis(run.completedAt)-millis(run.startedAt) if run.startedAt and run.completedAt else None})
   jobs={('agent_run.lifecycle:'+run_id):run_id for run_id in RUN_IDS}
   cursor.execute('SELECT task_id,payload_json FROM runtime.runtime_events WHERE task_id=ANY(%s) AND event_type=%s ORDER BY at_ms,event_id',[list(jobs),'runtime.resident_capacity.claimed.v1'])
-  claims=[]
+  validated_claims=[]
   for job_id,payload in cursor.fetchall():
    event=json.loads(payload) if isinstance(payload,str) else payload
-   released,claimed=event.get('releaseRecordedAtMs'),event.get('claimedAtMs')
-   if (event.get('jobId')!=job_id or job_id not in jobs or type(released) is not int or type(claimed) is not int or not 0<=released<=claimed):
+   released,claimed,generation=event.get('releaseRecordedAtMs'),event.get('claimedAtMs'),event.get('generation')
+   if (event.get('schema')!='runtime.resident_capacity.claimed.v1' or event.get('jobId')!=job_id or job_id not in jobs or type(generation) is not int or generation<0 or type(released) is not int or type(claimed) is not int or not 0<=released<=claimed):
     raise RuntimeError('capacity claim timing identity invalid')
-   claims.append({'agentRunId':jobs[job_id],'jobId':job_id,'generation':event.get('generation'),'releaseRecordedAtMs':released,'claimedAtMs':claimed,'releaseToClaimMs':claimed-released})
-  print(json.dumps({'schema':'runsc.shared.durable_timing.v1','toolTimingBasis':'committedSessionEvent.createdAtMs','rows':rows,'capacityClaims':claims,'releaseToClaimMs':[event['releaseToClaimMs'] for event in claims] if claims else 'notObserved','clientFirstToolLatency':'notObserved','resumeToFirstToolLatency':'notObserved'}))
+   validated_claims.append((job_id,event))
+  generations={event['generation'] for _,event in validated_claims}
+  preparations={}
+  if generations:
+   cursor.execute("SELECT event_id,task_id,at_ms,payload_json FROM runtime.runtime_events WHERE event_type=%s AND (event_id=ANY(%s) OR (payload_json::jsonb->>'generation')=ANY(%s))",['runtime.host_preparation.available.v1',['host_preparation_available:'+str(generation) for generation in sorted(generations)],[str(generation) for generation in sorted(generations)]])
+   for event_id,host_id,at_ms,payload in cursor.fetchall():
+    available=json.loads(payload) if isinstance(payload,str) else payload
+    if not isinstance(available,dict) or set(available)!={'schema','scope','hostId','generation','availableAtMs'}:
+     raise RuntimeError('host preparation availability identity invalid')
+    generation=available['generation']
+    if (available['schema']!='runtime.host_preparation.available.v1' or available['scope']!='globalPreparation' or type(generation) is not int or generation not in generations or generation in preparations or not isinstance(available['hostId'],str) or not available['hostId'].strip() or host_id!=available['hostId'] or event_id!='host_preparation_available:'+str(generation) or type(at_ms) is not int or type(available['availableAtMs']) is not int or at_ms!=available['availableAtMs'] or at_ms<0):
+     raise RuntimeError('host preparation availability identity invalid')
+    preparations[generation]=available
+  claims=[]
+  for job_id,event in validated_claims:
+   released,claimed,generation=event['releaseRecordedAtMs'],event['claimedAtMs'],event['generation']
+   row={'agentRunId':jobs[job_id],'jobId':job_id,'generation':generation,'claimedAtMs':claimed}
+   available=preparations.get(generation)
+   if available is not None:
+    if available['availableAtMs']!=released or available['availableAtMs']>claimed:
+     raise RuntimeError('host preparation availability timestamp mismatch')
+    row.update(wakeSource='hostPreparation',hostId=available['hostId'],availabilityScope=available['scope'],hostPreparationAvailableAtMs=available['availableAtMs'],hostPreparationToClaimMs=claimed-available['availableAtMs'])
+   else:
+    row.update(wakeSource='physicalRelease',releaseRecordedAtMs=released,releaseToClaimMs=claimed-released)
+   claims.append(row)
+  physical=[event['releaseToClaimMs'] for event in claims if event['wakeSource']=='physicalRelease']
+  preparation=[event['hostPreparationToClaimMs'] for event in claims if event['wakeSource']=='hostPreparation']
+  print(json.dumps({'schema':'runsc.shared.durable_timing.v1','toolTimingBasis':'committedSessionEvent.createdAtMs','rows':rows,'capacityClaims':claims,'releaseToClaimMs':physical if physical else 'notObserved','hostPreparationToClaimMs':preparation if preparation else 'notObserved','clientFirstToolLatency':'notObserved','resumeToFirstToolLatency':'notObserved'}))
 '''.replace('RUN_IDS', repr([record['agentRunId'] for record in admitted]))
     return driver.sql(code)
 
