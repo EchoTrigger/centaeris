@@ -81,7 +81,24 @@ class NativeObserver:
         self.manifest=Path(native_manifest);self.output=Path(output);self.expected=expected_environments
         self.expected_working=expected_environments if expected_working_environments is None else expected_working_environments
         if type(self.expected_working) is not int or not 1<=self.expected_working<=expected_environments:raise ValueError('working environment target must be within inventory count')
-        self.samples=[];self._stop=threading.Event();self._thread=None
+        self.samples=[];self._stop=threading.Event();self._thread=None;self._progress=None
+
+    def _probe_stage(self,stage,operation,io_stage):
+        self._progress.update(stage=stage,operation=operation,ioStage=io_stage)
+
+    def _probe_io(self,io_stage):
+        if self._progress is not None:self._progress['ioStage']=io_stage
+
+    def _probe_diagnostic(self,error):
+        progress=self._progress
+        if progress is None:return None
+        now=time.monotonic()
+        # Timings cover this entire sample; only fixed stages and counts are retained.
+        return {'stage':progress['stage'],'operation':progress['operation'],'ioStage':progress['ioStage'],
+                'elapsedMs':max(0,int((now-progress['started'])*1000)),
+                'remainingMs':max(0,int((progress['deadline']-now)*1000)),
+                'targetCount':progress['targetCount'],'completedTargetCount':progress['completedTargetCount'],
+                'exceptionType':type(error).__name__}
 
     def _docker(self,args,deadline):
         timeout=min(4,max(.1,deadline-time.monotonic()))
@@ -91,11 +108,14 @@ class NativeObserver:
         return value
 
     def _rpc(self,request,deadline):
+        self._probe_io('connect')
         with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as connection:
             connection.settimeout(min(2,max(.1,deadline-time.monotonic())))
             connection.connect(str(self.root/'host/control.sock'))
+            self._probe_io('send')
             connection.sendall(json.dumps({'schema':'environment.host.v1','request':request}).encode()+b'\n')
             data=bytearray()
+            self._probe_io('receive')
             while not data.endswith(b'\n'):
                 if time.monotonic()>=deadline:raise TimeoutError('host observation deadline')
                 connection.settimeout(min(2,max(.1,deadline-time.monotonic())))
@@ -103,19 +123,31 @@ class NativeObserver:
                 if not chunk:raise ValueError('truncated host observation')
                 data.extend(chunk)
                 if len(data)>4*1024*1024:raise ValueError('bounded host observation required')
+        self._probe_io('decode')
         result=json.loads(data)
+        self._probe_io('validate')
         if result.get('schema')!='environment.host.v1' or result.get('status')!='success':raise ValueError('host observation unavailable')
         return result['result']
 
     def _sample(self):
-        deadline=time.monotonic()+8
+        started=time.monotonic();deadline=started+8
+        # targetCount is inventory size; completedTargetCount counts Docker/task checks,
+        # never completed resource observations.
+        self._progress={'started':started,'deadline':deadline,'targetCount':0,'completedTargetCount':0}
+        self._probe_stage('dockerInventory','ps','subprocess')
         ids=self._docker(['ps','-aq','--no-trunc','--filter','label=centaeris.managed=true'],deadline).split()
+        self._progress['targetCount']=len(ids)
+        self._probe_io('validate')
         if len(ids)>64 or any(not re.fullmatch('[a-f0-9]{64}',item) for item in ids):raise ValueError('bounded exact managed inventory required')
         states={};targets=[]
         template='{"id":{{json .Id}},"image":{{json .Image}},"state":{{json .State}},"labels":{{json .Config.Labels}},"limits":{{json .HostConfig}}}'
         for container in ids:
+            self._probe_stage('dockerInspect','inspect','subprocess')
             if self._stop.is_set():raise InterruptedError('observer stopped')
-            facts=json.loads(self._docker(['inspect','--format',template,container],deadline));labels=facts['labels']
+            raw=self._docker(['inspect','--format',template,container],deadline)
+            self._probe_io('decode')
+            facts=json.loads(raw);labels=facts['labels']
+            self._probe_io('validate')
             if facts['id']!=container or labels.get('centaeris.managed')!='true' or facts['limits']['Runtime']!='runsc':raise ValueError('managed target mismatch')
             limits=facts['limits']
             if limits['Memory']!=4*1024**3 or limits['CpuPeriod']!=100000 or limits['CpuQuota']!=200000 or limits['PidsLimit']!=512:
@@ -125,6 +157,7 @@ class NativeObserver:
                     'imageDigest':facts['image']}
             inspection=None
             if facts['state']['Running'] and not facts['state']['Paused']:
+                self._probe_stage('taskInspection','inspect','connect')
                 response=self._rpc({'operation':'inspect','environmentInstanceId':target['environmentInstanceId']},deadline)
                 if response.get('kind')!='inspection':raise ValueError('task inspection response invalid')
                 inspection=response['inspection']
@@ -133,7 +166,10 @@ class NativeObserver:
                                'inspection':inspection,'caps':{'memoryBytes':facts['limits']['Memory'],
                                'cpuMilli':facts['limits']['CpuQuota']*1000//facts['limits']['CpuPeriod'],
                                'pids':facts['limits']['PidsLimit']},'agentRunId':labels.get('centaeris.agent_run_id')}
+            self._progress['completedTargetCount']=len(targets)
+        self._probe_stage('resourceObservation','observeResources','connect')
         result=self._rpc({'operation':'observeResources','expectedHostId':self.host_id,'targets':targets},deadline)
+        self._probe_stage('sampleValidation','validate','validate')
         if result.get('kind')!='resourceObservation':raise ValueError('resource observation response invalid')
         observation=result['observation']
         if (observation.get('schema')!='native.host.resources.v1' or observation.get('hostId')!=self.host_id
@@ -164,8 +200,12 @@ class NativeObserver:
         with self.output.open('x',encoding='utf-8') as output:
             while not self._stop.is_set():
                 started=time.monotonic()
+                self._progress=None
                 try:sample=self._sample()
-                except Exception as error:sample={'schema':'workspace.perf.native_sample.v1','state':'unknown','reason':'resource_probe_'+type(error).__name__.lower()}
+                except Exception as error:
+                    sample={'schema':'workspace.perf.native_sample.v1','state':'unknown','reason':'resource_probe_'+type(error).__name__.lower()}
+                    diagnostic=self._probe_diagnostic(error)
+                    if diagnostic is not None:sample['diagnostic']=diagnostic
                 self.samples.append(sample);output.write(json.dumps(sample)+'\n');output.flush()
                 if len(self.samples)>=1800:self._stop.set();break
                 self._stop.wait(max(0,1-(time.monotonic()-started)))

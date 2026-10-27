@@ -84,4 +84,99 @@ class NativeCollectorPausedTests(unittest.TestCase):
         self.assertEqual([request['operation'] for request in requests],['observeResources'])
         self.assertTrue(sample['states'][cid]['paused']);self.assertIsNone(sample['states'][cid]['inspection'])
 
+class NativeCollectorDiagnosticTests(unittest.TestCase):
+    def collect_timeout(self, operation, io_stage='receive', target_count=2):
+        import io
+        import json
+        from unittest.mock import patch
+        spec=importlib.util.spec_from_file_location('native_diagnostic_subject',SOURCE)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        observer=module.NativeObserver('/manifest','/output',target_count)
+        observer.root=Path('/private-sensitive-root');observer.host_id='sensitive-host'
+        class MemoryOutput:
+            def open(self,*args,**kwargs):return io.StringIO()
+        observer.output=MemoryOutput()
+        ids=[format(index+1,'064x') for index in range(target_count)]
+        clock=[100.0];requests=[]
+        def docker(args,deadline):
+            clock[0]+=.125
+            if args[0]=='ps':return ' '.join(ids)
+            cid=args[-1]
+            return json.dumps({'id':cid,'image':'sha256:'+'a'*64,
+                'state':{'Running':True,'Paused':False},
+                'labels':{'centaeris.managed':'true','centaeris.environment_id':'sensitive-environment',
+                    'centaeris.instance_id':'sensitive-instance','centaeris.environment_profile_digest':'sha256:'+'b'*64,
+                    'centaeris.agent_run_id':'sensitive-run','private-label':'sensitive-label'},
+                'limits':{'Runtime':'runsc','Memory':4*1024**3,'CpuQuota':200000,'CpuPeriod':100000,'PidsLimit':512}})
+        observer._docker=docker
+        planned=iter(['inspect']*target_count+['observeResources'])
+        class Socket:
+            def __init__(self):self.operation=next(planned)
+            def __enter__(self):return self
+            def __exit__(self,*args):return False
+            def settimeout(self,value):pass
+            def step(self,stage):
+                clock[0]+=.25
+                if self.operation==operation and stage==io_stage:
+                    observer._stop.set()
+                    raise TimeoutError('sensitive-error token=password request-body')
+            def connect(self,path):self.step('connect')
+            def sendall(self,data):
+                requests.append(json.loads(data));self.step('send')
+            def recv(self,size):
+                self.step('receive')
+                return json.dumps({'schema':'environment.host.v1','status':'success',
+                    'result':{'kind':'inspection','inspection':{'schema':'environment.task.store.inspection.v2',
+                        'instanceId':'sensitive-instance','activeTasks':1}}}).encode()+b'\n'
+        with patch.object(module.time,'monotonic',side_effect=lambda:clock[0]), \
+                patch.object(module.socket,'AF_UNIX',1,create=True), \
+                patch.object(module.socket,'socket',side_effect=lambda *_:Socket()):
+            observer._loop()
+        self.assertEqual(len(observer.samples),1)
+        return module,observer.samples[0],requests
+
+    def test_timeout_diagnostics_distinguish_task_inspection_from_resource_observation(self):
+        import json
+        for operation,stage,completed in [('inspect','taskInspection',0),('observeResources','resourceObservation',2)]:
+            with self.subTest(operation=operation):
+                _,sample,requests=self.collect_timeout(operation)
+                self.assertEqual(sample['state'],'unknown')
+                self.assertEqual(sample['reason'],'resource_probe_timeouterror')
+                self.assertEqual(set(sample),{'schema','state','reason','diagnostic'})
+                diagnostic=sample['diagnostic']
+                self.assertEqual(set(diagnostic),{'stage','operation','ioStage','elapsedMs','remainingMs',
+                    'targetCount','completedTargetCount','exceptionType'})
+                self.assertEqual(diagnostic['stage'],stage)
+                self.assertEqual(diagnostic['operation'],operation)
+                self.assertEqual(diagnostic['ioStage'],'receive')
+                self.assertEqual(diagnostic['exceptionType'],'TimeoutError')
+                self.assertEqual(diagnostic['targetCount'],2)
+                self.assertEqual(diagnostic['completedTargetCount'],completed)
+                self.assertGreater(diagnostic['elapsedMs'],0)
+                self.assertGreaterEqual(diagnostic['remainingMs'],0)
+                self.assertLessEqual(abs(diagnostic['elapsedMs']+diagnostic['remainingMs']-8000),1)
+                self.assertTrue(requests)
+                encoded=json.dumps(sample)
+                for secret in ('sensitive-','password','request-body','targets','environmentInstanceId','private-label'):
+                    self.assertNotIn(secret,encoded)
+
+    def test_timeout_diagnostics_keep_connect_and_send_failures_distinct(self):
+        for io_stage in ('connect','send'):
+            with self.subTest(io_stage=io_stage):
+                _,sample,_=self.collect_timeout('inspect',io_stage)
+                self.assertEqual(sample['reason'],'resource_probe_timeouterror')
+                self.assertEqual(sample['diagnostic']['stage'],'taskInspection')
+                self.assertEqual(sample['diagnostic']['ioStage'],io_stage)
+                self.assertEqual(sample['diagnostic']['completedTargetCount'],0)
+
+    def test_completed_targets_on_failed_sample_are_diagnostic_only(self):
+        module,sample,_=self.collect_timeout('observeResources',target_count=4)
+        self.assertEqual(sample['diagnostic']['completedTargetCount'],4)
+        self.assertNotIn('states',sample);self.assertNotIn('host',sample)
+        report=module.summarize([sample,sample,sample],4)
+        self.assertEqual(report['physicalOverlap'],'notObserved')
+        self.assertEqual(report['peakWorkingEnvironments'],0)
+        self.assertEqual(report['consecutiveWorkingIntervals'],0)
+        self.assertEqual(report['unknownReasons'],['resource_probe_timeouterror'])
+
 if __name__=='__main__':unittest.main()
