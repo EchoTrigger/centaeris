@@ -154,5 +154,6 @@
   "postgres_store::integration_tests::shared_admission_tests::postgres_real_resident_pressure_does_not_wake_itself_on_preparation_unlock",
   "postgres_store::integration_tests::shared_admission_tests::postgres_preparation_unlock_before_registration_rechecks_instead_of_losing_wake",
   "postgres_store::integration_tests::shared_admission_tests::postgres_preparation_unlock_before_yield_is_durable_and_contention_fact_is_idempotent",
-  "postgres_store::integration_tests::shared_admission_tests::postgres_mixed_preparation_and_pressure_wake_rechecks_budget_without_self_loop"
+  "postgres_store::integration_tests::shared_admission_tests::postgres_mixed_preparation_and_pressure_wake_rechecks_budget_without_self_loop",
+  "postgres_store::integration_tests::retained_instance_tests::preparation_tests::postgres_four_environment_initializations_overlap_with_shared_authority"
 ]

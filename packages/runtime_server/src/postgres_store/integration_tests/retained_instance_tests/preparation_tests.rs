@@ -223,6 +223,248 @@ fn postgres_confirmed_resident_initialization_does_not_hold_global_preparation()
 
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_four_environment_initializations_overlap_with_shared_authority() {
+    use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let (url, store, mut db) = setup();
+    let first = run(&store, &mut db, "four-initialize-0", 1);
+    let profile = first.original.environment_profile.clone();
+    let mut runs = vec![Arc::new(first)];
+    for index in 1..4 {
+        runs.push(Arc::new(super::super::shared_admission_tests::run_scoped(
+            &store,
+            &mut db,
+            &format!("four-initialize-{index}"),
+            &format!("four-session-{index}"),
+            &format!("four-environment-{index}"),
+            profile.clone(),
+        )));
+    }
+    let one = declared_usage(profile.resources.sandbox_resources());
+    let two = one.checked_add(one).unwrap();
+    let four = two.checked_add(two).unwrap();
+    // This test isolates preparation locks with four declared resource charges.
+    // The measured-resource admission tests independently protect shared budgets.
+    let capacity = ResidentCapacity {
+        global: four,
+        tenant: four,
+        host: four,
+    };
+    let stores: Vec<_> = (0..4)
+        .map(|_| PostgresRuntimeStore::new(&url).unwrap())
+        .collect();
+    let physical = Arc::new(Mutex::new(Vec::new()));
+    let active = Arc::new(AtomicUsize::new(0));
+    let backends = Arc::new((0..4).map(|_| AtomicI32::new(0)).collect::<Vec<_>>());
+    let inventory_counts = Arc::new(
+        (0..4)
+            .map(|_| AtomicUsize::new(usize::MAX))
+            .collect::<Vec<_>>(),
+    );
+    let jobs: Vec<_> = runs.iter().map(|run| run.fence.job_id.clone()).collect();
+    let retry_counts = |db: &mut Client| {
+        db.query("SELECT job_id,retry_count FROM runtime.runtime_jobs WHERE job_id=ANY($1) ORDER BY job_id", &[&jobs])
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.get::<_, String>(0), row.get::<_, i64>(1)))
+            .collect::<Vec<_>>()
+    };
+    let retries_before = retry_counts(&mut db);
+    assert_eq!(retries_before.len(), 4);
+    let (entered_tx, entered_rx) = mpsc::sync_channel(4);
+    let mut releases = Vec::new();
+    let mut threads = Vec::new();
+
+    // A failed assertion must release and join every holder before the test
+    // resumes unwinding, so later tests cannot inherit these authority pins.
+    let held_checks = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for (index, thread_store) in stores.into_iter().enumerate() {
+            let current = runs[index].clone();
+            let thread_physical = physical.clone();
+            let thread_active = active.clone();
+            let thread_backends = backends.clone();
+            let thread_counts = inventory_counts.clone();
+            let entered = entered_tx.clone();
+            let (release_tx, release_rx) = mpsc::sync_channel(1);
+            releases.push(release_tx);
+            threads.push(std::thread::spawn(move || {
+                let _deadline = crate::postgres_store::RequestDeadline::enter(Some(
+                    std::time::Instant::now() + Duration::from_secs(20),
+                ));
+                let digest = current.original.environment_profile.digest().unwrap();
+                thread_store.prepare_retained_instance_then_initialize(
+                    &current.request(&format!("four-execution-{index}"), &digest),
+                    capacity,
+                    || {
+                        let sandboxes = thread_physical.lock().unwrap().clone();
+                        thread_counts[index].store(sandboxes.len(), Ordering::SeqCst);
+                        Ok(crate::resident_capacity::ResidentInventory {
+                            sandboxes,
+                            shared: Some(crate::resident_capacity::SharedHostInventory {
+                                host_id: "host".into(),
+                                available_memory_bytes: four.memory_bytes.saturating_mul(2),
+                                memory_headroom_bytes: 1,
+                                valid_until: std::time::Instant::now() + Duration::from_secs(5),
+                                measured_by_container: std::collections::BTreeMap::new(),
+                            }),
+                        })
+                    },
+                    |client, _| {
+                        let pid = client
+                            .query_one("SELECT pg_backend_pid()", &[])
+                            .map_err(|error| error.to_string())?
+                            .get::<_, i32>(0);
+                        thread_backends[index].store(pid, Ordering::SeqCst);
+                        Ok(())
+                    },
+                    |allocation| confirm(&current, allocation, &thread_physical),
+                    move |_| {
+                        thread_active.fetch_add(1, Ordering::SeqCst);
+                        let result = entered
+                            .send(index)
+                            .map_err(|error| error.to_string())
+                            .and_then(|()| {
+                                release_rx
+                                    .recv_timeout(Duration::from_secs(30))
+                                    .map_err(|error| error.to_string())
+                            });
+                        thread_active.fetch_sub(1, Ordering::SeqCst);
+                        result
+                    },
+                )
+            }));
+            assert_eq!(
+                entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+                index
+            );
+            assert_eq!(active.load(Ordering::SeqCst), index + 1);
+        }
+        assert_eq!(active.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            inventory_counts
+                .iter()
+                .map(|count| count.load(Ordering::SeqCst))
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        let pids: Vec<_> = backends
+            .iter()
+            .map(|pid| pid.load(Ordering::SeqCst))
+            .collect();
+        assert!(pids.iter().all(|pid| *pid > 0));
+        assert_eq!(
+            pids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            4
+        );
+        assert_eq!(db.query_one("SELECT count(*) FROM pg_stat_activity WHERE pid=ANY($1) AND state='idle in transaction'", &[&pids]).unwrap().get::<_, i64>(0), 4);
+        let instances = db.query_one("SELECT count(*),count(DISTINCT instance_id),count(DISTINCT environment_id),count(DISTINCT session_id) FROM runtime.execution_instances", &[]).unwrap();
+        for field in 0..4 {
+            assert_eq!(instances.get::<_, i64>(field), 4);
+        }
+        let residents = db.query_one("SELECT count(*),count(DISTINCT instance_id),sum(memory_bytes)::bigint,sum(cpu_milli)::bigint,sum(pids)::bigint,sum(workspace_bytes)::bigint FROM runtime.resident_sandboxes WHERE state='resident'", &[]).unwrap();
+        assert_eq!(residents.get::<_, i64>(0), 4);
+        assert_eq!(residents.get::<_, i64>(1), 4);
+        for (field, expected) in [
+            (2, four.memory_bytes),
+            (3, four.cpu_milli),
+            (4, four.pids),
+            (5, four.workspace_bytes),
+        ] {
+            assert_eq!(residents.get::<_, i64>(field), expected as i64);
+        }
+        assert_eq!(db.query_one("SELECT count(*) FROM runtime.environment_creation_attempts WHERE state='dispatched'", &[]).unwrap().get::<_, i64>(0), 4);
+        let bindings = db.query_one("SELECT count(*),count(DISTINCT workspace_id),count(DISTINCT user_id),count(DISTINCT membership_ref),count(DISTINCT session_id),count(DISTINCT environment_id) FROM public.app_core_agentrun", &[]).unwrap();
+        assert_eq!(
+            (0..6)
+                .map(|field| bindings.get::<_, i64>(field))
+                .collect::<Vec<_>>(),
+            vec![4, 1, 1, 1, 4, 4]
+        );
+        let digest = runs[0].original.environment_profile.digest().unwrap();
+        let duplicate = {
+            let _deadline = crate::postgres_store::RequestDeadline::enter(Some(
+                std::time::Instant::now() + Duration::from_secs(1),
+            ));
+            store.prepare_retained_instance(
+                &runs[0].request("four-execution-0", &digest),
+                capacity,
+                || panic!("same-environment duplicate reached inventory"),
+                |_, _| panic!("same-environment duplicate published another fact"),
+                |_| panic!("same-environment duplicate repeated physical work"),
+            )
+        };
+        assert_eq!(
+            duplicate.unwrap_err(),
+            crate::resident_capacity::HOST_PREPARATION_WAIT
+        );
+        assert_eq!(retry_counts(&mut db), retries_before);
+        let mut rival = Client::connect(&url, NoTls).unwrap();
+        rival
+            .batch_execute("SET lock_timeout='150ms'; SET statement_timeout='2s'")
+            .unwrap();
+        let revoke = rival
+            .execute(
+                "UPDATE public.app_core_workspacemembership SET role='revoked' WHERE id='member'",
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(
+            revoke.code(),
+            Some(&postgres::error::SqlState::LOCK_NOT_AVAILABLE)
+        );
+        assert_eq!(active.load(Ordering::SeqCst), 4);
+    }));
+    for release in releases {
+        let _ = release.try_send(());
+    }
+    let results: Vec<_> = threads.into_iter().map(|thread| thread.join()).collect();
+    if let Err(panic) = held_checks {
+        std::panic::resume_unwind(panic);
+    }
+    for result in results {
+        result.unwrap().unwrap();
+    }
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert_eq!(physical.lock().unwrap().len(), 4);
+    assert_eq!(retry_counts(&mut db), retries_before);
+    db.execute(
+        "UPDATE public.app_core_workspacemembership SET role='revoked' WHERE id='member'",
+        &[],
+    )
+    .unwrap();
+    let digest = runs[0].original.environment_profile.digest().unwrap();
+    let revoked = store.prepare_retained_instance(
+        &runs[0].request("four-execution-0", &digest),
+        capacity,
+        || panic!("revoked membership reached inventory"),
+        |_, _| panic!("revoked membership published a fact"),
+        |_| panic!("revoked membership reached physical work"),
+    );
+    assert_eq!(revoked.unwrap_err(), "retained membership rejected");
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.resident_sandboxes WHERE state='resident'",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        4
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.environment_creation_attempts WHERE state='dispatched'",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        4
+    );
+    assert_eq!(physical.lock().unwrap().len(), 4);
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_initialization_failure_preserves_confirmed_resident_and_dispatch_responsibility() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let (_url, store, mut db) = setup();
