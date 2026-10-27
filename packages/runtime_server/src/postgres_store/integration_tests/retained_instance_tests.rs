@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 
 pub(super) const KEY: &[u8] = b"retained-test-key";
 mod allocation_mode_tests;
+mod authorization_digest_tests;
 mod cleanup_authority_tests;
 mod cleanup_receipt_tests;
 mod lease_contention_tests;

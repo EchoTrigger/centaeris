@@ -4,6 +4,8 @@ use sha2::{Digest, Sha256};
 
 use crate::agent_run_authorization::WorkspaceAgentRunAuthorization;
 
+#[cfg(test)]
+pub(crate) mod digest_observation;
 pub(crate) mod maintenance;
 pub(crate) mod provision;
 
@@ -112,7 +114,7 @@ pub(crate) struct EnvironmentAuthorization {
 }
 
 impl EnvironmentBinding {
-    pub(crate) fn digest(&self) -> Result<String, String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         match (&*self.schema, &*self.execution_mode, &self.controller) {
             ("workspace.environment_authorization.v1", "perRun" | "retained", Some(controller)) => {
                 if controller.controller_id != self.agent_run_id
@@ -157,9 +159,16 @@ impl EnvironmentBinding {
         {
             return Err("environment_authorization_digest_invalid".into());
         }
+        Ok(())
+    }
+
+    pub(crate) fn digest(&self) -> Result<String, String> {
+        self.validate()?;
         let canonical = crate::agent_run_authorization::canonical_json(
             serde_json::to_value(self).map_err(|e| e.to_string())?,
         )?;
+        #[cfg(test)]
+        digest_observation::environment_binding(canonical.len());
         Ok(format!("sha256:{:x}", Sha256::digest(canonical.as_bytes())))
     }
 }

@@ -41,7 +41,7 @@ pub(crate) fn verify_controller_authority(
     r: &ControllerAuthorityRequest<'_>,
 ) -> Result<VerifiedOriginalGrant, String> {
     let b = &r.environment_authorization.payload;
-    b.digest()?;
+    b.validate()?;
     let c = b
         .controller
         .as_ref()
@@ -161,9 +161,10 @@ pub(crate) fn verify_controller_authority(
             .ok_or("environment_profile_missing")?,
     )
     .map_err(|_| "environment_profile_invalid")?;
+    // checked_binding already validated the original profile and its digest.
+    // Exact profile equality binds the persisted copy to that verified result.
     if bound_profile != original.environment_profile
         || env.get::<_, Option<String>>(7).as_deref() != Some(&original.environment_profile_digest)
-        || bound_profile.digest()? != original.environment_profile_digest
     {
         return Err("environment_profile_binding_rejected".into());
     }

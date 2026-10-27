@@ -88,6 +88,8 @@ impl EnvironmentProfile {
         let value =
             serde_json::to_value(self).map_err(|_| "benchmark profile serialization failed")?;
         let canonical = canonical_json(value)?;
+        #[cfg(test)]
+        crate::environment_authorization::digest_observation::environment_profile(canonical.len());
         Ok(format!("sha256:{:x}", Sha256::digest(canonical.as_bytes())))
     }
 }

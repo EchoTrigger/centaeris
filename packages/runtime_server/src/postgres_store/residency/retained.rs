@@ -7,7 +7,7 @@ fn verify_controller(
     tx: &mut postgres::Transaction<'_>,
     r: &RetainedInstanceRequest<'_>,
 ) -> Result<(), String> {
-    r.environment_authorization.payload.digest()?;
+    r.environment_authorization.payload.validate()?;
     if r.execution_id.trim().is_empty()
         || r.host_id.trim().is_empty()
         || !r.profile_digest.strip_prefix("sha256:").is_some_and(|h| {
