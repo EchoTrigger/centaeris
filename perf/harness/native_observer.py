@@ -9,6 +9,19 @@ import threading
 import time
 
 
+# Only fixed public error codes may enter diagnostics; never retain host error text.
+_HOST_ERROR_CODES=frozenset({
+    'host_request_invalid','host_schema_unsupported','host_target_invalid',
+    'host_path_unavailable','host_path_untrusted','host_state_unavailable',
+    'host_state_invalid','host_state_oversized','host_registered_target_changed',
+    'host_retirement_pending','host_target_unknown','host_target_identity_rejected',
+    'host_runtime_identity_rejected','host_power_unknown','host_command_failed',
+    'host_command_timeout','host_command_response_invalid','host_probe_timeout',
+    'host_probe_failed','host_probe_cancelled','host_probe_busy','task_index_unavailable',
+    'task_index_invalid','task_index_unsupported_schema',
+})
+
+
 def _module(name, path):
     spec=importlib.util.spec_from_file_location(name,path)
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
@@ -93,12 +106,23 @@ class NativeObserver:
         progress=self._progress
         if progress is None:return None
         now=time.monotonic()
-        # Timings cover this entire sample; only fixed stages and counts are retained.
-        return {'stage':progress['stage'],'operation':progress['operation'],'ioStage':progress['ioStage'],
+        # Timings cover this entire sample; response details are fixed categories/codes.
+        diagnostic={'stage':progress['stage'],'operation':progress['operation'],'ioStage':progress['ioStage'],
                 'elapsedMs':max(0,int((now-progress['started'])*1000)),
                 'remainingMs':max(0,int((progress['deadline']-now)*1000)),
                 'targetCount':progress['targetCount'],'completedTargetCount':progress['completedTargetCount'],
                 'exceptionType':type(error).__name__}
+        for key in ('responseFailure','hostErrorCode'):
+            if key in progress:diagnostic[key]=progress[key]
+        return diagnostic
+
+    def _response_failure(self,failure,host_error=None):
+        if self._progress is not None:
+            self._progress['responseFailure']=failure
+            if failure=='hostError':
+                self._progress['hostErrorCode']=(host_error if type(host_error) is str
+                    and host_error in _HOST_ERROR_CODES else 'unknown')
+        raise ValueError('host observation unavailable')
 
     def _docker(self,args,deadline):
         timeout=min(4,max(.1,deadline-time.monotonic()))
@@ -126,7 +150,10 @@ class NativeObserver:
         self._probe_io('decode')
         result=json.loads(data)
         self._probe_io('validate')
-        if result.get('schema')!='environment.host.v1' or result.get('status')!='success':raise ValueError('host observation unavailable')
+        if not isinstance(result,dict) or result.get('schema')!='environment.host.v1':
+            self._response_failure('schemaMismatch')
+        if result.get('status')=='error':self._response_failure('hostError',result.get('error'))
+        if result.get('status')!='success':self._response_failure('statusInvalid')
         return result['result']
 
     def _sample(self):
@@ -159,7 +186,7 @@ class NativeObserver:
             if facts['state']['Running'] and not facts['state']['Paused']:
                 self._probe_stage('taskInspection','inspect','connect')
                 response=self._rpc({'operation':'inspect','environmentInstanceId':target['environmentInstanceId']},deadline)
-                if response.get('kind')!='inspection':raise ValueError('task inspection response invalid')
+                if not isinstance(response,dict) or response.get('kind')!='inspection':self._response_failure('resultKindMismatch')
                 inspection=response['inspection']
             targets.append(target)
             states[container]={'running':facts['state']['Running'],'paused':facts['state']['Paused'],
@@ -170,7 +197,7 @@ class NativeObserver:
         self._probe_stage('resourceObservation','observeResources','connect')
         result=self._rpc({'operation':'observeResources','expectedHostId':self.host_id,'targets':targets},deadline)
         self._probe_stage('sampleValidation','validate','validate')
-        if result.get('kind')!='resourceObservation':raise ValueError('resource observation response invalid')
+        if not isinstance(result,dict) or result.get('kind')!='resourceObservation':self._response_failure('resultKindMismatch')
         observation=result['observation']
         if (observation.get('schema')!='native.host.resources.v1' or observation.get('hostId')!=self.host_id
                 or observation.get('bootId')!=Path('/proc/sys/kernel/random/boot_id').read_text().strip()

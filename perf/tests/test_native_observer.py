@@ -85,7 +85,7 @@ class NativeCollectorPausedTests(unittest.TestCase):
         self.assertTrue(sample['states'][cid]['paused']);self.assertIsNone(sample['states'][cid]['inspection'])
 
 class NativeCollectorDiagnosticTests(unittest.TestCase):
-    def collect_timeout(self, operation, io_stage='receive', target_count=2):
+    def collect_timeout(self, operation, io_stage='receive', target_count=2, response=None):
         import io
         import json
         from unittest.mock import patch
@@ -117,7 +117,7 @@ class NativeCollectorDiagnosticTests(unittest.TestCase):
             def settimeout(self,value):pass
             def step(self,stage):
                 clock[0]+=.25
-                if self.operation==operation and stage==io_stage:
+                if self.operation==operation and stage==io_stage and response is None:
                     observer._stop.set()
                     raise TimeoutError('sensitive-error token=password request-body')
             def connect(self,path):self.step('connect')
@@ -125,6 +125,9 @@ class NativeCollectorDiagnosticTests(unittest.TestCase):
                 requests.append(json.loads(data));self.step('send')
             def recv(self,size):
                 self.step('receive')
+                if self.operation==operation and response is not None:
+                    observer._stop.set()
+                    return json.dumps(response).encode()+b'\n'
                 return json.dumps({'schema':'environment.host.v1','status':'success',
                     'result':{'kind':'inspection','inspection':{'schema':'environment.task.store.inspection.v2',
                         'instanceId':'sensitive-instance','activeTasks':1}}}).encode()+b'\n'
@@ -178,5 +181,61 @@ class NativeCollectorDiagnosticTests(unittest.TestCase):
         self.assertEqual(report['peakWorkingEnvironments'],0)
         self.assertEqual(report['consecutiveWorkingIntervals'],0)
         self.assertEqual(report['unknownReasons'],['resource_probe_timeouterror'])
+
+    def test_response_validation_distinguishes_host_error_schema_and_result_kind(self):
+        import json
+        cases=[({'schema':'environment.host.v1','status':'error','error':'host_runtime_identity_rejected'},
+                'hostError','host_runtime_identity_rejected'),
+               ({'schema':'unsupported-sensitive-schema','status':'error','error':'sensitive-error'},
+                'schemaMismatch',None),
+               ({'schema':'environment.host.v1','status':'success','result':{'kind':'sensitive-kind'}},
+                'resultKindMismatch',None),
+               ({'schema':'environment.host.v1','status':'sensitive-status'},'statusInvalid',None)]
+        for response,failure,code in cases:
+            with self.subTest(failure=failure):
+                module,sample,_=self.collect_timeout('inspect',target_count=4,response=response)
+                self.assertEqual(sample['state'],'unknown')
+                self.assertEqual(sample['reason'],'resource_probe_valueerror')
+                diagnostic=sample['diagnostic']
+                self.assertEqual(diagnostic['stage'],'taskInspection')
+                self.assertEqual(diagnostic['ioStage'],'validate')
+                self.assertEqual(diagnostic['completedTargetCount'],0)
+                self.assertEqual(diagnostic['responseFailure'],failure)
+                self.assertEqual(diagnostic.get('hostErrorCode'),code)
+                self.assertNotIn('sensitive',json.dumps(sample))
+                self.assertNotIn('states',sample);self.assertNotIn('host',sample)
+                report=module.summarize([sample,sample,sample],4)
+                self.assertEqual(report['physicalOverlap'],'notObserved')
+                self.assertEqual(report['peakWorkingEnvironments'],0)
+                self.assertEqual(report['consecutiveWorkingIntervals'],0)
+
+    def test_resource_result_kind_failure_retains_completed_checks_without_overlap(self):
+        module,sample,_=self.collect_timeout('observeResources',target_count=4,response={
+            'schema':'environment.host.v1','status':'success','result':{'kind':'inspection'}})
+        self.assertEqual(sample['state'],'unknown')
+        self.assertEqual(sample['diagnostic']['responseFailure'],'resultKindMismatch')
+        self.assertEqual(sample['diagnostic']['stage'],'sampleValidation')
+        self.assertEqual(sample['diagnostic']['completedTargetCount'],4)
+        report=module.summarize([sample,sample,sample],4)
+        self.assertEqual(report['physicalOverlap'],'notObserved')
+        self.assertEqual(report['peakWorkingEnvironments'],0)
+
+    def test_host_error_codes_use_a_finite_allowlist_without_retaining_unknown_text(self):
+        import json
+        for error,expected in [('host_path_unavailable','host_path_unavailable'),
+                               ('task_index_unavailable','task_index_unavailable'),
+                               ('host_probe_busy','host_probe_busy'),
+                               ('host_private_sensitive_token','unknown'),
+                               ('host_runtime_identity_rejected token=password','unknown'),
+                               ({'password':'sensitive-secret'},'unknown')]:
+            with self.subTest(expected=expected):
+                _,sample,_=self.collect_timeout('inspect',response={
+                    'schema':'environment.host.v1','status':'error','error':error})
+                self.assertEqual(sample['state'],'unknown')
+                self.assertEqual(sample['diagnostic']['responseFailure'],'hostError')
+                self.assertEqual(sample['diagnostic']['hostErrorCode'],expected)
+                encoded=json.dumps(sample)
+                for secret in ('sensitive','password','private_sensitive_token','token=','environmentInstanceId'):
+                    self.assertNotIn(secret,encoded)
 
 if __name__=='__main__':unittest.main()
