@@ -88,6 +88,136 @@ mod tests {
         assert_eq!(control_path(&second, &task), format!("/{second}{task}"));
         assert_ne!(control_path(&first, &task), control_path(&second, &task));
     }
+
+    #[test]
+    fn exited_proxy_preserves_buffered_short_task_receipts() {
+        use std::{io::Write, sync::Barrier};
+
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        let state = Arc::new(Mutex::new(Events::default()));
+        let release_reader = Arc::new(Barrier::new(2));
+        let read_state = state.clone();
+        let read_stream = host.try_clone().unwrap();
+        let read_release = release_reader.clone();
+        let reader = thread::spawn(move || {
+            read_release.wait();
+            read_events(read_stream, read_state);
+        });
+        guest
+            .write_all(
+                b"{\"kind\":\"ready\",\"pid\":42}\n{\"kind\":\"leaderExited\",\"waitStatus\":0}\n",
+            )
+            .unwrap();
+        drop(guest);
+        let mut proxy = OwnedChild::spawn(Command::new("/bin/sh").args(["-c", "exit 0"])).unwrap();
+        assert!(proxy.wait().unwrap().success());
+        let mut child = RunscChild {
+            proxy: Some(proxy),
+            state,
+            stream: host,
+            reader: Some(reader),
+        };
+        let mut released = false;
+        let outcome = wait_until_ready(&mut child, Duration::from_secs(1), |proxy| {
+            let status = proxy.try_wait()?;
+            if status.is_some() && !released {
+                released = true;
+                release_reader.wait();
+            }
+            Ok(status)
+        });
+        assert!(
+            released,
+            "test must observe proxy exit before releasing receipts"
+        );
+        assert_eq!(outcome, Ok(()), "buffered Ready survives proxy exit");
+        let began = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                began.elapsed() < Duration::from_secs(1),
+                "leader receipt missing"
+            );
+            thread::yield_now();
+        };
+        assert_eq!(status.code(), Some(0));
+    }
+
+    fn exited_proxy_with_event_channel() -> (RunscChild, UnixStream) {
+        let (host, guest) = UnixStream::pair().unwrap();
+        let state = Arc::new(Mutex::new(Events::default()));
+        let read_stream = host.try_clone().unwrap();
+        let read_state = state.clone();
+        let reader = thread::spawn(move || read_events(read_stream, read_state));
+        let mut proxy = OwnedChild::spawn(Command::new("/bin/sh").args(["-c", "exit 0"])).unwrap();
+        assert!(proxy.wait().unwrap().success());
+        (
+            RunscChild {
+                proxy: Some(proxy),
+                state,
+                stream: host,
+                reader: Some(reader),
+            },
+            guest,
+        )
+    }
+
+    #[test]
+    fn event_eof_before_ready_rejects_launch_without_waiting_for_timeout() {
+        let (mut child, guest) = exited_proxy_with_event_channel();
+        drop(guest);
+        let began = Instant::now();
+        assert_eq!(
+            wait_until_ready(&mut child, Duration::from_secs(5), OwnedChild::try_wait),
+            Err("task_launch_unknown".into())
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "closed event channel waited for the launch timeout"
+        );
+    }
+
+    #[test]
+    fn malformed_or_out_of_order_startup_receipts_reject_launch() {
+        use std::io::Write;
+
+        let receipts: &[&[u8]] = &[
+            b"not-json\n",
+            b"{\"kind\":\"ready\",\"pid\":42,\"extra\":true}\n",
+            b"{\"kind\":\"leaderExited\",\"waitStatus\":0}\n",
+            b"{\"kind\":\"ready\",\"pid\":1}\n",
+            b"{\"kind\":\"ready\",\"pid\":42}",
+        ];
+        for receipt in receipts {
+            let (mut child, mut guest) = exited_proxy_with_event_channel();
+            guest.write_all(receipt).unwrap();
+            drop(guest);
+            assert_eq!(
+                wait_until_ready(&mut child, Duration::from_secs(1), OwnedChild::try_wait),
+                Err("task_launch_unknown".into()),
+                "invalid startup receipt was accepted: {receipt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exited_proxy_without_receipts_waits_for_the_bounded_startup_budget() {
+        let (mut child, _guest) = exited_proxy_with_event_channel();
+        let timeout = Duration::from_millis(30);
+        let began = Instant::now();
+        assert_eq!(
+            wait_until_ready(&mut child, timeout, OwnedChild::try_wait),
+            Err("task_launch_unknown".into())
+        );
+        let elapsed = began.elapsed();
+        assert!(elapsed >= timeout, "proxy exit bypassed the receipt budget");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "missing startup receipt exceeded its bounded budget"
+        );
+    }
 }
 
 pub(super) fn events(target: &OciTarget, path: &Path) -> Result<String, String> {
@@ -420,6 +550,36 @@ fn read_events(stream: UnixStream, state: Arc<Mutex<Events>>) {
     }
 }
 
+fn wait_until_ready(
+    child: &mut RunscChild,
+    timeout: Duration,
+    mut poll_proxy: impl FnMut(&mut OwnedChild) -> std::io::Result<Option<std::process::ExitStatus>>,
+) -> Result<(), String> {
+    let began = Instant::now();
+    loop {
+        // Read completion before state: a finished reader has published all buffered events.
+        let reader_finished = child
+            .reader
+            .as_ref()
+            .is_some_and(|reader| reader.is_finished());
+        let (ready, failed) = {
+            let state = child.state.lock().map_err(|_| "task_service_failed")?;
+            (state.ready, state.failed)
+        };
+        if ready && !failed {
+            return Ok(());
+        }
+        if failed || reader_finished || began.elapsed() >= timeout {
+            return Err("task_launch_unknown".into());
+        }
+        // Proxy exit does not establish that its buffered Ready receipt has been consumed.
+        // Keep sole wait ownership while allowing the event reader the remaining budget.
+        let _ = poll_proxy(child.proxy.as_mut().expect("owned proxy"))
+            .map_err(|_| "task_launch_unknown")?;
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 pub(super) fn spawn(
     target: &OciTarget,
     id: &str,
@@ -479,29 +639,9 @@ pub(super) fn spawn(
     let stderr = proxy.stderr.take().expect("piped stderr");
     child.proxy = Some(proxy);
     drop(guest);
-    let began = Instant::now();
-    loop {
-        let (ready, failed) = {
-            let state = child.state.lock().map_err(|_| "task_service_failed")?;
-            (state.ready, state.failed)
-        };
-        if ready && !failed {
-            break;
-        }
-        if failed
-            || began.elapsed() >= Duration::from_secs(5)
-            || child
-                .proxy
-                .as_mut()
-                .expect("owned proxy")
-                .try_wait()
-                .map_err(|_| "task_launch_unknown")?
-                .is_some()
-        {
-            let _ = kill_unlocked(target, task_id(domain)?);
-            return Err("task_launch_unknown".into());
-        }
-        thread::sleep(Duration::from_millis(5));
+    if let Err(error) = wait_until_ready(&mut child, Duration::from_secs(5), OwnedChild::try_wait) {
+        let _ = kill_unlocked(target, task_id(domain)?);
+        return Err(error);
     }
     if let Err(error) = target.verify_identity() {
         let _ = kill_unlocked(target, id);
