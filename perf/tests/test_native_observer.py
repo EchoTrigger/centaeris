@@ -59,6 +59,64 @@ class NativeObservationTests(unittest.TestCase):
         for target in (0,5):
             with self.assertRaises(ValueError):module.NativeObserver('/manifest','/output',4,expected_working_environments=target)
 
+class NativeCollectionWindowTests(unittest.TestCase):
+    def collect(self, *, failure=None, wall_times=(1700000000.25, 1700000000.75)):
+        import json
+        import tempfile
+        from unittest.mock import patch
+        module = NativeObservationTests().subject()
+        observer = module.NativeObserver('/manifest', '/output', 4)
+        events = []
+        times = iter(wall_times)
+        def wall_time():
+            value = next(times)
+            events.append(('wall', value))
+            return value
+        def sample():
+            events.append(('sample',))
+            observer._stop.set()
+            if failure is not None:
+                raise failure
+            return NativeObservationTests().sample(0)
+        with tempfile.TemporaryDirectory() as directory:
+            observer.output = Path(directory) / 'observations.jsonl'
+            with patch.object(observer, '_sample', side_effect=sample) as probe, patch.object(module.time, 'time', side_effect=wall_time):
+                observer._loop()
+            probe.assert_called_once_with()
+            recorded = [json.loads(line) for line in observer.output.read_text().splitlines()]
+        self.assertEqual(recorded, observer.samples)
+        return module, observer.samples[0], events
+
+    def test_successful_collection_records_wall_times_around_the_actual_sample(self):
+        module, sample, events = self.collect()
+        self.assertEqual(sample['collectionWindow'], {'startedAtUnixMs': 1700000000250, 'completedAtUnixMs': 1700000000750})
+        self.assertEqual(events, [('wall', 1700000000.25), ('sample',), ('wall', 1700000000.75)])
+        self.assertIn('host', sample)
+        samples = [NativeObservationTests().sample(i) for i in range(3)]
+        expected = module.summarize(samples, 4)
+        for item in samples:
+            item['collectionWindow'] = sample['collectionWindow']
+        self.assertEqual(module.summarize(samples, 4), expected)
+
+    def test_unknown_collection_also_records_its_real_window_and_still_cannot_count_overlap(self):
+        module, sample, events = self.collect(failure=TimeoutError('private probe error'))
+        self.assertEqual(sample['collectionWindow'], {'startedAtUnixMs': 1700000000250, 'completedAtUnixMs': 1700000000750})
+        self.assertEqual(events, [('wall', 1700000000.25), ('sample',), ('wall', 1700000000.75)])
+        self.assertEqual(sample['state'], 'unknown')
+        self.assertEqual(sample['reason'], 'resource_probe_timeouterror')
+        report = module.summarize([sample, sample, sample], 4)
+        self.assertEqual(report['physicalOverlap'], 'notObserved')
+        self.assertEqual(report['peakWorkingEnvironments'], 0)
+        self.assertEqual(report['consecutiveWorkingIntervals'], 0)
+        self.assertEqual(report['unknownReasons'], ['resource_probe_timeouterror'])
+
+    def test_wall_clock_rollback_is_retained_without_fabricating_a_monotonic_window(self):
+        for failure in (None, TimeoutError('probe timeout')):
+            with self.subTest(unknown=failure is not None):
+                _, sample, _ = self.collect(failure=failure, wall_times=(1700000000.75, 1700000000.25))
+                self.assertEqual(sample['collectionWindow'], {'startedAtUnixMs': 1700000000750, 'completedAtUnixMs': 1700000000250})
+
+
 class NativeCollectorPausedTests(unittest.TestCase):
     def test_paused_container_is_sampled_without_requesting_running_task_inspection(self):
         import threading
@@ -145,7 +203,7 @@ class NativeCollectorDiagnosticTests(unittest.TestCase):
                 _,sample,requests=self.collect_timeout(operation)
                 self.assertEqual(sample['state'],'unknown')
                 self.assertEqual(sample['reason'],'resource_probe_timeouterror')
-                self.assertEqual(set(sample),{'schema','state','reason','diagnostic'})
+                self.assertEqual(set(sample),{'schema','state','reason','diagnostic','collectionWindow'})
                 diagnostic=sample['diagnostic']
                 self.assertEqual(set(diagnostic),{'stage','operation','ioStage','elapsedMs','remainingMs',
                     'targetCount','completedTargetCount','exceptionType'})

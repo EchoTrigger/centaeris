@@ -228,11 +228,14 @@ class NativeObserver:
             while not self._stop.is_set():
                 started=time.monotonic()
                 self._progress=None
+                collection_started=int(time.time()*1000)
                 try:sample=self._sample()
                 except Exception as error:
                     sample={'schema':'workspace.perf.native_sample.v1','state':'unknown','reason':'resource_probe_'+type(error).__name__.lower()}
                     diagnostic=self._probe_diagnostic(error)
                     if diagnostic is not None:sample['diagnostic']=diagnostic
+                # Preserve raw wall times, including rollback; consumers must reject inverted windows.
+                sample['collectionWindow']={'startedAtUnixMs':collection_started,'completedAtUnixMs':int(time.time()*1000)}
                 self.samples.append(sample);output.write(json.dumps(sample)+'\n');output.flush()
                 if len(self.samples)>=1800:self._stop.set();break
                 self._stop.wait(max(0,1-(time.monotonic()-started)))
