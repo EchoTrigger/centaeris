@@ -6,6 +6,7 @@ ARTIFACT_DOWNLOAD_SECONDS = 30  # Explicit common.js download timeout.
 COMMAND_SECONDS = 60  # FixtureDriver.command, including SQL and status wrappers.
 DRIVER_HTTP_SECONDS = 30
 POLL_SLEEP_MS = 200  # FixtureDriver.wait can sleep before its final observation.
+FINAL_JOB_SETTLE_SECONDS = 5  # Core cleanup can precede the Worker's complete_job RPC.
 
 
 def workload_budget(environments, iterations, terminal_seconds, between_run_ms=0, initial_stagger_ms=0):
@@ -34,7 +35,8 @@ def workload_budget(environments, iterations, terminal_seconds, between_run_ms=0
               'httpRequestSeconds': HTTP_REQUEST_SECONDS, 'artifactDownloadSeconds': ARTIFACT_DOWNLOAD_SECONDS,
               'k6ProcessSeconds': process, 'processCleanupSeconds': process_cleanup,
               'driverInitializationSeconds': 3 * COMMAND_SECONDS + 3 * DRIVER_HTTP_SECONDS,
-              'completedReadbackSeconds': completed, 'durableTimingSeconds': COMMAND_SECONDS,
+              'completedReadbackSeconds': completed,
+              'durableTimingSeconds': ceil_ms((FINAL_JOB_SETTLE_SECONDS + COMMAND_SECONDS) * 1000 + POLL_SLEEP_MS),
               'finalPauseSeconds': pause, 'retirementSeconds': retirement,
               'observerStopSeconds': 30,  # stop() plus one finally retry, each join <= 15.
               'outerCaptureSeconds': 10, 'limitSeconds': LIMIT_SECONDS}

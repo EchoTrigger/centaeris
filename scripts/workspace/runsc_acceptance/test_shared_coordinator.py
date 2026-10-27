@@ -17,7 +17,7 @@ module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 
 
 class SharedCoordinatorTests(unittest.TestCase):
-    def invoke(self, root, *, overlap='verified', bad_run=False, bad_retirement=False, resumed=None, environments=4, working=None, model_wait_ms=0, initial_stagger_ms=0, expected_working_environments=None, run_terminal_timeout_seconds=120, runtime_logs=None, runtime_log_error=None):
+    def invoke(self, root, *, overlap='verified', bad_run=False, bad_retirement=False, resumed=None, environments=4, working=None, model_wait_ms=0, initial_stagger_ms=0, expected_working_environments=None, run_terminal_timeout_seconds=120, runtime_logs=None, runtime_log_error=None, durable_change=None, iterations=3, memory_mib=0, minimum_hold_ms=0, fixture_profile='planned', workload_error=None, native_samples=None, memory_evaluator=None):
         resumed = environments if resumed is None else resumed
         working = environments if working is None else working
         fixture = root / 'fixture'; fixture.mkdir()
@@ -27,7 +27,7 @@ class SharedCoordinatorTests(unittest.TestCase):
             def __init__(self, fixture, result, *, expected_running_limit):
                 self.result = result; result.mkdir(); self.base = 'http://127.0.0.1:18083'
                 self.seed = {'email': 'fixture@example.invalid', 'password': 'private-fixture-password', 'workspaceId': 'workspace-a', 'agentId': 'agent-a', 'modelConfigRef': 'model-a'}
-                self.manifest = {'sharedWorkload': {'environmentCount': environments, 'modelWaitMs': model_wait_ms}, 'sourceRevision': 'abc'}
+                self.manifest = {'sharedWorkload': {'environmentCount': environments, 'modelWaitMs': model_wait_ms, 'workProfile': {'memoryMiB':memory_mib,'minimumHoldMs':minimum_hold_ms} if fixture_profile=='planned' else fixture_profile}, 'sourceRevision': 'abc','resourceLimits':{'resourceLimitIdentity':'actual manifest projection'}}
                 self.docker = ['docker', '--host', 'unix:///owned/docker.sock']
                 self.compose = fixture / 'compose.json'
                 self.environment = {'COMPOSE_DISABLE_ENV_FILE': 'true'}
@@ -41,36 +41,52 @@ class SharedCoordinatorTests(unittest.TestCase):
                 env = record['sessionId'].split('-')[-1]
                 return {'environmentId': 'environment-' + env, 'instanceId': 'instance-' + env, 'containerId': 'container-' + env,
                         'hostId': 'host', 'controllerEpoch': 3, 'runtime': 'runsc', 'paused': True, 'running': True, 'powerState': 'paused'}
-            def wait(self, observe, predicate, description):
-                value = observe(); assert predicate(value); return value
+            def wait(self, observe, predicate, description, timeout=120):
+                calls.append(('wait', description, timeout))
+                for _ in range(3):
+                    value = observe()
+                    if predicate(value): return value
+                raise RuntimeError('timed out waiting for ' + description)
             def retire(self, row):
                 calls.append(('retire', row['environmentId']))
                 return {'environmentId': row['environmentId'], 'status': 'destroyed', 'containerAbsent': not bad_retirement, 'residentHoldingCount': 0, 'historyPreserved': True}
+            def sql(self, code):
+                calls.append(('durableSnapshot',))
+                evidence = {'finalJobs': [{'agentRunId': f'run-{e}-{i}', 'jobId': f'agent_run.lifecycle:run-{e}-{i}',
+                    'sessionId': f'session-{e}', 'jobKind': 'agent_run.lifecycle', 'status': 'succeeded',
+                    'retryCount': 0, 'maxRetries': 3} for e in range(environments) for i in range(iterations)],
+                    'jobYields': [], 'capacityClaims': []}
+                if durable_change: durable_change(evidence)
+                return evidence
         class Observer:
-            def __init__(self, manifest, output, expected_environments, *, expected_working_environments=None): calls.append(('observer', expected_environments, expected_working_environments))
+            def __init__(self, manifest, output, expected_environments, *, expected_working_environments=None):
+                self.output=output;calls.append(('observer', expected_environments, expected_working_environments))
             def start(self): calls.append(('start',))
             def stop(self):
                 calls.append(('stop',))
+                if native_samples is not None:self.output.write_text(''.join(json.dumps(row)+'\n' for row in native_samples))
                 return {'physicalOverlap': overlap, 'peakWorkingEnvironments': working,
                         'pausedEnvironmentInstances': environments, 'resumedEnvironmentInstances': resumed}
         def workload(path, output, binary, **options):
             private = json.loads(path.read_text())
-            self.assertEqual(len(private['samples']), environments * 3)
+            self.assertEqual(len(private['samples']), environments * iterations)
             self.assertEqual({sample['workUnits'] for sample in private['samples']}, {2000})
             self.assertEqual(options['between_run_ms'], 6000)
-            self.assertEqual(options['timeout'],module.workload_budget(environments,3,run_terminal_timeout_seconds,6000,initial_stagger_ms)['k6ProcessSeconds'])
+            self.assertEqual(options['timeout'],module.workload_budget(environments,iterations,run_terminal_timeout_seconds,6000,initial_stagger_ms)['k6ProcessSeconds'])
             self.assertEqual(options['run_terminal_timeout_seconds'],run_terminal_timeout_seconds)
             if initial_stagger_ms: self.assertEqual(options['initial_stagger_ms'], initial_stagger_ms)
-            self.assertEqual(set(private['samples'][0]), {'sampleId', 'operationId', 'workUnits'})
+            self.assertEqual(set(private['samples'][0]), {'sampleId', 'operationId', 'workUnits'} | ({'memoryMiB','minimumHoldMs'} if memory_mib else set()))
             if os_name_is_posix(): self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             output.mkdir()
-            records = [{'phase': 'accepted', 'agentRunId': f'run-{e}-{i}', 'sessionId': f'session-{e}'} for e in range(environments) for i in range(3)]
+            records = [{'phase': 'accepted', 'agentRunId': f'run-{e}-{i}', 'sessionId': f'session-{e}'} for e in range(environments) for i in range(iterations)]
             (output / 'run-records.jsonl').write_text(''.join(json.dumps(record) + '\n' for record in records))
             calls.append(('k6',))
-            return {'status': 'clientVerified', 'verifiedSamples': environments * 3, 'wallTimeMs': 1000, 'betweenRunMs': 6000,
-                    'firstSuccessfulToolResultLatency': {'source': 'k6SseReceive', 'valuesMs': [125] * (environments * 3)}}
+            if workload_error: raise workload_error
+            return {'status': 'clientVerified', 'verifiedSamples': environments * iterations, 'wallTimeMs': 1000, 'betweenRunMs': 6000,
+                    'firstSuccessfulToolResultLatency': {'source': 'k6SseReceive', 'valuesMs': [125] * (environments * iterations)}}
         dependencies = {'driver': Driver, 'observer': Observer, 'workload': workload}
-        options = {'environments': environments,'run_terminal_timeout_seconds':run_terminal_timeout_seconds}
+        if memory_evaluator is not None:dependencies['memory_contention']=memory_evaluator
+        options = {'environments': environments,'iterations':iterations,'memory_mib':memory_mib,'minimum_hold_ms':minimum_hold_ms,'run_terminal_timeout_seconds':run_terminal_timeout_seconds}
         if model_wait_ms: options['model_wait_ms'] = model_wait_ms
         if initial_stagger_ms: options['initial_stagger_ms'] = initial_stagger_ms
         if expected_working_environments is not None: options['expected_working_environments'] = expected_working_environments
@@ -94,7 +110,61 @@ class SharedCoordinatorTests(unittest.TestCase):
             self.assertEqual(sum(call[0] == 'retire' for call in calls), 4)
             self.assertLess(calls.index(('stop',)), next(i for i, call in enumerate(calls) if call[0] == 'retire'))
             self.assertEqual(report['memoryContinuity'], 'notObserved')
+            self.assertEqual(report['workProfile'],{'memoryMiB':0,'minimumHoldMs':0})
             self.assertEqual(report['clientFirstToolLatency'], {'source': 'k6SseReceive', 'valuesMs': [125] * 12})
+    def test_memory_profile_samples_and_report_are_explicit_without_changing_cpu_samples(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name)
+            calls,execute=self.invoke(root,environments=8,iterations=1,memory_mib=1536,minimum_hold_ms=60000,workload_error=RuntimeError('profile captured'))
+            with self.assertRaisesRegex(RuntimeError,'profile captured'):execute()
+            private=json.loads((root/'fixture/perf-fixture.json').read_text())
+            self.assertEqual(len(private['samples']),8)
+            self.assertTrue(all(sample['memoryMiB']==1536 and sample['minimumHoldMs']==60000 for sample in private['samples']))
+            report=json.loads((root/'result/shared-report.json').read_text())
+            self.assertEqual(report['workProfile'],{'memoryMiB':1536,'minimumHoldMs':60000})
+            self.assertEqual(report['status'],'failedPreserved')
+            self.assertFalse(any(call[0]=='retire' for call in calls))
+    def test_manifest_profile_must_match_exactly_before_private_fixture_or_workload(self):
+        for profile in (None,{}, {'memoryMiB':False,'minimumHoldMs':0}, {'memoryMiB':0,'minimumHoldMs':True}, {'memoryMiB':1,'minimumHoldMs':1}, {'memoryMiB':0,'minimumHoldMs':0,'extra':1}):
+            with self.subTest(profile=profile),tempfile.TemporaryDirectory() as name:
+                root=Path(name);calls,execute=self.invoke(root,fixture_profile=profile)
+                with self.assertRaisesRegex(RuntimeError,'work profile mismatch'):execute()
+                self.assertFalse((root/'fixture/perf-fixture.json').exists())
+                self.assertFalse(any(call[0] in ('start','k6','retire') for call in calls))
+    def test_memory_evaluator_receives_real_observations_and_durable_bindings_before_retirement(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);observations=[{'sampleIdentity':'owned native sample'}]
+            evaluator=Mock(return_value={'schema':'runsc.shared.memory_contention.v1','status':'verified'})
+            calls,execute=self.invoke(root,iterations=1,memory_mib=1,minimum_hold_ms=1,native_samples=observations,memory_evaluator=evaluator)
+            report=execute()
+            self.assertEqual(report['memoryContention']['status'],'verified')
+            self.assertEqual(evaluator.call_args.args[:3],(observations,report['durableTiming'],report['runs']))
+            self.assertEqual(evaluator.call_args.args[3],{'resourceLimitIdentity':'actual manifest projection'})
+            self.assertEqual(sum(call[0]=='retire' for call in calls),4)
+    def test_memory_evaluator_failure_or_missing_samples_preserves_every_environment(self):
+        from unittest.mock import Mock
+        for observations in (None,[{'sampleIdentity':'unverified'}]):
+            with self.subTest(observations=observations),tempfile.TemporaryDirectory() as name:
+                root=Path(name);evaluator=Mock(side_effect=ValueError('pressure evidence incomplete'))
+                calls,execute=self.invoke(root,iterations=1,memory_mib=1,minimum_hold_ms=1,native_samples=observations,memory_evaluator=evaluator)
+                with self.assertRaises((ValueError,FileNotFoundError)):execute()
+                self.assertFalse(any(call[0]=='retire' for call in calls))
+                report=json.loads((root/'result/shared-report.json').read_text())
+                self.assertEqual(report['status'],'failedPreserved')
+                self.assertEqual(report['memoryContention'],'notObserved')
+                self.assertEqual(evaluator.call_count,0 if observations is None else 1)
+    def test_cli_forwards_memory_profile_without_changing_rolling_defaults(self):
+        argv=['shared_workload','--fixture','fixture','--result','result','--k6-binary','k6','--environment-count','8','--iterations','1','--memory-mib','1536','--minimum-hold-ms','60000']
+        with patch.object(sys,'argv',argv),patch.object(module,'run',return_value={'status':'captured'}) as run,patch('builtins.print'):
+            module.main()
+        self.assertEqual(run.call_args.kwargs['memory_mib'],1536)
+        self.assertEqual(run.call_args.kwargs['minimum_hold_ms'],60000)
+        self.assertEqual(run.call_args.kwargs['iterations'],1)
+    def test_invalid_memory_profile_rejects_before_dependencies(self):
+        for options in ({'memory_mib':1},{'minimum_hold_ms':1},{'memory_mib':1537,'minimum_hold_ms':1}, {'memory_mib':1,'minimum_hold_ms':1,'iterations':3}):
+            with self.subTest(options=options),patch.object(module,'_dependencies',side_effect=AssertionError('fixture must not load')):
+                with self.assertRaises(ValueError):module.run('absent','absent-result','absent-k6',**options)
     def test_unobserved_overlap_preserves_responsibility_and_stops_observer(self):
         with tempfile.TemporaryDirectory() as name:
             calls, execute = self.invoke(Path(name), overlap='notObserved')
@@ -190,6 +260,85 @@ class SharedCoordinatorTests(unittest.TestCase):
             self.assertEqual(report['expectedWorkingEnvironments'],4)
             self.assertEqual(report['completedRuns'],12)
 
+    def test_final_original_jobs_are_required_for_four_and_eight_environments(self):
+        for count in (4, 8):
+            with self.subTest(environments=count), tempfile.TemporaryDirectory() as directory:
+                _, execute = self.invoke(Path(directory), environments=count)
+                report = execute()
+                self.assertEqual(report['runtimeJobs']['expectedJobs'], count * 3)
+                self.assertEqual(report['runtimeJobs']['succeededJobs'], count * 3)
+                self.assertEqual(report['runtimeJobs']['failedRetryCount'], 0)
+                self.assertEqual(report['runtimeJobs']['capacityClaimCount'], 0)
+
+    def test_invalid_final_job_binding_or_cardinality_preserves_responsibility(self):
+        mutations = [lambda report: report['finalJobs'].pop(),
+            lambda report: report['finalJobs'].append(report['finalJobs'][0].copy()),
+            lambda report: report['finalJobs'][0].update(jobId='agent_run.lifecycle:replacement'),
+            lambda report: report['finalJobs'][0].update(agentRunId='replacement'),
+            lambda report: report['finalJobs'][0].update(sessionId='other-session'),
+            lambda report: report['finalJobs'][0].update(jobKind='worker.noop'),
+            lambda report: report['finalJobs'][0].update(status='queued'),
+            lambda report: report['finalJobs'][0].update(retryCount=True),
+            lambda report: report['finalJobs'][0].update(retryCount=-1),
+            lambda report: report['finalJobs'][0].update(retryCount=4),
+            lambda report: report['finalJobs'][0].update(maxRetries=True),
+            lambda report: report['finalJobs'][0].update(maxRetries=2**32)]
+        for index, mutate in enumerate(mutations):
+            with self.subTest(mutation=index), tempfile.TemporaryDirectory() as directory:
+                calls, execute = self.invoke(Path(directory), durable_change=mutate)
+                with self.assertRaisesRegex((ValueError, RuntimeError), 'Job'):
+                    execute()
+                self.assertFalse(any(call[0] == 'retire' for call in calls))
+
+    def test_final_job_retry_limit_is_not_tied_to_the_worker_default(self):
+        for maximum in (0, 11, 2**32 - 1):
+            with self.subTest(maximum=maximum), tempfile.TemporaryDirectory() as directory:
+                _, execute = self.invoke(Path(directory), durable_change=lambda report: report['finalJobs'][0].update(maxRetries=maximum))
+                self.assertEqual(execute()['runtimeJobs']['failedRetryCount'], 0)
+
+    def test_successful_runs_with_failed_retries_report_count_and_fail_acceptance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls, execute = self.invoke(root, durable_change=lambda report: report['finalJobs'][0].update(retryCount=2))
+            with self.assertRaisesRegex(RuntimeError, 'failed retry'):
+                execute()
+            report = json.loads((root / 'result/shared-report.json').read_text())
+            self.assertEqual(report['status'], 'failedPreserved')
+            self.assertEqual(report['runtimeJobs']['failedRetryCount'], 2)
+            self.assertEqual(report['runtimeJobs']['jobsWithFailedRetries'], 1)
+            self.assertEqual(report['runtimeJobs']['capacityClaimCount'], 0)
+            self.assertFalse(any(call[0] == 'retire' for call in calls))
+
+    def test_core_release_can_precede_worker_job_success_without_false_failure(self):
+        for pending in ('running', 'leased'):
+            with self.subTest(pending=pending), tempfile.TemporaryDirectory() as directory:
+                states = iter((pending, 'succeeded'))
+                calls, execute = self.invoke(Path(directory), durable_change=lambda report: report['finalJobs'][0].update(status=next(states)))
+                report = execute()
+                self.assertEqual(report['status'], 'passed')
+                self.assertEqual(report['runtimeJobs']['succeededJobs'], 12)
+                self.assertEqual(sum(call[0] == 'durableSnapshot' for call in calls), 2)
+                self.assertIn(('wait', 'original Worker Job completion', 5), calls)
+
+    def test_running_job_with_failed_retry_is_rejected_before_a_later_clean_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls, execute = self.invoke(root, durable_change=lambda report: report['finalJobs'][0].update(status='running', retryCount=1))
+            with self.assertRaisesRegex(RuntimeError, 'failed retry'): execute()
+            report = json.loads((root / 'result/shared-report.json').read_text())
+            self.assertEqual(report['runtimeJobs']['failedRetryCount'], 1)
+            self.assertEqual(report['runtimeJobs']['succeededJobs'], 11)
+            self.assertEqual(sum(call[0] == 'durableSnapshot' for call in calls), 1)
+            self.assertFalse(any(call[0] == 'retire' for call in calls))
+
+    def test_abnormal_worker_terminal_is_rejected_immediately_and_pending_is_bounded(self):
+        for status in ('failed', 'cancelled', 'dead_lettered', 'running'):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                calls, execute = self.invoke(Path(directory), durable_change=lambda report: report['finalJobs'][0].update(status=status))
+                with self.assertRaises((ValueError, RuntimeError)): execute()
+                self.assertEqual(sum(call[0] == 'durableSnapshot' for call in calls), 3 if status == 'running' else 1)
+                self.assertFalse(any(call[0] == 'retire' for call in calls))
+
 
 def os_name_is_posix():
     import os
@@ -231,10 +380,10 @@ class FixtureRunningLimitTests(unittest.TestCase):
 
 
 class DurableTimingTests(unittest.TestCase):
-    def report(self, events=None, *, availability=None, claim=None):
+    def report(self, events=None, *, availability=None, claim=None, jobs=None, yields=None, admitted=None):
         utc = datetime.timezone.utc
         at = lambda millis: datetime.datetime.fromtimestamp(millis / 1000, utc)
-        run = types.SimpleNamespace(id='run-a', createdAt=at(1000), startedAt=at(1100), completedAt=at(1800))
+        run = types.SimpleNamespace(id='run-a', session_id='session-a', createdAt=at(1000), startedAt=at(1100), completedAt=at(1800))
         class Query:
             def __init__(self, value): self.value = value
             def filter(self, **values): return self
@@ -266,12 +415,16 @@ class DurableTimingTests(unittest.TestCase):
         rows=[{'agent_run':run,'session_level':False,'agent_run_sequence':seq,'createdAtMs':at_ms,'payload':{'type':kind,'payload':payload}} for seq,at_ms,kind,payload in events]
         claim = claim if claim is not None else {'schema':'runtime.resident_capacity.claimed.v1','jobId':'agent_run.lifecycle:run-a','generation':2,'releaseRecordedAtMs':1050,'claimedAtMs':1080,'leaseOwner':'private-authority-not-exported'}
         availability = availability or []
+        jobs = [('agent_run.lifecycle:run-a', 'agent_run.lifecycle', 'succeeded', 0, 3, 'session-a')] if jobs is None else jobs
+        yields = [] if yields is None else yields
         class Cursor:
             def __enter__(self): return self
             def __exit__(self, *args): return False
             def execute(self, sql, parameters=None):
                 if parameters is None:self.kind='setup'
                 elif parameters == ['run-a']:self.kind='cleanup'
+                elif sql.startswith('SELECT job_id,job_kind,status,retry_count,max_retries,session_id'):self.kind='jobs'
+                elif len(parameters)>1 and parameters[1]=='runtime_job_yielded':self.kind='yields'
                 elif len(parameters)>1 and parameters[1]=='runtime.resident_capacity.claimed.v1':self.kind='claims'
                 elif parameters[0]=='runtime.host_preparation.available.v1':self.kind='availability'
                 else:raise AssertionError('unexpected timing query')
@@ -280,6 +433,8 @@ class DurableTimingTests(unittest.TestCase):
             def fetchall(self):
                 if self.kind=='claims':return [('agent_run.lifecycle:run-a', json.dumps(claim))]
                 if self.kind=='availability':return availability
+                if self.kind=='jobs':return jobs
+                if self.kind=='yields':return yields
                 raise AssertionError('unexpected timing result query')
         modules = {'django.conf': types.SimpleNamespace(settings=types.SimpleNamespace(DATABASES={'default': {'NAME': 'retained_acceptance'}})),
                    'django.db': types.SimpleNamespace(transaction=types.SimpleNamespace(atomic=contextlib.nullcontext), connection=types.SimpleNamespace(cursor=Cursor)),
@@ -290,7 +445,50 @@ class DurableTimingTests(unittest.TestCase):
             output = io.StringIO()
             with patch.dict(sys.modules, modules), contextlib.redirect_stdout(output): exec(code, {})
             return json.loads(output.getvalue())
-        return module._durable_timing(types.SimpleNamespace(sql=sql), [{'agentRunId': 'run-a'}])
+        return module._durable_timing(types.SimpleNamespace(sql=sql), admitted if admitted is not None else [{'agentRunId': 'run-a', 'sessionId': 'session-a'}])
+
+    def yield_fact(self, **changed):
+        event = {'schema': 'runtime.job.yielded.v1', 'jobId': 'agent_run.lifecycle:run-a',
+            'leaseOwner': 'private-authority-not-exported', 'yieldedAtMs': 1005, 'runAtMs': 31005,
+            'transitionReason': 'execution_host_preparation_wait', 'error': 'private-error-payload'}
+        event.update(changed)
+        return ('agent_run.lifecycle:run-a', 'session-a', 1005, json.dumps(event))
+
+    def test_final_jobs_and_yield_projection_keep_claims_separate_from_failed_retries(self):
+        report = self.report(yields=[self.yield_fact()])
+        self.assertEqual(report['finalJobs'], [{'agentRunId': 'run-a', 'jobId': 'agent_run.lifecycle:run-a',
+            'sessionId': 'session-a', 'jobKind': 'agent_run.lifecycle', 'status': 'succeeded', 'retryCount': 0, 'maxRetries': 3}])
+        self.assertEqual(report['jobYields'], [{'agentRunId': 'run-a', 'jobId': 'agent_run.lifecycle:run-a',
+            'sessionId': 'session-a', 'yieldedAtMs': 1005, 'runAtMs': 31005,
+            'transitionReason': 'execution_host_preparation_wait'}])
+        summary = module.validate_job_evidence(report, [{'agentRunId': 'run-a', 'sessionId': 'session-a'}])
+        self.assertEqual(summary['capacityClaimCount'], 1)
+        self.assertEqual(summary['failedRetryCount'], 0)
+        self.assertEqual(summary['yieldReasonCounts'], {'execution_host_preparation_wait': 1})
+        self.assertNotIn('private-authority-not-exported', json.dumps(report))
+        self.assertNotIn('private-error-payload', json.dumps(report))
+
+    def test_unknown_yield_reason_is_redacted_and_rejects_acceptance(self):
+        report = self.report(yields=[self.yield_fact(transitionReason='private-token-in-unknown-reason')])
+        self.assertEqual(report['jobYields'][0]['transitionReason'], 'unrecognized')
+        self.assertNotIn('private-token-in-unknown-reason', json.dumps(report))
+        with self.assertRaisesRegex(ValueError, 'yield reason'):
+            module.validate_job_evidence(report, [{'agentRunId': 'run-a', 'sessionId': 'session-a'}])
+
+    def test_yield_identity_timestamp_and_schema_must_belong_to_same_original_job(self):
+        good = self.yield_fact()
+        invalid = [self.yield_fact(jobId='agent_run.lifecycle:other-run'), self.yield_fact(schema='unknown'),
+            self.yield_fact(yieldedAtMs=True), self.yield_fact(runAtMs=1004),
+            (good[0], 'other-session', *good[2:]), (good[0], good[1], 1006, good[3])]
+        for fact in invalid:
+            with self.subTest(fact=fact), self.assertRaisesRegex(RuntimeError, 'yield'):
+                self.report(yields=[fact])
+
+    def test_duplicate_or_missing_admitted_run_binding_is_rejected_before_sql(self):
+        for admitted in ([{'agentRunId': 'run-a'}],
+                         [{'agentRunId': 'run-a', 'sessionId': 'session-a'}] * 2):
+            with self.subTest(admitted=admitted), self.assertRaisesRegex(ValueError, 'Job'):
+                self.report(admitted=admitted)
 
     def test_durable_times_keep_cleanup_release_and_first_client_tool_distinct(self):
         report=self.report();row=report['rows'][0]

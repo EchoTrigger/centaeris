@@ -5,6 +5,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from runsc_acceptance.daemon import PrivateDocker,command
 from runsc_acceptance.isolation import verify_owner
 from runsc_acceptance.workload_budget import workload_budget
+from runsc_acceptance.memory_profile import memory_profile,workspace_memory_budget
 
 def static_helper(path):
     data=path.read_bytes()
@@ -14,7 +15,8 @@ def static_helper(path):
     if any(struct.unpack_from('<I',data,offset+i*size)[0]==3 for i in range(count)):raise RuntimeError('dynamic helper interpreter rejected')
 
 
-def shared_arguments(environments, model_wait_ms=0, initial_stagger_ms=0, expected_working_environments=None):
+def shared_arguments(environments, model_wait_ms=0, initial_stagger_ms=0, expected_working_environments=None, *, memory_mib=0, minimum_hold_ms=0, iterations=3):
+    profile=memory_profile(environments,iterations,memory_mib,minimum_hold_ms)
     expected=environments if expected_working_environments is None else expected_working_environments
     if (type(environments) is not int or not 2<=environments<=64
             or type(model_wait_ms) is not int or not 0<=model_wait_ms<=120000
@@ -22,7 +24,9 @@ def shared_arguments(environments, model_wait_ms=0, initial_stagger_ms=0, expect
             or initial_stagger_ms*(environments-1)>120000
             or type(expected) is not int or not 1<=expected<=environments):
         raise ValueError('bounded shared model wait, initial stagger and working threshold required')
-    return ['--model-wait-ms',str(model_wait_ms),'--initial-stagger-ms',str(initial_stagger_ms),'--expected-working-environments',str(expected)]
+    arguments=['--model-wait-ms',str(model_wait_ms),'--initial-stagger-ms',str(initial_stagger_ms),'--expected-working-environments',str(expected)]
+    if profile['memoryMiB']:arguments+=['--memory-mib',str(profile['memoryMiB']),'--minimum-hold-ms',str(profile['minimumHoldMs'])]
+    return arguments
 
 
 def _fixture_values(root):
@@ -130,6 +134,9 @@ def main():
     parser.add_argument('--environment-count',type=int,default=4)
     parser.add_argument('--iterations',type=int,default=3)
     parser.add_argument('--work-units',type=int,default=2000)
+    parser.add_argument('--memory-mib',type=int,default=0)
+    parser.add_argument('--minimum-hold-ms',type=int,default=0)
+    parser.add_argument('--workspace-memory-budget-bytes',type=int)
     parser.add_argument('--model-wait-ms',type=int,default=0)
     parser.add_argument('--initial-stagger-ms',type=int,default=0)
     parser.add_argument('--run-terminal-timeout-seconds',type=terminal_timeout,default=120)
@@ -138,11 +145,12 @@ def main():
     parser.add_argument('--k6-binary',type=Path)
     for name in ('api','worker','runtime','general','postgres','redis'):parser.add_argument('--'+name+'-image',required=True)
     args=parser.parse_args()
-    if not args.shared_workload and (args.model_wait_ms or args.initial_stagger_ms or args.expected_working_environments is not None or args.run_terminal_timeout_seconds!=120 or args.between_run_ms!=6000):parser.error('workload timing and overlap parameters require shared mode')
+    if not args.shared_workload and (args.memory_mib or args.minimum_hold_ms or args.workspace_memory_budget_bytes is not None or args.model_wait_ms or args.initial_stagger_ms or args.expected_working_environments is not None or args.run_terminal_timeout_seconds!=120 or args.between_run_ms!=6000):parser.error('workload timing and overlap parameters require shared mode')
     shared=[]
     if args.shared_workload:
         try:
-            shared=shared_arguments(args.environment_count,args.model_wait_ms,args.initial_stagger_ms,args.expected_working_environments)
+            shared=shared_arguments(args.environment_count,args.model_wait_ms,args.initial_stagger_ms,args.expected_working_environments,memory_mib=args.memory_mib,minimum_hold_ms=args.minimum_hold_ms,iterations=args.iterations)
+            workspace_memory_budget(args.environment_count,args.workspace_memory_budget_bytes)
             budget=workload_budget(args.environment_count,args.iterations,args.run_terminal_timeout_seconds,args.between_run_ms,args.initial_stagger_ms)
         except ValueError as error:parser.error(str(error))
     if args.shared_workload and (args.k6_binary is None or not 2 <= args.environment_count <= 64
@@ -180,7 +188,9 @@ def main():
             return run_step(argv,root=root,env=env,input=input,timeout=timeout)
         tools=source/'scripts/workspace/runsc_acceptance';fixture=root/'fixture'
         argv=['python3','-B',str(tools/'prepare.py'),'--source',str(source),'--bins',str(bins),'--revision',build['sourceRevision'],'--build-manifest',str(manifest),'--tls-dir',str(tls),'--output',str(fixture),'--runsc-rotation','--isolation-owner',str(root/'owner.json'),'--docker-socket',str(root/'docker.sock'),'--host-socket-directory',str(root/'host'),'--api-port',str(args.api_port),'--runtime-port',str(args.runtime_port)]
-        if args.shared_workload:argv+=['--shared-workload','--environment-count',str(args.environment_count)]+shared
+        if args.shared_workload:
+            argv+=['--shared-workload','--environment-count',str(args.environment_count),'--iterations',str(args.iterations)]+shared
+            if args.workspace_memory_budget_bytes is not None:argv+=['--workspace-memory-budget-bytes',str(args.workspace_memory_budget_bytes)]
         for name,image in images.items():argv+=['--'+name+'-image',image]
         call(argv);config=json.loads((fixture/'compose.json').read_text());docker.record(project=config['name'],sourceRevision=build['sourceRevision'])
         # The containing network namespace has no uplink. A non-internal bridge

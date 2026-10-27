@@ -12,7 +12,8 @@ import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from runsc_acceptance.workload_budget import workload_budget
+from runsc_acceptance.workload_budget import FINAL_JOB_SETTLE_SECONDS, workload_budget
+from runsc_acceptance.memory_profile import memory_profile
 
 _PREPARATION_PHASES = frozenset({'preparationAttempt', 'environmentAcquire', 'globalAcquire', 'globalHold',
     'preparationInventory', 'preparationReconcileReserve', 'physicalConfirm', 'controllerTakeover', 'workspacePreparation'})
@@ -20,6 +21,11 @@ _PREPARATION_LOG_TIMEOUT_SECONDS = 5
 _PREPARATION_LOG_MAX_BYTES = 32 * 1024 * 1024
 _PREPARATION_LOG_MAX_LINE_BYTES = 64 * 1024
 _PREPARATION_LOG_MAX_RECORDS = 20000
+_YIELD_REASONS = frozenset({'environment_controller_wait', 'execution_host_preparation_wait',
+    'execution_resident_capacity_wait', 'runsc_environment_capacity_wait',
+    'execution_recovery_checkpoint_committed', 'question_wait', 'runtime_job_wait',
+    'session_record_commit_unavailable', 'session_workspace_commit_unavailable',
+    'session_workspace_resolve_unavailable', 'control_retry_pending', 'control_cleanup_pending'})
 
 
 def _preparation_record(line, jobs):
@@ -143,9 +149,69 @@ def validate_run_facts(rows, environments, iterations):
     return {'completedRuns': len(rows), 'sameInstanceEnvironments': environments, 'cleanupCompleteRuns': len(rows)}
 
 
+def _admitted_jobs(admitted):
+    if not isinstance(admitted, list) or not 1 <= len(admitted) <= 64 * 20:
+        raise ValueError('exact admitted Job bindings required')
+    jobs = {}
+    for record in admitted:
+        if (not isinstance(record, dict) or any(not isinstance(record.get(key), str) or not record[key]
+                for key in ('agentRunId', 'sessionId'))):
+            raise ValueError('original Job Run and Session binding required')
+        job_id = 'agent_run.lifecycle:' + record['agentRunId']
+        if job_id in jobs:
+            raise ValueError('distinct original Job bindings required')
+        jobs[job_id] = {key: record[key] for key in ('agentRunId', 'sessionId')}
+    return jobs
+
+
+def validate_job_evidence(evidence, admitted, *, allow_unsettled=False):
+    jobs = _admitted_jobs(admitted)
+    final = evidence.get('finalJobs')
+    if not isinstance(final, list) or len(final) != len(jobs):
+        raise ValueError('exact final Job cardinality required')
+    seen = set()
+    statuses = {'succeeded', 'queued', 'leased', 'running', 'failed', 'dead_lettered', 'cancelled'} if allow_unsettled else {'succeeded'}
+    for row in final:
+        binding = jobs.get(row.get('jobId')) if isinstance(row, dict) else None
+        if (binding is None or row['jobId'] in seen
+                or any(row.get(key) != binding[key] for key in ('agentRunId', 'sessionId'))
+                or row.get('jobKind') != 'agent_run.lifecycle' or row.get('status') not in statuses
+                or type(row.get('retryCount')) is not int or type(row.get('maxRetries')) is not int
+                or not 0 <= row['retryCount'] <= row['maxRetries'] < 2**32):
+            raise ValueError('successful original Job binding and bounded retry counts required')
+        seen.add(row['jobId'])
+    yields, claims = evidence.get('jobYields'), evidence.get('capacityClaims')
+    if not isinstance(yields, list) or not isinstance(claims, list):
+        raise ValueError('durable Job yield and claim evidence required')
+    yielded = set()
+    for row in yields:
+        binding = jobs.get(row.get('jobId')) if isinstance(row, dict) else None
+        if (binding is None or any(row.get(key) != binding[key] for key in ('agentRunId', 'sessionId'))
+                or type(row.get('yieldedAtMs')) is not int or type(row.get('runAtMs')) is not int
+                or not 0 <= row['yieldedAtMs'] <= row['runAtMs']):
+            raise ValueError('durable Job yield binding and time required')
+        if row.get('transitionReason') not in _YIELD_REASONS:
+            raise ValueError('unsupported durable Job yield reason')
+        identity = (row['jobId'], row['yieldedAtMs'], row['runAtMs'], row['transitionReason'])
+        if identity in yielded:
+            raise ValueError('distinct durable Job yields required')
+        yielded.add(identity)
+    for row in claims:
+        binding = jobs.get(row.get('jobId')) if isinstance(row, dict) else None
+        if binding is None or row.get('agentRunId') != binding['agentRunId']:
+            raise ValueError('original Job capacity claim binding required')
+    return {'expectedJobs': len(jobs), 'succeededJobs': sum(row['status'] == 'succeeded' for row in final),
+            'jobStatusCounts': dict(sorted(Counter(row['status'] for row in final).items())),
+            'failedRetryCount': sum(row['retryCount'] for row in final),
+            'jobsWithFailedRetries': sum(row['retryCount'] > 0 for row in final),
+            'capacityClaimCount': len(claims), 'yieldCount': len(yields),
+            'yieldReasonCounts': dict(sorted(Counter(row['transitionReason'] for row in yields).items()))}
+
+
 def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2000,
         between_run_ms=6000, model_wait_ms=0, initial_stagger_ms=0,
-        expected_working_environments=None, run_terminal_timeout_seconds=120, dependencies=None):
+        expected_working_environments=None, run_terminal_timeout_seconds=120, memory_mib=0, minimum_hold_ms=0, dependencies=None):
+    profile = memory_profile(environments, iterations, memory_mib, minimum_hold_ms)
     if type(run_terminal_timeout_seconds) is not int or not 1 <= run_terminal_timeout_seconds <= 600:
         raise ValueError('bounded per-Run terminal timeout required')
     if (type(environments) is not int or not 2 <= environments <= 64
@@ -166,16 +232,23 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
     if (driver.manifest.get('sharedWorkload', {}).get('environmentCount') != environments
             or driver.manifest.get('sharedWorkload', {}).get('modelWaitMs',0) != model_wait_ms):
         raise RuntimeError('shared fixture environment count mismatch')
+    fixture_profile = driver.manifest.get('sharedWorkload', {}).get('workProfile')
+    if (not isinstance(fixture_profile, dict) or set(fixture_profile) != set(profile)
+            or any(type(fixture_profile[key]) is not int for key in profile) or fixture_profile != profile):
+        raise RuntimeError('shared fixture work profile mismatch')
     report = {'schema': 'runsc.shared.workload.acceptance.v1', 'status': 'failedPreserved',
               'sourceRevision': driver.manifest['sourceRevision'], 'environments': environments,
               'budgets': budget, 'iterations': iterations, 'runTerminalTimeoutSeconds':run_terminal_timeout_seconds, 'workUnits': work_units, 'betweenRunMs': between_run_ms,
-              'modelWaitMs':model_wait_ms,'initialStaggerMs':initial_stagger_ms,
+              'modelWaitMs':model_wait_ms,'initialStaggerMs':initial_stagger_ms,'workProfile':profile,
               'initialStaggerTotalMs':initial_stagger_ms*(environments-1),'expectedWorkingEnvironments':expected_working,
               'memoryContinuity': 'notObserved', 'clientFirstToolLatency': 'notObserved',
               'resumeToFirstToolLatency': 'notObserved', 'durableTiming': 'notObserved', 'preparationTiming': 'notObserved',
+              'runtimeJobs': 'notObserved', 'memoryContention': 'notObserved',
               'retirement': [], 'responsibility': 'preserved'}
     samples = [{'sampleId': uuid.uuid4().hex, 'operationId': uuid.uuid4().hex, 'workUnits': work_units}
                for _ in range(environments * iterations)]
+    if profile['memoryMiB']:
+        for sample in samples: sample.update(profile)
     private = {'schema': 'workspace.perf.fixture.v1', 'nativeManifest': str((fixture / 'manifest.json').resolve()),
                'apiBase': driver.base, 'workspaceId': driver.seed['workspaceId'], 'agentId': driver.seed['agentId'],
                'modelRefs': {'tools': driver.seed['modelConfigRef']},
@@ -200,8 +273,17 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
         rows = [driver.completed(record) for record in admitted]
         report['runs'] = rows
         report.update(validate_run_facts(rows, environments, iterations))
-        if hasattr(driver, 'sql'):
+        def observe_job_completion():
             report['durableTiming'] = _durable_timing(driver, admitted)
+            summary = validate_job_evidence(report['durableTiming'], admitted, allow_unsettled=True)
+            report['runtimeJobs'] = summary
+            if summary['failedRetryCount']:
+                raise RuntimeError('normal workload consumed the failed retry budget')
+            if set(summary['jobStatusCounts']) - {'succeeded', 'leased', 'running'}:
+                raise ValueError('original Worker Job ended or queued without successful completion')
+            return summary
+        driver.wait(observe_job_completion, lambda summary: summary['succeededJobs'] == summary['expectedJobs'],
+                    'original Worker Job completion', timeout=FINAL_JOB_SETTLE_SECONDS)
         last = {record['sessionId']: record for record in admitted}
         final = [driver.wait(lambda label=str(index), run=record: driver.observe(label, run),
                             lambda row: row.get('paused') is True and row.get('powerState') == 'paused',
@@ -220,6 +302,16 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
                     or row.get('runtime') != 'runsc' or row.get('running') is not True):
                 raise RuntimeError('final physical environment identity unavailable')
         report['finalEnvironments'] = final
+        if profile['memoryMiB']:
+            evaluator = dependencies.get('memory_contention')
+            if evaluator is None:
+                from runsc_acceptance.memory_contention import evaluate
+                evaluator = evaluate
+            observations = [json.loads(line) for line in (result / 'native-observations.jsonl').read_text().splitlines() if line]
+            proof = evaluator(observations, report['durableTiming'], rows, driver.manifest.get('resourceLimits'))
+            if not isinstance(proof, dict) or proof.get('status') != 'verified':
+                raise RuntimeError('verified memory contention evidence required')
+            report['memoryContention'] = proof
         for row in final:
             retired = driver.retire(row)
             report['retirement'].append(retired)
@@ -253,13 +345,16 @@ def _dependencies():
 
 
 def _durable_timing(driver, admitted):
-    # Only timestamp projections are selected; model content, credentials and
-    # authorization records never enter the timing report.
+    # One read-only snapshot joins original Jobs, safe yield fields and timings.
+    # Model content, error payloads and lease authority never enter the report.
+    bindings = _admitted_jobs(admitted)
     code = '''import json
 from django.conf import settings
 from django.db import connection,transaction
 from app_core.models import AgentRun,AgentRunEnvironmentRelease,SessionEvent
 assert settings.DATABASES['default']['NAME']=='retained_acceptance'
+bindings=JOB_BINDINGS
+allowed_yield_reasons=YIELD_REASONS
 def millis(value): return int(value.timestamp()*1000) if value else None
 with transaction.atomic():
  with connection.cursor() as cursor:
@@ -282,7 +377,25 @@ with transaction.atomic():
    release=AgentRunEnvironmentRelease.objects.filter(agent_run=run).values_list('recorded_at',flat=True).first()
    cursor.execute('SELECT recorded_at_ms FROM runtime.agent_run_cleanup_receipts WHERE agent_run_id=%s AND cleanup_complete',[run.id]);cleanup=cursor.fetchone()
    rows.append({'agentRunId':run.id,'createdAtMs':millis(run.createdAt),'startedAtMs':millis(run.startedAt),'completedAtMs':millis(run.completedAt),'durableFirstBashCallAtMs':first,'durableExecutionFactCreatedAtMs':execution_fact,'durableFirstSuccessfulToolResultCreatedAtMs':first_successful_result,'executionFactToFirstToolResultMs':execution_to_result,'businessReleaseAtMs':millis(release),'cleanupReceiptAtMs':cleanup[0] if cleanup else None,'runWallTimeMs':millis(run.completedAt)-millis(run.startedAt) if run.startedAt and run.completedAt else None})
-  jobs={('agent_run.lifecycle:'+run_id):run_id for run_id in RUN_IDS}
+  jobs={job_id:binding['agentRunId'] for job_id,binding in bindings.items()}
+  cursor.execute('SELECT job_id,job_kind,status,retry_count,max_retries,session_id FROM runtime.runtime_jobs WHERE job_id=ANY(%s) ORDER BY job_id',[list(jobs)])
+  final_jobs=[]
+  for job_id,kind,status,retries,maximum,session_id in cursor.fetchall():
+   if job_id not in bindings:
+    raise RuntimeError('final Job identity invalid')
+   final_jobs.append({'agentRunId':jobs[job_id],'jobId':job_id,'jobKind':kind,'status':status,'retryCount':retries,'maxRetries':maximum,'sessionId':session_id})
+  cursor.execute('SELECT task_id,session_id,at_ms,payload_json FROM runtime.runtime_events WHERE task_id=ANY(%s) AND event_type=%s ORDER BY at_ms,event_id',[list(jobs),'runtime_job_yielded'])
+  yields=[]
+  for job_id,session_id,at_ms,payload in cursor.fetchall():
+   try:event=json.loads(payload) if isinstance(payload,str) else payload
+   except (ValueError,TypeError):raise RuntimeError('durable Job yield payload invalid') from None
+   if not isinstance(event,dict):raise RuntimeError('durable Job yield payload invalid')
+   yielded,run_at=event.get('yieldedAtMs'),event.get('runAtMs')
+   if (job_id not in bindings or bindings[job_id]['sessionId']!=session_id or event.get('schema')!='runtime.job.yielded.v1' or event.get('jobId')!=job_id or type(at_ms) is not int or type(yielded) is not int or type(run_at) is not int or not 0<=yielded<=run_at or at_ms!=yielded):
+    raise RuntimeError('durable Job yield identity or time invalid')
+   reason=event.get('transitionReason')
+   safe_reason=reason if isinstance(reason,str) and reason in allowed_yield_reasons else 'unrecognized'
+   yields.append({'agentRunId':jobs[job_id],'jobId':job_id,'sessionId':session_id,'yieldedAtMs':yielded,'runAtMs':run_at,'transitionReason':safe_reason})
   cursor.execute('SELECT task_id,payload_json FROM runtime.runtime_events WHERE task_id=ANY(%s) AND event_type=%s ORDER BY at_ms,event_id',[list(jobs),'runtime.resident_capacity.claimed.v1'])
   validated_claims=[]
   for job_id,payload in cursor.fetchall():
@@ -317,8 +430,8 @@ with transaction.atomic():
    claims.append(row)
   physical=[event['releaseToClaimMs'] for event in claims if event['wakeSource']=='physicalRelease']
   preparation=[event['hostPreparationToClaimMs'] for event in claims if event['wakeSource']=='hostPreparation']
-  print(json.dumps({'schema':'runsc.shared.durable_timing.v1','toolTimingBasis':'committedSessionEvent.createdAtMs','rows':rows,'capacityClaims':claims,'releaseToClaimMs':physical if physical else 'notObserved','hostPreparationToClaimMs':preparation if preparation else 'notObserved','clientFirstToolLatency':'notObserved','resumeToFirstToolLatency':'notObserved'}))
-'''.replace('RUN_IDS', repr([record['agentRunId'] for record in admitted]))
+  print(json.dumps({'schema':'runsc.shared.durable_timing.v1','toolTimingBasis':'committedSessionEvent.createdAtMs','rows':rows,'finalJobs':final_jobs,'jobYields':yields,'capacityClaims':claims,'releaseToClaimMs':physical if physical else 'notObserved','hostPreparationToClaimMs':preparation if preparation else 'notObserved','clientFirstToolLatency':'notObserved','resumeToFirstToolLatency':'notObserved'}))
+'''.replace('RUN_IDS', repr([record['agentRunId'] for record in admitted])).replace('JOB_BINDINGS', repr(bindings)).replace('YIELD_REASONS', repr(sorted(_YIELD_REASONS)))
     return driver.sql(code)
 
 
@@ -331,6 +444,8 @@ def main():
     parser.add_argument('--environment-count', type=int, default=4)
     parser.add_argument('--iterations', type=int, default=3)
     parser.add_argument('--work-units', type=int, default=2000)
+    parser.add_argument('--memory-mib', type=int, default=0)
+    parser.add_argument('--minimum-hold-ms', type=int, default=0)
     parser.add_argument('--between-run-ms', type=int, default=6000)
     parser.add_argument('--model-wait-ms', type=int, default=0)
     parser.add_argument('--initial-stagger-ms', type=int, default=0)
@@ -339,6 +454,7 @@ def main():
     args = parser.parse_args()
     report = run(args.fixture, args.result, args.k6_binary, environments=args.environment_count,
                  iterations=args.iterations, work_units=args.work_units, between_run_ms=args.between_run_ms,
+                 memory_mib=args.memory_mib,minimum_hold_ms=args.minimum_hold_ms,
                  model_wait_ms=args.model_wait_ms,initial_stagger_ms=args.initial_stagger_ms,
                  expected_working_environments=args.expected_working_environments,run_terminal_timeout_seconds=args.run_terminal_timeout_seconds)
     print(json.dumps(report))

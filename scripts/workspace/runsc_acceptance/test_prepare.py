@@ -4,14 +4,14 @@ from unittest.mock import patch
 spec=importlib.util.spec_from_file_location('native_prepare',Path(__file__).with_name('prepare.py'));prepare=importlib.util.module_from_spec(spec);spec.loader.exec_module(prepare)
 class PreparationTests(unittest.TestCase):
  def fixture(self,root):
-  source=root/'source';source.mkdir();(source/'.env.example').write_text('EXECUTION_GLOBAL_LIMIT=8\nWORKER_SLOT_COUNT=8\n')
+  source=root/'source';source.mkdir();(source/'.env.example').write_text('EXECUTION_GLOBAL_LIMIT=8\nWORKER_SLOT_COUNT=8\nRESIDENT_GLOBAL_PIDS=8192\nRESIDENT_TENANT_PIDS=2048\n')
   bins=root/'bins';bins.mkdir()
   for name in ('runtime_server','execution_agent','environment_host_supervisor'):(bins/name).write_bytes(name.encode())
   manifest=root/'build.json';manifest.write_text(json.dumps({'sourceRevision':'a'*40,'sourceTree':'c'*40,'binarySha256':{n:hashlib.sha256(n.encode()).hexdigest() for n in ('runtime_server','execution_agent')},'hostSupervisorSha256':hashlib.sha256(b'environment_host_supervisor').hexdigest()}))
   tls=root/'tls';tls.mkdir()
   for name in ('model.key','model.crt','combined-ca.pem'):(tls/name).write_text('synthetic fixture certificate')
   return ['prepare','--source',str(source),'--bins',str(bins),'--output',str(root/'result'),'--revision','a'*40,'--build-manifest',str(manifest),'--tls-dir',str(tls),'--isolation-owner',str(root/'owner.json'),'--runsc-rotation','--docker-socket','/run/owned/docker.sock','--host-socket-directory','/run/owned/host']+[v for n in ('api','worker','runtime','general','postgres','redis') for v in ('--'+n+'-image','cached-image')]
- def outputs(self):return [subprocess.CompletedProcess([],0,'','')]+[subprocess.CompletedProcess([],0,'sha256:'+'b'*64,'')]*6+[subprocess.CompletedProcess([],0,'a'*40,''),subprocess.CompletedProcess([],0,'',''),subprocess.CompletedProcess([],0,'c'*40,'')]
+ def outputs(self):return [subprocess.CompletedProcess([],0,'','')]+[subprocess.CompletedProcess([],0,'sha256:'+'b'*64,'')]*6+[subprocess.CompletedProcess([],0,'a'*40,''),subprocess.CompletedProcess([],0,'',''),subprocess.CompletedProcess([],0,'c'*40,''),subprocess.CompletedProcess([],0,str(16*1024**3),'')]
  def test_native_fixture_preserves_resource_charge_and_splits_maintenance_authority(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);argv=self.fixture(root)
@@ -40,6 +40,7 @@ class PreparationTests(unittest.TestCase):
    self.assertEqual(env['RUNTIME_NATIVE_SHARED_ADMISSION'],'1');self.assertEqual(env['RESIDENT_TENANT_MEMORY_BYTES'],str(8*1024**3));self.assertEqual(env['RESIDENT_TENANT_WORKSPACE_BYTES'],str(32*1024**3))
    self.assertEqual(config['services']['model']['command'],['/app/.venv/bin/python','/harness/server.py'])
    self.assertEqual(manifest['sharedWorkload']['environmentCount'],4)
+   self.assertEqual(manifest['sharedWorkload']['workProfile'],{'memoryMiB':0,'minimumHoldMs':0})
    self.assertEqual((root/'tls/model.pem').read_text(),'synthetic fixture certificatesynthetic fixture certificate')
  def test_sparse_eight_keeps_full_caps_and_records_model_wait_stagger_and_overlap(self):
   with tempfile.TemporaryDirectory() as tmp:
@@ -57,6 +58,52 @@ class PreparationTests(unittest.TestCase):
    self.assertEqual(env['RESIDENT_GLOBAL_MEMORY_BYTES'],str(12*1024**3))
    self.assertEqual(env['SANDBOX_MEMORY_BYTES'],str(4*1024**3));self.assertEqual(env['SANDBOX_CPU_MILLI'],'2000')
    self.assertEqual(env['RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS'],'8')
+ def test_dense_profile_changes_only_tenant_memory_budget_and_records_profile(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);argv=self.fixture(root)+['--shared-workload','--environment-count','8','--iterations','1','--memory-mib','1536','--minimum-hold-ms','60000','--workspace-memory-budget-bytes',str(8*1024**3)]
+   model=root/'source/perf/mock-model';model.mkdir(parents=True)
+   for name in ('server.py','fixed_workload.py'):(model/name).write_text('# deterministic test input')
+   with patch.object(sys,'argv',argv),patch.object(prepare,'verify_owner',return_value={'root':'/run/owned'}),patch.object(prepare.subprocess,'run',side_effect=self.outputs()),patch('builtins.print'):prepare.main()
+   config=json.loads((root/'result/compose.json').read_text());manifest=json.loads((root/'result/manifest.json').read_text());env=dict(v.split('=',1) for v in (root/'result/synthetic.env').read_text().splitlines())
+   self.assertEqual(env['RESIDENT_TENANT_MEMORY_BYTES'],str(8*1024**3));self.assertEqual(env['RESIDENT_GLOBAL_MEMORY_BYTES'],str(12*1024**3))
+   self.assertEqual(env['SANDBOX_MEMORY_BYTES'],str(4*1024**3));self.assertEqual(env['SANDBOX_CPU_MILLI'],'2000')
+   self.assertEqual(manifest['sharedWorkload']['workspaceMemoryBudgetBytes'],8*1024**3)
+   self.assertEqual(manifest['sharedWorkload']['workProfile'],{'memoryMiB':1536,'minimumHoldMs':60000})
+   self.assertEqual(env['RESIDENT_HOST_MEMORY_HEADROOM_BYTES'],str((16*1024**3)//5))
+   self.assertEqual(manifest['resourceLimits'],{'global':{'count':8,'memoryBytes':12*1024**3,'pids':8192,'workspaceBytes':32*1024**3},'tenant':{'count':8,'memoryBytes':8*1024**3,'pids':2048,'workspaceBytes':32*1024**3},'hostHeadroomBytes':(16*1024**3)//5,'requested':{'memoryBytes':4*1024**3,'pids':512,'workspaceBytes':4*1024**3}})
+   self.assertEqual(config['services']['model']['environment'],{'MOCK_TLS_CERT':'/harness/model.crt','MOCK_TLS_KEY':'/harness/model.key','MOCK_FIXED_MODEL_WAIT_MS':'0'})
+ def test_shared_resource_projection_uses_actual_pids_and_host_headroom_floor(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);argv=self.fixture(root)+['--shared-workload']
+   (root/'source/.env.example').write_text('RESIDENT_GLOBAL_PIDS=6144\nRESIDENT_TENANT_PIDS=3072\n')
+   model=root/'source/perf/mock-model';model.mkdir(parents=True)
+   for name in ('server.py','fixed_workload.py'):(model/name).write_text('# deterministic test input')
+   outputs=self.outputs();outputs[-1]=subprocess.CompletedProcess([],0,str(1024**3),'')
+   with patch.object(sys,'argv',argv),patch.object(prepare,'verify_owner',return_value={'root':'/run/owned'}),patch.object(prepare.subprocess,'run',side_effect=outputs),patch('builtins.print'):prepare.main()
+   manifest=json.loads((root/'result/manifest.json').read_text())
+   self.assertEqual(manifest['resourceLimits']['global']['pids'],6144)
+   self.assertEqual(manifest['resourceLimits']['tenant']['pids'],3072)
+   self.assertEqual(manifest['resourceLimits']['hostHeadroomBytes'],512*1024**2)
+ def test_shared_fixture_rejects_invalid_host_capacity_before_creating_output(self):
+  for value in ('0','-1','true','null','"invalid"'):
+   with self.subTest(value=value),tempfile.TemporaryDirectory() as tmp:
+    root=Path(tmp);argv=self.fixture(root)+['--shared-workload'];outputs=self.outputs();outputs[-1]=subprocess.CompletedProcess([],0,value,'')
+    with patch.object(sys,'argv',argv),patch.object(prepare,'verify_owner',return_value={'root':'/run/owned'}),patch.object(prepare.subprocess,'run',side_effect=outputs):
+     with self.assertRaisesRegex(SystemExit,'positive Docker host memory'):prepare.main()
+    self.assertFalse((root/'result').exists())
+ def test_prepare_rejects_invalid_profiles_and_budgets_before_isolation_or_mutation(self):
+  cases=[([],['--memory-mib','1','--minimum-hold-ms','1'],'require shared mode'),
+   ([],['--workspace-memory-budget-bytes',str(8*1024**3)],'require shared mode'),
+   (['--shared-workload'],['--memory-mib','1'],'paired'),
+   (['--shared-workload','--iterations','2'],['--memory-mib','1','--minimum-hold-ms','1'],'one iteration'),
+   (['--shared-workload','--environment-count','1','--iterations','1'],['--memory-mib','1','--minimum-hold-ms','1'],'two environments'),
+   (['--shared-workload'],['--workspace-memory-budget-bytes',str(12*1024**3+1)],'workspace memory budget')]
+  for shared,options,message in cases:
+   with self.subTest(options=options),tempfile.TemporaryDirectory() as tmp:
+    root=Path(tmp);argv=self.fixture(root)+shared+options
+    with patch.object(sys,'argv',argv),patch.object(prepare,'verify_owner') as owner,patch.object(prepare.subprocess,'run') as run,patch.object(sys,'stderr') as stderr:
+     with self.assertRaises(SystemExit):prepare.main()
+    self.assertIn(message,''.join(str(call.args[0]) for call in stderr.write.call_args_list));owner.assert_not_called();run.assert_not_called();self.assertFalse((root/'result').exists())
  def test_unverified_isolation_rejects_before_any_docker_or_file_mutation(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);argv=self.fixture(root)

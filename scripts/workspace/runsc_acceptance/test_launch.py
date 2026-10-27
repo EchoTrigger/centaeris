@@ -21,6 +21,31 @@ class SharedArgumentTests(unittest.TestCase):
  def test_invalid_shared_budgets_reject_before_launch(self):
   for values in ((8,120001,0,None),(8,0,20000,None),(8,0,0,9),(8,0,0,0)):
    with self.subTest(values=values),self.assertRaises(ValueError):launch.shared_arguments(*values)
+class MemoryProfileArgumentTests(unittest.TestCase):
+ def test_dense_memory_profile_is_forwarded_and_default_shared_arguments_are_unchanged(self):
+  self.assertEqual(launch.shared_arguments(8,0,10000,2,memory_mib=1536,minimum_hold_ms=60000,iterations=1),
+   ['--model-wait-ms','0','--initial-stagger-ms','10000','--expected-working-environments','2','--memory-mib','1536','--minimum-hold-ms','60000'])
+ def test_launcher_rejects_invalid_memory_configuration_before_loading_fixture(self):
+  import subprocess,sys
+  cases=[(['--memory-mib','1536'],'paired'),(['--minimum-hold-ms','60000'],'paired'),
+   (['--memory-mib','1537','--minimum-hold-ms','60000'],'bounded'),
+   (['--memory-mib','1','--minimum-hold-ms','120001'],'bounded'),
+   (['--memory-mib','1','--minimum-hold-ms','1','--iterations','2'],'one iteration'),
+   (['--workspace-memory-budget-bytes',str(4*1024**3-1)],'workspace memory budget'),
+   (['--workspace-memory-budget-bytes',str(12*1024**3+1)],'workspace memory budget')]
+  for options,message in cases:
+   with self.subTest(options=options):
+    command=[sys.executable,str(Path(__file__).with_name('launch.py')),'--root','absent','--source','absent','--shared-workload','--iterations','1']+options
+    for name in ('api','worker','runtime','general','postgres','redis'):command+=['--'+name+'-image','not-loaded']
+    result=subprocess.run(command,capture_output=True,text=True,timeout=10)
+    self.assertEqual(result.returncode,2);self.assertIn(message,result.stderr)
+ def test_launcher_rejects_memory_options_outside_shared_mode(self):
+  import subprocess,sys
+  for options in (['--memory-mib','1','--minimum-hold-ms','1'],['--workspace-memory-budget-bytes',str(8*1024**3)]):
+   command=[sys.executable,str(Path(__file__).with_name('launch.py')),'--root','absent','--source','absent']+options
+   for name in ('api','worker','runtime','general','postgres','redis'):command+=['--'+name+'-image','not-loaded']
+   result=subprocess.run(command,capture_output=True,text=True,timeout=10)
+   self.assertEqual(result.returncode,2);self.assertIn('require shared mode',result.stderr)
 class FailureDiagnosticTests(unittest.TestCase):
  def test_failed_process_keeps_one_bounded_private_redacted_diagnostic(self):
   import json,os,stat,sys
@@ -77,12 +102,12 @@ class WorkloadBudgetTests(unittest.TestCase):
   self.assertEqual(budget['completedReadbackSeconds'],12*181)
   self.assertEqual(budget['finalPauseSeconds'],4*241)
   self.assertEqual(budget['retirementSeconds'],4*391)
-  self.assertEqual(budget['coordinatorSeconds'],6560)
+  self.assertEqual(budget['coordinatorSeconds'],6566)
   self.assertEqual(budget['limitSeconds'],14400)
  def test_eight_environment_stagger_is_budgeted_without_lowering_overlap_or_run_count(self):
   budget=launch.workload_budget(8,3,300,30000,3000)
   self.assertEqual(budget['k6']['scenarioSeconds'],1251)
-  self.assertEqual(budget['coordinatorSeconds'],11281)
+  self.assertEqual(budget['coordinatorSeconds'],11287)
  def test_launcher_rejects_the_total_budget_before_reading_fixture_or_k6(self):
   import subprocess,sys
   with tempfile.TemporaryDirectory() as directory:

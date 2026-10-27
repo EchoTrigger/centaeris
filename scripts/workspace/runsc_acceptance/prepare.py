@@ -2,6 +2,7 @@
 import argparse,base64,hashlib,json,os,re,secrets,shutil,subprocess
 from pathlib import Path,PurePosixPath
 from isolation import verify_owner
+from memory_profile import memory_profile,workspace_memory_budget
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -9,6 +10,10 @@ def main():
         parser.add_argument('--'+name,required=True,type=Path)
     parser.add_argument('--shared-workload',action='store_true')
     parser.add_argument('--environment-count',type=int,default=4)
+    parser.add_argument('--iterations',type=int,default=3)
+    parser.add_argument('--memory-mib',type=int,default=0)
+    parser.add_argument('--minimum-hold-ms',type=int,default=0)
+    parser.add_argument('--workspace-memory-budget-bytes',type=int)
     parser.add_argument('--model-wait-ms',type=int,default=0)
     parser.add_argument('--initial-stagger-ms',type=int,default=0)
     parser.add_argument('--expected-working-environments',type=int)
@@ -22,7 +27,11 @@ def main():
     for name in ('api','worker','runtime','general','postgres','redis'):parser.add_argument('--'+name+'-image',required=True)
     args=parser.parse_args()
     if not 1 <= args.environment_count <= 64:parser.error('environment count must be between 1 and 64')
-    if not args.shared_workload and (args.model_wait_ms or args.initial_stagger_ms or args.expected_working_environments is not None):parser.error('workload timing and overlap parameters require shared mode')
+    if not args.shared_workload and (args.memory_mib or args.minimum_hold_ms or args.workspace_memory_budget_bytes is not None or args.model_wait_ms or args.initial_stagger_ms or args.expected_working_environments is not None):parser.error('workload timing and overlap parameters require shared mode')
+    try:
+        profile=memory_profile(args.environment_count,args.iterations,args.memory_mib,args.minimum_hold_ms)
+        tenant_memory=workspace_memory_budget(args.environment_count,args.workspace_memory_budget_bytes)
+    except ValueError as error:parser.error(str(error))
     if (not 0<=args.model_wait_ms<=120000 or not 0<=args.initial_stagger_ms<=120000
             or args.initial_stagger_ms*(args.environment_count-1)>120000):parser.error('shared workload wait and total initial stagger must be bounded by 120000ms')
     expected_working=args.environment_count if args.expected_working_environments is None else args.expected_working_environments
@@ -52,6 +61,11 @@ def main():
     if command(['git','-C',str(source),'rev-parse','HEAD^{tree}'])!=build.get('sourceTree'):raise SystemExit('source tree differs from build')
     tls=args.tls_dir.resolve(strict=True)
     if any(not (tls/name).is_file() for name in ('model.key','model.crt','combined-ca.pem')):raise SystemExit('private model TLS files required')
+    host_memory_headroom=None
+    if args.shared_workload:
+        host_memory=json.loads(command([*docker,'info','--format','{{json .MemTotal}}']))
+        if type(host_memory) is not int or host_memory<=0:raise SystemExit('positive Docker host memory required')
+        host_memory_headroom=max(host_memory//5,512*1024**2)
     root=args.output.resolve();root.mkdir(mode=0o700,parents=True);project='retainedaccept'+secrets.token_hex(5)
     env={}
     for line in (source/'.env.example').read_text().splitlines():
@@ -59,15 +73,20 @@ def main():
             key,value=line.split('=',1)
             if value:env[key]=value
     env.update(DJANGO_SECRET_KEY=secrets.token_urlsafe(48),INTERNAL_API_TOKEN=secrets.token_urlsafe(48),ENVIRONMENT_MAINTENANCE_TOKEN=secrets.token_urlsafe(48),AGENT_RUN_AUTHORIZATION_SIGNING_KEY=secrets.token_urlsafe(48),CREDENTIAL_ENCRYPTION_KEY=base64.urlsafe_b64encode(secrets.token_bytes(32)).decode(),POSTGRES_PASSWORD=secrets.token_urlsafe(24),POSTGRES_DB='retained_acceptance',POSTGRES_USER='acceptance',POSTGRES_HOST='postgres',POSTGRES_PORT='5432',DJANGO_ALLOWED_HOSTS='localhost,127.0.0.1,api',WORK_RETURN_AUDIT_INTERVAL_SECONDS='30',UPLOAD_BODY_MAX_BYTES='1048576',UPLOAD_TEMP_MAX_BYTES='4194304',UPLOAD_MAX_CONCURRENT='1',UPLOAD_TEMP_ROOT='/var/lib/centaeris-upload-temp',STORAGE_ROOT='/var/lib/centaeris-storage',PLUGIN_CATALOG_ROOT='/opt/centaeris/plugins',SANDBOX_MEMORY_BYTES='268435456',SANDBOX_CPU_MILLI='1000',SANDBOX_PIDS_LIMIT='512',SANDBOX_DATA_TMPFS_BYTES='67108864',RUNTIME_URL='http://runtime:9000',RUNTIME_INTERNAL_URL='http://runtime:9000',API_INTERNAL_URL='http://api:8000',REDIS_URL='redis://redis:6379/0',WEB_ORIGIN=f'http://127.0.0.1:{args.api_port}',API_BASE_URL=f'http://127.0.0.1:{args.api_port}',RUNTIME_BIND_ADDRESS='0.0.0.0',RUNTIME_PORT='9000',RUNTIME_STATE_ROOT='/var/lib/centaeris-runtime/state',OCI_RUNTIME='runsc',WORKSPACE_GENERAL_IMAGE=project+'-general:fixed',PLUGIN_VOLUME_NAME=project+'_plugins',AGENT_MEMORY_VOLUME_NAME=project+'_memory',AGENT_RUN_EXECUTION_MODE='retained',WORKER_SLOT_COUNT='2',EXECUTION_GLOBAL_LIMIT='2',RESIDENT_GLOBAL_COUNT='2',RESIDENT_TENANT_COUNT='2',API_POSTGRES_POOL_MAX_SIZE='0',CENTAERIS_SOURCE_REVISION=sha,RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS='1',RUNTIME_RUNSC_IDLE_PAUSE_MS='3000',ENVIRONMENT_HOST_SOCKET='/run/centaeris-host/control.sock',ENVIRONMENT_EXECUTION_HELPER=str(bins/'execution_agent'))
+    resource_limits=None
     if args.shared_workload:
         count=str(args.environment_count);storage=str(max(32,args.environment_count*4)*1024**3)
         env.update(SANDBOX_MEMORY_BYTES=str(4*1024**3),SANDBOX_CPU_MILLI='2000',SANDBOX_DATA_TMPFS_BYTES=str(4*1024**3),
             WORKER_SLOT_COUNT=count,EXECUTION_GLOBAL_LIMIT=count,RESIDENT_GLOBAL_COUNT=count,RESIDENT_TENANT_COUNT=count,
             RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS=count,RUNTIME_NATIVE_SHARED_ADMISSION='1',
-            RESIDENT_GLOBAL_MEMORY_BYTES=str(12*1024**3),RESIDENT_TENANT_MEMORY_BYTES=str((12 if args.environment_count>=8 else 8)*1024**3),
+            RESIDENT_HOST_MEMORY_HEADROOM_BYTES=str(host_memory_headroom),RESIDENT_GLOBAL_MEMORY_BYTES=str(12*1024**3),RESIDENT_TENANT_MEMORY_BYTES=str(tenant_memory),
             RESIDENT_GLOBAL_CPU_MILLI='8000',RESIDENT_TENANT_CPU_MILLI='4000',
             RESIDENT_GLOBAL_WORKSPACE_BYTES=storage,RESIDENT_TENANT_WORKSPACE_BYTES=storage,
             CENTAERIS_ACCEPTANCE_SHARED_WORKLOAD='1',WORKSPACE_PERF_OBSERVATIONS='1')
+        fields={'count':'COUNT','memoryBytes':'MEMORY_BYTES','pids':'PIDS','workspaceBytes':'WORKSPACE_BYTES'}
+        resource_limits={scope:{field:int(env['RESIDENT_'+scope.upper()+'_'+suffix]) for field,suffix in fields.items()} for scope in ('global','tenant')}
+        resource_limits['hostHeadroomBytes']=int(env['RESIDENT_HOST_MEMORY_HEADROOM_BYTES'])
+        resource_limits['requested']={field:int(env[key]) for field,key in {'memoryBytes':'SANDBOX_MEMORY_BYTES','pids':'SANDBOX_PIDS_LIMIT','workspaceBytes':'SANDBOX_DATA_TMPFS_BYTES'}.items()}
         pem=tls/'model.pem';pem.write_bytes((tls/'model.crt').read_bytes()+(tls/'model.key').read_bytes());pem.chmod(0o600)
     env['DATABASE_URL']=f"postgresql://{env['POSTGRES_USER']}:{env['POSTGRES_PASSWORD']}@postgres:5432/{env['POSTGRES_DB']}"
     def private_file(name,values):
@@ -96,6 +115,6 @@ def main():
     (root/'compose.json').write_text(json.dumps({'name':project,'services':services,'volumes':volumes},indent=2))
     image=root/'general-image';image.mkdir();shutil.copyfile(bins/'execution_agent',image/'execution_agent');(image/'execution_agent').chmod(0o755)
     (image/'Dockerfile').write_text('FROM '+images['general']['id']+'\nCOPY execution_agent /opt/centaeris/bin/\n')
-    (root/'manifest.json').write_text(json.dumps({'project':project,'sourceRevision':sha,'source':str(source),'binaryDirectory':str(bins),'binarySha256':hashes,'buildManifest':build,'images':images,'apiPort':args.api_port,'runtimePort':args.runtime_port,'runscRotation':True,'sharedWorkload':({'environmentCount':args.environment_count,'idlePauseMs':3000,'capMemoryBytes':4*1024**3,'capCpuMilli':2000,'modelWaitMs':args.model_wait_ms,'initialStaggerMs':args.initial_stagger_ms,'expectedWorkingEnvironments':expected_working,'workspaceMemoryBudgetBytes':int(env['RESIDENT_TENANT_MEMORY_BYTES'])} if args.shared_workload else None),'dockerSocket':args.docker_socket,'hostSocketDirectory':args.host_socket_directory,'isolationOwner':str(args.isolation_owner.resolve()),'status':'prepared-not-started'},indent=2))
+    (root/'manifest.json').write_text(json.dumps({'project':project,'sourceRevision':sha,'source':str(source),'binaryDirectory':str(bins),'binarySha256':hashes,'buildManifest':build,'images':images,'apiPort':args.api_port,'runtimePort':args.runtime_port,'runscRotation':True,'resourceLimits':resource_limits,'sharedWorkload':({'environmentCount':args.environment_count,'idlePauseMs':3000,'capMemoryBytes':4*1024**3,'capCpuMilli':2000,'modelWaitMs':args.model_wait_ms,'initialStaggerMs':args.initial_stagger_ms,'expectedWorkingEnvironments':expected_working,'workspaceMemoryBudgetBytes':int(env['RESIDENT_TENANT_MEMORY_BYTES']),'workProfile':profile} if args.shared_workload else None),'dockerSocket':args.docker_socket,'hostSocketDirectory':args.host_socket_directory,'isolationOwner':str(args.isolation_owner.resolve()),'status':'prepared-not-started'},indent=2))
     print(json.dumps({'project':project,'sourceRevision':sha,'status':'prepared-not-started'}))
 if __name__=='__main__':main()
