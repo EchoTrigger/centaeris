@@ -4,10 +4,22 @@ use centaeris_core::extension::skills::{
     SkillCatalogLoadConfig, SkillSourceConfigV1, SkillSourceKindV1, SkillSourceScopeV1,
     SkillSourcesConfigV1, SKILL_SOURCES_CONFIG_SCHEMA_V1,
 };
-use centaeris_core::extension::{
-    build_plugin_activation_snapshot, validate_plugin_activation_snapshot,
-    PluginActivationSnapshotV1,
-};
+use centaeris_core::extension::{validate_plugin_activation_snapshot, PluginActivationSnapshotV1};
+
+#[cfg(not(test))]
+use centaeris_core::extension::build_plugin_activation_snapshot;
+
+#[cfg(test)]
+fn build_plugin_activation_snapshot(
+    package_roots: &[PathBuf],
+) -> Result<PluginActivationSnapshotV1, String> {
+    tests::SNAPSHOT_BUILDS.with(|observed| {
+        if let Some(builds) = observed.borrow_mut().as_mut() {
+            builds.push(package_roots.to_vec());
+        }
+    });
+    centaeris_core::extension::build_plugin_activation_snapshot(package_roots)
+}
 
 pub const PLUGIN_CATALOG_ROOT: &str = "/opt/centaeris/plugins";
 #[cfg(not(test))]
@@ -46,7 +58,7 @@ pub(crate) fn workspace_skill_catalog_config_at(
         return Err("System Skill catalog root is not a directory".to_string());
     }
     let package_roots = verified_plugin_package_roots_at(activation, catalog_root)?;
-    let actual = build_plugin_activation_snapshot(package_roots.as_slice())?;
+    // The verifier compared a freshly built package snapshot with this activation.
 
     let mut sources = vec![SkillSourceConfigV1 {
         source_id: "centaeris-workspace-system-skills".to_string(),
@@ -56,7 +68,7 @@ pub(crate) fn workspace_skill_catalog_config_at(
         workspace_root: None,
         enabled: true,
     }];
-    for (package, package_root) in actual.packages.iter().zip(package_roots) {
+    for (package, package_root) in activation.packages.iter().zip(package_roots) {
         for (index, resource) in package.skills.iter().enumerate() {
             let path = package_root.join(resource.path.as_str());
             let kind = if path.is_file() {
@@ -268,6 +280,168 @@ mod tests {
             "plugin_activation_package_mismatch"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    thread_local! {
+        pub(super) static SNAPSHOT_BUILDS: std::cell::RefCell<Option<Vec<Vec<PathBuf>>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    fn observe_snapshot_builds<T>(action: impl FnOnce() -> T) -> (T, Vec<Vec<PathBuf>>) {
+        SNAPSHOT_BUILDS.with(|observed| *observed.borrow_mut() = Some(Vec::new()));
+        let result = action();
+        let builds = SNAPSHOT_BUILDS.with(|observed| observed.borrow_mut().take().unwrap());
+        (result, builds)
+    }
+
+    struct ProjectionFixture {
+        root: PathBuf,
+        catalog: PathBuf,
+        system: PathBuf,
+    }
+
+    impl ProjectionFixture {
+        fn new() -> Self {
+            let root = temp_root();
+            let catalog = root.join("plugins");
+            let system = root.join("system-skills");
+            fs::create_dir_all(&catalog).expect("Plugin catalog");
+            write_system_skill(&system);
+            Self {
+                root,
+                catalog,
+                system,
+            }
+        }
+    }
+
+    impl Drop for ProjectionFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn projection_preserves_system_package_and_resource_order() {
+        let fixture = ProjectionFixture::new();
+        let roots = ["zeta", "banana"].map(|name| {
+            let root = fixture.catalog.join(name);
+            fs::create_dir_all(root.join(".centaeris-plugin")).expect("manifest root");
+            fs::create_dir_all(root.join("skills/beta")).expect("directory skill");
+            fs::create_dir_all(root.join("skills/alpha")).expect("file skill");
+            fs::write(root.join("skills/alpha/SKILL.md"), skill("file resource"))
+                .expect("file resource");
+            fs::write(
+                root.join("skills/beta/SKILL.md"),
+                skill("directory resource"),
+            )
+            .expect("directory resource");
+            let manifest = serde_json::json!({
+                "name": name,
+                "version": "1.0.0",
+                "paths": { "skills": ["skills/beta", "skills/alpha/SKILL.md"] },
+            });
+            fs::write(
+                root.join(".centaeris-plugin/plugin.json"),
+                manifest.to_string(),
+            )
+            .expect("manifest");
+            root
+        });
+        let activation = build_plugin_activation_snapshot(&roots).expect("activation");
+        let config =
+            workspace_skill_catalog_config_at(&activation, &fixture.catalog, &fixture.system)
+                .expect("projection");
+        let sources = config.sources_config.sources;
+        assert_eq!(sources.len(), 5);
+        assert_eq!(
+            config.sources_config.schema_version,
+            SKILL_SOURCES_CONFIG_SCHEMA_V1
+        );
+        assert!(config.sources_config.skill_policies.is_empty());
+        assert!(config.cwd.is_none());
+        let catalog = fixture.catalog.canonicalize().expect("canonical catalog");
+        let expected = [
+            (
+                "centaeris-workspace-system-skills",
+                SkillSourceScopeV1::System,
+                SkillSourceKindV1::CatalogDirectory,
+                fixture.system.canonicalize().unwrap(),
+            ),
+            (
+                "plugin-banana-0",
+                SkillSourceScopeV1::Plugin,
+                SkillSourceKindV1::SkillFile,
+                catalog.join("banana/skills/alpha/SKILL.md"),
+            ),
+            (
+                "plugin-banana-1",
+                SkillSourceScopeV1::Plugin,
+                SkillSourceKindV1::CatalogDirectory,
+                catalog.join("banana/skills/beta"),
+            ),
+            (
+                "plugin-zeta-0",
+                SkillSourceScopeV1::Plugin,
+                SkillSourceKindV1::SkillFile,
+                catalog.join("zeta/skills/alpha/SKILL.md"),
+            ),
+            (
+                "plugin-zeta-1",
+                SkillSourceScopeV1::Plugin,
+                SkillSourceKindV1::CatalogDirectory,
+                catalog.join("zeta/skills/beta"),
+            ),
+        ];
+        for (source, (id, scope, kind, path)) in sources.iter().zip(expected) {
+            assert_eq!(source.source_id, id);
+            assert_eq!(source.scope, scope);
+            assert_eq!(source.kind, kind);
+            assert_eq!(source.path, path.to_string_lossy());
+            assert!(source.workspace_root.is_none());
+            assert!(source.enabled);
+        }
+    }
+
+    #[test]
+    fn projection_reverifies_package_bytes_on_each_call() {
+        let fixture = ProjectionFixture::new();
+        let package = fixture.catalog.join("banana");
+        write_package(&package, "accepted skill bytes");
+        let activation =
+            build_plugin_activation_snapshot(std::slice::from_ref(&package)).expect("activation");
+        workspace_skill_catalog_config_at(&activation, &fixture.catalog, &fixture.system)
+            .expect("first projection");
+        // A non-skill file is still covered by the package digest.
+        fs::write(package.join("README.md"), "changed package bytes").expect("mutate package");
+        assert_eq!(
+            workspace_skill_catalog_config_at(&activation, &fixture.catalog, &fixture.system)
+                .expect_err("every projection must reverify current package bytes"),
+            "plugin_activation_package_mismatch",
+        );
+        assert_eq!(
+            verified_plugin_package_roots_at(&activation, &fixture.catalog)
+                .expect_err("other callers must retain package verification"),
+            "plugin_activation_package_mismatch",
+        );
+    }
+
+    #[test]
+    fn projection_builds_one_verified_snapshot() {
+        let fixture = ProjectionFixture::new();
+        let package = fixture.catalog.join("banana");
+        write_package(&package, "accepted skill bytes");
+        let activation =
+            build_plugin_activation_snapshot(std::slice::from_ref(&package)).expect("activation");
+        let (result, builds) = observe_snapshot_builds(|| {
+            workspace_skill_catalog_config_at(&activation, &fixture.catalog, &fixture.system)
+        });
+        let config = result.expect("projection");
+        assert_eq!(config.sources_config.sources.len(), 2);
+        assert_eq!(
+            builds,
+            vec![vec![package.canonicalize().unwrap()]],
+            "projection must construct and verify the current package snapshot once"
+        );
     }
 
     fn temp_root() -> PathBuf {
