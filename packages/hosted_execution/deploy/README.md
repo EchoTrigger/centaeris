@@ -31,6 +31,27 @@ configuration, separate PID/mount namespaces and cgroup v2 membership. Missing
 capabilities and changed targets fail explicitly; no execution backend fallback
 is selected.
 
+Host control commands for different containers can execute concurrently. A
+short process-wide registry protects child creation, wait ownership and adopted
+child collection; it does not cover command completion. Controls for the same
+OCI runtime/root/container retain a shared lifecycle mutex. Failed command
+handles transfer their remaining wait responsibility to a cleanup worker.
+
+Resource observations use one 30-second server budget from connection acceptance,
+including admission, command waits and response writes. At most two full resource
+walks execute concurrently; overload returns `host_probe_busy`. A disconnected
+response reader cancels read-only probes, while a client that only closes its
+request-writing side may still receive a response. Individual command execution
+and output drain remain bounded by five seconds or the shorter probe budget.
+Client timeouts may be shorter, and unavailable observations remain unknown.
+
+Inspection uses the same budget while attesting or waiting for a loaded manager.
+After a supervisor restart, entering manager recovery is also budgeted, but once
+recovery starts it retains its task reconciliation responsibility across client
+disconnect. The budget does not cancel accepted task starts, termination, helper
+operations or retirement. The existing eight-client limit includes request
+parsing and inspection; the resource-walk limit is not a reserved control lane.
+
 Mount only `/run/centaeris-host` into the trusted Runtime service and set
 `ENVIRONMENT_HOST_SOCKET=/run/centaeris-host/control.sock`. Workloads receive no
 control socket, journal, output directory, host PID namespace, Docker socket or

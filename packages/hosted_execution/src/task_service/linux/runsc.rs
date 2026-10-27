@@ -1,5 +1,6 @@
 //! gVisor's private cgroup v2 task domains and sealed, identity-isolated runner.
 use super::*;
+use crate::host_supervisor::linux::commands::{self, OwnedChild};
 use crate::{
     host_supervisor::HostOciRuntime,
     runsc_task::{RunnerAction, RunnerEvent, RunnerRequest},
@@ -14,7 +15,6 @@ use std::{
             process::{CommandExt, ExitStatusExt},
         },
     },
-    process::Child,
     sync::atomic::AtomicU64,
 };
 
@@ -91,9 +91,12 @@ mod tests {
 }
 
 pub(super) fn events(target: &OciTarget, path: &Path) -> Result<String, String> {
-    let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-        .lock()
-        .map_err(|_| "host_command_failed")?;
+    let gate = commands::instance_gate(
+        &target.runtime_path,
+        &target.runtime_root,
+        &target.container_id,
+    );
+    let _commands = gate.lock().map_err(|_| "host_command_failed")?;
     target.verify_identity()?;
     control_unlocked(
         target,
@@ -112,17 +115,23 @@ fn kill_unlocked(target: &OciTarget, id: &str) -> Result<bool, String> {
 }
 
 pub(super) fn kill(target: &OciTarget, path: &Path) -> Result<bool, String> {
-    let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-        .lock()
-        .map_err(|_| "host_command_failed")?;
+    let gate = commands::instance_gate(
+        &target.runtime_path,
+        &target.runtime_root,
+        &target.container_id,
+    );
+    let _commands = gate.lock().map_err(|_| "host_command_failed")?;
     target.verify_identity()?;
     kill_unlocked(target, task_id(path)?)
 }
 
 pub(super) fn initialize(target: &OciTarget) -> Result<(), String> {
-    let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-        .lock()
-        .map_err(|_| "host_command_failed")?;
+    let gate = commands::instance_gate(
+        &target.runtime_path,
+        &target.runtime_root,
+        &target.container_id,
+    );
+    let _commands = gate.lock().map_err(|_| "host_command_failed")?;
     if target.helper_binary.is_none() {
         return Err("host_runsc_runner_required".into());
     }
@@ -263,9 +272,12 @@ pub(super) fn administer(
     path: &Path,
     action: RunnerAction,
 ) -> Result<(), String> {
-    let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-        .lock()
-        .map_err(|_| "host_command_failed")?;
+    let gate = commands::instance_gate(
+        &target.runtime_path,
+        &target.runtime_root,
+        &target.container_id,
+    );
+    let _commands = gate.lock().map_err(|_| "host_command_failed")?;
     target.verify_identity()?;
     let request = RunnerRequest {
         action,
@@ -282,12 +294,11 @@ pub(super) fn administer(
         .custom_flags(libc::O_NOFOLLOW)
         .open(&diagnostic_path)
         .map_err(|_| "runsc_control_failed")?;
-    let mut child = command
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::from(diagnostic))
-        .spawn()
-        .map_err(|_| "runsc_control_failed")?;
+        .stderr(Stdio::from(diagnostic));
+    let mut child = OwnedChild::spawn(&mut command).map_err(|_| "runsc_control_failed")?;
     let began = Instant::now();
     loop {
         match child.try_wait().map_err(|_| "runsc_control_failed")? {
@@ -324,12 +335,13 @@ struct Events {
 }
 
 pub(super) struct RunscChild {
-    proxy: Option<Child>,
+    proxy: Option<OwnedChild>,
     state: Arc<Mutex<Events>>,
     stream: UnixStream,
     reader: Option<thread::JoinHandle<()>>,
 }
 impl RunscChild {
+    #[cfg(test)]
     pub(super) fn id(&self) -> u32 {
         self.proxy.as_ref().expect("launched proxy").id()
     }
@@ -361,11 +373,9 @@ impl Drop for RunscChild {
             if matches!(proxy.try_wait(), Ok(None)) {
                 let _ = proxy.kill();
             }
-            let _ = proxy.wait();
-            if let Ok(mut pids) = crate::host_supervisor::linux::MANAGED_PIDS.lock() {
-                pids.remove(&proxy.id());
-            }
         }
+        // Preserve the proxy grace period; the cleanup worker owns any outstanding wait.
+        self.proxy.take();
         let _ = self.stream.shutdown(Shutdown::Both);
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
@@ -420,9 +430,12 @@ pub(super) fn spawn(
     if target.runtime != HostOciRuntime::Runsc {
         return Err("runsc_backend_required".into());
     }
-    let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-        .lock()
-        .map_err(|_| "host_command_failed")?;
+    let gate = commands::instance_gate(
+        &target.runtime_path,
+        &target.runtime_root,
+        &target.container_id,
+    );
+    let _commands = gate.lock().map_err(|_| "host_command_failed")?;
     target.verify_identity()?;
     let process = match trusted {
         Some(launch) => launch.process(&target.process)?,
@@ -456,19 +469,14 @@ pub(super) fn spawn(
         process: Some(process),
     };
     let (mut command, _imports) = command(target, &input, Some(guest.as_raw_fd()))?;
-    let mut proxy = command
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|_| "task_launch_unknown")?;
+        .stderr(Stdio::piped());
+    let mut proxy = OwnedChild::spawn(&mut command).map_err(|_| "task_launch_unknown")?;
     let input = proxy.stdin.take();
     let stdout = proxy.stdout.take().expect("piped stdout");
     let stderr = proxy.stderr.take().expect("piped stderr");
-    crate::host_supervisor::linux::MANAGED_PIDS
-        .lock()
-        .map_err(|_| "task_service_failed")?
-        .insert(proxy.id());
     child.proxy = Some(proxy);
     drop(guest);
     let began = Instant::now();

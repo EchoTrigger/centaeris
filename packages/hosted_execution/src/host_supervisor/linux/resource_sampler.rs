@@ -195,17 +195,20 @@ pub(super) fn observe(
     config: &super::HostSupervisorConfig,
     expected_host_id: &str,
     targets: &[super::HostLaunchTarget],
+    budget: &super::probe::ProbeBudget<'_>,
 ) -> Result<crate::host_supervisor::resources::HostResourceObservation, String> {
-    collect(
+    budget.check()?;
+    let observation = collect(
         ResourceRequest {
             host: expected_host_id,
             targets,
         },
         &ProbeRoots::system(),
-        |target| super::attest_observation(config, target),
+        |target| super::attest_observation(config, target, budget),
         || {
+            budget.check()?;
             let endpoint = format!("unix://{}", config.docker_socket);
-            let value = super::command_json(
+            let value = super::command_json_with_budget(
                 &config.docker_path,
                 &[
                     "--host",
@@ -214,6 +217,7 @@ pub(super) fn observe(
                     "--format",
                     r#"{"id":{{json .ID}},"memoryBytes":{{.MemTotal}},"cpuCount":{{.NCPU}}}"#,
                 ],
+                Some(budget),
             )?;
             Ok(DaemonIdentity {
                 id: value["id"]
@@ -232,7 +236,9 @@ pub(super) fn observe(
                     .ok_or("host_resource_daemon_unknown")?,
             })
         },
-    )
+    )?;
+    budget.check()?;
+    Ok(observation)
 }
 #[cfg(test)]
 mod tests;

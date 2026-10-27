@@ -78,7 +78,12 @@ impl Host {
             || observe_power(&self.config, target),
             || {
                 let endpoint = format!("unix://{}", self.config.docker_socket);
-                let _command = COMMAND_LOCK.lock().map_err(|_| "host_command_failed")?;
+                let gate = commands::instance_gate(
+                    Path::new(&self.config.runtime_path),
+                    Path::new(&self.config.runtime_root),
+                    &target.container_id,
+                );
+                let _command = gate.lock().map_err(|_| "host_command_failed")?;
                 command_bytes_unlocked(
                     &self.config.docker_path,
                     &["--host", &endpoint, "pause", &target.container_id],
