@@ -94,50 +94,57 @@ pub(super) fn takeover(
     id: &str,
     fence: &EnvironmentTaskFence,
 ) -> Result<(), String> {
-    let result = relay(
-        expected,
-        id,
-        EnvironmentTaskRequest::Takeover {
-            environment_instance_id: fence.environment_instance_id.clone(),
-            controller_owner: fence.controller_owner.clone(),
-            controller_epoch: fence.controller_epoch,
-            controller_purpose: fence.controller_purpose.clone(),
-        },
-    )?;
-    if matches!(result,EnvironmentTaskResult::TakenOver{fence:ref actual} if actual==fence) {
-        use hosted_execution::host_supervisor::{
-            HostHelperRequest, HostLaunchTarget, TrustedHelperKind,
-        };
-        let scope = match &fence.controller_owner {
-            EnvironmentTaskOwner::AgentRun { run_id } => {
-                centaeris_core::execution::EnvironmentTaskScope::Run {
-                    run_id: run_id.clone(),
-                }
+    crate::observations::timed("controllerTakeover", || {
+        let result = relay(
+            expected,
+            id,
+            EnvironmentTaskRequest::Takeover {
+                environment_instance_id: fence.environment_instance_id.clone(),
+                controller_owner: fence.controller_owner.clone(),
+                controller_epoch: fence.controller_epoch,
+                controller_purpose: fence.controller_purpose.clone(),
+            },
+        )?;
+        if !matches!(result, EnvironmentTaskResult::TakenOver { fence: ref actual } if actual == fence)
+        {
+            return Err("retained takeover acknowledgement mismatch".into());
+        }
+        Ok(())
+    })?;
+    use hosted_execution::host_supervisor::{
+        HostHelperRequest, HostLaunchTarget, TrustedHelperKind,
+    };
+    let scope = match &fence.controller_owner {
+        EnvironmentTaskOwner::AgentRun { run_id } => {
+            centaeris_core::execution::EnvironmentTaskScope::Run {
+                run_id: run_id.clone(),
             }
-            EnvironmentTaskOwner::MaintenanceOperation { operation_id } => {
-                centaeris_core::execution::EnvironmentTaskScope::Operation {
-                    operation_id: operation_id.clone(),
-                }
+        }
+        EnvironmentTaskOwner::MaintenanceOperation { operation_id } => {
+            centaeris_core::execution::EnvironmentTaskScope::Operation {
+                operation_id: operation_id.clone(),
             }
-        };
-        let request = HostHelperRequest {
-            fence: fence.clone(),
-            operation_id: fence.operation_id("prepare-workspace"),
-            scope,
-            kind: TrustedHelperKind::PrepareWorkspace,
-            input_digest: format!("sha256:{:x}", Sha256::digest([])),
-            input_length: 0,
-        };
-        let target = HostLaunchTarget {
-            environment_instance_id: expected.instance_id.into(),
-            container_id: id.into(),
-            environment_id: expected.environment_id.into(),
-            profile_digest: expected
-                .profile_digest
-                .ok_or("environment_profile_required")?
-                .into(),
-            image_digest: expected.image_digest.into(),
-        };
+        }
+    };
+    let request = HostHelperRequest {
+        fence: fence.clone(),
+        operation_id: fence.operation_id("prepare-workspace"),
+        scope,
+        kind: TrustedHelperKind::PrepareWorkspace,
+        input_digest: format!("sha256:{:x}", Sha256::digest([])),
+        input_length: 0,
+    };
+    let target = HostLaunchTarget {
+        environment_instance_id: expected.instance_id.into(),
+        container_id: id.into(),
+        environment_id: expected.environment_id.into(),
+        profile_digest: expected
+            .profile_digest
+            .ok_or("environment_profile_required")?
+            .into(),
+        image_digest: expected.image_digest.into(),
+    };
+    crate::observations::timed("workspacePreparation", || {
         let mut error = "environment_workspace_preparation_unknown".to_owned();
         for _ in 0..2 {
             match crate::environment_supervisor::helper(
@@ -153,10 +160,9 @@ pub(super) fn takeover(
             }
         }
         Err(error)
-    } else {
-        Err("retained takeover acknowledgement mismatch".into())
-    }
+    })
 }
+
 impl DockerExecutionHostRunner {
     pub(crate) fn is_hot_reuse(&self) -> bool {
         self.retained_allocation.as_ref().is_some_and(|a| a.reused)

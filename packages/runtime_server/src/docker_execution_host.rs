@@ -620,7 +620,7 @@ impl DockerExecutionHostRunner {
                 resources: declared_usage(resources),
                 lease: &lease,
             };
-            let allocation = resident_store.prepare_retained_instance_with_inventory(
+            let allocation = resident_store.prepare_retained_instance_then_initialize(
                 &request,
                 resident_limits,
                 || shared_inventory::collect(&resident_host_id),
@@ -648,10 +648,18 @@ impl DockerExecutionHostRunner {
                     {
                         return Err("retained container incarnation mismatch".into());
                     }
+                    Ok(facts.id)
+                },
+                |allocation| {
+                    let name = self::container_name(&allocation.allocation_execution_id);
+                    let physical = retained::origin_expectation(&expected, allocation, &name);
+                    let id = allocation
+                        .container_id
+                        .as_deref()
+                        .ok_or("retained container unconfirmed")?;
                     let fence =
                         retained::fence(&environment_authorization, &allocation.instance_id)?;
-                    retained::takeover(&physical, &facts.id, &fence)?;
-                    Ok(facts.id)
+                    retained::takeover(&physical, id, &fence)
                 },
             )?;
             instance_id = allocation.instance_id.clone();

@@ -82,6 +82,32 @@ creation outcomes retain their debit. Container adoption checks exact identity,
 profile, network and security facts. Physical labels describe the original
 allocation even when a later controller uses it.
 
+Retained preparation acquires an environment gate before global admission.
+Global admission covers inventory reconciliation, reservation, the durable create
+dispatch record, resume/create and physical identity confirmation. Runtime commits
+the confirmed resident and running charge before releasing that global lock.
+Controller takeover and workspace preparation then proceed independently across
+environments, with the environment gate retained and current controller, lease
+and exact instance association revalidated and pinned through the host operation.
+A failure in this later stage keeps the confirmed instance and its resource debit.
+Cleanup and retirement acquire the same environment gate before global admission.
+
+Reconciliation does not rewrite an unchanged resident fact. If a resident missing
+from inventory is still pinned, reconciliation defers its deletion and retains its
+charge. Neither a skipped row nor a released gate proves resources are refundable.
+Preparation availability advances the existing durable eligibility clock; it is a
+hint to retry admission, never execution authority. An environment contender that
+cannot immediately update its pinned Job's wait marker retains the existing timed
+retry instead of blocking behind the active operation. The shared preparation
+wake pool does not identify which particular gate is available.
+
+Opt-in preparation observations separate environment/global acquisition, global
+hold, inventory, reconciliation/reservation, physical confirmation, takeover and
+workspace preparation. The acceptance report retains only timings associated with
+its accepted Jobs. Missing or failed collection is `notObserved`; nested phase
+intervals must not be added together. These timings explain delays independently
+of the sustained physical-concurrency acceptance gate.
+
 The native [host supervisor](../../packages/hosted_execution/deploy/README.md)
 owns process launch, task journals and output. It attests the Docker/runc target,
 runs commands with the profile's identity and security configuration, and

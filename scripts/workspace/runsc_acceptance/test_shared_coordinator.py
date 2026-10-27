@@ -9,13 +9,15 @@ import sys
 import contextlib
 import datetime
 import io
+import subprocess
+import time
 
 spec = importlib.util.spec_from_file_location('shared_coordinator', Path(__file__).with_name('shared_workload.py'))
 module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 
 
 class SharedCoordinatorTests(unittest.TestCase):
-    def invoke(self, root, *, overlap='verified', bad_run=False, bad_retirement=False, resumed=None, environments=4, working=None, model_wait_ms=0, initial_stagger_ms=0, expected_working_environments=None, run_terminal_timeout_seconds=120):
+    def invoke(self, root, *, overlap='verified', bad_run=False, bad_retirement=False, resumed=None, environments=4, working=None, model_wait_ms=0, initial_stagger_ms=0, expected_working_environments=None, run_terminal_timeout_seconds=120, runtime_logs=None, runtime_log_error=None):
         resumed = environments if resumed is None else resumed
         working = environments if working is None else working
         fixture = root / 'fixture'; fixture.mkdir()
@@ -26,6 +28,9 @@ class SharedCoordinatorTests(unittest.TestCase):
                 self.result = result; result.mkdir(); self.base = 'http://127.0.0.1:18083'
                 self.seed = {'email': 'fixture@example.invalid', 'password': 'private-fixture-password', 'workspaceId': 'workspace-a', 'agentId': 'agent-a', 'modelConfigRef': 'model-a'}
                 self.manifest = {'sharedWorkload': {'environmentCount': environments, 'modelWaitMs': model_wait_ms}, 'sourceRevision': 'abc'}
+                self.docker = ['docker', '--host', 'unix:///owned/docker.sock']
+                self.compose = fixture / 'compose.json'
+                self.environment = {'COMPOSE_DISABLE_ENV_FILE': 'true'}
                 calls.append(('driver', expected_running_limit))
             def completed(self, record):
                 calls.append(('completed', record['agentRunId']))
@@ -69,7 +74,17 @@ class SharedCoordinatorTests(unittest.TestCase):
         if model_wait_ms: options['model_wait_ms'] = model_wait_ms
         if initial_stagger_ms: options['initial_stagger_ms'] = initial_stagger_ms
         if expected_working_environments is not None: options['expected_working_environments'] = expected_working_environments
-        return calls, lambda: module.run(fixture, root / 'result', root / 'k6', dependencies=dependencies, **options)
+        def runtime_process(argv, **kwargs):
+            from unittest.mock import Mock
+            calls.append(('runtimeLogs', tuple(argv)))
+            if runtime_log_error is not None:
+                raise runtime_log_error
+            return types.SimpleNamespace(stdout=io.BytesIO((runtime_logs or '').encode()),
+                poll=Mock(return_value=0), wait=Mock(return_value=0), terminate=Mock(), kill=Mock())
+        def execute():
+            with patch.object(module.subprocess, 'Popen', side_effect=runtime_process):
+                return module.run(fixture, root / 'result', root / 'k6', dependencies=dependencies, **options)
+        return calls, execute
 
     def test_k6_is_only_admitter_and_retirement_follows_all_real_completion_facts(self):
         with tempfile.TemporaryDirectory() as name:
@@ -124,6 +139,34 @@ class SharedCoordinatorTests(unittest.TestCase):
                 calls,execute=self.invoke(Path(name),environments=8,expected_working_environments=2,**options)
                 with self.assertRaises((ValueError,RuntimeError)):execute()
                 self.assertFalse(any(call[0]=='retire' for call in calls))
+
+    def test_failed_physical_gate_still_collects_only_safe_runtime_timings(self):
+        event = {'schema': 'workspace.perf.v1', 'source': 'runtime', 'jobId': 'agent_run.lifecycle:run-0-0',
+            'phase': 'physicalConfirm', 'elapsedMs': 125.5, 'outcome': 'error', 'atUnixMs': 1000,
+            'error': 'private runtime response', 'body': {'token': 'private token'}}
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            calls, execute = self.invoke(root, overlap='notObserved', runtime_logs=json.dumps(event))
+            with self.assertRaisesRegex(RuntimeError, 'overlap threshold'):
+                execute()
+            report = json.loads((root / 'result/shared-report.json').read_text())
+            self.assertEqual(report['status'], 'failedPreserved')
+            self.assertEqual(report['preparationTiming']['records'], [
+                {key: event[key] for key in ('jobId', 'phase', 'elapsedMs', 'outcome', 'atUnixMs')}])
+            self.assertEqual(report['native']['physicalOverlap'], 'notObserved')
+            self.assertFalse(any(call[0] == 'retire' for call in calls))
+            self.assertEqual(len([call for call in calls if call[0] == 'runtimeLogs']), 1)
+            self.assertNotIn('private runtime response', json.dumps(report))
+            self.assertNotIn('private token', json.dumps(report))
+
+    def test_timing_capture_failure_does_not_change_successful_physical_gate(self):
+        with tempfile.TemporaryDirectory() as name:
+            calls, execute = self.invoke(Path(name), runtime_log_error=RuntimeError('private command output'))
+            report = execute()
+            self.assertEqual(report['status'], 'passed')
+            self.assertEqual(report['preparationTiming'], 'notObserved')
+            self.assertEqual(sum(call[0] == 'retire' for call in calls), 4)
+            self.assertNotIn('private command output', json.dumps(report))
 
     def test_shared_workload_rejects_unbounded_wait_stagger_and_invalid_overlap_before_loading(self):
         for options in ({'model_wait_ms':120001},{'model_wait_ms':-1},{'initial_stagger_ms':20000,'environments':8},{'expected_working_environments':9,'environments':8},{'expected_working_environments':0}):
@@ -315,5 +358,139 @@ class DurableTimingTests(unittest.TestCase):
                 self.report(availability=[fact])
         with self.assertRaisesRegex(RuntimeError,'preparation availability'):
             self.report(availability=[correct,correct])
+
+class PreparationTimingCaptureTests(unittest.TestCase):
+    def event(self, **changes):
+        return {'schema': 'workspace.perf.v1', 'source': 'runtime', 'jobId': 'agent_run.lifecycle:run-a',
+            'phase': 'preparationAttempt', 'elapsedMs': 27.5, 'outcome': 'ok', 'atUnixMs': 2000} | changes
+
+    def collect(self, output, *, error=None, accepted=None, exit_code=0):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            records = root / 'run-records.jsonl'
+            accepted = accepted if accepted is not None else [{'phase': 'accepted', 'agentRunId': 'run-a'}]
+            records.write_text(''.join(json.dumps(row) + '\n' for row in accepted))
+            process = types.SimpleNamespace(stdout=io.BytesIO(output.encode()), poll=Mock(return_value=exit_code),
+                wait=Mock(return_value=exit_code), terminate=Mock(), kill=Mock())
+            command = Mock(return_value=process, side_effect=error)
+            driver = types.SimpleNamespace(docker=['docker', '--host', 'unix:///owned/docker.sock'], compose=root / 'compose.json',
+                environment={'COMPOSE_DISABLE_ENV_FILE': 'true'})
+            with contextlib.redirect_stdout(io.StringIO()) as stdout, contextlib.redirect_stderr(io.StringIO()) as stderr, \
+                    patch.object(module.subprocess, 'Popen', command):
+                result = module._preparation_timing(driver, records)
+            self.assertEqual(stdout.getvalue(), '')
+            self.assertEqual(stderr.getvalue(), '')
+            return result, command
+
+    def test_phase_and_identity_whitelist_projects_safe_fields_and_preserves_failed_samples(self):
+        phases = ('preparationAttempt', 'environmentAcquire', 'globalAcquire', 'globalHold', 'preparationInventory',
+            'preparationReconcileReserve', 'physicalConfirm', 'controllerTakeover', 'workspacePreparation')
+        events = [self.event(phase=phase, outcome=outcome, elapsedMs=index + 10,
+            error='private response detail', body={'token': 'private token'}, leaseOwner='private owner')
+            for index, (phase, outcome) in enumerate(zip(phases, ('ok', 'error', 'interrupted') * 3))]
+        rejected = [self.event(schema='old.schema'), self.event(source='worker'), self.event(jobId='agent_run.lifecycle:other'),
+            self.event(phase='unknownPhase'), self.event(outcome='private outcome'), self.event(elapsedMs=-1),
+            self.event(elapsedMs=True), self.event(elapsedMs='27'), self.event(elapsedMs=float('nan')),
+            self.event(elapsedMs=float('inf')), self.event(atUnixMs=True), self.event(atUnixMs=-1),
+            self.event(atUnixMs='2000'), {'schema': 'workspace.perf.v1'}, ['private data']]
+        logs = '\n'.join(['private arbitrary log', '{invalid json', *map(json.dumps, events + rejected)])
+        report, command = self.collect(logs)
+        self.assertEqual(report['schema'], 'runsc.shared.preparation_timing.v1')
+        self.assertEqual(report['records'], [
+            {key: event[key] for key in ('jobId', 'phase', 'elapsedMs', 'outcome', 'atUnixMs')} for event in events])
+        self.assertEqual({record['outcome'] for record in report['records']}, {'ok', 'error', 'interrupted'})
+        self.assertNotIn('private', json.dumps(report))
+        args = command.call_args.args[0]
+        self.assertEqual(args[:5], ['docker', '--host', 'unix:///owned/docker.sock', 'compose', '-f'])
+        self.assertEqual(args[6:], ['logs', '--no-color', '--no-log-prefix', 'runtime'])
+        expected = {'stdin': subprocess.DEVNULL, 'stdout': subprocess.PIPE, 'stderr': subprocess.DEVNULL,
+            'env': {'COMPOSE_DISABLE_ENV_FILE': 'true'}}
+        if os_name_is_posix(): expected['start_new_session'] = True
+        self.assertEqual(command.call_args.kwargs, expected)
+
+    def test_unreached_phases_are_absent_rather_than_zero_duration_successes(self):
+        event = self.event(phase='globalAcquire', elapsedMs=18, outcome='error')
+        report, _ = self.collect(json.dumps(event))
+        self.assertEqual(report['records'], [{key: event[key] for key in ('jobId', 'phase', 'elapsedMs', 'outcome', 'atUnixMs')}])
+        self.assertFalse(any(record['phase'] == 'physicalConfirm' for record in report['records']))
+
+    def test_absent_matching_data_and_capture_failures_remain_not_observed(self):
+        for output, error in [('', None), ('private arbitrary log', None), ('{}', None),
+                              (json.dumps(self.event(jobId='agent_run.lifecycle:not-accepted')), None),
+                              ('private command stdout', RuntimeError('private stderr')),
+                              ('private command stdout', TimeoutError('private timeout detail')),
+                              ('x' * (64 * 1024 + 1), None)]:
+            with self.subTest(error=type(error).__name__ if error else None, length=len(output)):
+                result, _ = self.collect(output, error=error)
+                self.assertEqual(result, 'notObserved')
+
+    def test_full_stream_keeps_first_and_last_records_amid_many_unrelated_lines(self):
+        first, last = self.event(), self.event(phase='workspacePreparation', outcome='error', atUnixMs=3000)
+        unrelated = json.dumps(self.event(jobId='agent_run.lifecycle:unrelated', error='private body')) + '\n'
+        output = unrelated * 2500 + json.dumps(first) + '\n' + unrelated * 2500 + json.dumps(last) + '\n' + unrelated * 2500
+        report, _ = self.collect(output)
+        self.assertEqual(report['records'], [
+            {key: event[key] for key in ('jobId', 'phase', 'elapsedMs', 'outcome', 'atUnixMs')} for event in (first, last)])
+        self.assertNotIn('private body', json.dumps(report))
+
+    def test_exceeding_scan_or_record_bounds_discards_partial_timing_evidence(self):
+        event = json.dumps(self.event()) + '\n'
+        for setting, limit, output in [('_PREPARATION_LOG_MAX_BYTES', len(event.encode()) + 10, event + 'unrelated\n' * 10),
+                                       ('_PREPARATION_LOG_MAX_RECORDS', 1, event * 2)]:
+            with self.subTest(setting=setting), patch.object(module, setting, limit):
+                report, _ = self.collect(output)
+                self.assertEqual(report, 'notObserved')
+
+    def test_timeout_terminates_and_reaps_the_observation_child(self):
+        real_popen = subprocess.Popen
+        children = []
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            descendant_pid = root / 'descendant.pid'
+            descendant_ready = root / 'descendant.ready'
+            # POSIX production uses a private process group: emulate a compose
+            # plugin retaining stdout after its parent exits and ignoring TERM.
+            script = 'import time; time.sleep(30)'
+            if os_name_is_posix():
+                plugin = ('import signal,time,pathlib; signal.signal(signal.SIGTERM,signal.SIG_IGN); '
+                    + 'pathlib.Path(' + repr(str(descendant_ready)) + ').write_text("ready"); time.sleep(30)')
+                script = ('import subprocess,sys,time,pathlib; '
+                    + 'child=subprocess.Popen([sys.executable,"-B","-c",' + repr(plugin) + ']); '
+                    + 'pathlib.Path(' + repr(str(descendant_pid)) + ').write_text(str(child.pid)); time.sleep(30)')
+            def spawn(argv, **kwargs):
+                child = real_popen([sys.executable, '-B', '-c', script], **kwargs)
+                children.append(child)
+                if os_name_is_posix():
+                    deadline = time.monotonic() + 3
+                    while not descendant_ready.exists() and time.monotonic() < deadline:
+                        time.sleep(.005)
+                    self.assertTrue(descendant_ready.exists(), 'plugin must ignore TERM before collector timeout starts')
+                return child
+            records = root / 'run-records.jsonl'
+            records.write_text(json.dumps({'phase': 'accepted', 'agentRunId': 'run-a'}) + '\n')
+            driver = types.SimpleNamespace(docker=['docker'], compose=root / 'compose.json', environment=None)
+            with patch.object(module.subprocess, 'Popen', side_effect=spawn), \
+                    patch.object(module, '_PREPARATION_LOG_TIMEOUT_SECONDS', .2):
+                result = module._preparation_timing(driver, records)
+            self.assertEqual(result, 'notObserved')
+            self.assertEqual(len(children), 1)
+            self.assertIsNotNone(children[0].poll(), 'timed-out observation child must be reaped')
+            self.assertTrue(children[0].stdout.closed)
+            if os_name_is_posix():
+                self.assertTrue(descendant_pid.exists(), 'plugin must have started before timeout')
+                state = Path('/proc') / descendant_pid.read_text() / 'stat'
+                self.assertTrue(not state.exists() or state.read_text().split(') ', 1)[1].startswith('Z '),
+                    'collector plugin retaining the pipe must also stop')
+
+    def test_nonzero_log_process_exit_discards_partial_records(self):
+        result, _ = self.collect(json.dumps(self.event()), exit_code=1)
+        self.assertEqual(result, 'notObserved')
+
+    def test_nonaccepted_record_does_not_authorize_log_collection(self):
+        result, command = self.collect(json.dumps(self.event()), accepted=[{'phase': 'verified', 'agentRunId': 'run-a'}])
+        self.assertEqual(result, 'notObserved')
+        command.assert_not_called()
+
 
 if __name__ == '__main__': unittest.main()

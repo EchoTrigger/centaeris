@@ -11,22 +11,114 @@ use crate::resident_capacity::{ObservedResidentSandbox, ResidentCapacity, RESIDE
 // This session lock spans a committed reservation and the bounded Docker
 // mutation. A SQL transaction alone could roll back after Docker committed.
 // All managed create/remove paths use this lock; contention yields admission.
-struct ResidentHostLock<'a>(&'a mut Client, String);
+struct ResidentHostLock<'a>(&'a mut Client, String, Option<crate::observations::Span>);
 mod preparation_wait;
 
 impl Drop for ResidentHostLock<'_> {
     fn drop(&mut self) {
         match self.0.query_one("SELECT pg_advisory_unlock(731946,3)", &[]) {
             Ok(row) if row.get::<_, bool>(0) => {
+                if let Some(mut held) = self.2.take() {
+                    held.finished(true);
+                    drop(held);
+                }
                 // Eligibility changes without refunding any resident or unknown creation.
                 // A failed notification leaves the existing durable timed retry intact.
                 if let Err(error) = preparation_wait::signal(self.0, &self.1) {
                     eprintln!("host preparation wake unavailable: {error}");
                 }
+                #[cfg(test)]
+                AFTER_GLOBAL_UNLOCK.with(|pending| {
+                    if let Some(hook) = pending.borrow_mut().take() {
+                        hook();
+                    }
+                });
             }
-            _ => eprintln!("resident host admission unlock unavailable"),
+            _ => {
+                if let Some(mut held) = self.2.take() {
+                    held.finished(false);
+                    drop(held);
+                }
+                eprintln!("resident host admission unlock unavailable");
+            }
         }
     }
+}
+
+/// One environment's complete physical preparation, across committed SQL phases.
+/// This session gate is acquired before global admission and never waits for it.
+pub(super) struct EnvironmentPreparationLock<'a> {
+    pub(super) client: &'a mut Client,
+    environment_id: String,
+    host_id: String,
+    pub(super) acquired_global: bool,
+}
+impl Drop for EnvironmentPreparationLock<'_> {
+    fn drop(&mut self) {
+        match self.client.query_one(
+            "SELECT pg_advisory_unlock(731947,hashtext($1))",
+            &[&self.environment_id],
+        ) {
+            Ok(row) if row.get::<_, bool>(0) => {
+                // Release the environment gate after its actual global owner,
+                // including failed preparation and maintenance. The second hint
+                // closes the global-unlock/environment-unlock registration race.
+                // A failed global try must never broadcast temporary gate drops.
+                if self.acquired_global {
+                    if let Err(error) = preparation_wait::signal(self.client, &self.host_id) {
+                        eprintln!("environment preparation wake unavailable: {error}");
+                    }
+                }
+            }
+            _ => eprintln!("environment preparation unlock unavailable"),
+        }
+    }
+}
+fn try_lock_environment(client: &mut Client, environment_id: &str) -> Result<bool, String> {
+    client
+        .query_one(
+            "SELECT pg_try_advisory_lock(731947,hashtext($1))",
+            &[&environment_id],
+        )
+        .map(|row| row.get(0))
+        .map_err(|error| format!("environment preparation lock failed: {error}"))
+}
+pub(super) fn lock_environment<'a>(
+    client: &'a mut Client,
+    host_id: &str,
+    environment_id: &str,
+) -> Result<EnvironmentPreparationLock<'a>, String> {
+    if !try_lock_environment(client, environment_id)? {
+        return Err(RESIDENT_CAPACITY_WAIT.into());
+    }
+    Ok(EnvironmentPreparationLock {
+        client,
+        environment_id: environment_id.into(),
+        host_id: host_id.into(),
+        acquired_global: false,
+    })
+}
+fn lock_environment_for_run<'a>(
+    client: &'a mut Client,
+    host_id: &str,
+    environment_id: &str,
+    fence: &RuntimeJobLeaseFence,
+) -> Result<EnvironmentPreparationLock<'a>, String> {
+    if !try_lock_environment(client, environment_id)? {
+        // A pinned same-Job replay may be unable to write a marker. Keep its
+        // existing capacity waiter and the normal timed retry in that case.
+        let _registered = preparation_wait::register_environment(client, host_id, fence)?;
+        // Registration cannot miss an unlock that occurred before it committed.
+        if !try_lock_environment(client, environment_id)? {
+            return Err(crate::resident_capacity::HOST_PREPARATION_WAIT.into());
+        }
+    }
+    Ok(EnvironmentPreparationLock {
+        client,
+        environment_id: environment_id.into(),
+        host_id: host_id.into(),
+        acquired_global: false,
+    })
 }
 
 fn try_lock_host(client: &mut Client) -> Result<bool, String> {
@@ -40,7 +132,11 @@ fn lock_host<'a>(client: &'a mut Client, host_id: &str) -> Result<ResidentHostLo
     if !try_lock_host(client)? {
         return Err(RESIDENT_CAPACITY_WAIT.into());
     }
-    Ok(ResidentHostLock(client, host_id.into()))
+    Ok(ResidentHostLock(
+        client,
+        host_id.into(),
+        Some(crate::observations::Span::new("globalHold")),
+    ))
 }
 
 #[cfg(test)]
@@ -61,6 +157,7 @@ fn lock_host_for_run<'a>(
     client: &'a mut Client,
     host_id: &str,
     fence: &RuntimeJobLeaseFence,
+    acquired_global: &mut bool,
 ) -> Result<ResidentHostLock<'a>, String> {
     if !try_lock_host(client)? {
         #[cfg(test)]
@@ -76,9 +173,38 @@ fn lock_host_for_run<'a>(
             return Err(crate::resident_capacity::HOST_PREPARATION_WAIT.into());
         }
     }
-    let lock = ResidentHostLock(client, host_id.into());
+    let lock = ResidentHostLock(
+        client,
+        host_id.into(),
+        Some(crate::observations::Span::new("globalHold")),
+    );
+    *acquired_global = true;
     preparation_wait::clear(lock.0, fence)?;
     Ok(lock)
+}
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_GLOBAL_UNLOCK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(super) fn after_global_preparation_unlock(hook: impl FnOnce() + 'static) {
+    AFTER_GLOBAL_UNLOCK.with(|pending| {
+        assert!(pending.borrow().is_none());
+        *pending.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+pub(super) fn with_environment_inventory<T>(
+    environment: &mut EnvironmentPreparationLock<'_>,
+    inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String>,
+    operation: impl FnOnce(&mut Client, &[ObservedResidentSandbox]) -> Result<T, String>,
+) -> Result<T, String> {
+    let lock = lock_host(environment.client, &environment.host_id)?;
+    environment.acquired_global = true;
+    let physical = inventory()?;
+    reconcile(lock.0, &environment.host_id, &physical)?;
+    operation(lock.0, &physical)
 }
 
 pub(super) fn with_host_inventory<T>(
@@ -371,7 +497,7 @@ fn reconcile(
         } else {
             tx.query_opt("SELECT s.workspace_id FROM runtime.execution_instances i JOIN runtime.resident_sandboxes s ON s.execution_id=i.execution_id WHERE i.execution_id=$1 AND i.agent_run_id IS NULL AND i.allocation_owner_json::jsonb=$2::text::jsonb AND i.allocation_execution_id=i.execution_id FOR SHARE OF i,s",&[&sandbox.execution_id,&serde_json::to_string(&sandbox.allocation_owner).map_err(|_|"allocation_owner_invalid")?]).map_err(|e|e.to_string())?.ok_or("managed maintenance sandbox has no durable reservation")?.get(0)
         };
-        let existing = tx.query_opt("SELECT agent_run_id,workspace_id,container_id,memory_bytes,cpu_milli,pids,workspace_bytes,allocation_owner_json FROM resident_sandboxes WHERE host_id=$1 AND execution_id=$2", &[&host_id, &sandbox.execution_id]).map_err(|error| error.to_string())?;
+        let existing = tx.query_opt("SELECT agent_run_id,workspace_id,container_id,memory_bytes,cpu_milli,pids,workspace_bytes,allocation_owner_json,state FROM resident_sandboxes WHERE host_id=$1 AND execution_id=$2", &[&host_id, &sandbox.execution_id]).map_err(|error| error.to_string())?;
         if let Some(row) = existing {
             if row.get::<_, Option<String>>(0).as_deref() != run_id
                 || serde_json::from_str::<centaeris_core::execution::EnvironmentTaskOwner>(
@@ -389,7 +515,14 @@ fn reconcile(
                     "managed resident sandbox disagrees with reservation; admission blocked".into(),
                 );
             }
-            tx.execute("UPDATE resident_sandboxes SET container_id=$3,state=CASE WHEN state='releasing' THEN state ELSE 'resident' END,updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND execution_id=$2", &[&host_id, &sandbox.execution_id, &sandbox.container_id]).map_err(|error| error.to_string())?;
+            // A verified unchanged fact needs no write. In particular, ordinary
+            // task/controller pins must not make another environment hold the
+            // global preparation gate while refreshing an unused timestamp.
+            if row.get::<_, Option<String>>(2).as_deref() != Some(sandbox.container_id.as_str())
+                || !matches!(row.get::<_, String>(8).as_str(), "resident" | "releasing")
+            {
+                tx.execute("UPDATE resident_sandboxes SET container_id=$3,state=CASE WHEN state='releasing' THEN state ELSE 'resident' END,updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND execution_id=$2", &[&host_id, &sandbox.execution_id, &sandbox.container_id]).map_err(|error| error.to_string())?;
+            }
         } else {
             insert(
                 &mut tx,
@@ -409,6 +542,8 @@ fn reconcile(
         .iter()
         .map(|sandbox| sandbox.execution_id.clone())
         .collect::<Vec<_>>();
-    tx.execute("DELETE FROM resident_sandboxes WHERE host_id=$1 AND state='resident' AND NOT(execution_id=ANY($2))", &[&host_id, &present]).map_err(|error| error.to_string())?;
+    // A busy resident remains charged. Skipping its row is a deferred cleanup
+    // decision, never proof that its physical instance is absent or refundable.
+    tx.execute("WITH absent AS (SELECT host_id,execution_id FROM resident_sandboxes WHERE host_id=$1 AND state='resident' AND NOT(execution_id=ANY($2)) FOR UPDATE SKIP LOCKED) DELETE FROM resident_sandboxes s USING absent a WHERE s.host_id=a.host_id AND s.execution_id=a.execution_id", &[&host_id, &present]).map_err(|error| error.to_string())?;
     tx.commit().map_err(|error| error.to_string())
 }

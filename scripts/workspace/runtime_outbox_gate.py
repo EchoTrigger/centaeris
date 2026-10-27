@@ -168,7 +168,7 @@ def main(argv=()):
     commands.extend([
         ['cargo', 'test', '--locked', '-p', 'runtime_server',
          'postgres_store::integration_tests::' + group, '--']
-        for group in ('runsc_rotation_tests',)
+        for group in ('runsc_rotation_tests', 'shared_admission_tests')
     ])
     if args.test_filter is not None:
         commands = [['cargo', 'test', '--locked', '-p', 'runtime_server', args.test_filter, '--']]

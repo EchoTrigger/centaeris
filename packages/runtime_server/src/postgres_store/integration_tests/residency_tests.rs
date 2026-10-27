@@ -811,10 +811,14 @@ fn postgres_resident_concurrent_creation_cannot_exceed_last_slot() {
         .map(|attempt| attempt.join().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-    assert!(results
-        .iter()
-        .filter_map(|result| result.as_ref().err())
-        .all(|error| error == RESIDENT_CAPACITY_WAIT));
+    assert!(
+        results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .all(|error| error == RESIDENT_CAPACITY_WAIT
+                || error == crate::resident_capacity::HOST_PREPARATION_WAIT),
+        "{results:?}"
+    );
     assert_eq!(host.lock().unwrap().len(), 1);
     assert_eq!(count(&url), 1);
 }
@@ -945,7 +949,7 @@ fn postgres_resident_late_owner_cannot_remove_a_reclaimed_sandbox() {
 
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
-fn postgres_shipped_resource_profile_allows_serial_child_progress_after_confirmed_parent_release() {
+fn postgres_declared_resident_budget_allows_progress_after_confirmed_release() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let (url, store) = setup();
     let example = include_str!("../../../../../.env.example");
@@ -964,10 +968,14 @@ fn postgres_shipped_resource_profile_allows_serial_child_progress_after_confirme
         pids: configured("SANDBOX_PIDS_LIMIT"),
         workspace_bytes: configured("SANDBOX_DATA_TMPFS_BYTES"),
     };
+    // Declared-accounting mode conservatively charges the profile. These
+    // current defaults size this fixture; measured resource admission determines
+    // concurrency in shared-accounting mode, which requires valid observations.
     let capacity = ResidentCapacity::default()
         .bound_to_host(64 * 1024 * 1024 * 1024, 16, 8 * 1024 * 1024 * 1024, 1600)
         .unwrap();
     let parent = sandbox_with_resources(&store, &url, "default-parent", "default-tenant", shipped);
+    let peer = sandbox_with_resources(&store, &url, "default-peer", "default-tenant", shipped);
     let child = sandbox_with_resources(&store, &url, "default-child", "default-tenant", shipped);
     let host = Arc::new(Mutex::new(Vec::new()));
     let admit = |fixture: &SandboxFixture| {
@@ -988,8 +996,12 @@ fn postgres_shipped_resource_profile_allows_serial_child_progress_after_confirme
         )
     };
     seed_historical_resident(&url, &parent, &host);
+    admit(&peer).unwrap();
+    assert_eq!(host.lock().unwrap().len(), 2);
+    assert_eq!(count(&url), 2);
     assert_eq!(admit(&child).unwrap_err(), RESIDENT_CAPACITY_WAIT);
-    assert_eq!(host.lock().unwrap().len(), 1);
+    assert_eq!(host.lock().unwrap().len(), 2);
+    assert_eq!(count(&url), 2);
     Client::connect(&url, NoTls)
         .unwrap()
         .execute(
@@ -1003,21 +1015,39 @@ fn postgres_shipped_resource_profile_allows_serial_child_progress_after_confirme
             &parent.run,
             &parent.fence(),
             || {
-                host.lock().unwrap().clear();
+                host.lock()
+                    .unwrap()
+                    .retain(|resident| resident.execution_id != parent.execution);
                 Ok(())
             },
             || Ok(host.lock().unwrap().clone()),
         )
         .unwrap();
-    admit(&child).unwrap();
     assert_eq!(host.lock().unwrap().len(), 1);
-    assert_eq!(
-        host.lock().unwrap()[0].allocation_owner,
-        centaeris_core::execution::EnvironmentTaskOwner::AgentRun {
-            run_id: child.run.clone()
-        }
-    );
-    assert_eq!(count(&url), 1);
+    assert_eq!(host.lock().unwrap()[0].execution_id, peer.execution);
+    admit(&child).unwrap();
+    let mut physical = host
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|resident| resident.execution_id.clone())
+        .collect::<Vec<_>>();
+    physical.sort();
+    let mut expected = vec![peer.execution.clone(), child.execution.clone()];
+    expected.sort();
+    assert_eq!(physical, expected);
+    let mut db = Client::connect(&url, NoTls).unwrap();
+    let persisted = db
+        .query(
+            "SELECT execution_id FROM runtime.resident_sandboxes ORDER BY execution_id",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>();
+    assert_eq!(persisted, expected);
+    assert_eq!(count(&url), 2);
 }
 
 #[test]

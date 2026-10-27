@@ -90,6 +90,7 @@ fn postgres_execution_instance_binding_is_durable_and_rejects_reassignment() {
                             );
                             if result.as_ref().is_err_and(|e| {
                                 e == crate::resident_capacity::RESIDENT_CAPACITY_WAIT
+                                    || e == crate::resident_capacity::HOST_PREPARATION_WAIT
                             }) && std::time::Instant::now() < deadline
                             {
                                 std::thread::sleep(std::time::Duration::from_millis(10));

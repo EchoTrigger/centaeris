@@ -3,6 +3,9 @@ from collections import Counter
 import importlib.util
 import json
 import os
+import signal
+import subprocess
+import threading
 import sys
 from pathlib import Path
 import time
@@ -10,6 +13,108 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from runsc_acceptance.workload_budget import workload_budget
+
+_PREPARATION_PHASES = frozenset({'preparationAttempt', 'environmentAcquire', 'globalAcquire', 'globalHold',
+    'preparationInventory', 'preparationReconcileReserve', 'physicalConfirm', 'controllerTakeover', 'workspacePreparation'})
+_PREPARATION_LOG_TIMEOUT_SECONDS = 5
+_PREPARATION_LOG_MAX_BYTES = 32 * 1024 * 1024
+_PREPARATION_LOG_MAX_LINE_BYTES = 64 * 1024
+_PREPARATION_LOG_MAX_RECORDS = 20000
+
+
+def _preparation_record(line, jobs):
+    if len(line) > _PREPARATION_LOG_MAX_LINE_BYTES:
+        raise ValueError('preparation observation line exceeded bound')
+    try:
+        event = json.loads(line)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if (not isinstance(event, dict) or event.get('schema') != 'workspace.perf.v1' or event.get('source') != 'runtime'
+            or not isinstance(event.get('jobId'), str) or event['jobId'] not in jobs
+            or not isinstance(event.get('phase'), str) or event['phase'] not in _PREPARATION_PHASES
+            or not isinstance(event.get('outcome'), str) or event['outcome'] not in {'ok', 'error', 'interrupted'}
+            or type(event.get('elapsedMs')) not in (int, float) or not 0 <= event['elapsedMs'] <= 14400000
+            or type(event.get('atUnixMs')) is not int or not 0 <= event['atUnixMs'] < 2**64):
+        return None
+    return {key: event[key] for key in ('jobId', 'phase', 'elapsedMs', 'outcome', 'atUnixMs')}
+
+
+def _preparation_timing(driver, record_path):
+    """Retain only allowlisted timing values; raw process output never leaves this reader."""
+    try:
+        accepted = [json.loads(line) for line in record_path.read_text(encoding='utf-8').splitlines() if line]
+        jobs = {'agent_run.lifecycle:' + record['agentRunId'] for record in accepted
+            if isinstance(record, dict) and record.get('phase') == 'accepted'
+            and isinstance(record.get('agentRunId'), str) and record['agentRunId']}
+        if not jobs:
+            return 'notObserved'
+        options = {'stdin': subprocess.DEVNULL, 'stdout': subprocess.PIPE, 'stderr': subprocess.DEVNULL,
+            'env': driver.environment}
+        if os.name == 'posix':
+            # Only this log-reader command and its CLI plugin children belong to the group.
+            options['start_new_session'] = True
+        process = subprocess.Popen([*driver.docker, 'compose', '-f', str(driver.compose),
+            'logs', '--no-color', '--no-log-prefix', 'runtime'], **options)
+        expired, stopped = threading.Event(), threading.Event()
+        def stop():
+            if stopped.is_set(): return
+            stopped.set()
+            grouped = os.name == 'posix' and hasattr(process, 'pid')
+            try:
+                if grouped: os.killpg(process.pid, signal.SIGTERM)
+                elif process.poll() is None: process.terminate()
+            except OSError:
+                pass
+            try: process.wait(timeout=1)
+            except subprocess.TimeoutExpired: pass
+            try:
+                # A plugin may still retain the pipe after its CLI parent exits.
+                if grouped: os.killpg(process.pid, signal.SIGKILL)
+                elif process.poll() is None: process.kill()
+            except OSError:
+                pass
+            try: process.wait(timeout=1)
+            except subprocess.TimeoutExpired: pass
+        def timeout():
+            expired.set()
+            stop()
+        timer = threading.Timer(_PREPARATION_LOG_TIMEOUT_SECONDS, timeout)
+        timer.daemon = True
+        deadline = time.monotonic() + _PREPARATION_LOG_TIMEOUT_SECONDS
+        timer.start()
+        complete = False
+        try:
+            records, pending, scanned = [], b'', 0
+            while chunk := process.stdout.read(65536):
+                scanned += len(chunk)
+                if expired.is_set() or scanned > _PREPARATION_LOG_MAX_BYTES:
+                    return 'notObserved'
+                pieces = (pending + chunk).split(b'\n')
+                pending = pieces.pop()
+                if len(pending) > _PREPARATION_LOG_MAX_LINE_BYTES:
+                    return 'notObserved'
+                for line in pieces:
+                    record = _preparation_record(line, jobs)
+                    if record is not None: records.append(record)
+                    if len(records) > _PREPARATION_LOG_MAX_RECORDS:
+                        return 'notObserved'
+            if pending:
+                record = _preparation_record(pending, jobs)
+                if record is not None: records.append(record)
+            if (len(records) > _PREPARATION_LOG_MAX_RECORDS or expired.is_set()
+                    or process.wait(timeout=max(.01, deadline - time.monotonic())) != 0):
+                return 'notObserved'
+            complete = True
+            return {'schema': 'runsc.shared.preparation_timing.v1', 'records': records} if records else 'notObserved'
+        finally:
+            timer.cancel()
+            timer.join()
+            if not complete: stop()
+            process.stdout.close()
+    except Exception:
+        # Never retain command stderr, arbitrary log text, response bodies or error strings.
+        return 'notObserved'
+
 
 def validate_run_facts(rows, environments, iterations):
     if (type(environments) is not int or not 1 <= environments <= 64
@@ -67,7 +172,7 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
               'modelWaitMs':model_wait_ms,'initialStaggerMs':initial_stagger_ms,
               'initialStaggerTotalMs':initial_stagger_ms*(environments-1),'expectedWorkingEnvironments':expected_working,
               'memoryContinuity': 'notObserved', 'clientFirstToolLatency': 'notObserved',
-              'resumeToFirstToolLatency': 'notObserved', 'durableTiming': 'notObserved',
+              'resumeToFirstToolLatency': 'notObserved', 'durableTiming': 'notObserved', 'preparationTiming': 'notObserved',
               'retirement': [], 'responsibility': 'preserved'}
     samples = [{'sampleId': uuid.uuid4().hex, 'operationId': uuid.uuid4().hex, 'workUnits': work_units}
                for _ in range(environments * iterations)]
@@ -130,6 +235,7 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
         if started and not stopped:
             try: report['native'] = observer.stop()
             except BaseException as error: report['observerErrorType'] = type(error).__name__
+        report['preparationTiming'] = _preparation_timing(driver, result / 'k6/run-records.jsonl')
         report['wallTimeMs'] = int((time.monotonic() - began) * 1000)
         (result / 'shared-report.json').write_text(json.dumps(report, indent=2))
 

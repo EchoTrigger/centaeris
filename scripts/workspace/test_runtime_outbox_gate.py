@@ -2,7 +2,7 @@ import os
 import sys
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import runtime_outbox_gate as gate
 
@@ -13,6 +13,43 @@ def discovery_output(command):
 
 
 class OutboxGateTests(unittest.TestCase):
+    def test_default_runner_discovers_and_executes_shared_admission_regressions(self):
+        group = 'postgres_store::integration_tests::shared_admission_tests'
+        expected = {
+            group + '::postgres_four_independent_live_environments_share_observed_resources',
+            group + '::postgres_unmeasured_residents_keep_full_declarations_and_block_third_environment',
+            group + '::postgres_real_resident_pressure_does_not_wake_itself_on_preparation_unlock',
+            group + '::postgres_preparation_unlock_before_registration_rechecks_instead_of_losing_wake',
+            group + '::postgres_preparation_unlock_before_yield_is_durable_and_contention_fact_is_idempotent',
+            group + '::postgres_mixed_preparation_and_pressure_wake_rechecks_budget_without_self_loop',
+        }
+        required = gate.required_tests()
+        self.assertTrue(expected.issubset(set(required)))
+        for executable in (None, 'runtime-tests.exe'):
+            with self.subTest(executable=executable):
+                discovered, executed = set(), set()
+
+                def run(command, **kwargs):
+                    selected_filter = command[5] if executable is None else command[1]
+                    selected = {name for name in required if selected_filter in name}
+                    if '--list' in command:
+                        discovered.update(selected)
+                        return SimpleNamespace(stdout=''.join(name + ': test\n' for name in sorted(selected or {selected_filter})))
+                    self.assertEqual(command[-2:], ['--ignored', '--test-threads=1'])
+                    self.assertTrue(selected.issubset(discovered))
+                    executed.update(selected)
+                    return SimpleNamespace(returncode=0)
+
+                driver = SimpleNamespace(connect=MagicMock(), sql=MagicMock())
+                args = [] if executable is None else ['--test-executable', executable]
+                with patch.dict(sys.modules, {'psycopg': driver}), \
+                     patch.object(gate.subprocess, 'run', run), \
+                     patch.object(gate, 'drop_owned_database'), patch('builtins.print'):
+                    gate.main(args)
+                self.assertTrue(expected.issubset(discovered))
+                self.assertTrue(expected.issubset(executed))
+                driver.connect.assert_called_once()
+
     def test_host_retirement_cases_are_required_and_discovered_before_database_creation(self):
         group = 'postgres_store::integration_tests::host_retirement_tests::'
         expected = {name for name in gate.required_tests() if name.startswith(group)}

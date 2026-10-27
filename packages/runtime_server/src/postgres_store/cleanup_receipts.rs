@@ -176,7 +176,8 @@ impl PostgresRuntimeStore {
                 return Ok(receipt);
             }
             tx.commit().map_err(|e|e.to_string())?;
-            super::residency::with_host_inventory(client,request.host_id,inventory,|client,physical| {
+            let mut environment = super::residency::lock_environment(client,request.host_id,&request.cleanup.environment_authorization.payload.environment_id)?;
+            super::residency::with_environment_inventory(&mut environment,inventory,|client,physical| {
                 let mut tx=client.transaction().map_err(|e|e.to_string())?;
                 super::resource_commit::require_durable_resource_commit(&mut tx)?;
                 let verified=verify_controller_authority(&mut tx,&authority)?;

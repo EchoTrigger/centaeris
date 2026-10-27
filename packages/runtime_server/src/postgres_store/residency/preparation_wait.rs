@@ -15,6 +15,40 @@ pub(super) fn register(
     fence: &RuntimeJobLeaseFence,
 ) -> Result<(), String> {
     let mut tx = client.transaction().map_err(|e| e.to_string())?;
+    record(&mut tx, host_id, fence)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+// An already-dispatched operation may pin this same Job through physical work.
+// A duplicate request must not wait on that pin just to record a retry hint.
+pub(super) fn register_environment(
+    client: &mut Client,
+    host_id: &str,
+    fence: &RuntimeJobLeaseFence,
+) -> Result<bool, String> {
+    let mut tx = client.transaction().map_err(|error| error.to_string())?;
+    match tx.query_opt(
+        "SELECT job_id FROM runtime.runtime_jobs WHERE job_id=$1 FOR UPDATE NOWAIT",
+        &[&fence.job_id],
+    ) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err("host_preparation_wait_lease_rejected".into()),
+        Err(error) if error.code() == Some(&postgres::error::SqlState::LOCK_NOT_AVAILABLE) => {
+            tx.rollback().map_err(|rollback| rollback.to_string())?;
+            return Ok(false);
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    record(&mut tx, host_id, fence)?;
+    tx.commit().map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+fn record(
+    tx: &mut postgres::Transaction<'_>,
+    host_id: &str,
+    fence: &RuntimeJobLeaseFence,
+) -> Result<(), String> {
     let changed = tx.execute(
         "UPDATE runtime.runtime_jobs j SET last_error=$3 WHERE j.job_id=$1 AND j.lease_owner=$2 AND j.status IN('leased','running') AND j.lease_purpose='execute' AND j.lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND EXISTS(SELECT 1 FROM runtime.resident_capacity_waiters w WHERE w.job_id=j.job_id AND w.lease_owner=$2)",
         &[&fence.job_id, &fence.lease_owner, &HOST_PREPARATION_WAIT],
@@ -31,7 +65,7 @@ pub(super) fn register(
         "INSERT INTO runtime.runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) SELECT $1,COALESCE(session_id,'runtime_job:'||job_id),job_id,'runtime.host_preparation.waiting.v1',(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,'internal',$4 FROM runtime.runtime_jobs WHERE job_id=$2 AND lease_owner=$3 ON CONFLICT(event_id) DO NOTHING",
         &[&event_id(fence), &fence.job_id, &fence.lease_owner, &payload],
     ).map_err(|e|e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())
+    Ok(())
 }
 
 pub(super) fn clear(client: &mut Client, fence: &RuntimeJobLeaseFence) -> Result<(), String> {
