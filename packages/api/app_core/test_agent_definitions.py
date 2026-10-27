@@ -424,7 +424,7 @@ class AgentDefinitionConcurrencyTests(DefinitionFixture, TransactionTestCase):
         self._submit_across_access_change(remove_membership=True)
 
     def test_publication_after_submission_lock_preserves_accepted_old_version(self):
-        from app_core.workspace_access import locked_workspace_membership_for
+        from app_core.workspace_access import locked_workspace_membership_for, shared_submission_membership_for
         definition, previous = self.ready_definition()
         self.client.force_login(self.member)
         agent = self.instance(definition).json()["agent"]
@@ -443,7 +443,7 @@ class AgentDefinitionConcurrencyTests(DefinitionFixture, TransactionTestCase):
             return PROFILE
 
         def pause_submission(user, *args, **kwargs):
-            membership = locked_workspace_membership_for(user, *args, **kwargs)
+            membership = shared_submission_membership_for(user, *args, **kwargs)
             if user.id == self.member.id and preflight_complete.is_set():
                 submission_locked.set()
                 if not publication_waiting.wait(timeout=10):
@@ -473,7 +473,7 @@ class AgentDefinitionConcurrencyTests(DefinitionFixture, TransactionTestCase):
             finally:
                 close_old_connections()
 
-        with patch("app_core.http.workspaces.locked_workspace_membership_for", side_effect=pause_submission), \
+        with patch("app_core.http.workspaces.shared_submission_membership_for", side_effect=pause_submission), \
              patch("app_core.http.agent_definitions.locked_workspace_membership_for", side_effect=mark_publication), \
              patch("app_core.http.workspaces.request_execution_profile", side_effect=profile), \
              patch("app_core.http.workspaces.schedule_agent_run_lifecycle", return_value="inserted"):
@@ -511,7 +511,7 @@ class AgentDefinitionConcurrencyTests(DefinitionFixture, TransactionTestCase):
 
     def test_publication_and_submission_use_one_complete_version(self):
         from app_core.models import AgentDefinitionVersion
-        from app_core.workspace_access import locked_workspace_membership_for
+        from app_core.workspace_access import shared_submission_membership_for
         definition, previous = self.ready_definition()
         self.client.force_login(self.member)
         agent = self.instance(definition).json()["agent"]
@@ -536,7 +536,7 @@ class AgentDefinitionConcurrencyTests(DefinitionFixture, TransactionTestCase):
         def mark_submission(user, *args, **kwargs):
             if user.id == self.member.id:
                 submission_waiting.set()
-            return locked_workspace_membership_for(user, *args, **kwargs)
+            return shared_submission_membership_for(user, *args, **kwargs)
 
         def publish():
             close_old_connections()
@@ -557,7 +557,7 @@ class AgentDefinitionConcurrencyTests(DefinitionFixture, TransactionTestCase):
                 close_old_connections()
 
         with patch.object(AgentDefinitionVersion.objects, "create", side_effect=pause_publication), \
-             patch("app_core.http.workspaces.locked_workspace_membership_for", side_effect=mark_submission), \
+             patch("app_core.http.workspaces.shared_submission_membership_for", side_effect=mark_submission), \
              patch("app_core.http.workspaces.request_execution_profile", return_value=PROFILE), \
              patch("app_core.http.workspaces.schedule_agent_run_lifecycle", return_value="inserted"):
             with ThreadPoolExecutor(max_workers=2) as pool:

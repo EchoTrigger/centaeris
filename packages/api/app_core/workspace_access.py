@@ -1,5 +1,6 @@
 from collections.abc import Collection
 
+from django.db import connection
 from django.db.models import Q
 
 from app_core.models import (
@@ -60,6 +61,29 @@ def locked_workspace_membership_for(
         user=user,
         role__in=roles,
     ).first()
+
+
+def shared_submission_membership_for(user, workspace_id: str) -> WorkspaceMembership | None:
+    """Pin public submission authority; callers separately serialize operation IDs.
+
+    Configuration, membership and coordination writers retain Workspace UPDATE,
+    which conflicts with this SHARE pin. Do not substitute KEY SHARE: ordinary
+    status/role updates must remain excluded through the acceptance commit.
+    """
+    if not connection.in_atomic_block:
+        raise RuntimeError("submission_authorization_requires_transaction")
+    if not user.is_authenticated:
+        return None
+    workspace = next(iter(Workspace.objects.raw(
+        "SELECT * FROM app_core_workspace WHERE id=%s AND status='active' FOR SHARE", [workspace_id])), None)
+    if workspace is None:
+        return None
+    membership = next(iter(WorkspaceMembership.objects.raw(
+        "SELECT * FROM app_core_workspacemembership WHERE workspace_id=%s AND user_id=%s "
+        "AND role IN ('owner','admin','member') FOR SHARE", [workspace_id, user.pk])), None)
+    if membership is not None:
+        membership.workspace = workspace
+    return membership
 
 
 def agent_run_membership_is_current(agent_run) -> bool:

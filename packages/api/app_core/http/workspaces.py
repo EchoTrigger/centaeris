@@ -19,6 +19,7 @@ from app_core.hosted_operations import (
     OPERATION_ID_PATTERN,
     HostedOperationError,
     accept_operation,
+    lock_operation_identity,
     replay_operation,
     request_digest,
     serialize_operation,
@@ -74,6 +75,7 @@ from app_core.workspace_access import (
     WORKSPACE_ADMIN_ROLES,
     agent_run_membership_is_current,
     locked_workspace_membership_for,
+    shared_submission_membership_for,
     workspace_membership_for,
 )
 
@@ -1247,7 +1249,7 @@ def create_session_message(
     try:
         digest = request_digest(payload, session_id=session_id, uploads=uploads)
         with transaction.atomic():
-            membership = locked_workspace_membership_for(request.user, workspace_id)
+            membership = shared_submission_membership_for(request.user, workspace_id)
             if membership is None:
                 return Status(404, {"error": "session_not_found"})
             grant = require_request_delegation(request, "messages:submit", workspace_id=workspace_id,
@@ -1255,10 +1257,11 @@ def create_session_message(
                 additional_scopes=(["sessions:create"] if session_id == "new" else [])
                     + (["attachments:write"] if uploads else []), lock=True, require_active=False)
             # Coordination Sessions use the one Agent input/admission chain.
-            # This check shares the Workspace lock with coordination binding
-            # creation and runs before spending a generic operation identity.
+            # The Workspace SHARE pin excludes coordination writers using UPDATE;
+            # reject before spending a generic operation identity.
             if _is_coordination_message_target(request.user, workspace_id, session_id):
                 return Status(409, {"error": "coordination_session_requires_agent_input"})
+            lock_operation_identity(request.user, workspace_id, "submitMessage", payload.operation_id)
             receipt = replay_operation(request.user, workspace_id, "submitMessage", payload.operation_id, digest,
                                        app_delegation=grant)
             if receipt is not None:
@@ -1345,7 +1348,7 @@ def create_session_message(
             return Status(400, {"error": str(error)})
     try:
         with transaction.atomic():
-            membership = locked_workspace_membership_for(request.user, workspace_id)
+            membership = shared_submission_membership_for(request.user, workspace_id)
             if membership is None:
                 raise AgentSessionCreationError(404, "session_not_found")
             workspace = membership.workspace
@@ -1354,9 +1357,10 @@ def create_session_message(
                 additional_scopes=(["sessions:create"] if session_id == "new" else [])
                     + (["attachments:write"] if uploads else []), lock=True, require_active=False)
             # A binding may have appeared while the Runtime profile RPC ran.
-            # Revalidate under the same Workspace lock before any Run/receipt.
+            # Revalidate under the same authorization pin before any Run/receipt.
             if _is_coordination_message_target(request.user, workspace_id, session_id):
                 raise AgentSessionCreationError(409, "coordination_session_requires_agent_input")
+            lock_operation_identity(request.user, workspace_id, "submitMessage", payload.operation_id)
             receipt = replay_operation(request.user, workspace_id, "submitMessage", payload.operation_id, digest,
                                        app_delegation=grant)
             if receipt is not None:
@@ -1366,15 +1370,24 @@ def create_session_message(
                     require_delegated_agent(grant, payload.agent_id)
                 if session_id != "new":
                     require_delegated_session(grant, session_id)
+            # Take business locks in Agent -> Session order before the short
+            # global queue decision. Waiting for physical Session work must not
+            # retain the global admission lock and exclude unrelated Agents.
+            target_agent_id = payload.agent_id if session_id == "new" else requested_session.agent_id
+            agent = Agent.objects.select_for_update().filter(
+                id=target_agent_id, workspace=workspace, owner=request.user,
+            ).first()
+            session = None
+            if session_id != "new" and agent is not None:
+                session = Session.objects.select_for_update(of=("self",)).select_related("agent").filter(
+                    id=session_id, workspace=workspace, owner=request.user, status="active", agent_id=agent.pk,
+                ).first()
+            # Retain the previous quota-error precedence over the business
+            # existence/status checks below; no resource has been created yet.
             admission_error = queued_admission_error(workspace.id)
             if admission_error is not None:
                 raise AgentSessionCreationError(*admission_error)
             if session_id == "new":
-                agent = Agent.objects.select_for_update().filter(
-                    id=payload.agent_id,
-                    workspace=workspace,
-                    owner=request.user,
-                ).first()
                 if agent is None:
                     raise AgentSessionCreationError(404, "agent_not_found")
                 if agent.status == "deleted":
@@ -1414,16 +1427,7 @@ def create_session_message(
                     asset_links.append(asset_link)
                 attachment_refs = sorted(link.id for link in asset_links)
             else:
-                try:
-                    session = Session.objects.select_for_update().select_related(
-                        "agent"
-                    ).get(
-                        id=session_id,
-                        workspace=workspace,
-                        owner=request.user,
-                        status="active",
-                    )
-                except Session.DoesNotExist:
+                if session is None:
                     return Status(404, {"error": "session_not_found"})
                 if session.agent.status == "deleted":
                     return Status(410, {"error": "agent_deleted"})
