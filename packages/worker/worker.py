@@ -84,6 +84,7 @@ class DependencyUnavailable(RuntimeError):
     def __init__(self, reason, http_status=None):
         super().__init__(reason)
         self.http_status = http_status
+        self.http_error_code = None
 
 
 class RuntimeStepFailed(RuntimeError):
@@ -200,13 +201,16 @@ def _json_request(url, body, token_header, token, default_reason, timeout=10):
             raise RuntimeStepFailed(
                 reason, payload["retryable"], payload["agentRunId"], http_status=status
             ) from error
+        public_code = (payload["error"]
+                       if isinstance(payload, dict) and set(payload) == {"error"}
+                       and isinstance(payload["error"], str) else None)
         if status in {500, 502, 503, 504}:
-            raise DependencyUnavailable(reason, http_status=status) from error
+            failure = DependencyUnavailable(reason, http_status=status)
+            failure.http_error_code = public_code
+            raise failure from error
         failure = RuntimeError(reason)
         failure.http_status = status
-        failure.http_error_code = (payload["error"]
-                                   if isinstance(payload, dict) and set(payload) == {"error"}
-                                   and isinstance(payload["error"], str) else None)
+        failure.http_error_code = public_code
         raise failure from error
     except (
         urllib.error.URLError,
@@ -627,14 +631,25 @@ def is_environment_host_busy(error):
             and getattr(error, "http_error_code", None) == "environment_host_busy")
 
 
+def environment_cleanup_wait_reason(error):
+    if is_environment_controller_wait(error):
+        return "environment_controller_wait"
+    if is_environment_host_busy(error):
+        return "execution_host_admission_wait"
+    if (getattr(error, "http_status", None) == 409
+            and getattr(error, "http_error_code", None) == "execution_resident_capacity_wait"):
+        return "execution_resident_capacity_wait"
+    return None
+
+
 def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
     try:
         return _execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease)
     except RuntimeError as error:
-        if not is_environment_controller_wait(error) and not is_environment_host_busy(error):
+        reason = environment_cleanup_wait_reason(error)
+        if reason is None:
             raise
         require_healthy_lease()
-        reason = "execution_host_admission_wait" if is_environment_host_busy(error) else "environment_controller_wait"
         yield_job(job["jobId"], lease_owner, now_ms() + ENVIRONMENT_CONTROLLER_RECHECK_MS, reason)
         return False
 
@@ -768,8 +783,8 @@ def finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, req
     try:
         return _finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, require_healthy_lease)
     except (RuntimeError, urllib.error.URLError, OSError) as error:
-        if (isinstance(error, YieldHandoffUnknown) or is_environment_controller_wait(error)
-                or is_environment_host_busy(error) or str(error) == "agent_run_lifecycle_lease_lost"):
+        if (isinstance(error, YieldHandoffUnknown) or environment_cleanup_wait_reason(error) is not None
+                or str(error) == "agent_run_lifecycle_lease_lost"):
             raise
         # Never include untrusted response bodies or transport credentials.
         reason = str(error) if isinstance(error, RuntimeError) else "retained_cleanup_unavailable"
@@ -1458,8 +1473,7 @@ def execute_control_job(job):
             except (RuntimeError, urllib.error.URLError, OSError) as error:
                 # Keep the verifier until recovery hands off the same Job.
                 healthy()
-                reason = ("environment_controller_wait" if is_environment_controller_wait(error) else
-                          "execution_host_admission_wait" if is_environment_host_busy(error) else "control_retry_pending")
+                reason = environment_cleanup_wait_reason(error) or "control_retry_pending"
                 yield_job(job["jobId"], owner, now_ms() + ENVIRONMENT_CONTROLLER_RECHECK_MS, reason)
     except YieldHandoffUnknown as error:
         print(f"worker handoff unconfirmed: jobId={job['jobId']}; transitionReason=job_yield_handoff_unknown; "

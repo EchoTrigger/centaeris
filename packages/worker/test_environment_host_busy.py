@@ -26,12 +26,12 @@ class EnvironmentHostBusyTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.observe_cleanup_busy(mode)
 
-    def observe_cleanup_busy(self, mode, *, control=False):
+    def observe_cleanup_busy(self, mode, *, control=False, code="environment_host_busy", waiting_reason="execution_host_admission_wait"):
         job, start = lifecycle_fixture()
         job.update(retryCount=0, maxRetries=0, leaseOwner='worker:fixture-owner', controlStage='cleanup')
         terminal = test_retained_lifecycle.RetainedLifecycleTests().terminal()
         def busy(*_args, **_kwargs):
-            raise rejection()
+            raise rejection(payload={"error": code})
         def api_response(path, *_args):
             if path.endswith('/control'):
                 return {'schema':'runtime.agent_run_lifecycle.control.resolved.v1',
@@ -55,7 +55,7 @@ class EnvironmentHostBusyTests(unittest.TestCase):
                     worker.execute_claimed_job(job, job['leaseOwner'])
         self.assertEqual(yielded.call_count, 20)
         for call in yielded.call_args_list:
-            self.assertEqual(call.args, (job['jobId'], job['leaseOwner'], 2000, 'execution_host_admission_wait'))
+            self.assertEqual(call.args, (job['jobId'], job['leaseOwner'], 2000, waiting_reason))
         self.assertEqual(api.call_count, 40 if control else 20)
         failed.assert_not_called(); complete.assert_not_called(); step.assert_not_called()
         if control:

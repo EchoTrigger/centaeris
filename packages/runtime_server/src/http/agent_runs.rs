@@ -202,7 +202,14 @@ fn teardown_owned_tasks(
     };
     let signing_key = match env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY") {
         Ok(key) => key,
-        Err(_) => return json_error_response(503, "retained_cleanup_unavailable"),
+        Err(_) => {
+            return cleanup_unavailable_response(
+                &cleanup.agent_run_id,
+                "teardown_signing_key",
+                "cleanup_signing_key_unavailable",
+                "retained_cleanup_unavailable",
+            )
+        }
     };
     let cleanup = match cleanup.validate(signing_key.as_bytes()) {
         Ok(cleanup) => cleanup,
@@ -222,32 +229,42 @@ fn teardown_owned_tasks(
     }
     // The short pin above has ended: these operations use separate connections.
     // Physical cleanup below pins and rechecks the current lease and epoch.
-    if state
-        .job_store
-        .close_turn_supplement_queue(CloseTurnSupplementQueueRequest {
-            agent_run_id: cleanup.agent_run_id.clone(),
-            lifecycle_job_id: lease.job_id.clone(),
-            session_id: cleanup.authorization.session_id.clone(),
-            authorization_digest: cleanup.authorization_digest.clone(),
-            lease_owner: Some(lease.lease_owner.clone()),
-            reason: "agent_run_terminal".into(),
-            closed_at_ms: now_ms()?,
-        })
-        .is_err()
+    if let Err(error) =
+        state
+            .job_store
+            .close_turn_supplement_queue(CloseTurnSupplementQueueRequest {
+                agent_run_id: cleanup.agent_run_id.clone(),
+                lifecycle_job_id: lease.job_id.clone(),
+                session_id: cleanup.authorization.session_id.clone(),
+                authorization_digest: cleanup.authorization_digest.clone(),
+                lease_owner: Some(lease.lease_owner.clone()),
+                reason: "agent_run_terminal".into(),
+                closed_at_ms: now_ms()?,
+            })
     {
-        return json_error_response(503, "agent_run_supplement_cleanup_failed");
-    }
-    if state
-        .runtime
-        .block_on(terminal_subagents::settle_terminal_parent_subagent_jobs(
-            state.store.as_ref(),
-            &cleanup.authorization.session_id,
+        return cleanup_unavailable_response(
             &cleanup.agent_run_id,
-            now_ms()?,
-        ))
-        .is_err()
+            "teardown_supplement_queue",
+            &error.to_string(),
+            "agent_run_supplement_cleanup_failed",
+        );
+    }
+    if let Err(error) =
+        state
+            .runtime
+            .block_on(terminal_subagents::settle_terminal_parent_subagent_jobs(
+                state.store.as_ref(),
+                &cleanup.authorization.session_id,
+                &cleanup.agent_run_id,
+                now_ms()?,
+            ))
     {
-        return json_error_response(503, "terminal_subagent_cleanup_unavailable");
+        return cleanup_unavailable_response(
+            &cleanup.agent_run_id,
+            "teardown_terminal_subagents",
+            &error,
+            "terminal_subagent_cleanup_unavailable",
+        );
     }
     let host_context = || {
         #[cfg(test)]
@@ -258,7 +275,14 @@ fn teardown_owned_tasks(
     };
     let host_id = match host_context() {
         Ok((host_id, _)) => host_id,
-        Err(_) => return json_error_response(503, "retained_cleanup_unavailable"),
+        Err(error) => {
+            return cleanup_unavailable_response(
+                &cleanup.agent_run_id,
+                "teardown_host_context",
+                &error,
+                "retained_cleanup_unavailable",
+            )
+        }
     };
     let receipt = match state.job_store.with_cleanup_authority(
         &CleanupAuthorityRequest {
@@ -333,13 +357,11 @@ fn teardown_owned_tasks(
     ) {
         Ok(receipt) => receipt,
         Err(error) => {
-            #[cfg(test)]
-            if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
-                eprintln!(
-                    "native-consume-owned-cleanup-failed:agentRunId={}; error={error}",
-                    cleanup.agent_run_id
-                );
-            }
+            failure_diagnostics::report_cleanup(
+                &cleanup.agent_run_id,
+                "teardown_cleanup_authority",
+                &error,
+            );
             return cleanup_failure_response(&error);
         }
     };
@@ -515,9 +537,20 @@ pub(super) fn step(
     step_response(&agent_run_id, outcome)
 }
 
+fn cleanup_unavailable_response(
+    agent_run_id: &str,
+    stage: &'static str,
+    error: &str,
+    public_code: &'static str,
+) -> Result<Response<Body>, String> {
+    failure_diagnostics::report_cleanup(agent_run_id, stage, error);
+    json_error_response(503, public_code)
+}
+
 fn cleanup_failure_response(error: &str) -> Result<Response<Body>, String> {
-    if error == "environment_host_busy" {
-        json_error_response(409, "environment_host_busy")
+    if error == "environment_host_busy" || error == crate::resident_capacity::RESIDENT_CAPACITY_WAIT
+    {
+        json_error_response(409, error)
     } else {
         json_error_response(503, "retained_cleanup_unconfirmed")
     }
@@ -571,6 +604,41 @@ mod cleanup_receipt_http_tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         for (reason, expected_status, expected_code) in [
             ("environment_host_busy", 409, "environment_host_busy"),
+            (
+                "execution_resident_capacity_wait",
+                409,
+                "execution_resident_capacity_wait",
+            ),
+            (
+                "execution_resident_capacity_wait:detail",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            (
+                "execution_host_preparation_wait",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            (
+                "cleanup_container_identity_missing",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            (
+                "cleanup_physical_identity_rejected",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            (
+                "cleanup_physical_absence_unconfirmed",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            (
+                "cleanup_physical_release_unconfirmed",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
             ("host_busy", 503, "retained_cleanup_unconfirmed"),
             (
                 "environment_host_busy:unknown",

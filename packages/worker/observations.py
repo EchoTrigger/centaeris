@@ -9,6 +9,20 @@ import time
 ENABLED = os.environ.get("WORKSPACE_PERF_OBSERVATIONS") == "1"
 _context = threading.local()
 _REASONS = {"runtime_busy", "execution_claim_busy"}
+_HTTP_ERROR_CODES = _REASONS | {
+    "environment_host_busy", "execution_resident_capacity_wait",
+    "retained_cleanup_unconfirmed", "retained_cleanup_unavailable",
+    "agent_run_supplement_cleanup_failed", "terminal_subagent_cleanup_unavailable",
+}
+
+
+def _error_code(error):
+    # HTTP codes must come from an exact singleton response, never exception text.
+    if hasattr(error, "http_error_code"):
+        code = error.http_error_code
+        return code if isinstance(code, str) and code in _HTTP_ERROR_CODES else "other"
+    reason = str(error)
+    return reason if reason in _REASONS else "other"
 
 
 def emit(phase, started, **fields):
@@ -45,7 +59,7 @@ def measure(phase, **fields):
         yield
     except BaseException as error:
         result = {"outcome": "error", "errorType": type(error).__name__,
-                  "errorCode": str(error) if str(error) in _REASONS else "other",
+                  "errorCode": _error_code(error),
                   "httpStatus": getattr(error, "http_status", None)}
         raise
     finally:
