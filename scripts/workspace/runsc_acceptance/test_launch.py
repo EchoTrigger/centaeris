@@ -108,6 +108,12 @@ class WorkloadBudgetTests(unittest.TestCase):
   budget=launch.workload_budget(8,3,300,30000,3000)
   self.assertEqual(budget['k6']['scenarioSeconds'],1251)
   self.assertEqual(budget['coordinatorSeconds'],11287)
+ def test_per_run_budget_covers_each_receipt_inventory_and_public_history_without_retained_actions(self):
+  budget=launch.workload_budget(4,3,300,30000,0,execution_mode='perRun')
+  self.assertEqual(budget['executionMode'],'perRun')
+  self.assertEqual(budget['finalPauseSeconds'],0);self.assertEqual(budget['retirementSeconds'],0)
+  self.assertEqual(budget['perRunCleanupReadbackSeconds'],12*(60+60+30+30))
+  self.assertEqual(budget['finalManagedInventorySeconds'],60)
  def test_launcher_rejects_the_total_budget_before_reading_fixture_or_k6(self):
   import subprocess,sys
   with tempfile.TemporaryDirectory() as directory:

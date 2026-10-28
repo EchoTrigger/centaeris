@@ -14,7 +14,7 @@ class PreparationTests(unittest.TestCase):
  def outputs(self):return [subprocess.CompletedProcess([],0,'','')]+[subprocess.CompletedProcess([],0,'sha256:'+'b'*64,'')]*6+[subprocess.CompletedProcess([],0,'a'*40,''),subprocess.CompletedProcess([],0,'',''),subprocess.CompletedProcess([],0,'c'*40,''),subprocess.CompletedProcess([],0,str(16*1024**3),'')]
  def test_native_fixture_preserves_resource_charge_and_splits_maintenance_authority(self):
   with tempfile.TemporaryDirectory() as tmp:
-   root=Path(tmp);argv=self.fixture(root)
+   root=Path(tmp);argv=self.fixture(root)+['--execution-mode','retained']
    with patch.object(sys,'argv',argv),patch.object(prepare,'verify_owner',return_value={'root':'/run/owned'}) as owner,patch.object(prepare.subprocess,'run',side_effect=self.outputs()) as run,patch('builtins.print') as printed:prepare.main()
    config=json.loads((root/'result/compose.json').read_text());manifest=json.loads((root/'result/manifest.json').read_text());env=dict(v.split('=',1) for v in (root/'result/synthetic.env').read_text().splitlines())
    self.assertEqual(env['RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS'],'1');self.assertEqual(env['RUNTIME_RUNSC_IDLE_PAUSE_MS'],'3000');self.assertEqual(env['SANDBOX_PIDS_LIMIT'],'512');self.assertEqual(env['RESIDENT_GLOBAL_COUNT'],'2');self.assertEqual(env['WORKER_SLOT_COUNT'],'2');self.assertEqual(env['EXECUTION_GLOBAL_LIMIT'],'2')
@@ -39,6 +39,7 @@ class PreparationTests(unittest.TestCase):
    self.assertEqual(env['WORKSPACE_PERF_OBSERVATIONS'],'1')
    self.assertEqual(env['RUNTIME_NATIVE_SHARED_ADMISSION'],'1');self.assertEqual(env['RESIDENT_TENANT_MEMORY_BYTES'],str(8*1024**3));self.assertEqual(env['RESIDENT_TENANT_WORKSPACE_BYTES'],str(32*1024**3))
    self.assertEqual(config['services']['model']['command'],['/app/.venv/bin/python','/harness/server.py'])
+   self.assertEqual(manifest['executionMode'],'perRun');self.assertEqual(env['AGENT_RUN_EXECUTION_MODE'],'perRun')
    self.assertEqual(manifest['sharedWorkload']['environmentCount'],4)
    self.assertEqual(manifest['sharedWorkload']['workProfile'],{'memoryMiB':0,'minimumHoldMs':0})
    self.assertEqual((root/'tls/model.pem').read_text(),'synthetic fixture certificatesynthetic fixture certificate')
@@ -100,19 +101,25 @@ class PreparationTests(unittest.TestCase):
    (['--shared-workload'],['--workspace-memory-budget-bytes',str(12*1024**3+1)],'workspace memory budget')]
   for shared,options,message in cases:
    with self.subTest(options=options),tempfile.TemporaryDirectory() as tmp:
-    root=Path(tmp);argv=self.fixture(root)+shared+options
+    root=Path(tmp);argv=self.fixture(root)+['--execution-mode','retained']+shared+options
     with patch.object(sys,'argv',argv),patch.object(prepare,'verify_owner') as owner,patch.object(prepare.subprocess,'run') as run,patch.object(sys,'stderr') as stderr:
      with self.assertRaises(SystemExit):prepare.main()
     self.assertIn(message,''.join(str(call.args[0]) for call in stderr.write.call_args_list));owner.assert_not_called();run.assert_not_called();self.assertFalse((root/'result').exists())
- def test_unverified_isolation_rejects_before_any_docker_or_file_mutation(self):
+ def test_rotation_gate_requires_explicit_retained_mode(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);argv=self.fixture(root)
+   with patch.object(sys,'argv',argv),patch.object(prepare,'verify_owner') as owner,patch.object(sys,'stderr') as stderr:
+    with self.assertRaises(SystemExit):prepare.main()
+   self.assertIn('rotation requires retained',''.join(str(call.args[0]) for call in stderr.write.call_args_list));owner.assert_not_called()
+ def test_unverified_isolation_rejects_before_any_docker_or_file_mutation(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);argv=self.fixture(root)+['--execution-mode','retained']
    with patch.object(sys,'argv',argv),patch.object(prepare,'verify_owner',side_effect=RuntimeError('shared containerd rejected')),patch.object(prepare.subprocess,'run') as run:
     with self.assertRaisesRegex(RuntimeError,'shared containerd'):prepare.main()
    run.assert_not_called();self.assertFalse((root/'result').exists())
  def test_foreign_managed_responsibility_rejects_without_starting_services(self):
   with tempfile.TemporaryDirectory() as tmp:
-   root=Path(tmp);argv=self.fixture(root)
+   root=Path(tmp);argv=self.fixture(root)+['--execution-mode','retained']
    with patch.object(sys,'argv',argv),patch.object(prepare,'verify_owner',return_value={'root':'/run/owned'}),patch.object(prepare.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'foreign-id','')) as run:
     with self.assertRaisesRegex(SystemExit,'responsibility'):prepare.main()
    self.assertEqual(run.call_count,1);self.assertFalse((root/'result').exists())

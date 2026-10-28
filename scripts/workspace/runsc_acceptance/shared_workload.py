@@ -21,7 +21,7 @@ _PREPARATION_LOG_TIMEOUT_SECONDS = 5
 _PREPARATION_LOG_MAX_BYTES = 32 * 1024 * 1024
 _PREPARATION_LOG_MAX_LINE_BYTES = 64 * 1024
 _PREPARATION_LOG_MAX_RECORDS = 20000
-_YIELD_REASONS = frozenset({'environment_controller_wait', 'execution_host_preparation_wait',
+_YIELD_REASONS = frozenset({'environment_controller_wait', 'execution_host_preparation_wait', 'execution_host_admission_wait',
     'execution_resident_capacity_wait', 'runsc_environment_capacity_wait',
     'execution_recovery_checkpoint_committed', 'question_wait', 'runtime_job_wait',
     'session_record_commit_unavailable', 'session_workspace_commit_unavailable',
@@ -210,7 +210,8 @@ def validate_job_evidence(evidence, admitted, *, allow_unsettled=False):
 
 def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2000,
         between_run_ms=6000, model_wait_ms=0, initial_stagger_ms=0,
-        expected_working_environments=None, run_terminal_timeout_seconds=120, memory_mib=0, minimum_hold_ms=0, dependencies=None):
+        expected_working_environments=None, run_terminal_timeout_seconds=120, memory_mib=0, minimum_hold_ms=0, execution_mode='perRun', dependencies=None):
+    if execution_mode not in ('perRun','retained'):raise ValueError('supported explicit execution mode required')
     profile = memory_profile(environments, iterations, memory_mib, minimum_hold_ms)
     if type(run_terminal_timeout_seconds) is not int or not 1 <= run_terminal_timeout_seconds <= 600:
         raise ValueError('bounded per-Run terminal timeout required')
@@ -225,26 +226,27 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
             or initial_stagger_ms*(environments-1)>120000
             or type(expected_working) is not int or not 1<=expected_working<=environments):
         raise ValueError('bounded shared wait, initial stagger and overlap threshold required')
-    budget = workload_budget(environments, iterations, run_terminal_timeout_seconds, between_run_ms, initial_stagger_ms)
-    dependencies = dependencies or _dependencies()
+    budget = workload_budget(environments, iterations, run_terminal_timeout_seconds, between_run_ms, initial_stagger_ms,execution_mode=execution_mode)
+    dependencies = dependencies or _dependencies(execution_mode)
     fixture, result = Path(fixture), Path(result)
     driver = dependencies['driver'](fixture, result, expected_running_limit=environments)
     if (driver.manifest.get('sharedWorkload', {}).get('environmentCount') != environments
             or driver.manifest.get('sharedWorkload', {}).get('modelWaitMs',0) != model_wait_ms):
         raise RuntimeError('shared fixture environment count mismatch')
+    if driver.manifest.get('executionMode')!=execution_mode:raise RuntimeError('shared fixture execution mode mismatch')
     fixture_profile = driver.manifest.get('sharedWorkload', {}).get('workProfile')
     if (not isinstance(fixture_profile, dict) or set(fixture_profile) != set(profile)
             or any(type(fixture_profile[key]) is not int for key in profile) or fixture_profile != profile):
         raise RuntimeError('shared fixture work profile mismatch')
     report = {'schema': 'runsc.shared.workload.acceptance.v1', 'status': 'failedPreserved',
-              'sourceRevision': driver.manifest['sourceRevision'], 'environments': environments,
+              'sourceRevision': driver.manifest['sourceRevision'], 'environments': environments, 'executionMode':execution_mode,
               'budgets': budget, 'iterations': iterations, 'runTerminalTimeoutSeconds':run_terminal_timeout_seconds, 'workUnits': work_units, 'betweenRunMs': between_run_ms,
               'modelWaitMs':model_wait_ms,'initialStaggerMs':initial_stagger_ms,'workProfile':profile,
               'initialStaggerTotalMs':initial_stagger_ms*(environments-1),'expectedWorkingEnvironments':expected_working,
               'memoryContinuity': 'notObserved', 'clientFirstToolLatency': 'notObserved',
               'resumeToFirstToolLatency': 'notObserved', 'durableTiming': 'notObserved', 'preparationTiming': 'notObserved',
               'runtimeJobs': 'notObserved', 'memoryContention': 'notObserved',
-              'retirement': [], 'responsibility': 'preserved'}
+              'retirement': [], 'perRunCleanup':[], 'responsibility': 'preserved'}
     samples = [{'sampleId': uuid.uuid4().hex, 'operationId': uuid.uuid4().hex, 'workUnits': work_units}
                for _ in range(environments * iterations)]
     if profile['memoryMiB']:
@@ -263,7 +265,7 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
     try:
         observer.start(); started = True
         client = dependencies['workload'](private_path, result / 'k6', k6binary,
-                    environments=environments, iterations=iterations, timeout=budget['k6ProcessSeconds'], between_run_ms=between_run_ms, initial_stagger_ms=initial_stagger_ms, run_terminal_timeout_seconds=run_terminal_timeout_seconds)
+                    environments=environments, iterations=iterations, timeout=budget['k6ProcessSeconds'], between_run_ms=between_run_ms, initial_stagger_ms=initial_stagger_ms, run_terminal_timeout_seconds=run_terminal_timeout_seconds,execution_mode=execution_mode)
         report['client'] = client
         report['clientFirstToolLatency'] = client.get('firstSuccessfulToolResultLatency', 'notObserved')
         if client.get('status') != 'clientVerified':
@@ -272,7 +274,10 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
         admitted = [record for record in records if record.get('phase') == 'accepted']
         rows = [driver.completed(record) for record in admitted]
         report['runs'] = rows
-        report.update(validate_run_facts(rows, environments, iterations))
+        if execution_mode=='retained':report.update(validate_run_facts(rows,environments,iterations))
+        else:
+            from runsc_acceptance.per_run import validate_runs
+            report.update(validate_runs(rows,environments,iterations))
         def observe_job_completion():
             report['durableTiming'] = _durable_timing(driver, admitted)
             summary = validate_job_evidence(report['durableTiming'], admitted, allow_unsettled=True)
@@ -284,16 +289,18 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
             return summary
         driver.wait(observe_job_completion, lambda summary: summary['succeededJobs'] == summary['expectedJobs'],
                     'original Worker Job completion', timeout=FINAL_JOB_SETTLE_SECONDS)
-        last = {record['sessionId']: record for record in admitted}
-        final = [driver.wait(lambda label=str(index), run=record: driver.observe(label, run),
-                            lambda row: row.get('paused') is True and row.get('powerState') == 'paused',
-                            'final exact environment automatic pause')
-                 for index, record in enumerate(last.values())]
+        final=[]
+        if execution_mode=='retained':
+            last = {record['sessionId']: record for record in admitted}
+            final = [driver.wait(lambda label=str(index), run=record: driver.observe(label, run),
+                                lambda row: row.get('paused') is True and row.get('powerState') == 'paused',
+                                'final exact environment automatic pause')
+                     for index, record in enumerate(last.values())]
         report['native'] = observer.stop(); stopped = True
         if (report['native'].get('physicalOverlap') != 'verified'
                 or report['native'].get('peakWorkingEnvironments', 0) < expected_working):
             raise RuntimeError('explicit working-environment overlap threshold was not observed')
-        if iterations > 1 and (report['native'].get('pausedEnvironmentInstances', 0) < environments
+        if execution_mode=='retained' and iterations > 1 and (report['native'].get('pausedEnvironmentInstances', 0) < environments
                 or report['native'].get('resumedEnvironmentInstances', 0) < environments):
             raise RuntimeError('every original environment must be physically observed paused and resumed')
         expected = {row['environmentId']: row['instanceId'] for row in rows}
@@ -312,6 +319,11 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
             if not isinstance(proof, dict) or proof.get('status') != 'verified':
                 raise RuntimeError('verified memory contention evidence required')
             report['memoryContention'] = proof
+        if execution_mode=='perRun':
+            from runsc_acceptance.per_run import validate_cleanup
+            for record in admitted:report['perRunCleanup'].append(driver.per_run_cleanup(record))
+            report.update(validate_cleanup(report['perRunCleanup'],rows))
+            if not driver.per_run_inventory_absent():raise RuntimeError('perRun fixture still has managed physical responsibility')
         for row in final:
             retired = driver.retire(row)
             report['retirement'].append(retired)
@@ -332,16 +344,20 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
         (result / 'shared-report.json').write_text(json.dumps(report, indent=2))
 
 
-def _dependencies():
+def _dependencies(execution_mode):
     source = Path(__file__).resolve().parents[3]
     def load(name, path):
         spec = importlib.util.spec_from_file_location(name, path)
         module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
         return module
-    rotation = load('shared_rotation_driver', source / 'scripts/workspace/runsc_rotation_acceptance.py')
     workload = load('shared_k6_workload', source / 'perf/harness/fixture_workload.py')
     observer = load('shared_native_observer', source / 'perf/harness/native_observer.py')
-    return {'driver': rotation.FixtureDriver, 'workload': workload.run, 'observer': observer.NativeObserver}
+    from runsc_acceptance.per_run import SharedFixtureDriver
+    driver=SharedFixtureDriver
+    if execution_mode=='perRun':
+        from runsc_acceptance.per_run import PerRunFixtureDriver
+        driver=PerRunFixtureDriver
+    return {'driver': driver, 'workload': workload.run, 'observer': observer.NativeObserver}
 
 
 def _durable_timing(driver, admitted):
@@ -439,6 +455,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--fixture', required=True, type=Path)
+    parser.add_argument('--execution-mode',choices=('perRun','retained'),default='perRun')
     parser.add_argument('--result', required=True, type=Path)
     parser.add_argument('--k6-binary', required=True, type=Path)
     parser.add_argument('--environment-count', type=int, default=4)
@@ -454,7 +471,7 @@ def main():
     args = parser.parse_args()
     report = run(args.fixture, args.result, args.k6_binary, environments=args.environment_count,
                  iterations=args.iterations, work_units=args.work_units, between_run_ms=args.between_run_ms,
-                 memory_mib=args.memory_mib,minimum_hold_ms=args.minimum_hold_ms,
+                 memory_mib=args.memory_mib,minimum_hold_ms=args.minimum_hold_ms,execution_mode=args.execution_mode,
                  model_wait_ms=args.model_wait_ms,initial_stagger_ms=args.initial_stagger_ms,
                  expected_working_environments=args.expected_working_environments,run_terminal_timeout_seconds=args.run_terminal_timeout_seconds)
     print(json.dumps(report))

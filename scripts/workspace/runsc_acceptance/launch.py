@@ -131,6 +131,7 @@ def main():
     parser.add_argument('--root',required=True,type=Path);parser.add_argument('--source',required=True,type=Path);parser.add_argument('--git-dir',type=Path)
     parser.add_argument('--api-port',type=int,default=18083);parser.add_argument('--runtime-port',type=int,default=19003);parser.add_argument('--execute',action='store_true')
     parser.add_argument('--shared-workload',action='store_true')
+    parser.add_argument('--execution-mode',choices=('perRun','retained'),default='perRun')
     parser.add_argument('--environment-count',type=int,default=4)
     parser.add_argument('--iterations',type=int,default=3)
     parser.add_argument('--work-units',type=int,default=2000)
@@ -146,12 +147,13 @@ def main():
     for name in ('api','worker','runtime','general','postgres','redis'):parser.add_argument('--'+name+'-image',required=True)
     args=parser.parse_args()
     if not args.shared_workload and (args.memory_mib or args.minimum_hold_ms or args.workspace_memory_budget_bytes is not None or args.model_wait_ms or args.initial_stagger_ms or args.expected_working_environments is not None or args.run_terminal_timeout_seconds!=120 or args.between_run_ms!=6000):parser.error('workload timing and overlap parameters require shared mode')
+    if not args.shared_workload and args.execution_mode!='retained':parser.error('rotation requires retained execution mode')
     shared=[]
     if args.shared_workload:
         try:
             shared=shared_arguments(args.environment_count,args.model_wait_ms,args.initial_stagger_ms,args.expected_working_environments,memory_mib=args.memory_mib,minimum_hold_ms=args.minimum_hold_ms,iterations=args.iterations)
             workspace_memory_budget(args.environment_count,args.workspace_memory_budget_bytes)
-            budget=workload_budget(args.environment_count,args.iterations,args.run_terminal_timeout_seconds,args.between_run_ms,args.initial_stagger_ms)
+            budget=workload_budget(args.environment_count,args.iterations,args.run_terminal_timeout_seconds,args.between_run_ms,args.initial_stagger_ms,execution_mode=args.execution_mode)
         except ValueError as error:parser.error(str(error))
     if args.shared_workload and (args.k6_binary is None or not 2 <= args.environment_count <= 64
             or not 1 <= args.iterations <= 20 or not 1 <= args.work_units <= 1000000):
@@ -187,7 +189,7 @@ def main():
         def call(argv,timeout=120,input=None):
             return run_step(argv,root=root,env=env,input=input,timeout=timeout)
         tools=source/'scripts/workspace/runsc_acceptance';fixture=root/'fixture'
-        argv=['python3','-B',str(tools/'prepare.py'),'--source',str(source),'--bins',str(bins),'--revision',build['sourceRevision'],'--build-manifest',str(manifest),'--tls-dir',str(tls),'--output',str(fixture),'--runsc-rotation','--isolation-owner',str(root/'owner.json'),'--docker-socket',str(root/'docker.sock'),'--host-socket-directory',str(root/'host'),'--api-port',str(args.api_port),'--runtime-port',str(args.runtime_port)]
+        argv=['python3','-B',str(tools/'prepare.py'),'--source',str(source),'--bins',str(bins),'--revision',build['sourceRevision'],'--build-manifest',str(manifest),'--tls-dir',str(tls),'--output',str(fixture),'--runsc-rotation','--isolation-owner',str(root/'owner.json'),'--docker-socket',str(root/'docker.sock'),'--host-socket-directory',str(root/'host'),'--api-port',str(args.api_port),'--runtime-port',str(args.runtime_port),'--execution-mode',args.execution_mode]
         if args.shared_workload:
             argv+=['--shared-workload','--environment-count',str(args.environment_count),'--iterations',str(args.iterations)]+shared
             if args.workspace_memory_budget_bytes is not None:argv+=['--workspace-memory-budget-bytes',str(args.workspace_memory_budget_bytes)]
@@ -219,7 +221,7 @@ def main():
         docker.record(status='product-twelve-runs');print(json.dumps({'phase':'product-twelve-runs', **({'budgets':budget} if args.shared_workload else {})}),flush=True)
         if args.shared_workload:
             output=call(['python3','-B',str(tools/'shared_workload.py'),'--fixture',str(fixture),'--result',str(root/'results'),
-                '--k6-binary',str(args.k6_binary),'--environment-count',str(args.environment_count),'--iterations',str(args.iterations),'--work-units',str(args.work_units),'--run-terminal-timeout-seconds',str(args.run_terminal_timeout_seconds),'--between-run-ms',str(args.between_run_ms)]+shared,budget['coordinatorSeconds'])
+                '--k6-binary',str(args.k6_binary),'--environment-count',str(args.environment_count),'--iterations',str(args.iterations),'--work-units',str(args.work_units),'--run-terminal-timeout-seconds',str(args.run_terminal_timeout_seconds),'--between-run-ms',str(args.between_run_ms),'--execution-mode',args.execution_mode]+shared,budget['coordinatorSeconds'])
         else:
             output=call(['python3','-B',str(source/'scripts/workspace/runsc_rotation_acceptance.py'),'--fixture',str(fixture),'--result',str(root/'results'),'--acknowledge-fixture-retirement'],1800)
         # Successful product retirement has removed both managed workloads.

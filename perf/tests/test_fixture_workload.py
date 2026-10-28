@@ -29,6 +29,16 @@ class ExistingFixtureWorkloadTests(unittest.TestCase):
             self.assertEqual(environment['PERF_SAMPLES_PATH'],str(Path(folder)/'out/samples.json'))
             samples=module.prepared_samples(value);self.assertEqual(len(samples),12)
             self.assertEqual(len({x['expectedArtifact']['sha256'] for x in samples}),12)
+    def test_native_execution_mode_must_match_all_effective_services_without_fallback(self):
+        module=self.load()
+        with tempfile.TemporaryDirectory() as folder:
+            env=Path(folder)/'synthetic.env';env.write_text('AGENT_RUN_EXECUTION_MODE=perRun\n')
+            compose={'services':{name:{'env_file':[str(env)]} for name in ('api','worker','runtime')}}
+            self.assertEqual(module.fixture_execution_mode({'executionMode':'perRun'},compose),'perRun')
+            for manifest in ({},{'executionMode':'unknown'},{'executionMode':'retained'}):
+                with self.assertRaises(ValueError):module.fixture_execution_mode(manifest,compose)
+            compose['services']['worker']['environment']={'AGENT_RUN_EXECUTION_MODE':'retained'}
+            with self.assertRaises(ValueError):module.fixture_execution_mode({'executionMode':'perRun'},compose)
     def test_foreign_api_url_and_reused_sample_id_are_rejected_before_start(self):
         module=self.load()
         with tempfile.TemporaryDirectory() as folder:

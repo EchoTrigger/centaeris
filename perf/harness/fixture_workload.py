@@ -18,6 +18,7 @@ def _module(name, path):
 
 fixed_workload = _module('perf_fixed_workload', ROOT / 'perf/mock-model/fixed_workload.py')
 workload_budget = _module('perf_workload_budget', ROOT / 'scripts/workspace/runsc_acceptance/workload_budget.py').workload_budget
+fixture_execution_mode = _module('perf_execution_mode', ROOT / 'scripts/workspace/runsc_acceptance/execution_mode.py').fixture_execution_mode
 
 
 def _external(path):
@@ -45,11 +46,12 @@ def verify_native_fixture(path):
             or type(native['apiPort']) is not int or not 1024 <= native['apiPort'] <= 65535
             or compose['services']['api']['ports'] != [f"127.0.0.1:{native['apiPort']}:8000"]):
         raise ValueError('native fixture ownership or API binding mismatch')
+    mode=fixture_execution_mode(native,compose)
     model_wait_ms = (native.get('sharedWorkload') or {}).get('modelWaitMs', 0)
     if type(model_wait_ms) is not int or not 0 <= model_wait_ms <= 120000:
         raise ValueError('native fixture model wait is invalid')
     return {'apiBase': f"http://127.0.0.1:{native['apiPort']}", 'project': native['project'],
-            'sourceRevision': native['sourceRevision'], 'modelWaitMs': model_wait_ms}
+            'sourceRevision': native['sourceRevision'], 'modelWaitMs': model_wait_ms,'executionMode':mode}
 
 
 def read_fixture(path, *, environments, iterations):
@@ -91,7 +93,7 @@ def prepared_samples(fixture):
     return samples
 
 
-def k6_command(fixture, output, binary, *, environments, iterations, between_run_ms=0, initial_stagger_ms=0, run_terminal_timeout_seconds=120):
+def k6_command(fixture, output, binary, *, environments, iterations, between_run_ms=0, initial_stagger_ms=0, run_terminal_timeout_seconds=120,execution_mode='perRun'):
     if type(run_terminal_timeout_seconds) is not int or not 1 <= run_terminal_timeout_seconds <= 600:
         raise ValueError('bounded per-Run terminal timeout required')
     if (type(initial_stagger_ms) is not int or not 0 <= initial_stagger_ms <= 120000
@@ -99,7 +101,7 @@ def k6_command(fixture, output, binary, *, environments, iterations, between_run
         raise ValueError('bounded initial workload stagger required')
     if type(between_run_ms) is not int or not 0 <= between_run_ms <= 60000:
         raise ValueError('bounded between-Run gap required')
-    budget = workload_budget(environments, iterations, run_terminal_timeout_seconds, between_run_ms, initial_stagger_ms)
+    budget = workload_budget(environments, iterations, run_terminal_timeout_seconds, between_run_ms, initial_stagger_ms,execution_mode=execution_mode)
     allowed = {'PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA'}
     environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
     environment.update(API_BASE=fixture['apiBase'], PERF_WORKSPACE_ID=fixture['workspaceId'],
@@ -167,19 +169,20 @@ def validate_records(records, fixture):
             'firstSuccessfulToolResultLatency': timing}
 
 
-def run(fixture_path, output, binary, *, environments=4, iterations=3, timeout=None, between_run_ms=0, initial_stagger_ms=0, run_terminal_timeout_seconds=120):
+def run(fixture_path, output, binary, *, environments=4, iterations=3, timeout=None, between_run_ms=0, initial_stagger_ms=0, run_terminal_timeout_seconds=120,execution_mode='perRun'):
     import queue
     import subprocess
     import threading
     import time
     if type(run_terminal_timeout_seconds) is not int or not 1 <= run_terminal_timeout_seconds <= 600:
         raise ValueError('bounded per-Run terminal timeout required')
-    budget = workload_budget(environments, iterations, run_terminal_timeout_seconds, between_run_ms, initial_stagger_ms)
+    budget = workload_budget(environments, iterations, run_terminal_timeout_seconds, between_run_ms, initial_stagger_ms,execution_mode=execution_mode)
     if timeout is None:
         timeout = budget['k6ProcessSeconds']
     if type(timeout) is not int or timeout != budget['k6ProcessSeconds']:
         raise ValueError('K6 process budget must equal the recorded derived budget')
     fixture = read_fixture(fixture_path, environments=environments, iterations=iterations)
+    if fixture['native']['executionMode']!=execution_mode:raise ValueError('workload execution mode mismatch')
     output = _external(output)
     binary = Path(binary).resolve(strict=True)
     with binary.open('rb') as handle:
@@ -190,10 +193,10 @@ def run(fixture_path, output, binary, *, environments=4, iterations=3, timeout=N
     (output / 'samples.json').write_text(json.dumps(samples, indent=2), encoding='utf-8')
     manifest = {key: fixture[key] for key in ('apiBase', 'workspaceId', 'agentId', 'modelRefs')}
     manifest.update(schema='workspace.perf.workload.v1', budgets=budget, environments=environments, iterations=iterations,
-                    sourceRevision=fixture['native']['sourceRevision'], project=fixture['native']['project'], betweenRunMs=between_run_ms,
+                    sourceRevision=fixture['native']['sourceRevision'], project=fixture['native']['project'], executionMode=execution_mode, betweenRunMs=between_run_ms,
                     initialStaggerMs=initial_stagger_ms, runTerminalTimeoutSeconds=run_terminal_timeout_seconds, modelWaitMs=fixture['native'].get('modelWaitMs', 0))
     (output / 'manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
-    command, environment = k6_command(fixture, output, binary, environments=environments, iterations=iterations, between_run_ms=between_run_ms, initial_stagger_ms=initial_stagger_ms, run_terminal_timeout_seconds=run_terminal_timeout_seconds)
+    command, environment = k6_command(fixture, output, binary, environments=environments, iterations=iterations, between_run_ms=between_run_ms, initial_stagger_ms=initial_stagger_ms, run_terminal_timeout_seconds=run_terminal_timeout_seconds,execution_mode=execution_mode)
     started = time.monotonic()
     process = subprocess.Popen(command, env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, encoding='utf-8')

@@ -16,11 +16,13 @@ from app_core.models import (Agent, ModelConfig, ModelProvider, ProviderCredenti
                              Workspace, WorkspaceMembership)
 
 assert settings.DATABASES['default']['NAME'] == 'retained_acceptance'
-assert os.environ.get('AGENT_RUN_EXECUTION_MODE') == 'retained'
+execution_mode=os.environ.get('AGENT_RUN_EXECUTION_MODE')
+assert execution_mode in ('perRun','retained'), 'explicit supported execution mode required'
 assert not Workspace.objects.exists(), 'refusing to seed an existing workspace database'
 output = Path(settings.MEDIA_ROOT) / 'acceptance-seed.json'
 assert not output.exists(), 'refusing to replace fixture credentials'
 shared = os.environ.get('CENTAERIS_ACCEPTANCE_SHARED_WORKLOAD') == '1'
+assert shared or execution_mode=='retained', 'rotation requires retained execution mode'
 email = 'retained-' + secrets.token_hex(8) + '@fixture.invalid'
 password = secrets.token_urlsafe(40)
 with transaction.atomic():
@@ -41,6 +43,6 @@ output.parent.mkdir(parents=True, exist_ok=True)
 fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(fd, 'w') as stream:
     json.dump({'email':email,'password':password,'workspaceId':workspace.id,
-               'agentId':agent.id,'modelConfigRef':model.id}, stream)
+               'agentId':agent.id,'modelConfigRef':model.id,'executionMode':execution_mode}, stream)
 print(json.dumps({'status':'synthetic-business-inputs-created','workspaceId':workspace.id,
-                  'agentId':agent.id,'modelConfigRef':model.id}))
+                  'agentId':agent.id,'modelConfigRef':model.id,'executionMode':execution_mode}))

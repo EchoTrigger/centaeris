@@ -62,6 +62,12 @@ The deterministic model requests actual tool work: two CPU worker processes,
 a file write and artifact publication. K6 independently downloads each artifact
 and checks its sample-specific size and hash. A completed Run alone does not pass.
 
+Shared mode defaults to `perRun`: each Run must use a fresh physical instance, complete
+physical removal, leave no resident holding or managed container, and retain its public
+Run history. Pass `--execution-mode retained` to exercise the same-instance pause/resume
+and retirement checks described below. The single-slot rotation gate requires this
+explicit retained selection.
+
 The shared launcher derives one bounded timing plan before starting the fixture.
 `budgets` is recorded in the launch progress, shared report and K6 manifest/client
 report. It does not change work units, environment overlap, rolling Run creation,
@@ -78,7 +84,7 @@ at 60 seconds each; the scenario explicitly retains the existing 30-second
 The K6 process also reserves 25 seconds for initialization, summary and exit,
 matching the existing terminate/kill/reader cleanup bounds.
 
-The outer shared step preserves serial readbacks and adds their existing limits:
+For retained mode, the outer shared step preserves serial readbacks and adds their existing limits:
 270 seconds for driver initialization (three 60-second commands and three
 30-second HTTP requests), `E * I * 181` seconds for completed-Run readbacks,
 60 seconds for durable timing, `E * 241` for final pause, and `E * 391` for
@@ -96,7 +102,7 @@ excessive combinations fail before fixture loading or workload admission.
 These are worst-case ceilings, not intended runtimes. The first failed client,
 product or physical acceptance check still stops and preserves responsibility.
 
-Required evidence includes all of the following:
+For retained shared mode, required evidence includes all of the following:
 
 - Four environments with overlapping active tasks and positive CPU counter deltas,
   using unchanged cgroup/container identities; VU counts alone do not prove this.
@@ -176,7 +182,7 @@ cached image references; no image pull or application deployment is performed.
 
 ```sh
 unshare --net -- python3 "$SOURCE/scripts/workspace/runsc_acceptance/launch.py" \
-  --root "$NEW_ROOT" --source "$SOURCE" --execute \
+  --root "$NEW_ROOT" --source "$SOURCE" --execute --execution-mode retained \
   --api-image "$CACHED_API" --worker-image "$CACHED_WORKER" \
   --runtime-image "$CACHED_RUNTIME" --general-image "$CACHED_GENERAL_TOOLS" \
   --postgres-image "$CACHED_POSTGRES" --redis-image "$CACHED_REDIS"

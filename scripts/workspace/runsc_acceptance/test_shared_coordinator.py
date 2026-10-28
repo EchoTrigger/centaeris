@@ -17,7 +17,8 @@ module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 
 
 class SharedCoordinatorTests(unittest.TestCase):
-    def invoke(self, root, *, overlap='verified', bad_run=False, bad_retirement=False, resumed=None, environments=4, working=None, model_wait_ms=0, initial_stagger_ms=0, expected_working_environments=None, run_terminal_timeout_seconds=120, runtime_logs=None, runtime_log_error=None, durable_change=None, iterations=3, memory_mib=0, minimum_hold_ms=0, fixture_profile='planned', workload_error=None, native_samples=None, memory_evaluator=None):
+    def invoke(self, root, *, overlap='verified', bad_run=False, bad_retirement=False, resumed=None, environments=4, working=None, model_wait_ms=0, initial_stagger_ms=0, expected_working_environments=None, run_terminal_timeout_seconds=120, runtime_logs=None, runtime_log_error=None, durable_change=None, iterations=3, memory_mib=0, minimum_hold_ms=0, fixture_profile='planned', workload_error=None, native_samples=None, memory_evaluator=None, execution_mode='retained', fixture_mode='planned', cleanup_change=None, reuse_per_run_instance=False, managed_remaining=False):
+        effective_mode=execution_mode or 'perRun'
         resumed = environments if resumed is None else resumed
         working = environments if working is None else working
         fixture = root / 'fixture'; fixture.mkdir()
@@ -27,7 +28,8 @@ class SharedCoordinatorTests(unittest.TestCase):
             def __init__(self, fixture, result, *, expected_running_limit):
                 self.result = result; result.mkdir(); self.base = 'http://127.0.0.1:18083'
                 self.seed = {'email': 'fixture@example.invalid', 'password': 'private-fixture-password', 'workspaceId': 'workspace-a', 'agentId': 'agent-a', 'modelConfigRef': 'model-a'}
-                self.manifest = {'sharedWorkload': {'environmentCount': environments, 'modelWaitMs': model_wait_ms, 'workProfile': {'memoryMiB':memory_mib,'minimumHoldMs':minimum_hold_ms} if fixture_profile=='planned' else fixture_profile}, 'sourceRevision': 'abc','resourceLimits':{'resourceLimitIdentity':'actual manifest projection'}}
+                self.manifest = {'sharedWorkload': {'environmentCount': environments, 'modelWaitMs': model_wait_ms, 'workProfile': {'memoryMiB':memory_mib,'minimumHoldMs':minimum_hold_ms} if fixture_profile=='planned' else fixture_profile}, 'executionMode':effective_mode if fixture_mode=='planned' else fixture_mode,'sourceRevision': 'abc','resourceLimits':{'resourceLimitIdentity':'actual manifest projection'}}
+                self.private={'AGENT_RUN_EXECUTION_MODE':effective_mode}
                 self.docker = ['docker', '--host', 'unix:///owned/docker.sock']
                 self.compose = fixture / 'compose.json'
                 self.environment = {'COMPOSE_DISABLE_ENV_FILE': 'true'}
@@ -35,9 +37,19 @@ class SharedCoordinatorTests(unittest.TestCase):
             def completed(self, record):
                 calls.append(('completed', record['agentRunId']))
                 env = record['sessionId'].split('-')[-1]
-                return {**record, 'environmentId': 'environment-' + env, 'instanceId': 'instance-' + env,
+                return {**record, 'environmentId': 'environment-' + env, 'instanceId': 'instance-' + (record['agentRunId'] if effective_mode=='perRun' and not reuse_per_run_instance else env),
                         'runStatus': 'failed' if bad_run else 'completed', 'coreTerminalType': 'agent_run_completed', 'cleanupComplete': True, 'releaseReceiptCount': 1}
+            def per_run_cleanup(self, record):
+                calls.append(('perRunCleanup',record['agentRunId']))
+                env=record['sessionId'].split('-')[-1]
+                proof={**record,'environmentId':'environment-'+env,'instanceId':'instance-'+record['agentRunId'],'containerId':'container-'+record['agentRunId'],
+                    'cleanupComplete':True,'physicalRemoved':True,'containerAbsent':True,'residentHoldingCount':0,'historyPreserved':True,'cleanupReceiptAtMs':1900}
+                if cleanup_change:proof=cleanup_change(proof)
+                return proof
+            def per_run_inventory_absent(self):
+                calls.append(('perRunInventory',));return not managed_remaining
             def observe(self, label, record):
+                calls.append(('observe',record['agentRunId']))
                 env = record['sessionId'].split('-')[-1]
                 return {'environmentId': 'environment-' + env, 'instanceId': 'instance-' + env, 'containerId': 'container-' + env,
                         'hostId': 'host', 'controllerEpoch': 3, 'runtime': 'runsc', 'paused': True, 'running': True, 'powerState': 'paused'}
@@ -87,6 +99,7 @@ class SharedCoordinatorTests(unittest.TestCase):
         dependencies = {'driver': Driver, 'observer': Observer, 'workload': workload}
         if memory_evaluator is not None:dependencies['memory_contention']=memory_evaluator
         options = {'environments': environments,'iterations':iterations,'memory_mib':memory_mib,'minimum_hold_ms':minimum_hold_ms,'run_terminal_timeout_seconds':run_terminal_timeout_seconds}
+        if execution_mode is not None:options['execution_mode']=execution_mode
         if model_wait_ms: options['model_wait_ms'] = model_wait_ms
         if initial_stagger_ms: options['initial_stagger_ms'] = initial_stagger_ms
         if expected_working_environments is not None: options['expected_working_environments'] = expected_working_environments
@@ -102,6 +115,63 @@ class SharedCoordinatorTests(unittest.TestCase):
                 return module.run(fixture, root / 'result', root / 'k6', dependencies=dependencies, **options)
         return calls, execute
 
+    def test_default_per_run_validates_every_original_cleanup_without_pause_or_retirement(self):
+        with tempfile.TemporaryDirectory() as name:
+            calls,execute=self.invoke(Path(name),execution_mode=None,resumed=0)
+            report=execute()
+            self.assertEqual(report['executionMode'],'perRun')
+            self.assertEqual(report['status'],'passed')
+            self.assertEqual(report['freshInstanceRuns'],12)
+            self.assertEqual(len(report['perRunCleanup']),12)
+            self.assertFalse(any(call[0] in ('observe','retire') for call in calls))
+            self.assertEqual(sum(call[0]=='perRunCleanup' for call in calls),12)
+            self.assertIn(('perRunInventory',),calls)
+    def test_eight_per_run_sessions_keep_three_runs_each_and_twenty_four_fresh_instances(self):
+        with tempfile.TemporaryDirectory() as name:
+            calls,execute=self.invoke(Path(name),execution_mode=None,environments=8,resumed=0)
+            report=execute()
+            self.assertEqual(report['freshInstanceRuns'],24);self.assertEqual(report['absentContainers'],24)
+            self.assertEqual(report['publicHistoryRuns'],24)
+            self.assertFalse(any(call[0] in ('observe','retire') for call in calls))
+    def test_dense_per_run_still_requires_memory_proof_and_original_jobs_without_failed_retries(self):
+        from unittest.mock import Mock
+        for retry in (0,1):
+            with self.subTest(retry=retry),tempfile.TemporaryDirectory() as name:
+                evaluator=Mock(return_value={'status':'verified'})
+                change=lambda evidence:evidence['finalJobs'][0].update(retryCount=retry)
+                calls,execute=self.invoke(Path(name),execution_mode=None,environments=8,iterations=1,resumed=0,
+                    memory_mib=1536,minimum_hold_ms=60000,native_samples=[{'native':'sample'}],memory_evaluator=evaluator,durable_change=change)
+                if retry:
+                    with self.assertRaisesRegex(RuntimeError,'retry budget'):execute()
+                    evaluator.assert_not_called();self.assertFalse(any(call[0]=='perRunCleanup' for call in calls))
+                else:
+                    report=execute();self.assertEqual(report['freshInstanceRuns'],8)
+                    self.assertEqual(report['memoryContention']['status'],'verified')
+                    self.assertEqual(report['runtimeJobs']['failedRetryCount'],0)
+                    self.assertEqual(len(evaluator.call_args.args[2]),8)
+                    self.assertFalse(any(call[0] in ('observe','retire') for call in calls))
+    def test_per_run_missing_or_bad_cleanup_cannot_pass(self):
+        mutations=[lambda proof:None,lambda proof:{**proof,'physicalRemoved':False},lambda proof:{**proof,'cleanupComplete':False},
+            lambda proof:{**proof,'containerAbsent':False},lambda proof:{**proof,'residentHoldingCount':1},
+            lambda proof:{**proof,'residentHoldingCount':False},lambda proof:{**proof,'historyPreserved':False},
+            lambda proof:{**proof,'instanceId':'foreign'},lambda proof:{**proof,'containerId':'same-container'},
+            lambda proof:{**proof,'cleanupReceiptAtMs':None}]
+        for mutate in mutations:
+            with self.subTest(mutate=mutate),tempfile.TemporaryDirectory() as name:
+                root=Path(name);calls,execute=self.invoke(root,execution_mode=None,cleanup_change=mutate)
+                with self.assertRaises((ValueError,RuntimeError)):execute()
+                self.assertEqual(json.loads((root/'result/shared-report.json').read_text())['status'],'failedPreserved')
+                self.assertFalse(any(call[0]=='retire' for call in calls))
+    def test_per_run_reused_instance_and_unidentified_final_holding_reject(self):
+        for options in ({'reuse_per_run_instance':True},{'managed_remaining':True}):
+            with self.subTest(options=options),tempfile.TemporaryDirectory() as name:
+                _,execute=self.invoke(Path(name),execution_mode=None,**options)
+                with self.assertRaises((ValueError,RuntimeError)):execute()
+    def test_fixture_mode_mismatch_rejects_before_starting_the_observer(self):
+        with tempfile.TemporaryDirectory() as name:
+            calls,execute=self.invoke(Path(name),execution_mode=None,fixture_mode='retained')
+            with self.assertRaisesRegex(RuntimeError,'execution mode mismatch'):execute()
+            self.assertFalse(any(call[0] in ('start','k6','retire') for call in calls))
     def test_k6_is_only_admitter_and_retirement_follows_all_real_completion_facts(self):
         with tempfile.TemporaryDirectory() as name:
             calls, execute = self.invoke(Path(name)); report = execute()
@@ -468,6 +538,12 @@ class DurableTimingTests(unittest.TestCase):
         self.assertNotIn('private-authority-not-exported', json.dumps(report))
         self.assertNotIn('private-error-payload', json.dumps(report))
 
+    def test_exact_host_admission_yield_preserves_original_job_and_zero_failed_retry_budget(self):
+        report = self.report(yields=[self.yield_fact(transitionReason='execution_host_admission_wait')])
+        self.assertEqual(report['jobYields'][0]['transitionReason'],'execution_host_admission_wait')
+        summary=module.validate_job_evidence(report,[{'agentRunId':'run-a','sessionId':'session-a'}])
+        self.assertEqual(summary['yieldReasonCounts'],{'execution_host_admission_wait':1})
+        self.assertEqual(summary['failedRetryCount'],0)
     def test_unknown_yield_reason_is_redacted_and_rejects_acceptance(self):
         report = self.report(yields=[self.yield_fact(transitionReason='private-token-in-unknown-reason')])
         self.assertEqual(report['jobYields'][0]['transitionReason'], 'unrecognized')
