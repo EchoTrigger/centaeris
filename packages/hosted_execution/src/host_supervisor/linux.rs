@@ -31,6 +31,10 @@ use std::{
 static PROBE_ADMISSION: probe::ProbeAdmission = probe::ProbeAdmission::new();
 const MAX_REQUEST: usize = 128 * 1024;
 const MAX_RESPONSE: usize = 1024 * 1024;
+// Header readers and dispatched operations consume independent bounded slots.
+const HEADER_LIMIT: usize = 8;
+const EXECUTION_LIMIT: usize = 8;
+const HEADER_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -767,37 +771,120 @@ pub fn serve(config_path: &Path) -> Result<(), String> {
         helper_binary,
     });
     retirement::start_retries(&host)?;
-    let active = Arc::new(AtomicUsize::new(0));
+    let admission = Arc::new(ClientAdmission::new());
     for stream in listener.incoming() {
         let stream = stream.map_err(|_| "host_socket_accept_failed")?;
-        let accepted_at = Instant::now();
-        if active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < 8).then_some(n + 1)
-            })
-            .is_err()
-        {
-            continue;
-        }
-        let permit = ClientPermit(active.clone());
-        let host = host.clone();
-        thread::Builder::new()
-            .name("host-control".into())
-            .spawn(move || {
-                let _permit = permit;
-                let _ = exchange(&host, stream, accepted_at);
-            })
-            .map_err(|_| "host_worker_unavailable")?;
+        start_client(host.clone(), stream, Instant::now(), admission.clone())?;
     }
     Ok(())
 }
+struct ClientAdmission {
+    headers: Arc<AtomicUsize>,
+    executing: Arc<AtomicUsize>,
+}
+impl ClientAdmission {
+    fn new() -> Self {
+        Self {
+            headers: Arc::new(AtomicUsize::new(0)),
+            executing: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+fn start_client(
+    host: Arc<Host>,
+    stream: UnixStream,
+    accepted_at: Instant,
+    admission: Arc<ClientAdmission>,
+) -> Result<Option<thread::JoinHandle<()>>, String> {
+    let Some(header) = ClientPermit::acquire(&admission.headers, HEADER_LIMIT) else {
+        // An unparsed peer has no proof that a valid operation was rejected.
+        return Ok(None);
+    };
+    thread::Builder::new()
+        .name("host-control".into())
+        .spawn(move || {
+            let _ = exchange(&host, stream, accepted_at, &admission, header);
+        })
+        .map(Some)
+        .map_err(|_| "host_worker_unavailable".into())
+}
 struct ClientPermit(Arc<AtomicUsize>);
+impl ClientPermit {
+    fn acquire(counter: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
+        counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < limit).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Self(counter.clone()))
+    }
+}
 impl Drop for ClientPermit {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
-fn exchange(host: &Arc<Host>, mut stream: UnixStream, accepted_at: Instant) -> Result<(), String> {
+fn read_envelope(
+    reader: &mut BufReader<UnixStream>,
+    deadline: Instant,
+) -> Result<HostSupervisorEnvelope, String> {
+    let mut data = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("host_request_invalid".into());
+        }
+        reader
+            .get_ref()
+            .set_read_timeout(Some(remaining))
+            .map_err(|_| "host_socket_failed")?;
+        let bytes = reader.fill_buf().map_err(|_| "host_request_invalid")?;
+        if bytes.is_empty() {
+            return Err("host_request_invalid".into());
+        }
+        let count = bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |position| position + 1);
+        if data.len() + count > MAX_REQUEST {
+            return Err("host_request_invalid".into());
+        }
+        data.extend_from_slice(&bytes[..count]);
+        reader.consume(count);
+        if data.last() == Some(&b'\n') {
+            break;
+        }
+    }
+    let envelope: HostSupervisorEnvelope =
+        serde_json::from_slice(&data).map_err(|_| "host_request_invalid")?;
+    envelope.validate()?;
+    Ok(envelope)
+}
+fn helper_input_ready(stream: &mut UnixStream, helper: &HostHelperRequest) -> Result<(), String> {
+    let response = HostSupervisorResponse::Success {
+        schema: HOST_SUPERVISOR_SCHEMA.into(),
+        result: HostSupervisorResult::HelperInputReady {
+            operation_id: helper.operation_id.clone(),
+            input_length: helper.input_length,
+            input_digest: helper.input_digest.clone(),
+        },
+    };
+    let mut bytes = serde_json::to_vec(&response).map_err(|_| "host_response_invalid")?;
+    bytes.push(b'\n');
+    stream
+        .write_all(&bytes)
+        .and_then(|()| stream.flush())
+        .map_err(|_| "host_response_unknown".into())
+}
+fn exchange(
+    host: &Arc<Host>,
+    mut stream: UnixStream,
+    accepted_at: Instant,
+    admission: &ClientAdmission,
+    header: ClientPermit,
+) -> Result<(), String> {
+    let mut header = Some(header);
+    let mut _execution = None;
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of_val(&cred) as libc::socklen_t;
     // SAFETY: socket FD and credential output storage are valid.
@@ -825,18 +912,12 @@ fn exchange(host: &Arc<Host>, mut stream: UnixStream, accepted_at: Instant) -> R
     let budget = probe::ProbeBudget::new(accepted_at + Duration::from_secs(30), Some(peer.as_fd()));
     let mut read_only_probe = false;
     let result = (|| {
-        let mut data = Vec::new();
         let mut reader = BufReader::new(stream.try_clone().map_err(|_| "host_socket_failed")?);
-        (&mut reader)
-            .take(MAX_REQUEST as u64 + 1)
-            .read_until(b'\n', &mut data)
-            .map_err(|_| "host_request_invalid")?;
-        if data.len() > MAX_REQUEST || data.last() != Some(&b'\n') {
-            return Err("host_request_invalid".into());
-        }
-        let envelope: HostSupervisorEnvelope =
-            serde_json::from_slice(&data).map_err(|_| "host_request_invalid")?;
-        envelope.validate()?;
+        let envelope = read_envelope(&mut reader, accepted_at + HEADER_TIMEOUT)?;
+        _execution =
+            Some(ClientPermit::acquire(&admission.executing, EXECUTION_LIMIT).ok_or("host_busy")?);
+        // The execution slot now owns the full request, including response transfer.
+        drop(header.take());
         read_only_probe = matches!(
             &envelope.request,
             HostSupervisorRequest::ObserveResources { .. } | HostSupervisorRequest::Inspect { .. }
@@ -852,6 +933,7 @@ fn exchange(host: &Arc<Host>, mut stream: UnixStream, accepted_at: Instant) -> R
             None
         };
         if let HostSupervisorRequest::Helper { helper } = envelope.request {
+            helper_input_ready(&mut stream, &helper)?;
             let manager = host.existing(&helper.fence.environment_instance_id)?;
             stream
                 .set_read_timeout(Some(Duration::from_secs(30)))
@@ -943,3 +1025,6 @@ impl Write for TrackedWriter<'_> {
 
 #[cfg(test)]
 mod command_budget_tests;
+
+#[cfg(test)]
+mod admission_tests;

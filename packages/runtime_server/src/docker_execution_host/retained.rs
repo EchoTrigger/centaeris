@@ -6,6 +6,8 @@ use centaeris_core::execution::{
     ENVIRONMENT_TASK_SCHEMA,
 };
 
+mod busy_retry;
+
 pub(super) fn signing_key() -> Result<String, String> {
     env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
         .ok()
@@ -197,15 +199,21 @@ impl DockerExecutionHostRunner {
             return Err("retained task fence mismatch".into());
         }
         request.validate_authority()?;
-        self.with_supervisor_target(|target| {
-            crate::environment_supervisor::task(
-                target.clone(),
-                EnvironmentTaskEnvelope {
-                    schema: ENVIRONMENT_TASK_SCHEMA.into(),
-                    request,
-                },
-            )
-        })
+        busy_retry::call(
+            &request,
+            |request| {
+                self.with_supervisor_target(|target| {
+                    crate::environment_supervisor::task(
+                        target.clone(),
+                        EnvironmentTaskEnvelope {
+                            schema: ENVIRONMENT_TASK_SCHEMA.into(),
+                            request: request.clone(),
+                        },
+                    )
+                })
+            },
+            thread::sleep,
+        )
     }
     pub(super) fn with_supervisor_target<T: Send>(
         &self,
@@ -267,7 +275,7 @@ impl DockerExecutionHostRunner {
         request: &hosted_execution::host_supervisor::HostHelperRequest,
         input: &mut (impl Read + Seek + Send),
     ) -> Result<EnvironmentTaskSnapshot, String> {
-        let attempt = || {
+        let mut attempt = || {
             input
                 .rewind()
                 .map_err(|_| "environment_helper_input_unavailable")?;
@@ -276,10 +284,7 @@ impl DockerExecutionHostRunner {
             })
         };
         if request.fence.controller_purpose != EnvironmentTaskControllerPurpose::Execute {
-            return {
-                let mut attempt = attempt;
-                attempt()
-            };
+            return busy_retry::call(request, |_| attempt(), thread::sleep);
         }
         super::admission_wait::start(
             attempt,
@@ -343,7 +348,14 @@ impl DockerExecutionHostRunner {
                 task_id: task.task_id.clone(),
                 cursor: 0,
                 max_bytes: centaeris_core::execution::ENVIRONMENT_TASK_READ_BYTES as u32,
-            })?;
+            });
+            let response = match response {
+                Ok(response) => response,
+                // Only this Query was rejected. Keep observing the same helper
+                // until its existing deadline; never create another helper.
+                Err(error) if error == "environment_host_busy" => continue,
+                Err(error) => return Err(error),
+            };
             let EnvironmentTaskResult::Task { task: current, .. } = response else {
                 return Err("environment_helper_outcome_unknown".into());
             };
@@ -356,13 +368,19 @@ impl DockerExecutionHostRunner {
             task = current;
         }
         // Authorize the bounded response header, then release DB pins before raw I/O.
-        self.with_supervisor_target(|target| {
-            crate::environment_supervisor::prepare_helper_output(
-                target,
-                request.clone(),
-                &task.task_id,
-            )
-        })
+        busy_retry::call(
+            &task.task_id,
+            |task_id| {
+                self.with_supervisor_target(|target| {
+                    crate::environment_supervisor::prepare_helper_output(
+                        target,
+                        request.clone(),
+                        task_id,
+                    )
+                })
+            },
+            thread::sleep,
+        )
     }
     fn helper_request(
         &self,

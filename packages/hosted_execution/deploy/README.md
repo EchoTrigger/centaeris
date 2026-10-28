@@ -49,8 +49,24 @@ Inspection uses the same budget while attesting or waiting for a loaded manager.
 After a supervisor restart, entering manager recovery is also budgeted, but once
 recovery starts it retains its task reconciliation responsibility across client
 disconnect. The budget does not cancel accepted task starts, termination, helper
-operations or retirement. The existing eight-client limit includes request
-parsing and inspection; the resource-walk limit is not a reserved control lane.
+operations or retirement. The resource-walk limit is not a reserved control lane.
+
+Connection admission has separate limits of eight header readers and eight
+dispatched operations. A header reader authenticates the peer and validates one
+JSON request header, bounded by 128 KiB and an absolute two-second deadline from
+connection acceptance. Only a fully parsed, authenticated, valid request can
+receive the top-level `host_busy` error when all execution slots are occupied.
+That response proves this request was not dispatched: no task handler, helper
+input spooling or helper execution has begun. An execution slot remains held
+through response transfer. If all header-reader slots are occupied, an unparsed
+connection is closed without a busy receipt; its transport outcome remains
+unknown. Malformed headers, disconnects and timeouts are not busy receipts.
+
+Helper uploads use an explicit `helperInputReady` response before binary input.
+The Runtime checks its `operationId`, `inputLength` and `inputDigest` against the
+original request before reading or sending input bytes. A pre-upload `host_busy`
+therefore cannot consume the upload. Readiness confirms upload admission, not
+helper execution or completion; later transport failures remain unconfirmed.
 
 Mount only `/run/centaeris-host` into the trusted Runtime service and set
 `ENVIRONMENT_HOST_SOCKET=/run/centaeris-host/control.sock`. Workloads receive no

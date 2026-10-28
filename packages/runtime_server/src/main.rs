@@ -161,6 +161,7 @@ const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_RUN_WAITING_TRANSITION_REASONS: &[&str] = &[
     "execution_resident_capacity_wait",
     "execution_host_preparation_wait",
+    "execution_host_admission_wait",
     "runsc_environment_capacity_wait",
     "execution_recovery_checkpoint_committed",
     "question_wait",
@@ -1543,6 +1544,14 @@ fn execution_recovery_waiting(retry_at_ms: i64) -> AgentRunStepOutcome {
     }
 }
 
+fn preparation_waiting_reason(reason: &str) -> &str {
+    if reason == "environment_host_busy" {
+        "execution_host_admission_wait"
+    } else {
+        reason
+    }
+}
+
 fn recovery_preparation_waiting(reason: &str) -> AgentRunStepOutcome {
     AgentRunStepOutcome {
         disposition: "waiting",
@@ -2292,12 +2301,13 @@ fn execute_agent_run(
                 resident_capacity::RESIDENT_CAPACITY_WAIT
                     | resident_capacity::HOST_PREPARATION_WAIT
                     | "runsc_environment_capacity_wait"
+                    | "environment_host_busy"
             ) =>
         {
             return Ok(AgentRunStepOutcome {
                 disposition: "waiting",
                 terminal_state: None,
-                transition_reason: error,
+                transition_reason: preparation_waiting_reason(&error).into(),
                 retry_at_ms: None,
             });
         }
@@ -6680,6 +6690,27 @@ mod tests {
                     "{kind} changed the host's signed execution policy"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn host_admission_busy_preparation_uses_a_safe_waiting_contract() {
+        assert_eq!(
+            preparation_waiting_reason("environment_host_busy"),
+            "execution_host_admission_wait"
+        );
+        recovery_preparation_waiting(preparation_waiting_reason("environment_host_busy"))
+            .validate()
+            .expect("host admission rejection remains pending");
+        for reason in [
+            "execution_resident_capacity_wait",
+            "execution_host_preparation_wait",
+            "runsc_environment_capacity_wait",
+            "host_busy",
+            "environment_host_busy:unknown",
+            "environment_host_transport_unavailable",
+        ] {
+            assert_eq!(preparation_waiting_reason(reason), reason);
         }
     }
 

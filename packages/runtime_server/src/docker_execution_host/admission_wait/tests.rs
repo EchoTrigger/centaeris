@@ -72,6 +72,37 @@ fn accepted_start_is_returned_once_without_querying_control_or_restarting() {
 }
 
 #[test]
+fn trusted_host_busy_keeps_the_original_unaccepted_start_pending_and_checks_control() {
+    for cancel in [false, true] {
+        let attempts = Cell::new(0);
+        let controls = Cell::new(0);
+        let result = start(
+            || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    Err("environment_host_busy".into())
+                } else {
+                    Ok("original-start")
+                }
+            },
+            || {
+                controls.set(controls.get() + 1);
+                Ok(cancel.then(|| "agent_run_cancel_requested".into()))
+            },
+            |_| {},
+        );
+        if cancel {
+            assert_eq!(result.unwrap_err(), "agent_run_cancel_requested");
+            assert_eq!(attempts.get(), 1);
+        } else {
+            assert_eq!(result.unwrap(), "original-start");
+            assert_eq!(attempts.get(), 2);
+        }
+        assert!(controls.get() > 0);
+    }
+}
+
+#[test]
 fn unknown_or_noncapacity_outcome_is_never_retried() {
     for reason in [
         "environment_helper_start_unknown",

@@ -467,54 +467,63 @@ fn postgres_four_environment_initializations_overlap_with_shared_authority() {
 #[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_initialization_failure_preserves_confirmed_resident_and_dispatch_responsibility() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    let (_url, store, mut db) = setup();
-    let current = run(&store, &mut db, "run-initialize-failure", 1);
-    let physical = Arc::new(Mutex::new(Vec::new()));
-    let profile = current.original.environment_profile.digest().unwrap();
-    let error = store
-        .prepare_retained_instance_then_initialize(
-            &current.request("execution-initialize-failure", &profile),
-            limits(&current),
-            || {
-                Ok(crate::resident_capacity::ResidentInventory::declarations(
-                    Vec::new(),
-                ))
-            },
-            |_, _| Ok(()),
-            |allocation| confirm(&current, allocation, &physical),
-            |_| Err("controlled workspace initialization failure".into()),
-        )
-        .unwrap_err();
-    assert_eq!(error, "controlled workspace initialization failure");
-    assert_eq!(db.query_one("SELECT state FROM runtime.resident_sandboxes WHERE execution_id='execution-initialize-failure'", &[]).unwrap().get::<_, String>(0), "resident");
-    assert_eq!(db.query_one("SELECT state FROM runtime.environment_creation_attempts WHERE allocation_execution_id='execution-initialize-failure'", &[]).unwrap().get::<_, String>(0), "dispatched");
-    assert_eq!(physical.lock().unwrap().len(), 1);
-    let container = physical.lock().unwrap()[0].container_id.clone();
-    let retried = store
-        .prepare_retained_instance_then_initialize(
-            &current.request("execution-initialize-failure", &profile),
-            limits(&current),
-            || {
-                Ok(crate::resident_capacity::ResidentInventory::declarations(
-                    physical.lock().unwrap().clone(),
-                ))
-            },
-            |_, allocation| {
-                assert!(allocation.reused);
-                Ok(())
-            },
-            |allocation| {
-                assert!(allocation.reused);
-                assert_eq!(allocation.container_id.as_ref(), Some(&container));
-                Ok(container.clone())
-            },
-            |_| Ok(()),
-        )
-        .unwrap();
-    assert_eq!(retried.container_id.as_ref(), Some(&container));
-    assert!(retried.reused);
-    assert_eq!(physical.lock().unwrap().len(), 1);
-    assert_eq!(db.query_one("SELECT count(*) FROM runtime.environment_creation_attempts WHERE allocation_execution_id='execution-initialize-failure'", &[]).unwrap().get::<_, i64>(0), 1);
+    for mode in ["perRun", "retained"] {
+        for initialization_error in [
+            "controlled workspace initialization failure",
+            "environment_host_busy",
+        ] {
+            let (_url, store, mut db) = setup();
+            let mut current = run(&store, &mut db, "run-initialize-failure", 1);
+            current.grant.payload.execution_mode = mode.into();
+            current.grant = sign(current.grant.payload);
+            let physical = Arc::new(Mutex::new(Vec::new()));
+            let profile = current.original.environment_profile.digest().unwrap();
+            let error = store
+                .prepare_retained_instance_then_initialize(
+                    &current.request("execution-initialize-failure", &profile),
+                    limits(&current),
+                    || {
+                        Ok(crate::resident_capacity::ResidentInventory::declarations(
+                            Vec::new(),
+                        ))
+                    },
+                    |_, _| Ok(()),
+                    |allocation| confirm(&current, allocation, &physical),
+                    |_| Err(initialization_error.into()),
+                )
+                .unwrap_err();
+            assert_eq!(error, initialization_error);
+            assert_eq!(db.query_one("SELECT state FROM runtime.resident_sandboxes WHERE execution_id='execution-initialize-failure'", &[]).unwrap().get::<_, String>(0), "resident");
+            assert_eq!(db.query_one("SELECT state FROM runtime.environment_creation_attempts WHERE allocation_execution_id='execution-initialize-failure'", &[]).unwrap().get::<_, String>(0), "dispatched");
+            assert_eq!(physical.lock().unwrap().len(), 1);
+            let container = physical.lock().unwrap()[0].container_id.clone();
+            let retried = store
+                .prepare_retained_instance_then_initialize(
+                    &current.request("execution-initialize-failure", &profile),
+                    limits(&current),
+                    || {
+                        Ok(crate::resident_capacity::ResidentInventory::declarations(
+                            physical.lock().unwrap().clone(),
+                        ))
+                    },
+                    |_, allocation| {
+                        assert!(allocation.reused);
+                        Ok(())
+                    },
+                    |allocation| {
+                        assert!(allocation.reused);
+                        assert_eq!(allocation.container_id.as_ref(), Some(&container));
+                        Ok(container.clone())
+                    },
+                    |_| Ok(()),
+                )
+                .unwrap();
+            assert_eq!(retried.container_id.as_ref(), Some(&container));
+            assert!(retried.reused);
+            assert_eq!(physical.lock().unwrap().len(), 1);
+            assert_eq!(db.query_one("SELECT count(*) FROM runtime.environment_creation_attempts WHERE allocation_execution_id='execution-initialize-failure'", &[]).unwrap().get::<_, i64>(0), 1);
+        }
+    }
 }
 
 #[test]

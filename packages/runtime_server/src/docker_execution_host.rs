@@ -896,7 +896,7 @@ impl DockerExecutionHostRunner {
             &self.command_path,
             |request| self.environment_task_rpc(request),
         )
-        .map_err(|_| "lifecycle_hook_outcome_unknown")?;
+        .map_err(lifecycle_hook_command_failure)?;
         let mut stdout = output.process.stdout;
         let mut stderr = output.process.stderr;
         let stdout_truncated = output.process.stdout_decode.raw_byte_length > stdout.len()
@@ -2166,6 +2166,16 @@ impl DockerExecutionHostRunner {
                 "protected_input",
             )
         }))
+    }
+}
+
+fn lifecycle_hook_command_failure(error: ExecutionError) -> &'static str {
+    match error {
+        ExecutionError::CapacityRejected {
+            stage: centaeris_core::execution::ExecutionOperationStage::Start,
+            reason,
+        } if reason == "environment_host_busy" => "lifecycle_hook_start_busy",
+        _ => "lifecycle_hook_outcome_unknown",
     }
 }
 

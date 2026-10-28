@@ -138,6 +138,12 @@ pub enum HostSupervisorResult {
     Inspection {
         inspection: serde_json::Value,
     },
+    /// The validated upload has execution capacity; no input or helper was dispatched yet.
+    HelperInputReady {
+        operation_id: String,
+        input_length: u64,
+        input_digest: String,
+    },
     HelperFinished {
         task: centaeris_core::execution::EnvironmentTaskSnapshot,
         stdout_length: u64,

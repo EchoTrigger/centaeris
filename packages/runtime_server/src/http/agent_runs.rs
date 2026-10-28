@@ -340,8 +340,7 @@ fn teardown_owned_tasks(
                     cleanup.agent_run_id
                 );
             }
-            let _ = error;
-            return json_error_response(503, "retained_cleanup_unconfirmed");
+            return cleanup_failure_response(&error);
         }
     };
     let mut contexts = state
@@ -516,6 +515,14 @@ pub(super) fn step(
     step_response(&agent_run_id, outcome)
 }
 
+fn cleanup_failure_response(error: &str) -> Result<Response<Body>, String> {
+    if error == "environment_host_busy" {
+        json_error_response(409, "environment_host_busy")
+    } else {
+        json_error_response(503, "retained_cleanup_unconfirmed")
+    }
+}
+
 fn execution_control_failure_response(
     agent_run_id: &str,
     error: &str,
@@ -559,6 +566,33 @@ fn step_response(
 #[cfg(test)]
 mod cleanup_receipt_http_tests {
     use super::*;
+    #[test]
+    fn host_admission_busy_cleanup_is_an_exact_conflict_without_a_false_receipt() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for (reason, expected_status, expected_code) in [
+            ("environment_host_busy", 409, "environment_host_busy"),
+            ("host_busy", 503, "retained_cleanup_unconfirmed"),
+            (
+                "environment_host_busy:unknown",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            (
+                "environment_host_transport_unavailable",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+        ] {
+            let response = cleanup_failure_response(reason).unwrap();
+            assert_eq!(response.status(), expected_status);
+            let body = runtime
+                .block_on(axum::body::to_bytes(response.into_body(), 4096))
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value, json!({"error": expected_code}));
+        }
+    }
+
     #[test]
     fn unavailable_fresh_control_returns_retryable_503_before_terminalization() {
         let response = execution_control_failure_response(

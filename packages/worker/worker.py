@@ -44,6 +44,7 @@ if not 1 <= WORKER_SLOT_COUNT <= 16:
     raise ValueError("WORKER_SLOT_COUNT must be an integer between 1 and 16")
 AGENT_RUN_WAITING_TRANSITION_REASONS = {
     "execution_host_preparation_wait",
+    "execution_host_admission_wait",
     "execution_resident_capacity_wait",
     "runsc_environment_capacity_wait",
     "execution_recovery_checkpoint_committed",
@@ -621,15 +622,20 @@ def is_environment_controller_wait(error):
     }
 
 
+def is_environment_host_busy(error):
+    return (getattr(error, "http_status", None) == 409
+            and getattr(error, "http_error_code", None) == "environment_host_busy")
+
+
 def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
     try:
         return _execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease)
     except RuntimeError as error:
-        if not is_environment_controller_wait(error):
+        if not is_environment_controller_wait(error) and not is_environment_host_busy(error):
             raise
         require_healthy_lease()
-        yield_job(job["jobId"], lease_owner, now_ms() + ENVIRONMENT_CONTROLLER_RECHECK_MS,
-                  "environment_controller_wait")
+        reason = "execution_host_admission_wait" if is_environment_host_busy(error) else "environment_controller_wait"
+        yield_job(job["jobId"], lease_owner, now_ms() + ENVIRONMENT_CONTROLLER_RECHECK_MS, reason)
         return False
 
 
@@ -691,6 +697,8 @@ def _execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
             # Runtime derives this deadline from its recovery boundary.
             # Waiting releases the slot; retries never sleep inside a worker.
             next_run_at_ms = max(yielded_at_ms, result["retryAtMs"])
+        elif result["transitionReason"] == "execution_host_admission_wait":
+            next_run_at_ms = yielded_at_ms + ENVIRONMENT_CONTROLLER_RECHECK_MS
         elif result["transitionReason"] == "runtime_job_wait":
             next_run_at_ms = yielded_at_ms + RUNTIME_JOB_WAIT_RECHECK_MS
         else:
@@ -760,7 +768,8 @@ def finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, req
     try:
         return _finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, require_healthy_lease)
     except (RuntimeError, urllib.error.URLError, OSError) as error:
-        if isinstance(error, YieldHandoffUnknown) or is_environment_controller_wait(error) or str(error) == "agent_run_lifecycle_lease_lost":
+        if (isinstance(error, YieldHandoffUnknown) or is_environment_controller_wait(error)
+                or is_environment_host_busy(error) or str(error) == "agent_run_lifecycle_lease_lost"):
             raise
         # Never include untrusted response bodies or transport credentials.
         reason = str(error) if isinstance(error, RuntimeError) else "retained_cleanup_unavailable"
@@ -1449,7 +1458,8 @@ def execute_control_job(job):
             except (RuntimeError, urllib.error.URLError, OSError) as error:
                 # Keep the verifier until recovery hands off the same Job.
                 healthy()
-                reason = "environment_controller_wait" if is_environment_controller_wait(error) else "control_retry_pending"
+                reason = ("environment_controller_wait" if is_environment_controller_wait(error) else
+                          "execution_host_admission_wait" if is_environment_host_busy(error) else "control_retry_pending")
                 yield_job(job["jobId"], owner, now_ms() + ENVIRONMENT_CONTROLLER_RECHECK_MS, reason)
     except YieldHandoffUnknown as error:
         print(f"worker handoff unconfirmed: jobId={job['jobId']}; transitionReason=job_yield_handoff_unknown; "

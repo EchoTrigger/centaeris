@@ -11,7 +11,8 @@ pub(super) fn start<T>(
         match attempt() {
             Ok(value) => return Ok(value),
             Err(error)
-                if centaeris_core::execution::environment_task_capacity_rejection(&error) => {}
+                if error == "environment_host_busy"
+                    || centaeris_core::execution::environment_task_capacity_rejection(&error) => {}
             Err(error) => return Err(error),
         }
         let mut remaining = [100, 250, 500, 1000][backoff];

@@ -13,7 +13,8 @@ const REQUEST_LIMIT: usize = 128 * 1024;
 const RESPONSE_LIMIT: usize = 1024 * 1024;
 
 fn safe_error(error: &str) -> String {
-    if !error.is_empty()
+    if !matches!(error, "host_busy" | "environment_host_busy")
+        && !error.is_empty()
         && error.len() <= 96
         && error
             .bytes()
@@ -59,6 +60,9 @@ fn read_response(reader: &mut impl BufRead) -> Result<HostSupervisorResult, Stri
         .map_err(|_| "environment_host_response_invalid")?;
     match response {
         HostSupervisorResponse::Success { result, .. } => Ok(result),
+        HostSupervisorResponse::Error { error, .. } if error == "host_busy" => {
+            Err("environment_host_busy".into())
+        }
         HostSupervisorResponse::Error { error, .. } => Err(safe_error(&error)),
     }
 }
@@ -80,43 +84,9 @@ fn exchange_helper(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> Result<EnvironmentTaskSnapshot, String> {
-    helper.validate()?;
-    write_request(
-        stream,
-        HostSupervisorRequest::Helper {
-            helper: helper.clone(),
-        },
-    )?;
-    let mut remaining = helper.input_length;
-    let mut hash = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    while remaining > 0 {
-        let size = usize::try_from(remaining.min(buffer.len() as u64)).expect("bounded");
-        let n = input
-            .read(&mut buffer[..size])
-            .map_err(|_| "environment_host_input_unavailable")?;
-        if n == 0 {
-            return Err("environment_host_input_incomplete".into());
-        }
-        hash.update(&buffer[..n]);
-        stream
-            .write_all(&buffer[..n])
-            .map_err(|_| "environment_host_transport_unavailable")?;
-        remaining -= n as u64;
-    }
-    if input
-        .read(&mut buffer[..1])
-        .map_err(|_| "environment_host_input_unavailable")?
-        != 0
-        || format!("sha256:{:x}", hash.finalize()) != helper.input_digest
-    {
-        return Err("environment_host_input_rejected".into());
-    }
-    stream
-        .flush()
-        .map_err(|_| "environment_host_transport_unavailable")?;
-    // Keep this reader alive: read_until may already have prefetched raw output.
     let mut reader = BufReader::new(stream);
+    write_helper_input(&mut reader, &helper, input)?;
+    let mut buffer = [0u8; 1];
     let HostSupervisorResult::HelperFinished {
         task,
         stdout_length,
@@ -155,6 +125,66 @@ fn exchange_helper(
         return Err("environment_host_output_invalid".into());
     }
     Ok(task)
+}
+
+/// A ready receipt authorizes only this upload; it is not task execution success.
+fn write_helper_input<S: Read + Write>(
+    reader: &mut BufReader<S>,
+    helper: &HostHelperRequest,
+    input: &mut impl Read,
+) -> Result<(), String> {
+    helper.validate()?;
+    write_request(
+        reader.get_mut(),
+        HostSupervisorRequest::Helper {
+            helper: helper.clone(),
+        },
+    )?;
+    reader
+        .get_mut()
+        .flush()
+        .map_err(|_| "environment_host_transport_unavailable")?;
+    match read_response(reader)? {
+        HostSupervisorResult::HelperInputReady {
+            operation_id,
+            input_length,
+            input_digest,
+        } if operation_id == helper.operation_id
+            && input_length == helper.input_length
+            && input_digest == helper.input_digest => {}
+        _ => return Err("environment_host_helper_admission_unconfirmed".into()),
+    }
+    let mut remaining = helper.input_length;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let size =
+            usize::try_from(remaining.min(buffer.len() as u64)).expect("bounded input chunk");
+        let n = input
+            .read(&mut buffer[..size])
+            .map_err(|_| "environment_host_input_unavailable")?;
+        if n == 0 {
+            return Err("environment_host_input_incomplete".into());
+        }
+        hash.update(&buffer[..n]);
+        reader
+            .get_mut()
+            .write_all(&buffer[..n])
+            .map_err(|_| "environment_host_transport_unavailable")?;
+        remaining -= n as u64;
+    }
+    if input
+        .read(&mut buffer[..1])
+        .map_err(|_| "environment_host_input_unavailable")?
+        != 0
+        || format!("sha256:{:x}", hash.finalize()) != helper.input_digest
+    {
+        return Err("environment_host_input_rejected".into());
+    }
+    reader
+        .get_mut()
+        .flush()
+        .map_err(|_| "environment_host_transport_unavailable".into())
 }
 trait HostStream: Read + Write + Send {}
 impl<T: Read + Write + Send> HostStream for T {}
@@ -255,44 +285,9 @@ pub(crate) fn helper_start(
         return Err("environment_host_target_rejected".into());
     }
     register(target)?;
-    let mut stream = connection()?;
-    write_request(
-        &mut *stream,
-        HostSupervisorRequest::Helper {
-            helper: request.clone(),
-        },
-    )?;
-    let mut hash = Sha256::new();
-    let mut length = 0u64;
-    let mut buffer = [0u8; 65536];
-    loop {
-        let n = input
-            .read(&mut buffer)
-            .map_err(|_| "environment_host_input_unavailable")?;
-        if n == 0 {
-            break;
-        }
-        length = length
-            .checked_add(n as u64)
-            .ok_or("environment_host_input_rejected")?;
-        if length > request.input_length {
-            return Err("environment_host_input_rejected".into());
-        }
-        hash.update(&buffer[..n]);
-        stream
-            .write_all(&buffer[..n])
-            .map_err(|_| "environment_host_transport_unavailable")?;
-    }
-    if length != request.input_length
-        || format!("sha256:{:x}", hash.finalize()) != request.input_digest
-    {
-        return Err("environment_host_input_rejected".into());
-    }
-    stream
-        .flush()
-        .map_err(|_| "environment_host_transport_unavailable")?;
-    let HostSupervisorResult::Task { response } = read_response(&mut BufReader::new(stream))?
-    else {
+    let mut reader = BufReader::new(connection()?);
+    write_helper_input(&mut reader, &request, input)?;
+    let HostSupervisorResult::Task { response } = read_response(&mut reader)? else {
         return Err("environment_helper_start_unconfirmed".into());
     };
     let result = match response {
@@ -810,7 +805,17 @@ mod tests {
                 stderr_length: 3,
             },
         };
-        let mut bytes = serde_json::to_vec(&response).unwrap();
+        let ready = HostSupervisorResponse::Success {
+            schema: HOST_SUPERVISOR_SCHEMA.into(),
+            result: HostSupervisorResult::HelperInputReady {
+                operation_id: helper.operation_id.clone(),
+                input_length: helper.input_length,
+                input_digest: helper.input_digest.clone(),
+            },
+        };
+        let mut bytes = serde_json::to_vec(&ready).unwrap();
+        bytes.push(b'\n');
+        bytes.extend(serde_json::to_vec(&response).unwrap());
         bytes.push(b'\n');
         bytes.extend(vec![0xff; 2 * 1024 * 1024]);
         bytes.extend(b"err");
@@ -886,5 +891,110 @@ mod tests {
             .unwrap_err(),
             "environment_host_resources_unconfirmed"
         );
+    }
+    #[test]
+    fn host_busy_is_only_trusted_from_the_top_level_admission_response() {
+        let response =
+            b"{\"status\":\"error\",\"schema\":\"environment.host.v1\",\"error\":\"host_busy\"}\n";
+        assert_eq!(
+            read_response(&mut std::io::Cursor::new(response)).unwrap_err(),
+            "environment_host_busy"
+        );
+        assert_eq!(
+            safe_error("host_busy"),
+            "environment_host_response_rejected"
+        );
+        assert_eq!(
+            safe_error("environment_host_busy"),
+            "environment_host_response_rejected"
+        );
+        assert_eq!(
+            read_response(&mut std::io::Cursor::new(b"" as &[u8])).unwrap_err(),
+            "environment_host_response_invalid"
+        );
+    }
+
+    #[test]
+    fn helper_admission_busy_never_reads_or_sends_binary_input() {
+        let EnvironmentTaskRequest::List { fence } = envelope().request else {
+            unreachable!()
+        };
+        let helper = HostHelperRequest {
+            operation_id: fence.operation_id("filesystem"),
+            scope: EnvironmentTaskScope::Run {
+                run_id: "run".into(),
+            },
+            kind: hosted_execution::host_supervisor::TrustedHelperKind::FileSystem,
+            input_digest: format!("sha256:{:x}", Sha256::digest(b"input")),
+            input_length: 5,
+            fence,
+        };
+        let mut input = std::io::Cursor::new(b"input");
+        let mut wire = Wire { read: std::io::Cursor::new(b"{\"status\":\"error\",\"schema\":\"environment.host.v1\",\"error\":\"host_busy\"}\n".to_vec()), written: vec![] };
+        let error = exchange_helper(
+            &mut wire,
+            helper,
+            &mut input,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            input.position(),
+            0,
+            "rejected admission cannot consume input"
+        );
+        assert_eq!(error, "environment_host_busy");
+        assert_eq!(
+            wire.written.iter().filter(|&&byte| byte == b'\n').count(),
+            1
+        );
+        assert!(wire.written.ends_with(b"\n"), "header only; no binary body");
+    }
+
+    #[test]
+    fn helper_upload_requires_matching_ready_identity_and_complete_response() {
+        let EnvironmentTaskRequest::List { fence } = envelope().request else {
+            unreachable!()
+        };
+        let helper = HostHelperRequest {
+            operation_id: fence.operation_id("filesystem"),
+            scope: EnvironmentTaskScope::Run {
+                run_id: "run".into(),
+            },
+            kind: hosted_execution::host_supervisor::TrustedHelperKind::FileSystem,
+            input_digest: format!("sha256:{:x}", Sha256::digest(b"input")),
+            input_length: 5,
+            fence,
+        };
+        for field in ["operationId", "inputLength", "inputDigest", "transport"] {
+            let mut ready = serde_json::json!({"status":"success","schema":HOST_SUPERVISOR_SCHEMA,
+                "result":{"kind":"helperInputReady","operationId":helper.operation_id,
+                    "inputLength":helper.input_length,"inputDigest":helper.input_digest}});
+            match field {
+                "operationId" => ready["result"][field] = serde_json::json!("1:foreign"),
+                "inputLength" => ready["result"][field] = serde_json::json!(6),
+                "inputDigest" => {
+                    ready["result"][field] = serde_json::json!(format!("sha256:{}", "a".repeat(64)))
+                }
+                _ => {}
+            }
+            let mut bytes = serde_json::to_vec(&ready).unwrap();
+            if field != "transport" {
+                bytes.push(b'\n');
+            }
+            let wire = Wire {
+                read: std::io::Cursor::new(bytes),
+                written: vec![],
+            };
+            let mut reader = BufReader::new(wire);
+            let mut input = std::io::Cursor::new(b"input");
+            assert!(
+                write_helper_input(&mut reader, &helper, &mut input).is_err(),
+                "{field}"
+            );
+            assert_eq!(input.position(), 0, "{field}");
+            assert!(reader.get_ref().written.ends_with(b"\n"), "{field}");
+        }
     }
 }

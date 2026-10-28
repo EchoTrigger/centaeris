@@ -11,7 +11,9 @@ fn unknown(reason: impl Into<String>) -> ExecutionError {
 fn attempt_error(stage: ExecutionOperationStage, reason: String) -> ExecutionError {
     // These exact errors are emitted only before accepting this RPC attempt.
     // An Input rejection does not undo an earlier accepted Start.
-    if environment_task_capacity_rejection(&reason) {
+    if environment_task_capacity_rejection(&reason)
+        || (stage == ExecutionOperationStage::Start && reason == "environment_host_busy")
+    {
         ExecutionError::CapacityRejected { stage, reason }
     } else {
         ExecutionError::OperationIndeterminate { stage, reason }
@@ -118,14 +120,84 @@ struct InputTarget<'a> {
     scope: &'a EnvironmentTaskScope,
 }
 
+struct CommandIo<Rpc, Now, Delay> {
+    rpc: Rpc,
+    now: Now,
+    delay: Delay,
+}
+
+struct CommandControl<'a> {
+    deadline: Instant,
+    cancellation_probe: Option<&'a ExecutionCancellationProbe>,
+}
+
+impl<Rpc, Now, Delay> CommandIo<Rpc, Now, Delay>
+where
+    Rpc: FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
+    Now: FnMut() -> Instant,
+    Delay: FnMut(Duration),
+{
+    fn start_without_probe(
+        &mut self,
+        request: &EnvironmentTaskRequest,
+    ) -> Result<EnvironmentTaskResult, String> {
+        // Hooks have no cancellation probe. Only the host's definitive
+        // pre-dispatch rejection permits a short wait on the identical Start.
+        let deadline = (self.now)() + Duration::from_secs(1);
+        loop {
+            let error = match (self.rpc)(request.clone()) {
+                Ok(response) => return Ok(response),
+                Err(reason) if reason == "environment_host_busy" => reason,
+                Err(reason) => return Err(reason),
+            };
+            let remaining = deadline.saturating_duration_since((self.now)());
+            if remaining.is_zero() {
+                return Err(error);
+            }
+            (self.delay)(Duration::from_millis(25).min(remaining));
+            if (self.now)() >= deadline {
+                return Err(error);
+            }
+        }
+    }
+
+    fn pause_busy(&mut self, control: &CommandControl<'_>) -> Result<bool, ExecutionError> {
+        if (self.now)() >= control.deadline {
+            return Ok(false);
+        }
+        if let Some(probe) = control.cancellation_probe {
+            if probe().map_err(unknown)?.is_some() {
+                return Ok(false);
+            }
+        }
+        (self.delay)(
+            Duration::from_millis(25).min(control.deadline.saturating_duration_since((self.now)())),
+        );
+        if (self.now)() >= control.deadline {
+            return Ok(false);
+        }
+        if let Some(probe) = control.cancellation_probe {
+            if probe().map_err(unknown)?.is_some() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
 fn confirm_input(
     fence: &EnvironmentTaskFence,
     target: InputTarget<'_>,
     operation_id: String,
     data: Vec<u8>,
     close: bool,
-    rpc: &mut impl FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
-) -> Result<(), ExecutionError> {
+    io: &mut CommandIo<
+        impl FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
+        impl FnMut() -> Instant,
+        impl FnMut(Duration),
+    >,
+    control: &CommandControl<'_>,
+) -> Result<bool, ExecutionError> {
     let InputTarget {
         task_id,
         start_id,
@@ -144,37 +216,47 @@ fn confirm_input(
     } else {
         "retainedInputData"
     };
-    let reason = match crate::observations::timed(phase, || {
-        rpc(EnvironmentTaskRequest::Input {
-            fence: fence.clone(),
-            task_id: task_id.into(),
-            operation_id: operation_id.clone(),
-            data,
-            close,
-        })
-    }) {
-        Ok(result) if confirmed(&result) => return Ok(()),
-        Ok(_) => "command_input_unconfirmed".into(),
-        Err(reason) if environment_task_capacity_rejection(&reason) => {
-            return Err(attempt_error(ExecutionOperationStage::Input, reason));
+    let input = EnvironmentTaskRequest::Input {
+        fence: fence.clone(),
+        task_id: task_id.into(),
+        operation_id: operation_id.clone(),
+        data,
+        close,
+    };
+    let reason = loop {
+        match crate::observations::timed(phase, || (io.rpc)(input.clone())) {
+            Ok(result) if confirmed(&result) => return Ok(true),
+            Ok(_) => break "command_input_unconfirmed".into(),
+            Err(reason) if reason == "environment_host_busy" => {
+                if !io.pause_busy(control)? {
+                    return Ok(false);
+                }
+            }
+            Err(reason) if environment_task_capacity_rejection(&reason) => {
+                return Err(attempt_error(ExecutionOperationStage::Input, reason));
+            }
+            Err(reason) => break reason,
         }
-        Err(reason) => reason,
     };
     // An uncertain acknowledgement permits only a read of this original
     // operation's durable receipt. Never repeat the stdin write or EOF.
-    if crate::observations::timed("retainedInputReceipt", || {
-        rpc(EnvironmentTaskRequest::QueryInputReceipt {
-            fence: fence.clone(),
-            task_id: task_id.into(),
-            operation_id,
-            request_digest,
-        })
-    })
-    .is_ok_and(|result| confirmed(&result))
-    {
-        return Ok(());
+    let receipt = EnvironmentTaskRequest::QueryInputReceipt {
+        fence: fence.clone(),
+        task_id: task_id.into(),
+        operation_id,
+        request_digest,
+    };
+    loop {
+        match crate::observations::timed("retainedInputReceipt", || (io.rpc)(receipt.clone())) {
+            Ok(result) if confirmed(&result) => return Ok(true),
+            Err(reason) if reason == "environment_host_busy" => {
+                if !io.pause_busy(control)? {
+                    return Ok(false);
+                }
+            }
+            _ => return Err(attempt_error(ExecutionOperationStage::Input, reason)),
+        }
     }
-    Err(attempt_error(ExecutionOperationStage::Input, reason))
 }
 
 fn run_command_with_input(
@@ -184,7 +266,35 @@ fn run_command_with_input(
     cancellation_probe: Option<&ExecutionCancellationProbe>,
     command_path: &str,
     mode: CommandMode<'_>,
-    mut rpc: impl FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
+    rpc: impl FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
+) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+    run_command_with_io(
+        fence,
+        operation_id,
+        request,
+        cancellation_probe,
+        command_path,
+        mode,
+        CommandIo {
+            rpc,
+            now: Instant::now,
+            delay: std::thread::sleep,
+        },
+    )
+}
+
+fn run_command_with_io(
+    fence: &EnvironmentTaskFence,
+    operation_id: &str,
+    request: ExecutionCommandRequest,
+    cancellation_probe: Option<&ExecutionCancellationProbe>,
+    command_path: &str,
+    mode: CommandMode<'_>,
+    mut io: CommandIo<
+        impl FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
+        impl FnMut() -> Instant,
+        impl FnMut(Duration),
+    >,
 ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
     let (input, recovering) = match mode {
         CommandMode::Execute(input) => (input, false),
@@ -220,15 +330,12 @@ fn run_command_with_input(
     ]);
     env.extend(request.env.clone());
     let start_id = operation(fence, operation_id, "start");
-    let first_request = if recovering {
-        EnvironmentTaskRequest::Query {
-            fence: fence.clone(),
-            task_id: fence.task_id(&start_id).map_err(unknown)?,
-            cursor: 0,
-            max_bytes: ENVIRONMENT_TASK_READ_BYTES as u32,
-        }
+    let (id, mut first, running) = if recovering {
+        // Recovery already owns this task identity. Its first Query belongs to
+        // the same cancellation/deadline loop as every later Query.
+        (fence.task_id(&start_id).map_err(unknown)?, None, false)
     } else {
-        EnvironmentTaskRequest::Start {
+        let first_request = EnvironmentTaskRequest::Start {
             fence: fence.clone(),
             operation_id: start_id.clone(),
             scope: scope.clone(),
@@ -237,45 +344,43 @@ fn run_command_with_input(
             env,
             cwd: request.cwd.to_string_lossy().into_owned(),
             timeout_ms: request.timeout_ms,
-        }
-    };
-    let first = if !recovering {
-        if let Some(probe) = cancellation_probe {
-            super::admission_wait::start(|| rpc(first_request.clone()), probe, std::thread::sleep)
+        };
+        let first = if let Some(probe) = cancellation_probe {
+            super::admission_wait::start(|| (io.rpc)(first_request.clone()), probe, &mut io.delay)
         } else {
-            rpc(first_request)
+            io.start_without_probe(&first_request)
         }
-    } else {
-        rpc(first_request)
-    }
-    .map_err(|reason| {
-        if recovering {
-            unknown(reason)
-        } else {
-            attempt_error(ExecutionOperationStage::Start, reason)
-        }
-    })?;
-    let (id, running) = match &first {
-        EnvironmentTaskResult::Task { task, .. }
-            if task.scope == scope
-                && (!recovering || fence.task_id(&start_id).is_ok_and(|id| id == task.task_id))
-                && fence.matches_original_operation_id(&task.operation_id, &start_id) =>
-        {
-            (
-                task.task_id.clone(),
-                task.state == EnvironmentTaskState::Running,
-            )
-        }
-        _ => {
-            return Err(attempt_error(
-                ExecutionOperationStage::Start,
-                "command_start_unconfirmed".into(),
-            ))
-        }
+        .map_err(|reason| attempt_error(ExecutionOperationStage::Start, reason))?;
+        let (id, running) = match &first {
+            EnvironmentTaskResult::Task { task, .. }
+                if task.scope == scope
+                    && fence.matches_original_operation_id(&task.operation_id, &start_id) =>
+            {
+                (
+                    task.task_id.clone(),
+                    task.state == EnvironmentTaskState::Running,
+                )
+            }
+            _ => {
+                return Err(attempt_error(
+                    ExecutionOperationStage::Start,
+                    "command_start_unconfirmed".into(),
+                ))
+            }
+        };
+        (id, Some(first), running)
     };
+    // Start capacity waits precede execution; after acceptance, Input/Query
+    // pressure must never restart this command's original timeout budget.
+    let deadline = (io.now)() + Duration::from_millis(request.timeout_ms.saturating_add(5000));
+    let control = CommandControl {
+        deadline,
+        cancellation_probe,
+    };
+    let mut input_interrupted = false;
     if running && !recovering {
         for (index, chunk) in input.chunks(4096).enumerate() {
-            confirm_input(
+            if !confirm_input(
                 fence,
                 InputTarget {
                     task_id: &id,
@@ -285,23 +390,36 @@ fn run_command_with_input(
                 operation(fence, operation_id, &format!("input-{index}")),
                 chunk.to_vec(),
                 false,
-                &mut rpc,
-            )?;
+                &mut io,
+                &control,
+            )? {
+                input_interrupted = true;
+                break;
+            }
         }
         // A fast process can exit before stdin is closed. Its confirmed terminal
         // query below resolves that race without replaying the command.
         if input.is_empty() {
-            let _ = crate::observations::timed("retainedInputEof", || {
-                rpc(EnvironmentTaskRequest::Input {
-                    fence: fence.clone(),
-                    task_id: id.clone(),
-                    operation_id: operation(fence, operation_id, "close"),
-                    data: Vec::new(),
-                    close: true,
-                })
-            });
-        } else {
-            confirm_input(
+            let close = EnvironmentTaskRequest::Input {
+                fence: fence.clone(),
+                task_id: id.clone(),
+                operation_id: operation(fence, operation_id, "close"),
+                data: Vec::new(),
+                close: true,
+            };
+            loop {
+                match crate::observations::timed("retainedInputEof", || (io.rpc)(close.clone())) {
+                    Err(reason) if reason == "environment_host_busy" => {
+                        if !io.pause_busy(&control)? {
+                            input_interrupted = true;
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        } else if !input_interrupted {
+            input_interrupted = !confirm_input(
                 fence,
                 InputTarget {
                     task_id: &id,
@@ -311,7 +429,8 @@ fn run_command_with_input(
                 operation(fence, operation_id, "close"),
                 Vec::new(),
                 true,
-                &mut rpc,
+                &mut io,
+                &control,
             )?;
         }
     } else if !input.is_empty() && !recovering {
@@ -320,39 +439,64 @@ fn run_command_with_input(
             "command_exited_before_input".into(),
         ));
     }
-    let deadline = Instant::now() + Duration::from_millis(request.timeout_ms.saturating_add(5000));
-    let mut first = Some(first);
     let mut cancelled = false;
+    let mut cancellation_pending = input_interrupted;
     let mut cancel_deadline = None;
     let mut cursor = 0;
     let (mut stdout, mut stderr) = (Capture::default(), Capture::default());
     let exit_code = loop {
+        if (io.now)() >= deadline || cancel_deadline.is_some_and(|at| (io.now)() >= at) {
+            // A rejected Query is still subject to the original task deadline.
+            // EndRun cleanup retains responsibility for unconfirmed termination.
+            let _ = (io.rpc)(EnvironmentTaskRequest::Terminate {
+                fence: fence.clone(),
+                task_id: id.clone(),
+                operation_id: operation(fence, operation_id, "deadline"),
+            });
+            return Err(cancellation_unknown("command_cleanup_unconfirmed"));
+        }
         let cancellation_requested = if cancelled {
             false
+        } else if cancellation_pending {
+            true
         } else if let Some(probe) = cancellation_probe {
             probe().map_err(unknown)?.is_some()
         } else {
             false
         };
         if cancellation_requested {
-            rpc(EnvironmentTaskRequest::Terminate {
+            cancellation_pending = true;
+            let result = (io.rpc)(EnvironmentTaskRequest::Terminate {
                 fence: fence.clone(),
                 task_id: id.clone(),
                 operation_id: operation(fence, operation_id, "cancel"),
-            })
-            .map_err(cancellation_unknown)?;
+            });
+            match result {
+                Ok(_) => {}
+                Err(reason) if reason == "environment_host_busy" => {
+                    (io.delay)(Duration::from_millis(25));
+                    continue;
+                }
+                Err(reason) => return Err(cancellation_unknown(reason)),
+            }
             cancelled = true;
-            cancel_deadline = Some(Instant::now() + Duration::from_secs(5));
+            cancel_deadline = Some((io.now)() + Duration::from_secs(5));
         }
         let response = match first.take() {
             Some(result) => result,
-            None => rpc(EnvironmentTaskRequest::Query {
+            None => match (io.rpc)(EnvironmentTaskRequest::Query {
                 fence: fence.clone(),
                 task_id: id.clone(),
                 cursor,
                 max_bytes: ENVIRONMENT_TASK_READ_BYTES as u32,
-            })
-            .map_err(unknown)?,
+            }) {
+                Ok(response) => response,
+                Err(reason) if reason == "environment_host_busy" => {
+                    (io.delay)(Duration::from_millis(25));
+                    continue;
+                }
+                Err(reason) => return Err(unknown(reason)),
+            },
         };
         let EnvironmentTaskResult::Task {
             task,
@@ -410,18 +554,8 @@ fn run_command_with_input(
         {
             break task.exit_code;
         }
-        if Instant::now() >= deadline || cancel_deadline.is_some_and(|at| Instant::now() >= at) {
-            // A failed acknowledgement is not proof of task termination. EndRun
-            // cleanup still owns this registered process after this caller exits.
-            let _ = rpc(EnvironmentTaskRequest::Terminate {
-                fence: fence.clone(),
-                task_id: id.clone(),
-                operation_id: operation(fence, operation_id, "deadline"),
-            });
-            return Err(cancellation_unknown("command_cleanup_unconfirmed"));
-        }
         if !has_more {
-            std::thread::sleep(Duration::from_millis(25));
+            (io.delay)(Duration::from_millis(25));
         }
     };
     let (mut out, mut err) = (
@@ -475,6 +609,8 @@ fn run_command_with_input(
 mod tests {
     use super::*;
     use std::collections::{HashMap, VecDeque};
+
+    mod busy_tests;
 
     fn run_stdin_fixture(
         fence: &EnvironmentTaskFence,
