@@ -140,10 +140,17 @@ class NativeObserver:
             connection.sendall(json.dumps({'schema':'environment.host.v1','request':request}).encode()+b'\n')
             data=bytearray()
             self._probe_io('receive')
+            resource_response=request.get('operation')=='observeResources'
             while not data.endswith(b'\n'):
                 if time.monotonic()>=deadline:raise TimeoutError('host observation deadline')
-                connection.settimeout(min(2,max(.1,deadline-time.monotonic())))
+                if resource_response:
+                    remaining=deadline-time.monotonic()
+                    if remaining<=0:raise TimeoutError('host observation deadline')
+                    connection.settimeout(remaining)
+                else:
+                    connection.settimeout(min(2,max(.1,deadline-time.monotonic())))
                 chunk=connection.recv(65536)
+                if resource_response and time.monotonic()>=deadline:raise TimeoutError('host observation deadline')
                 if not chunk:raise ValueError('truncated host observation')
                 data.extend(chunk)
                 if len(data)>4*1024*1024:raise ValueError('bounded host observation required')

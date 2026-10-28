@@ -419,4 +419,81 @@ class NativeBatchInventoryTests(unittest.TestCase):
         observer._rpc.assert_called_once()
         self.assertEqual(observer._rpc.call_args.args[0]['targets'], [])
         self.assertEqual(sample['states'], {})
+class NativeResourceResponseDeadlineTests(unittest.TestCase):
+    def transport(self, operation, chunks, *, deadline=108.0):
+        import json
+        from unittest.mock import patch
+        module = NativeObservationTests().subject()
+        observer = module.NativeObserver('/manifest', '/output', 8)
+        observer.root = Path('/private')
+        clock = [100.0]
+        result = {'kind':'resourceObservation' if operation == 'observeResources' else 'inspection'}
+        response = json.dumps({'schema':'environment.host.v1', 'status':'success', 'result':result}).encode()
+        pending = iter((delay, response if data is None else data) for delay, data in chunks)
+        class Socket:
+            def __init__(self):
+                self.timeout = None; self.receive_timeouts = []; self.receives = 0
+                self.connect_timeout = None; self.send_timeout = None
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def settimeout(self, value): self.timeout = value
+            def connect(self, path): self.connect_timeout = self.timeout
+            def sendall(self, data): self.send_timeout = self.timeout
+            def recv(self, size):
+                self.receives += 1; self.receive_timeouts.append(self.timeout)
+                delay, data = next(pending)
+                if delay > self.timeout:
+                    clock[0] += self.timeout
+                    raise TimeoutError('simulated response timeout')
+                clock[0] += delay
+                return data
+        connection = Socket()
+        def invoke():
+            with patch.object(module.time, 'monotonic', side_effect=lambda:clock[0]), \
+                    patch.object(module.socket, 'AF_UNIX', 1, create=True), \
+                    patch.object(module.socket, 'socket', return_value=connection):
+                return observer._rpc({'operation':operation}, deadline)
+        return invoke, connection, clock, result
+
+    def test_resource_response_after_two_seconds_uses_remaining_sample_budget(self):
+        invoke, connection, clock, result = self.transport('observeResources', [(2.2, None), (0, b'\n')])
+        self.assertEqual(invoke(), result)
+        self.assertEqual(connection.connect_timeout, 2)
+        self.assertEqual(connection.send_timeout, 2)
+        self.assertAlmostEqual(clock[0], 102.2)
+        self.assertAlmostEqual(connection.receive_timeouts[0], 8)
+
+    def test_fragmented_response_does_not_refresh_the_absolute_deadline(self):
+        invoke, connection, clock, _ = self.transport('observeResources',
+            [(2.2, b'{'), (2.2, b'"schema"'), (3.7, b':')])
+        with self.assertRaises(TimeoutError): invoke()
+        self.assertAlmostEqual(clock[0], 108)
+        self.assertEqual(connection.receives, 3)
+        for actual, expected in zip(connection.receive_timeouts, (8, 5.8, 3.6)):
+            self.assertAlmostEqual(actual, expected)
+
+    def test_expired_deadline_prevents_the_next_receive(self):
+        invoke, connection, clock, _ = self.transport('observeResources', [(8, b'{')])
+        with self.assertRaises(TimeoutError): invoke()
+        self.assertAlmostEqual(clock[0], 108)
+        self.assertEqual(connection.receives, 1)
+        invoke, connection, _, _ = self.transport('observeResources', [], deadline=100)
+        with self.assertRaises(TimeoutError): invoke()
+        self.assertEqual(connection.receives, 0)
+
+    def test_ordinary_task_inspection_keeps_its_two_second_response_limit(self):
+        invoke, connection, clock, _ = self.transport('inspect', [(2.2, None)])
+        with self.assertRaises(TimeoutError): invoke()
+        self.assertAlmostEqual(clock[0], 102)
+        self.assertEqual(connection.receive_timeouts, [2])
+        self.assertEqual(connection.connect_timeout, 2)
+        self.assertEqual(connection.send_timeout, 2)
+
+    def test_completed_resource_response_at_expiry_cannot_be_accepted(self):
+        invoke, connection, clock, _ = self.transport('observeResources', [(0, None), (8, b'\n')])
+        with self.assertRaises(TimeoutError): invoke()
+        self.assertAlmostEqual(clock[0], 108)
+        self.assertEqual(connection.receives, 2)
+
+
 if __name__=='__main__':unittest.main()
