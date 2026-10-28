@@ -165,23 +165,36 @@ class NativeObserver:
         ids=self._docker(['ps','-aq','--no-trunc','--filter','label=centaeris.managed=true'],deadline).split()
         self._progress['targetCount']=len(ids)
         self._probe_io('validate')
-        if len(ids)>64 or any(not re.fullmatch('[a-f0-9]{64}',item) for item in ids):raise ValueError('bounded exact managed inventory required')
-        states={};targets=[]
+        if (len(ids)>64 or len(set(ids))!=len(ids)
+                or any(not re.fullmatch('[a-f0-9]{64}',item) for item in ids)):
+            raise ValueError('bounded exact managed inventory required')
+        states={};targets=[];prepared={}
         template='{"id":{{json .Id}},"image":{{json .Image}},"state":{{json .State}},"labels":{{json .Config.Labels}},"limits":{{json .HostConfig}}}'
-        for container in ids:
+        if ids:
             self._probe_stage('dockerInspect','inspect','subprocess')
             if self._stop.is_set():raise InterruptedError('observer stopped')
-            raw=self._docker(['inspect','--format',template,container],deadline)
+            raw=self._docker(['inspect','--format',template,*ids],deadline)
             self._probe_io('decode')
-            facts=json.loads(raw);labels=facts['labels']
+            facts_batch=[json.loads(line) for line in raw.splitlines() if line.strip()]
             self._probe_io('validate')
-            if facts['id']!=container or labels.get('centaeris.managed')!='true' or facts['limits']['Runtime']!='runsc':raise ValueError('managed target mismatch')
-            limits=facts['limits']
-            if limits['Memory']!=4*1024**3 or limits['CpuPeriod']!=100000 or limits['CpuQuota']!=200000 or limits['PidsLimit']!=512:
-                raise ValueError('default workload cap mismatch')
-            target={'containerId':container,'environmentId':labels['centaeris.environment_id'],
-                    'environmentInstanceId':labels['centaeris.instance_id'],'profileDigest':labels['centaeris.environment_profile_digest'],
-                    'imageDigest':facts['image']}
+            for facts in facts_batch:
+                container=facts['id'];labels=facts['labels'];limits=facts['limits']
+                if (container not in ids or container in prepared
+                        or labels.get('centaeris.managed')!='true' or limits['Runtime']!='runsc'):
+                    raise ValueError('managed target mismatch')
+                if limits['Memory']!=4*1024**3 or limits['CpuPeriod']!=100000 or limits['CpuQuota']!=200000 or limits['PidsLimit']!=512:
+                    raise ValueError('default workload cap mismatch')
+                target={'containerId':container,'environmentId':labels['centaeris.environment_id'],
+                        'environmentInstanceId':labels['centaeris.instance_id'],'profileDigest':labels['centaeris.environment_profile_digest'],
+                        'imageDigest':facts['image']}
+                if (any(not isinstance(value,str) or not value for value in target.values())
+                        or type(facts['state']['Running']) is not bool or type(facts['state']['Paused']) is not bool):
+                    raise ValueError('managed target identity unavailable')
+                prepared[container]=(facts,target)
+            if set(prepared)!=set(ids):raise ValueError('exact managed inspection inventory required')
+        for container in ids:
+            if self._stop.is_set():raise InterruptedError('observer stopped')
+            facts,target=prepared[container];labels=facts['labels']
             inspection=None
             if facts['state']['Running'] and not facts['state']['Paused']:
                 self._probe_stage('taskInspection','inspect','connect')

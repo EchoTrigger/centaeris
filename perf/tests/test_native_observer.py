@@ -159,13 +159,13 @@ class NativeCollectorDiagnosticTests(unittest.TestCase):
         def docker(args,deadline):
             clock[0]+=.125
             if args[0]=='ps':return ' '.join(ids)
-            cid=args[-1]
-            return json.dumps({'id':cid,'image':'sha256:'+'a'*64,
+            return '\n'.join(json.dumps({'id':cid,'image':'sha256:'+'a'*64,
                 'state':{'Running':True,'Paused':False},
                 'labels':{'centaeris.managed':'true','centaeris.environment_id':'sensitive-environment',
                     'centaeris.instance_id':'sensitive-instance','centaeris.environment_profile_digest':'sha256:'+'b'*64,
                     'centaeris.agent_run_id':'sensitive-run','private-label':'sensitive-label'},
                 'limits':{'Runtime':'runsc','Memory':4*1024**3,'CpuQuota':200000,'CpuPeriod':100000,'PidsLimit':512}})
+                for cid in args[3:])
         observer._docker=docker
         planned=iter(['inspect']*target_count+['observeResources'])
         class Socket:
@@ -296,4 +296,127 @@ class NativeCollectorDiagnosticTests(unittest.TestCase):
                 for secret in ('sensitive','password','private_sensitive_token','token=','environmentInstanceId'):
                     self.assertNotIn(secret,encoded)
 
+
+class NativeBatchInventoryTests(unittest.TestCase):
+    def collector(self, count=8, *, inventory=None, batch=None, failure=None):
+        import json
+        from unittest.mock import Mock
+        module = NativeObservationTests().subject()
+        observer = module.NativeObserver('/manifest', '/output', max(count, 1))
+        observer.root = Path('/private'); observer.host_id = 'host'
+        ids = [format(index + 1, '064x') for index in range(count)]
+        facts = [{'id':cid, 'image':'sha256:'+'a'*64,
+            'state':{'Running':True,'Paused':False},
+            'labels':{'centaeris.managed':'true','centaeris.environment_id':f'env-{index}',
+                'centaeris.instance_id':f'instance-{index}',
+                'centaeris.environment_profile_digest':'sha256:'+'b'*64},
+            'limits':{'Runtime':'runsc','Memory':4*1024**3,'CpuQuota':200000,'CpuPeriod':100000,'PidsLimit':512}}
+            for index,cid in enumerate(ids)]
+        lines = facts if batch is None else batch(facts)
+        def docker(args, deadline):
+            if args[0] == 'ps':
+                return ' '.join(ids if inventory is None else inventory(ids))
+            if failure is not None:
+                raise failure
+            return lines if isinstance(lines, str) else '\n'.join(json.dumps(row) for row in lines)
+        observer._docker = Mock(side_effect=docker)
+        def rpc(request, deadline):
+            if request['operation'] == 'inspect':
+                return {'kind':'inspection','inspection':{'schema':'environment.task.store.inspection.v2',
+                    'instanceId':request['environmentInstanceId'],'activeTasks':1}}
+            return {'kind':'resourceObservation','observation':{'schema':'native.host.resources.v1',
+                'hostId':'host','bootId':'test-boot','observedAtBootMs':1000,
+                'containers':[{'state':'unknown','target':target,'reason':'test_unknown'} for target in request['targets']]}}
+        observer._rpc = Mock(side_effect=rpc)
+        class KernelFile:
+            def __init__(self, path): self.path=path
+            def read_text(self): return 'test-boot' if self.path.endswith('boot_id') else '1.0 1.0'
+        return module, observer, ids, KernelFile
+
+    def sample(self, observer, module, kernel):
+        from unittest.mock import patch
+        with patch.object(module, 'Path', kernel):
+            return observer._sample()
+
+    def failed_sample(self, observer, module, kernel):
+        import io
+        from unittest.mock import patch
+        class MemoryOutput:
+            def open(self, *args, **kwargs): return io.StringIO()
+        observer.output = MemoryOutput()
+        collect = observer._sample
+        def once():
+            try: return collect()
+            finally: observer._stop.set()
+        with patch.object(observer, '_sample', side_effect=once), patch.object(module, 'Path', kernel):
+            observer._loop()
+        return observer.samples[0]
+
+    def test_eight_targets_use_one_exact_batch_before_serial_task_and_resource_rpcs(self):
+        module, observer, ids, kernel = self.collector(batch=lambda rows:list(reversed(rows)))
+        sample = self.sample(observer, module, kernel)
+        inspections = [call for call in observer._docker.call_args_list if call.args[0][0]=='inspect']
+        self.assertEqual(len(inspections), 1)
+        self.assertEqual(inspections[0].args[0][3:], ids)
+        self.assertEqual(set(sample['states']), set(ids))
+        requests = [call.args[0] for call in observer._rpc.call_args_list]
+        self.assertEqual([request['operation'] for request in requests], ['inspect']*8+['observeResources'])
+        self.assertEqual([request['environmentInstanceId'] for request in requests[:-1]],
+                         [f'instance-{index}' for index in range(8)])
+        deadlines = [call.args[1] for call in observer._docker.call_args_list+observer._rpc.call_args_list]
+        self.assertEqual(len(set(deadlines)), 1)
+
+    def test_entire_batch_is_validated_before_any_task_rpc(self):
+        def foreign(rows):
+            rows[-1]['id']='f'*64
+            return rows
+        def invalid_caps(rows):
+            rows[-1]['limits']['Memory']=1
+            return rows
+        def invalid_instance(rows):
+            rows[-1]['labels']['centaeris.instance_id']=''
+            return rows
+        def invalid_running(rows):
+            rows[-1]['state']['Running']='true'
+            return rows
+        def extra_id(rows):
+            extra=copy.deepcopy(rows[-1]);extra['id']='f'*64
+            return rows+[extra]
+        for mutate in (lambda rows:rows[:-1], lambda rows:rows+[rows[0]], foreign,
+                       invalid_caps, invalid_instance, invalid_running, extra_id,
+                       lambda rows:'private-invalid-json'):
+            with self.subTest(mutate=mutate):
+                module, observer, _, kernel = self.collector(batch=mutate)
+                sample = self.failed_sample(observer, module, kernel)
+                self.assertEqual(sample['state'], 'unknown')
+                self.assertEqual(sample['diagnostic']['stage'], 'dockerInspect')
+                self.assertEqual(sample['diagnostic']['completedTargetCount'], 0)
+                self.assertNotIn('host', sample)
+                observer._rpc.assert_not_called()
+                self.assertNotIn('private', __import__('json').dumps(sample))
+
+    def test_partial_batch_subprocess_failure_never_uses_returned_targets(self):
+        import subprocess
+        failure = subprocess.CalledProcessError(1, ['docker'], output='private partial facts')
+        module, observer, _, kernel = self.collector(failure=failure)
+        sample = self.failed_sample(observer, module, kernel)
+        self.assertEqual(sample['state'], 'unknown')
+        self.assertEqual(sample['reason'], 'resource_probe_calledprocesserror')
+        observer._rpc.assert_not_called()
+        self.assertNotIn('private', __import__('json').dumps(sample))
+
+    def test_duplicate_inventory_is_rejected_before_inspection(self):
+        module, observer, _, kernel = self.collector(inventory=lambda ids:ids+[ids[0]])
+        sample = self.failed_sample(observer, module, kernel)
+        self.assertEqual(sample['state'], 'unknown')
+        self.assertEqual(observer._docker.call_count, 1)
+        observer._rpc.assert_not_called()
+
+    def test_empty_inventory_skips_docker_inspect_but_observes_the_host(self):
+        module, observer, _, kernel = self.collector(count=0)
+        sample = self.sample(observer, module, kernel)
+        self.assertEqual(observer._docker.call_count, 1)
+        observer._rpc.assert_called_once()
+        self.assertEqual(observer._rpc.call_args.args[0]['targets'], [])
+        self.assertEqual(sample['states'], {})
 if __name__=='__main__':unittest.main()
