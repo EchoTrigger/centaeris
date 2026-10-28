@@ -140,33 +140,65 @@ export function waitForTerminalObserved(store, csrf, sessionId, agentRunId, time
   const terminals = { agent_run_completed: 'completed', agent_run_failed: 'failed', agent_run_interrupted: 'interrupted' };
   let status, invalid = false;
   let firstCommittedEventObservedAtMs = null, firstSuccessfulToolResultObservedAtMs = null;
+  let streamOpenedAtMs = null, firstSseItemObservedAtMs = null, firstSseItemSource = null;
+  let firstModelTextObservedAtMs = null, firstModelTextSource = null;
+  let firstToolCallObservedAtMs = null, terminalObservedAtMs = null;
+  let previousSequence = 0;
+  const eventIds = new Set();
   const response = sse.open(`${API}/api/sessions/${sessionId}/agent-runs/${agentRunId}/events`, {
     headers: { Cookie: cookieHeader(store), Accept: 'text/event-stream' },
     timeout: `${timeoutSeconds}s`, tags: { type: 'terminal_events' },
   }, connection => {
+    connection.on('open', () => { if (streamOpenedAtMs === null) streamOpenedAtMs = Date.now(); });
     connection.on('event', item => {
       try {
-        const event = committedEvent(JSON.parse(item.data), sessionId, agentRunId);
-        if (!event) return;
+        const frame = JSON.parse(item.data);
+        const event = committedEvent(frame, sessionId, agentRunId);
         const observed = Date.now();
-        if (firstCommittedEventObservedAtMs === null) firstCommittedEventObservedAtMs = observed;
         if (status) throw new Error('event after terminal');
+        if (!event && (!Number.isInteger(frame.afterSequence) || frame.afterSequence < 0
+            || !Number.isInteger(frame.revision) || frame.revision < 1
+            || typeof frame.turnId !== 'string' || !frame.turnId
+            || typeof frame.messageId !== 'string' || !frame.messageId || typeof frame.text !== 'string')) {
+          throw new Error('live stream position invalid');
+        }
+        if (event && (event.sequence <= previousSequence || eventIds.has(event.eventId))) {
+          throw new Error('committed stream ordering invalid');
+        }
+        if (firstSseItemObservedAtMs === null) { firstSseItemObservedAtMs = observed; firstSseItemSource = frame.kind; }
+        const text = event?.type === 'assistant_message' ? event.payload?.modelMarkdown : (!event ? frame.text : null);
+        if (firstModelTextObservedAtMs === null && typeof text === 'string' && text.trim()) {
+          firstModelTextObservedAtMs = observed;
+          firstModelTextSource = event ? 'committedAssistantMessage' : 'live';
+        }
+        if (!event) return;
+        previousSequence = event.sequence; eventIds.add(event.eventId);
+        if (firstCommittedEventObservedAtMs === null) firstCommittedEventObservedAtMs = observed;
         events.push(event);
-        if (event.type === 'tool_call') calls.set(event.payload?.callId, event.payload?.toolName);
+        if (event.type === 'tool_call') {
+          if (typeof event.payload?.callId !== 'string' || !event.payload.callId
+              || typeof event.payload.toolName !== 'string' || !event.payload.toolName || calls.has(event.payload.callId)) {
+            throw new Error('tool call identity invalid');
+          }
+          calls.set(event.payload.callId, event.payload.toolName);
+          if (firstToolCallObservedAtMs === null) firstToolCallObservedAtMs = observed;
+        }
         if (event.type === 'tool_result' && firstSuccessfulToolResultObservedAtMs === null
             && typeof event.payload?.callId === 'string' && calls.get(event.payload.callId) === 'bash'
             && event.payload.toolName === 'bash'
             && ['successWithOutput', 'successNoOutput'].includes(event.payload.resultState)) {
           firstSuccessfulToolResultObservedAtMs = observed;
         }
-        if (terminals[event.type]) { status = terminals[event.type]; connection.close(); }
+        if (terminals[event.type]) { status = terminals[event.type]; terminalObservedAtMs = observed; connection.close(); }
       } catch (_) { invalid = true; connection.close(); }
     });
     connection.on('error', () => { if (!status) invalid = true; connection.close(); });
   });
   if (invalid || response?.status !== 200 || !status) throw new Error('Run event stream incomplete or invalid');
   return { status, elapsedMs: Date.now() - started, events,
-    firstCommittedEventObservedAtMs, firstSuccessfulToolResultObservedAtMs };
+    firstCommittedEventObservedAtMs, firstSuccessfulToolResultObservedAtMs,
+    streamOpenedAtMs, firstSseItemObservedAtMs, firstSseItemSource,
+    firstModelTextObservedAtMs, firstModelTextSource, firstToolCallObservedAtMs, terminalObservedAtMs };
 }
 
 // Completion and tool success are independent facts.
