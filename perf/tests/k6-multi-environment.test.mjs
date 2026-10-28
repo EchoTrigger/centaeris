@@ -49,7 +49,10 @@ for (const initialStaggerMs of [0, 1250]) test(`stagger ${initialStaggerMs}: fou
   assert.deepEqual(sleeps, expectedSleeps, 'one initial stagger plus two between-Run gaps per VU');
   for (let vu = 1; vu <= 4; vu += 1) assert.deepEqual(requests.filter(row => row.vu === vu).map(row => row.admittedAtMs), [0, 5000, 10000].map(value => value + (vu - 1) * initialStaggerMs));
   assert.ok(records.filter(row => row.phase === 'verified').every(row => row.elapsedMs === 0), 'client stagger and idle gaps are outside per-Run latency');
-  for (const row of requests) assert.equal(JSON.parse(row.text.slice('PERF_FIXED_WORKLOAD '.length)).sampleId, row.sampleId);
+  for (const row of requests) {
+    const sample = samples.find(item => item.sampleId === row.sampleId);
+    assert.deepEqual(JSON.parse(row.text.slice('PERF_FIXED_WORKLOAD '.length)), { sampleId: sample.sampleId, operationId: sample.operationId, workUnits: sample.workUnits });
+  }
 });
 
 test('invalid per-Run stream deadlines reject before any workload admission', () => {
@@ -106,4 +109,40 @@ test('declared terminal budgets and idle gaps fit three real rolling iterations 
   assert.equal(starts.length, 12); assert.equal(verified.length, 12);
   assert.deepEqual(starts.filter(row => row.at === 0).map(row => row.vu), [1, 2, 3, 4]);
   for (let vu = 1; vu <= 4; vu++) assert.deepEqual(starts.filter(row => row.vu === vu).map(row => row.sessionId), ['new', `session-${vu}`, `session-${vu}`]);
+});
+
+
+test('dense memory profile reaches each admitted prompt without fixture verification metadata', () => {
+  const samples = Array.from({ length: 2 }, (_, index) => ({
+    sampleId: (index + 1).toString(16).padStart(32, '0'), operationId: (index + 11).toString(16).padStart(32, '0'),
+    workUnits: 2, memoryMiB: 1536, minimumHoldMs: 60000,
+    expectedArtifact: { filename: 'perf-result.bin', sha256: 'sha256:private-expectation' },
+    expectedCommandSha256: 'sha256:private-command-expectation',
+  }));
+  const prompts = [], records = [];
+  const source = fs.readFileSync(new URL('../k6/scenarios/multi-environment-workload.js', import.meta.url), 'utf8')
+    .replace(/^import .*;\r?\n/gm, '').replace('export default function (data)', 'function workloadIteration(data)').replace(/export /g, '');
+  for (let vu = 1; vu <= 2; vu += 1) {
+    class Metric { add() {} }
+    const context = vm.createContext({
+      __ENV: { PERF_ENVIRONMENT_COUNT: '2', PERF_RUNS_PER_ENVIRONMENT: '1', PERF_SAMPLES_PATH: 'samples.json',
+        PERF_K6_BUDGET: JSON.stringify({ scenarioSeconds: 210, setupSeconds: 180, gracefulStopSeconds: 30 }) },
+      execution: { vu: { idInTest: vu, iterationInScenario: 0 } }, open: () => JSON.stringify(samples),
+      Trend: Metric, Rate: Metric, Counter: Metric, Date: { now: () => 1000 }, sleep() {},
+      console: { log(value) { records.push(JSON.parse(value.slice('PERF_RUN '.length))); } },
+      configuredTarget: () => ({ workspaceId: 'workspace', agentId: 'agent', modelId: 'model' }),
+      login: () => ({ store: {}, csrf: 'csrf' }),
+      startRun(_store, _csrf, _workspace, _agent, _model, text, options) {
+        prompts.push(JSON.parse(text.slice('PERF_FIXED_WORKLOAD '.length)));
+        return { sessionId: `session-${vu}`, agentRunId: `run-${options.sampleId}` };
+      },
+      waitForTerminal: () => ({ firstSuccessfulToolResultObservedAtMs: 1000, firstCommittedEventObservedAtMs: 1000 }),
+      verifyToolRun: () => ({ toolCount: 2 }), verifyFixedCommand() {}, verifyPublishedArtifact: () => ({ downloadMs: 1 }),
+    });
+    vm.runInContext(source, context);
+    context.workloadIteration(context.setup());
+  }
+  assert.deepEqual(prompts, samples.map(({ sampleId, operationId, workUnits, memoryMiB, minimumHoldMs }) =>
+    ({ sampleId, operationId, workUnits, memoryMiB, minimumHoldMs })));
+  assert.equal(records.filter(record => record.phase === 'verified').length, 2);
 });
