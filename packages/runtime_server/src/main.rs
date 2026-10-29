@@ -26,6 +26,8 @@ mod host_retirement;
 mod http;
 mod job_protocol;
 mod lifecycle_hooks;
+#[cfg(test)]
+mod lifecycle_test_fixture;
 mod mcp;
 #[cfg(test)]
 mod native_consumption_tests;

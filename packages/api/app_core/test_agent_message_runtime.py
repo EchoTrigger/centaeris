@@ -21,6 +21,7 @@ from .agent_run_authorization_factory import create_agent_run_authorization
 from .models import Agent, AgentRun, ModelConfig, Session, SessionAssetLink, SessionEvent, UserLibraryObject, Workspace, WorkspaceMembership
 from .testing import fenced_start_fixture
 from .runtime_schema_test_helpers import remove_runtime_trigger_functions
+from .runtime_lifecycle_test_helpers import persisted_runtime_cleanup_receipts
 
 
 class AgentMessageRuntimeTests(LiveServerTestCase):
@@ -95,11 +96,12 @@ class AgentMessageRuntimeTests(LiveServerTestCase):
 
     def _invoke_runtime(self, fixture, test_name, receipt):
         root = Path(__file__).resolve().parents[3]
-        result = subprocess.run(["cargo", "test", "--locked", "-p", "runtime_server",
-            "agent_messages::tests::runtime::" + test_name, "--", "--ignored", "--exact", "--nocapture"],
-            cwd=root, env={**os.environ, "CARGO_BUILD_JOBS": "1", "CENTAERIS_AGENT_MESSAGE_FIXTURE": json.dumps(fixture),
-                           "NO_PROXY": "127.0.0.1,localhost," + os.environ.get("NO_PROXY", "")},
-            capture_output=True, text=True, encoding="utf-8", timeout=300)
+        with persisted_runtime_cleanup_receipts():
+            result = subprocess.run(["cargo", "test", "--locked", "-p", "runtime_server",
+                "agent_messages::tests::runtime::" + test_name, "--", "--ignored", "--exact", "--nocapture"],
+                cwd=root, env={**os.environ, "CARGO_BUILD_JOBS": "1", "CENTAERIS_AGENT_MESSAGE_FIXTURE": json.dumps(fixture),
+                               "NO_PROXY": "127.0.0.1,localhost," + os.environ.get("NO_PROXY", "")},
+                capture_output=True, text=True, encoding="utf-8", timeout=300)
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("running 1 test", output)

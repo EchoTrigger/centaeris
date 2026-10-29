@@ -588,6 +588,13 @@ fn run_message_runtime_contract(revocation_window: bool) {
             committed, 1,
             "the previously validated call committed once; the subsequent call failed"
         );
+        crate::lifecycle_test_fixture::cleanup_and_release_unallocated_run(
+            &store,
+            start,
+            &fence,
+            &fixture.live_server_url,
+            &fixture.internal_token,
+        );
         store
             .complete_runtime_job(CompleteRuntimeJobRequest {
                 job_id: job,
@@ -644,6 +651,13 @@ fn run_message_runtime_contract(revocation_window: bool) {
             .status()
             .as_u16(),
         404
+    );
+    crate::lifecycle_test_fixture::cleanup_and_release_unallocated_run(
+        &store,
+        start,
+        &fence,
+        &fixture.live_server_url,
+        &fixture.internal_token,
     );
     store
         .complete_runtime_job(CompleteRuntimeJobRequest {

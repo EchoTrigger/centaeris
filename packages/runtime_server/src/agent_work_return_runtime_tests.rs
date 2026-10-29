@@ -9,6 +9,8 @@ use serde_json::Value;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Fixture {
+    live_server_url: String,
+    internal_token: String,
     database: Value,
     cases: Vec<Case>,
 }
@@ -196,6 +198,13 @@ fn django_committed_work_return_facts() {
             }
         }
         if case.kind != "lifecycleFailure" {
+            crate::lifecycle_test_fixture::cleanup_and_release_unallocated_run(
+                &store,
+                &start,
+                &fence,
+                &fixture.live_server_url,
+                &fixture.internal_token,
+            );
             store
                 .complete_runtime_job(CompleteRuntimeJobRequest {
                     job_id: job.clone(),
