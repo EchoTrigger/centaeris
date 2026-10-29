@@ -339,9 +339,12 @@ Interpret the measurements independently:
 - `secondToolClientCallToResultMs` measures the second command in the same Run
   on the client clock. It is not a reused container across different Runs.
 - Request-local model `firstEventMs`, `firstTextMs`, and `httpMs` remain separate.
-  `httpMs` includes consuming the complete response through EOF. Tool-only model
-  responses have no text TTFT. Request identity is captured at HTTP-attempt start;
-  retries are separate attempts. Existing `firstModelTextMs` is Run submission to
+  `httpMs` measures the HTTP attempt through response validation, including body
+  reads after a terminal streaming result. The existing client may accept that
+  result after a subsequent body-read error, so this metric does not establish
+  clean HTTP EOF. Tool-only model responses have no text TTFT. Request identity
+  is captured at HTTP-attempt start; retries are separate attempts. Existing
+  `firstModelTextMs` is Run submission to
   first observed assistant text and may occur after tools; it is not model TTFT.
 - Startup components and child spans can overlap. `runtimeCoveredMs` is only
   the union of recorded Runtime intervals, never their sum or a reconstructed
