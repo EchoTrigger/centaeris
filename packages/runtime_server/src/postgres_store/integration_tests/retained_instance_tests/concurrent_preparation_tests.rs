@@ -5,6 +5,8 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+mod pending_capacity_wake_tests;
+
 const FIRST_EXECUTION: &str = "cold-preparation-a";
 
 type Prepared = Result<RetainedInstanceAllocation, String>;

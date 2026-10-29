@@ -269,10 +269,15 @@ impl PostgresRuntimeStore {
             }
             let container=crate::observations::timed("physicalConfirm", || prepare(&a))?;
             if container.trim().is_empty() || a.container_id.as_ref().is_some_and(|id|id!=&container) { return Err("retained physical instance reassignment rejected".into()); }
-            tx.execute("UPDATE runtime.resident_sandboxes SET container_id=$3,state='resident',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND execution_id=$2", &[&r.host_id,&a.allocation_execution_id,&container]).map_err(|e|e.to_string())?;
+            let newly_confirmed=confirm_reserved_resident(&mut tx,r.host_id,&a.allocation_execution_id,&container)?;
+            if !newly_confirmed {
+                let unchanged=tx.execute("UPDATE runtime.resident_sandboxes SET updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND execution_id=$2 AND state='resident' AND container_id=$3", &[&r.host_id,&a.allocation_execution_id,&container]).map_err(|e|e.to_string())?;
+                if unchanged!=1 { return Err("retained reservation confirmation rejected".into()); }
+            }
             if rotation.is_some() {
                 super::super::runsc_rotation::observe_running(&mut tx, &super::super::runsc_rotation::RunscBinding::from(&a), &container)?;
             }
+            if newly_confirmed { super::super::capacity_wait::resident_confirmed(&mut tx,r.host_id)?; }
             tx.commit().map_err(|e|e.to_string())?; a.container_id=Some(container);
             #[cfg(test)]
             super::after_resident_preparation_commit_hook();

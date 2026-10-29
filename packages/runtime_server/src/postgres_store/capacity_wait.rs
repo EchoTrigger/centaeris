@@ -1,7 +1,7 @@
 use centaeris_core::session::RuntimeJobLeaseFence;
 use postgres::GenericClient;
 
-// A release changes eligibility, never the resource debit or execution authority.
+// Capacity signals change eligibility, never the resource debit or execution authority.
 // The epoch comparison remains true across lost notifications, yield races and
 // process restarts. No release transaction scans or locks waiting Job owners.
 pub(super) const DUE_AT: &str = "LEAST(j.run_at_ms,COALESCE((SELECT c.changed_at_ms FROM runtime.resident_capacity_clock c JOIN runtime.resident_capacity_waiters w ON w.job_id=j.job_id WHERE c.singleton AND w.observed_generation<c.generation),j.run_at_ms))";
@@ -55,6 +55,25 @@ END;
 
 pub(super) fn ddl() -> String {
     format!("{TABLE_DDL} CREATE FUNCTION runtime.resident_capacity_release() RETURNS trigger LANGUAGE plpgsql AS $$ {RELEASE_BODY} $$; CREATE TRIGGER resident_capacity_release AFTER DELETE ON runtime.resident_sandboxes REFERENCING OLD TABLE AS released_residents FOR EACH STATEMENT EXECUTE FUNCTION runtime.resident_capacity_release(); CREATE FUNCTION runtime.resident_capacity_job_change() RETURNS trigger LANGUAGE plpgsql AS $$ {JOB_BODY} $$; CREATE TRIGGER resident_capacity_job_change AFTER UPDATE OF status,lease_owner ON runtime.runtime_jobs FOR EACH ROW EXECUTE FUNCTION runtime.resident_capacity_job_change();")
+}
+
+// Lock availability and first physical confirmation are global opportunities
+// to resample preparation. They prove neither host headroom nor a refunded holding.
+pub(super) const PREPARATION_AVAILABLE_EVENT: &str = "recorded AS (INSERT INTO runtime.runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) SELECT 'host_preparation_available:'||generation,'runtime_host_preparation:'||$1,$1,'runtime.host_preparation.available.v1',changed_at_ms,'internal',json_build_object('schema','runtime.host_preparation.available.v1','hostId',$1,'scope','globalPreparation','generation',generation,'availableAtMs',changed_at_ms)::text FROM changed ON CONFLICT(event_id) DO NOTHING RETURNING event_id) SELECT pg_notify('runtime_job_ready_v1','') FROM recorded";
+
+/// Record one opportunity to observe newly confirmed residents in this transaction.
+pub(super) fn resident_confirmed(
+    db: &mut postgres::Transaction<'_>,
+    host_id: &str,
+) -> Result<(), String> {
+    let recorded = db.query(
+        &format!("WITH changed AS (UPDATE runtime.resident_capacity_clock SET generation=generation+1,changed_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE singleton RETURNING generation,changed_at_ms), {PREPARATION_AVAILABLE_EVENT}"),
+        &[&host_id],
+    ).map_err(|error| format!("record resident confirmation availability failed: {error}"))?;
+    if recorded.len() != 1 {
+        return Err("resident confirmation availability missing".into());
+    }
+    Ok(())
 }
 
 pub(super) fn register(

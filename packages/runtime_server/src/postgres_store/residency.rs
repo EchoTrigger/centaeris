@@ -570,6 +570,18 @@ pub(super) fn insert(
         .map(|_| ()).map_err(|error| format!("reserve resident sandbox failed: {error}"))
 }
 
+/// Confirm only the original reservation's first known physical incarnation.
+fn confirm_reserved_resident(
+    client: &mut impl GenericClient,
+    host_id: &str,
+    execution_id: &str,
+    container_id: &str,
+) -> Result<bool, String> {
+    client.execute("UPDATE runtime.resident_sandboxes SET container_id=$3,state='resident',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND execution_id=$2 AND state='reserved' AND (container_id IS NULL OR container_id=$3)", &[&host_id, &execution_id, &container_id])
+        .map(|changed| changed == 1)
+        .map_err(|error| format!("confirm resident reservation failed: {error}"))
+}
+
 fn reconcile(
     client: &mut Client,
     host_id: &str,
@@ -581,6 +593,7 @@ fn reconcile(
     }
     let mut tx = client.transaction().map_err(|error| error.to_string())?;
     super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    let mut newly_confirmed = false;
     for sandbox in inventory {
         if let Some(preparing) = snapshot
             .preparing
@@ -644,7 +657,19 @@ fn reconcile(
             if row.get::<_, Option<String>>(2).as_deref() != Some(sandbox.container_id.as_str())
                 || !matches!(row.get::<_, String>(8).as_str(), "resident" | "releasing")
             {
-                tx.execute("UPDATE resident_sandboxes SET container_id=$3,state=CASE WHEN state='releasing' THEN state ELSE 'resident' END,updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND execution_id=$2", &[&host_id, &sandbox.execution_id, &sandbox.container_id]).map_err(|error| error.to_string())?;
+                if confirm_reserved_resident(
+                    &mut tx,
+                    host_id,
+                    &sandbox.execution_id,
+                    &sandbox.container_id,
+                )? {
+                    newly_confirmed = true;
+                } else {
+                    let updated = tx.execute("UPDATE resident_sandboxes SET container_id=$3,updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND execution_id=$2 AND state IN('resident','releasing') AND (container_id IS NULL OR container_id=$3)", &[&host_id, &sandbox.execution_id, &sandbox.container_id]).map_err(|error| error.to_string())?;
+                    if updated != 1 {
+                        return Err("resident reservation changed during confirmation".into());
+                    }
+                }
             }
         } else {
             insert(
@@ -658,6 +683,9 @@ fn reconcile(
                 sandbox.resources,
             )?;
         }
+    }
+    if newly_confirmed {
+        super::capacity_wait::resident_confirmed(&mut tx, host_id)?;
     }
     // No timeout releases reserved/unknown creations. A confirmed resident can
     // be reconciled absent only if it was already confirmed before this sample.
