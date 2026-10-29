@@ -25,7 +25,7 @@ class ResidentCleanupWaitTests(unittest.TestCase):
                     waiting_reason="execution_resident_capacity_wait",
                 )
 
-    def test_nearby_http_and_transport_errors_keep_the_failure_path(self):
+    def test_unclassified_http_and_transport_errors_preserve_cleanup_responsibility(self):
         for status, payload in (
             (503, {"error": "execution_resident_capacity_wait"}),
             (409, {"error": "execution_resident_capacity_wait", "extra": True}),
@@ -39,11 +39,10 @@ class ResidentCleanupWaitTests(unittest.TestCase):
                 with patch.object(worker, "resolve_agent_run_lifecycle", return_value=terminal), \
                         patch("urllib.request.urlopen", side_effect=error), \
                         patch.object(worker, "yield_job") as yielded:
-                    with self.assertRaises(worker.RetainedCleanupPending):
-                        worker.execute_agent_run_lifecycle_job(job, "worker:fixture-owner", lambda: None)
-                yielded.assert_not_called()
+                    self.assertFalse(worker.execute_agent_run_lifecycle_job(job, "worker:fixture-owner", lambda: None))
+                self.assertEqual(yielded.call_args.args[-1], "retained_cleanup_pending")
 
-    def test_503_exact_code_still_consumes_the_existing_failure_retry_path(self):
+    def test_unclassified_503_yields_without_spending_execution_retry_budget(self):
         job, _ = lifecycle_fixture()
         job.update(retryCount=0, maxRetries=10)
         terminal = test_retained_lifecycle.RetainedLifecycleTests().terminal()
@@ -54,8 +53,8 @@ class ResidentCleanupWaitTests(unittest.TestCase):
                     503, {"error": "execution_resident_capacity_wait"})), \
                 patch.object(worker, "fail_job") as failed, patch.object(worker, "yield_job") as yielded:
             worker.execute_claimed_job(job, "worker:fixture-owner")
-        failed.assert_called_once_with(job, "worker:fixture-owner", "retained_cleanup_pending", True)
-        yielded.assert_not_called()
+        failed.assert_not_called()
+        self.assertEqual(yielded.call_args.args[-1], "retained_cleanup_pending")
 
     def test_exact_cleanup_wait_cannot_handoff_after_lease_loss(self):
         job, _ = lifecycle_fixture()

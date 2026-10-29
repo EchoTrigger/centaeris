@@ -653,7 +653,8 @@ def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
     try:
         return _execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease)
     except RuntimeError as error:
-        reason = environment_cleanup_wait_reason(error)
+        reason = ("retained_cleanup_pending" if isinstance(error, RetainedCleanupPending)
+                  else environment_cleanup_wait_reason(error))
         if reason is None:
             raise
         require_healthy_lease()
@@ -783,7 +784,7 @@ def resolve_agent_run_lifecycle(job, lease_owner, agent_run_id, digest):
 
 
 class RetainedCleanupPending(RuntimeError):
-    """Cleanup is unconfirmed; retain the original terminal and retry this job."""
+    """Cleanup is unconfirmed; retain the terminal and yield this Job's lease."""
 
 
 def finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, require_healthy_lease):
@@ -956,10 +957,6 @@ def _execute_claimed_job(job, lease_owner):
             f"worker job stopped: jobId={job['jobId']}; transitionReason={error}",
             flush=True,
         )
-    except RetainedCleanupPending:
-        # The job state machine records retry/deadletter, but cleanup failure
-        # cannot synthesize a different Core terminal or release residency.
-        fail_job(job, lease_owner, "retained_cleanup_pending", True)
     except DependencyUnavailable:
         fail_claimed_job(job, lease_owner, "dependency_unavailable", True)
     except RuntimeStepFailed as error:

@@ -39,7 +39,7 @@ class RetainedLifecycleTests(unittest.TestCase):
             worker.execute_agent_run_lifecycle_job(job, 'worker:test-owner', lambda: None)
         self.assertEqual(execute.call_args.args[0]['agentRunStart'], start)
 
-    def test_cleanup_failure_retries_same_job_without_projecting_another_terminal(self):
+    def test_cleanup_failure_yields_same_job_without_projecting_another_terminal(self):
         job, _ = lifecycle_fixture()
         job.update(retryCount=0, maxRetries=10)
         @contextmanager
@@ -51,9 +51,10 @@ class RetainedLifecycleTests(unittest.TestCase):
                 patch.object(worker, 'runtime_teardown_request', return_value={}), \
                 patch.object(worker, 'fail_job', return_value=False) as failed, \
                 patch.object(worker, 'transition_agent_run') as transition, \
-                patch.object(worker, 'complete_job') as complete:
+                patch.object(worker, 'complete_job') as complete, patch.object(worker, 'yield_job') as yielded:
             worker.execute_claimed_job(job, 'worker:test-owner')
-            self.assertTrue(failed.call_args.args[-1], 'cleanup failure must remain retryable')
+            failed.assert_not_called()
+            self.assertEqual(yielded.call_args.args[-1], 'retained_cleanup_pending')
             transition.assert_not_called()
             complete.assert_not_called()
 
@@ -112,9 +113,14 @@ class RetainedLifecycleTests(unittest.TestCase):
         complete.assert_called_once()
 
     def test_invalid_cleanup_receipt_never_releases_or_completes(self):
-        with self.assertRaisesRegex(RuntimeError, 'runtime_teardown_response_invalid'):
-            self.execute([self.terminal()], teardown={'schema': 'runtime.agent_run.teardown.result.v1',
+        with patch.object(worker, 'yield_job') as yielded:
+            calls, transition, execute, _, complete = self.execute([self.terminal()], teardown={'schema': 'runtime.agent_run.teardown.result.v1',
                 'agentRunId': 'agent_run_1', 'status': 'cleanupConfirmed', 'cleanupReceiptId': ''})
+        self.assertEqual(len(calls), 1, 'an invalid receipt cannot authorize controller release')
+        transition.assert_not_called()
+        execute.assert_not_called()
+        complete.assert_not_called()
+        self.assertEqual(yielded.call_args.args[-1], 'retained_cleanup_pending')
 
     def test_step_terminal_resolves_new_cleanup_authority(self):
         _, start = lifecycle_fixture()

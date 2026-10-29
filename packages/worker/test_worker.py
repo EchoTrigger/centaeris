@@ -791,11 +791,11 @@ class WorkerContractTests(unittest.TestCase):
             'terminalState': 'completed', 'agentRunCleanup': self.cleanup_fixture(start)}
         with patch.object(worker, 'api_request', return_value=terminal) as api, \
                 patch.object(worker, 'runtime_teardown_request', side_effect=worker.DependencyUnavailable('sandbox_teardown_failed')), \
-                patch.object(worker, 'complete_job') as complete:
-            with self.assertRaises(worker.RetainedCleanupPending):
-                worker.execute_agent_run_lifecycle_job(job, 'worker:test-owner', lambda: None)
+                patch.object(worker, 'complete_job') as complete, patch.object(worker, 'yield_job') as yielded:
+            self.assertFalse(worker.execute_agent_run_lifecycle_job(job, 'worker:test-owner', lambda: None))
         self.assertEqual(api.call_count, 1)
         complete.assert_not_called()
+        self.assertEqual(yielded.call_args.args[-1], 'retained_cleanup_pending')
 
     def test_worker_allows_two_sessions_to_run(self):
         slots = 2

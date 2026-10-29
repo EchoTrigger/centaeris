@@ -69,7 +69,7 @@ class EnvironmentHostBusyTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.observe_cleanup_busy(mode, control=True)
 
-    def test_other_http_and_transport_errors_keep_cleanup_failure_path(self):
+    def test_other_http_and_transport_errors_preserve_cleanup_responsibility(self):
         for status,payload in [(503,{'error':'environment_host_busy'}),(409,{'error':'other'}),
                 (409,{'error':'environment_host_busy','extra':True}),(409,{}),(500,{'error':'environment_host_busy'}),
                 (403,{'error':'environment_host_busy'}),(None,None)]:
@@ -78,9 +78,8 @@ class EnvironmentHostBusyTests(unittest.TestCase):
                 error=OSError('transport unavailable') if status is None else rejection(status,payload)
                 with patch.object(worker,'resolve_agent_run_lifecycle',return_value=terminal), \
                         patch('urllib.request.urlopen',side_effect=error),patch.object(worker,'yield_job') as yielded:
-                    with self.assertRaises(worker.RetainedCleanupPending):
-                        worker.execute_agent_run_lifecycle_job(job,'worker:fixture-owner',lambda:None)
-                yielded.assert_not_called()
+                    self.assertFalse(worker.execute_agent_run_lifecycle_job(job,'worker:fixture-owner',lambda:None))
+                self.assertEqual(yielded.call_args.args[-1], 'retained_cleanup_pending')
 
     def test_preparation_wait_result_uses_short_yield_without_cleanup(self):
         job,start=lifecycle_fixture()
