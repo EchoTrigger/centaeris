@@ -1,12 +1,17 @@
 """The additive custom-avatar migration preserves published private profile data."""
+import unittest
+
+from django.contrib.auth.models import Permission
 from django.db import transaction
 from django.db.migrations.executor import MigrationExecutor
-from django.test import TransactionTestCase
+from django.test import SimpleTestCase, TransactionTestCase
 
 from .migration_testing import isolated_migration_database
 
 
 class AgentAvatarMigrationTests(TransactionTestCase):
+    serialized_rollback = True
+
     old = [("app_core", "0031_workspace_resource_scope")]
     current = [("app_core", "0032_agent_avatar_image")]
 
@@ -39,3 +44,33 @@ class AgentAvatarMigrationTests(TransactionTestCase):
             self.assertEqual(list(updated.get_model("app_core", "Session").objects.using(alias).order_by("id").values()), sessions)
             self.assertEqual(updated.get_model("auth", "User").objects.using(alias).values().get(pk=user.pk), original_user)
             self.assertEqual(updated.get_model("app_core", "WorkspaceMembership").objects.using(alias).values().get(pk=membership.pk), original_membership)
+
+
+class AgentAvatarMigrationIsolationTests(SimpleTestCase):
+    databases = {"default"}
+    serialized_rollback = True
+
+    def test_migration_teardown_allows_the_next_case_to_restore_auth_permissions(self):
+        class SerializedPermissionTests(TransactionTestCase):
+            serialized_rollback = True
+
+            def test_auth_permissions_are_restored(self):
+                self.assertEqual(Permission.objects.filter(
+                    content_type__app_label="auth",
+                    content_type__model="user",
+                    codename="add_user",
+                ).count(), 1)
+
+        # Run real class fixtures in the failing order, independent of discovery.
+        suite = unittest.TestSuite([
+            AgentAvatarMigrationTests(
+                "test_forward_keeps_owners_memberships_profiles_and_history_with_no_custom_avatar"
+            ),
+            SerializedPermissionTests("test_auth_permissions_are_restored"),
+        ])
+        result = unittest.TestResult()
+        suite.run(result)
+        self.assertTrue(result.wasSuccessful(), "\n".join(
+            detail for _test, detail in [*result.errors, *result.failures]
+        ))
+        self.assertEqual(result.testsRun, 2)
