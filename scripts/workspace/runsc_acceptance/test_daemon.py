@@ -117,15 +117,15 @@ class StorageDriverTests(unittest.TestCase):
    raise AssertionError('unexpected private command')
   docker.run=run
   shared={'id':'shared-host','pid':10,'startTicks':'20'}
-  with patch.object(daemon,'network_identity',return_value={'own':3,'init':1,'sharedDocker':2}),patch.object(daemon.os,'geteuid',return_value=0),patch.object(docker,'shared_identity',return_value=shared),patch.object(daemon,'command',side_effect=command),patch.object(daemon,'runtime_flags',return_value='  -panic-log string\n  -log string\n  -log-format string\n'),patch.object(daemon.subprocess,'Popen',side_effect=Process),patch.object(daemon,'process_arguments',side_effect=lambda pid:processes[pid].argv):
+  with patch.object(daemon,'network_identity',return_value={'own':3,'init':1,'sharedDocker':2}),patch.object(daemon.os,'geteuid',return_value=0),patch.object(docker,'shared_identity',return_value=shared),patch.object(daemon,'command',side_effect=command),patch.object(daemon,'runtime_flags',return_value='  -panic-log string\n  -log string\n  -log-format string\n  -overlay2 string\n'),patch.object(daemon.subprocess,'Popen',side_effect=Process),patch.object(daemon,'process_arguments',side_effect=lambda pid:processes[pid].argv):
    try:docker.start()
    finally:
     for name in ('ctr_log','docker_log'):
      handle=getattr(docker,name,None)
      if handle:handle.close()
   return docker,processes
- def test_default_overlay2_and_explicit_vfs_use_exact_driver_and_record_actual_identity(self):
-  for requested,observed in ((None,'overlay2'),('vfs','vfs'),('overlay2','overlay2')):
+ def test_default_and_explicit_overlayfs_use_exact_driver_and_record_actual_identity(self):
+  for requested,observed in ((None,'overlay2'),('overlay2','overlay2')):
    with self.subTest(requested=requested),tempfile.TemporaryDirectory(dir='/var/tmp',prefix='centaeris-runsc-storage-test-') as tmp:
     docker,processes=self.launch_fake(Path(tmp),requested,observed)
     vector=next(process.argv for process in processes.values() if process.argv[0]=='dockerd')
@@ -134,6 +134,9 @@ class StorageDriverTests(unittest.TestCase):
     self.assertEqual(docker.owner['requestedStorageDriver'],observed)
     self.assertEqual(docker.owner['observedStorageDriver'],observed)
     self.assertTrue(docker.owner['privateContainerdVerified'])
+    selected=json.loads((Path(tmp)/'daemon.json').read_text())['runtimes']['runsc']['runtimeArgs']
+    self.assertEqual(selected.count('--overlay2=none'),1)
+    self.assertEqual(docker.owner['runscArguments'],selected)
  def test_driver_mismatch_does_not_mark_the_daemon_ready(self):
   with tempfile.TemporaryDirectory(dir='/var/tmp',prefix='centaeris-runsc-storage-test-') as tmp:
    with self.assertRaisesRegex(RuntimeError,'storage driver'):self.launch_fake(Path(tmp),'overlay2','overlayfs')
@@ -142,7 +145,7 @@ class StorageDriverTests(unittest.TestCase):
    self.assertEqual(owner['observedStorageDriver'],'overlayfs')
    self.assertNotEqual(owner.get('privateContainerdVerified'),True)
  def test_unknown_driver_and_existing_data_are_rejected_without_starting_processes(self):
-  for driver in ('overlayfs','overlay','VFS','',None):
+  for driver in ('vfs','overlayfs','overlay','VFS','',None):
    with self.subTest(driver=driver),tempfile.TemporaryDirectory(dir='/var/tmp',prefix='centaeris-runsc-storage-test-') as tmp,patch.object(daemon.subprocess,'Popen') as popen:
     with self.assertRaises(ValueError):daemon.PrivateDocker(Path(tmp),storage_driver=driver)
     self.assertFalse((Path(tmp)/'owner.json').exists());popen.assert_not_called()
@@ -157,5 +160,18 @@ class StorageDriverTests(unittest.TestCase):
     root=Path(tmp);outside=root.parent/(root.name+'-outside');(root/name).symlink_to(outside)
     with self.assertRaisesRegex(RuntimeError,'existing validation responsibility'):daemon.PrivateDocker(root,storage_driver='overlay2')
     self.assertTrue((root/name).is_symlink());self.assertFalse(outside.exists());popen.assert_not_called()
+
+
+
+class WorkspaceBackingTests(unittest.TestCase):
+ def test_new_owned_fixture_normalizes_inherited_overlay_flags_without_mutating_source(self):
+  original=['--platform=ptrace','--overlay2=root:self','--overlay=true','--in-sandbox-cgroup=v2']
+  selected=daemon.workspace_backing_arguments(original,'  -overlay2 string\n')
+  self.assertEqual(selected,['--platform=ptrace','--in-sandbox-cgroup=v2','--overlay2=none'])
+  self.assertEqual(original,['--platform=ptrace','--overlay2=root:self','--overlay=true','--in-sandbox-cgroup=v2'])
+  self.assertEqual(daemon.workspace_backing_arguments(['--overlay2','root:self','--platform=ptrace','--overlay2=none'],'  -overlay2 string\n'),['--platform=ptrace','--overlay2=none'])
+ def test_rootfs_policy_requires_installed_overlay_flag_and_well_formed_arguments(self):
+  for args,help_text in (([],'unknown'),(['--overlay2'],'  -overlay2 string\n'),([None],'  -overlay2 string\n'),(['--overlay2','--platform=ptrace'],'  -overlay2 string\n')):
+   with self.subTest(args=args),self.assertRaisesRegex(RuntimeError,'workspace backing'):daemon.workspace_backing_arguments(args,help_text)
 
 if __name__=='__main__':unittest.main()

@@ -9,6 +9,14 @@ fi
 workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$workspace_root"
 export CENTAERIS_SOURCE_REVISION="$(node scripts/workspace/source-revision.mjs)"
+storage_driver="$(docker info --format '{{.Driver}}')" || {
+  echo "Docker storage backend could not be verified" >&2
+  exit 69
+}
+case "$storage_driver" in
+  overlayfs|overlay2) ;;
+  *) echo "fresh-start gate requires OverlayFS-backed Docker storage" >&2; exit 69 ;;
+esac
 if ! docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'; then
   echo "fresh-start gate requires runsc on an explicitly disposable Docker host" >&2
   exit 69

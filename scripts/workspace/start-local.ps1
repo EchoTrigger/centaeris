@@ -10,6 +10,11 @@ if (-not (Test-Path -LiteralPath $envPath)) {
 
 Push-Location $repoRoot
 try {
+    $dockerStorageDriver = (docker info --format '{{.Driver}}')
+    if ($LASTEXITCODE -ne 0) { throw "Docker storage backend could not be verified." }
+    if ($dockerStorageDriver.Trim() -notin @("overlayfs", "overlay2")) {
+        throw "Local deployment requires OverlayFS-backed Docker storage."
+    }
     $env:CENTAERIS_SOURCE_REVISION = (node scripts/workspace/source-revision.mjs).Trim()
     if ($LASTEXITCODE -ne 0) { throw "Source revision validation failed." }
     python scripts/workspace/build.py --env-file .env

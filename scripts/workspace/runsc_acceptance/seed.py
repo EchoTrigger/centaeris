@@ -22,6 +22,8 @@ assert not Workspace.objects.exists(), 'refusing to seed an existing workspace d
 output = Path(settings.MEDIA_ROOT) / 'acceptance-seed.json'
 assert not output.exists(), 'refusing to replace fixture credentials'
 shared = os.environ.get('CENTAERIS_ACCEPTANCE_SHARED_WORKLOAD') == '1'
+recovery = os.environ.get('CENTAERIS_ACCEPTANCE_WORKSPACE_RECOVERY') == '1'
+assert not recovery or (shared and execution_mode == 'perRun'), 'workspace recovery requires shared perRun fixture'
 assert shared or execution_mode=='retained', 'rotation requires retained execution mode'
 email = 'retained-' + secrets.token_hex(8) + '@fixture.invalid'
 password = secrets.token_urlsafe(40)
@@ -35,7 +37,7 @@ with transaction.atomic():
         encryptedSecret=encrypt_credential_secret(secrets.token_urlsafe(40)),
         createdBy=user, updatedBy=user)
     model = ModelConfig.objects.create(provider=provider, displayName='Deterministic acceptance',
-        modelName=('perf-fixed-workload' if shared else 'retained-acceptance'), contextTokens=131072, maxOutputTokens=4096)
+        modelName=('perf-workspace-recovery' if recovery else 'perf-fixed-workload' if shared else 'retained-acceptance'), contextTokens=131072, maxOutputTokens=4096)
     agent = Agent.objects.create(workspace=workspace, owner=user, name='Acceptance task runner',
         instructions='Follow the acceptance prompt and invoke only the requested tools.',
         model_config=model)

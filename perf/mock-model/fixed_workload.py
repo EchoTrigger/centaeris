@@ -103,3 +103,55 @@ def sample_from_text(text):
     except ValueError as error:
         raise ValueError('fixed workload JSON invalid') from error
     return validate_sample(sample)
+
+
+RECOVERY_MARKER = 'PERF_WORKSPACE_RECOVERY '
+
+
+def validate_recovery(sample):
+    if (not isinstance(sample, dict) or set(sample) != {'schema', 'caseId', 'phase'}
+            or sample['schema'] != 'workspace.recovery.fixture.v1'
+            or not isinstance(sample['caseId'], str) or not re.fullmatch('[a-f0-9]{32}', sample['caseId'])
+            or sample['phase'] not in ('write', 'readAndAdvance', 'read')):
+        raise ValueError('strict workspace recovery fixture required')
+    return sample
+
+
+def recovery_sample(text):
+    if not isinstance(text, str) or not text.startswith(RECOVERY_MARKER):
+        raise ValueError('workspace recovery marker required')
+    return validate_recovery(json.loads(text[len(RECOVERY_MARKER):]))
+
+
+def recovery_bytes(case_id):
+    validate_recovery({'schema': 'workspace.recovery.fixture.v1', 'caseId': case_id, 'phase': 'write'})
+    return b'\x00Centaeris workspace recovery ' + case_id.encode() + b'\xff\n'
+
+
+def recovery_expectation(case_id):
+    data = recovery_bytes(case_id)
+    return {'filename': 'recovery-' + case_id + '.bin', 'sizeBytes': len(data),
+            'sha256': 'sha256:' + hashlib.sha256(data).hexdigest()}
+
+
+def recovery_command(sample, *, output_directory='/mnt/data'):
+    validate_recovery(sample)
+    expected = recovery_expectation(sample['caseId'])
+    if sample['phase'] == 'write':
+        program = """import pathlib,sys
+root=pathlib.Path(sys.argv[1]);name,data=sys.argv[2:]
+with (root/name).open('xb') as stream:stream.write(bytes.fromhex(data))
+(root/(name+'.churn')).write_bytes(b'first\\n')
+"""
+        arguments = [output_directory, expected['filename'], recovery_bytes(sample['caseId']).hex()]
+    else:
+        # Reader commands receive only a digest, never the bytes needed to reconstruct a missing file.
+        program = """import hashlib,pathlib,sys
+root=pathlib.Path(sys.argv[1]);name,digest,phase=sys.argv[2:]
+data=(root/name).read_bytes()
+if hashlib.sha256(data).hexdigest()!=digest:raise RuntimeError('restored sentinel digest mismatch')
+if phase=='readAndAdvance':(root/(name+'.churn')).write_bytes(b'second\\n')
+print('WORKSPACE_RECOVERY_READ '+hashlib.sha256(data).hexdigest())
+"""
+        arguments = [output_directory, expected['filename'], expected['sha256'][7:], sample['phase']]
+    return shlex.join(['python3', '-c', program, *arguments])

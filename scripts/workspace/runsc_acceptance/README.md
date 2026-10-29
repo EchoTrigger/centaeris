@@ -16,6 +16,12 @@ Credentials remain in the owned root or Docker volumes and are never printed.
 No utility changes the current application stack, shared Docker resources, or
 operator runtime configuration.
 
+New owned daemons explicitly use `--overlay2=none` so guest workspace writes reach
+the Docker writable layer. The launcher normalizes inherited guest-overlay flags
+only in the fresh private daemon configuration and records its effective runtime
+arguments. It does not change the shared daemon or historical ownership records.
+Stopped archive acceptance must preserve guest-written contents, including a
+non-empty file, rather than treating a readable image-layer directory as evidence.
 For a shared eight-environment experiment, pass `--shared-workload --environment-count 8`.
 Each environment keeps its 2-core, 4-GiB ceiling. The eight-environment fixture uses
 12 GiB for both workspace and global measured-memory admission; the four-environment
@@ -41,3 +47,42 @@ and first successful result `createdAtMs`, plus `executionFactToFirstToolResultM
 These are timestamps carried by committed Session events, not measured database
 commit instants, task process-start times, or resume-to-first-tool latency. Missing
 or unconfirmed event shapes remain null; exact resume timing remains not observed.
+
+## Workspace restore and reachability GC
+
+The owned launcher can run one Session through three sequential `perRun` Runs:
+write a unique binary sentinel; restore/read it in a fresh instance and change a
+separate churn file; restart only the owned Runtime, collect the superseded head,
+then restore/read the sentinel again in a third fresh instance. Every phase waits
+for original physical cleanup, exact container absence and successful completion
+of the original canonical Job with zero failed retries before continuing.
+
+After the exact clean candidate has been built with `build.py`, use the existing
+isolated Linux root network-namespace launcher, with the same six pinned image
+arguments as the shared gate:
+
+```sh
+unshare --net python3 "$SOURCE/scripts/workspace/runsc_acceptance/launch.py" \
+  --root "$OWNED_ROOT" --source "$SOURCE" --execute \
+  --shared-workload --workspace-recovery --execution-mode perRun \
+  --environment-count 2 --iterations 3 --work-units 1 --between-run-ms 0 \
+  --k6-binary "$LINUX_K6" \
+  --api-image "$API_IMAGE" --worker-image "$WORKER_IMAGE" \
+  --runtime-image "$RUNTIME_IMAGE" --general-image "$GENERAL_IMAGE" \
+  --postgres-image "$POSTGRES_IMAGE" --redis-image "$REDIS_IMAGE"
+```
+
+Two fixture slots are configured, but this correctness gate admits one Session
+and three Runs; it makes no concurrency/overlap claim. The deterministic
+`perf-workspace-recovery` model makes two actual tool requests per Run (`bash`,
+`publish_artifact`) followed by a final response. Reader commands receive only
+the sentinel digest and fail on absent/corrupt bytes. The existing public admit
+driver creates each Run; existing k6 smoke/common helpers independently verify
+the exact command, committed tool facts and downloaded artifact bytes.
+
+GC uses a real one-second cutoff after a two-second grace, first dry-run and then
+collection. It must actually remove the first committed head and preserve the
+second, with no timestamp rewriting or manually created orphan. The full report
+is `results/workspace-recovery-report.json` inside the owned root. Failure keeps
+the fixture and resource responsibility available for diagnosis. No real model
+credentials or external model bridge are used.

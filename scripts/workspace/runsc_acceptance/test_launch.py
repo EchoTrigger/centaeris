@@ -15,6 +15,14 @@ class StaticHelperTests(unittest.TestCase):
     path=Path(tmp)/'helper';path.write_bytes(data)
     with self.assertRaises(RuntimeError):launch.static_helper(path)
 class SharedArgumentTests(unittest.TestCase):
+ def test_recovery_launcher_rejects_non_per_run_or_non_shared_fixture_before_starting_anything(self):
+  import subprocess,sys
+  for options in ([],['--shared-workload','--execution-mode','retained']):
+   command=[sys.executable,str(Path(__file__).with_name('launch.py')),'--root','absent','--source','absent','--workspace-recovery']+options
+   for name in ('api','worker','runtime','general','postgres','redis'):command+=['--'+name+'-image','not-loaded']
+   result=subprocess.run(command,capture_output=True,text=True,timeout=10)
+   self.assertEqual(result.returncode,2)
+   self.assertIn('workspace recovery requires explicit shared perRun fixture',result.stderr)
  def test_sparse_eight_parameters_are_forwarded_explicitly(self):
   self.assertEqual(launch.shared_arguments(8,400,125,2),['--model-wait-ms','400','--initial-stagger-ms','125','--expected-working-environments','2'])
   self.assertEqual(launch.shared_arguments(4),['--model-wait-ms','0','--initial-stagger-ms','0','--expected-working-environments','4'])
@@ -137,7 +145,7 @@ class StorageDriverArgumentTests(unittest.TestCase):
   import hashlib,json,sys,types
   from unittest.mock import patch
   class StoppedBeforeDaemonStart(Exception):pass
-  for extra,expected in (([],'overlay2'),(['--storage-driver','vfs'],'vfs'),(['--storage-driver','overlay2'],'overlay2')):
+  for extra,expected in (([],'overlay2'),(['--storage-driver','overlay2'],'overlay2')):
    with self.subTest(expected=expected),tempfile.TemporaryDirectory(dir='/var/tmp',prefix='centaeris-runsc-storage-test-') as tmp:
     root=Path(tmp);source=root/'source';source.mkdir();bins=root/'bins';bins.mkdir()
     values={'runtime_server':b'fixture-runtime','execution_agent':StaticHelperTests().elf(1),'environment_host_supervisor':b'fixture-supervisor'}
@@ -159,7 +167,7 @@ class StorageDriverArgumentTests(unittest.TestCase):
     constructor.assert_called_once_with(root.resolve(),network=True,storage_driver=expected)
  def test_unsupported_storage_driver_fails_before_fixture_access(self):
   import subprocess,sys
-  argv=[sys.executable,str(Path(__file__).with_name('launch.py')),'--root','absent','--source','absent','--storage-driver','overlayfs']
+  argv=[sys.executable,str(Path(__file__).with_name('launch.py')),'--root','absent','--source','absent','--storage-driver','vfs']
   for name in ('api','worker','runtime','general','postgres','redis'):argv+=['--'+name+'-image','not-loaded']
   result=subprocess.run(argv,capture_output=True,text=True,timeout=10)
   self.assertEqual(result.returncode,2);self.assertIn('invalid choice',result.stderr)

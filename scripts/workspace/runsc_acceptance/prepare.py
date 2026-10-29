@@ -9,6 +9,7 @@ def main():
     for name in ('source','bins','output','build-manifest','tls-dir','isolation-owner'):
         parser.add_argument('--'+name,required=True,type=Path)
     parser.add_argument('--shared-workload',action='store_true')
+    parser.add_argument('--workspace-recovery',action='store_true')
     parser.add_argument('--execution-mode',choices=('perRun','retained'),default='perRun')
     parser.add_argument('--environment-count',type=int,default=4)
     parser.add_argument('--iterations',type=int,default=3)
@@ -27,6 +28,8 @@ def main():
     parser.add_argument('--runtime-port',type=int,default=19003)
     for name in ('api','worker','runtime','general','postgres','redis'):parser.add_argument('--'+name+'-image',required=True)
     args=parser.parse_args()
+    if args.workspace_recovery and (not args.shared_workload or args.execution_mode!='perRun'):
+        parser.error('workspace recovery requires explicit shared perRun fixture')
     if not 1 <= args.environment_count <= 64:parser.error('environment count must be between 1 and 64')
     if not args.shared_workload and (args.memory_mib or args.minimum_hold_ms or args.workspace_memory_budget_bytes is not None or args.model_wait_ms or args.initial_stagger_ms or args.expected_working_environments is not None):parser.error('workload timing and overlap parameters require shared mode')
     if not args.shared_workload and args.execution_mode!='retained':parser.error('rotation requires retained execution mode')
@@ -91,6 +94,7 @@ def main():
         resource_limits['requested']={field:int(env[key]) for field,key in {'memoryBytes':'SANDBOX_MEMORY_BYTES','pids':'SANDBOX_PIDS_LIMIT','workspaceBytes':'SANDBOX_DATA_TMPFS_BYTES'}.items()}
         pem=tls/'model.pem';pem.write_bytes((tls/'model.crt').read_bytes()+(tls/'model.key').read_bytes());pem.chmod(0o600)
     env['DATABASE_URL']=f"postgresql://{env['POSTGRES_USER']}:{env['POSTGRES_PASSWORD']}@postgres:5432/{env['POSTGRES_DB']}"
+    if args.workspace_recovery:env['CENTAERIS_ACCEPTANCE_WORKSPACE_RECOVERY']='1'
     def private_file(name,values):
         path=root/name;path.write_text(''.join(f'{k}={v}\n' for k,v in sorted(values.items())));path.chmod(0o600);return str(path)
     full=private_file('synthetic.env',env);limited=private_file('service.env',{k:v for k,v in env.items() if k!='ENVIRONMENT_MAINTENANCE_TOKEN'})
@@ -118,5 +122,7 @@ def main():
     image=root/'general-image';image.mkdir();shutil.copyfile(bins/'execution_agent',image/'execution_agent');(image/'execution_agent').chmod(0o755)
     (image/'Dockerfile').write_text('FROM '+images['general']['id']+'\nCOPY execution_agent /opt/centaeris/bin/\n')
     (root/'manifest.json').write_text(json.dumps({'project':project,'sourceRevision':sha,'source':str(source),'binaryDirectory':str(bins),'binarySha256':hashes,'buildManifest':build,'images':images,'apiPort':args.api_port,'runtimePort':args.runtime_port,'runscRotation':True,'executionMode':args.execution_mode,'resourceLimits':resource_limits,'sharedWorkload':({'environmentCount':args.environment_count,'idlePauseMs':3000,'capMemoryBytes':4*1024**3,'capCpuMilli':2000,'modelWaitMs':args.model_wait_ms,'initialStaggerMs':args.initial_stagger_ms,'expectedWorkingEnvironments':expected_working,'workspaceMemoryBudgetBytes':int(env['RESIDENT_TENANT_MEMORY_BYTES']),'workProfile':profile} if args.shared_workload else None),'dockerSocket':args.docker_socket,'hostSocketDirectory':args.host_socket_directory,'isolationOwner':str(args.isolation_owner.resolve()),'status':'prepared-not-started'},indent=2))
+    if args.workspace_recovery:
+        path=root/'manifest.json';value=json.loads(path.read_text());value['workspaceRecovery']=True;path.write_text(json.dumps(value,indent=2))
     print(json.dumps({'project':project,'sourceRevision':sha,'status':'prepared-not-started'}))
 if __name__=='__main__':main()
