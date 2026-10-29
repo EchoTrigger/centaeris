@@ -150,6 +150,31 @@ class SharedCoordinatorTests(unittest.TestCase):
                     self.assertEqual(report['runtimeJobs']['failedRetryCount'],0)
                     self.assertEqual(len(evaluator.call_args.args[2]),8)
                     self.assertFalse(any(call[0] in ('observe','retire') for call in calls))
+    def test_dense_per_run_collects_validated_cleanup_before_memory_evaluation(self):
+        with tempfile.TemporaryDirectory() as name:
+            def evaluator(samples,durable,rows,limits,**kwargs):
+                self.assertEqual(sum(call[0]=='perRunCleanup' for call in calls),8)
+                self.assertEqual(kwargs['per_run_cleanup'],report_cleanup)
+                return {'status':'verified'}
+            calls,execute=self.invoke(Path(name),execution_mode=None,environments=8,iterations=1,
+                memory_mib=1536,minimum_hold_ms=60000,native_samples=[{'native':'sample'}],memory_evaluator=evaluator)
+            report_cleanup=[{'phase':'accepted','agentRunId':f'run-{i}-0','sessionId':f'session-{i}',
+                'environmentId':f'environment-{i}','instanceId':f'instance-run-{i}-0','containerId':f'container-run-{i}-0',
+                'cleanupComplete':True,'physicalRemoved':True,'containerAbsent':True,'residentHoldingCount':0,
+                'historyPreserved':True,'cleanupReceiptAtMs':1900} for i in range(8)]
+            report=execute()
+            self.assertEqual(report['status'],'passed')
+
+    def test_invalid_dense_cleanup_never_reaches_memory_evaluator(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as name:
+            evaluator=Mock(return_value={'status':'verified'})
+            calls,execute=self.invoke(Path(name),execution_mode=None,environments=8,iterations=1,
+                memory_mib=1536,minimum_hold_ms=60000,native_samples=[{'native':'sample'}],memory_evaluator=evaluator,
+                cleanup_change=lambda proof:{**proof,'physicalRemoved':False})
+            with self.assertRaises(ValueError):execute()
+            evaluator.assert_not_called()
+
     def test_per_run_missing_or_bad_cleanup_cannot_pass(self):
         mutations=[lambda proof:None,lambda proof:{**proof,'physicalRemoved':False},lambda proof:{**proof,'cleanupComplete':False},
             lambda proof:{**proof,'containerAbsent':False},lambda proof:{**proof,'residentHoldingCount':1},

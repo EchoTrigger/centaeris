@@ -156,14 +156,18 @@ def _other_budgets_fit(sample, limits):
                     for scope in ('global', 'tenant')))
 
 
-def _proof(frames, waiting, claim, environment, limits):
+def _proof(frames, waiting, claim, environment, limits, *, physical_cleanup=None):
     yielded, fallback = waiting['yieldedAtMs'], waiting['runAtMs']
-    released, claimed = claim['releaseRecordedAtMs'], claim['claimedAtMs']
+    released = physical_cleanup['cleanupReceiptAtMs'] if physical_cleanup is not None else claim['releaseRecordedAtMs']
+    claimed = claim['claimedAtMs']
     previous, streak, best = None, [], []
     for frame in frames:
         if (frame is None or not yielded <= frame['start'] <= frame['end'] <= released
                 or environment in frame['environments'] or not _other_budgets_fit(frame, limits)
-                or frame['memory'] + limits['requested']['memoryBytes'] <= limits['tenant']['memoryBytes']):
+                or frame['memory'] + limits['requested']['memoryBytes'] <= limits['tenant']['memoryBytes']
+                or (physical_cleanup is not None and (frame['host'] != claim['hostId']
+                    or not any(identity[:3] == (physical_cleanup['environmentId'],physical_cleanup['instanceId'],physical_cleanup['containerId'])
+                        for identity in frame['identity'])))):
             previous, streak = None, []
             continue
         streak = streak + [frame] if _consecutive(previous, frame) else [frame]
@@ -183,7 +187,7 @@ def _proof(frames, waiting, claim, environment, limits):
             low = {'collectionStartedAtMs': frame['start'], 'collectionCompletedAtMs': frame['end'],
                    'measuredMemoryBytes': frame['memory']}
             break
-    return {'jobId': waiting['jobId'], 'yieldedAtMs': yielded, 'releaseRecordedAtMs': released,
+    proof = {'jobId': waiting['jobId'], 'yieldedAtMs': yielded,
             'claimedAtMs': claimed, 'fallbackRunAtMs': fallback, 'pressureSampleCount': len(best),
             'firstCollectionStartedAtMs': best[0]['start'], 'lastCollectionCompletedAtMs': best[-1]['end'],
             'minimumMeasuredMemoryBytes': min(frame['memory'] for frame in best),
@@ -195,25 +199,67 @@ def _proof(frames, waiting, claim, environment, limits):
             'hostHeadroomBytes': limits['hostHeadroomBytes'],
             'maximumObservedCount': max(frame['count'] for frame in best),
             'maximumObservedPids': max(frame['pids'] for frame in best),
-            'maximumWorkspaceChargeBytes': max(frame['workspace'] for frame in best),
-            'postReleaseMemory': low}
+            'maximumWorkspaceChargeBytes': max(frame['workspace'] for frame in best)}
+    if physical_cleanup is None:
+        proof.update(releaseRecordedAtMs=released,postReleaseMemory=low)
+    else:
+        # The removed holder is physical evidence; the direct retry hint remains
+        # host preparation. Neither timestamp is substituted for the other.
+        proof.update(wakeSource='hostPreparation',hostId=claim['hostId'],generation=claim['generation'],
+            availabilityScope=claim['availabilityScope'],hostPreparationAvailableAtMs=claim['hostPreparationAvailableAtMs'],
+            hostPreparationToClaimMs=claim['hostPreparationToClaimMs'],
+            physicalCleanupToAvailabilityMs=claim['hostPreparationAvailableAtMs']-released,
+            physicalCleanup={key:physical_cleanup[key] for key in ('agentRunId','sessionId','environmentId','instanceId',
+                'containerId','cleanupReceiptAtMs','cleanupComplete','physicalRemoved','containerAbsent',
+                'residentHoldingCount','historyPreserved')})
+    return proof
 
 
-def evaluate(samples, durable, runs, limits):
-    """Require measured tenant pressure and a release wake of the original successful Job.
+def _per_run_cleanup(proofs, runs):
+    # Reuse the independent original-allocation, physical absence and history
+    # contract before any proof can explain a pressure holder's release.
+    from runsc_acceptance.per_run import validate_cleanup
+    import re
+    validate_cleanup(proofs, runs)
+    for proof in proofs:
+        _uint(proof['cleanupReceiptAtMs'])
+        if not re.fullmatch('[a-f0-9]{64}',proof['containerId']):
+            raise ValueError('exact original cleanup container identity required')
+    return proofs
 
+
+def _episode_claim(durable, waiting):
+    """A later retry cannot borrow pressure from an already consumed wait."""
+    job, yielded = waiting['jobId'], _uint(waiting['yieldedAtMs'])
+    claims = [claim for claim in durable['capacityClaims'] if claim.get('jobId') == job
+              and _uint(claim['claimedAtMs']) >= yielded]
+    if not claims:
+        return None
+    claim = min(claims, key=lambda row: _uint(row['claimedAtMs']))
+    next_yield = min((_uint(row['yieldedAtMs']) for row in durable['jobYields']
+                      if row.get('jobId') == job and _uint(row['yieldedAtMs']) > yielded), default=2**64)
+    return claim if _uint(claim['claimedAtMs']) < next_yield else None
+
+
+def evaluate(samples, durable, runs, limits, *, per_run_cleanup=None):
+    """Require tenant pressure, physical release evidence and the original Job's retry.
+
+    The direct release-wake path remains independent. Per-Run cleanup can also
+    prove removal before a host-preparation retry hint without relabeling it.
     A later low-water observation is optional and only reported with identical
     holder/cgroup identities. Completion proves recovery, never released bytes.
     """
     try:
         _limits(limits)
         jobs, environments = _bindings(runs, durable)
+        cleanup = _per_run_cleanup(per_run_cleanup, runs) if per_run_cleanup is not None else []
         if not isinstance(samples, list):
             raise ValueError('native sample sequence required')
         frames = [_snapshot(sample, environments, limits) for sample in samples]
         if not isinstance(durable.get('jobYields'), list) or not isinstance(durable.get('capacityClaims'), list):
             raise ValueError('durable yield and capacity claim sequence required')
-        proofs = []
+        proofs, preparation_proofs = [], {}
+        matching_yields = 0
         for waiting in durable['jobYields']:
             if waiting.get('transitionReason') != 'execution_resident_capacity_wait':
                 continue
@@ -222,21 +268,47 @@ def evaluate(samples, durable, runs, limits):
                     or waiting.get('sessionId') != binding['sessionId']):
                 raise ValueError('original waiting Job binding required')
             yielded, fallback = _uint(waiting['yieldedAtMs']), _uint(waiting['runAtMs'])
-            for claim in durable['capacityClaims']:
-                if claim.get('jobId') != job or claim.get('wakeSource') != 'physicalRelease':
-                    continue
-                if claim.get('agentRunId') != binding['agentRunId']:
-                    raise ValueError('original release-claimed Job binding required')
+            claim = _episode_claim(durable, waiting)
+            if claim is None:
+                continue
+            if claim.get('agentRunId') != binding['agentRunId']:
+                raise ValueError('original release-claimed Job binding required')
+            proof = None
+            if claim.get('wakeSource') == 'physicalRelease':
                 released, claimed = _uint(claim['releaseRecordedAtMs']), _uint(claim['claimedAtMs'])
-                if not yielded <= released <= claimed < fallback:
-                    continue
-                proof = _proof(frames, waiting, claim, binding['environmentId'], limits)
-                if proof is not None:
+                if yielded <= released <= claimed < fallback:
+                    proof = _proof(frames, waiting, claim, binding['environmentId'], limits)
+            elif claim.get('wakeSource') == 'hostPreparation' and cleanup:
+                available, claimed = _uint(claim['hostPreparationAvailableAtMs']), _uint(claim['claimedAtMs'])
+                _uint(claim['generation'],1)
+                _text(claim['hostId'])
+                if (claim.get('availabilityScope') != 'globalPreparation'
+                        or _uint(claim['hostPreparationToClaimMs']) != claimed-available):
+                    raise ValueError('exact host preparation availability evidence required')
+                for holder in cleanup:
+                    if not yielded <= holder['cleanupReceiptAtMs'] <= available <= claimed < fallback:
+                        continue
+                    proof = _proof(frames, waiting, claim, binding['environmentId'], limits,physical_cleanup=holder)
+                    if proof is not None:
+                        break
+            if proof is not None:
+                matching_yields += 1
+                if proof.get('wakeSource') == 'hostPreparation':
+                    holder = proof['physicalCleanup']
+                    key = (job,holder['instanceId'],holder['cleanupReceiptAtMs'],proof['generation'],proof['claimedAtMs'])
+                    previous = preparation_proofs.get(key)
+                    strength = lambda item:(item['pressureSampleCount'],
+                        item['lastCollectionCompletedAtMs']-item['firstCollectionStartedAtMs'],-item['yieldedAtMs'])
+                    if previous is None or strength(proof)>strength(previous):
+                        preparation_proofs[key] = proof
+                else:
                     proofs.append(proof)
-                    break
+        proofs.extend(preparation_proofs.values())
         if not proofs:
-            raise ValueError('two consecutive measured tenant-pressure samples and original release wake required')
-        return {'schema': 'runsc.shared.memory_contention.v1', 'status': 'verified', 'pressureProofs': proofs}
+            raise ValueError('two consecutive measured tenant-pressure samples, physical release evidence and original retry before fallback required')
+        return {'schema': 'runsc.shared.memory_contention.v1', 'status': 'verified', 'pressureProofs': proofs,
+                'matchingYieldProofs':matching_yields,'uniqueWaitingJobs':len({proof['jobId'] for proof in proofs}),
+                'uniqueWakeClaims':len({(proof['jobId'],proof.get('generation'),proof['claimedAtMs']) for proof in proofs})}
     except _ObservedOom:
         raise
     except (KeyError, TypeError, AttributeError):

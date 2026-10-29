@@ -309,21 +309,22 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
                     or row.get('runtime') != 'runsc' or row.get('running') is not True):
                 raise RuntimeError('final physical environment identity unavailable')
         report['finalEnvironments'] = final
+        if execution_mode=='perRun':
+            from runsc_acceptance.per_run import validate_cleanup
+            for record in admitted:report['perRunCleanup'].append(driver.per_run_cleanup(record))
+            report.update(validate_cleanup(report['perRunCleanup'],rows))
+            if not driver.per_run_inventory_absent():raise RuntimeError('perRun fixture still has managed physical responsibility')
         if profile['memoryMiB']:
             evaluator = dependencies.get('memory_contention')
             if evaluator is None:
                 from runsc_acceptance.memory_contention import evaluate
                 evaluator = evaluate
             observations = [json.loads(line) for line in (result / 'native-observations.jsonl').read_text().splitlines() if line]
-            proof = evaluator(observations, report['durableTiming'], rows, driver.manifest.get('resourceLimits'))
+            cleanup_arguments={'per_run_cleanup':report['perRunCleanup']} if execution_mode=='perRun' else {}
+            proof = evaluator(observations, report['durableTiming'], rows, driver.manifest.get('resourceLimits'),**cleanup_arguments)
             if not isinstance(proof, dict) or proof.get('status') != 'verified':
                 raise RuntimeError('verified memory contention evidence required')
             report['memoryContention'] = proof
-        if execution_mode=='perRun':
-            from runsc_acceptance.per_run import validate_cleanup
-            for record in admitted:report['perRunCleanup'].append(driver.per_run_cleanup(record))
-            report.update(validate_cleanup(report['perRunCleanup'],rows))
-            if not driver.per_run_inventory_absent():raise RuntimeError('perRun fixture still has managed physical responsibility')
         for row in final:
             retired = driver.retire(row)
             report['retirement'].append(retired)

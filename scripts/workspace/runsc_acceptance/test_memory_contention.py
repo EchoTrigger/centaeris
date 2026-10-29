@@ -1,8 +1,11 @@
 import copy
 import importlib.util
 import json
+import sys
 from pathlib import Path
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 spec = importlib.util.spec_from_file_location('memory_contention', Path(__file__).with_name('memory_contention.py'))
 module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
@@ -188,5 +191,145 @@ class MemoryContentionTests(unittest.TestCase):
         with self.assertRaises(ValueError) as caught: self.evaluate(fixture)
         self.assertNotIn('private password token', str(caught.exception))
 
+
+class PerRunCleanupContentionTests(unittest.TestCase):
+    def fixture(self):
+        base = MemoryContentionTests().fixture()
+        samples, durable, runs, limits = base
+        durable['capacityClaims'][0] = {'jobId':'agent_run.lifecycle:run-7','agentRunId':'run-7',
+            'generation':2,'wakeSource':'hostPreparation','hostId':'host-a','availabilityScope':'globalPreparation',
+            'hostPreparationAvailableAtMs':5000,'hostPreparationToClaimMs':100,'claimedAtMs':5100}
+        cleanup = [{**row,'containerId':str(i+1)*64,'cleanupComplete':True,'physicalRemoved':True,
+            'containerAbsent':True,'residentHoldingCount':0,'historyPreserved':True,
+            'cleanupReceiptAtMs':4000 if i==0 else 9000} for i,row in enumerate(runs)]
+        return base, cleanup
+
+    def evaluate(self, fixture):
+        base, cleanup = fixture
+        return module.evaluate(*base, per_run_cleanup=cleanup)
+
+    def test_original_pressure_holder_cleanup_and_host_preparation_recheck_are_distinct_evidence(self):
+        report = self.evaluate(self.fixture())
+        proof = report['pressureProofs'][0]
+        self.assertEqual(proof['wakeSource'],'hostPreparation')
+        self.assertEqual(proof['hostPreparationAvailableAtMs'],5000)
+        self.assertEqual(proof['hostPreparationToClaimMs'],100)
+        self.assertEqual(proof['physicalCleanup']['agentRunId'],'run-0')
+        self.assertEqual(proof['physicalCleanup']['instanceId'],'instance-0')
+        self.assertEqual(proof['physicalCleanup']['containerId'],'1'*64)
+        self.assertEqual(proof['physicalCleanup']['cleanupReceiptAtMs'],4000)
+        self.assertEqual(proof['physicalCleanupToAvailabilityMs'],1000)
+        self.assertEqual(proof['pressureSampleCount'],2)
+        self.assertNotIn('releaseRecordedAtMs',proof)
+        self.assertNotIn('postReleaseMemory',proof)
+
+    def test_host_preparation_alone_or_unrelated_complete_cleanup_does_not_prove_release(self):
+        base,cleanup = self.fixture()
+        with self.assertRaises(ValueError):module.evaluate(*base)
+        for change in ('unrelatedHolder','wrongRun','wrongSession','wrongEnvironment','wrongInstance','wrongContainer',
+                'missingCleanup','duplicateCleanup','physicalUnknown','incomplete','present','holding','history',
+                'booleanHolding','booleanReceipt'):
+            fixture=self.fixture();base,proofs=fixture
+            if change=='unrelatedHolder':proofs[0]['cleanupReceiptAtMs']=9000;proofs[6]['cleanupReceiptAtMs']=4000
+            elif change=='missingCleanup':proofs.pop()
+            elif change=='duplicateCleanup':proofs.append(proofs[0].copy())
+            elif change=='wrongRun':proofs[0]['agentRunId']='run-6'
+            elif change=='wrongSession':proofs[0]['sessionId']='session-6'
+            elif change=='wrongEnvironment':proofs[0]['environmentId']='environment-6'
+            elif change=='wrongInstance':proofs[0]['instanceId']='instance-6'
+            elif change=='wrongContainer':proofs[0]['containerId']='f'*64
+            elif change=='physicalUnknown':proofs[0]['physicalRemoved']=False
+            elif change=='incomplete':proofs[0]['cleanupComplete']=False
+            elif change=='present':proofs[0]['containerAbsent']=False
+            elif change=='holding':proofs[0]['residentHoldingCount']=1
+            elif change=='history':proofs[0]['historyPreserved']=False
+            elif change=='booleanHolding':proofs[0]['residentHoldingCount']=False
+            else:proofs[0]['cleanupReceiptAtMs']=True
+            with self.subTest(change=change),self.assertRaises(ValueError):self.evaluate(fixture)
+
+    def test_pressure_cleanup_availability_claim_and_fallback_order_must_all_hold(self):
+        for change in ('cleanupBeforePressureEnd','cleanupBeforeYield','cleanupAfterAvailability','availabilityAfterClaim',
+                'availabilityBeforeYield','claimAtFallback','wrongHost','wrongScope','wrongJob','wrongRun','badDelay','badGeneration'):
+            fixture=self.fixture();base,cleanup=fixture;claim=base[1]['capacityClaims'][0]
+            if change=='cleanupBeforePressureEnd':cleanup[0]['cleanupReceiptAtMs']=2150
+            elif change=='cleanupBeforeYield':cleanup[0]['cleanupReceiptAtMs']=999
+            elif change=='cleanupAfterAvailability':cleanup[0]['cleanupReceiptAtMs']=5001
+            elif change=='availabilityAfterClaim':claim.update(hostPreparationAvailableAtMs=5101,hostPreparationToClaimMs=-1)
+            elif change=='availabilityBeforeYield':claim.update(hostPreparationAvailableAtMs=999,hostPreparationToClaimMs=4101)
+            elif change=='claimAtFallback':claim.update(claimedAtMs=31000,hostPreparationToClaimMs=26000)
+            elif change=='wrongHost':claim['hostId']='other-host'
+            elif change=='wrongScope':claim['availabilityScope']='other'
+            elif change=='wrongJob':claim['jobId']='agent_run.lifecycle:run-6'
+            elif change=='wrongRun':claim['agentRunId']='run-6'
+            elif change=='badDelay':claim['hostPreparationToClaimMs']=99
+            else:claim['generation']=True
+            with self.subTest(change=change),self.assertRaises(ValueError):self.evaluate(fixture)
+
+    def early_claim(self):
+        return {'jobId':'agent_run.lifecycle:run-7','agentRunId':'run-7','generation':1,
+            'wakeSource':'hostPreparation','hostId':'host-a','availabilityScope':'globalPreparation',
+            'hostPreparationAvailableAtMs':2400,'hostPreparationToClaimMs':100,'claimedAtMs':2500}
+
+    def test_a_completed_wait_episode_cannot_lend_pressure_to_a_later_claim(self):
+        for path in ('hostPreparation','physicalRelease'):
+            for later_yield in (False,True):
+                fixture=self.fixture();base,cleanup=fixture
+                if path=='physicalRelease':base[1]['capacityClaims'][0]=MemoryContentionTests().fixture()[1]['capacityClaims'][0]
+                # Deliberately reverse chronological order: matching must use the
+                # earliest observed claim, even when it cannot establish release.
+                base[1]['capacityClaims'].append(self.early_claim())
+                if later_yield:
+                    later=copy.deepcopy(base[1]['jobYields'][0]);later.update(yieldedAtMs=3500,runAtMs=33500)
+                    base[1]['jobYields'].append(later)
+                with self.subTest(path=path,laterYield=later_yield),self.assertRaises(ValueError):
+                    module.evaluate(*base,**({'per_run_cleanup':cleanup} if path=='hostPreparation' else {}))
+
+    def test_any_next_yield_closes_the_pressure_window_even_without_a_recorded_earlier_claim(self):
+        for path in ('hostPreparation','physicalRelease'):
+            for reason in ('execution_host_preparation_wait','question_wait'):
+                fixture=self.fixture();base,cleanup=fixture
+                if path=='physicalRelease':base[1]['capacityClaims'][0]=MemoryContentionTests().fixture()[1]['capacityClaims'][0]
+                later=copy.deepcopy(base[1]['jobYields'][0]);later.update(yieldedAtMs=3500,runAtMs=33500,transitionReason=reason)
+                base[1]['jobYields'].append(later)
+                with self.subTest(path=path,reason=reason),self.assertRaises(ValueError):
+                    module.evaluate(*base,**({'per_run_cleanup':cleanup} if path=='hostPreparation' else {}))
+
+    def test_reclaimed_same_job_needs_fresh_pressure_in_its_current_wait_episode(self):
+        for path in ('hostPreparation','physicalRelease'):
+            fixture=self.fixture();base,cleanup=fixture
+            base[0].extend([MemoryContentionTests().sample(4100),MemoryContentionTests().sample(5100)])
+            later=copy.deepcopy(base[1]['jobYields'][0]);later.update(yieldedAtMs=3500,runAtMs=33500)
+            base[1]['jobYields'].append(later)
+            if path=='hostPreparation':
+                cleanup[0]['cleanupReceiptAtMs']=6000
+                base[1]['capacityClaims'][0].update(hostPreparationAvailableAtMs=7000,claimedAtMs=7100)
+            else:
+                base[1]['capacityClaims'][0]={'jobId':'agent_run.lifecycle:run-7','agentRunId':'run-7',
+                    'generation':2,'wakeSource':'physicalRelease','releaseRecordedAtMs':6000,'claimedAtMs':7100}
+            base[1]['capacityClaims'].append(self.early_claim())
+            report=module.evaluate(*base,**({'per_run_cleanup':cleanup} if path=='hostPreparation' else {}))
+            with self.subTest(path=path):
+                self.assertEqual(len(report['pressureProofs']),1)
+                self.assertEqual(report['pressureProofs'][0]['pressureSampleCount'],2)
+                self.assertEqual(report['pressureProofs'][0]['yieldedAtMs'],3500)
+                self.assertEqual(report['matchingYieldProofs'],1)
+                self.assertEqual(report['uniqueWaitingJobs'],1)
+                self.assertEqual(report['uniqueWakeClaims'],1)
+
+    def test_host_recheck_does_not_relax_pressure_continuity_other_budgets_or_oom(self):
+        for change in ('single','unknown','low','cgroup','oom','globalMemory','count','pids','workspace','headroom'):
+            fixture=self.fixture();base,cleanup=fixture;samples,durable,runs,limits=base
+            if change=='single':samples.pop()
+            elif change=='unknown':samples.insert(1,{'state':'unknown'})
+            elif change=='low':samples[1]=MemoryContentionTests().sample(2100,memory=GIB)
+            elif change=='cgroup':samples[1]['host']['containers'][0]['resources']['cgroupIdentity']['inode']+=1
+            elif change=='oom':samples[0]['host']['containers'][0]['resources']['memoryEvents']['oomKill']=1
+            elif change=='globalMemory':limits['global']['memoryBytes']=8*GIB
+            elif change=='count':limits['tenant']['count']=3
+            elif change=='pids':limits['tenant']['pids']=550
+            elif change=='workspace':limits['tenant']['workspaceBytes']=4*GIB
+            else:
+                for sample in samples:sample['host']['memAvailableBytes']=6*GIB
+            with self.subTest(change=change),self.assertRaises(ValueError):self.evaluate(fixture)
 
 if __name__ == '__main__': unittest.main()
