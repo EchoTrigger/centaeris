@@ -1,7 +1,7 @@
 """Owned Docker/containerd lifecycle for native validation only."""
 import json,os,re,subprocess,time,uuid
 from pathlib import Path,PurePosixPath
-from runsc_acceptance.isolation import validate_vectors,process_arguments
+from runsc_acceptance.isolation import STORAGE_DRIVERS,validate_vectors,process_arguments
 SHARED=['docker','--host','unix:///var/run/docker.sock']
 
 def command(argv,timeout=30):
@@ -48,15 +48,16 @@ def cgroup_pids(container,pid,limit,proc_root=Path('/proc'),cgroup_root=Path('/s
 
 
 class PrivateDocker:
-    def __init__(self,root,network=False):
+    def __init__(self,root,network=False,*,storage_driver='vfs'):
+        if storage_driver not in STORAGE_DRIVERS:raise ValueError('supported private storage driver required')
         if Path(root).is_symlink():raise RuntimeError('private root symlink rejected')
         self.root=Path(root).resolve(strict=True)
         if self.root.parent!=Path('/var/tmp') or not self.root.name.startswith('centaeris-runsc-') or self.root.is_symlink():raise RuntimeError('fresh owned disk-backed root required')
-        if any((self.root/n).exists() for n in ('owner.json','data','containerd-data','exec')):raise RuntimeError('existing validation responsibility must be preserved')
-        self.root.chmod(0o700);self.network=network;self.daemon=None;self.containerd=None
+        if any((self.root/n).exists() or (self.root/n).is_symlink() for n in ('owner.json','data','containerd-data','exec')):raise RuntimeError('existing validation responsibility must be preserved')
+        self.root.chmod(0o700);self.network=network;self.storage_driver=storage_driver;self.daemon=None;self.containerd=None
         self.namespace='runsc-'+uuid.uuid4().hex[:12]
         self.argv=['docker','--host','unix://'+str(self.root/'docker.sock')]
-        self.owner={'root':str(self.root),'fixtureOwner':uuid.uuid4().hex,'containerdNamespace':self.namespace,'containerdPluginsNamespace':self.namespace+'-plugins','daemonPid':None,'containerdPid':None,'status':'preparing'}
+        self.owner={'root':str(self.root),'fixtureOwner':uuid.uuid4().hex,'containerdNamespace':self.namespace,'containerdPluginsNamespace':self.namespace+'-plugins','daemonPid':None,'containerdPid':None,'status':'preparing','requestedStorageDriver':storage_driver}
     def record(self,**fields):self.owner.update(fields);(self.root/'owner.json').write_text(json.dumps(self.owner,indent=2))
     def run(self,*args,timeout=30):return command([*self.argv,*args],timeout)
     def inspect(self,cid):return json.loads(self.run('inspect',cid))[0]
@@ -77,8 +78,8 @@ class PrivateDocker:
         arguments=runtime_logging(arguments,self.root,help_text)
         config=self.root/'daemon.json';config.write_text(json.dumps({'runtimes':{'runsc':{'path':path,'runtimeArgs':arguments}}}));config.chmod(0o600)
         ctr=['/usr/bin/containerd','--config','/dev/null','--address',str(self.root/'containerd.sock'),'--root',str(self.root/'containerd-data'),'--state',str(self.root/'containerd-state')]
-        dock=['dockerd','--config-file',str(config),'--host','unix://'+str(self.root/'docker.sock'),'--data-root',str(self.root/'data'),'--exec-root',str(self.root/'exec'),'--pidfile',str(self.root/'daemon.pid'),'--containerd',str(self.root/'containerd.sock'),'--containerd-namespace',self.namespace,'--containerd-plugins-namespace',self.namespace+'-plugins','--bridge=none','--iptables='+str(self.network).lower(),'--ip6tables=false','--ip-forward='+str(self.network).lower(),'--ip-masq='+str(self.network).lower(),'--storage-driver=vfs']
-        validate_vectors(str(self.root),self.namespace,self.namespace+'-plugins',dock,ctr)
+        dock=['dockerd','--config-file',str(config),'--host','unix://'+str(self.root/'docker.sock'),'--data-root',str(self.root/'data'),'--exec-root',str(self.root/'exec'),'--pidfile',str(self.root/'daemon.pid'),'--containerd',str(self.root/'containerd.sock'),'--containerd-namespace',self.namespace,'--containerd-plugins-namespace',self.namespace+'-plugins','--bridge=none','--iptables='+str(self.network).lower(),'--ip6tables=false','--ip-forward='+str(self.network).lower(),'--ip-masq='+str(self.network).lower(),'--storage-driver='+self.storage_driver]
+        validate_vectors(str(self.root),self.namespace,self.namespace+'-plugins',dock,ctr,storage_driver=self.storage_driver)
         self.record(status='starting',sharedDaemonIdentity=self.shared,runscVersion=version,runscArguments=arguments)
         self.ctr_log=(self.root/'containerd.log').open('wb');self.containerd=subprocess.Popen(ctr,stdin=subprocess.DEVNULL,stdout=self.ctr_log,stderr=self.ctr_log,start_new_session=True)
         self.record(containerdPid=self.containerd.pid)
@@ -95,7 +96,10 @@ class PrivateDocker:
             except (RuntimeError,subprocess.TimeoutExpired):
                 if time.monotonic()>end:raise RuntimeError('owned Docker readiness timeout')
                 time.sleep(.2)
-        validate_vectors(str(self.root),self.namespace,self.namespace+'-plugins',process_arguments(self.daemon.pid),process_arguments(self.containerd.pid))
+        observed_storage_driver=self.run('info','--format','{{.Driver}}').strip()
+        self.record(observedStorageDriver=observed_storage_driver)
+        if observed_storage_driver!=self.storage_driver:raise RuntimeError('requested private storage driver differs from observed storage driver')
+        validate_vectors(str(self.root),self.namespace,self.namespace+'-plugins',process_arguments(self.daemon.pid),process_arguments(self.containerd.pid),storage_driver=self.storage_driver)
         log=(self.root/'daemon.log').read_text(errors='replace')
         if 'address='+str(self.root/'containerd.sock') not in log or 'address=/run/containerd/containerd.sock' in log:raise RuntimeError('owned containerd endpoint not observed')
         observed_network=network_identity(self.shared['pid'],owned_pids=[self.daemon.pid,self.containerd.pid])

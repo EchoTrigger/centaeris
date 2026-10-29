@@ -130,4 +130,38 @@ class WorkloadBudgetTests(unittest.TestCase):
   with self.assertRaisesRegex(ValueError,'four.hour'):
    launch.workload_budget(64,20,600,60000,0)
 
+
+
+class StorageDriverArgumentTests(unittest.TestCase):
+ def test_default_and_explicit_storage_driver_reach_the_owned_daemon_without_starting_it(self):
+  import hashlib,json,sys,types
+  from unittest.mock import patch
+  class StoppedBeforeDaemonStart(Exception):pass
+  for extra,expected in (([],'vfs'),(['--storage-driver','vfs'],'vfs'),(['--storage-driver','overlay2'],'overlay2')):
+   with self.subTest(expected=expected),tempfile.TemporaryDirectory(dir='/var/tmp',prefix='centaeris-runsc-storage-test-') as tmp:
+    root=Path(tmp);source=root/'source';source.mkdir();bins=root/'bins';bins.mkdir()
+    values={'runtime_server':b'fixture-runtime','execution_agent':StaticHelperTests().elf(1),'environment_host_supervisor':b'fixture-supervisor'}
+    for name,value in values.items():(bins/name).write_bytes(value)
+    (root/'build-final.json').write_text(json.dumps({'binarySha256':{name:hashlib.sha256(value).hexdigest() for name,value in values.items()},'hostSupervisorSha256':hashlib.sha256(values['environment_host_supervisor']).hexdigest()}))
+    argv=['launch','--root',str(root),'--source',str(source),'--execution-mode','retained','--execute']+extra
+    for name in ('api','worker','runtime','general','postgres','redis'):argv+=['--'+name+'-image','sha256:'+'a'*64]
+    original_stat=Path.stat
+    def stat(path,**kwargs):
+     if str(path)=='/proc/self/ns/net':return types.SimpleNamespace(st_ino=2)
+     if str(path)=='/proc/1/ns/net':return types.SimpleNamespace(st_ino=1)
+     return original_stat(path,**kwargs)
+    def command(argv,**kwargs):
+     if argv==['ip','link','set','lo','up']:return ''
+     if argv==['ip','-j','link']:return json.dumps([{'ifname':'lo'}])
+     raise AssertionError('unexpected command before private daemon')
+    with patch.object(sys,'argv',argv),patch.object(launch.os,'geteuid',return_value=0),patch.object(Path,'stat',stat),patch.object(launch,'command',side_effect=command),patch.object(launch,'PrivateDocker',side_effect=StoppedBeforeDaemonStart) as constructor:
+     with self.assertRaises(StoppedBeforeDaemonStart):launch.main()
+    constructor.assert_called_once_with(root.resolve(),network=True,storage_driver=expected)
+ def test_unsupported_storage_driver_fails_before_fixture_access(self):
+  import subprocess,sys
+  argv=[sys.executable,str(Path(__file__).with_name('launch.py')),'--root','absent','--source','absent','--storage-driver','overlayfs']
+  for name in ('api','worker','runtime','general','postgres','redis'):argv+=['--'+name+'-image','not-loaded']
+  result=subprocess.run(argv,capture_output=True,text=True,timeout=10)
+  self.assertEqual(result.returncode,2);self.assertIn('invalid choice',result.stderr)
+
 if __name__=='__main__':unittest.main()

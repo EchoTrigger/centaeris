@@ -3,7 +3,7 @@ import argparse,hashlib,json,os,re,struct,subprocess,sys,threading,time,urllib.r
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from runsc_acceptance.daemon import PrivateDocker,command
-from runsc_acceptance.isolation import verify_owner
+from runsc_acceptance.isolation import STORAGE_DRIVERS,verify_owner
 from runsc_acceptance.workload_budget import workload_budget
 from runsc_acceptance.memory_profile import memory_profile,workspace_memory_budget
 
@@ -131,6 +131,7 @@ def main():
     parser.add_argument('--root',required=True,type=Path);parser.add_argument('--source',required=True,type=Path);parser.add_argument('--git-dir',type=Path)
     parser.add_argument('--api-port',type=int,default=18083);parser.add_argument('--runtime-port',type=int,default=19003);parser.add_argument('--execute',action='store_true')
     parser.add_argument('--shared-workload',action='store_true')
+    parser.add_argument('--storage-driver',choices=STORAGE_DRIVERS,default='vfs')
     parser.add_argument('--execution-mode',choices=('perRun','retained'),default='perRun')
     parser.add_argument('--environment-count',type=int,default=4)
     parser.add_argument('--iterations',type=int,default=3)
@@ -172,7 +173,7 @@ def main():
         file.chmod(0o755)
     static_helper(bins/'execution_agent');command(['ip','link','set','lo','up'])
     if {row['ifname'] for row in json.loads(command(['ip','-j','link']))}!={'lo'}:raise RuntimeError('fresh uplink-free network namespace required')
-    docker=PrivateDocker(root,network=True);supervisor=None
+    docker=PrivateDocker(root,network=True,storage_driver=args.storage_driver);supervisor=None
     try:
         docker.start();print(json.dumps({'phase':'private-runtime-prerequisites'}),flush=True)
         images={name:getattr(args,name+'_image') for name in ('api','worker','runtime','general','postgres','redis')}

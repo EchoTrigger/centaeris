@@ -93,4 +93,69 @@ class RawProbeTests(unittest.TestCase):
    self.assertEqual(daemon.cgroup_pids(cid,321,512,proc_root=proc,cgroup_root=group),{'current':63,'max':512,'eventsMax':0})
    with self.assertRaisesRegex(RuntimeError,'identity'):daemon.cgroup_pids('2'*64,321,512,proc_root=proc,cgroup_root=group)
    with self.assertRaisesRegex(RuntimeError,'limit'):daemon.cgroup_pids(cid,321,128,proc_root=proc,cgroup_root=group)
+
+
+class StorageDriverTests(unittest.TestCase):
+ def launch_fake(self,root,requested=None,observed='vfs'):
+  from unittest.mock import Mock
+  arguments={} if requested is None else {'storage_driver':requested}
+  docker=daemon.PrivateDocker(root,**arguments)
+  processes={}
+  class Process:
+   def __init__(self,argv,**kwargs):
+    self.pid=1000+len(processes);self.argv=argv;processes[self.pid]=self
+    if argv[0]=='/usr/bin/containerd':(root/'containerd.sock').touch()
+    if argv[0]=='dockerd':kwargs['stdout'].write(('address='+str(root/'containerd.sock')+'\n').encode());kwargs['stdout'].flush()
+   def poll(self):return None
+  def command(argv,timeout=30):
+   if argv[-1]=='{{json .Runtimes}}':return json.dumps({'runsc':{'path':'/usr/bin/runsc','runtimeArgs':['--platform=systrap']}})
+   if argv==['/usr/bin/runsc','--version']:return 'runsc fixture-version\n'
+   raise AssertionError('unexpected external command')
+  def run(*args,timeout=30):
+   if args==('info','--format','{{.ID}}'):return 'private-host'
+   if args==('info','--format','{{.Driver}}'):return observed
+   raise AssertionError('unexpected private command')
+  docker.run=run
+  shared={'id':'shared-host','pid':10,'startTicks':'20'}
+  with patch.object(daemon,'network_identity',return_value={'own':3,'init':1,'sharedDocker':2}),patch.object(daemon.os,'geteuid',return_value=0),patch.object(docker,'shared_identity',return_value=shared),patch.object(daemon,'command',side_effect=command),patch.object(daemon,'runtime_flags',return_value='  -panic-log string\n  -log string\n  -log-format string\n'),patch.object(daemon.subprocess,'Popen',side_effect=Process),patch.object(daemon,'process_arguments',side_effect=lambda pid:processes[pid].argv):
+   try:docker.start()
+   finally:
+    for name in ('ctr_log','docker_log'):
+     handle=getattr(docker,name,None)
+     if handle:handle.close()
+  return docker,processes
+ def test_default_vfs_and_explicit_overlay2_use_exact_driver_and_record_actual_identity(self):
+  for requested,observed in ((None,'vfs'),('vfs','vfs'),('overlay2','overlay2')):
+   with self.subTest(requested=requested),tempfile.TemporaryDirectory(dir='/var/tmp',prefix='centaeris-runsc-storage-test-') as tmp:
+    docker,processes=self.launch_fake(Path(tmp),requested,observed)
+    vector=next(process.argv for process in processes.values() if process.argv[0]=='dockerd')
+    from runsc_acceptance.isolation import option
+    self.assertEqual(option(vector,'--storage-driver'),observed)
+    self.assertEqual(docker.owner['requestedStorageDriver'],observed)
+    self.assertEqual(docker.owner['observedStorageDriver'],observed)
+    self.assertTrue(docker.owner['privateContainerdVerified'])
+ def test_driver_mismatch_does_not_mark_the_daemon_ready(self):
+  with tempfile.TemporaryDirectory(dir='/var/tmp',prefix='centaeris-runsc-storage-test-') as tmp:
+   with self.assertRaisesRegex(RuntimeError,'storage driver'):self.launch_fake(Path(tmp),'overlay2','overlayfs')
+   owner=json.loads((Path(tmp)/'owner.json').read_text())
+   self.assertEqual(owner['requestedStorageDriver'],'overlay2')
+   self.assertEqual(owner['observedStorageDriver'],'overlayfs')
+   self.assertNotEqual(owner.get('privateContainerdVerified'),True)
+ def test_unknown_driver_and_existing_data_are_rejected_without_starting_processes(self):
+  for driver in ('overlayfs','overlay','VFS','',None):
+   with self.subTest(driver=driver),tempfile.TemporaryDirectory(dir='/var/tmp',prefix='centaeris-runsc-storage-test-') as tmp,patch.object(daemon.subprocess,'Popen') as popen:
+    with self.assertRaises(ValueError):daemon.PrivateDocker(Path(tmp),storage_driver=driver)
+    self.assertFalse((Path(tmp)/'owner.json').exists());popen.assert_not_called()
+  with tempfile.TemporaryDirectory(dir='/var/tmp',prefix='centaeris-runsc-storage-test-') as tmp,patch.object(daemon.subprocess,'Popen') as popen:
+   root=Path(tmp);(root/'data').mkdir();(root/'data/sentinel').write_text('existing-vfs-data')
+   with self.assertRaisesRegex(RuntimeError,'existing validation responsibility'):daemon.PrivateDocker(root,storage_driver='overlay2')
+   self.assertEqual((root/'data/sentinel').read_text(),'existing-vfs-data');popen.assert_not_called()
+
+ def test_dangling_responsibility_symlinks_are_rejected_before_owner_can_escape_root(self):
+  for name in ('owner.json','data','containerd-data','exec'):
+   with self.subTest(name=name),tempfile.TemporaryDirectory(dir='/var/tmp',prefix='centaeris-runsc-storage-test-') as tmp,patch.object(daemon.subprocess,'Popen') as popen:
+    root=Path(tmp);outside=root.parent/(root.name+'-outside');(root/name).symlink_to(outside)
+    with self.assertRaisesRegex(RuntimeError,'existing validation responsibility'):daemon.PrivateDocker(root,storage_driver='overlay2')
+    self.assertTrue((root/name).is_symlink());self.assertFalse(outside.exists());popen.assert_not_called()
+
 if __name__=='__main__':unittest.main()
