@@ -1912,7 +1912,11 @@ class AgentRun(models.Model):
                     or delegation.definition_id != self.session.agent.definition_id):
                 raise ValueError("AgentRun application origin binding mismatch")
         if not self._state.adding:
-            if type(self).objects.values_list("acting_app_id", "app_delegation_id").get(pk=self.pk) != (self.acting_app_id, self.app_delegation_id):
+            stored_snapshot = type(self).objects.values_list(
+                "acting_app_id", "app_delegation_id", "definition_version_id", "agent_instructions",
+                "session_id", "environment_id",
+            ).get(pk=self.pk)
+            if stored_snapshot[:2] != (self.acting_app_id, self.app_delegation_id):
                 raise ValueError("AgentRun application origin is immutable")
         if self._state.adding:
             definition_id = self.session.agent.definition_id
@@ -1922,10 +1926,7 @@ class AgentRun(models.Model):
             elif definition_id:
                 raise ValueError("Managed AgentRun requires a published definition version")
         else:
-            stored_snapshot = type(self).objects.values_list(
-                "definition_version_id", "agent_instructions", "session_id", "environment_id",
-            ).get(pk=self.pk)
-            if stored_snapshot[:2] != (self.definition_version_id, self.agent_instructions):
+            if stored_snapshot[2:4] != (self.definition_version_id, self.agent_instructions):
                 raise ValueError("AgentRun configuration snapshot is immutable")
         if self.thinkingMode:
             validate_thinking_mode(self.thinkingMode)
@@ -1973,7 +1974,7 @@ class AgentRun(models.Model):
                     raise ValueError("agent_run_environment_binding_invalid")
                 self.environment = session.current_environment
                 return super().save(*args, **kwargs)
-        if stored_snapshot[2:] != (self.session_id, self.environment_id):
+        if stored_snapshot[4:] != (self.session_id, self.environment_id):
             raise ValueError("agent_run_environment_binding_immutable")
         return super().save(*args, **kwargs)
 
