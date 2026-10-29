@@ -65,11 +65,17 @@ Plugin catalog, applies Django migrations, and bootstraps the configured
 administrator. Initialization failure blocks rollout and must not clear the
 Plugin volume.
 
-The first-release `app_core` schema is one `0001_initial` migration, including
-the PostgreSQL tool-result lookup index. It initializes a fresh database; it
-does not convert development migration histories or change existing volumes.
-Choose and confirm a data retention strategy before replacing a development
-database with a fresh first-release database.
+For this native runsc revision, `api-init` applies the forward Django migration
+chain through `0032_agent_avatar_image`; `0031_workspace_resource_scope` adds the
+Workspace resource authority used by this deployment. Run the same migration
+chain against fresh and existing supported databases. Runtime performs its own
+published-schema upgrade to store version 17 when the matching service starts.
+
+Drain existing workers and complete their cleanup responsibilities before
+changing execution mode or replacing the HostSupervisor. Preserve database and
+file volumes, historical authorizations and signed environment profiles. Existing
+bindings keep their original configuration; stopped instances retain their
+file-protection and cleanup responsibilities throughout the upgrade.
 
 The `gc` service runs the server-side lifecycle collector. Worker and Runtime
 start only after their required dependencies become healthy.
