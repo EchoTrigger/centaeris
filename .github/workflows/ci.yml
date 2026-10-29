@@ -226,12 +226,25 @@ jobs:
             https://github.com/google/gvisor/releases/download/release-20260921.0/gvisor-x86_64.tar.zstd \
             --output "$archive"
           echo "e3e7776afd36b08431c668a60f4271f9e9787ce0def960be680acb1681af3861  $archive" | sha256sum --check
-          sudo tar --zstd --extract --file "$archive" --directory /usr/local/bin
-          /usr/local/bin/runsc --version
-          sudo /usr/local/bin/runsc install -- --platform=systrap
+          # The runner makes /usr/local/bin writable for Node tooling. Native
+          # host control requires root-owned, non-writable executable ancestry.
+          runsc_directory=/usr/libexec/centaeris-ci-runsc
+          sudo install -d --owner=root --group=root --mode=0755 "$runsc_directory"
+          sudo tar --zstd --no-same-owner --extract --file "$archive" --directory "$runsc_directory"
+          "$runsc_directory/runsc" --version
+          sudo "$runsc_directory/runsc" install -- --platform=systrap
           sudo systemctl reload docker
           docker info --format '{{json .Runtimes}}'
           docker run --rm --runtime=runsc hello-world@sha256:d1a8d0a4eeb63aff09f5f34d4d80505e0ba81905f36158cc3970d8e07179e59e
+          # Show the exact paths consumed by native host control before builds.
+          sudo python3 - "$(docker info --format '{{.ID}}')" <<'PY'
+          import runpy
+          import subprocess
+          import sys
+          host = runpy.run_path("scripts/workspace/docker-fresh-start-host.py")
+          config = host["daemon_configuration"](sys.argv[1])
+          subprocess.run(["namei", "-l", *(config[key] for key in ("runtimePath", "dockerPath", "runtimeRoot"))], check=True)
+          PY
 
       - name: Build and validate empty-volume deployment
         env:

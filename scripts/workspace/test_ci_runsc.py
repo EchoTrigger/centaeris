@@ -1,11 +1,14 @@
 """CI must provision the default OCI runtime before the full deployment gate."""
 from pathlib import Path
 import importlib.util
+import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
+import tarfile
 import unittest
 from unittest.mock import patch
 
@@ -227,6 +230,48 @@ class HostConfigurationTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("host", ROOT / "scripts/workspace/docker-fresh-start-host.py")
         self.host = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.host)
+
+    @unittest.skipIf(os.name == "nt", "native runner installation requires Unix file permissions")
+    def test_ci_runsc_install_has_trusted_ancestry_even_with_writable_node_bin(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        extraction = next(shlex.split(line.strip())[1:] for line in workflow.splitlines()
+                          if line.strip().startswith("sudo tar "))
+        variables = {"runsc_directory": next((line.strip().partition("=")[2].strip('"')
+                                             for line in workflow.splitlines()
+                                             if line.strip().startswith("runsc_directory=")), "")}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            node_bin = root / "usr/local/bin"
+            node_bin.mkdir(parents=True)
+            node_bin.chmod(0o777)
+            archive = root / "runtime.tar"
+            with tarfile.open(archive, "w") as bundle:
+                for name in ("runsc", "gvisor-bin/runsc-sandbox"):
+                    member = tarfile.TarInfo(name)
+                    member.mode = 0o755
+                    member.size = 6
+                    bundle.addfile(member, io.BytesIO(b"binary"))
+            # Compression is orthogonal to filesystem ownership and ancestry.
+            # Execute the workflow's real tar extraction against an uncompressed fixture.
+            arguments = [str(archive) if item == "$archive" else
+                         str(root / variables[item[1:]].lstrip("/")) if item.startswith("$") else
+                         str(root / item.lstrip("/")) if item.startswith("/usr/") else item
+                         for item in extraction if item != "--zstd"]
+            destination = Path(arguments[arguments.index("--directory") + 1])
+            destination.mkdir(parents=True, exist_ok=True)
+            subprocess.run(arguments, check=True, capture_output=True)
+            for name in ("runsc", "gvisor-bin/runsc-sandbox"):
+                executable = destination / name
+                self.assertEqual(executable.read_bytes(), b"binary")
+                for path in (executable, *executable.parents):
+                    if path == root.parent:
+                        break
+                    metadata = path.lstat()
+                    # The workflow runs extraction as root; the fixture uses its test actor.
+                    self.assertEqual(metadata.st_uid, os.geteuid(), str(path))
+                    self.assertEqual(metadata.st_mode & 0o022, 0, f"untrusted installed ancestry: {path}")
+            self.assertEqual(node_bin.stat().st_mode & 0o777, 0o777,
+                             "install must preserve the runner Node directory")
 
     def test_daemon_flags_preserve_paths_after_boolean_options(self):
         self.assertEqual(self.host.daemon_flags([
