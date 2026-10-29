@@ -34,6 +34,7 @@ from . import tests as fixtures
 from .models import AgentRun, ModelConfig, ModelRunLog, Workspace
 from .model_adapter.common import model_database_operation
 from .test_model_gateway import configure_gateway
+from .testing import leased_lifecycle_job_fixture
 
 
 def database_probe(request):
@@ -94,6 +95,7 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
             modelConfig=self.model, prompt="lease-test",
         )
         authorization = fixtures.create_agent_run_authorization(run)
+        leased_lifecycle_job_fixture(self, run)
         self.run_id = run.id
         self.body = {
             "schema": fixtures.MODEL_RUN_SCHEMA, "agentRunId": run.id,
