@@ -22,8 +22,86 @@ CREATE TRIGGER lifecycle_lease_purpose_facts BEFORE UPDATE ON runtime.runtime_jo
 pub(super) const PENDING: &str = "EXISTS(SELECT 1 FROM runtime.runtime_events c WHERE c.session_id=j.session_id AND c.task_id=substring(j.job_id FROM 21) AND c.event_id IN('agent_run_cancel_requested:'||c.task_id,'agent_run_control_pending:'||c.task_id) AND j.idempotency_key=j.job_id||':'||(c.payload_json::jsonb->>'authorizationDigest'))";
 const TERMINAL: &str = r#"(EXISTS(SELECT 1 FROM public.app_core_agentrun r WHERE r.id=substring(j.job_id FROM 21) AND r.session_id=j.session_id AND r."preAdmissionCancelledAt" IS NOT NULL) OR EXISTS(SELECT 1 FROM public.app_core_sessionevent e WHERE e.agent_run_id=substring(j.job_id FROM 21) AND e.session_id=j.session_id AND NOT e.session_level AND e.payload->>'type' IN('agent_run_completed','agent_run_failed','agent_run_interrupted')) OR EXISTS(SELECT 1 FROM runtime.runtime_events e WHERE e.event_id='agent_run_pre_admission_failure:'||substring(j.job_id FROM 21) AND e.session_id=j.session_id))"#;
 
-fn control_candidates() -> String {
-    format!("j.job_kind='agent_run.lifecycle' AND j.status='queued' AND j.run_at_ms<=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND COALESCE(j.lease_reclaim_not_before_ms,j.run_at_ms)<=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND ($1::text IS NULL OR j.job_id=$1) AND {PENDING} AND ({TERMINAL})=$2")
+// A terminal Job is recoverable only for its original, still-held resource
+// responsibility. Legacy terminal receipts can reconstruct the missing intent.
+const RECOVERABLE_CLEANUP: &str = r#"EXISTS(
+ SELECT 1 FROM public.app_core_agentrun r
+ JOIN public.app_core_agentrunauthorization a ON a.agent_run_id=r.id
+ JOIN public.app_core_sessionenvironment e ON e.id=r.environment_id
+ WHERE j.job_id='agent_run.lifecycle:'||r.id AND j.session_id=r.session_id
+ AND j.payload_ref='record:agent_run:'||r.id AND j.idempotency_key=j.job_id||':'||a.digest
+ AND a.payload->>'agentRunId'=r.id AND a.payload->>'sessionId'=r.session_id
+ AND a.payload->>'workspaceId'=r.workspace_id
+ AND e.session_id=r.session_id AND e.controller_run_id=r.id
+ AND NOT e.controller_released AND e.controller_epoch>0 AND e.controller_purpose IN('execute','cleanup')
+ AND (r."preAdmissionCancelledAt" IS NOT NULL
+  OR EXISTS(SELECT 1 FROM public.app_core_sessionevent t WHERE t.agent_run_id=r.id
+   AND t.session_id=r.session_id AND t.workspace_id=r.workspace_id AND NOT t.session_level
+   AND t.payload->>'type' IN('agent_run_completed','agent_run_failed','agent_run_interrupted'))
+  OR (r."preAdmissionCancelledAt" IS NULL
+   AND NOT EXISTS(SELECT 1 FROM public.app_core_sessionevent t WHERE t.agent_run_id=r.id AND NOT t.session_level)
+   AND EXISTS(SELECT 1 FROM runtime.runtime_events f WHERE f.event_id='agent_run_pre_admission_failure:'||r.id
+    AND f.session_id=r.session_id AND f.task_id=r.id AND f.visibility='internal'
+    AND f.event_type='runtime.agent_run.pre_admission_failure.v1' AND f.at_ms>0 AND f.at_ms<=253402300799999
+    AND f.payload_json::jsonb->>'schema'=f.event_type
+    AND f.payload_json::jsonb->>'workspaceId'=r.workspace_id
+    AND f.payload_json::jsonb->>'sessionId'=r.session_id AND f.payload_json::jsonb->>'agentRunId'=r.id
+    AND f.payload_json::jsonb->>'authorizationDigest'=a.digest AND f.payload_json::jsonb->>'jobId'=j.job_id
+    AND f.payload_json::jsonb->'failedAtMs'=to_jsonb(f.at_ms)
+    AND length(btrim(f.payload_json::jsonb->>'leaseOwner'))>0)))
+ AND NOT EXISTS(SELECT 1 FROM runtime.runtime_events p WHERE p.event_id='agent_run_control_pending:'||r.id
+  AND (p.session_id IS DISTINCT FROM r.session_id OR p.task_id IS DISTINCT FROM r.id
+   OR p.event_type IS DISTINCT FROM 'runtime.agent_run.control_pending.v1' OR p.visibility IS DISTINCT FROM 'internal'
+   OR p.payload_json::jsonb->>'schema' IS DISTINCT FROM 'runtime.agent_run.control_pending.v1'
+   OR p.payload_json::jsonb->>'agentRunId' IS DISTINCT FROM r.id
+   OR p.payload_json::jsonb->>'authorizationDigest' IS DISTINCT FROM a.digest)))"#;
+
+fn control_candidates(stage: &str) -> String {
+    let queued = format!(
+        "j.status='queued' AND j.run_at_ms<=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND COALESCE(j.lease_reclaim_not_before_ms,j.run_at_ms)<=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND {PENDING} AND ({TERMINAL})=$2"
+    );
+    let eligible = if stage == "cleanup" {
+        format!("({queued}) OR (j.status IN('failed','dead_lettered') AND {RECOVERABLE_CLEANUP})")
+    } else {
+        queued
+    };
+    format!(
+        "j.job_kind='agent_run.lifecycle' AND ($1::text IS NULL OR j.job_id=$1) AND ({eligible})"
+    )
+}
+
+fn record_cleanup_recovery(
+    tx: &mut impl GenericClient,
+    id: &str,
+    owner: &str,
+    now: i64,
+) -> Result<(), String> {
+    let row = tx.query_one("SELECT r.id,r.workspace_id,r.session_id,a.digest,a.payload::text FROM runtime_jobs j JOIN public.app_core_agentrun r ON j.job_id='agent_run.lifecycle:'||r.id JOIN public.app_core_agentrunauthorization a ON a.agent_run_id=r.id WHERE j.job_id=$1", &[&id]).map_err(|e| e.to_string())?;
+    let run: String = row.get(0);
+    let workspace: String = row.get(1);
+    let session: String = row.get(2);
+    let digest: String = row.get(3);
+    let authorization: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
+        serde_json::from_str(&row.get::<_, String>(4)).map_err(|e| e.to_string())?;
+    if authorization.workspace_id != workspace || authorization.session_id != session {
+        return Err("cleanup recovery authorization binding mismatch".into());
+    }
+    authorization
+        .checked_binding(&run)?
+        .verify_digest_binding(&digest)?;
+    // A malformed pre-admission receipt never becomes cleanup authority merely
+    // because its event ID exists. This also rejects conflicting Session history.
+    super::pre_admission_failure::has_pre_admission_failure(
+        tx, &workspace, &session, &run, &digest,
+    )?;
+    mark_terminal_pending(tx, &run)?;
+    tx.execute("INSERT INTO runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) SELECT 'agent_run_cleanup_recovered:'||job_id||':'||$2::text,session_id,job_id,'runtime.agent_run.cleanup_recovered.v1',$3::bigint,'internal',json_build_object('schema','runtime.agent_run.cleanup_recovered.v1','agentRunId',$4::text,'jobId',job_id,'authorizationDigest',$5::text,'leaseOwner',$2::text,'previousStatus',status,'retryCount',retry_count,'maxRetries',max_retries,'previousError',last_error,'previousUpdatedAtMs',updated_at_ms,'recoveredAtMs',$3::bigint,'deadLetterIds',COALESCE((SELECT json_agg(dead_letter_id ORDER BY dead_letter_id) FROM dead_letters WHERE original_job_id=$1),'[]'::json))::text FROM runtime_jobs WHERE job_id=$1", &[&id,&owner,&now,&run,&digest]).map_err(|error| {
+        error.as_db_error().map_or_else(
+            || format!("record cleanup recovery failed: {error}"),
+            |cause| format!("record cleanup recovery failed: SQLSTATE={} cause={}", cause.code().code(), cause.message()),
+        )
+    })?;
+    Ok(())
 }
 
 pub(super) fn mark_terminal_pending(tx: &mut impl GenericClient, run: &str) -> Result<(), String> {
@@ -43,7 +121,7 @@ impl PostgresRuntimeStore {
             return Err("control stage invalid".into());
         }
         self.with_execution_control_client(|client| {
-            client.query_one(&format!("SELECT (SELECT count(*) FROM runtime_jobs WHERE job_kind='agent_run.lifecycle' AND status IN('leased','running') AND lease_purpose='control' AND lease_control_stage=$3)<2 AND EXISTS(SELECT 1 FROM runtime_jobs j WHERE {} )",control_candidates()),&[&None::<String>,&(stage=="cleanup"),&stage]).map(|row|row.get(0)).map_err(|e|e.to_string())
+            client.query_one(&format!("SELECT (SELECT count(*) FROM runtime_jobs WHERE job_kind='agent_run.lifecycle' AND status IN('leased','running') AND lease_purpose='control' AND lease_control_stage=$3)<2 AND EXISTS(SELECT 1 FROM runtime_jobs j WHERE {} )",control_candidates(stage)),&[&None::<String>,&(stage=="cleanup"),&stage]).map(|row|row.get(0)).map_err(|e|e.to_string())
         })
     }
     pub(crate) fn claim_control_jobs(
@@ -58,17 +136,22 @@ impl PostgresRuntimeStore {
         }
         self.with_execution_control_client(|client| {
             let mut tx=client.transaction().map_err(|e|e.to_string())?;
+            super::resource_commit::require_durable_resource_commit(&mut tx)?;
             if !tx.query_one("SELECT pg_try_advisory_xact_lock(731946,2)",&[]).map_err(|e|e.to_string())?.get::<_,bool>(0) { return Err("execution claim busy".into()); }
             let used=tx.query_one("SELECT count(*) FROM runtime_jobs WHERE job_kind='agent_run.lifecycle' AND status IN('leased','running') AND lease_purpose='control' AND lease_control_stage=$1", &[&stage]).map_err(|e|e.to_string())?.get::<_,i64>(0);
             let available=(2i64-used).max(0).min(req.limit as i64);
             if available==0 { return Ok(vec![]); }
-            let rows=tx.query(&format!("SELECT j.job_id FROM runtime_jobs j WHERE {} ORDER BY j.run_at_ms,j.created_at_ms,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT $3",control_candidates()), &[&req.job_id,&(stage=="cleanup"),&available]).map_err(|e|e.to_string())?;
+            let rows=tx.query(&format!("SELECT j.job_id,j.status FROM runtime_jobs j WHERE {} ORDER BY j.run_at_ms,j.created_at_ms,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT $3",control_candidates(stage)), &[&req.job_id,&(stage=="cleanup"),&available]).map_err(|e|e.to_string())?;
             let now=tx.query_one("SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",&[]).map_err(|e|e.to_string())?.get::<_,i64>(0);
             let until=now.saturating_add(i64::try_from(req.lease_ms).map_err(|_|"lease overflow")?);
             let mut jobs=vec![];
             for row in rows {
                 let id:String=row.get(0);
-                tx.execute("UPDATE runtime_jobs SET status='leased',lease_owner=gen_random_uuid()::text,lease_expires_at_ms=$2,heartbeat_at_ms=$3,updated_at_ms=$3,lease_purpose='control',lease_control_stage=$4 WHERE job_id=$1", &[&id,&until,&now,&stage]).map_err(|e|e.to_string())?;
+                let owner:String=tx.query_one("SELECT gen_random_uuid()::text", &[]).map_err(|e|e.to_string())?.get(0);
+                if row.get::<_,String>(1)!="queued" {
+                    record_cleanup_recovery(&mut tx,&id,&owner,now)?;
+                }
+                tx.execute("UPDATE runtime_jobs SET status='leased',lease_owner=$5,lease_expires_at_ms=$2,heartbeat_at_ms=$3,updated_at_ms=$3,lease_purpose='control',lease_control_stage=$4 WHERE job_id=$1", &[&id,&until,&now,&stage,&owner]).map_err(|e|e.to_string())?;
                 jobs.push(super::reliability::load_job(&mut tx,&id)?.ok_or("claimed control Job missing")?);
             }
             tx.commit().map_err(|e|e.to_string())?; Ok(jobs)

@@ -79,6 +79,7 @@ impl Default for PostgresConnectionLimits {
 
 pub(crate) mod allocation_origin;
 mod capacity_wait;
+pub(crate) mod cleanup_preservation;
 pub(crate) mod cleanup_receipts;
 pub(crate) mod controller_authority;
 mod creation_attempts;
@@ -103,6 +104,7 @@ mod schema;
 mod transactions;
 mod transcript;
 pub(crate) mod turn_supplement;
+pub(crate) mod workspace_snapshot_roots;
 
 #[derive(Clone)]
 pub struct PostgresRuntimeStore {

@@ -4,6 +4,7 @@ Lock order is Workspace → original membership → Session → Environment → 
 original grant → lifecycle job. Read-only Workspace/membership authorization uses
 FOR SHARE; mutable controller bindings remain exclusive. Every lock uses NOWAIT
 so contention rolls back the complete transaction before returning retryable busy.
+Snapshot preservation additionally locks Agent before Session to fence parent GC.
 The job lock only pins existing authority; this module never creates a lease.
 Callers must not enter with partial locks acquired in a different order.
 Public authority operations require an outermost transaction: they return only
@@ -14,7 +15,7 @@ import hashlib
 from django.conf import settings
 from django.db import DatabaseError, connection, transaction
 
-from .models import AgentRun, AgentRunAuthorization, AgentRunEnvironmentRelease, Session, SessionEnvironment, Workspace, WorkspaceMembership
+from .models import Agent, AgentRun, AgentRunAuthorization, AgentRunEnvironmentRelease, Session, SessionEnvironment, Workspace, WorkspaceMembership
 from .runtime_contract import agent_run_binding_matches, authorization_digest, verify_agent_run_authorization_signature
 from .resource_commit import require_durable_commit
 
@@ -43,7 +44,7 @@ def _authority(environment):
         "controllerPurpose": environment.controller_purpose}
 
 
-def _locked_binding(run_id, lease_owner, *, acquiring, lease_purpose=None):
+def _locked_binding(run_id, lease_owner, *, acquiring, lease_purpose=None, protect_session_owner=False):
     controller_lease_digest(lease_owner)
     initial = AgentRun.objects.only("session_id", "environment_id", "workspace_id", "membership_ref", "user_id").get(pk=run_id)
     # SHARE also conflicts with non-key status/role updates, while allowing
@@ -56,6 +57,10 @@ def _locked_binding(run_id, lease_owner, *, acquiring, lease_purpose=None):
         "SELECT * FROM app_core_workspacemembership WHERE id=%s AND workspace_id=%s "
         "AND user_id=%s AND role IN ('owner','admin','member') FOR SHARE NOWAIT",
         [initial.membership_ref, initial.workspace_id, initial.user_id])), None)
+    if protect_session_owner:
+        # Snapshot publication and permanent-owner GC serialize parent before child.
+        agent_id = Session.objects.values_list("agent_id", flat=True).get(pk=initial.session_id)
+        Agent.objects.select_for_update(nowait=True).get(pk=agent_id)
     session = Session.objects.select_for_update(of=("self",), nowait=True).get(pk=initial.session_id)
     environment = SessionEnvironment.objects.select_for_update(nowait=True).get(pk=initial.environment_id)
     run = AgentRun.objects.select_for_update(of=("self",), nowait=True).select_related("session__agent").get(pk=run_id)

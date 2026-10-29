@@ -308,10 +308,11 @@ class _WorkspaceSnapshotUpload:
     temporary_path: str
     validated: bool = False
     existing_verified: bool = False
+    publication_id: str | None = None
 
 
 @contextmanager
-def _workspace_snapshot_upload(storage_key: str):
+def _workspace_snapshot_upload(storage_key: str, *, body=None, agent_run=None, session=None):
     """Create directory entries while the owning active Session is locked."""
     if not storage_key:
         yield None
@@ -323,6 +324,9 @@ def _workspace_snapshot_upload(storage_key: str):
     )
     upload = _WorkspaceSnapshotUpload(descriptor, temporary_path)
     try:
+        if body is not None:
+            from app_core.workspace_snapshot_publication import register_upload
+            upload.publication_id = register_upload(session, agent_run, body, storage_key, temporary_path)
         yield upload
     finally:
         if upload.descriptor >= 0:
@@ -333,11 +337,14 @@ def _workspace_snapshot_upload(storage_key: str):
             # GC may unlink a purged owner's open temporary on POSIX.
             pass
         protection_observations.gauge("temporaryBytes", 0)
+        if upload.publication_id is not None:
+            from app_core.workspace_snapshot_publication import finish_upload
+            finish_upload(upload.publication_id)
 
 
 def _store_workspace_snapshot(
     request, candidate: dict, storage_key: str, upload: _WorkspaceSnapshotUpload | None,
-    body: dict,
+    body: dict, *, lock_workspace=None,
 ) -> None:
     protection_observations.increment("apiWrittenBytes", 0)
     if not candidate["snapshotSizeBytes"]:
@@ -345,7 +352,7 @@ def _store_workspace_snapshot(
         return
     reader = _WorkspaceSnapshotReader(request, candidate)
     if default_storage.exists(storage_key):
-        _verify_owned_workspace_snapshot(body, candidate, storage_key)
+        _verify_owned_workspace_snapshot(body, candidate, storage_key, lock_workspace=lock_workspace)
         while reader.read(64 * 1024):
             pass
         reader.require_complete()
@@ -381,6 +388,9 @@ def _link_workspace_snapshot(storage_key: str, upload: _WorkspaceSnapshotUpload 
         return True
     if upload is None or not upload.validated:
         raise RuntimeError("workspace snapshot upload was not validated")
+    if upload.publication_id is not None:
+        from app_core.workspace_snapshot_publication import require_upload_live
+        require_upload_live(upload.publication_id, storage_key)
     if upload.existing_verified:
         return True
     final_path = default_storage.path(storage_key)
@@ -395,26 +405,35 @@ def _link_workspace_snapshot(storage_key: str, upload: _WorkspaceSnapshotUpload 
 
 def _publish_workspace_snapshot(
     body: dict, candidate: dict, storage_key: str, upload: _WorkspaceSnapshotUpload | None,
-    *, advance_session: bool,
+    *, advance_session: bool, lock_workspace=None, record_commit=None, is_commit_replay=None,
 ) -> str:
     commit_pending = False
 
     def publish():
         nonlocal commit_pending
         with transaction.atomic():
-            agent_run, session, frozen = _locked_session_workspace_agent_run(body)
+            agent_run, session, frozen = (lock_workspace or _locked_session_workspace_agent_run)(body)
             replay = advance_session and _is_workspace_commit_replay(
                 session, candidate, agent_run, storage_key,
             )
+            if advance_session and not replay and is_commit_replay is not None:
+                replay = is_commit_replay(agent_run, session, candidate, storage_key)
             if advance_session and not replay:
                 _require_workspace_baseline(session, frozen)
             if not _link_workspace_snapshot(storage_key, upload):
                 return None
+            if upload is not None and upload.publication_id is not None:
+                from app_core.workspace_snapshot_publication import mark_published
+                mark_published(upload.publication_id, "committed" if advance_session else "staged")
             if not advance_session:
                 return "staged"
             if replay:
+                if record_commit is not None:
+                    record_commit(agent_run, session, candidate, storage_key)
                 return "idempotent"
             session.workspaceGeneration = candidate["generation"]
+            session.workspaceBaselineKnown = True
+            session.workspaceSnapshotEncoding = "frameV1"
             session.workspaceStorageKey = storage_key
             session.workspaceSnapshotSha256 = candidate["snapshotSha256"]
             session.workspaceSnapshotSizeBytes = candidate["snapshotSizeBytes"]
@@ -422,10 +441,12 @@ def _publish_workspace_snapshot(
             session.workspaceFileCount = candidate["fileCount"]
             session.workspaceLastAdvancedAgentRun = agent_run
             session.save(update_fields=[
-                "workspaceGeneration", "workspaceStorageKey", "workspaceSnapshotSha256",
-                "workspaceSnapshotSizeBytes", "workspaceExpandedSizeBytes", "workspaceFileCount",
+                "workspaceGeneration", "workspaceBaselineKnown", "workspaceStorageKey", "workspaceSnapshotSha256",
+                "workspaceSnapshotEncoding", "workspaceSnapshotSizeBytes", "workspaceExpandedSizeBytes", "workspaceFileCount",
                 "workspaceLastAdvancedAgentRun", "updatedAt",
             ])
+            if record_commit is not None:
+                record_commit(agent_run, session, candidate, storage_key)
             commit_pending = True
             return "committed"
 
@@ -437,7 +458,7 @@ def _publish_workspace_snapshot(
             if disposition is None:
                 # A concurrent immutable writer won the same key. Full verification
                 # happens without row locks; publication then rechecks all owner facts.
-                _verify_owned_workspace_snapshot(body, candidate, storage_key)
+                _verify_owned_workspace_snapshot(body, candidate, storage_key, lock_workspace=lock_workspace)
                 upload.existing_verified = True
                 disposition = publish()
         except BaseException:
@@ -453,14 +474,14 @@ def _publish_workspace_snapshot(
     return disposition
 
 
-def _verify_owned_workspace_snapshot(body: dict, candidate: dict, storage_key: str) -> None:
+def _verify_owned_workspace_snapshot(body: dict, candidate: dict, storage_key: str, *, lock_workspace=None) -> None:
     try:
         _verify_workspace_snapshot(candidate, storage_key)
     except FileNotFoundError:
         # Permanent deletion may reclaim an existing key during the unlocked
         # verification phase. Preserve the owner/lease conflict instead of 500.
         with transaction.atomic():
-            _locked_session_workspace_agent_run(body)
+            (lock_workspace or _locked_session_workspace_agent_run)(body)
         raise SessionWorkspaceError("session_workspace_snapshot_invalid") from None
 
 
@@ -700,6 +721,8 @@ def resolve_session_workspace(request):
         )
         with transaction.atomic():
             agent_run, session, frozen = _locked_session_workspace_agent_run(body)
+            if not session.workspaceBaselineKnown:
+                raise SessionWorkspaceError("session_workspace_baseline_unavailable")
             if _workspace_advanced_by_agent_run(session, frozen, agent_run):
                 disposition = "advanced"
                 resolved = session_workspace_for_session(session)
@@ -721,14 +744,23 @@ def resolve_session_workspace(request):
     )
 
 
+@_internal_post("/agent-runs/session-workspace/preserve")
+def preserve_session_workspace(request):
+    from app_core.session_workspace_preservation import preserve_session_workspace as preserve
+    return preserve(request)
+
+
 @_internal_post("/agent-runs/session-workspace/download")
 async def download_session_workspace(request):
     prepared = await _prepare_session_workspace_download(request)
     if isinstance(prepared, JsonResponse):
         return prepared
-    frozen, storage_key = prepared
+    frozen, storage_key, encoding = prepared
     async def authorized_open():
-        _frozen, handle = await _prepare_session_workspace_download(request, open_file=True)
+        _frozen, handle, current_encoding = await _prepare_session_workspace_download(request, open_file=True)
+        if current_encoding != encoding:
+            handle.close()
+            raise SessionWorkspaceError("session_workspace_baseline_conflict")
         return handle
 
     try:
@@ -747,6 +779,7 @@ async def download_session_workspace(request):
         return JsonResponse({"error": "session_workspace_download_failed"}, status=500)
     if response.status_code == 200:
         response["X-Content-Sha256"] = frozen["snapshotSha256"]
+        response["X-Workspace-Snapshot-Encoding"] = encoding
     return response
 
 
@@ -765,10 +798,13 @@ def _prepare_session_workspace_download(request, *, open_file=False):
             _require_workspace_baseline(session, frozen)
             if frozen["snapshotSizeBytes"] == 0 or not session.workspaceStorageKey:
                 raise SessionWorkspaceError("session_workspace_snapshot_empty")
+            encoding = session.workspaceSnapshotEncoding
+            if encoding not in {"frameV1", "tarZstdV1"}:
+                raise SessionWorkspaceError("session_workspace_encoding_invalid")
             if open_file:
                 handle = _open_workspace_snapshot_handle(session.workspaceStorageKey)
         transferred = True
-        return frozen, handle if open_file else session.workspaceStorageKey
+        return frozen, handle if open_file else session.workspaceStorageKey, encoding
     except SessionWorkspaceError as error:
         if open_file:
             raise
@@ -827,7 +863,8 @@ def commit_session_workspace(request):
                     and not _is_workspace_commit_replay(session, candidate, agent_run, storage_key)
                 ):
                     raise SessionWorkspaceError("session_workspace_baseline_conflict")
-                upload = uploads.enter_context(_workspace_snapshot_upload(storage_key))
+                upload = uploads.enter_context(_workspace_snapshot_upload(storage_key,
+                    body=body, agent_run=agent_run, session=session))
 
             _store_workspace_snapshot(request, candidate, storage_key, upload, body)
             disposition = _publish_workspace_snapshot(
@@ -868,8 +905,8 @@ def stage_execution_workspace(request):
         }
         with ExitStack() as uploads:
             with transaction.atomic():
-                agent_run, _session, _frozen = _locked_session_workspace_agent_run(body)
-                protection_observations.bind(sessionId=str(_session.id), runId=str(agent_run.id), jobId=body["jobId"])
+                agent_run, session, _frozen = _locked_session_workspace_agent_run(body)
+                protection_observations.bind(sessionId=str(session.id), runId=str(agent_run.id), jobId=body["jobId"])
                 if not _workspace_tmpfs_fits(agent_run, body["expandedSizeBytes"]):
                     raise SessionWorkspaceError("execution_workspace_stage_invalid", 400)
                 storage_key = ""
@@ -880,7 +917,8 @@ def stage_execution_workspace(request):
                         f"agent-runs/{agent_run.id}/execution-checkpoints/{checkpoint_key}/"
                         f"{candidate['snapshotSha256'].removeprefix('sha256:')}.snapshot"
                     )
-                upload = uploads.enter_context(_workspace_snapshot_upload(storage_key))
+                upload = uploads.enter_context(_workspace_snapshot_upload(storage_key,
+                    body=body, agent_run=agent_run, session=session))
             _store_workspace_snapshot(request, candidate, storage_key, upload, body)
             _publish_workspace_snapshot(
                 body, candidate, storage_key, upload, advance_session=False,
@@ -933,6 +971,8 @@ async def download_execution_workspace(request):
         return JsonResponse({"error": "execution_workspace_download_failed"}, status=500)
     if response.status_code == 200:
         response["X-Content-Sha256"] = body["snapshotSha256"]
+        # The immutable execution-workspace stage protocol accepts frameV1 only.
+        response["X-Workspace-Snapshot-Encoding"] = "frameV1"
     return response
 
 
@@ -950,8 +990,23 @@ def _prepare_execution_workspace_download(request, *, open_file=False):
             "execution_workspace_download_invalid",
         )
         require_opaque_ref("checkpointId", body["checkpointId"])
+        from app_core.workspace_snapshot_roots import (
+            WorkspaceRootsUnavailable, request_workspace_snapshot_roots, require_current_roots,
+        )
+        # Authenticate before the RPC, but retain no API row locks while Runtime
+        # replays Core's root selection. The final fence authenticates again.
         with transaction.atomic():
-            agent_run, _session, _frozen = _locked_session_workspace_agent_run(body)
+            _run, source_session, _frozen = _locked_session_workspace_agent_run(body)
+        try:
+            roots = request_workspace_snapshot_roots(source_session)
+        except WorkspaceRootsUnavailable:
+            raise SessionWorkspaceError("execution_workspace_roots_unavailable", 503) from None
+        with transaction.atomic():
+            agent_run, session, _frozen = _locked_session_workspace_agent_run(body)
+            try:
+                require_current_roots(session, roots)
+            except WorkspaceRootsUnavailable:
+                raise SessionWorkspaceError("execution_workspace_roots_changed") from None
             snapshot = _recovery_checkpoint_workspace(body, agent_run)
             body.update(snapshot)
             object_ref_prefix = (
@@ -972,6 +1027,10 @@ def _prepare_execution_workspace_download(request, *, open_file=False):
                 or not default_storage.exists(body["objectRef"])
             ):
                 raise SessionWorkspaceError("execution_workspace_download_invalid", 400)
+            selected = {"agentRunId":agent_run.pk,"authorizationDigest":body["authorizationDigest"],
+                "checkpointId":body["checkpointId"],**snapshot}
+            if selected not in roots["roots"]:
+                raise SessionWorkspaceError("execution_workspace_checkpoint_unreachable")
             if open_file:
                 handle = _open_workspace_snapshot_handle(body["objectRef"])
         transferred = True

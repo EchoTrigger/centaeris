@@ -284,79 +284,154 @@ fn teardown_owned_tasks(
             )
         }
     };
-    let receipt = match state.job_store.with_cleanup_authority(
-        &CleanupAuthorityRequest {
-            cleanup: &cleanup,
-            signing_key: signing_key.as_bytes(),
-            lease: &lease,
-            host_id: &host_id,
-        },
-        crate::resident_capacity::FilteredResidentInventory(
-            |preparing: &[crate::resident_capacity::PreparingResidentSandbox]| {
-                #[cfg(test)]
-                if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
-                    return crate::native_consumption_tests::owned_inventory();
-                }
-                crate::docker_execution_host::observed_resident_sandboxes_excluding(preparing)
-            },
-        ),
-        |target, verified| match target {
-            CleanupTarget::NeverAllocated
-            | CleanupTarget::Destroyed { .. }
-            | CleanupTarget::Unmaterialized { .. } => {
-                Ok(crate::postgres_store::cleanup_receipts::CleanupPhysicalResult::Retained)
-            }
-            CleanupTarget::Instance {
-                allocation,
-                resources,
-                origin_authorization,
-            } => {
-                let fence = EnvironmentTaskFence {
-                    environment_instance_id: allocation.instance_id.clone(),
-                    controller_owner: EnvironmentTaskOwner::AgentRun {
-                        run_id: cleanup.agent_run_id.clone(),
-                    },
-                    controller_epoch: verified
-                        .controller_epoch
-                        .try_into()
-                        .map_err(|_| "cleanup epoch invalid")?,
-                    controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
+    let authority = CleanupAuthorityRequest {
+        cleanup: &cleanup,
+        signing_key: signing_key.as_bytes(),
+        lease: &lease,
+        host_id: &host_id,
+    };
+    let inventory = |preparing: &[crate::resident_capacity::PreparingResidentSandbox]| {
+        #[cfg(test)]
+        if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
+            return crate::native_consumption_tests::owned_inventory();
+        }
+        crate::docker_execution_host::observed_resident_sandboxes_excluding(preparing)
+    };
+    #[cfg(test)]
+    let native_fixture = crate::native_consumption_tests::owns_run(&cleanup.agent_run_id);
+    #[cfg(not(test))]
+    let native_fixture = false;
+    let recovered = if cleanup.environment_authorization.payload.execution_mode == "perRun"
+        && !native_fixture
+        && crate::docker_execution_host::OciRuntime::from_environment()?
+            == crate::docker_execution_host::OciRuntime::Runsc
+    {
+        state
+            .job_store
+            .with_cleanup_target(
+                &authority,
+                crate::resident_capacity::FilteredResidentInventory(inventory),
+                |target, _| crate::docker_execution_host::stopped_recovery::prepare(target),
+            )
+            .and_then(|prepared| {
+                prepared
+                    .map(|prepared| {
+                        let api_url = env::var("API_INTERNAL_URL")
+                            .map_err(|_| "API_INTERNAL_URL is required")?;
+                        let api_token = env::var("INTERNAL_API_TOKEN")
+                            .map_err(|_| "INTERNAL_API_TOKEN is required")?;
+                        prepared.publish(&api_url, &api_token, &cleanup, &lease)
+                    })
+                    .transpose()
+            })
+    } else {
+        Ok(None)
+    };
+    let recovery = match recovered {
+        Ok(value) => value,
+        Err(error) => {
+            failure_diagnostics::report_cleanup(
+                &cleanup.agent_run_id,
+                "teardown_workspace_preservation",
+                &error,
+            );
+            return cleanup_failure_response(&error);
+        }
+    };
+    let physical_cleanup =
+        |target: &CleanupTarget,
+         verified: &crate::postgres_store::controller_authority::VerifiedOriginalGrant| {
+            if let Some(recovery) = recovery.as_ref() {
+                let CleanupTarget::Instance {
+                    allocation,
+                    origin_authorization,
+                    ..
+                } = target
+                else {
+                    return Err("cleanup_recovery_target_changed".into());
                 };
-                let per_run = cleanup.environment_authorization.payload.execution_mode == "perRun";
-                #[cfg(test)]
-                if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
-                    return crate::native_consumption_tests::cleanup_owned_physical_execution(
-                        allocation, *resources, &fence, per_run,
-                    );
-                }
-                // A prior release may have completed before its final DB receipt.
-                // Only the exact recorded container's independent absence closes it.
-                if per_run
-                    && allocation
-                        .container_id
-                        .as_deref()
-                        .is_some_and(|id| matches!(crate::docker_engine::inspect(id), Ok(None)))
-                {
-                    return crate::docker_execution_host::remove_cleaned_environment(allocation);
-                }
-                retained_cleanup::confirm_run_cleanup(
-                    &retained_cleanup::DockerCleanupHost {
-                        cleanup: &cleanup,
-                        lease: &lease,
-                        allocation,
-                        resources: *resources,
-                        origin_authorization: origin_authorization.as_ref(),
-                    },
-                    &fence,
-                )?;
-                if per_run {
-                    crate::docker_execution_host::remove_cleaned_environment(allocation)
-                } else {
+                return crate::docker_execution_host::runsc_power::remove_stopped_after_preservation(
+                allocation, &origin_authorization.environment_profile, || match &recovery.evidence {
+                    crate::postgres_store::cleanup_preservation::CleanupRecoveryEvidence::Preserved { .. } => Ok(()),
+                    crate::postgres_store::cleanup_preservation::CleanupRecoveryEvidence::Absent => Err("stopped_workspace_preservation_required".into()),
+                },
+            );
+            }
+            match target {
+                CleanupTarget::NeverAllocated
+                | CleanupTarget::Destroyed { .. }
+                | CleanupTarget::Unmaterialized { .. } => {
                     Ok(crate::postgres_store::cleanup_receipts::CleanupPhysicalResult::Retained)
                 }
+                CleanupTarget::Instance {
+                    allocation,
+                    resources,
+                    origin_authorization,
+                } => {
+                    let fence = EnvironmentTaskFence {
+                        environment_instance_id: allocation.instance_id.clone(),
+                        controller_owner: EnvironmentTaskOwner::AgentRun {
+                            run_id: cleanup.agent_run_id.clone(),
+                        },
+                        controller_epoch: verified
+                            .controller_epoch
+                            .try_into()
+                            .map_err(|_| "cleanup epoch invalid")?,
+                        controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
+                    };
+                    let per_run =
+                        cleanup.environment_authorization.payload.execution_mode == "perRun";
+                    #[cfg(test)]
+                    if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
+                        return crate::native_consumption_tests::cleanup_owned_physical_execution(
+                            allocation, *resources, &fence, per_run,
+                        );
+                    }
+                    // A prior release may have completed before its final DB receipt.
+                    // Only the exact recorded container's independent absence closes it.
+                    if per_run
+                        && allocation
+                            .container_id
+                            .as_deref()
+                            .is_some_and(|id| matches!(crate::docker_engine::inspect(id), Ok(None)))
+                    {
+                        return crate::docker_execution_host::remove_cleaned_environment(
+                            allocation,
+                        );
+                    }
+                    retained_cleanup::confirm_run_cleanup(
+                        &retained_cleanup::DockerCleanupHost {
+                            cleanup: &cleanup,
+                            lease: &lease,
+                            allocation,
+                            resources: *resources,
+                            origin_authorization: origin_authorization.as_ref(),
+                        },
+                        &fence,
+                    )?;
+                    if per_run {
+                        crate::docker_execution_host::remove_cleaned_environment(allocation)
+                    } else {
+                        Ok(crate::postgres_store::cleanup_receipts::CleanupPhysicalResult::Retained)
+                    }
+                }
             }
-        },
-    ) {
+        };
+    let result = if let Some(recovery) = recovery.as_ref() {
+        state.job_store.with_recovery_cleanup_authority(
+            &authority,
+            crate::resident_capacity::FilteredResidentInventory(inventory),
+            recovery,
+            physical_cleanup,
+        )
+    } else {
+        state.job_store.with_cleanup_authority(
+            &authority,
+            crate::resident_capacity::FilteredResidentInventory(inventory),
+            physical_cleanup,
+        )
+    };
+    let receipt = match result {
         Ok(receipt) => receipt,
         Err(error) => {
             failure_diagnostics::report_cleanup(

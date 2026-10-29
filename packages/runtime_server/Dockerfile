@@ -12,6 +12,7 @@ COPY packages/runtime_sqlite packages/runtime_sqlite
 COPY packages/hosted_execution packages/hosted_execution
 COPY packages/runtime_server packages/runtime_server
 COPY packages/api/app_core/contracts packages/api/app_core/contracts
+COPY packages/api/app_core/workspace_snapshot_gc_witness.sql packages/api/app_core/workspace_snapshot_gc_witness.sql
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked cargo build --release --locked -p runtime_server
 
 FROM debian:12.11-slim@sha256:b1a741487078b369e78119849663d7f1a5341ef2768798f7b7406c4240f86aef

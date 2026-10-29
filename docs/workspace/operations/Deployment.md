@@ -33,8 +33,9 @@ ceiling. Host-derived memory headroom and conservative unknown-allocation charge
 remain active, so eight concurrent environments are not guaranteed on every host.
 `DOCKER_CREATE_CONCURRENCY=2` bounds create calls per Runtime process.
 
-Use the matching HostSupervisor with cgroup v2 and an OverlayFS-backed Docker
-store, with automatic idle pause and demand resume enabled. The running limit
+OverlayFS-backed Docker storage is required. Runtime refuses to start on `vfs`,
+a missing backend, or any unsupported storage driver. Use the matching
+HostSupervisor with cgroup v2, automatic idle pause, and demand resume enabled. The running limit
 is 8 and idle grace is 3000 ms, matching the accepted eight-environment profile.
 Pause eligibility requires released controller authority and no queued demand;
 it does not pause an active Run merely because the model is waiting. Pausing
@@ -45,6 +46,19 @@ with the containerd image store or `overlay2` with the classic image store. Chec
 docker info --format '{{.Driver}} {{.CgroupVersion}}'
 ```
 
+For runsc, the registered Docker runtime must also contain exactly one explicit
+`--overlay2=none` argument in `runtimeArgs`. Keep its other required runtime
+arguments. Runtime rejects missing or conflicting overlay arguments at startup.
+gVisor's default `--overlay2=root:self` keeps guest writes in a separate overlay;
+Docker's filesystem archive can then expose an empty or stale lower view instead
+of those writes. See [gVisor filesystem configuration](https://gvisor.dev/docs/user_guide/filesystem/).
+
+New environments record `centaeris.workspace_backing=dockerOverlayfs` under this
+validated policy. Stopped workspace export requires that original creation marker.
+A daemon configuration change does not prove the backing of an older container,
+and must not be used to add the marker retroactively. Legacy recovery requires
+an independently committed Session snapshot when its guest writes cannot be read.
+Direct runc execution does not use gVisor overlay arguments.
 The application does not select or migrate Docker storage. A host using `vfs`
 needs a separately planned storage transition; do not change its storage driver
 in place during an application rollout. Explicit runc deployments must disable

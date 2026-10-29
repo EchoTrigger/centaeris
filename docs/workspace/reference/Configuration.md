@@ -269,6 +269,12 @@ values for both runsc scheduling variables. Runtime selection accepts exactly `r
 invalid or unregistered selection fails rather than falling back. Existing
 private `.env` values are not replaced when the default changes.
 
+The Docker `runsc` registration must explicitly include exactly one
+`--overlay2=none` runtime argument. This makes guest workspace writes reach the
+Docker OverlayFS layer used by stopped-instance preservation. Missing, duplicate,
+or conflicting overlay arguments fail Runtime startup. New instances carry a
+fixed workspace-backing marker; existing containers are not relabeled. This
+runsc setting does not apply to direct `runc` execution.
 `RUNTIME_EXECUTION_RECOVERY_MAX_ATTEMPTS` defaults to 5 replacement preparation
 attempts per AgentRun; the initial execution is excluded. Each attempt is recorded
 under the current lifecycle lease before preparing a replacement. A failed

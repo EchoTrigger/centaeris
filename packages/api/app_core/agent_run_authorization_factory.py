@@ -23,6 +23,8 @@ def create_agent_run_authorization(
             raise ValueError("AgentRun WorkspaceMembership is no longer current")
         if not agent_run_environment_matches(agent_run):
             raise ValueError("AgentRun environment binding mismatch")
+        if not agent_run.session.workspaceBaselineKnown:
+            raise ValueError("session_workspace_baseline_unavailable")
         from .environment_profile import freeze_run_environment_profile
         freeze_run_environment_profile(agent_run, image_digest)
         authorization_id = new_agent_run_authorization_id()

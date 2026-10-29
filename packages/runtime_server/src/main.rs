@@ -13,6 +13,7 @@ mod contract;
 mod deferred_input_resolver;
 mod docker_engine;
 mod docker_execution_host;
+mod docker_storage;
 mod environment_authorization;
 mod environment_stdio;
 mod environment_supervisor;

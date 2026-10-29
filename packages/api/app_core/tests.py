@@ -1348,6 +1348,12 @@ class ApiVerticalSliceTests(TransactionTestCase):
                     json.dumps(checkpoint, separators=(",", ":")),
                 ],
             )
+        workspace_roots = {"schema":"runtime.workspace_snapshot.roots.v1",
+            "sessionId":session.pk,"sessionSequence":1,"authorityFingerprint":"sha256:"+"a"*64,
+            "protectedAgentRunIds":[agent_run.pk],"roots":[{"agentRunId":agent_run.pk,
+                "authorizationDigest":authorization.digest,"checkpointId":checkpoint_id,**staged_snapshot}]}
+        self.enterContext(patch("app_core.workspace_snapshot_roots.request_workspace_snapshot_roots",return_value=workspace_roots))
+        self.enterContext(patch("app_core.workspace_snapshot_roots.current_witness",return_value=(1,"sha256:"+"a"*64)))
         recovered = self.client.post(
             "/internal/agent-runs/execution-workspace/download",
             data=json.dumps(
@@ -1363,6 +1369,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(streaming_response_bytes(recovered), snapshot)
 
         reused_checkpoint_id = "checkpoint:workspace-api-test-reused"
+        workspace_roots["roots"].append({"agentRunId":agent_run.pk,"authorizationDigest":authorization.digest,
+            "checkpointId":reused_checkpoint_id,**staged_snapshot})
         reused_checkpoint = checkpoint | {
             "checkpointId": reused_checkpoint_id,
             "modelRequestId": "request_test_reused",

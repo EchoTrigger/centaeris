@@ -1793,6 +1793,7 @@ impl PostgresSessionLog {
                     &[&super::pre_admission_failure::event_id(agent_run_id), &self.session_id, &agent_run_id,
                         &super::pre_admission_failure::SCHEMA, &failed_at_ms, &payload]).map_err(|e| e.to_string())?;
             }
+            super::lifecycle_control::mark_terminal_pending(&mut tx, agent_run_id)?;
             tx.commit().map_err(|e| e.to_string())
         })
         })
@@ -2183,7 +2184,7 @@ impl PostgresSessionLog {
                     let stored: Option<String> = tx.query_one("SELECT wait_handoff_json FROM runtime.checkpoints WHERE checkpoint_id=$1 FOR UPDATE", &[&checkpoint.checkpoint_id]).map_err(|e|e.to_string())?.get(0);
                     match stored {
                         Some(value) if value != serialized => {
-                            return Err("wait handoff idempotency conflict".into())
+                            return Err("wait handoff idempotency conflict".into());
                         }
                         Some(_) => {}
                         None => {

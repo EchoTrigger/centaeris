@@ -858,6 +858,42 @@ Cancellation during opening, unused responses and response-construction failures
 close the handle and release capacity. Later requests against a deleted Session
 remain unavailable; they never select another Session or replacement file.
 
+A private Session baseline-authority marker distinguishes a new, known-empty
+workspace from an old descriptor with missing evidence. Forward migration marks
+only previously committed generations as known. An unknown baseline cannot
+authorize a new empty instance or resolve as `empty`; neither Run counts nor
+current environment defaults reconstruct missing history. Explicit Session
+workspace commits, including empty commits, record authoritative baseline state.
+
+`runtime.session_workspace.preserve.v1` accepts the existing framed snapshot
+stream under a current terminal cleanup controller and lifecycle lease. Runtime
+separately proves that the exact allocation is stopped and exports its readable
+workspace without starting the guest. The API revalidates the original signed
+grant, exact allocation and resident identity, profile, active owner and cleanup
+authority before and after streaming. Its baseline must equal the cleanup Run's
+signed baseline, and publication uses the ordinary Session generation CAS and
+snapshot paths. It cannot rebase an old root onto a newer committed head.
+
+The head advance and immutable preservation receipt commit in one durable
+transaction. The receipt binds the Run and originating grant, exact physical
+target, baseline, committed descriptor and encoding; its creator lease and epoch are audit
+facts. A later valid cleanup lease can replay the same receipt. A replay after
+a newer head advance returns the original proof without changing that head.
+The receipt does not grant guest execution or provide an additional archive.
+Physical removal must independently revalidate current cleanup authority and
+the exact stopped target against the durable proof.
+
+Both ordinary commit and preservation accept the existing frame reader, so each
+new head records `frameV1` atomically, including a transition from an older
+`tarZstdV1` head to an explicitly empty workspace. Prior objects and signatures
+retain their original bytes and metadata.
+
+Successful workspace downloads return `X-Workspace-Snapshot-Encoding` with the
+exact value `frameV1` or `tarZstdV1`. Session downloads use the locked current
+head encoding and recheck it when opening storage; execution downloads use their
+immutable frame-stage contract. The response preserves stored bytes, SHA-256 and
+size. Runtime validates the encoding before preparing the helper frame stream.
+
 `gc_deleted_resources` also collects local workspace bytes of Sessions with
 `status=deleted` and a non-null `purgedAt`. Both the purge time and the file mtime
 must precede its cutoff, which defaults to 30 days. It enumerates outside the
@@ -865,17 +901,49 @@ transaction, then rechecks the locked owner before unlinking each exact key.
 Only canonical Session snapshot generations, checkpoint keys of AgentRuns owned
 by that Session, and this uploader's temporary-name format are eligible. It
 rejects symlinks/reparse points and reports unknown Run directories as blocked.
-Active Sessions, restorable trash, unrelated names and directory entries remain.
-This collector neither reads nor changes Runtime checkpoint tables. It reclaims
-purged-owner payloads, not active-owner orphans or all filesystem metadata.
+Unrelated names and directory entries remain. Retained active Sessions and
+restorable trash use a separate reachability pass with the same cutoff grace.
+Its roots are the current Session head, frozen baselines of Runtime-protected
+canonical Runs, Core-selected recovery/wait checkpoint objects, and exact
+preservation receipts while physical or canonical cleanup responsibility remains.
+Settled historical grants and receipts do not keep every older payload alive.
+An unknown legacy baseline blocks this retained-owner pass.
+
+Runtime selects recovery roots through `runtime.workspace_snapshot.roots.v1`.
+The API requests this manifest outside owner locks. Runtime and API use the same
+packaged SQL witness to compare Session high-water and a SHA256 fingerprint of
+authoritative relational state. The API then locks Agent before Session, pins
+canonical Job ownership, checks the witness again, and recomputes current API
+roots and publication ownership. A changed witness aborts that plan. The API
+does not reproduce Core's checkpoint-selection policy. Historical recovery
+downloads likewise require a currently selected root and a current witness.
+
+Each upload durably registers its temporary and final keys before streaming.
+A current valid canonical Job lease protects these bytes regardless of age,
+including the interval before a checkpoint reference commits. Unregistered
+legacy keys also retain live ownership protection. After grace and loss of
+ownership, GC records a collected publication incarnation under the owner lock
+before unlinking. Final publication checks its captured token, including replay
+and immutable-name collisions, so a late upload cannot undo that decision.
+
+A fresh authenticated upload with a valid signed baseline may reintroduce the
+same content at the same key with a new random publication token. It rearms
+cleanup retry state for that incarnation; older upload and GC tokens remain
+invalid. Retry claims and completion updates compare the token, and exact unlink
+rechecks it under the owner lock. Expired upload rows and absent collected
+temporary-object metadata retire after grace; current references do not need to
+retain every historical upload request.
+
+The collector reads Runtime facts only for witness and liveness checks; Core owns
+the recovery root selection, and GC does not modify Runtime checkpoint history.
 Dry-run reports keys without deletion; missing keys are idempotent, and other
 failures are reported and make the command fail for retry.
 
-The first deployment enabling this collector must replace every API writer and
-drain requests served by the old upload implementation before starting the new
-GC worker. An old writer can otherwise create a final name after purge. No schema
-migration is required; existing canonical objects of purged Sessions are eligible
-under the same cutoff. Remote object storage needs a separate version-aware
+Enabling reachability collection requires the publication-registry migration,
+the matching Runtime root/witness implementation, replacement of every API
+writer, and draining requests served by the old upload implementation before
+starting the new GC worker. Existing unregistered canonical objects acquire an
+incarnation fence when selected. Remote object storage needs a separate version-aware
 collector and cannot use this local-file implementation.
 
 Input batch resolvers live for one request. They reuse only a verified snapshot

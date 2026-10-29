@@ -1,3 +1,4 @@
+mod cleanup_preservation_tests;
 use super::*;
 use crate::contract::AgentRunCleanup;
 use crate::postgres_store::cleanup_receipts::{
@@ -60,6 +61,142 @@ fn postgres_cleanup_preflight_pins_authority_before_other_terminal_side_effects(
     assert!(store
         .check_cleanup_authority(&cleanup, KEY, &r.fence)
         .is_err());
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL cleanup database"]
+fn postgres_cleanup_target_capture_pins_exact_authority_without_acknowledging_cleanup() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (url, store, mut db) = setup();
+    let mut r = run(&store, &mut db, "run-capture-cleanup", 1);
+    let physical = Arc::new(Mutex::new(Vec::new()));
+    let allocation = prepare(&store, &r, "execution-capture", &physical).unwrap();
+    let cleanup = terminal(&mut db, &mut r, false);
+    let resident_before: String = db
+        .query_one(
+            "SELECT (to_jsonb(s)-'updated_at_ms')::text FROM runtime.resident_sandboxes s",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    let controller_before: String = db
+        .query_one(
+            "SELECT row_to_json(e)::text FROM public.app_core_sessionenvironment e",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    let captured = AtomicBool::new(false);
+    store.with_cleanup_target(&CleanupAuthorityRequest {
+        cleanup:&cleanup, signing_key:KEY, lease:&r.fence, host_id:"host",
+    }, || Ok(physical.lock().unwrap().clone()), |target, verified| {
+        let CleanupTarget::Instance { allocation:target, .. } = target else { panic!("capture needs exact resident target") };
+        assert_eq!(target.instance_id, allocation.instance_id);
+        assert_eq!(target.container_id, allocation.container_id);
+        assert_eq!(verified.authorization_digest, cleanup.authorization_digest);
+        let mut observer = Client::connect(&url, NoTls).unwrap();
+        assert!(observer.query_one("SELECT pg_try_advisory_lock(731946,3)",&[]).unwrap().get::<_,bool>(0), "archive capture must release the global host preparation lock");
+        assert!(observer.query_one("SELECT pg_advisory_unlock(731946,3)",&[]).unwrap().get::<_,bool>(0));
+        assert!(observer.batch_execute("SELECT id FROM public.app_core_session WHERE id='sess_1' FOR UPDATE NOWAIT").is_err(), "capture retains Session authority pins");
+        assert!(observer.batch_execute("SELECT execution_id FROM runtime.resident_sandboxes FOR UPDATE NOWAIT").is_err(), "capture retains exact resource responsibility pins");
+        captured.store(true, Ordering::SeqCst);
+        Ok(())
+    }).unwrap();
+    assert!(captured.load(Ordering::SeqCst));
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.agent_run_cleanup_receipts",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
+        0,
+        "archive capture alone cannot acknowledge cleanup"
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT (to_jsonb(s)-'updated_at_ms')::text FROM runtime.resident_sandboxes s",
+            &[]
+        )
+        .unwrap()
+        .get::<_, String>(0),
+        resident_before
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT row_to_json(e)::text FROM public.app_core_sessionenvironment e",
+            &[]
+        )
+        .unwrap()
+        .get::<_, String>(0),
+        controller_before
+    );
+    db.batch_execute("SELECT id FROM public.app_core_session WHERE id='sess_1' FOR UPDATE NOWAIT")
+        .unwrap();
+    let mut stale = r.fence.clone();
+    stale.lease_owner = "stale-capture-owner".into();
+    assert!(store
+        .with_cleanup_target(
+            &CleanupAuthorityRequest {
+                cleanup: &cleanup,
+                signing_key: KEY,
+                lease: &stale,
+                host_id: "host",
+            },
+            || Ok(physical.lock().unwrap().clone()),
+            |_, _| -> Result<(), String> {
+                panic!("stale capture lease cannot read physical target")
+            }
+        )
+        .is_err());
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL cleanup database"]
+fn postgres_cleanup_recovery_capture_observes_prior_resident_despite_unstarted_paused_shortcut() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = setup();
+    let origin = run(&store, &mut db, "prior-paused-origin", 1);
+    let physical = Arc::new(Mutex::new(Vec::new()));
+    let allocation = prepare(&store, &origin, "prior-paused-allocation", &physical).unwrap();
+    db.execute("INSERT INTO runtime.runsc_environment_power(environment_id,host_id,allocation_execution_id,instance_id,container_id,state,controller_epoch,idle_since_ms,updated_at_ms) VALUES('environment','host',$1,$2,$3,'paused',1,0,0)", &[&allocation.allocation_execution_id,&allocation.instance_id,&allocation.container_id]).unwrap();
+    let mut current = run(&store, &mut db, "unstarted-recovery-controller", 2);
+    let cleanup = terminal(&mut db, &mut current, true);
+    let request = CleanupAuthorityRequest {
+        cleanup: &cleanup,
+        signing_key: KEY,
+        lease: &current.fence,
+        host_id: "host",
+    };
+    store.with_cleanup_target(&request, || Ok(physical.lock().unwrap().clone()), |target,_| {
+        let CleanupTarget::Instance { allocation:observed,.. } = target else {
+            return Err("recovery capture must inspect original resident rather than trust persisted paused state".into());
+        };
+        assert_eq!(observed.instance_id,allocation.instance_id);
+        assert_eq!(observed.container_id,allocation.container_id);
+        Ok(())
+    }).unwrap();
+    let receipt = store
+        .with_cleanup_authority(
+            &request,
+            || Ok(physical.lock().unwrap().clone()),
+            |target, _| {
+                assert!(
+                    matches!(target, CleanupTarget::NeverAllocated),
+                    "ordinary unstarted Run-only cleanup must retain the paused origin"
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(receipt.allocation, CleanupAllocation::NeverAllocated {});
+    assert_eq!(physical.lock().unwrap().len(), 1);
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
 }
 
 #[test]

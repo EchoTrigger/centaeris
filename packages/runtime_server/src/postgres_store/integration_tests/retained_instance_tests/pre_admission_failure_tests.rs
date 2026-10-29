@@ -47,6 +47,7 @@ fn postgres_pre_admission_failed_producer_commits_control_receipt_without_histor
             .get::<_, i64>(0),
         0
     );
+    assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_events WHERE event_id='agent_run_control_pending:'||$1", &[&start.agent_run_id]).unwrap().get::<_,i64>(0), 1, "terminal failure must retain durable cleanup intent in the same transaction");
     assert_eq!(
         crate::load_existing_terminal_state(&store, &start).unwrap(),
         Some("failed")

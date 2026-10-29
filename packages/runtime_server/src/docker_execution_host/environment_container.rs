@@ -2,6 +2,9 @@
 use super::*;
 use crate::agent_run_authorization::EnvironmentProfile;
 
+pub(super) const WORKSPACE_BACKING_LABEL: &str = "centaeris.workspace_backing";
+pub(super) const WORKSPACE_BACKING_DOCKER_OVERLAYFS: &str = "dockerOverlayfs";
+
 pub(super) const HELPER_DESTINATION: &str = super::AGENT_BINARY;
 
 pub(super) fn create_body(
@@ -41,6 +44,7 @@ pub(super) fn create_body_with_proxy_environment(
         "centaeris.environment_profile_digest":profile.digest()?,
         "centaeris.data_budget":profile.resources.data_tmpfs_bytes.to_string(),
     });
+    labels[WORKSPACE_BACKING_LABEL] = serde_json::json!(WORKSPACE_BACKING_DOCKER_OVERLAYFS);
     if let centaeris_core::execution::EnvironmentTaskOwner::AgentRun { run_id } = &owner {
         labels["centaeris.agent_run_id"] = serde_json::json!(run_id);
     }
@@ -245,7 +249,22 @@ mod tests {
         )
         .expect("runsc must accept the same signed environment profile");
         assert_eq!(body["HostConfig"]["Runtime"], "runsc");
+        assert_eq!(
+            body["Labels"][WORKSPACE_BACKING_LABEL],
+            WORKSPACE_BACKING_DOCKER_OVERLAYFS
+        );
         assert_eq!(body["Image"], profile.image_digest);
+        let mut facts = serde_json::json!({"Id":"physical","Image":body["Image"],"Config":body,"HostConfig":body["HostConfig"]});
+        crate::docker_engine::verify_created(&facts, &body)
+            .expect("new backing policy matches created configuration");
+        facts["Config"]["Labels"]
+            .as_object_mut()
+            .unwrap()
+            .remove(WORKSPACE_BACKING_LABEL);
+        assert!(
+            crate::docker_engine::verify_created(&facts, &body).is_err(),
+            "an old unlabeled container cannot be adopted as host-backed"
+        );
         assert_eq!(body["User"], profile.user);
         assert_eq!(body["HostConfig"]["CapDrop"], serde_json::json!(["ALL"]));
         assert_eq!(body["HostConfig"]["Mounts"][0]["ReadOnly"], true);
@@ -315,6 +334,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(body["Image"], profile.image_digest);
+        let mut facts = serde_json::json!({"Id":"physical","Image":body["Image"],"Config":body,"HostConfig":body["HostConfig"]});
+        crate::docker_engine::verify_created(&facts, &body)
+            .expect("new backing policy matches created configuration");
+        facts["Config"]["Labels"]
+            .as_object_mut()
+            .unwrap()
+            .remove(WORKSPACE_BACKING_LABEL);
+        assert!(
+            crate::docker_engine::verify_created(&facts, &body).is_err(),
+            "an old unlabeled container cannot be adopted as host-backed"
+        );
         assert_eq!(body["WorkingDir"], "/");
         assert_eq!(body["Env"][0], "CENTAERIS_WORKSPACE_ROOT=/app");
         assert_eq!(body["Env"][1], "CENTAERIS_WORKSPACE_USER=0:0");
@@ -441,6 +471,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(body["HostConfig"]["Runtime"], "runsc");
+        assert_eq!(
+            body["Labels"][WORKSPACE_BACKING_LABEL],
+            WORKSPACE_BACKING_DOCKER_OVERLAYFS
+        );
         assert_eq!(body["HostConfig"]["Memory"], profile.resources.memory_bytes);
         let mut file = fs::OpenOptions::new()
             .write(true)

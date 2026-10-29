@@ -8,6 +8,10 @@ mod retained_commands;
 pub(crate) mod runsc_power;
 pub(crate) mod shared_inventory;
 mod snapshot_capture;
+mod stopped_preservation;
+pub(crate) mod stopped_recovery;
+mod stopped_workspace;
+mod workspace_restore;
 pub(crate) use maintenance::{
     maintenance_helper, maintenance_task, observe_environment, provision_environment,
     remove_cleaned_environment,
@@ -768,12 +772,14 @@ impl DockerExecutionHostRunner {
         let oci_runtime = OciRuntime::from_environment()?;
         let runtime_name = oci_runtime.docker_runtime_name();
         let info = crate::docker_engine::info()?;
+        crate::docker_storage::require_overlayfs(info["Driver"].as_str())?;
         let runtimes = &info["Runtimes"];
         if runtimes.get(runtime_name).is_none() {
             return Err(format!(
                 "configured OCI runtime is unavailable: {runtime_name}"
             ));
         }
+        crate::docker_storage::require_workspace_backing(runtime_name, &runtimes[runtime_name])?;
         Ok(())
     }
 
@@ -1064,20 +1070,9 @@ impl DockerExecutionHostRunner {
             )
             .map_err(SessionWorkspaceApiError::Rejected)?;
             let capture = self.restore_activity()?;
-            artifact
-                .file
-                .rewind()
-                .map_err(|error| SessionWorkspaceApiError::Unavailable(error.to_string()))?;
-            // The sealed helper authorizes every start, query and result against
-            // the current controller and exact physical instance.
-            self.restore_snapshot_stream(
-                &mut artifact.file,
-                artifact.descriptor.size_bytes,
-                &artifact.descriptor.sha256,
-                &capture,
-                &artifact.observation,
-            )
-            .map_err(SessionWorkspaceApiError::Rejected)?;
+            // The sealed helper still verifies current controller/instance authority.
+            self.restore_snapshot_artifact(artifact, &capture)
+                .map_err(SessionWorkspaceApiError::Rejected)?;
         }
         Ok(prepared.resolution)
     }
@@ -1238,16 +1233,21 @@ impl DockerExecutionHostRunner {
             &self.agent_run_id,
             Some(&lease.job_id),
         );
-        observation
+        let encoding = workspace_restore::response_encoding(response.headers())
+            .map_err(SessionWorkspaceApiError::Rejected)?;
+        let stored = WorkspaceSnapshotDescriptor::from(frozen);
+        let mut prepared = observation
             .download(&mut response, |source| {
-                self.restore_snapshot_stream(
+                workspace_restore::prepare(
                     source,
-                    frozen.snapshot_size_bytes,
-                    frozen.snapshot_sha256.as_str(),
-                    &capture,
-                    &observation,
+                    &stored,
+                    Some(&encoding),
+                    self.resources.data_tmpfs_bytes,
+                    observation.clone(),
                 )
             })
+            .map_err(SessionWorkspaceApiError::Rejected)?;
+        self.restore_snapshot_artifact(&mut prepared.helper_frame, &capture)
             .map_err(SessionWorkspaceApiError::Rejected)?;
         Ok(resolution)
     }
@@ -1794,19 +1794,18 @@ impl DockerExecutionHostRunner {
             &self.agent_run_id,
             Some(&lease.job_id),
         );
-        observation
-            .download(&mut response, |source| {
-                self.restore_snapshot_stream(
-                    source,
-                    snapshot.snapshot_size_bytes,
-                    snapshot.snapshot_sha256.as_str(),
-                    &capture,
-                    &observation,
-                )
-            })
+        let encoding = workspace_restore::response_encoding(response.headers())
+            .map_err(SessionWorkspaceApiError::Rejected)?;
+        let mut artifact = prepare_recovery_restore_artifact(
+            &mut response,
+            snapshot,
+            Some(&encoding),
+            self.resources.data_tmpfs_bytes,
+            observation,
+        )?;
+        self.restore_snapshot_artifact(&mut artifact, &capture)
             .map_err(SessionWorkspaceApiError::Rejected)
     }
-
     fn reconcile_session_workspace_commit(
         &self,
         lease: &SessionWorkspaceLease,
@@ -1843,28 +1842,29 @@ impl DockerExecutionHostRunner {
         )
     }
 
-    fn restore_snapshot_stream(
+    fn restore_snapshot_artifact(
         &self,
-        source: &mut impl Read,
-        expected_size_bytes: u64,
-        expected_sha256: &str,
+        artifact: &mut ImmutableWorkspaceSnapshot,
         capture: &SnapshotActivityGuard,
-        observation: &WorkspaceProtection,
     ) -> Result<(), String> {
+        let observation = artifact.observation.clone();
         observation.timed(ProtectionMetric::RestoreApplyElapsedMs, || {
             self.begin_snapshot_restore()?;
             let _ = capture;
-            if expected_size_bytes > hosted_execution::host_supervisor::HELPER_STREAM_LIMIT {
+            if artifact.descriptor.size_bytes
+                > hosted_execution::host_supervisor::HELPER_STREAM_LIMIT
+            {
                 return Err("snapshot_restore_limit_exceeded".into());
             }
-            let mut input =
-                tempfile::tempfile().map_err(|_| "snapshot_restore_spool_unavailable")?;
-            copy_exact(source, &mut input, expected_size_bytes, expected_sha256)?;
+            artifact
+                .file
+                .rewind()
+                .map_err(|_| "snapshot_restore_spool_unavailable")?;
             let (_, _, exit) = self.supervised_helper_file(
                 hosted_execution::host_supervisor::TrustedHelperKind::SnapshotRestore,
-                &mut input,
-                expected_size_bytes,
-                expected_sha256,
+                &mut artifact.file,
+                artifact.descriptor.size_bytes,
+                &artifact.descriptor.sha256,
             )?;
             if exit != Some(0) {
                 return Err("snapshot_restore_failed".into());
@@ -1872,7 +1872,6 @@ impl DockerExecutionHostRunner {
             Ok(())
         })
     }
-
     fn restore_activity(&self) -> Result<SnapshotActivityGuard, SessionWorkspaceApiError> {
         self.restore_activity_with_observer(|capture| self.agent_process_count(capture))
     }
@@ -2900,21 +2899,25 @@ impl ContainerFacts {
     }
 
     fn matches_configuration(&self, expected: &ContainerExpectation<'_>) -> bool {
-        container_create_body(expected)
-            .is_ok_and(|body| crate::docker_engine::verify_created(&self.raw, &body).is_ok())
-            && (if let Some(owner) = expected.allocation_owner {
-                self.labels
-                    .get("centaeris.allocation_owner")
-                    .and_then(|v| {
-                        serde_json::from_str::<centaeris_core::execution::EnvironmentTaskOwner>(v)
-                            .ok()
-                    })
-                    .as_ref()
-                    == Some(owner)
-            } else {
-                self.has_identity(expected.agent_run_id, expected.execution_id)
-            })
-            && self.image == expected.image_digest
+        container_create_body(expected).is_ok_and(|mut body| {
+            // Archive backing is a capability, not part of an older live
+            // instance's original signed identity or execution eligibility.
+            let Some(labels) = body["Labels"].as_object_mut() else {
+                return false;
+            };
+            labels.remove(environment_container::WORKSPACE_BACKING_LABEL);
+            crate::docker_engine::verify_created(&self.raw, &body).is_ok()
+        }) && (if let Some(owner) = expected.allocation_owner {
+            self.labels
+                .get("centaeris.allocation_owner")
+                .and_then(|v| {
+                    serde_json::from_str::<centaeris_core::execution::EnvironmentTaskOwner>(v).ok()
+                })
+                .as_ref()
+                == Some(owner)
+        } else {
+            self.has_identity(expected.agent_run_id, expected.execution_id)
+        }) && self.image == expected.image_digest
             && self.runtime == expected.oci_runtime.docker_runtime_name()
             && self.memory == expected.resources.memory_bytes
             && self.cpu_period == 100_000
@@ -3447,7 +3450,15 @@ pub(crate) fn prepare_recovery_workspace_restore(
         binding.agent_run_id,
         Some(&binding.lease.job_id),
     );
-    let artifact = prepare_recovery_restore_artifact(&mut response, snapshot, observation)?;
+    let encoding = workspace_restore::response_encoding(response.headers())
+        .map_err(SessionWorkspaceApiError::Rejected)?;
+    let artifact = prepare_recovery_restore_artifact(
+        &mut response,
+        snapshot,
+        Some(&encoding),
+        binding.data_tmpfs_bytes,
+        observation,
+    )?;
     Ok(PreparedRecoveryWorkspaceRestore {
         artifact: Some(artifact),
         resolution: SessionWorkspaceResolution::Download,
@@ -3457,25 +3468,29 @@ pub(crate) fn prepare_recovery_workspace_restore(
 fn prepare_recovery_restore_artifact(
     source: &mut impl Read,
     snapshot: &RecoveryWorkspaceSnapshotV1,
+    encoding: Option<&str>,
+    expanded_limit: u64,
     observation: WorkspaceProtection,
 ) -> Result<ImmutableWorkspaceSnapshot, SessionWorkspaceApiError> {
-    let artifact = observation
+    let stored = WorkspaceSnapshotDescriptor::from(snapshot);
+    let prepared = observation
         .download(source, |source| {
-            capture_snapshot_artifact_observed(
+            workspace_restore::prepare(
                 source,
-                snapshot.snapshot_size_bytes,
+                &stored,
+                encoding,
+                expanded_limit,
                 observation.clone(),
             )
         })
         .map_err(SessionWorkspaceApiError::Unavailable)?;
-    if !snapshot_matches_recovery_workspace(&artifact.descriptor, snapshot) {
+    if !snapshot_matches_recovery_workspace(&prepared.stored_descriptor, snapshot) {
         return Err(SessionWorkspaceApiError::Rejected(
             "recovery workspace artifact binding mismatch".into(),
         ));
     }
-    Ok(artifact)
+    Ok(prepared.helper_frame)
 }
-
 fn require_workspace_capacity_for_limit(
     expanded_size_bytes: u64,
     input_upper_bound_bytes: u64,
@@ -4454,7 +4469,7 @@ mod tests {
                     .unwrap();
                 let mut request_body = vec![0; length];
                 socket.read_exact(&mut request_body).unwrap();
-                write!(socket, "HTTP/1.1 200 fixture\r\nContent-Length: {}\r\nX-Content-Sha256: {hash}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                write!(socket, "HTTP/1.1 200 fixture\r\nContent-Length: {}\r\nX-Content-Sha256: {hash}\r\nX-Workspace-Snapshot-Encoding: frameV1\r\nConnection: close\r\n\r\n", body.len()).unwrap();
                 socket.write_all(&body).unwrap();
             }
         });
@@ -5406,6 +5421,8 @@ mod tests {
             prepare_recovery_restore_artifact(
                 &mut source,
                 &snapshot,
+                Some("frameV1"),
+                snapshot.expanded_size_bytes,
                 WorkspaceProtection::new().with_context(
                     ProtectionTrigger::RecoveryRestore,
                     "run-restored",
@@ -5428,6 +5445,8 @@ mod tests {
         assert!(prepare_recovery_restore_artifact(
             &mut source,
             &snapshot,
+            Some("frameV1"),
+            snapshot.expanded_size_bytes,
             WorkspaceProtection::new()
         )
         .is_err());
@@ -5436,6 +5455,8 @@ mod tests {
         assert!(prepare_recovery_restore_artifact(
             &mut Cursor::new(frame),
             &wrong_binding,
+            Some("frameV1"),
+            wrong_binding.expanded_size_bytes,
             WorkspaceProtection::new()
         )
         .is_err());
@@ -6186,6 +6207,86 @@ mod tests {
         );
     }
 
+    #[test]
+    fn legacy_runsc_identity_survives_missing_archive_capability_without_weakening_original_configuration(
+    ) {
+        let mut runner = retained_test_runner();
+        let original: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
+            serde_json::from_str(include_str!(
+                "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+            ))
+            .unwrap();
+        runner.resources = original.environment_profile.resources.sandbox_resources();
+        runner.image_digest = original.environment_profile.image_digest.clone();
+        runner.retained_allocation.as_mut().unwrap().image_digest = runner.image_digest.clone();
+        runner.environment_profile = Some(original.environment_profile.clone());
+        runner.benchmark_helper = Some("/tmp/execution_agent".into());
+        runner.oci_runtime = OciRuntime::Runsc;
+        let expected = runner.container_expectation();
+        let body = container_create_body(&expected).unwrap();
+        let host = &body["HostConfig"];
+        let mut config = body.clone();
+        config.as_object_mut().unwrap().remove("HostConfig");
+        config.as_object_mut().unwrap().remove("Image");
+        config["Labels"]
+            .as_object_mut()
+            .unwrap()
+            .remove(environment_container::WORKSPACE_BACKING_LABEL);
+        let mut facts = ContainerFacts {
+            id: "a".repeat(64),
+            raw: serde_json::json!({"Id":"a".repeat(64),"Config":config,"Image":body["Image"],"HostConfig":host,"Mounts":host["Mounts"],"State":{"Running":true,"Paused":false,"Restarting":false,"Dead":false}}),
+            running: true,
+            image: runner.image_digest.clone(),
+            runtime: "runsc".into(),
+            labels: serde_json::from_value(config["Labels"].clone()).unwrap(),
+            memory: host["Memory"].as_u64().unwrap(),
+            cpu_period: host["CpuPeriod"].as_i64().unwrap(),
+            cpu_quota: host["CpuQuota"].as_i64().unwrap(),
+            pids_limit: host["PidsLimit"].as_i64(),
+            readonly_rootfs: false,
+            network_mode: network::mode(expected.network).into(),
+            mounts: serde_json::from_value(host["Mounts"].clone()).unwrap(),
+        };
+        assert!(
+            facts.matches_configuration(&expected),
+            "archive capability must not replace an original signed physical identity"
+        );
+        assert!(
+            facts.matches(&expected),
+            "original running instance remains eligible for its fenced RPCs"
+        );
+        facts.raw["State"]["Paused"] = true.into();
+        assert!(
+            facts.matches_configuration(&expected),
+            "a paused legacy instance still has the same configuration"
+        );
+        assert!(
+            !facts.matches(&expected),
+            "paused execution eligibility remains separate from identity"
+        );
+        facts.raw["State"]["Paused"] = false.into();
+        for label in [
+            "centaeris.environment_id",
+            "centaeris.instance_id",
+            "centaeris.execution_id",
+            "centaeris.environment_authorization_digest",
+            "centaeris.environment_profile_digest",
+            "centaeris.allocation_owner",
+        ] {
+            let original = facts.raw["Config"]["Labels"][label].clone();
+            facts.raw["Config"]["Labels"][label] = "foreign".into();
+            assert!(
+                !facts.matches_configuration(&expected),
+                "original identity {label} remains exact"
+            );
+            facts.raw["Config"]["Labels"][label] = original;
+        }
+        facts.raw["HostConfig"]["Memory"] = 1.into();
+        assert!(
+            !facts.matches_configuration(&expected),
+            "original resource configuration remains exact"
+        );
+    }
     #[test]
     fn resident_inventory_counts_declared_limits_and_rejects_unknown_managed_resources() {
         let runner = test_docker_execution_host_runner();
