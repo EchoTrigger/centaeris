@@ -21,7 +21,11 @@ const verified = new Counter('experience_samples_verified');
 const admission = new Trend('experience_admission_ms', true);
 const streamOpened = new Trend('experience_stream_open_ms', true);
 const firstSseItem = new Trend('experience_first_sse_item_ms', true);
+// Run submission to first observed nonempty assistant text, including committed fallback.
+// This is not model-request TTFT: a tool round may precede the first assistant text.
 const firstModelText = new Trend('experience_first_model_text_ms', true);
+const toolClientInterval = new Trend('experience_tool_client_call_to_result_ms', true);
+const secondToolClientInterval = new Trend('experience_second_tool_client_call_to_result_ms', true);
 const firstToolCall = new Trend('experience_first_tool_call_observed_ms', true);
 const firstToolResult = new Trend('experience_first_successful_tool_result_ms', true);
 const terminal = new Trend('experience_terminal_ms', true);
@@ -99,6 +103,35 @@ export function verifyExperienceRun(result, contract, sessionId, agentRunId) {
   return { toolCount: nextResult };
 }
 
+// Called only after the complete command/output/order contract passes. Project
+// explicit identity/numeric/enum fields so model commands and output cannot leak.
+function verifiedToolTimings(result, expectedCount) {
+  if (!Array.isArray(result.toolTimings) || result.toolTimings.length !== expectedCount) throw new Error('per-tool observations missing');
+  const calls = result.events.filter(event => event.type === 'tool_call' && event.payload.toolName === 'bash');
+  const eventTime = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+  return result.toolTimings.map((timing, index) => {
+    const call = calls[index];
+    const completion = result.events.find(event => event.type === 'tool_result' && event.payload.callId === call?.payload.callId);
+    const callCreated = eventTime(call?.createdAtMs), resultCreated = eventTime(completion?.createdAtMs);
+    const serverState = callCreated !== null && resultCreated !== null && resultCreated >= callCreated ? 'observed' : 'notObserved';
+    const callObserved = timing?.toolCallObservedAtMs, resultObserved = timing?.toolResultObservedAtMs;
+    if (!Number.isSafeInteger(callObserved) || callObserved < 0 || !Number.isSafeInteger(resultObserved) || resultObserved < 0) throw new Error('client callback times missing');
+    const clientState = resultObserved >= callObserved ? 'observed' : 'notObserved';
+    const clientInterval = clientState === 'observed' ? resultObserved - callObserved : null;
+    if (!timing || typeof timing.callId !== 'string' || !timing.callId || timing.callId.length > 160
+        || timing.callId !== call?.payload.callId || timing.toolIndex !== index + 1 || timing.toolName !== 'bash'
+        || timing.resultState !== completion?.payload.resultState
+        || timing.toolCallCreatedAtMs !== callCreated || timing.toolResultCreatedAtMs !== resultCreated
+        || timing.serverTimingState !== serverState || timing.clientTimingState !== clientState
+        || timing.clientCallToResultMs !== clientInterval) throw new Error('per-tool timing binding invalid');
+    return { callId: timing.callId, toolIndex: timing.toolIndex, toolName: 'bash',
+      toolCallCreatedAtMs: callCreated, toolResultCreatedAtMs: resultCreated,
+      toolCallObservedAtMs: callObserved, toolResultObservedAtMs: resultObserved,
+      clientCallToResultMs: clientInterval, resultState: timing.resultState,
+      serverTimingState: serverState, clientTimingState: clientState, contractState: 'verified' };
+  });
+}
+
 function record(phase, data, sampleId, admitted, extra = {}) {
   console.log('PERF_EXPERIENCE ' + JSON.stringify({ schema: 'workspace.perf.experience.v1', phase, task,
     sampleId, operationId: sampleId, workspaceId: data.workspaceId, modelConfigRef: data.modelId,
@@ -120,6 +153,7 @@ export default function (data) {
     const result = waitForTerminalObserved(data.store, data.csrf, admitted.sessionId, admitted.agentRunId, timeoutSeconds);
     stage = 'contract';
     const proof = verifyExperienceRun(result, contract, admitted.sessionId, admitted.agentRunId);
+    const toolTimings = verifiedToolTimings(result, proof.toolCount);
     const times = {}, fields = [
       ['streamOpenedAtMs', 'streamOpenMs', streamOpened], ['firstSseItemObservedAtMs', 'firstSseItemMs', firstSseItem],
       ['firstModelTextObservedAtMs', 'firstModelTextMs', firstModelText],
@@ -134,10 +168,17 @@ export default function (data) {
       times[name] = value - started;
       metric.add(times[name], { task, ...(name === 'firstModelTextMs' ? { source: result.firstModelTextSource } : {}) });
     }
+    for (const timing of toolTimings) {
+      if (timing.clientCallToResultMs !== null) toolClientInterval.add(timing.clientCallToResultMs, { task, toolIndex: String(timing.toolIndex) });
+      record('toolTiming', data, sampleId, admitted, timing);
+    }
+    const secondToolClientCallToResultMs = toolTimings.length === 2 ? toolTimings[1].clientCallToResultMs : null;
+    if (secondToolClientCallToResultMs !== null) secondToolClientInterval.add(secondToolClientCallToResultMs, { task });
     const verifiedMs = Date.now() - started;
     verifiedTime.add(verifiedMs, { task }); verified.add(1, { task }); failures.add(0, { task });
     record('verified', data, sampleId, admitted, { ...times, ...proof, admissionMs, verifiedMs,
       firstSseItemSource: result.firstSseItemSource, firstModelTextSource: result.firstModelTextSource,
+      firstModelTextTimingKind: 'runStartToFirstObservedAssistantText', secondToolClientCallToResultMs,
       artifactDownloadMs: null, cleanup: 'notObserved' });
   } catch (_) {
     previousFailed = true; failures.add(1, { task }); record('failed', data, sampleId, admitted, { errorCode: 'experience_' + stage + '_failed' });

@@ -23,11 +23,17 @@ function subject(environment = {}, change = () => {}) {
       }
       events.push({ type: 'assistant_message', payload: { modelMarkdown: contract.finalText, status: 'done' } });
       events.push({ type: 'agent_run_completed', payload: {} });
-      const result = { status: 'completed', events: events.map((event, index) => ({ ...event, sessionId, agentRunId, sequence: index + 1, eventId: 'event-' + index })),
+      const result = { status: 'completed', events: events.map((event, index) => ({ ...event, sessionId, agentRunId, sequence: index + 1, eventId: 'event-' + index, createdAtMs: 1000000 + index * 100 })),
         streamOpenedAtMs: 1010, firstSseItemObservedAtMs: 1020, firstSseItemSource: 'committed',
         firstModelTextObservedAtMs: 1040, firstModelTextSource: 'committedAssistantMessage',
         firstToolCallObservedAtMs: contract.commands.length ? 1025 : null,
         firstSuccessfulToolResultObservedAtMs: contract.commands.length ? 1030 : null, terminalObservedAtMs: 1050 };
+      result.toolTimings = contract.commands.map((command, index) => ({ callId: 'call-' + index,
+        toolIndex: index + 1, toolName: 'bash', toolCallCreatedAtMs: result.events[index * 2].createdAtMs,
+        toolResultCreatedAtMs: result.events[index * 2 + 1].createdAtMs,
+        toolCallObservedAtMs: 1025 + index * 15, toolResultObservedAtMs: index === 0 ? 1030 : 1090,
+        clientCallToResultMs: index === 0 ? 5 : 50, resultState: 'successWithOutput',
+        serverTimingState: 'observed', clientTimingState: 'observed' }));
       change(result); return result;
     },
   });
@@ -88,4 +94,67 @@ test('unsupported plans fail before admission and failed samples stop the Sessio
   const s = subject({}, result => { result.status = 'failed'; }); const data = s.context.setup();
   assert.throws(() => s.context.iteration(data)); s.context.iteration(data);
   assert.equal(s.admissions.length, 1); assert.equal(s.records.at(-1).phase, 'notSubmitted');
+});
+
+
+test('multi-step emits bounded per-call clocks and an independent second client interval after command validation', () => {
+  const s = subject({ PERF_EXPERIENCE_TASK: 'multi-step' }, result => {
+    result.firstModelTextObservedAtMs = 2050; result.terminalObservedAtMs = 2100;
+  });
+  s.context.iteration(s.context.setup());
+  const timing = s.records.filter(record => record.phase === 'toolTiming');
+  assert.equal(timing.length, 2);
+  assert.deepEqual(timing.map(record => record.callId), ['call-0', 'call-1']);
+  assert.deepEqual(timing.map(record => record.toolIndex), [1, 2]);
+  assert.deepEqual(timing.map(record => record.clientCallToResultMs), [5, 50]);
+  assert.deepEqual(timing.map(record => record.toolCallCreatedAtMs), [1000000, 1000200]);
+  assert.deepEqual(timing.map(record => record.toolCallObservedAtMs), [1025, 1040]);
+  assert.ok(timing.every(record => record.contractState === 'verified'));
+  const allowed = ['schema','phase','task','sampleId','operationId','workspaceId','modelConfigRef','sessionId','agentRunId',
+    'callId','toolIndex','toolName','toolCallCreatedAtMs','toolResultCreatedAtMs','toolCallObservedAtMs','toolResultObservedAtMs',
+    'clientCallToResultMs','resultState','serverTimingState','clientTimingState','contractState'].sort();
+  for (const record of timing) assert.deepEqual(Object.keys(record).sort(), allowed);
+  const proof = s.records.at(-1);
+  assert.equal(proof.secondToolClientCallToResultMs, 50);
+  assert.equal(proof.firstSuccessfulToolResultMs, 30);
+  assert.equal(proof.firstModelTextMs, 1050);
+  assert.equal(proof.firstModelTextTimingKind, 'runStartToFirstObservedAssistantText');
+  assert.deepEqual(s.metrics.get('experience_second_tool_client_call_to_result_ms'), [50]);
+  assert.deepEqual(s.metrics.get('experience_tool_client_call_to_result_ms'), [5, 50]);
+});
+
+test('second-tool command, output, order and timing binding must all validate before any timing success log', () => {
+  for (const change of [
+    result => { result.events[2].payload.normalizedInput.command = 'printf fake'; },
+    result => { result.events[3].payload.modelContent = 'wrong second output'; },
+    result => { result.events[3].payload.callId = 'call-0'; },
+    result => { result.toolTimings[1].callId = 'call-0'; },
+    result => { [result.events[1],result.events[2]] = [result.events[2],result.events[1]]; },
+  ]) {
+    const s = subject({ PERF_EXPERIENCE_TASK: 'multi-step' }, change);
+    assert.throws(() => s.context.iteration(s.context.setup()));
+    assert.equal(s.records.filter(record => record.phase === 'toolTiming').length, 0);
+    assert.equal(s.metrics.get('experience_second_tool_client_call_to_result_ms')?.length || 0, 0);
+  }
+});
+
+test('single-tool and text keep second-tool timing null rather than deriving it from final text', () => {
+  for (const task of ['text','single-tool']) {
+    const s=subject({ PERF_EXPERIENCE_TASK: task }); s.context.iteration(s.context.setup());
+    assert.equal(s.records.at(-1).secondToolClientCallToResultMs, null);
+    assert.equal(s.metrics.get('experience_second_tool_client_call_to_result_ms').length, 0);
+  }
+});
+
+test('missing server event time is logged as unobserved without changing client intervals', () => {
+  const s=subject({ PERF_EXPERIENCE_TASK: 'single-tool' }, result => {
+    delete result.events[0].createdAtMs;
+    result.toolTimings[0].toolCallCreatedAtMs=null;
+    result.toolTimings[0].serverTimingState='notObserved';
+  });
+  s.context.iteration(s.context.setup());
+  const timing=s.records.find(record => record.phase === 'toolTiming');
+  assert.equal(timing.toolCallCreatedAtMs, null);
+  assert.equal(timing.serverTimingState, 'notObserved');
+  assert.equal(timing.clientCallToResultMs, 5);
 });

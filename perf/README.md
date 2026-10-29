@@ -292,3 +292,70 @@ stdout-byte measurements do not estimate physical disk or complete API cost.
 - Keep background VM activity and continuous-history growth in the report. They
   can affect medians and trends, not only maxima. No capacity/extrapolation claim
   is justified by these uncontrolled Windows runs alone.
+
+
+## Lightweight tool latency
+
+Use `k6/scenarios/light-experience.js` with `perf-light-experience` for the
+model-independent tool comparison. `single-tool` runs the first real Bash command;
+`multi-step` measures two real commands and file continuity in one Run. Keep
+`PERF_EXPERIENCE_SAME_SESSION=true` for rolling Session tests. In `perRun` mode
+those iterations still create distinct physical instances after prior cleanup.
+Do not run a preparation command before the measured first tool.
+
+Enable `WORKSPACE_PERF_OBSERVATIONS=1` on the Runtime and HostSupervisor before
+starting the isolated fixture. This adds no execution permission or persistent
+ready state. The Runtime emits `startupProfile`, model-attempt timings,
+`toolService`, and `hostCommand`; the Host emits `taskReady` and
+`taskLeaderExited` when it receives each valid runner receipt. Host markers do
+not measure the guest's first instruction. Successful command completion still
+requires leader exit, complete output, consumed output pages, and cleanup.
+
+After the existing k6 runner has written its safe `run-records.jsonl`, analyze
+the matching Runtime and Host observation logs without starting services:
+
+```sh
+python -B perf/harness/experience_timing.py \
+  --client-records /tmp/experience/run-records.jsonl \
+  --runtime-observations /tmp/experience/runtime-observations.jsonl \
+  --host-observations /tmp/experience/host-observations.jsonl \
+  --execution-mode perRun --model-kind immediateMock \
+  --output /tmp/experience/timing-report.json
+```
+
+The output path must be new; inputs may be bare observation JSONL or Docker
+JSON logs. The reader bounds input bytes and selected record counts, filters to
+original admitted Jobs, and writes only approved scalar fields. Use the existing
+fixture-owned paths and credentials; this command does not load credentials,
+submit Runs, generate model requests, or collect arbitrary log prose.
+
+Interpret the measurements independently:
+
+- `newRunToFirstToolSuccessMs` is submission to the client's first successful
+  tool result. It includes normal queueing, preparation and consistency work.
+- Per-call `serviceMs` is the Runtime's monotonic interval from the tool-call
+  safe point to a successful durable tool-result commit. Error, failed commit,
+  unpaired, or ambiguous observations do not become successful durations.
+- `secondToolClientCallToResultMs` measures the second command in the same Run
+  on the client clock. It is not a reused container across different Runs.
+- Request-local model `firstEventMs`, `firstTextMs`, and `httpMs` remain separate.
+  `httpMs` includes consuming the complete response through EOF. Tool-only model
+  responses have no text TTFT. Request identity is captured at HTTP-attempt start;
+  retries are separate attempts. Existing `firstModelTextMs` is Run submission to
+  first observed assistant text and may occur after tools; it is not model TTFT.
+- Startup components and child spans can overlap. `runtimeCoveredMs` is only
+  the union of recorded Runtime intervals, never their sum or a reconstructed
+  causal critical path. Wall-clock end markers place approximate intervals;
+  durations come from producer-local monotonic clocks. Do not subtract client,
+  Runtime, Host, or event `createdAtMs` timestamps across clock domains.
+
+The report is explicitly `latencyOnly`, with missing evidence listed as
+`notObserved`; neither the execution mode argument nor a fast command proves
+physical instance policy. It cannot pass the four-environment, sparse, or dense
+acceptance gates. Keep independent artifact download/size/hash, original Run/Job
+identity and retry counts, sustained physical CPU overlap, exact cleanup receipt,
+physical absence, resource release, and controller release evidence. Report
+queue-free service samples separately from user latency including congestion.
+Use matched source/configuration/workspace sizes for comparisons and adequate
+repetitions for p50/p95. The 500 ms value is an investigation target, not an
+unmeasured pass threshold.

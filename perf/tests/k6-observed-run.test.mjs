@@ -3,17 +3,17 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
-function observe({ foreign = false, failed = false, truncated = false, transportError = false, non200 = false, prefix = [], assistant = false } = {}) {
+function observe({ foreign = false, failed = false, truncated = false, transportError = false, non200 = false, prefix = [], assistant = false, eventsOverride = null, observedTimes = null, frameCreatedAtMs } = {}) {
   let clock = 1000, closed = false; const handlers = {};
-  const events = [
+  const events = (eventsOverride || [
     { type: 'tool_call', payload: { callId: 'call', toolName: 'bash' } },
     { type: 'tool_result', payload: { callId: 'call', toolName: 'bash', resultState: failed ? 'error' : 'successWithOutput' } },
     ...(assistant ? [{ type: 'assistant_message', payload: { modelMarkdown: 'done', status: 'done' } }] : []),
     { type: 'agent_run_completed', payload: {} },
-  ].map((event, index) => ({ ...event, sequence: index + 1, eventId: 'event-' + index,
+  ]).map((event, index) => ({ ...event, sequence: index + 1, eventId: 'event-' + index,
     sessionId: 'session', agentRunId: foreign ? 'other' : 'run' }));
   const items = [...prefix, ...events.map(event => ({ schema: 'session.stream.item.v1', kind: 'committed',
-    agentRunId: event.agentRunId, sourceSequence: event.sequence, event }))];
+    agentRunId: event.agentRunId, sourceSequence: event.sequence, createdAtMs: frameCreatedAtMs, event }))];
   const context = vm.createContext({ __ENV: {}, Date: { now: () => clock }, crypto: {}, sleep() {},
     http: { get() { clock = 9000; return { status: 200, body: items.map(item => 'data: ' + JSON.stringify(item)).join('\n\n') }; } },
     sse: { open(url, options, configure) {
@@ -23,7 +23,7 @@ function observe({ foreign = false, failed = false, truncated = false, transport
       clock = 1100; handlers.open?.();
       if (transportError) { handlers.error?.(); return { status: 200 }; }
       for (let index = 0; index < (truncated ? 2 : items.length) && !closed; index += 1) {
-        clock = prefix.length || assistant ? 1200 + index * 100 : [1200, 2500, 8000][index];
+        clock = observedTimes ? observedTimes[index] : (prefix.length || assistant ? 1200 + index * 100 : [1200, 2500, 8000][index]);
         handlers.event?.({ data: JSON.stringify(items[index]) });
       }
       clock = 9000; return { status: 200 };
@@ -87,4 +87,54 @@ test('foreign binding and missing terminal are rejected', () => {
 test('transport error and non-200 initial connection fail without successful timing', () => {
   assert.throws(() => observe({ transportError: true }));
   assert.throws(() => observe({ non200: true }));
+});
+
+
+function bashEvent(type, callId, createdAtMs) {
+  return { type, createdAtMs, payload: { callId, toolName: 'bash', ...(type === 'tool_result' ? { resultState: 'successWithOutput' } : {}) } };
+}
+
+test('every actual bash pair keeps independent server event and client receive clocks', () => {
+  const { result } = observe({ eventsOverride: [bashEvent('tool_call', 'first', 1000000), bashEvent('tool_result', 'first', 1000010),
+    bashEvent('tool_call', 'second', 2000000), bashEvent('tool_result', 'second', 2000005),
+    { type: 'assistant_message', payload: { modelMarkdown: 'final answer' } }, { type: 'agent_run_completed' }],
+    observedTimes: [1200, 1800, 4000, 4050, 7000, 8000] });
+  assert.equal(result.firstSuccessfulToolResultObservedAtMs, 1800);
+  assert.equal(result.firstModelTextObservedAtMs, 7000);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.toolTimings)), [
+    { callId: 'first', toolIndex: 1, toolName: 'bash', toolCallCreatedAtMs: 1000000, toolResultCreatedAtMs: 1000010,
+      toolCallObservedAtMs: 1200, toolResultObservedAtMs: 1800, clientCallToResultMs: 600,
+      resultState: 'successWithOutput', serverTimingState: 'observed', clientTimingState: 'observed' },
+    { callId: 'second', toolIndex: 2, toolName: 'bash', toolCallCreatedAtMs: 2000000, toolResultCreatedAtMs: 2000005,
+      toolCallObservedAtMs: 4000, toolResultObservedAtMs: 4050, clientCallToResultMs: 50,
+      resultState: 'successWithOutput', serverTimingState: 'observed', clientTimingState: 'observed' },
+  ]);
+});
+
+test('missing or invalid server event times remain null and envelope time cannot replace them', () => {
+  for (const invalid of [undefined, null, '1000', -1, 1.5]) {
+    const { result } = observe({ eventsOverride: [bashEvent('tool_call', 'call', invalid), bashEvent('tool_result', 'call', 10),
+      { type: 'agent_run_completed' }], frameCreatedAtMs: 9999999 });
+    assert.equal(result.toolTimings[0].toolCallCreatedAtMs, null);
+    assert.equal(result.toolTimings[0].toolResultCreatedAtMs, 10);
+    assert.equal(result.toolTimings[0].serverTimingState, 'notObserved');
+    assert.equal(result.toolTimings[0].clientCallToResultMs, 1300);
+  }
+});
+
+test('clock rollback is never converted to a valid timing interval', () => {
+  const { result } = observe({ eventsOverride: [bashEvent('tool_call', 'call', 100), bashEvent('tool_result', 'call', 90),
+    { type: 'agent_run_completed' }], observedTimes: [1200, 1190, 8000] });
+  assert.equal(result.toolTimings[0].toolCallCreatedAtMs, 100);
+  assert.equal(result.toolTimings[0].toolResultCreatedAtMs, 90);
+  assert.equal(result.toolTimings[0].serverTimingState, 'notObserved');
+  assert.equal(result.toolTimings[0].clientCallToResultMs, null);
+  assert.equal(result.toolTimings[0].clientTimingState, 'notObserved');
+});
+
+test('orphaned or duplicate bash results cannot supply per-call timings', () => {
+  for (const eventsOverride of [
+    [bashEvent('tool_result', 'orphan', 100), { type: 'agent_run_completed' }],
+    [bashEvent('tool_call', 'call', 100), bashEvent('tool_result', 'call', 110), bashEvent('tool_result', 'call', 120), { type: 'agent_run_completed' }],
+  ]) assert.throws(() => observe({ eventsOverride, observedTimes: [1200, 1300, 1400, 8000] }));
 });

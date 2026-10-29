@@ -137,6 +137,10 @@ export function waitForTerminal(store, csrf, sessionId, agentRunId, timeoutSecon
 // Receive-time measurements use live callbacks; buffered terminal responses cannot provide them.
 export function waitForTerminalObserved(store, csrf, sessionId, agentRunId, timeoutSeconds = 120) {
   const started = Date.now(), events = [], calls = new Map();
+  // Server event.createdAtMs and client callback Date.now() belong to separate clocks.
+  // Event creation is not a database commit timestamp; never subtract across clocks.
+  const toolTimings = [], bashCalls = new Map();
+  const eventTime = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
   const terminals = { agent_run_completed: 'completed', agent_run_failed: 'failed', agent_run_interrupted: 'interrupted' };
   let status, invalid = false;
   let firstCommittedEventObservedAtMs = null, firstSuccessfulToolResultObservedAtMs = null;
@@ -181,7 +185,32 @@ export function waitForTerminalObserved(store, csrf, sessionId, agentRunId, time
             throw new Error('tool call identity invalid');
           }
           calls.set(event.payload.callId, event.payload.toolName);
+          if (event.payload.toolName === 'bash') {
+            const timing = { callId: event.payload.callId, toolIndex: toolTimings.length + 1, toolName: 'bash',
+              toolCallCreatedAtMs: eventTime(event.createdAtMs), toolResultCreatedAtMs: null,
+              toolCallObservedAtMs: observed, toolResultObservedAtMs: null, clientCallToResultMs: null,
+              resultState: 'notObserved', serverTimingState: 'notObserved', clientTimingState: 'notObserved' };
+            toolTimings.push(timing); bashCalls.set(timing.callId, timing);
+          }
           if (firstToolCallObservedAtMs === null) firstToolCallObservedAtMs = observed;
+        }
+        if (event.type === 'tool_result') {
+          const timing = bashCalls.get(event.payload?.callId);
+          if (event.payload?.toolName === 'bash' || timing) {
+            if (!timing || event.payload.toolName !== 'bash' || timing.toolResultObservedAtMs !== null) {
+              throw new Error('bash timing call/result binding invalid');
+            }
+            timing.toolResultCreatedAtMs = eventTime(event.createdAtMs);
+            timing.toolResultObservedAtMs = observed;
+            timing.resultState = event.payload.resultState;
+            if (Number.isSafeInteger(observed) && Number.isSafeInteger(timing.toolCallObservedAtMs)
+                && observed >= timing.toolCallObservedAtMs) {
+              timing.clientCallToResultMs = observed - timing.toolCallObservedAtMs;
+              timing.clientTimingState = 'observed';
+            }
+            if (timing.toolCallCreatedAtMs !== null && timing.toolResultCreatedAtMs !== null
+                && timing.toolResultCreatedAtMs >= timing.toolCallCreatedAtMs) timing.serverTimingState = 'observed';
+          }
         }
         if (event.type === 'tool_result' && firstSuccessfulToolResultObservedAtMs === null
             && typeof event.payload?.callId === 'string' && calls.get(event.payload.callId) === 'bash'
@@ -198,7 +227,7 @@ export function waitForTerminalObserved(store, csrf, sessionId, agentRunId, time
   return { status, elapsedMs: Date.now() - started, events,
     firstCommittedEventObservedAtMs, firstSuccessfulToolResultObservedAtMs,
     streamOpenedAtMs, firstSseItemObservedAtMs, firstSseItemSource,
-    firstModelTextObservedAtMs, firstModelTextSource, firstToolCallObservedAtMs, terminalObservedAtMs };
+    firstModelTextObservedAtMs, firstModelTextSource, firstToolCallObservedAtMs, terminalObservedAtMs, toolTimings };
 }
 
 // Completion and tool success are independent facts.
