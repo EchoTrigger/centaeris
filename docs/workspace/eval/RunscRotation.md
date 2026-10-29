@@ -14,8 +14,9 @@ RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS=1
 RUNTIME_RUNSC_IDLE_PAUSE_MS=3000
 ```
 
-The idle grace is a test value. Choose an operational value from actual request
-gaps. The fixture deliberately uses two Worker/execution leases so demand can
+The 3-second idle grace matches the deployment default; this gate
+separately restricts running environments to one instead of the deployment
+default of eight. The fixture deliberately uses two Worker/execution leases so demand can
 reach the independent running-environment gate. This does not change the
 application's normal Worker or execution-lease limits.
 

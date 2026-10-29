@@ -32,6 +32,9 @@ def initialize(root, oci_runtime=None):
     values = read_env(root / '.env.example')
     if oci_runtime is not None:
         values['OCI_RUNTIME'] = oci_runtime
+    if values.get('OCI_RUNTIME') == 'runc':
+        values.update(RUNTIME_NATIVE_SHARED_ADMISSION='0',
+                      RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS='', RUNTIME_RUNSC_IDLE_PAUSE_MS='')
     for key in ('DJANGO_SECRET_KEY', 'INTERNAL_API_TOKEN', 'AGENT_RUN_AUTHORIZATION_SIGNING_KEY',
                 'POSTGRES_PASSWORD', 'BOOTSTRAP_SUPERADMIN_PASSWORD'):
         values[key] = secrets.token_hex(32)

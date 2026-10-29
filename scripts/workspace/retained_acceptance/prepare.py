@@ -190,7 +190,8 @@ def main():
 
         "REDIS_URL": "redis://redis:6379/0", "WEB_ORIGIN": f"http://127.0.0.1:{args.api_port}", "API_BASE_URL": f"http://127.0.0.1:{args.api_port}",
 
-        "RUNTIME_BIND_ADDRESS": "0.0.0.0", "RUNTIME_PORT": "9000", "RUNTIME_STATE_ROOT": "/var/lib/centaeris-runtime/state", "OCI_RUNTIME": "runc",
+        "RUNTIME_BIND_ADDRESS": "0.0.0.0", "RUNTIME_PORT": "9000", "RUNTIME_STATE_ROOT": "/var/lib/centaeris-runtime/state", "OCI_RUNTIME": "runc", "RUNTIME_NATIVE_SHARED_ADMISSION": "0",
+        "RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS": "", "RUNTIME_RUNSC_IDLE_PAUSE_MS": "",
 
         "WORKSPACE_GENERAL_IMAGE": project + "-general:fixed", "PLUGIN_VOLUME_NAME": project + "_plugins", "AGENT_MEMORY_VOLUME_NAME": project + "_memory",
 

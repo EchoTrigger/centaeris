@@ -5,7 +5,7 @@ with patch.object(sys,'path',[str(Path(__file__).parent),*sys.path]):
  spec=importlib.util.spec_from_file_location('native_prepare',Path(__file__).with_name('prepare.py'));prepare=importlib.util.module_from_spec(spec);spec.loader.exec_module(prepare)
 class PreparationTests(unittest.TestCase):
  def fixture(self,root):
-  source=root/'source';source.mkdir();(source/'.env.example').write_text('EXECUTION_GLOBAL_LIMIT=8\nWORKER_SLOT_COUNT=8\nRESIDENT_GLOBAL_PIDS=8192\nRESIDENT_TENANT_PIDS=2048\n')
+  source=root/'source';source.mkdir();(source/'.env.example').write_text('EXECUTION_GLOBAL_LIMIT=8\nWORKER_SLOT_COUNT=8\nRUNTIME_NATIVE_SHARED_ADMISSION=1\nRESIDENT_GLOBAL_PIDS=8192\nRESIDENT_TENANT_PIDS=2048\n')
   bins=root/'bins';bins.mkdir()
   for name in ('runtime_server','execution_agent','environment_host_supervisor'):(bins/name).write_bytes(name.encode())
   manifest=root/'build.json';manifest.write_text(json.dumps({'sourceRevision':'a'*40,'sourceTree':'c'*40,'binarySha256':{n:hashlib.sha256(n.encode()).hexdigest() for n in ('runtime_server','execution_agent')},'hostSupervisorSha256':hashlib.sha256(b'environment_host_supervisor').hexdigest()}))
@@ -18,6 +18,7 @@ class PreparationTests(unittest.TestCase):
    root=Path(tmp);argv=self.fixture(root)+['--execution-mode','retained']
    with patch.object(sys,'argv',argv),patch.object(prepare,'verify_owner',return_value={'root':'/run/owned'}) as owner,patch.object(prepare.subprocess,'run',side_effect=self.outputs()) as run,patch('builtins.print') as printed:prepare.main()
    config=json.loads((root/'result/compose.json').read_text());manifest=json.loads((root/'result/manifest.json').read_text());env=dict(v.split('=',1) for v in (root/'result/synthetic.env').read_text().splitlines())
+   self.assertEqual(env['RUNTIME_NATIVE_SHARED_ADMISSION'],'0')
    self.assertEqual(env['RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS'],'1');self.assertEqual(env['RUNTIME_RUNSC_IDLE_PAUSE_MS'],'3000');self.assertEqual(env['SANDBOX_PIDS_LIMIT'],'512');self.assertEqual(env['RESIDENT_GLOBAL_COUNT'],'2');self.assertEqual(env['WORKER_SLOT_COUNT'],'2');self.assertEqual(env['EXECUTION_GLOBAL_LIMIT'],'2')
    self.assertEqual(config['services']['runtime']['user'],'0:0');self.assertIn('/run/owned/host:/run/centaeris-host:ro',config['services']['runtime']['volumes'])
    helper=str((root/'bins/execution_agent').resolve());self.assertIn(helper+':'+helper+':ro',config['services']['runtime']['volumes'])

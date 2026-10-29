@@ -9,9 +9,11 @@ private `.env`. Do not invoke Compose manually to change slots.
 
 Initialization uses `runsc`, requiring a Docker host with gVisor registered.
 On hosts without it, explicitly initialize with
-`python perf/harness/control.py init --oci-runtime runc`. The option applies only
-to initialization; it does not rewrite an existing test environment or the root
-private `.env`. A configured runtime failure never selects another runtime.
+`python perf/harness/control.py init --oci-runtime runc`. This explicit profile
+also disables runsc shared admission and clears its pause/resume settings. The
+option applies only to initialization; it does not rewrite an existing test
+environment or the root private `.env`. A configured runtime failure never
+selects another runtime.
 
 ```powershell
 python perf/harness/control.py init

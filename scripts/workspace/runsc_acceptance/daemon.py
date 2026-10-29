@@ -48,7 +48,7 @@ def cgroup_pids(container,pid,limit,proc_root=Path('/proc'),cgroup_root=Path('/s
 
 
 class PrivateDocker:
-    def __init__(self,root,network=False,*,storage_driver='vfs'):
+    def __init__(self,root,network=False,*,storage_driver='overlay2'):
         if storage_driver not in STORAGE_DRIVERS:raise ValueError('supported private storage driver required')
         if Path(root).is_symlink():raise RuntimeError('private root symlink rejected')
         self.root=Path(root).resolve(strict=True)

@@ -131,7 +131,7 @@ def main():
     parser.add_argument('--root',required=True,type=Path);parser.add_argument('--source',required=True,type=Path);parser.add_argument('--git-dir',type=Path)
     parser.add_argument('--api-port',type=int,default=18083);parser.add_argument('--runtime-port',type=int,default=19003);parser.add_argument('--execute',action='store_true')
     parser.add_argument('--shared-workload',action='store_true')
-    parser.add_argument('--storage-driver',choices=STORAGE_DRIVERS,default='vfs')
+    parser.add_argument('--storage-driver',choices=STORAGE_DRIVERS,default='overlay2')
     parser.add_argument('--execution-mode',choices=('perRun','retained'),default='perRun')
     parser.add_argument('--environment-count',type=int,default=4)
     parser.add_argument('--iterations',type=int,default=3)

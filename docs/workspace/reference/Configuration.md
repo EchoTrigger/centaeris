@@ -214,24 +214,27 @@ yielding an execution lease does not free its resident sandbox capacity.
 
 | Variable | Default | Scope |
 | --- | ---: | --- |
-| `RESIDENT_GLOBAL_COUNT` | 16 | Resident sandbox count across Runtime hosts sharing the database |
-| `RESIDENT_GLOBAL_MEMORY_BYTES` | 34359738368 | Global declared memory ceiling (32 GiB) |
-| `RESIDENT_GLOBAL_CPU_MILLI` | 16000 | Global declared CPU ceiling (16 cores) |
-| `RESIDENT_GLOBAL_PIDS` | 8192 | Global declared process ceiling |
-| `RESIDENT_GLOBAL_WORKSPACE_BYTES` | 34359738368 | Global workspace tmpfs ceiling (32 GiB) |
-| `RESIDENT_TENANT_COUNT` | 4 | Resident sandbox count within one Workspace |
-| `RESIDENT_TENANT_MEMORY_BYTES` | 8589934592 | Workspace declared memory ceiling (8 GiB) |
-| `RESIDENT_TENANT_CPU_MILLI` | 4000 | Workspace declared CPU ceiling (4 cores) |
-| `RESIDENT_TENANT_PIDS` | 2048 | Workspace declared process ceiling |
-| `RESIDENT_TENANT_WORKSPACE_BYTES` | 8589934592 | Workspace tmpfs ceiling (8 GiB) |
+| `RESIDENT_GLOBAL_COUNT` | 8 | Resident sandbox count across Runtime hosts sharing the database |
+| `RESIDENT_GLOBAL_MEMORY_BYTES` | 12884901888 | Global admission memory budget (12 GiB) |
+| `RESIDENT_GLOBAL_CPU_MILLI` | 8000 | Global CPU ceiling (8 cores); shared admission checks each request |
+| `RESIDENT_GLOBAL_PIDS` | 8192 | Global process budget |
+| `RESIDENT_GLOBAL_WORKSPACE_BYTES` | 34359738368 | Global workspace byte budget (32 GiB) |
+| `RESIDENT_TENANT_COUNT` | 8 | Resident sandbox count within one Workspace |
+| `RESIDENT_TENANT_MEMORY_BYTES` | 12884901888 | Workspace admission memory budget (12 GiB) |
+| `RESIDENT_TENANT_CPU_MILLI` | 4000 | Workspace CPU ceiling (4 cores); shared admission checks each request |
+| `RESIDENT_TENANT_PIDS` | 2048 | Workspace process budget |
+| `RESIDENT_TENANT_WORKSPACE_BYTES` | 34359738368 | Workspace byte budget (32 GiB) |
 | `RESIDENT_HOST_MEMORY_HEADROOM_BYTES` | Greater of 20% of Docker host RAM or 512 MiB | Memory reserved for host services |
 | `RESIDENT_HOST_CPU_HEADROOM_MILLI` | 100 per Docker host CPU core | CPU reserved for host services |
 
-Runtime derives host capacity from the Docker daemon's reported resources, then
-caps the host's memory, CPU, and workspace ceilings by both the global limits and
-the resources left after host headroom. Workspace tmpfs is capped by available
-RAM separately; it is not added to declared cgroup memory a second time. Headroom
-that leaves no capacity fails rather than allowing overbooking.
+These are Compose deployment defaults for the accepted eight-environment,
+12-GiB admission profile. Runtime also derives host capacity from Docker and
+retains host headroom; eight is a count ceiling, not guaranteed physical capacity.
+The shared policy charges fresh observed memory plus swap and PID usage for known
+residents. Pending or unknown creations keep their full declared charge; unknown
+workspace usage keeps the declared workspace byte budget. CPU remains a
+per-environment ceiling and is not summed as a reservation. Headroom that leaves
+no capacity fails rather than allowing overbooking.
 
 Compose supplies the ten finite global and Workspace defaults and passes explicit
 overrides to Runtime. All Runtime replicas sharing one database must use the same
@@ -242,11 +245,14 @@ or headroom override must be a positive integer. Empty values, zero, negative
 values, and non-integers reach Runtime and
 fail validation instead of silently selecting a default.
 
-Capacity planning must account for retained containers, not only active execution
-steps. The default Workspace memory and CPU ceilings fit one default authorized
-sandbox profile; independent AgentRuns sharing that Workspace may therefore wait
-for capacity even when the resident count limit has not been reached. Capacity
-waiting defers execution until resources become available.
+Compose and `.env.example` set `RUNTIME_NATIVE_SHARED_ADMISSION=1` for the
+matching Docker/runsc HostSupervisor. Direct Runtime launches still require an
+explicit shared-admission switch and resource budgets; an unset switch retains
+declaration-based admission. Capacity planning includes reservations and
+containers awaiting confirmed removal, not only active execution leases. A
+known capacity wait preserves the original Run/Job without consuming failed
+retry budget. The dense-memory acceptance uses an explicit 8-GiB Workspace
+override; it does not change this 12-GiB deployment default.
 
 ### Sandbox execution profile
 
@@ -258,7 +264,8 @@ keep their original resource limits.
 Compose and the material Worker default `OCI_RUNTIME` to `runsc`. Install and
 register gVisor on the Docker host before using that profile. Hosts without
 gVisor, including local Docker Desktop test environments, must explicitly set
-`OCI_RUNTIME=runc`. Runtime selection accepts exactly `runsc` or `runc`; an empty,
+`OCI_RUNTIME=runc`, `RUNTIME_NATIVE_SHARED_ADMISSION=0`, and explicitly empty
+values for both runsc scheduling variables. Runtime selection accepts exactly `runsc` or `runc`; an empty,
 invalid or unregistered selection fails rather than falling back. Existing
 private `.env` values are not replaced when the default changes.
 
@@ -352,7 +359,8 @@ recovery are documented in [Garbage collection](../operations/GarbageCollection.
 Runtime's `DOCKER_CREATE_CONCURRENCY` limits simultaneous Docker container-create
 calls (integer 1..16, default 2); invalid values fail startup. This does not change
 worker slots, start/remove concurrency or execution limits. The production
-Compose configuration retains the default. Isolated perf experiments use
+Compose configuration supplies 2 and passes explicit overrides through. Isolated
+perf experiments use
 `PERF_DOCKER_CREATE_CONCURRENCY` in `perf/.state/test.env` through the perf overlay.
 
 Before deployment, set `DJANGO_DEBUG=0`, use explicit allowed hosts and web
@@ -366,10 +374,14 @@ docker compose --env-file .env -f docker-compose.yml -f docker-compose.prod.yml 
 
 ### Native retained-memory scheduling
 
-Set both `RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS` and
-`RUNTIME_RUNSC_IDLE_PAUSE_MS` to positive values to enable automatic idle pause
-and demand resume on the native runsc backend. Unset both to disable it. The
-running-environment limit applies per Docker host. Pausing preserves the original
+Compose and `.env.example` enable automatic idle pause and demand resume with
+`RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS=8` and `RUNTIME_RUNSC_IDLE_PAUSE_MS=3000`,
+matching the accepted eight-environment profile. Explicitly empty both values in
+Compose to disable it; direct Runtime launches can leave both unset. The
+running-environment limit applies per Docker host. Idle eligibility requires
+released controller authority and no queued demand. An active Run is not paused
+merely because it is waiting for a model response. `perRun` still removes its
+instance after terminal cleanup rather than retaining it between Runs. Pausing preserves the original
 container, memory and files, and every resident memory/PID/storage/count debit.
 Only an exact observed pause releases its running slot. Unknown outcomes remain
 charged; restart reconciles persisted power state before admission starts.

@@ -137,7 +137,7 @@ class StorageDriverArgumentTests(unittest.TestCase):
   import hashlib,json,sys,types
   from unittest.mock import patch
   class StoppedBeforeDaemonStart(Exception):pass
-  for extra,expected in (([],'vfs'),(['--storage-driver','vfs'],'vfs'),(['--storage-driver','overlay2'],'overlay2')):
+  for extra,expected in (([],'overlay2'),(['--storage-driver','vfs'],'vfs'),(['--storage-driver','overlay2'],'overlay2')):
    with self.subTest(expected=expected),tempfile.TemporaryDirectory(dir='/var/tmp',prefix='centaeris-runsc-storage-test-') as tmp:
     root=Path(tmp);source=root/'source';source.mkdir();bins=root/'bins';bins.mkdir()
     values={'runtime_server':b'fixture-runtime','execution_agent':StaticHelperTests().elf(1),'environment_host_supervisor':b'fixture-supervisor'}

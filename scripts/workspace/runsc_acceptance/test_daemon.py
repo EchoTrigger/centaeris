@@ -96,7 +96,7 @@ class RawProbeTests(unittest.TestCase):
 
 
 class StorageDriverTests(unittest.TestCase):
- def launch_fake(self,root,requested=None,observed='vfs'):
+ def launch_fake(self,root,requested=None,observed='overlay2'):
   from unittest.mock import Mock
   arguments={} if requested is None else {'storage_driver':requested}
   docker=daemon.PrivateDocker(root,**arguments)
@@ -124,8 +124,8 @@ class StorageDriverTests(unittest.TestCase):
      handle=getattr(docker,name,None)
      if handle:handle.close()
   return docker,processes
- def test_default_vfs_and_explicit_overlay2_use_exact_driver_and_record_actual_identity(self):
-  for requested,observed in ((None,'vfs'),('vfs','vfs'),('overlay2','overlay2')):
+ def test_default_overlay2_and_explicit_vfs_use_exact_driver_and_record_actual_identity(self):
+  for requested,observed in ((None,'overlay2'),('vfs','vfs'),('overlay2','overlay2')):
    with self.subTest(requested=requested),tempfile.TemporaryDirectory(dir='/var/tmp',prefix='centaeris-runsc-storage-test-') as tmp:
     docker,processes=self.launch_fake(Path(tmp),requested,observed)
     vector=next(process.argv for process in processes.values() if process.argv[0]=='dockerd')
