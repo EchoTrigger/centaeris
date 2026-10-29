@@ -70,6 +70,7 @@ def leased_lifecycle_job_fixture(test_case, agent_run, *, isolate_schema=True):
     from django.db import connection
     from .runtime_schema_test_helpers import isolate_runtime_schema
 
+    test_case.assertTrue(connection.settings_dict["NAME"].startswith("test_"))
     if isolate_schema:
         isolate_runtime_schema(test_case)
     job_id = f"agent_run.lifecycle:{agent_run.pk}"
