@@ -32,6 +32,7 @@ type Props = Readonly<{
   onLoadOlderHistory(): Promise<void>;
   emptyState?: ReactNode;
   pendingUserMessage?: PendingTranscriptMessage | null;
+  onRetrySubmission?(): void;
   historyMemoryPressure?: boolean;
   onReleaseLoadedHistory?(): void;
   onReadingLatestChange?(sessionId: string | null, readingLatest: boolean): void;
@@ -106,6 +107,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   onLoadOlderHistory,
   emptyState,
   pendingUserMessage,
+  onRetrySubmission,
   historyMemoryPressure = false,
   onReleaseLoadedHistory,
   onReadingLatestChange,
@@ -175,6 +177,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   const pendingVisible = pendingUserMessage
     && (pendingUserMessage.sessionId === null || pendingUserMessage.sessionId === sessionId)
     && !hasCommittedPendingMessage(pendingUserMessage, sessionId, blockIds, store.getBlockSnapshot);
+  const pendingTerminal = pendingUserMessage?.status === "completed" || pendingUserMessage?.status === "failed" || pendingUserMessage?.status === "cancelled";
   const renderedTurns = pendingVisible
     ? [...turns, { id: "pending:user", userBlockId: null, processIds: [], answerIds: [] }]
     : turns;
@@ -528,14 +531,18 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
                 <div className="workspaceUserMessage">{pendingUserMessage?.text}</div>
                 <div className="workspaceUserMessageMeta workspaceUserMessageMetaPlaceholder" aria-hidden="true" />
               </div> : turn.userBlockId ? <TranscriptBlockRow store={store} blockId={turn.userBlockId} initialInputOrigin={initialInputOrigin} /> : null}
-              {hasWork ? <WorkProgress key="work" running={Boolean(isPending || (isLast && running))} finalStarted={turn.answerIds.length > 0}
+              {hasWork ? <WorkProgress key="work" running={Boolean(isPending ? !pendingTerminal : isLast && running)} finalStarted={turn.answerIds.length > 0}
                 response={turnLive ? <TranscriptLiveTail live={turnLive} mode="text" /> : null}
-                startedAtMs={isPending ? pendingStartedAt : time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={isPending ? undefined : time?.completedAtMs ?? (isLast ? completedAtMs : undefined)}>
+                startedAtMs={isPending ? pendingStartedAt : time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={isPending ? pendingUserMessage?.completedAtMs : time?.completedAtMs ?? (isLast ? completedAtMs : undefined)}>
                 {groupTranscriptBlocks(store, turn.processIds).map((entry) => entry.kind === "tool"
                   ? <TranscriptToolGroupCard store={store} blockIds={entry.blockIds} toolOperations={toolOperations} citations={citations.citations} onShowCitation={onShowCitation} runEnded={runEnded} key={`tool:${entry.blockIds[0]}`} />
                   : <TranscriptBlockRow store={store} blockId={entry.blockId} key={entry.blockId} />)}
                 {turnLive ? <TranscriptLiveTail live={turnLive} mode="reasoning" /> : null}
               </WorkProgress> : null}
+              {isPending && pendingTerminal ? <div className="workspaceToolOutputStatus" role="status">
+                {t(pendingUserMessage?.status === "failed" ? "appRoute.submissionFailed" : pendingUserMessage?.status === "cancelled" ? "appRoute.submissionCancelled" : "appRoute.submissionCompleted")}
+                {onRetrySubmission && pendingUserMessage?.status !== "completed" ? <button type="button" onClick={onRetrySubmission}>{t("agentChat.retry")}</button> : null}
+              </div> : null}
               {turn.answerIds.map((blockId) => <TranscriptBlockRow store={store} blockId={blockId} key={blockId} />)}
               {time?.artifacts.length ? <div className="workspaceArtifactInline" aria-label={t("agentRunRow.generatedFiles")}>
                 {time.artifacts.map((artifact) => <span className="workspaceArtifactInlineRow" key={artifact.artifactRef}>

@@ -4,7 +4,9 @@ import type { TranscriptViewStore } from "./transcriptViewStore.ts";
 
 type Command = "createSession" | "submitMessage";
 type Scope = { userId: string; workspaceId: string; command: Command };
-type Receipt = { operationId: string; command: Command; status: "accepted"; sessionId: string; agentRunId: string | null; turnId: string | null };
+export type OperationReceipt = { operationId: string; command: Command; status: "accepted"; sessionId: string; agentRunId: string | null; turnId: string | null };
+type Receipt = OperationReceipt;
+export type OperationSubmissionHooks = { shouldDispatch?: () => boolean; onOperationId?: (operationId: string) => void; onDispatch?: (operationId: string) => void };
 type Pending = { operationId: string; fingerprint: string; assetIds: string[]; inputChanged: boolean; receipt: Receipt | null };
 type Storage = Pick<globalThis.Storage, "getItem" | "setItem" | "removeItem">;
 type Request = (path: string, options?: RequestInit) => Promise<unknown>;
@@ -95,12 +97,15 @@ export class OperationClient {
     this.save({ ...current, ...changes });
   }
 
-  async submit(path: string, input: Record<string, unknown>, files: File[] = [], assetIds: string[] = [], replaceUnconfirmedInput = false): Promise<Receipt> {
+  async submit(path: string, input: Record<string, unknown>, files: File[] = [], assetIds: string[] = [], replaceUnconfirmedInput = false, hooks: OperationSubmissionHooks = {}): Promise<Receipt> {
+    if (hooks.shouldDispatch?.() === false) throw new Error("operation_dispatch_stopped");
     const uploads = [];
     for (const file of files) uploads.push({ name: file.name, type: file.type, digest: await digest(await file.arrayBuffer()) });
     const fingerprint = await digest(new TextEncoder().encode(JSON.stringify(canonical({ path, input, uploads, assetIds }))).buffer);
+    if (hooks.shouldDispatch?.() === false) throw new Error("operation_dispatch_stopped");
     let item = this.pending();
     const previouslyPending = item !== null;
+    if (item) hooks.onOperationId?.(item.operationId);
     const replacing = item !== null && item.fingerprint !== fingerprint && replaceUnconfirmedInput && item.receipt === null && this.scope.command === "submitMessage";
     if (item) {
       if (item.fingerprint !== fingerprint && !replacing) throw new Error("operation_pending_input_changed");
@@ -125,6 +130,7 @@ export class OperationClient {
       item = { operationId: crypto.randomUUID(), fingerprint, assetIds: [...assetIds], inputChanged: false, receipt: null };
       // Storage failure stops the request before the server can accept it.
       this.save(item);
+      hooks.onOperationId?.(item.operationId);
     }
     if (!samePendingVersion(this.pending(), item)) throw new Error("operation_result_stale");
     let body: BodyInit;
@@ -136,6 +142,14 @@ export class OperationClient {
       files.forEach((file) => form.append("files", file));
       body = form;
     } else body = JSON.stringify({ ...input, operationId: item.operationId });
+    const checkDispatch = () => {
+      if (hooks.shouldDispatch?.() !== false) return;
+      if (!previouslyPending && samePendingVersion(this.pending(), item) && this.pending()?.receipt === null) this.complete(item.operationId);
+      throw new Error("operation_dispatch_stopped");
+    };
+    checkDispatch();
+    hooks.onDispatch?.(item.operationId);
+    checkDispatch();
     try {
       const result = receipt(await this.request(path, { method: "POST", body }), this.scope.command, item.operationId);
       this.update(item, { receipt: result, inputChanged: false });

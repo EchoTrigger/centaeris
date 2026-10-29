@@ -31,7 +31,7 @@ async function setup(t, draft=false, navigationRead=null, controls={}) {
     calls.push([path,request]);
     const override = await controls.request?.(path,request);
     if (override !== undefined) return override;
-    if(path==="/api/models?workspaceId=workspace") return {json:async()=>({models:[{id:"model",providerId:"provider",modelName:"model",thinkingModes:[]}]})};
+    if(path==="/api/models?workspaceId=workspace") return {json:async()=>({models:controls.models ?? [{id:"model",providerId:"provider",modelName:"model",thinkingModes:[]}]})};
     if(path.includes("session-projects")) return {json:async()=>({projects:[]})};
     if(path.endsWith("/assets")) return {json:async()=>({assets:[]})};
     if(path.endsWith("/read")) return {session:row({isUnread:false,readThroughSequence:JSON.parse(request.body).throughSequence,attentionRevision:"2"})};
@@ -98,7 +98,7 @@ test("pushed navigation opens the requested conversation while the startup HTTP 
 
 const composer = f => nodes(f.subject.tree,n=>n.type.name==="WorkspaceComposer")[0].props;
 const checkpoint = (agentRun, sourceHighWater="10") => ({projectionGeneration:"generation",sourceHighWater,agentRun});
-const run = (agentRunId="run-new",status="queued") => ({agentRunId,status,startedAt:null,completedAt:status==="cancelled"?"2026-10-23T00:00:01Z":null});
+const run = (agentRunId="run-new",status="queued") => ({agentRunId,status,startedAt:null,completedAt:["completed","failed","cancelled"].includes(status)?"2026-10-23T00:00:01Z":null});
 const receipt = request => ({operationId:JSON.parse(request.body).operationId,command:"submitMessage",status:"accepted",sessionId:"session",agentRunId:"run-new",turnId:"turn-new"});
 async function settleUntil(f, ready) {
   for(let i=0;i<100;i++){
@@ -234,14 +234,15 @@ for(const outcome of ["terminal","failure"]){
   });
 }
 
-test("a lost submit response recovers the original operation before exposing a cancellation target",async t=>{
+test("a lost submit response keeps Stop available while recovering the original operation",async t=>{
   let release;let accepted;
   const f=await setup(t,false,null,{request:async(path,request)=>{
     if(path.endsWith("/messages")){accepted=receipt(request);throw new TypeError("lost acknowledgement");}
     if(path.includes("/operations/submitMessage/"))return new Promise(resolve=>{release=()=>resolve(accepted);});
   }});
   await f.send("snapshot",{page});await startSend(f,()=>Boolean(release));
-  assert.equal(composer(f).hasActiveAgentRun,false);
+  assert.equal(composer(f).hasActiveAgentRun,true);
+  assert.equal(composer(f).activeAgentRunId,"");
   await composer(f).onCancelActiveAgentRun();
   assert.equal(f.calls.filter(([path])=>path.endsWith("/cancel")).length,0);
   release();await settleUntil(f,()=>!composer(f).sending);
@@ -320,4 +321,201 @@ test("a stale empty checkpoint after receipt handoff cannot remove a currently q
   await f.send("checkpoint",checkpoint(run()),"matching");
   await f.send("checkpoint",checkpoint(null),"stale-empty");
   assert.equal(composer(f).activeAgentRunId,"run-new");
+});
+
+
+const transcript = f => nodes(f.subject.tree,n=>n.type.name==="TranscriptBlockList")[0].props;
+
+test("Stop is available immediately and cancels the original receipt after acceptance arrives",async t=>{
+  let accept;let sent;
+  const f=await setup(t,false,null,{request:async(path,request)=>{
+    if(path.endsWith("/messages")){sent=request;return new Promise(resolve=>{accept=()=>resolve(receipt(request));});}
+    if(path.endsWith("/cancel"))return {json:async()=>({agentRunId:"run-new",status:"queued",disposition:"requested"})};
+  }});
+  await f.send("snapshot",{page});await startSend(f,()=>Boolean(accept));
+  assert.equal(composer(f).hasActiveAgentRun,true);
+  const stopping=composer(f).onCancelActiveAgentRun();await tick();await f.subject.settle();
+  assert.ok(composer(f).controlStatus);
+  assert.equal(f.calls.filter(([path])=>path.endsWith("/cancel")).length,0);
+  accept();await stopping;await settleUntil(f,()=>f.calls.some(([path])=>path.endsWith("/cancel")));
+  assert.equal(f.calls.filter(([path])=>path.endsWith("/messages")).length,1);
+  assert.equal(f.calls.filter(([path])=>path==="/api/sessions/session/agent-runs/run-new/cancel").length,1);
+  assert.ok(JSON.parse(sent.body).operationId);
+});
+
+for(const status of ["failed","cancelled","completed"]){
+ test(`matching ${status} settles pending input even when no Core user block exists`,async t=>{
+  const f=await setup(t,false,null,{request:async(path,request)=>path.endsWith("/messages")?receipt(request):undefined});
+  await f.send("snapshot",{page});await startSend(f);
+  await f.send("checkpoint",checkpoint(run("run-new",status)),"terminal-without-event");
+  assert.equal(transcript(f).pendingUserMessage.text,"synthetic input");
+  assert.equal(transcript(f).pendingUserMessage.status,status);
+  assert.equal(typeof transcript(f).pendingUserMessage.completedAtMs,"number");
+  assert.equal(transcript(f).running,false);
+  assert.equal(composer(f).hasActiveAgentRun,false);
+ });
+}
+
+test("terminal before receipt settles the matching submission without reactivating Stop",async t=>{
+ let accept;
+ const f=await setup(t,false,null,{request:async(path,request)=>path.endsWith("/messages")?new Promise(resolve=>{accept=()=>resolve(receipt(request));}):undefined});
+ await f.send("snapshot",{page});await startSend(f,()=>Boolean(accept));
+ await f.send("checkpoint",checkpoint(run("run-new","failed")),"failed-first");
+ accept();await settleUntil(f,()=>!composer(f).sending);
+ assert.equal(transcript(f).pendingUserMessage.status,"failed");
+ assert.equal(composer(f).hasActiveAgentRun,false);
+});
+
+test("empty input and missing model produce feedback instead of a disabled or silent action",async t=>{
+ const f=await setup(t,false,null,{models:[]});
+ await f.send("snapshot",{page});await f.send("checkpoint",checkpoint(null),"ready");
+ await composer(f).onSubmit({preventDefault(){}});await f.subject.settle();
+ assert.ok(composer(f).controlStatus);
+ composer(f).onDraftChange("keep this draft");await f.subject.settle();
+ await composer(f).onSubmit({preventDefault(){}});await f.subject.settle();
+ assert.equal(composer(f).draft,"keep this draft");
+ assert.ok(composer(f).controlStatus);
+ assert.equal(f.calls.filter(([path])=>path.endsWith("/messages")).length,0);
+});
+
+test("repeated Stop while cancellation is pending stays actionable and shares one request",async t=>{
+ let finish;
+ const f=await setup(t,false,null,{request:async(path)=>path.endsWith("/cancel")?new Promise(resolve=>{finish=()=>resolve({json:async()=>({agentRunId:"run-new",status:"running",disposition:"requested"})});}):undefined});
+ await f.send("snapshot",{page});await f.send("checkpoint",checkpoint(run()),"active");
+ const first=composer(f).onCancelActiveAgentRun();await tick();await f.subject.settle();
+ const second=composer(f).onCancelActiveAgentRun();await tick();await f.subject.settle();
+ assert.ok(composer(f).controlStatus);
+ assert.equal(f.calls.filter(([path])=>path.endsWith("/cancel")).length,1);
+ finish();await Promise.all([first,second]);await f.subject.settle();
+ assert.equal(composer(f).hasActiveAgentRun,true,"requested does not declare terminal");
+});
+
+
+test("a new Session keeps its pending text visible while acceptance metadata is delayed",async t=>{
+ let read;let submitted=false;
+ const f=await setup(t,true,null,{request:async(path,request)=>{
+  if(path.endsWith("/messages")){submitted=true;return receipt(request);}
+  if(path==="/api/sessions/session"&&submitted)return new Promise(resolve=>{read=()=>resolve({json:async()=>({session:row()})});});
+ }});
+ await startSend(f,()=>Boolean(read));
+ assert.equal(transcript(f).pendingUserMessage.sessionId,null,"the pending text belongs to the still-visible draft conversation");
+ assert.equal(transcript(f).pendingUserMessage.agentRunId,"run-new");
+ read();await settleUntil(f,()=>!composer(f).sending);
+});
+
+test("terminal releases local send progress even when the follow-up Session read is still pending",async t=>{
+ let read;let submitted=false;
+ const f=await setup(t,false,null,{request:async(path,request)=>{
+  if(path.endsWith("/messages")){submitted=true;return receipt(request);}
+  if(path==="/api/sessions/session"&&submitted)return new Promise(resolve=>{read=()=>resolve({json:async()=>({session:row()})});});
+ }});
+ await f.send("snapshot",{page});await startSend(f,()=>Boolean(read));
+ await f.send("checkpoint",checkpoint(run("run-new","failed")),"failed-before-metadata");
+ assert.equal(composer(f).sending,false);
+ assert.equal(transcript(f).pendingUserMessage.status,"failed");
+ read();await tick();await f.subject.settle();
+});
+
+
+test("terminal without a new snapshot retires its receipt so retry can create a new operation",async t=>{
+ let posts=0;const ids=[];let finishMetadata;
+ const f=await setup(t,false,null,{request:async(path,request)=>{
+  if(path.endsWith("/messages")){posts++;ids.push(JSON.parse(request.body).operationId);return {...receipt(request),agentRunId:posts===1?"run-new":"run-retry",turnId:posts===1?"turn-new":"turn-retry"};}
+  if(path==="/api/sessions/session"&&posts===1)return new Promise(resolve=>{finishMetadata=()=>resolve({json:async()=>({session:row()})});});
+ }});
+ await f.send("snapshot",{page});await startSend(f,()=>Boolean(finishMetadata));
+ t.after(()=>finishMetadata?.());
+ await f.send("checkpoint",checkpoint(run("run-new","failed")),"failed-no-snapshot");
+ assert.equal(sessionStorage.getItem('centaeris.pendingOperation.v1:["user","workspace","submitMessage"]'),null);
+ transcript(f).onRetrySubmission();await f.subject.settle();
+ assert.equal(composer(f).draft,"synthetic input");
+ composer(f).onSubmit({preventDefault(){}});await settleUntil(f,()=>posts===2&&!composer(f).sending);
+ assert.notEqual(ids[0],ids[1]);
+ assert.equal(composer(f).activeAgentRunId,"run-retry");
+});
+
+
+test("a new Session terminal before its details still preserves the accepted navigation",async t=>{
+ let read;let submitted=false;let acceptedPath;
+ const f=await setup(t,true,null,{accepted:path=>{acceptedPath=path;},request:async(path,request)=>{
+  if(path.endsWith("/messages")){submitted=true;return receipt(request);}
+  if(path==="/api/sessions/session"&&submitted)return new Promise(resolve=>{read=()=>resolve({json:async()=>({session:row()})});});
+  if(path.endsWith("/cancel"))return {json:async()=>({agentRunId:"run-new",status:"cancelled",disposition:"terminal"})};
+ }});
+ await startSend(f,()=>Boolean(read));
+ await composer(f).onCancelActiveAgentRun();await f.subject.settle();
+ assert.equal(transcript(f).pendingUserMessage.status,"cancelled");
+ assert.equal(transcript(f).pendingUserMessage.sessionId,null);
+ read();await settleUntil(f,()=>Boolean(acceptedPath));
+ assert.ok(acceptedPath.endsWith("?sessionId=session"));
+ assert.equal(transcript(f).pendingUserMessage.sessionId,"session");
+ assert.equal(transcript(f).pendingUserMessage.status,"cancelled");
+});
+
+
+test("checking a stopped unknown submission cancels the recovered original Run without reposting",async t=>{
+ let available=false;let original;let lookups=0;
+ const f=await setup(t,false,null,{request:async(path,request)=>{
+  if(path.endsWith("/messages")){original=request;throw new TypeError("lost acknowledgement");}
+  if(path.includes("/operations/submitMessage/")){lookups++;if(!available)throw new ApiError("operation_not_found",404);return receipt(original);}
+  if(path.endsWith("/cancel"))return {json:async()=>({agentRunId:"run-new",status:"queued",disposition:"requested"})};
+ }});
+ await f.send("snapshot",{page});await startSend(f);
+ await composer(f).onCancelActiveAgentRun();await f.subject.settle();
+ assert.ok(lookups>=2);available=true;
+ const retry=nodes(f.subject.tree,n=>n.type==="button"&&n.props.children==="agentChat.retry")[0];
+ assert.ok(retry);retry.props.onClick();
+ await settleUntil(f,()=>!composer(f).sending);
+ assert.equal(f.calls.filter(([path])=>path==="/api/sessions/session/agent-runs/run-new/cancel").length,1);
+ assert.equal(f.calls.filter(([path])=>path.endsWith("/messages")).length,1);
+});
+
+test("a new conversation pending input never appears in another Session while its Stop survives",async t=>{
+ let accept;
+ const f=await setup(t,true,null,{sessions:[row(),row({id:"other"})],request:async(path,request)=>{
+  if(path.endsWith("/messages"))return new Promise(resolve=>{accept=()=>resolve(receipt(request));});
+  if(path==="/api/sessions/other")return {json:async()=>({session:row({id:"other"})})};
+  if(path.endsWith("/cancel"))return {json:async()=>({agentRunId:"run-new",status:"queued",disposition:"requested"})};
+ }});
+ await startSend(f,()=>Boolean(accept));await composer(f).onCancelActiveAgentRun();
+ f.props.workspaceDraft=false;f.props.location.search="?sessionId=other";await f.subject.settle();
+ assert.equal(transcript(f).sessionId,"other");
+ assert.equal(transcript(f).pendingUserMessage,null);
+ accept();await settleUntil(f,()=>f.calls.some(([path])=>path.endsWith("/cancel")));
+ assert.equal(transcript(f).pendingUserMessage,null);
+ assert.equal(f.calls.filter(([path])=>path==="/api/sessions/session/agent-runs/run-new/cancel").length,1);
+});
+
+
+test("Stop during file preparation restores the draft immediately and late file bytes never dispatch",async t=>{
+ let finishRead;let readFinished=false;
+ const file=new File(["attachment"],"note.txt",{type:"text/plain"});
+ Object.defineProperty(file,"arrayBuffer",{value:()=>readFinished?Promise.resolve(new ArrayBuffer(0)):new Promise(resolve=>{finishRead=()=>{readFinished=true;resolve(new ArrayBuffer(0));};})});
+ const f=await setup(t,true,null,{request:async(path,request)=>path.endsWith("/messages")?receipt(request):undefined});
+ await composer(f).onUploadAttachment({currentTarget:{files:[file],value:""}});await f.subject.settle();
+ await startSend(f,()=>Boolean(finishRead));
+ await composer(f).onCancelActiveAgentRun();await settleUntil(f,()=>!composer(f).sending);
+ assert.equal(composer(f).draft,"synthetic input");
+ assert.equal(composer(f).hasActiveAgentRun,false);
+ assert.equal(transcript(f).pendingUserMessage,null);
+ assert.equal(f.calls.filter(([path])=>path.endsWith("/messages")).length,0);
+ finishRead();await tick();await f.subject.settle();
+ assert.equal(f.calls.filter(([path])=>path.endsWith("/messages")).length,0);
+ assert.ok(composer(f).controlStatus);
+});
+
+
+test("editing a new draft during supplemental input keeps it after the old response",async t=>{
+ let finish;let requests=0;
+ const f=await setup(t,false,null,{request:async(path,request)=>{
+  if(path.endsWith("/supplements")){requests++;const input=JSON.parse(request.body);return new Promise(resolve=>{finish=()=>resolve({json:async()=>({sessionId:"session",agentRunId:"run-new",supplementId:input.supplementId,disposition:"accepted",queuedCount:1})});});}
+ }});
+ await f.send("snapshot",{page});await f.send("checkpoint",checkpoint(run()),"active");
+ composer(f).onDraftChange("extra note");await f.subject.settle();
+ composer(f).onSubmit({preventDefault(){}});await settleUntil(f,()=>Boolean(finish));
+ composer(f).onDraftChange("next draft");await f.subject.settle();
+ composer(f).onSubmit({preventDefault(){}});await f.subject.settle();
+ assert.equal(requests,1);assert.ok(composer(f).controlStatus);
+ finish();await settleUntil(f,()=>!composer(f).sending);
+ assert.equal(composer(f).draft,"next draft");
 });

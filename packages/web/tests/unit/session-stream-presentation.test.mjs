@@ -26,6 +26,10 @@ const page = text => ({
 });
 
 async function setup(context, tailPage = page("Retained authoritative answer"), idle = false) {
+  const oldStorage = globalThis.sessionStorage;
+  const stored = new Map();
+  globalThis.sessionStorage = { getItem:key=>stored.get(key)??null, setItem:(key,value)=>stored.set(key,value), removeItem:key=>stored.delete(key) };
+  context.after(() => { globalThis.sessionStorage = oldStorage; });
   const oldWindow = globalThis.window, oldDocument = globalThis.document;
   globalThis.window = { addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {}, location: { pathname: "/w/workspace/agents/agent" } };
   globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {} };

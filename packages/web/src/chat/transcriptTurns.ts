@@ -5,6 +5,8 @@ export type PendingTranscriptMessage = Readonly<{
   startedAtMs: number;
   sessionId: string | null;
   agentRunId: string | null;
+  status?: "pending" | "completed" | "failed" | "cancelled";
+  completedAtMs?: number;
 }>;
 
 export function hasCommittedPendingMessage(

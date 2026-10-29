@@ -25,6 +25,7 @@ import {
   transcriptContentRangeCacheBytes,
 } from "../chat/transcriptContentRanges";
 import { WorkspaceComposer } from "../chat/WorkspaceComposer";
+import { SubmissionControl } from "../chat/submissionControl";
 import {
   attachmentCanPreview,
   attachmentDownloadUrl,
@@ -91,6 +92,21 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const { user } = useRouteLoaderData("authenticated");
   const { workspace, agents } = useRouteLoaderData("workspace");
   const operations = useMemo(() => new OperationClient({ userId: user.id, workspaceId: workspace.id, command: "submitMessage" }), [user.id, workspace.id]);
+  const cancelSubmission = useCallback(async (target) => {
+    const response = await apiResponse(`/api/sessions/${encodeURIComponent(target.sessionId)}/agent-runs/${encodeURIComponent(target.agentRunId)}/cancel`, { method: "POST" });
+    return response.json();
+  }, []);
+  const submissionControl = useMemo(() => new SubmissionControl({ operations,
+    scope: { userId: user.id, workspaceId: workspace.id }, cancel: cancelSubmission,
+  }), [operations, user.id, workspace.id, cancelSubmission]);
+  const submissionSnapshot = useSyncExternalStore(submissionControl.subscribe, submissionControl.getSnapshot, submissionControl.getSnapshot);
+  const submissionOriginRef = useRef(null);
+  const messageRequestRef = useRef(null);
+  const pendingBindingRef = useRef(null);
+  const auxiliaryRequestRef = useRef(null);
+  const knownRunControlsRef = useRef(new Map());
+  const terminalFactsRef = useRef(new Map());
+  const [actionFeedback, setActionFeedback] = useState("");
   const [operationReviewLink, setOperationReviewLink] = useState(null);
   const navigate = useNavigate();
   const searchParams = new URLSearchParams(location.search);
@@ -114,7 +130,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const terminalRunIdsRef = useRef(new Set());
   const runControlRevisionRef = useRef(0);
   const currentRunIdentityRef = useRef(undefined);
-  const cancelRequestRef = useRef(null);
   const acceptedRouteSessionIdRef = useRef("");
   const transcriptStoreRef = useRef(null);
   if (!transcriptStoreRef.current) transcriptStoreRef.current = createTranscriptViewStore();
@@ -163,7 +178,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const [attachmentPreview, setAttachmentPreview] = useState(null);
   const sessionActions = useSessionNavigationActions({ scopeKey: JSON.stringify([workspace.id, activeAgent.id]), sessions, onChangeSessions: setSessions, onError: setError, onDeleted: onSessionDeleted });
   const { deletingSessionId, deleteConfirmationSessionId, setDeleteConfirmationSessionId, setEditingSessionId, setOpenSessionMenuId, markSessionRead, deleteSession } = sessionActions;
-  const [cancellingAgentRunId, setCancellingRunId] = useState("");
   const [loadingHistory, setLoadingHistory] = useState(!workspaceDraft);
   const [loadingOlderHistory, setLoadingOlderHistory] = useState(false);
   const [activeTranscriptRun, setActiveTranscriptRun] = useState(null);
@@ -245,15 +259,77 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     setAcceptedRunTarget(null);
     terminalRunIdsRef.current.clear();
     currentRunIdentityRef.current = undefined;
-    cancelRequestRef.current = null;
-    setCancellingRunId("");
+    messageRequestRef.current = null;
+    auxiliaryRequestRef.current = null;
+    setActionFeedback("");
   }, []);
-  useEffect(() => {
-    if (cancelRequestRef.current?.agentRunId !== activeAgentRunId) {
-      cancelRequestRef.current = null;
-      setCancellingRunId("");
+  const knownRunControl = useMemo(() => {
+    if (!activeAgentRunId || !sessionId || (submissionSnapshot.target?.sessionId === sessionId
+      && submissionSnapshot.target.agentRunId === activeAgentRunId)) return submissionControl;
+    const key = JSON.stringify([user.id, workspace.id, sessionId, activeAgentRunId]);
+    if (!knownRunControlsRef.current.has(key)) knownRunControlsRef.current.set(key, new SubmissionControl({
+      operations: { pending: () => null, recover: async () => null },
+      scope: { userId: user.id, workspaceId: workspace.id, controlId: JSON.stringify([sessionId, activeAgentRunId]) }, cancel: cancelSubmission,
+    }));
+    return knownRunControlsRef.current.get(key);
+  }, [activeAgentRunId, sessionId, submissionControl, submissionSnapshot.target?.sessionId, submissionSnapshot.target?.agentRunId, user.id, workspace.id, cancelSubmission]);
+  const knownRunSnapshot = useSyncExternalStore(knownRunControl.subscribe, knownRunControl.getSnapshot, knownRunControl.getSnapshot);
+  const submissionIsVisible = submissionSnapshot.target
+    ? submissionSnapshot.target.sessionId === sessionId || (!sessionId && submissionOriginRef.current?.scope === requestScopeRef.current)
+    : submissionOriginRef.current?.scope === requestScopeRef.current;
+  const useSubmissionControl = submissionIsVisible && (!activeAgentRunId || submissionSnapshot.target?.agentRunId === activeAgentRunId);
+  const currentControl = useSubmissionControl ? submissionControl : knownRunControl;
+  const controlSnapshot = useSubmissionControl ? submissionSnapshot : knownRunSnapshot;
+  const controlApplies = useSubmissionControl || Boolean(activeAgentRunId && sessionId);
+  const controlPending = controlApplies && !["idle", "terminal", "rejected"].includes(controlSnapshot.phase);
+  const cancellingAgentRunId = controlApplies && controlSnapshot.phase === "cancelling"
+    ? controlSnapshot.target?.agentRunId || "pending" : "";
+  const controlStatus = actionFeedback || (controlApplies && controlSnapshot.feedback && controlSnapshot.feedback !== "terminal"
+    ? t(`appRoute.control.${controlSnapshot.feedback}`) : "");
+  const recordRunTerminal = useCallback((target) => {
+    const key = JSON.stringify([target.sessionId, target.agentRunId]);
+    terminalFactsRef.current.set(key, target);
+    const pendingOperation = operations.pending();
+    if (pendingOperation?.receipt?.sessionId === target.sessionId && pendingOperation.receipt.agentRunId === target.agentRunId) {
+      operations.complete(pendingOperation.operationId);
     }
-  }, [activeAgentRunId]);
+    submissionControl.observeTerminal(target);
+    const known = knownRunControlsRef.current.get(JSON.stringify([user.id, workspace.id, target.sessionId, target.agentRunId]));
+    known?.observeTerminal(target);
+    const binding = pendingBindingRef.current;
+    if (binding?.sessionId === target.sessionId && binding.agentRunId === target.agentRunId
+      && activeSessionIdRef.current === target.sessionId && messageRequestRef.current === binding.request) {
+      messageRequestRef.current = null;
+      setSending(false);
+    }
+    setPendingUserMessage(value => {
+      if (!value || value.agentRunId !== target.agentRunId
+        || (value.sessionId !== target.sessionId && !(value.sessionId === null && binding?.sessionId === target.sessionId && binding.agentRunId === target.agentRunId))) return value;
+      const completedAtMs = target.completedAtMs ?? value.completedAtMs ?? Date.now();
+      if (value.status === target.status && value.completedAtMs === completedAtMs) return value;
+      return { ...value, status: target.status, completedAtMs };
+    });
+  }, [operations, submissionControl, user.id, workspace.id]);
+  useEffect(() => {
+    if (activeAgentRunId && sessionId) knownRunControl.setTarget({ sessionId, agentRunId: activeAgentRunId });
+  }, [knownRunControl, activeAgentRunId, sessionId]);
+  useEffect(() => {
+    if (submissionControl.getSnapshot().stopRequested && submissionControl.getSnapshot().phase === "unknown") void submissionControl.recover();
+  }, [submissionControl]);
+  useEffect(() => {
+    if (!controlApplies || controlSnapshot.phase !== "terminal" || !controlSnapshot.target || !controlSnapshot.terminal) return;
+    const target = { ...controlSnapshot.target, ...controlSnapshot.terminal };
+    recordRunTerminal(target);
+    if (activeSessionIdRef.current !== target.sessionId) return;
+    if (acceptedRunTargetRef.current?.agentRunId === target.agentRunId) {
+      acceptedRunTargetRef.current = null; setAcceptedRunTarget(null);
+    }
+    if (activeTranscriptRunRef.current?.agentRunId === target.agentRunId) updateActiveTranscriptRun(null);
+    runControlRevisionRef.current += 1;
+    terminalRunIdsRef.current.add(target.agentRunId);
+    if (currentRunIdentityRef.current === target.agentRunId) currentRunIdentityRef.current = null;
+    setPresentationAttempt(value => value + 1);
+  }, [controlApplies, controlSnapshot.phase, controlSnapshot.target, controlSnapshot.terminal, recordRunTerminal, updateActiveTranscriptRun]);
   const pendingAttachments = useMemo(
     () => pendingAttachmentIds
       .map((id) => assets.find((link) => link.id === id))
@@ -539,6 +615,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         runControlRevisionRef.current += 1;
         const run = checkpoint.agentRun;
         const active = run && ["queued", "running"].includes(run.status);
+        if (run && !active) recordRunTerminal({ sessionId: selectedSessionId, agentRunId: run.agentRunId, status: run.status,
+          ...(run.completedAt ? { completedAtMs: Date.parse(run.completedAt) } : {}) });
         const currentId = currentRunIdentityRef.current;
         if (active && terminalRunIdsRef.current.has(run.agentRunId)) return;
         if (active && currentId !== undefined && currentId !== run.agentRunId
@@ -578,7 +656,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       },
     }).catch(errorValue => { if (isCurrent()) handlePresentationFailure(errorValue, selectedSessionId); });
     return () => { active = false; abortController.abort(); controller.dispose(); };
-  }, [presentationScopeKey, presentationAttempt, sessionId, workspace.id, activeAgent.id, operations, transcriptStore, toolOperations, clearConversationProjection, stopActiveStream, updateActiveTranscriptRun, restorePresentationSnapshot, handlePresentationFailure, showStreamError, workspaceDraft, startFresh, requestedSessionId]);
+  }, [presentationScopeKey, presentationAttempt, sessionId, workspace.id, activeAgent.id, operations, transcriptStore, toolOperations, clearConversationProjection, stopActiveStream, updateActiveTranscriptRun, restorePresentationSnapshot, handlePresentationFailure, showStreamError, recordRunTerminal, workspaceDraft, startFresh, requestedSessionId]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: Route ownership, Retry, and conflicting Run metadata each require a fresh authoritative read.
   useEffect(() => {
@@ -668,64 +746,41 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   }
 
   async function cancelActiveAgentRun() {
+    setActionFeedback("");
     const targetSessionId = acceptedTarget?.sessionId || sessionId;
-    if (!targetSessionId || !activeAgentRunId || cancelRequestRef.current) return;
-    const targetAgentRunId = activeAgentRunId;
-    const request = { scope: requestScopeRef.current, agentRunId: targetAgentRunId };
-    cancelRequestRef.current = request;
-    const ownsRequest = () => request.scope.active && requestScopeRef.current === request.scope
-      && cancelRequestRef.current === request;
-    const isCurrent = () => ownsRequest()
-      && (acceptedRunTargetRef.current?.agentRunId || activeTranscriptRunRef.current?.agentRunId) === targetAgentRunId;
-    setCancellingRunId(targetAgentRunId);
-    setError("");
-    try {
-      const response = await apiResponse(`/api/sessions/${encodeURIComponent(targetSessionId)}/agent-runs/${encodeURIComponent(targetAgentRunId)}/cancel`, {
-        method: "POST",
-      });
-      const result = await response.json();
-      if (!isCurrent()) return;
-      const statuses = result.disposition === "terminal" ? ["completed", "failed", "cancelled"] : ["queued", "running"];
-      if (result.agentRunId !== targetAgentRunId
-        || !["requested", "terminal"].includes(result.disposition) || !statuses.includes(result.status)) {
-        throw new Error("AgentRun cancellation response is invalid");
-      }
-      if (result.disposition === "terminal") {
-        runControlRevisionRef.current += 1;
-        terminalRunIdsRef.current.add(targetAgentRunId);
-        currentRunIdentityRef.current = null;
-        if (acceptedRunTargetRef.current?.agentRunId === targetAgentRunId) {
-          acceptedRunTargetRef.current = null;
-          setAcceptedRunTarget(null);
-        }
-        if (activeTranscriptRunRef.current?.agentRunId === targetAgentRunId) updateActiveTranscriptRun(null);
-        setPresentationAttempt(value => value + 1);
-      }
-    } catch (requestError) {
-      if (isCurrent()) setError(requestError?.message === "agent_run_cancel_unavailable" ? t("appRoute.unableToStopThisRunRightNowPleaseTry") : t("appRoute.unableToStopRun"));
-    } finally {
-      if (ownsRequest()) {
-        cancelRequestRef.current = null;
-        setCancellingRunId("");
-      }
+    if (activeAgentRunId && targetSessionId && currentControl !== submissionControl) {
+      currentControl.setTarget({ sessionId: targetSessionId, agentRunId: activeAgentRunId });
     }
+    if (!controlApplies && !messageRequestRef.current) {
+      setActionFeedback(t("appRoute.stopTargetUnknown"));
+      setPresentationAttempt(value => value + 1);
+      return;
+    }
+    try { await currentControl.stop(); }
+    catch { setActionFeedback(t("appRoute.stopConfirmationUnavailable")); }
   }
 
   async function sendMessage(event, replaceUnconfirmedInput = false) {
     event?.preventDefault();
-    const text = draft.trim();
-    if (!workspace || !text || sending || loadingHistory) return;
+    const submittedDraft = draft;
+    const text = submittedDraft.trim();
+    if (!workspace) { setActionFeedback(t("appRoute.workspaceRequired")); return; }
+    if (!text) { setActionFeedback(t("appRoute.messageRequired")); document.getElementById?.("messageDraft")?.focus(); return; }
+    if (messageRequestRef.current || auxiliaryRequestRef.current) { setActionFeedback(t("appRoute.submissionInProgress")); return; }
+    if (loadingHistory) { setActionFeedback(t("appRoute.conversationSyncing")); setPresentationAttempt(value => value + 1); return; }
     const requestScope = requestScopeRef.current;
+    let ownedSubmission = null;
     const isCurrentRequest = () => {
       const pathname = window.location.pathname;
       const currentAgentId = matchPath(`${workspaceBase}/agents/:agentId`, pathname)?.params.agentId;
       const locationOwnsRequest = pathname === `${workspaceBase}/app`
         || currentAgentId === activeAgent.id
         || pathname.startsWith(`${workspaceBase}/settings/`);
-      return locationOwnsRequest && requestScope.active && requestScopeRef.current === requestScope;
+      return locationOwnsRequest && requestScope.active && requestScopeRef.current === requestScope
+        && (!ownedSubmission || messageRequestRef.current === ownedSubmission);
     };
     if (hasActiveAgentRun && !operations.pending()) {
-      if (!sessionId || !activeAgentRunId) return;
+      if (!sessionId || !activeAgentRunId) { setActionFeedback(t("appRoute.conversationSyncing")); return; }
       if (pendingAttachmentIds.length || pendingUploadFiles.length) {
         setError(t("appRoute.supplementalInputDoesNotSupportAttachmentsYetRemoveThe"));
         return;
@@ -733,6 +788,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       setSending(true);
       setError("");
       const supplementId = crypto.randomUUID();
+      auxiliaryRequestRef.current = supplementId;
       try {
         const response = await apiResponse(`/api/sessions/${sessionId}/agent-runs/${activeAgentRunId}/supplements`, {
           method: "POST",
@@ -754,15 +810,26 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         ) {
           throw new Error("AgentRun supplement response is invalid");
         }
-        setDraft("");
+        setDraft(value => value === submittedDraft ? "" : value);
+        setActionFeedback(t("appRoute.supplementAccepted"));
       } catch (requestError) {
         if (isCurrentRequest()) setError(requestError?.message === "agent_run_supplement_unavailable" ? t("appRoute.unableToDeliverSupplementalInputRightNowPleaseTry") : t("appRoute.unableToSendSupplementalInput"));
       } finally {
+        if (auxiliaryRequestRef.current === supplementId) auxiliaryRequestRef.current = null;
         if (isCurrentRequest()) setSending(false);
       }
       return;
     }
-    if (!modelId) return;
+    if (!modelId) { setActionFeedback(t("appRoute.modelRequired")); return; }
+    let attemptId;
+    try { attemptId = submissionControl.begin(); }
+    catch { setActionFeedback(t("appRoute.control.pendingStop")); return; }
+    const requestToken = { attemptId, scopeKey: requestScopeKey, scope: requestScope };
+    messageRequestRef.current = requestToken;
+    ownedSubmission = requestToken;
+    submissionOriginRef.current = requestToken;
+    pendingBindingRef.current = { request: requestToken, sessionId: null, agentRunId: null };
+    setActionFeedback("");
     setSending(true);
     const targetSessionId = sessionId || "new";
     const attachmentRefs = [...pendingAttachmentIds].sort();
@@ -776,19 +843,25 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     setDraft("");
     let accepted = false;
     try {
-      const messageData = await operations.submit(`/api/workspaces/${workspace.id}/sessions/${targetSessionId}/messages`, {
+      const messageData = await submissionControl.submit(hooks => operations.submit(`/api/workspaces/${workspace.id}/sessions/${targetSessionId}/messages`, {
           text,
           agentId: activeAgent.id,
           ...(targetSessionId === "new" && requestedProjectId ? { projectId: requestedProjectId } : {}),
           modelConfigRef: modelId,
           ...(thinkingMode ? { thinkingMode } : {}),
           ...(uploadFiles.length ? {} : { attachmentRefs }),
-      }, uploadFiles, [], replaceUnconfirmedInput);
+      }, uploadFiles, [], replaceUnconfirmedInput, hooks));
       accepted = true;
       // Navigation invalidates only this UI result, never the server's accepted work.
       if (!isCurrentRequest()) return;
+      setActionFeedback("");
       if (targetSessionId !== "new" && messageData.sessionId !== targetSessionId) throw new Error("AgentRun acceptance identity is invalid");
       acceptRunTarget(messageData);
+      pendingBindingRef.current = { request: requestToken, sessionId: messageData.sessionId, agentRunId: messageData.agentRunId };
+      const priorTerminal = terminalFactsRef.current.get(JSON.stringify([messageData.sessionId, messageData.agentRunId]));
+      if (priorTerminal) operations.complete(messageData.operationId);
+      setPendingUserMessage(value => value === pendingMessage ? { ...value, agentRunId: messageData.agentRunId,
+        ...(priorTerminal ? { status: priorTerminal.status, completedAtMs: priorTerminal.completedAtMs ?? Date.now() } : {}) } : value);
       const { session: acceptedSession } = await (await apiResponse(`/api/sessions/${encodeURIComponent(messageData.sessionId)}`)).json();
       if (!isCurrentRequest()) return;
       if (
@@ -799,8 +872,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         throw new Error("AgentRun acceptance identity is invalid");
       }
       const resolvedSessionId = messageData.sessionId;
-      setPendingUserMessage((value) => value === pendingMessage
-        ? { ...value, sessionId: resolvedSessionId, agentRunId: messageData.agentRunId } : value);
+      setPendingUserMessage(value => value?.agentRunId === messageData.agentRunId
+        ? { ...value, sessionId: resolvedSessionId } : value);
       setPendingAttachmentIds([]);
       setPendingUploadFiles([]);
       setSessions((items) =>
@@ -823,8 +896,15 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     } catch (errorValue) {
       if (!isCurrentRequest()) return;
       if (errorValue?.message === "operation_result_stale") return;
-      setPendingUserMessage(null);
-      setDraft((value) => value || text);
+      if (errorValue?.message === "operation_dispatch_stopped") {
+        setPendingUserMessage(value => value === pendingMessage ? null : value);
+        setDraft(value => value || text);
+        setActionFeedback(t("appRoute.control.stoppedBeforeDispatch"));
+        setWorkTime(null);
+        return;
+      }
+      setDraft(value => value || text);
+      if (!accepted && !operations.pending()) setPendingUserMessage(value => value === pendingMessage ? null : value);
       if (accepted) {
         setError(t("operations.acceptedReadFailed"));
       } else if (errorValue?.message === "operation_pending_input_changed") {
@@ -844,24 +924,57 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         } catch {
           if (isCurrentRequest()) showStreamError(errorValue);
         }
+      } else if (submissionControl.getSnapshot().phase === "unknown") {
+        setActionFeedback(t("appRoute.submissionUnconfirmed"));
+        setError(t("operations.inputUnconfirmed"));
       } else {
         showStreamError(errorValue);
       }
     } finally {
-      if (isCurrentRequest()) setSending(false);
+      const current = isCurrentRequest();
+      if (messageRequestRef.current === requestToken) messageRequestRef.current = null;
+      if (current) setSending(false);
     }
   }
 
+  function retrySubmission() {
+    if (!pendingUserMessage || pendingUserMessage.status === "pending") return;
+    if (draft.trim()) { setActionFeedback(t("appRoute.reviewDraftBeforeRetry")); document.getElementById?.("messageDraft")?.focus(); return; }
+    setDraft(pendingUserMessage.text);
+    setActionFeedback(t("appRoute.reviewDraftBeforeRetry"));
+    document.getElementById?.("messageDraft")?.focus();
+  }
+
   async function checkPendingOperation(preserveChangedDraft = false) {
+    if (auxiliaryRequestRef.current) { setActionFeedback(t("appRoute.submissionInProgress")); return; }
+    const auxiliaryToken = {};
+    auxiliaryRequestRef.current = auxiliaryToken;
     const operationId = operations.pending()?.operationId;
     const scope = requestScopeRef.current;
     const isCurrent = () => scope.active && requestScopeRef.current === scope;
     setSending(true);
     try {
-      const accepted = await operations.recover();
+      let accepted;
+      const controlled = submissionControl.getSnapshot();
+      if (controlled.stopRequested && controlled.operationId === operationId) {
+        const recovered = await submissionControl.recover();
+        if (recovered.error) throw recovered.error;
+        if (recovered.target && recovered.operationId === operationId) {
+          // These identities came from the validated receipt/cancel response;
+          // this is local navigation data, not a fabricated protocol receipt.
+          accepted = { operationId, ...recovered.target };
+        }
+      } else accepted = await operations.recover();
       if (accepted) {
         if (!isCurrent()) return;
-        if (accepted.sessionId === activeSessionIdRef.current) acceptRunTarget(accepted);
+        setActionFeedback("");
+        if (accepted.sessionId === activeSessionIdRef.current) {
+          acceptRunTarget(accepted);
+          if (pendingBindingRef.current) pendingBindingRef.current = { ...pendingBindingRef.current, sessionId: accepted.sessionId, agentRunId: accepted.agentRunId };
+          const terminal = terminalFactsRef.current.get(JSON.stringify([accepted.sessionId, accepted.agentRunId]));
+          setPendingUserMessage(value => value && (value.sessionId === accepted.sessionId || value.sessionId === null)
+            ? { ...value, agentRunId: accepted.agentRunId, ...(terminal ? { status: terminal.status, completedAtMs: terminal.completedAtMs ?? Date.now() } : {}) } : value);
+        }
         const { session } = await (await apiResponse(`/api/sessions/${encodeURIComponent(accepted.sessionId)}`)).json();
         if (!isCurrent()) return;
         if (session?.id !== accepted.sessionId || typeof session.agentId !== "string" || !session.agentId) throw new Error("session_response_invalid");
@@ -880,7 +993,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         if (operationId) operations.complete(operationId);
         setError(t("operations.unavailable"));
       } else setError(t(requestError?.message === "operation_not_found" ? "operations.notFound" : "operations.checkFailed"));
-    } finally { if (isCurrent()) setSending(false); }
+    } finally { if (auxiliaryRequestRef.current === auxiliaryToken) auxiliaryRequestRef.current = null; if (isCurrent()) setSending(false); }
   }
 
   async function consumeOperationReview(operationId) {
@@ -1140,7 +1253,9 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
 
   const hasContextPanel = contextPanel.mode !== "closed";
   const contextPanelClass = hasContextPanel ? "withContextPanel withFilePreview" : "";
-  const isHome = !requestedSessionId && !sessionId && transcriptList.blockIds.length === 0 && !pendingUserMessage;
+  const visiblePendingMessage = pendingUserMessage && (pendingUserMessage.sessionId === sessionId
+    || (pendingUserMessage.sessionId === null && submissionOriginRef.current?.scope === requestScopeRef.current)) ? pendingUserMessage : null;
+  const isHome = !requestedSessionId && !sessionId && transcriptList.blockIds.length === 0 && !visiblePendingMessage;
   useLayoutEffect(() => {
     const startRect = composerStartRectRef.current;
     if (isHome || !startRect) return;
@@ -1248,10 +1363,11 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
             emptyState={isHome ? <HomePlane agent={activeAgent} /> : null}
             onShowCitation={showCitation}
             onShowArtifact={(artifact) => showArtifact(artifact, "conversation")}
-            pendingUserMessage={pendingUserMessage}
+            pendingUserMessage={visiblePendingMessage}
+            onRetrySubmission={retrySubmission}
             historyMemoryPressure={transcriptManagedBytes >= TRANSCRIPT_MEMORY_WARNING_BYTES}
             onReleaseLoadedHistory={releaseLoadedTranscriptHistory}
-            running={hasActiveAgentRun || sending}
+            running={hasActiveAgentRun || (sending && !["failed", "cancelled", "completed"].includes(pendingUserMessage?.status))}
             startedAtMs={workTime?.sessionId === sessionId ? workTime.startedAtMs : undefined}
             completedAtMs={workTime?.sessionId === sessionId ? workTime.completedAtMs : undefined}
           />
@@ -1273,7 +1389,9 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
             workspaceAvailable={Boolean(workspace)}
             sending={sending}
             loadingHistory={loadingHistory}
-            hasActiveAgentRun={hasActiveAgentRun}
+            hasActiveAgentRun={hasActiveAgentRun || controlPending}
+            controlStatus={controlStatus}
+            controlBusy={controlApplies && ["preparing", "submitting", "recovering", "cancelling"].includes(controlSnapshot.phase)}
             uploadingAttachment={uploadingAttachment}
             onUploadAttachment={uploadAttachment}
             sessionId={sessionId}

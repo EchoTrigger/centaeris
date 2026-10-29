@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import { ModelPicker, ThinkingPicker } from "../../src/components/ModelSelectionPickers";
 import { ConfirmDialog } from "../../src/components/ConfirmDialog";
+import { WorkspaceComposer } from "../../src/chat/WorkspaceComposer";
 
 vi.mock("../../src/i18n", () => {
   const labels: Record<string, string> = {
@@ -24,6 +25,51 @@ const models = [
   { id: "b", displayName: "Model B", thinkingModes: ["low", "high"] },
 ];
 const groups = [{ provider: "provider", label: "Provider", models }];
+
+const composerProps = {
+  pendingAttachments: [], pendingUploadFiles: [], draft: "", onDraftChange: () => {},
+  modelGroups: groups, modelId: "a", currentModel: models[0], thinkingMode: "high",
+  fileInputRef: { current: null }, workspaceAvailable: true,
+  sessionId: null,
+};
+
+test("empty send remains reachable by mouse and keyboard while the draft stays editable during submission", async () => {
+  const user = userEvent.setup(), submit = vi.fn();
+  function Harness() {
+    const [draft, setDraft] = useState("");
+    return <WorkspaceComposer {...composerProps} draft={draft} onDraftChange={setDraft} sending loadingHistory
+      controlBusy controlStatus="Checking submission" onSubmit={event => { event.preventDefault(); submit(); }} />;
+  }
+  render(<Harness />);
+  const send = screen.getByRole("button", { name: "appRoute.input" });
+  const draft = screen.getByRole("textbox", { name: "appRoute.message" }) as HTMLTextAreaElement;
+  await user.click(send);
+  send.focus(); await user.keyboard("{Enter}"); await user.keyboard(" ");
+  expect(submit).toHaveBeenCalledTimes(3);
+  expect(send.getAttribute("aria-busy")).toBe("true");
+  expect(screen.getByRole("status").textContent).toBe("Checking submission");
+  expect(document.getElementById(send.getAttribute("aria-describedby")!)?.textContent).toBe("Checking submission");
+  await user.type(draft, "Next draft");
+  expect(draft.value).toBe("Next draft");
+  await user.keyboard("{Enter}");
+  expect(submit).toHaveBeenCalledTimes(4);
+});
+
+test("Stop remains reachable by mouse and keyboard while its identity or cancellation is pending", async () => {
+  const user = userEvent.setup(), stop = vi.fn();
+  const { rerender } = render(<WorkspaceComposer {...composerProps} hasActiveAgentRun activeAgentRunId=""
+    controlBusy controlStatus="Confirming submission before stopping" onCancelActiveAgentRun={stop} />);
+  const button = screen.getByRole("button", { name: "appRoute.stop" });
+  await user.click(button);
+  button.focus(); await user.keyboard("{Enter}"); await user.keyboard(" ");
+  expect(stop).toHaveBeenCalledTimes(3);
+  rerender(<WorkspaceComposer {...composerProps} hasActiveAgentRun activeAgentRunId="run" cancellingAgentRunId="run"
+    controlStatus="Stopping this run" onCancelActiveAgentRun={stop} />);
+  await user.click(button);
+  expect(stop).toHaveBeenCalledTimes(4);
+  expect(button.getAttribute("aria-busy")).toBe("true");
+  expect(screen.getByRole("status").textContent).toBe("Stopping this run");
+});
 
 test("model and effort keep separate choices and preserve the draft", async () => {
   const user = userEvent.setup();

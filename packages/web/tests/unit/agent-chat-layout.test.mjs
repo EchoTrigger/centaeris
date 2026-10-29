@@ -222,6 +222,10 @@ test("ordinary Session rows retain running, unread and pin indicators and all me
 });
 
 test("the Session sidebar refreshes background work without changing the open draft or rereading projects", async context => {
+  const previousStorage = globalThis.sessionStorage;
+  const stored = new Map();
+  globalThis.sessionStorage = { getItem:key=>stored.get(key)??null, setItem:(key,value)=>stored.set(key,value), removeItem:key=>stored.delete(key) };
+  context.after(() => { globalThis.sessionStorage = previousStorage; });
   const previousWindow = globalThis.window;
   globalThis.window = { addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {} };
   context.after(() => { globalThis.window = previousWindow; });
