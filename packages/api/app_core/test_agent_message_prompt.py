@@ -29,6 +29,7 @@ from .models import (
     WorkspaceMembership,
 )
 from .runtime_contract import MODEL_RUN_SCHEMA
+from .testing import leased_lifecycle_job_fixture
 
 
 PROVIDERS = (
@@ -136,6 +137,7 @@ class AgentMessagePromptTests(TransactionTestCase):
         run = AgentRun.objects.create(workspace=self.workspace, session=session, user=self.user, modelConfig=model,
             prompt="你好", agent_instructions=agent.instructions, status="running")
         authorization = create_agent_run_authorization(run, image_digest="sha256:" + "a" * 64)
+        leased_lifecycle_job_fixture(self, run)
         body = {"schema": MODEL_RUN_SCHEMA, "agentRunId": run.id, "modelConfigRef": model.id,
             "authorizationRef": authorization.id, "authorizationDigest": authorization.digest, "maxOutputTokens": 64,
             "preparedPrompt": {"schema": "prepared_prompt.v1", "systemPrompt": "Original Agent system",
