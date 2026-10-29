@@ -633,6 +633,12 @@ def is_environment_host_busy(error):
 
 
 def environment_cleanup_wait_reason(error):
+    if (isinstance(error, DependencyUnavailable)
+            and type(getattr(error, "http_status", None)) is int
+            and error.http_status == 503
+            and getattr(error, "http_error_code", None) == "runtime_busy"
+            and getattr(error, "route", None) == "/agent-runs/teardown"):
+        return "execution_host_admission_wait"
     if is_environment_controller_wait(error):
         return "environment_controller_wait"
     if is_environment_host_busy(error):
