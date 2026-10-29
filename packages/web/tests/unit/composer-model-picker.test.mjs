@@ -45,3 +45,19 @@ test("ordinary Session sending and active-Run states retain existing picker rest
   assert.equal(control(subject({ modelGroups: [], currentModel: undefined }), "model").props.disabled, true);
   assert.equal(control(subject({ currentModel: { ...model, thinkingModes: [] } }), "thinking").props.disabled, true);
 });
+
+
+test("a known Run keeps an enabled Stop control during submission and history loading", () => {
+  let stops=0;
+  const tree=subject({hasActiveAgentRun:true,activeAgentRunId:"queued-run",sending:true,loadingHistory:true,onCancelActiveAgentRun:()=>stops++});
+  const stop=elements(tree,node=>node.type==="button" && node.props["aria-label"]==="appRoute.stop")[0];
+  assert.ok(stop);
+  assert.equal(stop.props.disabled,false);
+  stop.props.onClick();assert.equal(stops,1);
+});
+
+test("a pending cancellation disables duplicate Stop requests", () => {
+  const tree=subject({hasActiveAgentRun:true,activeAgentRunId:"queued-run",cancellingAgentRunId:"queued-run"});
+  const stop=elements(tree,node=>node.type==="button" && node.props["aria-label"]==="appRoute.stop")[0];
+  assert.equal(stop.props.disabled,true);
+});

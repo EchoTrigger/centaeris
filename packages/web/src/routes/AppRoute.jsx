@@ -108,7 +108,13 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   if (navigationSnapshotRef.current.scope !== requestScopeKey) navigationSnapshotRef.current = { scope: requestScopeKey, sessions: null };
   const streamAbortRef = useRef(null);
   const chatControllerRef = useRef(null);
-  const acceptedSessionRef = useRef(null);
+  // A submit receipt can identify cancellable work before presentation catches up.
+  const [acceptedRunTarget, setAcceptedRunTarget] = useState(null);
+  const acceptedRunTargetRef = useRef(null);
+  const terminalRunIdsRef = useRef(new Set());
+  const runControlRevisionRef = useRef(0);
+  const currentRunIdentityRef = useRef(undefined);
+  const cancelRequestRef = useRef(null);
   const acceptedRouteSessionIdRef = useRef("");
   const transcriptStoreRef = useRef(null);
   if (!transcriptStoreRef.current) transcriptStoreRef.current = createTranscriptViewStore();
@@ -130,6 +136,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const [projects, setProjects] = useState([]);
   const [sessionId, setSessionId] = useState("");
   const [presentationAttempt, setPresentationAttempt] = useState(0);
+  const [runControlAttempt, setRunControlAttempt] = useState(0);
   const [contextVersion, setContextVersion] = useState(null);
   const [readableThrough, setReadableThrough] = useState("0");
   const [readingLatest, setReadingLatest] = useState(true);
@@ -220,8 +227,33 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     if (selected) writePreferredModelIdentity(user.id, workspace.id, selected);
     setModelId(id);
   }, [models, user.id, workspace.id]);
-  const hasActiveAgentRun = activeTranscriptRun !== null;
-  const activeAgentRunId = activeTranscriptRun?.agentRunId || "";
+  const acceptedTarget = acceptedRunTarget && (!sessionId || acceptedRunTarget.sessionId === sessionId)
+    ? acceptedRunTarget : null;
+  const activeAgentRunId = acceptedTarget?.agentRunId || activeTranscriptRun?.agentRunId || "";
+  const hasActiveAgentRun = Boolean(activeAgentRunId);
+  const acceptRunTarget = useCallback((receipt) => {
+    runControlRevisionRef.current += 1;
+    if (terminalRunIdsRef.current.has(receipt.agentRunId)) return;
+    currentRunIdentityRef.current = receipt.agentRunId;
+    const target = { sessionId: receipt.sessionId, agentRunId: receipt.agentRunId };
+    acceptedRunTargetRef.current = target;
+    setAcceptedRunTarget(target);
+  }, []);
+  const clearRunControl = useCallback(() => {
+    runControlRevisionRef.current += 1;
+    acceptedRunTargetRef.current = null;
+    setAcceptedRunTarget(null);
+    terminalRunIdsRef.current.clear();
+    currentRunIdentityRef.current = undefined;
+    cancelRequestRef.current = null;
+    setCancellingRunId("");
+  }, []);
+  useEffect(() => {
+    if (cancelRequestRef.current?.agentRunId !== activeAgentRunId) {
+      cancelRequestRef.current = null;
+      setCancellingRunId("");
+    }
+  }, [activeAgentRunId]);
   const pendingAttachments = useMemo(
     () => pendingAttachmentIds
       .map((id) => assets.find((link) => link.id === id))
@@ -321,7 +353,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     setError("");
     const navigationScopeKey = requestScopeKey;
     setLoadingHistory(!workspaceDraft);
-    acceptedSessionRef.current = null;
+    clearRunControl();
     acceptedRouteSessionIdRef.current = "";
     setSessions([]);
     setSessionId("");
@@ -356,7 +388,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         setLoadingHistory(false);
       });
     return () => { active = false; };
-  }, [workspace.id, workspaceDraft, requestedSessionId, requestScopeKey, startFresh, activeAgent.id, clearConversationProjection, clearContextPanel, setEditingSessionId, setOpenSessionMenuId]);
+  }, [workspace.id, workspaceDraft, requestedSessionId, requestScopeKey, startFresh, activeAgent.id, clearConversationProjection, clearContextPanel, clearRunControl, setEditingSessionId, setOpenSessionMenuId]);
 
   useEffect(() => {
     if (requestedPrompt) setDraft(requestedPrompt);
@@ -416,13 +448,13 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       readController.dispose();
       navigationSnapshotRef.current.sessions = [];
       setSessions([]); setProjects([]); setReadableThrough("0");
-      clearConversationProjection(); setStreamIssue(null); setWorkTime(null); setLoadingHistory(false);
+      clearConversationProjection(); clearRunControl(); setStreamIssue(null); setWorkTime(null); setLoadingHistory(false);
       setError(t("appRoute.unableToLoadConversationHistoryRefreshThePageAnd"));
       return;
     }
     setLoadingHistory(false);
     setStreamIssue({ sessionId: targetSessionId || "", error: errorValue, reconnecting: false });
-  }, [clearConversationProjection, stopActiveStream, readController, t]);
+  }, [clearConversationProjection, clearRunControl, stopActiveStream, readController, t]);
 
   const restorePresentationSnapshot = useCallback(async (tail, signal, isCurrent) => {
     const previous = transcriptStore.getListSnapshot();
@@ -504,14 +536,30 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       onOperation: detail => { if (isCurrent()) toolOperations.applyPresentationDetail(detail); },
       onCheckpoint: checkpoint => {
         if (!isCurrent() || selectedSessionId === null) return;
+        runControlRevisionRef.current += 1;
         const run = checkpoint.agentRun;
-        if (run && ["queued", "running"].includes(run.status)) {
-          updateActiveTranscriptRun(run);
-          if (run.startedAt) setWorkTime(value => ({ ...value, sessionId: selectedSessionId, startedAtMs: Date.parse(run.startedAt), completedAtMs: null }));
-        } else {
-          updateActiveTranscriptRun(null);
-          if (run?.completedAt) setWorkTime(value => ({ ...value, sessionId: selectedSessionId, completedAtMs: Date.parse(run.completedAt) }));
+        const active = run && ["queued", "running"].includes(run.status);
+        const currentId = currentRunIdentityRef.current;
+        if (active && terminalRunIdsRef.current.has(run.agentRunId)) return;
+        if (active && currentId !== undefined && currentId !== run.agentRunId
+          || !run && currentId) {
+          // HTTP reads and presentation have no shared response order. Keep the
+          // confirmed target until a fresh current-state read resolves a conflict.
+          setRunControlAttempt(value => value + 1);
+          return;
         }
+        if (run && !active) {
+          terminalRunIdsRef.current.add(run.agentRunId);
+          if (currentId !== undefined && currentId !== run.agentRunId) return;
+        }
+        currentRunIdentityRef.current = active ? run.agentRunId : null;
+        if (run && acceptedRunTargetRef.current?.agentRunId === run.agentRunId) {
+          acceptedRunTargetRef.current = null;
+          setAcceptedRunTarget(null);
+        }
+        updateActiveTranscriptRun(active ? run : null);
+        if (active && run.startedAt) setWorkTime(value => ({ ...value, sessionId: selectedSessionId, startedAtMs: Date.parse(run.startedAt), completedAtMs: null }));
+        if (!active && run?.completedAt) setWorkTime(value => ({ ...value, sessionId: selectedSessionId, completedAtMs: Date.parse(run.completedAt) }));
       },
       onApplied: checkpoint => {
         if (!isCurrent()) return;
@@ -532,6 +580,29 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     return () => { active = false; abortController.abort(); controller.dispose(); };
   }, [presentationScopeKey, presentationAttempt, sessionId, workspace.id, activeAgent.id, operations, transcriptStore, toolOperations, clearConversationProjection, stopActiveStream, updateActiveTranscriptRun, restorePresentationSnapshot, handlePresentationFailure, showStreamError, workspaceDraft, startFresh, requestedSessionId]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Route ownership, Retry, and conflicting Run metadata each require a fresh authoritative read.
+  useEffect(() => {
+    if (!sessionId || !requestScopeRef.current.active) return;
+    const controller = new AbortController();
+    const scope = requestScopeRef.current;
+    const revision = runControlRevisionRef.current;
+    const isCurrentRead = () => !controller.signal.aborted && scope.active && requestScopeRef.current === scope
+      && activeSessionIdRef.current === sessionId && runControlRevisionRef.current === revision;
+    // Zero is a valid source waterline; this endpoint reads current Run state.
+    transcriptTransport.loadActiveAgentRun({ sessionId, sourceHighWater: "0" }, controller.signal)
+      .then(({ agentRun }) => {
+        if (!isCurrentRead()) return;
+        const currentRun = agentRun && !terminalRunIdsRef.current.has(agentRun.agentRunId) ? agentRun : null;
+        currentRunIdentityRef.current = currentRun?.agentRunId || null;
+        updateActiveTranscriptRun(currentRun);
+        acceptedRunTargetRef.current = null;
+        setAcceptedRunTarget(null);
+      }).catch(errorValue => {
+        if (isCurrentRead()) handlePresentationFailure(errorValue, sessionId);
+      });
+    return () => controller.abort();
+  }, [sessionId, requestScopeKey, presentationAttempt, runControlAttempt, transcriptTransport, updateActiveTranscriptRun, handlePresentationFailure]);
+
   function retryTranscriptStream() {
     if (streamIssue?.reconnecting) return;
     setPresentationAttempt(value => value + 1);
@@ -539,7 +610,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
 
   function startNewChat(projectId = "", sidebarTab = "chat") {
     if (sending) return;
-    acceptedSessionRef.current = null;
+    clearRunControl();
     acceptedRouteSessionIdRef.current = "";
     stopActiveStream();
     setSessionId("");
@@ -582,7 +653,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
 
   function onSessionDeleted(targetSessionId, remainingSessions) {
     if (targetSessionId === sessionId) {
-      acceptedSessionRef.current = null;
+      clearRunControl();
       acceptedRouteSessionIdRef.current = "";
       clearConversationProjection();
       setDraft("");
@@ -597,30 +668,46 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   }
 
   async function cancelActiveAgentRun() {
-    if (!sessionId || !activeAgentRunId || cancellingAgentRunId) return;
-    const targetSessionId = sessionId;
+    const targetSessionId = acceptedTarget?.sessionId || sessionId;
+    if (!targetSessionId || !activeAgentRunId || cancelRequestRef.current) return;
     const targetAgentRunId = activeAgentRunId;
+    const request = { scope: requestScopeRef.current, agentRunId: targetAgentRunId };
+    cancelRequestRef.current = request;
+    const ownsRequest = () => request.scope.active && requestScopeRef.current === request.scope
+      && cancelRequestRef.current === request;
+    const isCurrent = () => ownsRequest()
+      && (acceptedRunTargetRef.current?.agentRunId || activeTranscriptRunRef.current?.agentRunId) === targetAgentRunId;
     setCancellingRunId(targetAgentRunId);
     setError("");
     try {
-      const response = await apiResponse(`/api/sessions/${targetSessionId}/agent-runs/${targetAgentRunId}/cancel`, {
+      const response = await apiResponse(`/api/sessions/${encodeURIComponent(targetSessionId)}/agent-runs/${encodeURIComponent(targetAgentRunId)}/cancel`, {
         method: "POST",
       });
       const result = await response.json();
-      if (
-        result.agentRunId !== targetAgentRunId
-        || !["requested", "terminal"].includes(result.disposition)
-        || !["queued", "running", "completed", "failed", "cancelled"].includes(result.status)
-      ) {
+      if (!isCurrent()) return;
+      const statuses = result.disposition === "terminal" ? ["completed", "failed", "cancelled"] : ["queued", "running"];
+      if (result.agentRunId !== targetAgentRunId
+        || !["requested", "terminal"].includes(result.disposition) || !statuses.includes(result.status)) {
         throw new Error("AgentRun cancellation response is invalid");
       }
-      if (result.disposition === "terminal" && activeSessionIdRef.current === targetSessionId) {
-        await refreshAgentRunResumeState(targetAgentRunId, workspace.id, targetSessionId);
+      if (result.disposition === "terminal") {
+        runControlRevisionRef.current += 1;
+        terminalRunIdsRef.current.add(targetAgentRunId);
+        currentRunIdentityRef.current = null;
+        if (acceptedRunTargetRef.current?.agentRunId === targetAgentRunId) {
+          acceptedRunTargetRef.current = null;
+          setAcceptedRunTarget(null);
+        }
+        if (activeTranscriptRunRef.current?.agentRunId === targetAgentRunId) updateActiveTranscriptRun(null);
+        setPresentationAttempt(value => value + 1);
       }
     } catch (requestError) {
-      setError(requestError?.message === "agent_run_cancel_unavailable" ? t("appRoute.unableToStopThisRunRightNowPleaseTry") : t("appRoute.unableToStopRun"));
+      if (isCurrent()) setError(requestError?.message === "agent_run_cancel_unavailable" ? t("appRoute.unableToStopThisRunRightNowPleaseTry") : t("appRoute.unableToStopRun"));
     } finally {
-      setCancellingRunId("");
+      if (ownsRequest()) {
+        cancelRequestRef.current = null;
+        setCancellingRunId("");
+      }
     }
   }
 
@@ -700,6 +787,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       accepted = true;
       // Navigation invalidates only this UI result, never the server's accepted work.
       if (!isCurrentRequest()) return;
+      if (targetSessionId !== "new" && messageData.sessionId !== targetSessionId) throw new Error("AgentRun acceptance identity is invalid");
+      acceptRunTarget(messageData);
       const { session: acceptedSession } = await (await apiResponse(`/api/sessions/${encodeURIComponent(messageData.sessionId)}`)).json();
       if (!isCurrentRequest()) return;
       if (
@@ -723,7 +812,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       );
       if (!sessionId) {
         setWorkTime((value) => value ? { ...value, sessionId: resolvedSessionId } : null);
-        acceptedSessionRef.current = { sessionId: resolvedSessionId, agentRunId: messageData.agentRunId };
         acceptedRouteSessionIdRef.current = resolvedSessionId;
         setSessionId(resolvedSessionId);
         setSending(false);
@@ -772,6 +860,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     try {
       const accepted = await operations.recover();
       if (accepted) {
+        if (!isCurrent()) return;
+        if (accepted.sessionId === activeSessionIdRef.current) acceptRunTarget(accepted);
         const { session } = await (await apiResponse(`/api/sessions/${encodeURIComponent(accepted.sessionId)}`)).json();
         if (!isCurrent()) return;
         if (session?.id !== accepted.sessionId || typeof session.agentId !== "string" || !session.agentId) throw new Error("session_response_invalid");

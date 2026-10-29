@@ -193,7 +193,7 @@ export function createWorkspaceTranscriptTransport({
   }
 
   async function loadActiveAgentRun(
-    identity: TranscriptReadIdentity,
+    identity: Pick<TranscriptReadIdentity, "sessionId" | "sourceHighWater">,
     signal: AbortSignal,
   ): Promise<ActiveTranscriptAgentRunEnvelope> {
     const path = pathWithQuery(

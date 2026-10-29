@@ -37,7 +37,7 @@ async function setup(context, tailPage = page("Retained authoritative answer"), 
       : path.includes("session-projects") ? { projects: [] }
       : path.endsWith("/assets") ? { assets: [] }
       : path === "/api/sessions/session" ? { session } : { sessions: [session] } }),
-    transport: { loadOlder: async () => { throw new Error("unexpected older history request"); } },
+    transport: { loadActiveAgentRun: async () => ({agentRun: idle ? null : {agentRunId:"run",status:"running",streamCursor:"cursor:0"}}), loadOlder: async () => { throw new Error("unexpected older history request"); } },
     stream: options => { env.streamOptions = options; const pending = env.nextAttempt ?? attempt; env.nextAttempt = null; return pending.promise; },
   });
   const subject = renderer(AppPageContent, { agentId: "agent", workspaceDraft: false, location: env.location, modelsVersion: 0 }, env);
