@@ -623,7 +623,11 @@ impl DockerExecutionHostRunner {
             let allocation = resident_store.prepare_retained_instance_then_initialize(
                 &request,
                 resident_limits,
-                || shared_inventory::collect(&resident_host_id),
+                crate::resident_capacity::FilteredResidentInventory(
+                    |preparing: &[crate::resident_capacity::PreparingResidentSandbox]| {
+                        shared_inventory::collect_excluding(&resident_host_id, preparing)
+                    },
+                ),
                 |client, _| before_create(client),
                 |allocation| {
                     prepare_memory_scope(&memory_mount)?;
@@ -963,7 +967,12 @@ impl DockerExecutionHostRunner {
 
     pub(crate) fn reconcile_residency(resident_store: &PostgresRuntimeStore) -> Result<(), String> {
         let (host_id, _) = resident_host_context()?;
-        resident_store.reconcile_resident_sandboxes(&host_id, observed_resident_sandboxes)
+        resident_store.reconcile_resident_sandboxes(
+            &host_id,
+            crate::resident_capacity::FilteredResidentInventory(
+                observed_resident_sandboxes_excluding,
+            ),
+        )
     }
 
     pub(crate) fn retire_recovery_execution(
@@ -2665,8 +2674,93 @@ pub(crate) fn resident_host_context() -> Result<(String, ResidentCapacity), Stri
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn observed_resident_sandboxes() -> Result<Vec<ObservedResidentSandbox>, String> {
-    observe_resident_container_ids(crate::docker_engine::list_managed(None)?)
+    observed_resident_sandboxes_excluding(&[])
+}
+
+pub(crate) fn observed_resident_sandboxes_excluding(
+    preparing: &[crate::resident_capacity::PreparingResidentSandbox],
+) -> Result<Vec<ObservedResidentSandbox>, String> {
+    let mut sandboxes = Vec::new();
+    let mut filter = PreparingInventoryFilter::new(preparing);
+    for id in crate::docker_engine::list_managed(None)? {
+        let Some(facts) = inspect_container(&id)? else {
+            continue;
+        };
+        let sandbox = observed_resident_sandbox(&facts)?;
+        if !filter.should_skip(&facts, &sandbox)? {
+            sandboxes.push(sandbox);
+        }
+    }
+    Ok(sandboxes)
+}
+
+struct PreparingInventoryFilter<'a> {
+    preparing: &'a [crate::resident_capacity::PreparingResidentSandbox],
+    containers_by_execution: HashMap<String, String>,
+}
+impl<'a> PreparingInventoryFilter<'a> {
+    fn new(preparing: &'a [crate::resident_capacity::PreparingResidentSandbox]) -> Self {
+        Self {
+            preparing,
+            containers_by_execution: HashMap::new(),
+        }
+    }
+
+    fn should_skip(
+        &mut self,
+        facts: &ContainerFacts,
+        sandbox: &ObservedResidentSandbox,
+    ) -> Result<bool, String> {
+        if !preparing_resident(facts, sandbox, self.preparing)? {
+            return Ok(false);
+        }
+        // One durable pending declaration can cover only one physical container.
+        // Keep this responsibility local to this inventory, before either collector
+        // omits the container from reconciliation or resource observation.
+        if let Some(container_id) = self.containers_by_execution.get(&sandbox.execution_id) {
+            if container_id != &facts.id {
+                return Err("managed preparing sandbox has duplicate physical containers; admission blocked".into());
+            }
+        } else {
+            self.containers_by_execution
+                .insert(sandbox.execution_id.clone(), facts.id.clone());
+        }
+        Ok(true)
+    }
+}
+
+fn preparing_resident(
+    facts: &ContainerFacts,
+    sandbox: &ObservedResidentSandbox,
+    preparing: &[crate::resident_capacity::PreparingResidentSandbox],
+) -> Result<bool, String> {
+    let Some(pending) = preparing
+        .iter()
+        .find(|pending| pending.execution_id == sandbox.execution_id)
+    else {
+        return Ok(false);
+    };
+    let label_matches =
+        |name: &str, expected: &str| facts.labels.get(name).map(String::as_str) == Some(expected);
+    if pending.allocation_owner != sandbox.allocation_owner
+        || pending.resources != sandbox.resources
+        || pending
+            .container_id
+            .as_ref()
+            .is_some_and(|id| id != &facts.id)
+        || !label_matches("centaeris.instance_id", &pending.instance_id)
+        || !label_matches("centaeris.environment_id", &pending.environment_id)
+        || !label_matches(
+            "centaeris.environment_profile_digest",
+            &pending.profile_digest,
+        )
+        || facts.image != pending.image_digest
+    {
+        return Err("managed preparing sandbox identity mismatch; admission blocked".into());
+    }
+    Ok(true)
 }
 
 fn observed_resident_sandboxes_for_run(

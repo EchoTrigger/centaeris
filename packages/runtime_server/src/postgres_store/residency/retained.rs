@@ -142,7 +142,7 @@ impl PostgresRuntimeStore {
         &self,
         r: &RetainedInstanceRequest<'_>,
         limits: ResidentCapacity,
-        inventory: impl FnOnce() -> Result<crate::resident_capacity::ResidentInventory, String> + Send,
+        inventory: impl ResidentInventorySource<crate::resident_capacity::ResidentInventory>,
         before_create: impl FnOnce(&mut Client, &RetainedInstanceAllocation) -> Result<(), String>
             + Send,
         prepare: impl FnOnce(&RetainedInstanceAllocation) -> Result<String, String> + Send,
@@ -160,7 +160,7 @@ impl PostgresRuntimeStore {
         &self,
         r: &RetainedInstanceRequest<'_>,
         limits: ResidentCapacity,
-        inventory: impl FnOnce() -> Result<crate::resident_capacity::ResidentInventory, String> + Send,
+        inventory: impl ResidentInventorySource<crate::resident_capacity::ResidentInventory>,
         before_create: impl FnOnce(&mut Client, &RetainedInstanceAllocation) -> Result<(), String>
             + Send,
         prepare: impl FnOnce(&RetainedInstanceAllocation) -> Result<String, String> + Send,
@@ -177,12 +177,13 @@ impl PostgresRuntimeStore {
             })?;
             let result = self.with_client(|client| {
             let mut environment = crate::observations::timed("environmentAcquire", || lock_environment_for_run(client, r.host_id, &r.environment_authorization.payload.environment_id, r.lease))?;
-            let a = {
+            let mut a = {
             let lock = crate::observations::timed("globalAcquire", || lock_host_for_run(environment.client, r.host_id, r.lease, &mut environment.acquired_global))?;
-            let inventory = crate::observations::timed("preparationInventory", inventory)?;
+            let snapshot = ResidentInventorySnapshot::freeze(lock.0, r.host_id, Some(&r.environment_authorization.payload.environment_id))?;
+            let inventory = crate::observations::timed("preparationInventory", || inventory.collect(&snapshot.preparing))?;
             let physical=inventory.sandboxes; let shared=inventory.shared;
             let mut reservation = crate::observations::Span::new("preparationReconcileReserve");
-            reconcile(lock.0,r.host_id,&physical)?;
+            reconcile(lock.0,r.host_id,&physical,&snapshot)?;
             let mut tx=lock.0.transaction().map_err(|e|e.to_string())?;
             super::super::resource_commit::require_durable_resource_commit(&mut tx)?; verify_controller(&mut tx,r)?;
             let b=&r.environment_authorization.payload;
@@ -190,7 +191,7 @@ impl PostgresRuntimeStore {
             let blocked=tx.query_one("SELECT EXISTS(SELECT 1 FROM runtime.resident_sandboxes s LEFT JOIN runtime.execution_instances i ON i.execution_id=s.execution_id WHERE (s.allocation_mode='unbound' AND i.execution_id IS NULL) OR (i.environment_id=$1 AND i.allocation_mode='perRun'))", &[&b.environment_id]).map_err(|e|e.to_string())?.get::<_,bool>(0);
             if blocked { return Err("retained allocation blocked by unresolved reservation".into()); }
             let holding=tx.query_opt("SELECT execution_id,host_id,workspace_id,container_id,state,memory_bytes,cpu_milli,pids,workspace_bytes FROM runtime.resident_sandboxes WHERE environment_id=$1 AND allocation_mode='retained' FOR UPDATE", &[&b.environment_id]).map_err(|e|e.to_string())?;
-            let mut a=if let Some(row)=holding {
+            let a=if let Some(row)=holding {
                 let origin:String=row.get(0); let mut a=allocation(&mut tx,&origin)?;
                 if row.get::<_,String>(1)!=r.host_id || row.get::<_,String>(2)!=r.workspace_id || usage(&row,5)?!=r.resources || a.image_digest!=r.image_digest || a.profile_digest!=r.profile_digest { return Err("retained allocation configuration mismatch".into()); }
                 if let Some(sample) = shared.as_ref() {
@@ -209,7 +210,7 @@ impl PostgresRuntimeStore {
                 // a new Run/execution cannot impersonate same-instance continuity.
                 if tx.query_opt("SELECT 1 FROM runtime.execution_instances i WHERE execution_id=$1 OR (environment_id=$2 AND allocation_mode='retained' AND NOT EXISTS(SELECT 1 FROM runtime.environment_creation_attempts a WHERE a.allocation_execution_id=i.allocation_execution_id AND a.state='notDispatched') AND NOT($3 AND EXISTS(SELECT 1 FROM runtime.agent_run_cleanup_receipts c WHERE c.instance_id=i.instance_id AND c.environment_id=i.environment_id AND c.cleanup_complete AND c.physical_removed)))", &[&r.execution_id,&b.environment_id,&(b.execution_mode=="perRun")]).map_err(|e|e.to_string())?.is_some() { return Err("execution_environment_lost:retained_allocation_missing".into()); }
                 let admitted = if let Some(sample) = shared.as_ref() {
-                    let (global_used, tenant_used, host_used, pending_memory) = used_shared(&mut tx, r.host_id, r.workspace_id, sample)?;
+                    let (global_used, tenant_used, host_used, pending_memory) = used_shared(&mut tx, r.host_id, r.workspace_id, sample, &snapshot)?;
                     crate::shared_resident_admission::admits(&crate::shared_resident_admission::Admission {
                         global_used, tenant_used, host_used, requested: r.resources, limits,
                         host_available_bytes: sample.available_memory_bytes,
@@ -237,11 +238,15 @@ impl PostgresRuntimeStore {
             tx.commit().map_err(|e|e.to_string())?;
             reservation.finished(true);
             drop(reservation);
+            // The durable declaration covers the whole physical attempt while
+            // this Environment's gate continues to reject duplicate creators.
+            a
+            };
             // Core persists its execution fact using this same Client, outside
             // our transaction. It must finish before authority is pinned again.
-            if let Err(error)=before_create(lock.0,&a) {
+            if let Err(error)=before_create(environment.client,&a) {
                 if !a.reused {
-                    let mut tx=lock.0.transaction().map_err(|e|e.to_string())?;
+                    let mut tx=environment.client.transaction().map_err(|e|e.to_string())?;
                     super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
                     verify_controller(&mut tx,r)?;
                     super::super::creation_attempts::close_before_dispatch(&mut tx,&a)?;
@@ -249,7 +254,7 @@ impl PostgresRuntimeStore {
                 }
                 return Err(error);
             }
-            let mut tx=lock.0.transaction().map_err(|e|e.to_string())?;
+            let mut tx=environment.client.transaction().map_err(|e|e.to_string())?;
             super::super::resource_commit::require_durable_resource_commit(&mut tx)?; verify_controller(&mut tx,r)?;
             let current=tx.query_opt("SELECT container_id,state FROM runtime.resident_sandboxes WHERE host_id=$1 AND execution_id=$2 FOR UPDATE", &[&r.host_id,&a.allocation_execution_id]).map_err(|e|e.to_string())?.ok_or("retained reservation missing")?;
             if current.get::<_,String>(1)=="releasing" || current.get::<_,Option<String>>(0)!=a.container_id { return Err("retained reservation changed".into()); }
@@ -258,7 +263,7 @@ impl PostgresRuntimeStore {
                 // A crash before the actual send is Unknown, never refund evidence.
                 super::super::creation_attempts::dispatch(&mut tx,&a)?;
                 tx.commit().map_err(|e|e.to_string())?;
-                tx=lock.0.transaction().map_err(|e|e.to_string())?;
+                tx=environment.client.transaction().map_err(|e|e.to_string())?;
                 super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
                 verify_controller(&mut tx,r)?;
             }
@@ -268,11 +273,11 @@ impl PostgresRuntimeStore {
             if rotation.is_some() {
                 super::super::runsc_rotation::observe_running(&mut tx, &super::super::runsc_rotation::RunscBinding::from(&a), &container)?;
             }
-            tx.commit().map_err(|e|e.to_string())?; a.container_id=Some(container); a
-            };
-            // Physical existence and its resource charge are durable before
-            // releasing global admission. Re-pin current authority and the exact
-            // association on this same checked-out client for initialization.
+            tx.commit().map_err(|e|e.to_string())?; a.container_id=Some(container);
+            #[cfg(test)]
+            super::after_resident_preparation_commit_hook();
+            // Physical existence and its resource charge are durable. Re-pin
+            // current authority and the exact association for initialization.
             with_retained_operation_on_client(environment.client, r, &a, initialize)?;
             Ok(a)
         });

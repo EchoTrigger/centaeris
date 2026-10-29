@@ -129,7 +129,7 @@ impl PostgresRuntimeStore {
     pub(crate) fn with_cleanup_authority<P: Into<CleanupPhysicalResult>>(
         &self,
         request: &CleanupAuthorityRequest<'_>,
-        inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
+        inventory: impl crate::resident_capacity::ResidentInventorySource<Vec<ObservedResidentSandbox>>,
         cleanup: impl FnOnce(&CleanupTarget, &VerifiedOriginalGrant) -> Result<P, String> + Send,
     ) -> Result<CleanupReceipt, String> {
         self.with_cleanup_authority_and_power_observation(
@@ -148,7 +148,7 @@ impl PostgresRuntimeStore {
     pub(crate) fn with_cleanup_authority_and_power_observation<P: Into<CleanupPhysicalResult>>(
         &self,
         request: &CleanupAuthorityRequest<'_>,
-        inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
+        inventory: impl crate::resident_capacity::ResidentInventorySource<Vec<ObservedResidentSandbox>>,
         observe_paused: impl FnOnce(
                 &RetainedInstanceAllocation,
                 &crate::agent_run_authorization::EnvironmentProfile,

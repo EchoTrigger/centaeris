@@ -291,13 +291,15 @@ fn teardown_owned_tasks(
             lease: &lease,
             host_id: &host_id,
         },
-        || {
-            #[cfg(test)]
-            if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
-                return crate::native_consumption_tests::owned_inventory();
-            }
-            crate::docker_execution_host::observed_resident_sandboxes()
-        },
+        crate::resident_capacity::FilteredResidentInventory(
+            |preparing: &[crate::resident_capacity::PreparingResidentSandbox]| {
+                #[cfg(test)]
+                if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
+                    return crate::native_consumption_tests::owned_inventory();
+                }
+                crate::docker_execution_host::observed_resident_sandboxes_excluding(preparing)
+            },
+        ),
         |target, verified| match target {
             CleanupTarget::NeverAllocated
             | CleanupTarget::Destroyed { .. }

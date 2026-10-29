@@ -4,11 +4,20 @@ use crate::resident_capacity::{ResidentInventory, SharedHostInventory};
 use hosted_execution::host_supervisor::{resources::ObservationClock, HostLaunchTarget};
 
 pub(crate) fn collect(host: &str) -> Result<ResidentInventory, String> {
+    collect_excluding(host, &[])
+}
+
+pub(crate) fn collect_excluding(
+    host: &str,
+    preparing: &[crate::resident_capacity::PreparingResidentSandbox],
+) -> Result<ResidentInventory, String> {
     if !crate::shared_resident_admission::enabled()? {
-        return observed_resident_sandboxes().map(ResidentInventory::declarations);
+        return observed_resident_sandboxes_excluding(preparing)
+            .map(ResidentInventory::declarations);
     }
     let mut sandboxes = Vec::new();
     let mut targets = Vec::new();
+    let mut filter = PreparingInventoryFilter::new(preparing);
     for id in crate::docker_engine::list_managed(None)? {
         let Some(facts) = inspect_container(&id)? else {
             continue;
@@ -23,6 +32,11 @@ pub(crate) fn collect(host: &str) -> Result<ResidentInventory, String> {
         };
         if facts.runtime != "runsc" {
             return Err("shared_inventory_runtime_rejected".into());
+        }
+        // A partial native startup may not answer resource RPCs yet. Its frozen
+        // declaration remains fully charged until a later complete inventory.
+        if filter.should_skip(&facts, &sandbox)? {
+            continue;
         }
         let target = HostLaunchTarget {
             container_id: facts.id.clone(),
@@ -52,3 +66,6 @@ pub(crate) fn collect(host: &str) -> Result<ResidentInventory, String> {
         )?),
     })
 }
+
+#[cfg(test)]
+mod tests;

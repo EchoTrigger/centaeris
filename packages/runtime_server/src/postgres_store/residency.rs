@@ -6,11 +6,13 @@ use postgres::{Client, GenericClient};
 use super::PostgresRuntimeStore;
 mod retained;
 pub(crate) mod retirement;
-use crate::resident_capacity::{ObservedResidentSandbox, ResidentCapacity, RESIDENT_CAPACITY_WAIT};
+use crate::resident_capacity::{
+    ObservedResidentSandbox, PreparingResidentSandbox, ResidentCapacity, ResidentInventorySource,
+    RESIDENT_CAPACITY_WAIT,
+};
 
-// This session lock spans a committed reservation and the bounded Docker
-// mutation. A SQL transaction alone could roll back after Docker committed.
-// All managed create/remove paths use this lock; contention yields admission.
+// Serialize inventory reconciliation and admission. Retained preparation releases
+// this gate after its durable reservation; maintenance keeps its existing scope.
 struct ResidentHostLock<'a>(&'a mut Client, String, Option<crate::observations::Span>);
 mod preparation_wait;
 
@@ -195,27 +197,114 @@ pub(super) fn after_global_preparation_unlock(hook: impl FnOnce() + 'static) {
     });
 }
 
+/// Freeze pending declarations before the physical sample can become stale.
+struct ResidentInventorySnapshot {
+    pending_executions: Vec<String>,
+    preparing: Vec<PreparingResidentSandbox>,
+}
+impl ResidentInventorySnapshot {
+    fn freeze(
+        client: &mut Client,
+        host_id: &str,
+        caller_environment: Option<&str>,
+    ) -> Result<Self, String> {
+        let rows = client.query("SELECT s.execution_id,s.host_id,s.container_id,s.memory_bytes,s.cpu_milli,s.pids,s.workspace_bytes,i.instance_id,i.environment_id,i.image_digest,i.profile_digest,i.allocation_owner_json FROM runtime.resident_sandboxes s LEFT JOIN runtime.execution_instances i ON i.execution_id=s.execution_id AND i.allocation_execution_id=i.execution_id AND i.instance_id=s.instance_id AND i.environment_id=s.environment_id AND i.allocation_mode='retained' AND i.allocation_owner_json::jsonb=s.allocation_owner_json::jsonb WHERE s.state='reserved'", &[]).map_err(|error| format!("freeze pending resident inventory failed: {error}"))?;
+        let mut snapshot = Self {
+            pending_executions: Vec::new(),
+            preparing: Vec::new(),
+        };
+        for row in rows {
+            let execution_id: String = row.get(0);
+            snapshot.pending_executions.push(execution_id.clone());
+            if row.get::<_, String>(1) != host_id {
+                continue;
+            }
+            let Some(environment_id) = row.get::<_, Option<String>>(8) else {
+                continue;
+            };
+            if caller_environment == Some(environment_id.as_str()) {
+                continue;
+            }
+            // Probing another gate never waits or sends a release notification.
+            // Exclude our own gate because advisory locks are session-reentrant.
+            if try_lock_environment(client, &environment_id)? {
+                let unlocked = client
+                    .query_one(
+                        "SELECT pg_advisory_unlock(731947,hashtext($1))",
+                        &[&environment_id],
+                    )
+                    .map_err(|error| format!("pending environment probe unlock failed: {error}"))?
+                    .get::<_, bool>(0);
+                if !unlocked {
+                    return Err("pending environment probe unlock rejected".into());
+                }
+                continue;
+            }
+            snapshot.preparing.push(PreparingResidentSandbox {
+                execution_id,
+                allocation_owner: serde_json::from_str(&row.get::<_, String>(11))
+                    .map_err(|_| "allocation_owner_invalid")?,
+                instance_id: row.get(7),
+                environment_id,
+                image_digest: row.get(9),
+                profile_digest: row
+                    .get::<_, Option<String>>(10)
+                    .ok_or("preparing resident profile missing; admission blocked")?,
+                container_id: row.get(2),
+                resources: usage(&row, 3)?,
+            });
+        }
+        Ok(snapshot)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_RESIDENT_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(super) fn after_resident_preparation_commit(hook: impl FnOnce() + 'static) {
+    AFTER_RESIDENT_COMMIT.with(|pending| {
+        assert!(pending.borrow().is_none());
+        *pending.borrow_mut() = Some(Box::new(hook));
+    });
+}
+#[cfg(test)]
+fn after_resident_preparation_commit_hook() {
+    AFTER_RESIDENT_COMMIT.with(|pending| {
+        if let Some(hook) = pending.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
 pub(super) fn with_environment_inventory<T>(
     environment: &mut EnvironmentPreparationLock<'_>,
-    inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String>,
+    inventory: impl ResidentInventorySource<Vec<ObservedResidentSandbox>>,
     operation: impl FnOnce(&mut Client, &[ObservedResidentSandbox]) -> Result<T, String>,
 ) -> Result<T, String> {
     let lock = lock_host(environment.client, &environment.host_id)?;
     environment.acquired_global = true;
-    let physical = inventory()?;
-    reconcile(lock.0, &environment.host_id, &physical)?;
+    let snapshot = ResidentInventorySnapshot::freeze(
+        lock.0,
+        &environment.host_id,
+        Some(&environment.environment_id),
+    )?;
+    let physical = inventory.collect(&snapshot.preparing)?;
+    reconcile(lock.0, &environment.host_id, &physical, &snapshot)?;
     operation(lock.0, &physical)
 }
 
 pub(super) fn with_host_inventory<T>(
     client: &mut Client,
     host_id: &str,
-    inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String>,
+    inventory: impl ResidentInventorySource<Vec<ObservedResidentSandbox>>,
     operation: impl FnOnce(&mut Client, &[ObservedResidentSandbox]) -> Result<T, String>,
 ) -> Result<T, String> {
     let lock = lock_host(client, host_id)?;
-    let physical = inventory()?;
-    reconcile(lock.0, host_id, &physical)?;
+    let snapshot = ResidentInventorySnapshot::freeze(lock.0, host_id, None)?;
+    let physical = inventory.collect(&snapshot.preparing)?;
+    reconcile(lock.0, host_id, &physical, &snapshot)?;
     operation(lock.0, &physical)
 }
 
@@ -223,11 +312,17 @@ impl PostgresRuntimeStore {
     pub(crate) fn reconcile_resident_sandboxes(
         &self,
         host_id: &str,
-        inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
+        inventory: impl ResidentInventorySource<Vec<ObservedResidentSandbox>>,
     ) -> Result<(), String> {
         self.with_client(|client| {
             let lock = lock_host(client, host_id)?;
-            reconcile(lock.0, host_id, &inventory()?)
+            let snapshot = ResidentInventorySnapshot::freeze(lock.0, host_id, None)?;
+            reconcile(
+                lock.0,
+                host_id,
+                &inventory.collect(&snapshot.preparing)?,
+                &snapshot,
+            )
         })
     }
 
@@ -405,6 +500,7 @@ fn used_shared(
     host_id: &str,
     tenant: &str,
     sample: &crate::resident_capacity::SharedHostInventory,
+    snapshot: &ResidentInventorySnapshot,
 ) -> Result<
     (
         ResidentResourceUsage,
@@ -415,7 +511,7 @@ fn used_shared(
     String,
 > {
     sample.ensure_fresh(host_id)?;
-    let rows = client.query("SELECT host_id,workspace_id,memory_bytes,cpu_milli,pids,workspace_bytes,container_id,state FROM runtime.resident_sandboxes", &[])
+    let rows = client.query("SELECT host_id,workspace_id,memory_bytes,cpu_milli,pids,workspace_bytes,container_id,state,execution_id FROM runtime.resident_sandboxes", &[])
         .map_err(|error| format!("load shared resident declarations failed: {error}"))?;
     let mut global = ResidentResourceUsage::default();
     let mut tenant_used = ResidentResourceUsage::default();
@@ -425,7 +521,12 @@ fn used_shared(
         let declared = usage(&row, 2)?;
         let on_host = row.get::<_, String>(0) == host_id;
         let confirmed = row.get::<_, String>(7) == "resident";
-        let observed = if on_host && confirmed {
+        let observed = if on_host
+            && confirmed
+            && !snapshot
+                .pending_executions
+                .contains(&row.get::<_, String>(8))
+        {
             row.get::<_, Option<String>>(6)
                 .as_ref()
                 .and_then(|id| sample.measured_by_container.get(id))
@@ -473,6 +574,7 @@ fn reconcile(
     client: &mut Client,
     host_id: &str,
     inventory: &[ObservedResidentSandbox],
+    snapshot: &ResidentInventorySnapshot,
 ) -> Result<(), String> {
     if host_id.trim().is_empty() {
         return Err("resident host identity missing".into());
@@ -480,6 +582,27 @@ fn reconcile(
     let mut tx = client.transaction().map_err(|error| error.to_string())?;
     super::resource_commit::require_durable_resource_commit(&mut tx)?;
     for sandbox in inventory {
+        if let Some(preparing) = snapshot
+            .preparing
+            .iter()
+            .find(|pending| pending.execution_id == sandbox.execution_id)
+        {
+            if preparing.allocation_owner != sandbox.allocation_owner
+                || preparing.resources != sandbox.resources
+                || preparing
+                    .container_id
+                    .as_ref()
+                    .is_some_and(|id| id != &sandbox.container_id)
+            {
+                return Err(
+                    "managed preparing sandbox disagrees with reservation; admission blocked"
+                        .into(),
+                );
+            }
+            // Its creator owns the final resident commit. Updating this row here
+            // could wait for its physical transaction while holding global admission.
+            continue;
+        }
         let run_id = match &sandbox.allocation_owner {
             centaeris_core::execution::EnvironmentTaskOwner::AgentRun { run_id } => {
                 Some(run_id.as_str())
@@ -537,13 +660,13 @@ fn reconcile(
         }
     }
     // No timeout releases reserved/unknown creations. A confirmed resident can
-    // be reconciled absent while this lock excludes every managed creation.
+    // be reconciled absent only if it was already confirmed before this sample.
     let present = inventory
         .iter()
         .map(|sandbox| sandbox.execution_id.clone())
         .collect::<Vec<_>>();
     // A busy resident remains charged. Skipping its row is a deferred cleanup
     // decision, never proof that its physical instance is absent or refundable.
-    tx.execute("WITH absent AS (SELECT host_id,execution_id FROM resident_sandboxes WHERE host_id=$1 AND state='resident' AND NOT(execution_id=ANY($2)) FOR UPDATE SKIP LOCKED) DELETE FROM resident_sandboxes s USING absent a WHERE s.host_id=a.host_id AND s.execution_id=a.execution_id", &[&host_id, &present]).map_err(|error| error.to_string())?;
+    tx.execute("WITH absent AS (SELECT host_id,execution_id FROM resident_sandboxes WHERE host_id=$1 AND state='resident' AND NOT(execution_id=ANY($2)) AND NOT(execution_id=ANY($3)) FOR UPDATE SKIP LOCKED) DELETE FROM resident_sandboxes s USING absent a WHERE s.host_id=a.host_id AND s.execution_id=a.execution_id", &[&host_id, &present, &snapshot.pending_executions]).map_err(|error| error.to_string())?;
     tx.commit().map_err(|error| error.to_string())
 }

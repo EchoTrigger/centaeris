@@ -22,7 +22,7 @@ pub(super) fn dispatch(
 }
 
 /// Only the fresh attempt's caller may close this branch before its physical callback.
-/// The caller holds host serialization and current controller/lease pins in this transaction.
+/// The caller serializes the original attempt and pins current controller/lease authority.
 pub(super) fn close_before_dispatch(
     db: &mut impl GenericClient,
     a: &RetainedInstanceAllocation,

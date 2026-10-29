@@ -106,7 +106,7 @@ impl PostgresRuntimeStore {
         key: &[u8],
         host: &str,
         limits: ResidentCapacity,
-        inventory: impl FnOnce() -> Result<Vec<ObservedResidentSandbox>, String> + Send,
+        inventory: impl crate::resident_capacity::ResidentInventorySource<Vec<ObservedResidentSandbox>>,
         prepare: impl FnOnce(&RetainedInstanceAllocation) -> Result<String, String> + Send,
     ) -> Result<RetainedInstanceAllocation, String> {
         if host.is_empty() {

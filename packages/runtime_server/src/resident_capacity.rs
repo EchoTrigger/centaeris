@@ -116,6 +116,43 @@ pub(crate) struct ObservedResidentSandbox {
     pub resources: ResidentResourceUsage,
 }
 
+/// A reserved incarnation whose Environment is still being physically prepared.
+#[derive(Clone, Debug)]
+pub(crate) struct PreparingResidentSandbox {
+    pub execution_id: String,
+    pub allocation_owner: centaeris_core::execution::EnvironmentTaskOwner,
+    pub instance_id: String,
+    pub environment_id: String,
+    pub image_digest: String,
+    pub profile_digest: String,
+    pub container_id: Option<String>,
+    pub resources: ResidentResourceUsage,
+}
+
+/// Collect one inventory, excluding only verified incarnations still being prepared.
+pub(crate) trait ResidentInventorySource<T>: Send {
+    fn collect(self, preparing: &[PreparingResidentSandbox]) -> Result<T, String>;
+}
+impl<T, F> ResidentInventorySource<T> for F
+where
+    F: FnOnce() -> Result<T, String> + Send,
+{
+    fn collect(self, _preparing: &[PreparingResidentSandbox]) -> Result<T, String> {
+        self()
+    }
+}
+
+/// Supply physical inventory with the precise declarations frozen before sampling.
+pub(crate) struct FilteredResidentInventory<F>(pub F);
+impl<T, F> ResidentInventorySource<T> for FilteredResidentInventory<F>
+where
+    F: FnOnce(&[PreparingResidentSandbox]) -> Result<T, String> + Send,
+{
+    fn collect(self, preparing: &[PreparingResidentSandbox]) -> Result<T, String> {
+        (self.0)(preparing)
+    }
+}
+
 /// A trusted, identity-checked host sample for one admission attempt.
 #[derive(Clone, Debug)]
 pub(crate) struct SharedHostInventory {

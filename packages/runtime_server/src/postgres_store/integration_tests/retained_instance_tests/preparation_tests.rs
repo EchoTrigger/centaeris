@@ -730,27 +730,26 @@ fn postgres_environment_unlock_closes_registration_after_global_unlock_wake() {
             &current.request("execution-unlock-owner", &profile),
             capacity,
             || {
-                Ok(crate::resident_capacity::ResidentInventory::declarations(
-                    Vec::new(),
-                ))
-            },
-            |_, _| Ok(()),
-            |allocation| {
+                // Inventory remains inside admission serialization; physical creation may overlap.
                 let waiting_profile = waiting.original.environment_profile.digest().unwrap();
                 assert_eq!(
                     store
                         .prepare_retained_instance(
                             &waiting.request("execution-unlock-waiter", &waiting_profile),
                             capacity,
-                            || panic!("the first owner still holds global admission"),
+                            || panic!("the inventory owner still holds global admission"),
                             |_, _| panic!("no waiter fact"),
                             |_| panic!("no waiter container")
                         )
                         .unwrap_err(),
                     crate::resident_capacity::HOST_PREPARATION_WAIT
                 );
-                confirm(&current, allocation, &physical)
+                Ok(crate::resident_capacity::ResidentInventory::declarations(
+                    Vec::new(),
+                ))
             },
+            |_, _| Ok(()),
+            |allocation| confirm(&current, allocation, &physical),
             |_| Ok(()),
         )
         .unwrap();
@@ -773,14 +772,14 @@ fn postgres_environment_unlock_closes_registration_after_global_unlock_wake() {
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
 fn postgres_initialization_rechecks_controller_and_job_after_resident_commit() {
-    use crate::postgres_store::residency::after_global_preparation_unlock;
+    use crate::postgres_store::residency::after_resident_preparation_commit;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     for change in ["controller", "job"] {
         let (url, store, mut db) = setup();
         let current = run(&store, &mut db, "run-repin-initialize", 1);
         let physical = Arc::new(Mutex::new(Vec::new()));
-        after_global_preparation_unlock(move || {
+        after_resident_preparation_commit(move || {
             let mut authority = Client::connect(&url, NoTls).unwrap();
             if change == "controller" {
                 authority.execute("UPDATE public.app_core_sessionenvironment SET controller_epoch=controller_epoch+1 WHERE id='environment'", &[]).unwrap();
@@ -821,7 +820,7 @@ fn postgres_initialization_rechecks_controller_and_job_after_resident_commit() {
 fn postgres_cleanup_during_initialization_declines_before_global_inventory_and_retries() {
     use crate::contract::AgentRunCleanup;
     use crate::postgres_store::cleanup_receipts::CleanupAuthorityRequest;
-    use crate::postgres_store::residency::after_global_preparation_unlock;
+    use crate::postgres_store::residency::after_resident_preparation_commit;
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let (url, store, mut db) = setup();
     let current = Arc::new(run(&store, &mut db, "run-cleanup-initializing", 1));
@@ -830,7 +829,7 @@ fn postgres_cleanup_during_initialization_declines_before_global_inventory_and_r
     let hook_cleanup = cleanup_record.clone();
     let hook_run = current.clone();
     let hook_store = store.clone();
-    after_global_preparation_unlock(move || {
+    after_resident_preparation_commit(move || {
         let mut authority = Client::connect(&url, NoTls).unwrap();
         authority.execute("UPDATE public.app_core_sessionenvironment SET controller_purpose='cleanup' WHERE id='environment'", &[]).unwrap();
         authority.execute("INSERT INTO public.app_core_sessionevent VALUES('ws_1','sess_1','run-cleanup-initializing',false,'{\"type\":\"agent_run_failed\"}')", &[]).unwrap();

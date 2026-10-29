@@ -19,6 +19,7 @@ mod allocation_mode_tests;
 mod authorization_digest_tests;
 mod cleanup_authority_tests;
 mod cleanup_receipt_tests;
+mod concurrent_preparation_tests;
 mod lease_contention_tests;
 mod pre_admission_failure_tests;
 mod preparation_tests;
