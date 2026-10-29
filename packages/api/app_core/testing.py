@@ -61,12 +61,17 @@ def fenced_start_fixture(agent_run, *, execution_mode='perRun'):
     return build_agent_run_start(agent_run, controller_authority=_authority(environment), execution_mode=execution_mode)
 
 
-def leased_lifecycle_job_fixture(test_case, agent_run):
-    """Persist the worker lease used by real lifecycle HTTP/controller fixtures."""
+def leased_lifecycle_job_fixture(test_case, agent_run, *, isolate_schema=True):
+    """Persist the worker lease used by real lifecycle HTTP/controller fixtures.
+
+    Set isolate_schema=False only after the caller has isolated the namespace,
+    so the job can share it with that fixture's other Runtime tables.
+    """
     from django.db import connection
     from .runtime_schema_test_helpers import isolate_runtime_schema
 
-    isolate_runtime_schema(test_case)
+    if isolate_schema:
+        isolate_runtime_schema(test_case)
     job_id = f"agent_run.lifecycle:{agent_run.pk}"
     lease_owner = "worker:fixture:" + agent_run.pk
     with connection.cursor() as cursor:
