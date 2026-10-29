@@ -6,7 +6,8 @@ import re
 import sys
 import urllib.parse
 
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+discovery_root=str(Path(__file__).resolve().parents[1])
+if discovery_root not in sys.path:sys.path.insert(0,discovery_root)
 from runsc_rotation_acceptance import FixtureDriver
 from runsc_acceptance.execution_mode import fixture_execution_mode
 

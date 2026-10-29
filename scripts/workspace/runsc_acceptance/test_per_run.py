@@ -15,6 +15,12 @@ module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 
 
 class PhysicalCleanupTests(unittest.TestCase):
+ def test_loading_cleanup_module_preserves_existing_discovery_path(self):
+  with patch.object(sys,'path',list(sys.path)):
+   before=list(sys.path)
+   probe_spec=importlib.util.spec_from_file_location('per_run_path_probe',Path(__file__).with_name('per_run.py'))
+   probe=importlib.util.module_from_spec(probe_spec);probe_spec.loader.exec_module(probe)
+   self.assertEqual(sys.path,before)
  def driver(self,*,allocations=None,receipts=None,holding=0):
   driver=object.__new__(module.PerRunFixtureDriver)
   driver.docker=['docker','--host','unix:///owned/docker.sock'];driver.base='http://127.0.0.1:18083'

@@ -1,7 +1,8 @@
 import hashlib,importlib.util,json,subprocess,sys,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
-spec=importlib.util.spec_from_file_location('native_prepare',Path(__file__).with_name('prepare.py'));prepare=importlib.util.module_from_spec(spec);spec.loader.exec_module(prepare)
+with patch.object(sys,'path',[str(Path(__file__).parent),*sys.path]):
+ spec=importlib.util.spec_from_file_location('native_prepare',Path(__file__).with_name('prepare.py'));prepare=importlib.util.module_from_spec(spec);spec.loader.exec_module(prepare)
 class PreparationTests(unittest.TestCase):
  def fixture(self,root):
   source=root/'source';source.mkdir();(source/'.env.example').write_text('EXECUTION_GLOBAL_LIMIT=8\nWORKER_SLOT_COUNT=8\nRESIDENT_GLOBAL_PIDS=8192\nRESIDENT_TENANT_PIDS=2048\n')

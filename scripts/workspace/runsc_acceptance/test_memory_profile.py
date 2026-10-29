@@ -1,5 +1,11 @@
+import importlib.util
+from pathlib import Path
 import unittest
-from memory_profile import memory_profile,workspace_memory_budget
+
+spec=importlib.util.spec_from_file_location('native_memory_profile',Path(__file__).with_name('memory_profile.py'))
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+memory_profile=module.memory_profile
+workspace_memory_budget=module.workspace_memory_budget
 
 
 class MemoryProfileTests(unittest.TestCase):
