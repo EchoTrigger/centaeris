@@ -1,12 +1,17 @@
 """Released records remain platform shared; forward upgrade never promotes users."""
 
+import unittest
+
+from django.contrib.auth.models import Permission
 from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.exceptions import IrreversibleError
-from django.test import TransactionTestCase
+from django.test import SimpleTestCase, TransactionTestCase
 from .migration_testing import isolated_migration_database
 
 
 class WorkspaceResourceMigrationTests(TransactionTestCase):
+    serialized_rollback = True
+
     def test_forward_preserves_roles_owners_secret_bytes_and_shared_consumers(self):
         previous = [("app_core", "0030_session_manual_unread")]
         target = [("app_core", "0031_workspace_resource_scope")]
@@ -188,3 +193,32 @@ class WorkspaceResourceMigrationTests(TransactionTestCase):
             # A forward-only deployment must refuse that destructive downgrade.
             with self.assertRaises(IrreversibleError):
                 MigrationExecutor(db).migrate(previous)
+
+
+class WorkspaceResourceMigrationIsolationTests(SimpleTestCase):
+    databases = {"default"}
+    serialized_rollback = True
+
+    def test_resource_migration_allows_the_next_case_to_restore_auth_permissions(self):
+        class SerializedPermissionTests(TransactionTestCase):
+            serialized_rollback = True
+
+            def test_auth_permissions_are_restored(self):
+                self.assertEqual(Permission.objects.filter(
+                    content_type__app_label="auth",
+                    content_type__model="user",
+                    codename="add_user",
+                ).count(), 1)
+
+        suite = unittest.TestSuite([
+            WorkspaceResourceMigrationTests(
+                "test_forward_preserves_roles_owners_secret_bytes_and_shared_consumers"
+            ),
+            SerializedPermissionTests("test_auth_permissions_are_restored"),
+        ])
+        result = unittest.TestResult()
+        suite.run(result)
+        self.assertTrue(result.wasSuccessful(), "\n".join(
+            detail for _test, detail in [*result.errors, *result.failures]
+        ))
+        self.assertEqual(result.testsRun, 2)
