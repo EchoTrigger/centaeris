@@ -18,6 +18,8 @@ use std::{
     sync::atomic::AtomicU64,
 };
 
+mod timing;
+
 const CGROUP_ROOT: &str = "/centaeris-tasks";
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
@@ -77,6 +79,62 @@ fn control_unlocked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runner_receipt_observations_use_host_receive_clock_and_reject_duplicates() {
+        use std::io::Write;
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        guest.write_all(b"{\"kind\":\"ready\",\"pid\":42}\n{\"kind\":\"leaderExited\",\"waitStatus\":0}\n{\"kind\":\"leaderExited\",\"waitStatus\":0}\n").unwrap();
+        drop(guest);
+        let state = Arc::new(Mutex::new(Events::default()));
+        let mut times = [11_u64, 29, 31].into_iter();
+        let mut records = Vec::new();
+        read_events_with_observer(
+            host,
+            state.clone(),
+            || times.next().unwrap(),
+            |phase, at| {
+                assert!(
+                    state.try_lock().is_ok(),
+                    "observation must not hold the event state lock"
+                );
+                records.push((phase, at));
+            },
+        );
+        assert_eq!(records, vec![("taskReady", 11), ("taskLeaderExited", 29)]);
+        let state = state.lock().unwrap();
+        assert!(state.ready && state.leader == Some(0) && state.failed);
+    }
+
+    #[test]
+    fn invalid_runner_receipt_never_becomes_a_timing_record() {
+        use std::io::Write;
+        for receipt in [
+            b"{\"kind\":\"ready\",\"pid\":1}\n".as_slice(),
+            b"{\"kind\":\"leaderExited\",\"waitStatus\":0}\n",
+            b"not-json\n",
+        ] {
+            let (host, mut guest) = UnixStream::pair().unwrap();
+            guest.write_all(receipt).unwrap();
+            drop(guest);
+            let state = Arc::new(Mutex::new(Events::default()));
+            let mut records = Vec::new();
+            read_events_with_observer(
+                host,
+                state.clone(),
+                || 17,
+                |phase, at| {
+                    assert!(
+                        state.try_lock().is_ok(),
+                        "observation must not hold the event state lock"
+                    );
+                    records.push((phase, at));
+                },
+            );
+            assert!(records.is_empty());
+            assert!(state.lock().unwrap().failed);
+        }
+    }
 
     #[test]
     fn task_controls_use_the_attested_containers_cgroup_namespace() {
@@ -513,7 +571,17 @@ impl Drop for RunscChild {
     }
 }
 
+#[cfg(test)]
 fn read_events(stream: UnixStream, state: Arc<Mutex<Events>>) {
+    read_events_with_observer(stream, state, || (), |_, ()| {});
+}
+
+fn read_events_with_observer<T>(
+    stream: UnixStream,
+    state: Arc<Mutex<Events>>,
+    mut now: impl FnMut() -> T,
+    mut observe: impl FnMut(&'static str, T),
+) {
     let mut reader = BufReader::new(stream);
     loop {
         let mut bytes = Vec::new();
@@ -523,6 +591,7 @@ fn read_events(stream: UnixStream, state: Arc<Mutex<Events>>) {
         if matches!(result, Ok(0)) {
             break;
         }
+        let received_at = now();
         let parsed = if result.is_ok() && bytes.len() <= 1024 && bytes.last() == Some(&b'\n') {
             serde_json::from_slice::<RunnerEvent>(&bytes).ok()
         } else {
@@ -531,22 +600,26 @@ fn read_events(stream: UnixStream, state: Arc<Mutex<Events>>) {
         let Ok(mut state) = state.lock() else {
             return;
         };
-        match parsed {
+        let phase = match parsed {
             Some(RunnerEvent::Ready { pid })
                 if pid > 1 && !state.ready && state.leader.is_none() =>
             {
-                state.ready = true
+                state.ready = true;
+                "taskReady"
             }
             Some(RunnerEvent::LeaderExited { wait_status })
                 if state.ready && state.leader.is_none() =>
             {
-                state.leader = Some(wait_status)
+                state.leader = Some(wait_status);
+                "taskLeaderExited"
             }
             _ => {
                 state.failed = true;
                 break;
             }
-        }
+        };
+        drop(state);
+        observe(phase, received_at);
     }
 }
 
@@ -587,6 +660,7 @@ pub(super) fn spawn(
     domain: &Path,
     trusted: Option<&TrustedLaunch>,
 ) -> Result<Spawned, String> {
+    let observation = timing::TaskTiming::new(id);
     if target.runtime != HostOciRuntime::Runsc {
         return Err("runsc_backend_required".into());
     }
@@ -615,7 +689,14 @@ pub(super) fn spawn(
     let read_state = state.clone();
     let reader = thread::Builder::new()
         .name("runsc-task-events".into())
-        .spawn(move || read_events(read_stream, read_state))
+        .spawn(move || {
+            read_events_with_observer(
+                read_stream,
+                read_state,
+                || observation.sample(),
+                |phase, received_at| observation.record(phase, received_at),
+            )
+        })
         .map_err(|_| "task_thread_capacity")?;
     let mut child = RunscChild {
         proxy: None,

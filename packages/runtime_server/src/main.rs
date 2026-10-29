@@ -1893,6 +1893,9 @@ fn execute_agent_run(
             transition_reason: "runtime_session_terminal_committed".to_string(),
         });
     }
+    let run_timings =
+        observations::RunTimings::new(&lifecycle_job_id, &agent_run_start.agent_run_id);
+    let _unpaired_timings = run_timings.unpaired_guard();
     let model_client = ApiModelClient::new(ApiModelClientConfig {
         api_internal_url: api_url.clone(),
         internal_api_token: token.clone(),
@@ -1902,7 +1905,8 @@ fn execute_agent_run(
         authorization_digest: agent_run_start.authorization_digest.clone(),
         thinking_mode: agent_run_start.authorization.thinking_mode.clone(),
         model_max_output_tokens: agent_run_start.model_max_output_tokens,
-    });
+    })
+    .with_timings(run_timings.clone());
     let session_log = job_store
         .session_log(
             agent_run_start.authorization.workspace_id.clone(),
@@ -2972,20 +2976,18 @@ fn execute_agent_run(
         session_start_commit_ms = session_start_commit_started.elapsed().as_millis();
     }
 
-    eprintln!(
-        "agent_run_startup_profile: agentRunId={}; serverCount={}; credentialCount={}; mcpConnectionCount={}; runtimePreludeMs={}; sandboxEnsureMs={}; mcpCredentialResolveMs={}; mcpDiscoveryMs={}; workspaceRestoreMs={}; sessionStartCommitMs={}; startupTotalMs={}",
-        agent_run_start.agent_run_id,
-        mcp_startup_metrics.server_count,
-        mcp_startup_metrics.credential_count,
-        mcp_startup_metrics.connection_count,
+    run_timings.startup_profile(observations::StartupProfile {
+        server_count: mcp_startup_metrics.server_count,
+        credential_count: mcp_startup_metrics.credential_count,
+        mcp_connection_count: mcp_startup_metrics.connection_count,
         runtime_prelude_ms,
         sandbox_ensure_ms,
-        mcp_startup_metrics.credential_resolve_ms,
-        mcp_startup_metrics.discovery_ms,
+        mcp_credential_resolve_ms: mcp_startup_metrics.credential_resolve_ms,
+        mcp_discovery_ms: mcp_startup_metrics.discovery_ms,
         workspace_restore_ms,
         session_start_commit_ms,
-        startup_started.elapsed().as_millis(),
-    );
+        startup_total_ms: startup_started.elapsed().as_millis(),
+    });
     let supplement_session_log = session_log.clone();
     let supplement_agent_run_start = agent_run_start.clone();
     let supplement_sequence = session_record_sequence.clone();
@@ -3111,6 +3113,25 @@ fn execute_agent_run(
     };
     let mut commit_tool_safe_point = |safe_point: ToolSafePoint| {
         let safe_point_started = Instant::now();
+        let observed_call = match &safe_point {
+            ToolSafePoint::ModelRequestStarted(started) => {
+                run_timings.request_started(started.turn_id(), started.request_id());
+                None
+            }
+            ToolSafePoint::DurableToolCall { call, .. } => {
+                run_timings.tool_started(&call.id);
+                Some((call.id.clone(), None))
+            }
+            ToolSafePoint::DurableReceipt { call, result, .. }
+                if call.id == result.tool_call_id =>
+            {
+                Some((
+                    call.id.clone(),
+                    Some(result.status == "ok" && result.error.is_none()),
+                ))
+            }
+            _ => None,
+        };
         let stage = match &safe_point {
             ToolSafePoint::ModelRequestStarted(_) => "model_request_safe_point",
             ToolSafePoint::DurableToolCall { .. } => "tool_call_safe_point",
@@ -3504,6 +3525,9 @@ fn execute_agent_run(
                 &terminal_lease_fence,
                 work_trigger.as_ref(),
             )?;
+            if let Some((call_id, Some(tool_ok))) = &observed_call {
+                run_timings.tool_committed(call_id, *tool_ok);
+            }
             accept_session_commit(
                 &mut committed_sequence,
                 &mut *session_stream_guard(&safe_point_stream)?,
@@ -3561,6 +3585,11 @@ fn execute_agent_run(
             }
             Ok(())
         });
+        if result.is_err() {
+            if let Some((call_id, _)) = &observed_call {
+                run_timings.tool_commit_failed(call_id);
+            }
+        }
         observations::timing(
             stage,
             safe_point_started,

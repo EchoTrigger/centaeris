@@ -283,6 +283,12 @@ fn run_command_with_input(
     )
 }
 
+struct CommandTiming {
+    started: Instant,
+    operation_id: String,
+    task_id: String,
+}
+
 fn run_command_with_io(
     fence: &EnvironmentTaskFence,
     operation_id: &str,
@@ -295,6 +301,62 @@ fn run_command_with_io(
         impl FnMut() -> Instant,
         impl FnMut(Duration),
     >,
+) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+    let mut observation = (crate::observations::operation_timing_enabled()
+        && matches!(
+            fence.controller_owner,
+            EnvironmentTaskOwner::AgentRun { .. }
+        ))
+    .then(|| CommandTiming {
+        started: (io.now)(),
+        operation_id: String::new(),
+        task_id: String::new(),
+    });
+    let result = run_command_inner(
+        fence,
+        operation_id,
+        request,
+        cancellation_probe,
+        command_path,
+        mode,
+        &mut io,
+        &mut observation,
+    );
+    if let (Some(mut observation), EnvironmentTaskOwner::AgentRun { run_id }) =
+        (observation, &fence.controller_owner)
+    {
+        if observation.task_id.is_empty() && !observation.operation_id.is_empty() {
+            observation.task_id = fence.task_id(&observation.operation_id).unwrap_or_default();
+        }
+        crate::observations::operation_timing(
+            "hostCommand",
+            (io.now)().saturating_duration_since(observation.started),
+            if result.is_ok() { "ok" } else { "error" },
+            run_id,
+            &observation.operation_id,
+            &observation.task_id,
+        );
+    }
+    result
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The observation sidecar preserves the existing command execution boundary"
+)]
+fn run_command_inner(
+    fence: &EnvironmentTaskFence,
+    operation_id: &str,
+    request: ExecutionCommandRequest,
+    cancellation_probe: Option<&ExecutionCancellationProbe>,
+    command_path: &str,
+    mode: CommandMode<'_>,
+    io: &mut CommandIo<
+        impl FnMut(EnvironmentTaskRequest) -> Result<EnvironmentTaskResult, String>,
+        impl FnMut() -> Instant,
+        impl FnMut(Duration),
+    >,
+    observation: &mut Option<CommandTiming>,
 ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
     let (input, recovering) = match mode {
         CommandMode::Execute(input) => (input, false),
@@ -330,6 +392,9 @@ fn run_command_with_io(
     ]);
     env.extend(request.env.clone());
     let start_id = operation(fence, operation_id, "start");
+    if let Some(observation) = observation {
+        observation.operation_id.clone_from(&start_id);
+    }
     let (id, mut first, running) = if recovering {
         // Recovery already owns this task identity. Its first Query belongs to
         // the same cancellation/deadline loop as every later Query.
@@ -370,6 +435,9 @@ fn run_command_with_io(
         };
         (id, Some(first), running)
     };
+    if let Some(observation) = observation {
+        observation.task_id.clone_from(&id);
+    }
     // Start capacity waits precede execution; after acceptance, Input/Query
     // pressure must never restart this command's original timeout budget.
     let deadline = (io.now)() + Duration::from_millis(request.timeout_ms.saturating_add(5000));
@@ -390,7 +458,7 @@ fn run_command_with_io(
                 operation(fence, operation_id, &format!("input-{index}")),
                 chunk.to_vec(),
                 false,
-                &mut io,
+                io,
                 &control,
             )? {
                 input_interrupted = true;
@@ -429,7 +497,7 @@ fn run_command_with_io(
                 operation(fence, operation_id, "close"),
                 Vec::new(),
                 true,
-                &mut io,
+                io,
                 &control,
             )?;
         }
@@ -611,6 +679,119 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
 
     mod busy_tests;
+
+    #[test]
+    fn host_command_observation_includes_output_and_cleanup_tail() {
+        let observation_started = Instant::now();
+        let clock = std::cell::Cell::new(observation_started);
+        let mut queries = 0;
+        let (result, records) = crate::observations::capture_operation_records(|| {
+            run_command_with_io(
+                &fence(),
+                "tool-1",
+                command(),
+                None,
+                "/bin",
+                CommandMode::Execute(&[]),
+                CommandIo {
+                    now: || clock.get(),
+                    delay: |duration| clock.set(clock.get() + duration),
+                    rpc: |request| match request {
+                        EnvironmentTaskRequest::Start { .. } => Ok(started()),
+                        EnvironmentTaskRequest::Input { .. } => {
+                            Ok(EnvironmentTaskResult::Mutated {
+                                task: snapshot(false),
+                            })
+                        }
+                        EnvironmentTaskRequest::Query { .. } => {
+                            queries += 1;
+                            clock.set(clock.get() + Duration::from_millis(40));
+                            let EnvironmentTaskResult::Task {
+                                mut task,
+                                mut output,
+                                earliest_cursor,
+                                next_cursor,
+                                gap,
+                                has_more,
+                            } = finished(false)
+                            else {
+                                unreachable!()
+                            };
+                            task.cleanup_complete = queries != 1;
+                            task.output_complete = queries != 2;
+                            if queries > 1 {
+                                output.clear();
+                            }
+                            Ok(EnvironmentTaskResult::Task {
+                                task,
+                                output,
+                                earliest_cursor,
+                                next_cursor,
+                                gap,
+                                has_more,
+                            })
+                        }
+                        _ => panic!("unexpected command operation"),
+                    },
+                },
+            )
+        });
+        assert_eq!(result.unwrap().process.stdout, "hello");
+        assert_eq!(
+            queries, 3,
+            "leader exit must not replace complete output and cleanup"
+        );
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record["phase"], "hostCommand");
+        assert_eq!(
+            record["elapsedMs"],
+            clock
+                .get()
+                .duration_since(observation_started)
+                .as_secs_f64()
+                * 1000.0
+        );
+        assert_eq!(record["runId"], "run-a");
+        assert_eq!(record["jobId"], "agent_run.lifecycle:run-a");
+        assert_eq!(
+            record["operationId"],
+            operation(&fence(), "tool-1", "start")
+        );
+        assert_eq!(record["taskId"], "task-1");
+        assert_eq!(record["outcome"], "ok");
+    }
+
+    #[test]
+    fn host_command_failed_start_records_error_with_same_derived_identity() {
+        let clock = std::cell::Cell::new(Instant::now());
+        let (result, records) = crate::observations::capture_operation_records(|| {
+            run_command_with_io(
+                &fence(),
+                "tool-1",
+                command(),
+                None,
+                "/bin",
+                CommandMode::Execute(&[]),
+                CommandIo {
+                    now: || clock.get(),
+                    delay: |_| panic!("unknown start cannot retry"),
+                    rpc: |_| {
+                        clock.set(clock.get() + Duration::from_millis(7));
+                        Err("secret command output must not appear".into())
+                    },
+                },
+            )
+        });
+        assert!(result.is_err());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["elapsedMs"], 7.0);
+        assert_eq!(records[0]["outcome"], "error");
+        let start_id = operation(&fence(), "tool-1", "start");
+        assert_eq!(records[0]["operationId"], start_id);
+        assert_eq!(records[0]["taskId"], fence().task_id(&start_id).unwrap());
+        assert!(!records[0].to_string().contains("secret"));
+    }
 
     fn run_stdin_fixture(
         fence: &EnvironmentTaskFence,
