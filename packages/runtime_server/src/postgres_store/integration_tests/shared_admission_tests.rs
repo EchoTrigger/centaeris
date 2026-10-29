@@ -706,6 +706,19 @@ fn postgres_preparation_unlock_before_registration_rechecks_instead_of_losing_wa
         "registration-race-environment",
         profile(),
     );
+    let generation_before: i64 = db
+        .query_one(
+            "SELECT generation FROM runtime.resident_capacity_clock",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    let job_before = db
+        .query_one(
+            "SELECT status,lease_owner,retry_count FROM runtime.runtime_jobs WHERE job_id=$1",
+            &[&run.fence.job_id],
+        )
+        .unwrap();
     let (release, holder) = hold_host_preparation(&store);
     crate::postgres_store::residency::before_preparation_wait_registration(move || {
         release.send(()).unwrap();
@@ -746,9 +759,26 @@ fn postgres_preparation_unlock_before_registration_rechecks_instead_of_losing_wa
         )
         .unwrap()
         .get::<_, i64>(0),
-        0,
-        "an acquired requester must not wake itself"
+        generation_before + 1,
+        "successful first confirmation advances eligibility exactly once"
     );
+    assert!(
+        preparation_claim(&store, &mut db, &run).is_empty(),
+        "confirmation eligibility cannot reclaim the still-active original Job"
+    );
+    let job = db
+        .query_one(
+            "SELECT status,lease_owner,retry_count FROM runtime.runtime_jobs WHERE job_id=$1",
+            &[&run.fence.job_id],
+        )
+        .unwrap();
+    assert_eq!(job.get::<_, String>(0), job_before.get::<_, String>(0));
+    assert_eq!(
+        job.get::<_, Option<String>>(1),
+        job_before.get::<_, Option<String>>(1)
+    );
+    assert_eq!(job.get::<_, i64>(2), job_before.get::<_, i64>(2));
+    assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_events WHERE task_id=$1 AND event_type='runtime.resident_capacity.claimed.v1'", &[&run.fence.job_id]).unwrap().get::<_,i64>(0), 0);
 }
 
 #[test]
@@ -901,6 +931,7 @@ fn postgres_real_resident_pressure_does_not_wake_itself_on_preparation_unlock() 
         )
         .unwrap()
         .get::<_, i64>(0);
+    let events_before: i64 = db.query_one("SELECT count(*) FROM runtime.runtime_events WHERE event_type IN('runtime.host_preparation.waiting.v1','runtime.host_preparation.available.v1')", &[]).unwrap().get(0);
     let reason = store
         .prepare_retained_instance_with_inventory(
             &run.request("pressure-demand-execution", &digest),
@@ -926,7 +957,7 @@ fn postgres_real_resident_pressure_does_not_wake_itself_on_preparation_unlock() 
         .get::<_, i64>(0),
         before
     );
-    assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_events WHERE event_type IN('runtime.host_preparation.waiting.v1','runtime.host_preparation.available.v1')",&[]).unwrap().get::<_,i64>(0),0);
+    assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_events WHERE event_type IN('runtime.host_preparation.waiting.v1','runtime.host_preparation.available.v1')",&[]).unwrap().get::<_,i64>(0),events_before);
     assert_eq!(
         db.query_one(
             "SELECT count(*) FROM runtime.resident_sandboxes WHERE state='resident'",

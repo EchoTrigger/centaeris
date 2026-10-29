@@ -24,6 +24,13 @@ fn retained() -> (
 fn postgres_runsc_completed_pause_releases_only_running_capacity() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_url, store, mut db, run, binding) = retained();
+    let seeded_generation: i64 = db
+        .query_one(
+            "SELECT generation FROM runtime.resident_capacity_clock",
+            &[],
+        )
+        .unwrap()
+        .get(0);
     let resident = db
         .query_one(
             "SELECT row_to_json(s)::text FROM runtime.resident_sandboxes s",
@@ -79,7 +86,7 @@ fn postgres_runsc_completed_pause_releases_only_running_capacity() {
         )
         .unwrap()
         .get::<_, i64>(0);
-    assert_eq!(generation, 1);
+    assert_eq!(generation, seeded_generation + 1);
     let mut tx = db.transaction().unwrap();
     runsc_rotation::reserve_running(&mut tx, &binding, 1).unwrap();
     assert_eq!(
@@ -434,6 +441,13 @@ fn postgres_runsc_stop_after_one_observation_preserves_unobserved_pause_debits()
 fn postgres_runsc_yield_preserves_waiter_until_confirmed_pause_wakes_claim() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (url, store, mut db, run, _binding) = retained();
+    let seeded_generation: i64 = db
+        .query_one(
+            "SELECT generation FROM runtime.resident_capacity_clock",
+            &[],
+        )
+        .unwrap()
+        .get(0);
     db.execute(
         "UPDATE public.app_core_agentrun SET status='completed' WHERE id=$1",
         &[&run.original.agent_run_id],
@@ -582,7 +596,7 @@ fn postgres_runsc_yield_preserves_waiter_until_confirmed_pause_wakes_claim() {
     let evidence: serde_json::Value = serde_json::from_str(&db.query_one(
         "SELECT payload_json FROM runtime.runtime_events WHERE task_id=$1 AND event_type='runtime.resident_capacity.claimed.v1'", &[&job_id]
     ).unwrap().get::<_, String>(0)).unwrap();
-    assert_eq!(evidence["generation"], 1);
+    assert_eq!(evidence["generation"], seeded_generation + 1);
     assert_eq!(
         evidence["leaseOwner"].as_str(),
         claimed[0].lease_owner.as_deref()
@@ -657,6 +671,13 @@ fn postgres_runsc_known_busy_pause_restores_running_and_restarts_idle_interval()
 fn postgres_runsc_typed_unknown_pause_keeps_dispatched_responsibility() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_url, store, mut db, run, _binding) = retained();
+    let seeded_generation: i64 = db
+        .query_one(
+            "SELECT generation FROM runtime.resident_capacity_clock",
+            &[],
+        )
+        .unwrap()
+        .get(0);
     db.execute(
         "UPDATE public.app_core_agentrun SET status='completed' WHERE id=$1",
         &[&run.original.agent_run_id],
@@ -693,6 +714,6 @@ fn postgres_runsc_typed_unknown_pause_keeps_dispatched_responsibility() {
         )
         .unwrap()
         .get::<_, i64>(0),
-        0
+        seeded_generation
     );
 }
