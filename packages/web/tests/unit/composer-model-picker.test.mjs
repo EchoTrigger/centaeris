@@ -56,15 +56,15 @@ test("a known Run keeps an enabled Stop control during submission and history lo
   stop.props.onClick();assert.equal(stops,1);
 });
 
-test("a pending cancellation remains actionable and describes its progress", () => {
+test("a pending cancellation remains actionable with the existing compact controls", () => {
   let stops = 0;
-  const tree=subject({hasActiveAgentRun:true,activeAgentRunId:"queued-run",cancellingAgentRunId:"queued-run", controlStatus:"Stopping this run", onCancelActiveAgentRun:()=>stops++});
+  const tree=subject({hasActiveAgentRun:true,activeAgentRunId:"queued-run",cancellingAgentRunId:"queued-run", onCancelActiveAgentRun:()=>stops++});
   const stop=elements(tree,node=>node.type==="button" && node.props["aria-label"]==="appRoute.stop")[0];
   assert.equal(Boolean(stop.props.disabled),false);
   assert.equal(stop.props["aria-busy"],true);
   stop.props.onClick();
   assert.equal(stops,1);
-  assert.ok(elements(tree,node=>node.props?.role==="status" && node.props.children==="Stopping this run").length);
+  assert.equal(elements(tree,node=>node.props?.role==="status").length,0);
 });
 
 test("send and draft remain actionable while validation or submission is pending", () => {

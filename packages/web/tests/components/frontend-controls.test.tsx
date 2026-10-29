@@ -38,7 +38,7 @@ test("empty send remains reachable by mouse and keyboard while the draft stays e
   function Harness() {
     const [draft, setDraft] = useState("");
     return <WorkspaceComposer {...composerProps} draft={draft} onDraftChange={setDraft} sending loadingHistory
-      controlBusy controlStatus="Checking submission" onSubmit={event => { event.preventDefault(); submit(); }} />;
+      controlBusy onSubmit={event => { event.preventDefault(); submit(); }} />;
   }
   render(<Harness />);
   const send = screen.getByRole("button", { name: "appRoute.input" });
@@ -47,8 +47,7 @@ test("empty send remains reachable by mouse and keyboard while the draft stays e
   send.focus(); await user.keyboard("{Enter}"); await user.keyboard(" ");
   expect(submit).toHaveBeenCalledTimes(3);
   expect(send.getAttribute("aria-busy")).toBe("true");
-  expect(screen.getByRole("status").textContent).toBe("Checking submission");
-  expect(document.getElementById(send.getAttribute("aria-describedby")!)?.textContent).toBe("Checking submission");
+  expect(screen.queryByRole("status")).toBeNull();
   await user.type(draft, "Next draft");
   expect(draft.value).toBe("Next draft");
   await user.keyboard("{Enter}");
@@ -58,17 +57,17 @@ test("empty send remains reachable by mouse and keyboard while the draft stays e
 test("Stop remains reachable by mouse and keyboard while its identity or cancellation is pending", async () => {
   const user = userEvent.setup(), stop = vi.fn();
   const { rerender } = render(<WorkspaceComposer {...composerProps} hasActiveAgentRun activeAgentRunId=""
-    controlBusy controlStatus="Confirming submission before stopping" onCancelActiveAgentRun={stop} />);
+    controlBusy onCancelActiveAgentRun={stop} />);
   const button = screen.getByRole("button", { name: "appRoute.stop" });
   await user.click(button);
   button.focus(); await user.keyboard("{Enter}"); await user.keyboard(" ");
   expect(stop).toHaveBeenCalledTimes(3);
   rerender(<WorkspaceComposer {...composerProps} hasActiveAgentRun activeAgentRunId="run" cancellingAgentRunId="run"
-    controlStatus="Stopping this run" onCancelActiveAgentRun={stop} />);
+    onCancelActiveAgentRun={stop} />);
   await user.click(button);
   expect(stop).toHaveBeenCalledTimes(4);
   expect(button.getAttribute("aria-busy")).toBe("true");
-  expect(screen.getByRole("status").textContent).toBe("Stopping this run");
+  expect(screen.queryByRole("status")).toBeNull();
 });
 
 test("model and effort keep separate choices and preserve the draft", async () => {

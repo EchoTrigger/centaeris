@@ -131,14 +131,15 @@ test("Send immediately exposes Stop and a deferred receipt cancels only its orig
   await waitFor(() => expect(callsFor("/messages")).toHaveLength(1));
   await user.click(stop);
   expect(callsFor("/cancel")).toHaveLength(0);
-  expect(screen.getByRole("status").textContent).toContain("appRoute.control.stopRecorded");
+  expect(screen.queryByRole("status")).toBeNull();
   await act(async () => { accepted.resolve(receiptFor(callsFor("/messages")[0][1])); });
   await waitFor(() => expect(callsFor("/cancel")).toHaveLength(1));
   expect(callsFor("/cancel")[0][0]).toBe("/api/sessions/session/agent-runs/original-run/cancel");
   expect(callsFor("/messages")).toHaveLength(1);
+  expect(screen.queryByRole("status")).toBeNull();
 });
 
-test("repeated mouse and Space activation during cancellation keeps one request and reports progress", async () => {
+test("repeated mouse and Space activation during cancellation keeps one request and the original compact controls", async () => {
   const user = userEvent.setup(), cancellation = deferred<unknown>();
   const initial = fixture.request.getMockImplementation()!;
   fixture.request.mockImplementation((path, options) => path.endsWith("/messages") ? Promise.resolve(receiptFor(options))
@@ -154,9 +155,10 @@ test("repeated mouse and Space activation during cancellation keeps one request 
   expect(callsFor("/cancel")).toHaveLength(1);
   expect((stop as HTMLButtonElement).disabled).toBe(false);
   expect(stop.getAttribute("aria-busy")).toBe("true");
-  expect(screen.getByRole("status").textContent).toContain("appRoute.control.stopInProgress");
+  expect(screen.queryByRole("status")).toBeNull();
   await act(async () => { cancellation.resolve({ agentRunId: "original-run", status: "queued", disposition: "requested" }); });
   expect(callsFor("/messages")).toHaveLength(1);
+  expect(screen.queryByRole("status")).toBeNull();
 });
 
 test("a failed checkpoint without a Core message ends the pending submission while retaining its input", async () => {

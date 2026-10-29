@@ -335,7 +335,7 @@ test("Stop is available immediately and cancels the original receipt after accep
   await f.send("snapshot",{page});await startSend(f,()=>Boolean(accept));
   assert.equal(composer(f).hasActiveAgentRun,true);
   const stopping=composer(f).onCancelActiveAgentRun();await tick();await f.subject.settle();
-  assert.ok(composer(f).controlStatus);
+  assert.equal(composer(f).hasActiveAgentRun,true);
   assert.equal(f.calls.filter(([path])=>path.endsWith("/cancel")).length,0);
   accept();await stopping;await settleUntil(f,()=>f.calls.some(([path])=>path.endsWith("/cancel")));
   assert.equal(f.calls.filter(([path])=>path.endsWith("/messages")).length,1);
@@ -366,15 +366,15 @@ test("terminal before receipt settles the matching submission without reactivati
  assert.equal(composer(f).hasActiveAgentRun,false);
 });
 
-test("empty input and missing model produce feedback instead of a disabled or silent action",async t=>{
+test("empty input and missing model preserve the draft without dispatching a request",async t=>{
  const f=await setup(t,false,null,{models:[]});
  await f.send("snapshot",{page});await f.send("checkpoint",checkpoint(null),"ready");
  await composer(f).onSubmit({preventDefault(){}});await f.subject.settle();
- assert.ok(composer(f).controlStatus);
+ assert.equal(composer(f).hasActiveAgentRun,false);
  composer(f).onDraftChange("keep this draft");await f.subject.settle();
  await composer(f).onSubmit({preventDefault(){}});await f.subject.settle();
  assert.equal(composer(f).draft,"keep this draft");
- assert.ok(composer(f).controlStatus);
+ assert.equal(composer(f).hasActiveAgentRun,false);
  assert.equal(f.calls.filter(([path])=>path.endsWith("/messages")).length,0);
 });
 
@@ -384,7 +384,7 @@ test("repeated Stop while cancellation is pending stays actionable and shares on
  await f.send("snapshot",{page});await f.send("checkpoint",checkpoint(run()),"active");
  const first=composer(f).onCancelActiveAgentRun();await tick();await f.subject.settle();
  const second=composer(f).onCancelActiveAgentRun();await tick();await f.subject.settle();
- assert.ok(composer(f).controlStatus);
+ assert.equal(composer(f).hasActiveAgentRun,true);
  assert.equal(f.calls.filter(([path])=>path.endsWith("/cancel")).length,1);
  finish();await Promise.all([first,second]);await f.subject.settle();
  assert.equal(composer(f).hasActiveAgentRun,true,"requested does not declare terminal");
@@ -417,7 +417,7 @@ test("terminal releases local send progress even when the follow-up Session read
 });
 
 
-test("terminal without a new snapshot retires its receipt so retry can create a new operation",async t=>{
+test("terminal without a new snapshot retires its receipt so a new submission can create a new operation",async t=>{
  let posts=0;const ids=[];let finishMetadata;
  const f=await setup(t,false,null,{request:async(path,request)=>{
   if(path.endsWith("/messages")){posts++;ids.push(JSON.parse(request.body).operationId);return {...receipt(request),agentRunId:posts===1?"run-new":"run-retry",turnId:posts===1?"turn-new":"turn-retry"};}
@@ -427,7 +427,7 @@ test("terminal without a new snapshot retires its receipt so retry can create a 
  t.after(()=>finishMetadata?.());
  await f.send("checkpoint",checkpoint(run("run-new","failed")),"failed-no-snapshot");
  assert.equal(sessionStorage.getItem('centaeris.pendingOperation.v1:["user","workspace","submitMessage"]'),null);
- transcript(f).onRetrySubmission();await f.subject.settle();
+ composer(f).onDraftChange("synthetic input");await f.subject.settle();
  assert.equal(composer(f).draft,"synthetic input");
  composer(f).onSubmit({preventDefault(){}});await settleUntil(f,()=>posts===2&&!composer(f).sending);
  assert.notEqual(ids[0],ids[1]);
@@ -501,7 +501,7 @@ test("Stop during file preparation restores the draft immediately and late file 
  assert.equal(f.calls.filter(([path])=>path.endsWith("/messages")).length,0);
  finishRead();await tick();await f.subject.settle();
  assert.equal(f.calls.filter(([path])=>path.endsWith("/messages")).length,0);
- assert.ok(composer(f).controlStatus);
+ assert.equal(composer(f).hasActiveAgentRun,false);
 });
 
 
@@ -515,7 +515,7 @@ test("editing a new draft during supplemental input keeps it after the old respo
  composer(f).onSubmit({preventDefault(){}});await settleUntil(f,()=>Boolean(finish));
  composer(f).onDraftChange("next draft");await f.subject.settle();
  composer(f).onSubmit({preventDefault(){}});await f.subject.settle();
- assert.equal(requests,1);assert.ok(composer(f).controlStatus);
+ assert.equal(requests,1);assert.equal(composer(f).draft,"next draft");
  finish();await settleUntil(f,()=>!composer(f).sending);
  assert.equal(composer(f).draft,"next draft");
 });

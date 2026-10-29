@@ -32,7 +32,6 @@ type Props = Readonly<{
   onLoadOlderHistory(): Promise<void>;
   emptyState?: ReactNode;
   pendingUserMessage?: PendingTranscriptMessage | null;
-  onRetrySubmission?(): void;
   historyMemoryPressure?: boolean;
   onReleaseLoadedHistory?(): void;
   onReadingLatestChange?(sessionId: string | null, readingLatest: boolean): void;
@@ -107,7 +106,6 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   onLoadOlderHistory,
   emptyState,
   pendingUserMessage,
-  onRetrySubmission,
   historyMemoryPressure = false,
   onReleaseLoadedHistory,
   onReadingLatestChange,
@@ -539,10 +537,6 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
                   : <TranscriptBlockRow store={store} blockId={entry.blockId} key={entry.blockId} />)}
                 {turnLive ? <TranscriptLiveTail live={turnLive} mode="reasoning" /> : null}
               </WorkProgress> : null}
-              {isPending && pendingTerminal ? <div className="workspaceToolOutputStatus" role="status">
-                {t(pendingUserMessage?.status === "failed" ? "appRoute.submissionFailed" : pendingUserMessage?.status === "cancelled" ? "appRoute.submissionCancelled" : "appRoute.submissionCompleted")}
-                {onRetrySubmission && pendingUserMessage?.status !== "completed" ? <button type="button" onClick={onRetrySubmission}>{t("agentChat.retry")}</button> : null}
-              </div> : null}
               {turn.answerIds.map((blockId) => <TranscriptBlockRow store={store} blockId={blockId} key={blockId} />)}
               {time?.artifacts.length ? <div className="workspaceArtifactInline" aria-label={t("agentRunRow.generatedFiles")}>
                 {time.artifacts.map((artifact) => <span className="workspaceArtifactInlineRow" key={artifact.artifactRef}>

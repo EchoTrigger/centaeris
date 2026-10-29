@@ -106,7 +106,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const auxiliaryRequestRef = useRef(null);
   const knownRunControlsRef = useRef(new Map());
   const terminalFactsRef = useRef(new Map());
-  const [actionFeedback, setActionFeedback] = useState("");
   const [operationReviewLink, setOperationReviewLink] = useState(null);
   const navigate = useNavigate();
   const searchParams = new URLSearchParams(location.search);
@@ -261,7 +260,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     currentRunIdentityRef.current = undefined;
     messageRequestRef.current = null;
     auxiliaryRequestRef.current = null;
-    setActionFeedback("");
   }, []);
   const knownRunControl = useMemo(() => {
     if (!activeAgentRunId || !sessionId || (submissionSnapshot.target?.sessionId === sessionId
@@ -284,8 +282,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   const controlPending = controlApplies && !["idle", "terminal", "rejected"].includes(controlSnapshot.phase);
   const cancellingAgentRunId = controlApplies && controlSnapshot.phase === "cancelling"
     ? controlSnapshot.target?.agentRunId || "pending" : "";
-  const controlStatus = actionFeedback || (controlApplies && controlSnapshot.feedback && controlSnapshot.feedback !== "terminal"
-    ? t(`appRoute.control.${controlSnapshot.feedback}`) : "");
   const recordRunTerminal = useCallback((target) => {
     const key = JSON.stringify([target.sessionId, target.agentRunId]);
     terminalFactsRef.current.set(key, target);
@@ -746,28 +742,26 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
   }
 
   async function cancelActiveAgentRun() {
-    setActionFeedback("");
     const targetSessionId = acceptedTarget?.sessionId || sessionId;
     if (activeAgentRunId && targetSessionId && currentControl !== submissionControl) {
       currentControl.setTarget({ sessionId: targetSessionId, agentRunId: activeAgentRunId });
     }
     if (!controlApplies && !messageRequestRef.current) {
-      setActionFeedback(t("appRoute.stopTargetUnknown"));
       setPresentationAttempt(value => value + 1);
       return;
     }
     try { await currentControl.stop(); }
-    catch { setActionFeedback(t("appRoute.stopConfirmationUnavailable")); }
+    catch { setPresentationAttempt(value => value + 1); }
   }
 
   async function sendMessage(event, replaceUnconfirmedInput = false) {
     event?.preventDefault();
     const submittedDraft = draft;
     const text = submittedDraft.trim();
-    if (!workspace) { setActionFeedback(t("appRoute.workspaceRequired")); return; }
-    if (!text) { setActionFeedback(t("appRoute.messageRequired")); document.getElementById?.("messageDraft")?.focus(); return; }
-    if (messageRequestRef.current || auxiliaryRequestRef.current) { setActionFeedback(t("appRoute.submissionInProgress")); return; }
-    if (loadingHistory) { setActionFeedback(t("appRoute.conversationSyncing")); setPresentationAttempt(value => value + 1); return; }
+    if (!workspace) return;
+    if (!text) { document.getElementById?.("messageDraft")?.focus(); return; }
+    if (messageRequestRef.current || auxiliaryRequestRef.current) return;
+    if (loadingHistory) { setPresentationAttempt(value => value + 1); return; }
     const requestScope = requestScopeRef.current;
     let ownedSubmission = null;
     const isCurrentRequest = () => {
@@ -780,7 +774,7 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
         && (!ownedSubmission || messageRequestRef.current === ownedSubmission);
     };
     if (hasActiveAgentRun && !operations.pending()) {
-      if (!sessionId || !activeAgentRunId) { setActionFeedback(t("appRoute.conversationSyncing")); return; }
+      if (!sessionId || !activeAgentRunId) return;
       if (pendingAttachmentIds.length || pendingUploadFiles.length) {
         setError(t("appRoute.supplementalInputDoesNotSupportAttachmentsYetRemoveThe"));
         return;
@@ -811,7 +805,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
           throw new Error("AgentRun supplement response is invalid");
         }
         setDraft(value => value === submittedDraft ? "" : value);
-        setActionFeedback(t("appRoute.supplementAccepted"));
       } catch (requestError) {
         if (isCurrentRequest()) setError(requestError?.message === "agent_run_supplement_unavailable" ? t("appRoute.unableToDeliverSupplementalInputRightNowPleaseTry") : t("appRoute.unableToSendSupplementalInput"));
       } finally {
@@ -820,16 +813,15 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       }
       return;
     }
-    if (!modelId) { setActionFeedback(t("appRoute.modelRequired")); return; }
+    if (!modelId) return;
     let attemptId;
     try { attemptId = submissionControl.begin(); }
-    catch { setActionFeedback(t("appRoute.control.pendingStop")); return; }
+    catch { return; }
     const requestToken = { attemptId, scopeKey: requestScopeKey, scope: requestScope };
     messageRequestRef.current = requestToken;
     ownedSubmission = requestToken;
     submissionOriginRef.current = requestToken;
     pendingBindingRef.current = { request: requestToken, sessionId: null, agentRunId: null };
-    setActionFeedback("");
     setSending(true);
     const targetSessionId = sessionId || "new";
     const attachmentRefs = [...pendingAttachmentIds].sort();
@@ -854,7 +846,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       accepted = true;
       // Navigation invalidates only this UI result, never the server's accepted work.
       if (!isCurrentRequest()) return;
-      setActionFeedback("");
       if (targetSessionId !== "new" && messageData.sessionId !== targetSessionId) throw new Error("AgentRun acceptance identity is invalid");
       acceptRunTarget(messageData);
       pendingBindingRef.current = { request: requestToken, sessionId: messageData.sessionId, agentRunId: messageData.agentRunId };
@@ -899,7 +890,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       if (errorValue?.message === "operation_dispatch_stopped") {
         setPendingUserMessage(value => value === pendingMessage ? null : value);
         setDraft(value => value || text);
-        setActionFeedback(t("appRoute.control.stoppedBeforeDispatch"));
         setWorkTime(null);
         return;
       }
@@ -925,7 +915,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
           if (isCurrentRequest()) showStreamError(errorValue);
         }
       } else if (submissionControl.getSnapshot().phase === "unknown") {
-        setActionFeedback(t("appRoute.submissionUnconfirmed"));
         setError(t("operations.inputUnconfirmed"));
       } else {
         showStreamError(errorValue);
@@ -937,16 +926,8 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
     }
   }
 
-  function retrySubmission() {
-    if (!pendingUserMessage || pendingUserMessage.status === "pending") return;
-    if (draft.trim()) { setActionFeedback(t("appRoute.reviewDraftBeforeRetry")); document.getElementById?.("messageDraft")?.focus(); return; }
-    setDraft(pendingUserMessage.text);
-    setActionFeedback(t("appRoute.reviewDraftBeforeRetry"));
-    document.getElementById?.("messageDraft")?.focus();
-  }
-
   async function checkPendingOperation(preserveChangedDraft = false) {
-    if (auxiliaryRequestRef.current) { setActionFeedback(t("appRoute.submissionInProgress")); return; }
+    if (auxiliaryRequestRef.current) return;
     const auxiliaryToken = {};
     auxiliaryRequestRef.current = auxiliaryToken;
     const operationId = operations.pending()?.operationId;
@@ -967,7 +948,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
       } else accepted = await operations.recover();
       if (accepted) {
         if (!isCurrent()) return;
-        setActionFeedback("");
         if (accepted.sessionId === activeSessionIdRef.current) {
           acceptRunTarget(accepted);
           if (pendingBindingRef.current) pendingBindingRef.current = { ...pendingBindingRef.current, sessionId: accepted.sessionId, agentRunId: accepted.agentRunId };
@@ -1364,7 +1344,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
             onShowCitation={showCitation}
             onShowArtifact={(artifact) => showArtifact(artifact, "conversation")}
             pendingUserMessage={visiblePendingMessage}
-            onRetrySubmission={retrySubmission}
             historyMemoryPressure={transcriptManagedBytes >= TRANSCRIPT_MEMORY_WARNING_BYTES}
             onReleaseLoadedHistory={releaseLoadedTranscriptHistory}
             running={hasActiveAgentRun || (sending && !["failed", "cancelled", "completed"].includes(pendingUserMessage?.status))}
@@ -1390,7 +1369,6 @@ export function AppPageContent({ agentId, workspaceDraft, location, modelsVersio
             sending={sending}
             loadingHistory={loadingHistory}
             hasActiveAgentRun={hasActiveAgentRun || controlPending}
-            controlStatus={controlStatus}
             controlBusy={controlApplies && ["preparing", "submitting", "recovering", "cancelling"].includes(controlSnapshot.phase)}
             uploadingAttachment={uploadingAttachment}
             onUploadAttachment={uploadAttachment}
