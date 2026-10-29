@@ -10,6 +10,7 @@ from django.contrib.auth import get_user_model
 from django.core.handlers.asgi import ASGIHandler
 from django.test import Client, SimpleTestCase, TestCase, override_settings
 from pydantic import ValidationError
+from jsonschema import Draft202012Validator
 
 from api.ninja_api import api
 from app_core import agent_run_stream
@@ -188,9 +189,56 @@ class NinjaContractTests(TestCase):
             {"type": "string", "format": "uri"},
         )
 
+    def test_agent_avatar_publishes_png_bytes_and_json_errors(self):
+        operation = api.get_openapi_schema()["paths"]["/api/agents/{agent_id}/avatar"]["get"]
+        responses = {str(code): definition for code, definition in operation["responses"].items()}
+        self.assertEqual(
+            responses["200"].get("content"),
+            {"image/png": {"schema": {"type": "string", "format": "binary"}}},
+        )
+        for status in ("400", "401", "404"):
+            with self.subTest(status=status):
+                self.assertIn("application/json", responses[status]["content"])
+
+    def test_workspace_provider_payloads_match_declared_scoped_contracts(self):
+        user = get_user_model().objects.create_user(username="resource-schema", is_superuser=True)
+        workspace = Workspace.objects.create(name="Resource schema", createdBy=user)
+        self.client.force_login(user)
+        schema = api.get_openapi_schema()
+
+        def validate_response(response, path, method):
+            self.assertIn(response.status_code, {200, 201})
+            operation = schema["paths"][path][method]
+            responses = {str(code): value for code, value in operation["responses"].items()}
+            self.assertIn(str(response.status_code), responses)
+            payload_schema = responses[str(response.status_code)]["content"]["application/json"]["schema"]
+            Draft202012Validator({**payload_schema, "components": schema["components"]}).validate(response.json())
+            return response.json()
+
+        local = self.client.post(f"/api/workspaces/{workspace.pk}/model-providers", json.dumps({
+            "displayName": "Local", "api": "openai-completions",
+            "apiBase": "https://api.example.invalid/v1", "secret": "synthetic-local-secret",
+        }), content_type="application/json")
+        local_data = validate_response(local, "/api/workspaces/{workspace_id}/model-providers", "post")
+        self.assertEqual((local_data["provider"]["scope"], local_data["provider"]["writable"]), ("workspace", True))
+        shared = self.client.post("/api/admin/model-providers", json.dumps({
+            "displayName": "Shared", "api": "openai-completions",
+            "apiBase": "https://api.example.invalid/v1", "secret": "synthetic-shared-secret",
+        }), content_type="application/json")
+        self.assertEqual(shared.status_code, 201, shared.content)
+        listed = self.client.get(f"/api/workspaces/{workspace.pk}/model-providers")
+        data = validate_response(listed, "/api/workspaces/{workspace_id}/model-providers", "get")
+        self.assertEqual(
+            {(provider["scope"], provider["writable"]) for provider in data["providers"]},
+            {("workspace", True), ("platform", False)},
+        )
+        self.assertNotContains(listed, "synthetic-local-secret")
+        self.assertNotContains(listed, "synthetic-shared-secret")
+
     def test_ordinary_public_json_operations_publish_success_schemas(self):
         schema = api.get_openapi_schema()
         raw_response_paths = {
+            "/api/agents/{agent_id}/avatar",
             "/api/sso/{provider_id}/callback",
             "/api/agents/{agent_id}/messages/{message_id}/files/{input_ref}/{action}",
             "/api/agents/{agent_id}/inputs/{input_id}/attachments/{input_ref}/{action}",

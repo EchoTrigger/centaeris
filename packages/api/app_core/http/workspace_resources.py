@@ -1,10 +1,12 @@
 """Tenant administration of local resources; platform resources stay read-only."""
 
 from types import SimpleNamespace
+from typing import Literal
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.http import JsonResponse, HttpResponse
 from ninja import Router, Status
+from ninja.responses import codes_4xx
 from app_core.models import Workspace, ModelProvider, ModelConfig, McpBearerCredential
 from app_core.workspace_resources import workspace_resource_admin, resource_scope
 from app_core.plugin_catalog import load_plugin_bearer_credential_refs
@@ -17,10 +19,71 @@ from app_core.credentials import (
 from .security import session_auth
 from . import model_management as mm
 from . import mcp_credentials as mc
-from .assistant_connectors import ConnectorApprovalRequest
+from .assistant_connectors import ConnectorApprovalRequest, ConnectorApprovalEnvelope
+from .response_schema import (
+    AdminModelResponse,
+    COMMON_ERROR_RESPONSES,
+    ModelProviderResponse,
+    ModelProviderTemplatesEnvelope,
+    ModelTestResponse,
+    RunIdsErrorResponse,
+    WorkspacePluginEnvelope,
+)
+from .schema import ErrorResponse, StrictSchema
 from .serialization import serialize_model_provider, serialize_admin_model
 
 router = Router(tags=["workspace resources"], by_alias=True)
+
+
+class ResourceScopeResponse(StrictSchema):
+    scope: Literal["workspace", "platform"]
+    writable: bool
+
+
+class ScopedModelProviderResponse(ModelProviderResponse, ResourceScopeResponse):
+    pass
+
+
+class ScopedModelProviderEnvelope(StrictSchema):
+    provider: ScopedModelProviderResponse
+
+
+class ScopedModelProvidersEnvelope(StrictSchema):
+    providers: list[ScopedModelProviderResponse]
+
+
+class ScopedAdminModelResponse(AdminModelResponse, ResourceScopeResponse):
+    pass
+
+
+class ScopedAdminModelEnvelope(StrictSchema):
+    model: ScopedAdminModelResponse
+
+
+class ScopedAdminModelsEnvelope(StrictSchema):
+    models: list[ScopedAdminModelResponse]
+
+
+class ScopedMcpBearerCredentialResponse(mc.McpBearerCredentialResponse, ResourceScopeResponse):
+    pass
+
+
+class ScopedMcpBearerCredentialEnvelope(StrictSchema):
+    credential: ScopedMcpBearerCredentialResponse
+
+
+class ScopedMcpBearerCredentialsEnvelope(StrictSchema):
+    credentials: list[ScopedMcpBearerCredentialResponse]
+
+
+class WorkspaceResourceMetadataResponse(StrictSchema):
+    id: str
+    name: str
+    status: Literal["active", "archived"]
+
+
+class WorkspaceResourceMetadataEnvelope(StrictSchema):
+    workspaces: list[WorkspaceResourceMetadataResponse]
 
 
 def _response(result):
@@ -51,7 +114,7 @@ def model_action(request, workspace_id, action, **kwargs):
 
 
 @router.get(
-    "/workspaces/{workspace_id}/model-providers", auth=session_auth, response=None
+    "/workspaces/{workspace_id}/model-providers", auth=session_auth, response={200: ScopedModelProvidersEnvelope} | COMMON_ERROR_RESPONSES
 )
 def providers(request, workspace_id: str):
     with transaction.atomic():
@@ -73,7 +136,7 @@ def providers(request, workspace_id: str):
         )
 
 
-@router.get("/workspaces/{workspace_id}/models", auth=session_auth, response=None)
+@router.get("/workspaces/{workspace_id}/models", auth=session_auth, response={200: ScopedAdminModelsEnvelope} | COMMON_ERROR_RESPONSES)
 def models(request, workspace_id: str):
     with transaction.atomic():
         try:
@@ -120,7 +183,7 @@ def credential_ref_exists(workspace, plugin_name, credential_ref):
 @router.get(
     "/workspaces/{workspace_id}/mcp-bearer-credentials",
     auth=session_auth,
-    response=None,
+    response={200: ScopedMcpBearerCredentialsEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def credentials(request, workspace_id: str):
     with transaction.atomic():
@@ -144,7 +207,7 @@ def credentials(request, workspace_id: str):
 @router.post(
     "/workspaces/{workspace_id}/mcp-bearer-credentials",
     auth=session_auth,
-    response=None,
+    response={201: ScopedMcpBearerCredentialEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def create_credential(
     request, workspace_id: str, payload: mc.McpBearerCredentialRequest
@@ -188,7 +251,7 @@ def create_credential(
 @router.post(
     "/workspaces/{workspace_id}/mcp-bearer-credentials/{credential_id}/rotate",
     auth=session_auth,
-    response=None,
+    response={200: ScopedMcpBearerCredentialEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def rotate_credential(
     request,
@@ -233,7 +296,7 @@ def rotate_credential(
 @router.delete(
     "/workspaces/{workspace_id}/mcp-bearer-credentials/{credential_id}",
     auth=session_auth,
-    response=None,
+    response={204: None} | COMMON_ERROR_RESPONSES,
 )
 def remove_credential(request, workspace_id: str, credential_id: str):
     try:
@@ -258,7 +321,7 @@ def remove_credential(request, workspace_id: str, credential_id: str):
 @router.get(
     "/workspaces/{workspace_id}/model-provider-templates",
     auth=session_auth,
-    response=None,
+    response={200: ModelProviderTemplatesEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def provider_templates(request, workspace_id: str):
     return model_action(request, workspace_id, mm.list_model_provider_templates)
@@ -267,7 +330,7 @@ def provider_templates(request, workspace_id: str):
 @router.post(
     "/workspaces/{workspace_id}/model-provider-templates/{template_id}/instantiate",
     auth=session_auth,
-    response=None,
+    response={201: ScopedModelProviderEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def instantiate_provider(
     request,
@@ -285,7 +348,7 @@ def instantiate_provider(
 
 
 @router.post(
-    "/workspaces/{workspace_id}/model-providers", auth=session_auth, response=None
+    "/workspaces/{workspace_id}/model-providers", auth=session_auth, response={201: ScopedModelProviderEnvelope} | COMMON_ERROR_RESPONSES
 )
 def create_provider(request, workspace_id: str, payload: mm.CreateModelProviderRequest):
     return model_action(
@@ -296,7 +359,7 @@ def create_provider(request, workspace_id: str, payload: mm.CreateModelProviderR
 @router.patch(
     "/workspaces/{workspace_id}/model-providers/{provider_id}",
     auth=session_auth,
-    response=None,
+    response={200: ScopedModelProviderEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def update_provider(
     request, workspace_id: str, provider_id: str, payload: mm.UpdateModelProviderRequest
@@ -313,7 +376,7 @@ def update_provider(
 @router.delete(
     "/workspaces/{workspace_id}/model-providers/{provider_id}",
     auth=session_auth,
-    response=None,
+    response={204: None} | COMMON_ERROR_RESPONSES | {codes_4xx: ErrorResponse | RunIdsErrorResponse},
 )
 def delete_provider(request, workspace_id: str, provider_id: str):
     return model_action(
@@ -324,7 +387,7 @@ def delete_provider(request, workspace_id: str, provider_id: str):
 @router.post(
     "/workspaces/{workspace_id}/model-providers/{provider_id}/credential/rotate",
     auth=session_auth,
-    response=None,
+    response={200: ScopedModelProviderEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def rotate_provider(
     request,
@@ -341,13 +404,13 @@ def rotate_provider(
     )
 
 
-@router.post("/workspaces/{workspace_id}/models", auth=session_auth, response=None)
+@router.post("/workspaces/{workspace_id}/models", auth=session_auth, response={201: ScopedAdminModelEnvelope} | COMMON_ERROR_RESPONSES)
 def create_model(request, workspace_id: str, payload: mm.CreateModelRequest):
     return model_action(request, workspace_id, mm.create_model, payload=payload)
 
 
 @router.patch(
-    "/workspaces/{workspace_id}/models/{model_id}", auth=session_auth, response=None
+    "/workspaces/{workspace_id}/models/{model_id}", auth=session_auth, response={200: ScopedAdminModelEnvelope} | COMMON_ERROR_RESPONSES
 )
 def update_model(
     request, workspace_id: str, model_id: str, payload: mm.UpdateModelRequest
@@ -358,7 +421,7 @@ def update_model(
 
 
 @router.delete(
-    "/workspaces/{workspace_id}/models/{model_id}", auth=session_auth, response=None
+    "/workspaces/{workspace_id}/models/{model_id}", auth=session_auth, response={204: None} | COMMON_ERROR_RESPONSES
 )
 def delete_model(request, workspace_id: str, model_id: str):
     return model_action(request, workspace_id, mm.delete_model, model_id=model_id)
@@ -367,7 +430,7 @@ def delete_model(request, workspace_id: str, model_id: str):
 @router.post(
     "/workspaces/{workspace_id}/models/{model_id}/test",
     auth=session_auth,
-    response=None,
+    response={200: ModelTestResponse} | COMMON_ERROR_RESPONSES,
 )
 def test_model(
     request, workspace_id: str, model_id: str, payload: mm.EmptyRequest | None = None
@@ -378,7 +441,7 @@ def test_model(
 
 
 @router.post(
-    "/workspaces/{workspace_id}/plugins/upload", auth=session_auth, response=None
+    "/workspaces/{workspace_id}/plugins/upload", auth=session_auth, response={200: WorkspacePluginEnvelope} | COMMON_ERROR_RESPONSES
 )
 def upload_plugin(request, workspace_id: str):
     from app_core.workspace_plugins import install_workspace_plugin
@@ -421,7 +484,7 @@ def upload_plugin(request, workspace_id: str):
 @router.delete(
     "/workspaces/{workspace_id}/plugins/{plugin_name}/installation",
     auth=session_auth,
-    response=None,
+    response={204: None} | COMMON_ERROR_RESPONSES,
 )
 def uninstall_plugin(request, workspace_id: str, plugin_name: str):
     from app_core.workspace_plugins import remove_workspace_plugin
@@ -439,7 +502,7 @@ def uninstall_plugin(request, workspace_id: str, plugin_name: str):
 @router.post(
     "/workspaces/{workspace_id}/mcp-bearer-credentials/{credential_id}/assistant-approvals",
     auth=session_auth,
-    response=None,
+    response={201: ConnectorApprovalEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def approve_local_assistant_credential(
     request, workspace_id: str, credential_id: str, payload: ConnectorApprovalRequest
@@ -510,7 +573,7 @@ def approve_local_assistant_credential(
 @router.delete(
     "/workspaces/{workspace_id}/mcp-assistant-credential-approvals/{approval_id}",
     auth=session_auth,
-    response=None,
+    response={204: None} | COMMON_ERROR_RESPONSES,
 )
 def revoke_local_assistant_credential(request, workspace_id: str, approval_id: str):
     from django.utils import timezone
@@ -540,7 +603,7 @@ def revoke_local_assistant_credential(request, workspace_id: str, approval_id: s
         return JsonResponse({"error": "workspace_not_found"}, status=404)
 
 
-@router.get("/admin/workspace-resources", auth=session_auth, response=None)
+@router.get("/admin/workspace-resources", auth=session_auth, response={200: WorkspaceResourceMetadataEnvelope} | COMMON_ERROR_RESPONSES)
 def operator_workspace_resources(request):
     # This is an explicit operator metadata endpoint, not workspace membership.
     if not request.user.is_superuser:

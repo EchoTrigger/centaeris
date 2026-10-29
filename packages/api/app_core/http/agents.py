@@ -294,7 +294,11 @@ def get_agent(request, agent_id: str):
     return {"agent": serialize_agent(agent)}
 
 
-@router.get("/agents/{agent_id}/avatar", auth=session_auth, response={200: None} | COMMON_ERROR_RESPONSES)
+@router.get("/agents/{agent_id}/avatar", auth=session_auth, response={200: None} | COMMON_ERROR_RESPONSES,
+    openapi_extra={"responses": {200: {
+        "description": "Private normalized Agent avatar",
+        "content": {"image/png": {"schema": {"type": "string", "format": "binary"}}},
+    }}})
 def get_agent_avatar(request, agent_id: str):
     if not valid_query_fields(request.GET, {"v"}, required={"v"}):
         return Status(400, {"error": "agent_avatar_request_invalid"})
