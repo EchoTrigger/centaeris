@@ -2,6 +2,7 @@ import json
 import hashlib
 import re
 import os
+import random
 import http.client
 import signal
 import socket
@@ -1414,9 +1415,11 @@ def run_job_loop(slot_index, stopped):
 
 
 def _run_job_loop(slot_index, stopped):
+    claim_contention_streak = 0
     while not stopped.is_set():
         try:
             worked = execute_next_job(slot_index)
+            claim_contention_streak = 0
             if not worked:
                 wait_for_jobs()
         except Exception as error:
@@ -1425,7 +1428,19 @@ def _run_job_loop(slot_index, stopped):
                 file=sys.stderr,
                 flush=True,
             )
-            delay = 5 if str(error) in {"runtime_busy", "execution_claim_busy"} else JOB_WAIT_FAILURE_BACKOFF_SECONDS
+            if (isinstance(error, DependencyUnavailable)
+                    and type(getattr(error, "http_status", None)) is int
+                    and error.http_status == 503
+                    and getattr(error, "http_error_code", None) == "execution_claim_busy"
+                    and getattr(error, "route", None) == "/internal/jobs/claim"):
+                # A rejected pre-claim owns no Job. Retry the short transaction
+                # contention without spending its queued Job's failure budget.
+                ceiling = min(.05 * (2 ** claim_contention_streak), .8)
+                claim_contention_streak = min(claim_contention_streak + 1, 4)
+                delay = random.uniform(ceiling / 2, ceiling)
+            else:
+                claim_contention_streak = 0
+                delay = 5 if str(error) in {"runtime_busy", "execution_claim_busy"} else JOB_WAIT_FAILURE_BACKOFF_SECONDS
             with observations.measure("backoff", requestedMs=delay * 1000,
                     route=getattr(error, "route", None),
                     errorCode=str(error) if str(error) in {"runtime_busy", "execution_claim_busy"} else "other"):
