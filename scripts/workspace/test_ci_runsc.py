@@ -104,7 +104,10 @@ else:
     event["action"] = args[0]
     record()
     if args[0] == "info":
-        print("fixture-daemon" if "{{.ID}}" in args else '{"runsc": {}}')
+        if "{{.Driver}}" in args:
+            print("overlay2")
+        else:
+            print("fixture-daemon" if "{{.ID}}" in args else '{"runsc": {}}')
     elif args[0] == "create":
         name = "owned-helper-container" if args[-1] == "built-workspace-general" else "owned-supervisor-container"
         pathlib.Path(args[args.index("--cidfile") + 1]).write_text(name)
