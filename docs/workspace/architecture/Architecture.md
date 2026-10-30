@@ -891,6 +891,14 @@ snapshots, and removed paths are absent from the next manifest. Restoration
 requires one manifest and its content objects rather than a chain of deltas.
 Empty workspaces retain the explicit `frameV1` no-object representation.
 
+Small content objects may share a Session-scoped immutable physical pack. A pack
+contains 2–32 files of at most 16 KiB each and at most 512 KiB in total; a lone
+small file or a larger file remains a loose object. File identities in manifests
+stay the SHA256 of their individual bytes. The file index records its pack and
+byte offset, and the API exposes the same bounded file stream to Runtime. This
+reduces physical publication/fsync count without changing the public manifest,
+file hashes, upload batches, or helper frame protocol.
+
 `snapshotSha256` and `snapshotSizeBytes` identify the exact stored manifest bytes;
 `expandedSizeBytes` sums file bodies across paths, including repeated content.
 The referenced unique-object bytes and PostgreSQL indexes are reported separately
@@ -921,12 +929,24 @@ individually fenced. A recent manifest also retains its referenced content for
 the grace period. Expired reservations and collected manifest edges are retired
 as scheduling metadata once their responsibility ends.
 
+For candidate packs, GC expands only their bounded member index, finds members
+referenced by the actual retained roots, and maps those members back to physical
+storage. Current lease reservations and grace-period logical registrations also
+protect their packs. A live logical file registry row or a historical snapshot
+edge does not independently root a pack. Any reachable member retains the whole
+pack; it is reclaimed only when no member remains reachable, through the same
+owner/witness and exact publication-token fences. The collector does not compact
+partly live packs or delete their virtual file names one by one. Measurements
+therefore count physical pack bytes, including any retained dead members, rather
+than treating logical deduplication alone as reclaimed disk space.
+
 `gc_deleted_resources` also collects local workspace bytes of Sessions with
 `status=deleted` and a non-null `purgedAt`. Both the purge time and the file mtime
 must precede its cutoff, which defaults to 30 days. It enumerates outside the
 transaction, then rechecks the locked owner before unlinking each exact key.
-Only canonical Session snapshot generations, checkpoint keys of AgentRuns owned
-by that Session, and this uploader's temporary-name format are eligible. It
+Only canonical Session snapshot generations, indexed loose file objects and
+file packs, checkpoint keys of AgentRuns owned by that Session, and this
+uploader's temporary-name format are eligible. It
 rejects symlinks/reparse points and reports unknown Run directories as blocked.
 Unrelated names and directory entries remain. Retained active Sessions and
 restorable trash use a separate reachability pass with the same cutoff grace.

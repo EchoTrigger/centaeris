@@ -75,7 +75,9 @@ def rss_high_water():
 
 
 def disk_usage(root):
-    sizes = {"snapshotBytes": 0, "fileObjectBytes": 0, "otherBytes": 0, "fileCount": 0}
+    sizes = {"snapshotBytes": 0, "fileObjectBytes": 0, "packBytes": 0,
+             "otherBytes": 0, "fileCount": 0, "packCount": 0, "looseFileCount": 0}
+    byte_keys = {".snapshot": "snapshotBytes", ".file": "fileObjectBytes", ".pack": "packBytes"}
     allocated = 0
     have_allocated = True
     for path in root.rglob("*"):
@@ -83,13 +85,17 @@ def disk_usage(root):
             continue
         value = path.stat()
         sizes["fileCount"] += 1
-        key = "snapshotBytes" if path.suffix == ".snapshot" else "fileObjectBytes" if path.suffix == ".file" else "otherBytes"
+        key = byte_keys.get(path.suffix, "otherBytes")
         sizes[key] += value.st_size
+        if path.suffix == ".pack":
+            sizes["packCount"] += 1
+        elif path.suffix == ".file":
+            sizes["looseFileCount"] += 1
         if hasattr(value, "st_blocks"):
             allocated += value.st_blocks * 512
         else:
             have_allocated = False
-    sizes["logicalBytes"] = sizes["snapshotBytes"] + sizes["fileObjectBytes"] + sizes["otherBytes"]
+    sizes["logicalBytes"] = sum(sizes[key] for key in (*byte_keys.values(), "otherBytes"))
     sizes["allocatedBytes"] = allocated if have_allocated else None
     return sizes
 

@@ -31,6 +31,17 @@ user; existing directories retain the image's contents and permissions.
 configured execution proxy. GPU and multi-container task topologies remain
 outside this adapter's supported task inputs.
 
+## Workspace content storage
+
+File-level incremental snapshots retain a complete manifest while reusing
+unchanged content. Small files can share immutable packs (2–32 members, each at
+most 16 KiB, at most 512 KiB per pack); larger or ungrouped files stay loose.
+This physical layout preserves the same file hashes and restored bytes. It does
+not change the expanded-workspace admission budget or add a writable-layer quota.
+Storage measurements include the actual loose/pack bytes and PostgreSQL indexes.
+A partially reachable pack retains all its bytes until its final protected member
+is no longer rooted; GC does not repack it during collection.
+
 ## Setup, Agent execution and verification
 
 1. Create a Session and bind its environment profile through the independently

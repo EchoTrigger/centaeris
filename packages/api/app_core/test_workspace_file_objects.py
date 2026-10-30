@@ -2,14 +2,17 @@
 import hashlib
 import io
 import json
+import os
+import tempfile
 from pathlib import Path
+from threading import Barrier, Lock
 from unittest.mock import patch
 
 from django.db import connection, transaction
 from django.test import SimpleTestCase, TransactionTestCase
 
 from .http import internal
-from .models import Agent, Session, WorkspaceFileObject, WorkspaceSnapshotObject
+from .models import Agent, Session, WorkspaceFilePack, WorkspaceFileObject, WorkspaceSnapshotObject
 from .test_execution_publication_fencing import ExecutionPublicationFixture
 from .testing import create_session
 from .workspace_file_objects import (WorkspaceFileError, file_key, live_reservation_keys, open_file,
@@ -38,6 +41,36 @@ class OnEnd(io.BytesIO):
             callback, self.on_end = self.on_end, None
             callback()
         return result
+
+
+class RecordingWriter:
+    def __init__(self, handle):
+        self.handle = handle
+        self.fd = handle.fileno()
+        self.flushed = False
+
+    @property
+    def closed(self):
+        return self.handle.closed
+
+    def write(self, chunk):
+        return self.handle.write(chunk)
+
+    def flush(self):
+        self.handle.flush()
+        self.flushed = True
+
+    def fileno(self):
+        return self.handle.fileno()
+
+    def close(self):
+        self.handle.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_error):
+        self.close()
 
 
 class WorkspaceFileObjectTests(ExecutionPublicationFixture, TransactionTestCase):
@@ -171,6 +204,153 @@ class WorkspaceFileObjectTests(ExecutionPublicationFixture, TransactionTestCase)
         with open_file(self.session, descriptor(b"")["sha256"]) as stored:
             self.assertEqual(stored.read(), b"")
 
+    def test_batch_flushes_all_private_files_before_sync_and_final_authority(self):
+        contents = [b"a" * 17000, b"b" * 17000, b"c" * 17000]
+        files = [descriptor(content) for content in contents]
+        self.reserve(files)
+        writers, synced = [], []
+        real_fdopen, real_fsync = os.fdopen, os.fsync
+        def open_writer(fd, mode):
+            writer = RecordingWriter(real_fdopen(fd, mode))
+            writers.append(writer)
+            return writer
+        def sync_file(fd):
+            if any(writer.fd == fd and not writer.closed for writer in writers):
+                self.assertEqual(len(writers), len(contents))
+                self.assertTrue(all(writer.flushed for writer in writers))
+                synced.append(fd)
+            return real_fsync(fd)
+        authority_calls = 0
+        def authorize(body):
+            nonlocal authority_calls
+            authority_calls += 1
+            if authority_calls == 2:
+                self.assertEqual(len(synced), len(contents))
+                self.assertTrue(all(writer.closed for writer in writers))
+            return self.authorized(body)
+        with patch("app_core.workspace_file_objects.os.fdopen", side_effect=open_writer), \
+                patch("app_core.workspace_file_objects.os.fsync", side_effect=sync_file):
+            self.assertEqual(upload_files(io.BytesIO(b"".join(contents)), self.identity(), files, authorize), files)
+        self.assertEqual(authority_calls, 2)
+        self.assertEqual(len(synced), len(contents))
+        self.assertTrue(all(writer.closed for writer in writers))
+
+    def test_batch_file_syncs_overlap_before_final_authority(self):
+        contents = [b"a" * 17000, b"b" * 17000, b"c" * 17000]
+        files = [descriptor(content) for content in contents]
+        self.reserve(files)
+        writers, synced = [], []
+        real_fdopen, real_fsync = os.fdopen, os.fsync
+        rendezvous = Barrier(2, timeout=3)
+        lock = Lock()
+        active = peak = 0
+        def open_writer(fd, mode):
+            writer = RecordingWriter(real_fdopen(fd, mode))
+            writers.append(writer)
+            return writer
+        def sync_file(fd):
+            nonlocal active, peak
+            if not any(writer.fd == fd and not writer.closed for writer in writers):
+                return real_fsync(fd)
+            with lock:
+                synced.append(fd)
+                ordinal = len(synced)
+                active += 1
+                peak = max(peak, active)
+            try:
+                if ordinal <= 2:
+                    rendezvous.wait()
+                return real_fsync(fd)
+            finally:
+                with lock:
+                    active -= 1
+        authority_calls = 0
+        def authorize(body):
+            nonlocal authority_calls
+            authority_calls += 1
+            if authority_calls == 2:
+                self.assertEqual(len(synced), len(contents))
+                self.assertEqual(active, 0)
+                self.assertTrue(all(writer.closed for writer in writers))
+            return self.authorized(body)
+        with patch("app_core.workspace_file_objects.os.fdopen", side_effect=open_writer), \
+                patch("app_core.workspace_file_objects.os.fsync", side_effect=sync_file):
+            upload_files(io.BytesIO(b"".join(contents)), self.identity(), files, authorize)
+        self.assertGreaterEqual(peak, 2)
+        self.assertEqual(authority_calls, 2)
+        self.assertEqual(len(synced), len(contents))
+
+    def test_batch_sync_failure_closes_all_private_files_without_publication(self):
+        contents = [b"a" * 17000, b"b" * 17000, b"c" * 17000]
+        files = [descriptor(content) for content in contents]
+        self.reserve(files)
+        writers, synced = [], []
+        sync_lock = Lock()
+        real_fdopen, real_fsync = os.fdopen, os.fsync
+        def open_writer(fd, mode):
+            writer = RecordingWriter(real_fdopen(fd, mode))
+            writers.append(writer)
+            return writer
+        def fail_second_sync(fd):
+            if any(writer.fd == fd and not writer.closed for writer in writers):
+                with sync_lock:
+                    synced.append(fd)
+                    fail = len(synced) == 2
+                if fail:
+                    raise OSError("injected file sync failure")
+            return real_fsync(fd)
+        authority_calls = 0
+        def authorize(body):
+            nonlocal authority_calls
+            authority_calls += 1
+            return self.authorized(body)
+        with patch("app_core.workspace_file_objects.os.fdopen", side_effect=open_writer), \
+                patch("app_core.workspace_file_objects.os.fsync", side_effect=fail_second_sync):
+            with self.assertRaisesMessage(OSError, "injected file sync failure"):
+                upload_files(io.BytesIO(b"".join(contents)), self.identity(), files, authorize)
+        self.assertEqual(authority_calls, 1)
+        self.assertEqual(len(synced), len(contents))
+        self.assertEqual(len(writers), len(contents))
+        self.assertTrue(all(writer.flushed and writer.closed for writer in writers))
+        self.assertTrue(all(file.verifiedPublicationToken == "" for file in WorkspaceFileObject.objects.all()))
+        self.assertEqual(list(self.storage_root.rglob("*.file")), [])
+        self.assertEqual(list(self.storage_root.rglob("*.pack")), [])
+        self.assertEqual(list(self.storage_root.rglob(".centaeris-immutable-*.tmp")), [])
+
+    def test_batch_write_failure_closes_opened_and_unopened_private_descriptors(self):
+        contents = [b"a" * 17000, b"b" * 17000, b"c" * 17000]
+        files = [descriptor(content) for content in contents]
+        self.reserve(files)
+        writers, descriptors = [], []
+        real_fdopen, real_mkstemp = os.fdopen, tempfile.mkstemp
+        class FailedWriter(RecordingWriter):
+            def write(self, chunk):
+                if len(writers) == 2:
+                    self.handle.write(chunk[:1])
+                    raise OSError("injected private write failure")
+                return super().write(chunk)
+        def open_writer(fd, mode):
+            writer = FailedWriter(real_fdopen(fd, mode))
+            writers.append(writer)
+            return writer
+        def temporary(*args, **kwargs):
+            fd, path = real_mkstemp(*args, **kwargs)
+            descriptors.append(fd)
+            return fd, path
+        with patch("app_core.workspace_file_objects.os.fdopen", side_effect=open_writer), \
+                patch("app_core.workspace_file_objects.tempfile.mkstemp", side_effect=temporary):
+            with self.assertRaisesMessage(OSError, "injected private write failure"):
+                upload_files(io.BytesIO(b"".join(contents)), self.identity(), files, self.authorized)
+        self.assertEqual(len(descriptors), len(contents))
+        self.assertTrue(all(writer.closed for writer in writers))
+        for fd in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+        self.assertTrue(all(file.verifiedPublicationToken == "" for file in WorkspaceFileObject.objects.all()))
+        self.assertEqual(list(self.storage_root.rglob("*.file")), [])
+        self.assertEqual(list(self.storage_root.rglob("*.pack")), [])
+        self.assertEqual(list(self.storage_root.rglob(".centaeris-immutable-*.tmp")), [])
+
     def test_batch_tampering_never_publishes_any_file(self):
         contents = [b"first", b"second"]
         files = [descriptor(content) for content in contents]
@@ -179,6 +359,7 @@ class WorkspaceFileObjectTests(ExecutionPublicationFixture, TransactionTestCase)
             upload_files(io.BytesIO(contents[0] + b"broken"), self.identity(), files, self.authorized)
         self.assertTrue(all(file.verifiedPublicationToken == "" for file in WorkspaceFileObject.objects.all()))
         self.assertEqual(list(self.storage_root.rglob("*.file")), [])
+        self.assertEqual(list(self.storage_root.rglob("*.pack")), [])
         self.assertEqual(list(self.storage_root.rglob(".centaeris-immutable-*.tmp")), [])
 
     def test_batch_lease_loss_after_stream_prevents_every_publish(self):
@@ -190,6 +371,7 @@ class WorkspaceFileObjectTests(ExecutionPublicationFixture, TransactionTestCase)
             upload_files(source, self.identity(), files, self.authorized)
         self.assertTrue(all(file.verifiedPublicationToken == "" for file in WorkspaceFileObject.objects.all()))
         self.assertEqual(list(self.storage_root.rglob("*.file")), [])
+        self.assertEqual(list(self.storage_root.rglob("*.pack")), [])
 
     def test_one_replaced_incarnation_fences_the_entire_batch_before_rename(self):
         contents = [b"first", b"second"]
@@ -203,6 +385,87 @@ class WorkspaceFileObjectTests(ExecutionPublicationFixture, TransactionTestCase)
             upload_files(source, self.identity(), files, self.authorized)
         self.assertTrue(all(file.verifiedPublicationToken == "" for file in WorkspaceFileObject.objects.all()))
         self.assertEqual(list(self.storage_root.rglob("*.file")), [])
+        self.assertEqual(list(self.storage_root.rglob("*.pack")), [])
+
+    def test_small_files_share_one_durable_pack_and_read_exact_ranges(self):
+        contents = [b"first", b"", b"last"]
+        files = [descriptor(content) for content in contents]
+        self.reserve(files)
+        with patch("app_core.workspace_file_objects.os.fsync", wraps=os.fsync) as sync:
+            upload_files(io.BytesIO(b"".join(contents)), self.identity(), files, self.authorized)
+        self.assertEqual(sync.call_count, 1)
+        pack = WorkspaceFilePack.objects.get()
+        self.assertEqual(pack.sizeBytes, sum(map(len, contents)))
+        self.assertEqual(len(list(self.storage_root.rglob("*.pack"))), 1)
+        self.assertEqual(list(self.storage_root.rglob("*.file")), [])
+        for content, offset in zip(contents, [0, 5, 5]):
+            file = WorkspaceFileObject.objects.get(sha256=descriptor(content)["sha256"])
+            self.assertEqual((file.pack_id, file.packOffset), (pack.pk, offset))
+            with open_file(self.session, file.sha256) as stored:
+                self.assertEqual(stored.read(2) + stored.read(), content)
+                self.assertEqual(stored.read(), b"")
+        self.assertEqual(self.reserve(files), [])
+        self.snapshot(manifest([(str(index), content, False) for index, content in enumerate(contents)]), 1)
+
+    def test_single_small_and_large_file_remain_loose(self):
+        for content in [b"small", b"large" * 4000]:
+            self.reserve([descriptor(content)])
+            self.upload(content)
+        self.assertEqual(WorkspaceFilePack.objects.count(), 0)
+        self.assertEqual(len(list(self.storage_root.rglob("*.file"))), 2)
+
+    def test_pack_member_and_size_bounds_split_upload(self):
+        contents = [bytes([index]) * 16384 for index in range(33)]
+        files = [descriptor(content) for content in contents]
+        self.reserve(files)
+        upload_files(io.BytesIO(b"".join(contents)), self.identity(), files, self.authorized)
+        pack = WorkspaceFilePack.objects.get()
+        self.assertEqual(pack.sizeBytes, 512 * 1024)
+        self.assertEqual(pack.files.count(), 32)
+        self.assertEqual(WorkspaceFileObject.objects.filter(pack__isnull=True).count(), 1)
+        with open_file(self.session, files[-1]["sha256"]) as stored:
+            self.assertEqual(stored.read(), contents[-1])
+
+    def test_collected_pack_is_missing_and_can_be_reuploaded(self):
+        contents = [b"first", b"second"]
+        files = [descriptor(content) for content in contents]
+        self.reserve(files)
+        upload_files(io.BytesIO(b"".join(contents)), self.identity(), files, self.authorized)
+        old_pack = WorkspaceFilePack.objects.select_related("object").get()
+        with transaction.atomic():
+            Agent.objects.select_for_update().get(pk=self.session.agent_id)
+            session = Session.objects.select_for_update().get(pk=self.session.pk)
+            collect_key(session, old_pack.object.storageKey, kind="filePack")
+        (self.storage_root / old_pack.object.storageKey).unlink()
+        with self.assertRaisesMessage(WorkspaceFileError, "workspace_file_unavailable"):
+            open_file(self.session, files[0]["sha256"])
+        self.assertEqual(self.reserve(files), files)
+        upload_files(io.BytesIO(b"".join(contents)), self.identity(), files, self.authorized)
+        for file, content in zip(files, contents):
+            current = WorkspaceFileObject.objects.get(sha256=file["sha256"])
+            self.assertNotEqual(current.pack_id, old_pack.pk)
+            with open_file(self.session, file["sha256"]) as stored:
+                self.assertEqual(stored.read(), content)
+
+    def test_pack_sync_failure_does_not_publish_and_closes_writer(self):
+        contents = [b"first", b"second"]
+        files = [descriptor(content) for content in contents]
+        self.reserve(files)
+        writers = []
+        real_fdopen = os.fdopen
+        def open_writer(fd, mode):
+            writer = RecordingWriter(real_fdopen(fd, mode))
+            writers.append(writer)
+            return writer
+        with patch("app_core.workspace_file_objects.os.fdopen", side_effect=open_writer), \
+                patch("app_core.workspace_file_objects.os.fsync", side_effect=OSError("pack sync failed")):
+            with self.assertRaisesMessage(OSError, "pack sync failed"):
+                upload_files(io.BytesIO(b"".join(contents)), self.identity(), files, self.authorized)
+        self.assertEqual(len(writers), 1)
+        self.assertTrue(writers[0].closed)
+        self.assertEqual(list(self.storage_root.rglob("*.pack")), [])
+        self.assertEqual(list(self.storage_root.rglob(".centaeris-immutable-*.tmp")), [])
+        self.assertTrue(all(file.verifiedPublicationToken == "" for file in WorkspaceFileObject.objects.all()))
 
     def test_conflicting_size_for_one_content_identity_is_rejected(self):
         content = descriptor(b"identity")

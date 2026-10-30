@@ -3092,7 +3092,7 @@ class WorkspaceSnapshotObject(models.Model):
 
     class Meta:
         constraints = [
-            models.CheckConstraint(condition=models.Q(kind__in=["snapshot", "temporary", "file"]), name="workspace_object_kind"),
+            models.CheckConstraint(condition=models.Q(kind__in=["snapshot", "temporary", "file", "filePack"]), name="workspace_object_kind"),
             models.CheckConstraint(condition=(models.Q(state="live", collectedAt__isnull=True)
                 | models.Q(state="collected", collectedAt__isnull=False)), name="workspace_object_state"),
         ]
@@ -3120,12 +3120,23 @@ class WorkspaceSnapshotUpload(models.Model):
         indexes = [models.Index(fields=["jobId", "authorizationDigest"], name="workspace_upload_job")]
 
 
+class WorkspaceFilePack(models.Model):
+    """One immutable physical file containing bounded, verified content ranges."""
+    object = models.OneToOneField(WorkspaceSnapshotObject, primary_key=True,
+        on_delete=models.CASCADE, related_name="filePack")
+    sizeBytes = models.PositiveBigIntegerField()
+    verifiedPublicationToken = models.CharField(max_length=32, blank=True, default="")
+
+
 class WorkspaceFileObject(models.Model):
     """Verified content bytes in a Session-owned publication incarnation."""
     object = models.OneToOneField(WorkspaceSnapshotObject, primary_key=True,
         on_delete=models.CASCADE, related_name="fileContent")
     sha256 = models.CharField(max_length=71)
     sizeBytes = models.PositiveBigIntegerField()
+    pack = models.ForeignKey(WorkspaceFilePack, null=True, blank=True,
+        on_delete=models.PROTECT, related_name="files")
+    packOffset = models.PositiveBigIntegerField(default=0)
     verifiedPublicationToken = models.CharField(max_length=32, blank=True, default="")
 
 

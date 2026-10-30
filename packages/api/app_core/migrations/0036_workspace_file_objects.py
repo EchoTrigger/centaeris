@@ -15,12 +15,21 @@ class Migration(migrations.Migration):
             name="session_workspace_encoding_valid")),
         migrations.RemoveConstraint(model_name="workspacesnapshotobject", name="workspace_object_kind"),
         migrations.AddConstraint(model_name="workspacesnapshotobject", constraint=models.CheckConstraint(
-            condition=models.Q(kind__in=["snapshot", "temporary", "file"]), name="workspace_object_kind")),
+            condition=models.Q(kind__in=["snapshot", "temporary", "file", "filePack"]), name="workspace_object_kind")),
+        migrations.CreateModel(name="WorkspaceFilePack", fields=[
+            ("object", models.OneToOneField(primary_key=True, serialize=False,
+                on_delete=django.db.models.deletion.CASCADE, related_name="filePack", to="app_core.workspacesnapshotobject")),
+            ("sizeBytes", models.PositiveBigIntegerField()),
+            ("verifiedPublicationToken", models.CharField(max_length=32, blank=True, default="")),
+        ]),
         migrations.CreateModel(name="WorkspaceFileObject", fields=[
             ("object", models.OneToOneField(primary_key=True, serialize=False,
                 on_delete=django.db.models.deletion.CASCADE, related_name="fileContent", to="app_core.workspacesnapshotobject")),
             ("sha256", models.CharField(max_length=71)),
             ("sizeBytes", models.PositiveBigIntegerField()),
+            ("pack", models.ForeignKey(null=True, blank=True, on_delete=django.db.models.deletion.PROTECT,
+                related_name="files", to="app_core.workspacefilepack")),
+            ("packOffset", models.PositiveBigIntegerField(default=0)),
             ("verifiedPublicationToken", models.CharField(max_length=32, blank=True, default="")),
         ]),
         migrations.CreateModel(name="WorkspaceFileReservation", fields=[

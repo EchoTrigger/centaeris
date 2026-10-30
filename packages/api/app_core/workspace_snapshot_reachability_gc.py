@@ -73,12 +73,20 @@ BATCH_SIZE = 32
 
 
 def _batch_roots(session, manifest, keys, cutoff):
-    from .workspace_file_objects import referenced_file_keys, live_reservation_keys
+    from .workspace_file_objects import (
+        referenced_file_keys, live_reservation_keys, logical_file_keys, physical_file_keys,
+    )
     roots = _api_roots(session, manifest, None)
     # Grace-period manifests retain their content as well as their own bytes.
     roots.update(_recent_registry_keys(session, cutoff))
     roots.update(live_reservation_keys(session))
-    roots.update(referenced_file_keys(roots, keys))
+    # A physical candidate pack has at most 32 logical members. Expand only this
+    # bounded batch before querying references from actual retained manifests.
+    logical_candidates = set(keys) | logical_file_keys(keys)
+    roots.update(referenced_file_keys(roots, logical_candidates))
+    # Only rooted logical members keep a pack. Live historical registration or
+    # an unrooted manifest edge alone does not make its content reachable.
+    roots.update(physical_file_keys(roots, candidate_keys=keys))
     registered = set(WorkspaceSnapshotObject.objects.filter(session=session, storageKey__in=keys,
         registered=True).values_list("storageKey", flat=True))
     for key in set(keys) - registered:
