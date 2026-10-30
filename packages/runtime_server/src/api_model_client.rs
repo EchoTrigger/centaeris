@@ -77,6 +77,7 @@ pub struct ApiModelClient {
     thinking_mode: Option<String>,
     model_max_output_tokens: u32,
     client: reqwest::Client,
+    stream_idle_timeout: std::time::Duration,
     timings: crate::observations::RunTimings,
 }
 
@@ -107,6 +108,9 @@ impl ApiModelClient {
             thinking_mode: config.thinking_mode,
             model_max_output_tokens: config.model_max_output_tokens,
             client: reqwest::Client::new(),
+            stream_idle_timeout: std::time::Duration::from_millis(
+                centaeris_core::model::DEFAULT_MODEL_SSE_IDLE_TIMEOUT_MS,
+            ),
             timings,
         }
     }
@@ -164,11 +168,7 @@ impl ApiModelClient {
         let model_run_request = self.model_run_request(request)?;
         let mut observation = self.timings.model_http(&request.turn_id, attempt, false);
         let result = self
-            .call_api_response(
-                model_run_request,
-                request.session_config.timeout_ms,
-                &mut observation,
-            )
+            .call_api_response(model_run_request, &mut observation)
             .await;
         match &result {
             Ok(response) => observation.complete(
@@ -186,7 +186,6 @@ impl ApiModelClient {
     async fn call_api_response(
         &self,
         model_run_request: ModelRunRequest<'_>,
-        timeout_ms: u64,
         observation: &mut crate::observations::ModelHttp,
     ) -> Result<ModelClientResponse, ModelClientError> {
         let url = format!(
@@ -196,33 +195,16 @@ impl ApiModelClient {
         let response = self
             .client
             .post(url)
-            .timeout(model_response_timeout(timeout_ms))
             .header("Content-Type", "application/json")
             .header("X-Internal-Token", self.internal_api_token.as_str())
             .json(&model_run_request)
             .send()
             .await
-            .map_err(|error| {
-                ModelClientError::new(
-                    if error.is_timeout() {
-                        ModelClientErrorKind::Timeout
-                    } else if error.is_builder() {
-                        ModelClientErrorKind::InvalidRequest
-                    } else {
-                        ModelClientErrorKind::Network
-                    },
-                    format!("api model run request failed: {error}"),
-                    !error.is_builder(),
-                )
-            })?;
+            .map_err(|error| model_proxy_transport_error("api model run request failed", error))?;
         observation.headers_received();
         let status = response.status();
         let body = response.text().await.map_err(|error| {
-            ModelClientError::new(
-                ModelClientErrorKind::Network,
-                format!("read api model run response failed: {error}"),
-                true,
-            )
+            model_proxy_transport_error("read api model run response failed", error)
         })?;
         if !status.is_success() {
             if status == reqwest::StatusCode::BAD_GATEWAY {
@@ -333,13 +315,14 @@ impl ApiModelClient {
         let mut response = tokio::time::timeout(model_response_timeout(timeout_ms), pending)
             .await
             .map_err(|_| {
-                ModelClientError::new(
+                model_proxy_outcome_unknown(
                     ModelClientErrorKind::Timeout,
                     "api model stream response headers timed out",
-                    true,
                 )
             })?
-            .map_err(|error| stream_error("api model stream request failed", error))?;
+            .map_err(|error| {
+                model_proxy_transport_error("api model stream request failed", error)
+            })?;
         observation.headers_received();
         if !response.status().is_success() {
             return Err(ModelClientError::new(
@@ -353,25 +336,27 @@ impl ApiModelClient {
         let mut result = None;
         let mut terminal_received = false;
         loop {
-            let received = tokio::time::timeout(
-                std::time::Duration::from_millis(
-                    centaeris_core::model::DEFAULT_MODEL_SSE_IDLE_TIMEOUT_MS,
-                ),
-                response.chunk(),
-            )
-            .await
-            .map_err(|_| {
-                ModelClientError::new(
-                    ModelClientErrorKind::Timeout,
-                    "api model stream idle timeout",
-                    true,
-                )
-            })?;
+            let received =
+                match tokio::time::timeout(self.stream_idle_timeout, response.chunk()).await {
+                    Ok(received) => received,
+                    Err(_) if terminal_received => break,
+                    Err(_) => {
+                        return Err(model_proxy_outcome_unknown(
+                            ModelClientErrorKind::Timeout,
+                            "api model stream idle timeout",
+                        ))
+                    }
+                };
             let chunk = match received {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break,
                 Err(_) if terminal_received => break,
-                Err(error) => return Err(stream_error("read api model stream failed", error)),
+                Err(error) => {
+                    return Err(model_proxy_transport_error(
+                        "read api model stream failed",
+                        error,
+                    ))
+                }
             };
             let frames = decoder.push(chunk.as_ref()).map_err(|message| {
                 ModelClientError::new(
@@ -489,17 +474,15 @@ impl ApiModelClient {
             }
         }
         decoder.finish().map_err(|message| {
-            ModelClientError::new(
+            model_proxy_outcome_unknown(
                 ModelClientErrorKind::ProviderResponseInterrupted,
                 format!("api model stream {message}"),
-                true,
             )
         })?;
         let payload = result.ok_or_else(|| {
-            ModelClientError::new(
+            model_proxy_outcome_unknown(
                 ModelClientErrorKind::ProviderResponseInterrupted,
                 "api model stream ended without result",
-                true,
             )
         })?;
         if payload.text != streamed_text {
@@ -636,17 +619,29 @@ async fn sleep_before_retry(attempt: u32, retry_backoff_ms: u64, advice: Option<
     }
 }
 
-fn stream_error(label: &str, error: reqwest::Error) -> ModelClientError {
+fn model_proxy_outcome_unknown(
+    kind: ModelClientErrorKind,
+    message: impl Into<String>,
+) -> ModelClientError {
+    let mut error = ModelClientError::new(kind, message, false);
+    error.provider_code = Some("model_proxy_outcome_unknown".into());
+    error
+}
+
+fn model_proxy_transport_error(label: &str, error: reqwest::Error) -> ModelClientError {
+    let message = format!("{label}: {error}");
+    if error.is_builder() {
+        return ModelClientError::new(ModelClientErrorKind::InvalidRequest, message, false);
+    }
+    if error.is_connect() {
+        return ModelClientError::new(ModelClientErrorKind::Network, message, true);
+    }
     let kind = if error.is_timeout() {
         ModelClientErrorKind::Timeout
-    } else if error.is_builder() {
-        ModelClientErrorKind::InvalidRequest
-    } else if error.is_connect() {
-        ModelClientErrorKind::Network
     } else {
         ModelClientErrorKind::ProviderResponseInterrupted
     };
-    ModelClientError::new(kind, format!("{label}: {error}"), !error.is_builder())
+    model_proxy_outcome_unknown(kind, message)
 }
 
 #[derive(Deserialize)]
@@ -917,7 +912,7 @@ fn model_response(payload: ModelRunResponse) -> Result<ModelClientResponse, Mode
         .collect::<Vec<_>>();
     validate_provider_tool_call_arguments("api.model.run.v1", &tool_calls)?;
     Ok(ModelClientResponse {
-        transport_timings: None,
+        request_timings: None,
         generate_result: GenerateResult {
             content: payload.text,
             tool_calls,
@@ -1610,17 +1605,50 @@ mod tests {
         let client = model_client(format!("http://{address}"), None, 1024);
         let mut request = model_request();
         request.session_config.timeout_ms = 250;
-        request.session_config.max_retries = 0;
+        request.session_config.max_retries = 3;
         let error = client
             .generate_stream(&request, &mut |_| {})
             .await
             .unwrap_err();
         assert_eq!(error.kind, ModelClientErrorKind::Timeout);
         assert_eq!(error.provider_attempts, 1);
+        assert!(!error.retryable);
+        assert_eq!(
+            error.provider_code.as_deref(),
+            Some("model_proxy_outcome_unknown")
+        );
         tokio::time::timeout(std::time::Duration::from_secs(2), server)
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_result_survives_an_idle_transport_tail() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (finish, finished) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            read_http_request(&mut connection).await;
+            let body = "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"delta\",\"delta\":\"ok\"}\n\ndata: {\"schema\":\"api.model.stream.v1\",\"type\":\"result\",\"text\":\"ok\",\"toolCalls\":[],\"usage\":null}\n\n";
+            connection.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:X}\r\n{body}\r\n", body.len()).as_bytes()).await.unwrap();
+            finished.await.unwrap();
+        });
+        let mut client = model_client(format!("http://{address}"), None, 1024);
+        client.stream_idle_timeout = std::time::Duration::from_millis(50);
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.generate_stream(&model_request(), &mut |_| {}),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.generate_result.content, "ok");
+        assert_eq!(response.provider_attempts, 1);
+        finish.send(()).unwrap();
+        server.await.unwrap();
     }
 
     #[test]
@@ -1971,91 +1999,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_model_stream_retries_interrupted_body_and_replaces_partial_content() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test server");
-        let address = listener.local_addr().expect("test server address");
-        let server = tokio::spawn(async move {
-            let (mut first, _) = listener.accept().await.expect("first request");
-            read_http_request(&mut first).await;
-            let partial = b"data: {\"schema\":\"api.model.stream.v1\",\"type\":\"reasoning\",\"text\":\"first attempt\"}\n\ndata: {\"schema\":\"api.model.stream.v1\",\"type\":\"delta\",\"delta\":\"partial\"}\n\n";
-            first
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
-                )
-                .await
-                .expect("first response headers");
-            first
-                .write_all(format!("{:X}\r\n", partial.len()).as_bytes())
-                .await
-                .expect("first chunk size");
-            first.write_all(partial).await.expect("first chunk");
-            first.write_all(b"\r\n").await.expect("first chunk end");
-            first.shutdown().await.expect("interrupt first response");
-
-            let (mut second, _) = listener.accept().await.expect("retry request");
-            read_http_request(&mut second).await;
-            let body = concat!(
-                "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"reasoning\",\"text\":\"second attempt\"}\n\n",
-                "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"delta\",\"delta\":\"recovered\"}\n\n",
-                "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"result\",\"text\":\"recovered\",\"reasoningContent\":null,\"toolCalls\":[],\"usage\":null}\n\n"
+    async fn api_model_response_loss_never_replays_a_dispatched_request() {
+        use tokio::io::AsyncWriteExt;
+        for streaming in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (stop, mut stopped) = tokio::sync::oneshot::channel();
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let server_calls = calls.clone();
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut connection, _) = tokio::select! {
+                        incoming = listener.accept() => incoming.unwrap(),
+                        _ = &mut stopped => break,
+                    };
+                    read_http_request(&mut connection).await;
+                    let attempt = server_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if attempt == 0 {
+                        // The API accepted the request; the response is lost after dispatch.
+                        if streaming {
+                            connection.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+                            let partial = b"data: {\"schema\":\"api.model.stream.v1\",\"type\":\"delta\",\"delta\":\"partial\"}\n\n";
+                            connection
+                                .write_all(format!("{:X}\r\n", partial.len()).as_bytes())
+                                .await
+                                .unwrap();
+                            connection.write_all(partial).await.unwrap();
+                            connection.write_all(b"\r\n").await.unwrap();
+                        }
+                        connection.shutdown().await.unwrap();
+                    } else {
+                        let body = if streaming {
+                            "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"result\",\"text\":\"\",\"toolCalls\":[],\"usage\":null}\n\n"
+                        } else {
+                            "{\"text\":\"\",\"toolCalls\":[],\"usage\":null}"
+                        };
+                        let _ = connection.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+                    }
+                }
+            });
+            let client = model_client(format!("http://{address}"), None, 1024);
+            let mut request = model_request();
+            request.session_config.max_retries = 3;
+            request.session_config.retry_backoff_ms = 0;
+            let mut events = Vec::new();
+            let result = if streaming {
+                client
+                    .generate_stream(&request, &mut |event| events.push(event))
+                    .await
+            } else {
+                client.generate(&request).await
+            };
+            let error = result.expect_err(
+                "response loss must remain unknown instead of issuing another model request",
             );
-            second
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(), body
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .expect("retry response");
-            second.shutdown().await.expect("complete retry response");
-        });
-
-        let client = model_client(format!("http://{address}"), None, 1_024);
-        let mut request = model_request();
-        request.session_config.max_retries = 1;
-        request.session_config.retry_backoff_ms = 0;
-        let mut events = Vec::new();
-        let response = client
-            .generate_stream(&request, &mut |event| events.push(event))
-            .await
-            .expect("retry should recover the model stream");
-        server.await.expect("test server");
-
-        assert_eq!(response.provider_attempts, 2);
-        let reasoning: Vec<_> = events
-            .iter()
-            .filter_map(|event| match event {
-                ModelClientStreamEvent::Reasoning { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(reasoning, ["first attempt", "", "second attempt"]);
-        let events: Vec<_> = events
-            .iter()
-            .filter(|event| !matches!(event, ModelClientStreamEvent::Reasoning { .. }))
-            .collect();
-        assert!(
-            matches!(&events[0], ModelClientStreamEvent::Token { content } if content == "partial")
-        );
-        assert!(
-            matches!(&events[1], ModelClientStreamEvent::ReplaceContent { content } if content.is_empty())
-        );
-        assert!(matches!(
-            &events[2],
-            ModelClientStreamEvent::Status {
-                process_state: RuntimeProcessState::Retrying,
-                ..
-            }
-        ));
-        assert!(
-            matches!(&events[3], ModelClientStreamEvent::Token { content } if content == "recovered")
-        );
-        assert!(matches!(&events[4], ModelClientStreamEvent::Done { .. }));
+            assert!(!error.retryable);
+            assert_eq!(
+                error.provider_code.as_deref(),
+                Some("model_proxy_outcome_unknown")
+            );
+            assert_eq!(error.provider_attempts, 1);
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event, ModelClientStreamEvent::ReplaceContent { .. })));
+            stop.send(()).unwrap();
+            server.await.unwrap();
+        }
     }
+
     #[tokio::test]
     async fn api_model_stream_recovers_typed_failure_after_reasoning_and_bounds_retries() {
         for recover in [true, false] {

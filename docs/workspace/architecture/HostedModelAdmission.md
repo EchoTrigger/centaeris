@@ -31,7 +31,11 @@ Provider status and `Retry-After` remain on `ModelProviderError`. Django does no
 sleep or automatically resend after an upstream rejection. Runtime retains its
 existing proxy retry loop: the proxy error body forwards optional
 `retryAfter` in JSON and SSE failures. Runtime honors that advice for this logical
-request; ambiguous network failures can still cause a later external attempt. No exactly-once provider execution is promised. The local Rust transport has no model concurrency admission. Local and hosted
+request. A dispatched proxy call whose response is lost returns the nonretryable
+`model_proxy_outcome_unknown` diagnostic instead of automatically issuing another
+POST. Connection setup failures can retry; explicit API terminal failure frames
+retain their established retry classifications. No exactly-once supplier execution
+is promised across independent infrastructure recovery. The local Rust transport has no model concurrency admission. Local and hosted
 endpoints remain independently configured; a common gateway is not required.
 
 Retained transcript failures keep their original diagnostic codes. Retired
@@ -55,12 +59,17 @@ a one-connection ordinary pool. The migration test upgrades populated legacy
 credentials and verifies retained models and upload occupancy.
 
 The existing Python SDKs remain the hosted protocol implementation, with SDK
-retries disabled. Runtime bounds its API response-header wait using the model
-request timeout, JSON calls use that timeout through response consumption, and SSE
-reads use the existing stream-idle budget. Cancellation retains stream ownership
+retries disabled. Runtime bounds SSE API response-header waiting using the model
+request timeout and SSE reads use the existing stream-idle budget. The API/SDK
+continues to own the upstream call timeout. Runtime does not impose a shorter
+independent total deadline on synchronous JSON proxy calls. Cancellation retains stream ownership
 and close behavior. The optional retry advice requires updating API and Runtime
 together: strict older Runtime decoders reject unknown error fields.
 
 Runtime observations distinguish `modelResponseHeaders`, `modelFirstEvent`,
 `modelFirstText` and `modelHttp`. Proxy attempt counts describe calls to API,
 not a proven count of supplier dispatches after ambiguous network failures.
+
+Header or body response loss before a result is nonretryable outcome-unknown.
+After a result arrives, an idle/read-error tail ends reading and runs the same
+existing text, payload and tool validation; it does not erase a known result.
