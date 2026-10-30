@@ -15,6 +15,20 @@ gate and inspection of its final artifacts.
 
 ## Test quality
 
+Reuse existing behavioral coverage before adding tests. Add a focused regression
+when a reported defect or new behavior lacks coverage; refactors, extractions and
+component splits do not automatically require new characterization tests.
+Consolidate overlapping cases around their observable contract.
+
+During implementation, run directly affected tests and necessary compile or type
+checks. Reuse passing results while their relevant inputs remain unchanged. A
+commit, handoff or change of agent does not require another test run. The lead
+coordinates integrated validation at a stable candidate; full suites, query-loop
+gates and end-to-end acceptance run when affected semantics or the actual CI and
+release requirements call for them. Generic skill checklists do not expand the
+agreed scope. Sub-agents receive a bounded validation scope and report existing
+results for reuse instead of repeating each other's checks.
+
 Frontend visual design uses manual appearance acceptance rather than TDD.
 Implement and iterate on layout, icons, spacing, color and typography directly.
 Focused behavioral tests still protect parsing, validation, requests, state
@@ -95,9 +109,9 @@ visibility, alignment, and containment rather than incidental class names or
 exact pixel values unless those values are an explicit product contract.
 
 Before replacing a brittle test, identify equivalent existing coverage or add
-the smallest missing behavioral test. Verify that a representative broken
-behavior fails the replacement, and that a harmless implementation change does
-not. Retain security and public-contract checks when consolidating tests. Do not
+the smallest missing behavioral test. Retain security and public-contract checks
+when consolidating tests; a separate mutation campaign or new validation
+framework is not required to remove an incidental assertion. Do not
 implement this policy as another blacklist of source patterns in tests; enforce
 it through review and evidence.
 
@@ -114,8 +128,9 @@ Upload alias tests retain their no-refund assertion on both platforms: Unix uses
 a dangling symlink, and Windows uses a dangling directory junction without
 requiring the symlink privilege. Neither case skips the resource-safety check.
 
-HTTP transport refactors first characterize actual request dispatch, rejection
-order, response envelopes/headers and cancellation/timeout resource ownership.
+HTTP transport refactors reuse coverage of actual request dispatch, rejection
+order, response envelopes/headers and cancellation/timeout resource ownership;
+add characterization tests only for observable behavior not already covered.
 Protocol-function and storage tests remain necessary but do not substitute for
 the complete HTTP path. For hosted Runtime endpoints, use the protected
 behaviors and coverage gaps in [Runtime HTTP](../workspace/reference/RuntimeHTTP.md).
