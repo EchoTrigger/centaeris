@@ -241,12 +241,12 @@ async fn resolve_session_config_uses_provider_defaults_when_session_is_zeroed() 
 #[derive(Debug)]
 struct MockJsonHttpTransport {
     requests: Mutex<Vec<JsonHttpRequest>>,
-    next_responses: Mutex<VecDeque<Result<JsonHttpResponse, String>>>,
+    next_responses: Mutex<VecDeque<Result<JsonHttpResponse, crate::model::TransportError>>>,
     sse_chunks: Mutex<VecDeque<Vec<String>>>,
 }
 
 impl MockJsonHttpTransport {
-    fn with_response(response: Result<JsonHttpResponse, String>) -> Self {
+    fn with_response(response: Result<JsonHttpResponse, crate::model::TransportError>) -> Self {
         Self {
             requests: Mutex::new(vec![]),
             next_responses: Mutex::new(VecDeque::from([response])),
@@ -254,7 +254,9 @@ impl MockJsonHttpTransport {
         }
     }
 
-    fn with_responses(responses: Vec<Result<JsonHttpResponse, String>>) -> Self {
+    fn with_responses(
+        responses: Vec<Result<JsonHttpResponse, crate::model::TransportError>>,
+    ) -> Self {
         Self {
             requests: Mutex::new(vec![]),
             next_responses: Mutex::new(VecDeque::from(responses)),
@@ -262,7 +264,10 @@ impl MockJsonHttpTransport {
         }
     }
 
-    fn with_sse(response: Result<JsonHttpResponse, String>, chunks: Vec<&str>) -> Self {
+    fn with_sse(
+        response: Result<JsonHttpResponse, crate::model::TransportError>,
+        chunks: Vec<&str>,
+    ) -> Self {
         Self {
             requests: Mutex::new(vec![]),
             next_responses: Mutex::new(VecDeque::from([response])),
@@ -274,7 +279,7 @@ impl MockJsonHttpTransport {
     }
 
     fn with_sse_response_chunks(
-        responses: Vec<Result<JsonHttpResponse, String>>,
+        responses: Vec<Result<JsonHttpResponse, crate::model::TransportError>>,
         chunks_by_response: Vec<Vec<String>>,
     ) -> Self {
         Self {
@@ -522,6 +527,7 @@ fn build_anthropic_request() -> ModelClientRequest {
 #[tokio::test]
 async fn anthropic_messages_projects_request_and_parses_tool_result() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::from([("request-id".to_string(), "req-anthropic".to_string())]),
         body_json: json!({
@@ -586,7 +592,9 @@ async fn anthropic_messages_projects_request_and_parses_tool_result() {
 
 #[tokio::test]
 async fn anthropic_messages_rejects_unknown_effort_before_transport() {
-    let transport = MockJsonHttpTransport::with_response(Err("must not send".to_string()));
+    let transport = MockJsonHttpTransport::with_response(Err(
+        crate::model::TransportError::Network("must not send".to_string()),
+    ));
     let client = AnthropicMessagesModelClient::new(anthropic_test_registry(), &transport);
     let mut request = build_anthropic_request();
     request.session_config.thinking_mode = Some("banana".to_string());
@@ -604,6 +612,7 @@ async fn anthropic_messages_rejects_unknown_effort_before_transport() {
 async fn anthropic_output_limit_preserves_only_tool_identity_and_argument_diagnostics() {
     let raw_args = r#"{"path":"unfinished"#;
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: json!({
@@ -640,6 +649,7 @@ async fn anthropic_output_limit_preserves_only_tool_identity_and_argument_diagno
 async fn anthropic_non_stream_output_limit_preserves_complete_tool_identity() {
     let raw_args = r#"{"path":"unfinished"#;
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: json!({
@@ -669,6 +679,7 @@ async fn anthropic_stream_output_limit_preserves_complete_tool_identity_without_
     let raw_args = r#"{"path":"unfinished"#;
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -702,6 +713,7 @@ async fn anthropic_stream_output_limit_does_not_synthesize_tool_identity() {
     let raw_args = r#"{"path":"unfinished"#;
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -733,6 +745,7 @@ async fn anthropic_stream_output_limit_does_not_synthesize_tool_identity() {
 async fn anthropic_messages_stream_accumulates_tool_json_before_completion() {
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -798,6 +811,7 @@ async fn minimax_stream_replays_complete_thinking_and_tool_blocks() {
     std::env::set_var("MINIMAX_API_KEY", "test-key");
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -959,6 +973,7 @@ fn openai_provider_params_hash(request: &ModelClientRequest, stream: bool) -> St
 #[tokio::test]
 async fn openai_responses_prompt_cache_key_is_model_scoped_and_serialized() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json:
@@ -1001,6 +1016,7 @@ async fn xai_responses_keeps_cache_routing_without_openai_retention_extension() 
     let client = OpenAiResponsesModelClient::new(
         ModelProviderRegistry::new(),
         MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: "{\"id\":\"xai\",\"output_text\":\"ok\"}".to_string(),
@@ -1022,6 +1038,7 @@ async fn xai_responses_keeps_cache_routing_without_openai_retention_extension() 
 #[tokio::test]
 async fn openai_compatible_chat_completions_does_not_send_responses_prompt_cache_key() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: "{\"id\":\"chat_cache_key\",\"choices\":[{\"message\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":8,\"total_tokens\":9}}".to_string(),
@@ -1252,7 +1269,9 @@ async fn deepseek_chat_messages_reuse_previous_turn_prefix() {
 fn deepseek_thinking_request_uses_native_protocol_and_auto_tool_default() {
     let client = OpenAiCompatibleModelClient::new(
         deepseek_test_registry(),
-        MockJsonHttpTransport::with_response(Err("unused transport".to_string())),
+        MockJsonHttpTransport::with_response(Err(crate::model::TransportError::Network(
+            "unused transport".to_string(),
+        ))),
     );
     let high_request = build_deepseek_request(Some("high"));
     let high_http_request = client
@@ -1291,7 +1310,9 @@ fn deepseek_thinking_request_uses_native_protocol_and_auto_tool_default() {
 fn deepseek_ten_tool_rounds_preserve_reasoning_content() {
     let client = OpenAiCompatibleModelClient::new(
         deepseek_test_registry(),
-        MockJsonHttpTransport::with_response(Err("unused transport".to_string())),
+        MockJsonHttpTransport::with_response(Err(crate::model::TransportError::Network(
+            "unused transport".to_string(),
+        ))),
     );
     let mut history = vec![ChatMessage {
         message_id: "msg-user-root".to_string(),
@@ -1355,7 +1376,9 @@ fn deepseek_ten_tool_rounds_preserve_reasoning_content() {
 fn deepseek_thinking_request_rejects_forced_tool_choice() {
     let client = OpenAiCompatibleModelClient::new(
         deepseek_test_registry(),
-        MockJsonHttpTransport::with_response(Err("unused transport".to_string())),
+        MockJsonHttpTransport::with_response(Err(crate::model::TransportError::Network(
+            "unused transport".to_string(),
+        ))),
     );
     let mut request = build_deepseek_request(Some("max"));
     request.prepared_prompt.tool_choice = ModelToolChoice::Required;
@@ -1373,7 +1396,9 @@ fn deepseek_thinking_request_rejects_forced_tool_choice() {
 fn deepseek_thinking_request_rejects_unknown_mode() {
     let client = OpenAiCompatibleModelClient::new(
         deepseek_test_registry(),
-        MockJsonHttpTransport::with_response(Err("unused transport".to_string())),
+        MockJsonHttpTransport::with_response(Err(crate::model::TransportError::Network(
+            "unused transport".to_string(),
+        ))),
     );
     let request = build_deepseek_request(Some("banana"));
 
@@ -1389,7 +1414,9 @@ fn deepseek_thinking_request_rejects_unknown_mode() {
 fn kimi_models_use_their_native_output_and_thinking_fields() {
     let client = OpenAiCompatibleModelClient::new(
         kimi_test_registry(),
-        MockJsonHttpTransport::with_response(Err("unused transport".to_string())),
+        MockJsonHttpTransport::with_response(Err(crate::model::TransportError::Network(
+            "unused transport".to_string(),
+        ))),
     );
 
     let k3 = client
@@ -1431,7 +1458,9 @@ fn kimi_models_use_their_native_output_and_thinking_fields() {
 fn kimi_preserved_thinking_models_reject_forced_tool_choice() {
     let client = OpenAiCompatibleModelClient::new(
         kimi_test_registry(),
-        MockJsonHttpTransport::with_response(Err("unused transport".to_string())),
+        MockJsonHttpTransport::with_response(Err(crate::model::TransportError::Network(
+            "unused transport".to_string(),
+        ))),
     );
     let mut request = build_kimi_request("kimi-for-coding", Some("preserved"));
     request.prepared_prompt.tool_choice = ModelToolChoice::Required;
@@ -1724,6 +1753,7 @@ async fn openai_compatible_two_round_cache_audit_hashes_final_messages_and_provi
 #[tokio::test]
 async fn openai_compatible_client_builds_chat_completions_request() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json:
@@ -1758,6 +1788,7 @@ async fn openai_compatible_client_builds_chat_completions_request() {
 async fn gemini_chat_tool_signature_survives_the_next_request() {
     std::env::set_var("GEMINI_API_KEY", "test-gemini-key");
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: json!({
@@ -1827,6 +1858,7 @@ async fn gemini_stream_keeps_the_tool_signature_after_tool_arguments() {
     std::env::set_var("GEMINI_API_KEY", "test-gemini-key");
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -1864,7 +1896,9 @@ async fn gemini_accepts_tool_history_imported_from_another_model() {
     std::env::set_var("GEMINI_API_KEY", "test-gemini-key");
     let client = OpenAiCompatibleModelClient::new(
         ModelProviderRegistry::new(),
-        MockJsonHttpTransport::with_response(Err("must not send".to_string())),
+        MockJsonHttpTransport::with_response(Err(crate::model::TransportError::Network(
+            "must not send".to_string(),
+        ))),
     );
     let mut request = build_model_request("google.default");
     request.session_config.provider_kind = ModelProviderKind::Gemini;
@@ -1907,6 +1941,7 @@ async fn gemini_accepts_tool_history_imported_from_another_model() {
 #[tokio::test]
 async fn prepared_prompt_output_limit_may_be_below_model_capability() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json:
@@ -1932,7 +1967,9 @@ async fn prepared_prompt_output_limit_may_be_below_model_capability() {
 async fn prepared_prompt_output_limit_above_model_capability_fails() {
     let client = OpenAiCompatibleModelClient::new(
         ModelProviderRegistry::new(),
-        MockJsonHttpTransport::with_response(Err("must not send".to_string())),
+        MockJsonHttpTransport::with_response(Err(crate::model::TransportError::Network(
+            "must not send".to_string(),
+        ))),
     );
     let mut request = build_model_request("custom.openai_compatible");
     request.prepared_prompt.max_output_tokens = 513;
@@ -1952,8 +1989,9 @@ async fn prepared_prompt_output_limit_above_model_capability_fails() {
 #[tokio::test]
 async fn openai_compatible_client_retries_json_network_errors_before_success() {
     let transport = MockJsonHttpTransport::with_responses(vec![
-        Err("network timeout".to_string()),
+        Err(crate::model::TransportError::Timeout("network timeout".to_string())),
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: "{\"id\":\"resp_retry\",\"choices\":[{\"message\":{\"content\":\"ok after retry\"}}]}".to_string(),
@@ -1978,6 +2016,7 @@ async fn openai_compatible_client_retries_json_network_errors_before_success() {
 async fn openai_compatible_client_retries_reasoning_only_empty_final_response() {
     let transport = MockJsonHttpTransport::with_responses(vec![
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: json!({
@@ -1993,6 +2032,7 @@ async fn openai_compatible_client_retries_reasoning_only_empty_final_response() 
             .to_string(),
         }),
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: json!({
@@ -2024,8 +2064,9 @@ async fn openai_compatible_client_retries_reasoning_only_empty_final_response() 
 async fn openai_compatible_stream_retries_partial_uncommitted_response() {
     let transport = MockJsonHttpTransport::with_sse_response_chunks(
         vec![
-            Err("stream timeout".to_string()),
+            Err(crate::model::TransportError::Timeout("stream timeout".to_string())),
             Ok(JsonHttpResponse {
+                timings: None,
                 status_code: 200,
                 headers: HashMap::new(),
                 body_json: String::new(),
@@ -2076,6 +2117,7 @@ async fn openai_compatible_stream_retries_partial_uncommitted_response() {
 #[tokio::test]
 async fn openai_compatible_client_serializes_tool_context_as_native_tool_message() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: "{\"id\":\"resp_tool_ctx\",\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"
@@ -2159,6 +2201,7 @@ async fn openai_compatible_client_serializes_tool_context_as_native_tool_message
 #[tokio::test]
 async fn openai_compatible_client_fails_tool_context_without_call_identity() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: "{\"id\":\"resp_tool_ctx\",\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"
@@ -2190,6 +2233,7 @@ async fn openai_compatible_client_fails_tool_context_without_call_identity() {
 #[tokio::test]
 async fn openai_compatible_client_fails_assistant_tool_call_without_tool_result() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: "{\"id\":\"resp_tool_ctx\",\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"
@@ -2232,6 +2276,7 @@ async fn openai_compatible_client_fails_assistant_tool_call_without_tool_result(
 #[tokio::test]
 async fn openai_compatible_client_fails_mismatched_tool_call_id() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: "{\"id\":\"resp_tool_ctx\",\"choices\":[{\"message\":{\"content\":\"ok\"}}]}"
@@ -2306,6 +2351,7 @@ fn model_client_rejects_invalid_tool_call_identity() {
 #[tokio::test]
 async fn openai_compatible_client_parses_tool_calls() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: "{\"id\":\"resp_2\",\"choices\":[{\"message\":{\"content\":\"\",\"reasoning_content\":\"\",\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"file_read\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}]}}],\"usage\":{\"prompt_tokens\":11,\"total_tokens\":25,\"prompt_cache_hit_tokens\":7,\"prompt_cache_miss_tokens\":4}}".to_string(),
@@ -2338,6 +2384,7 @@ async fn openai_compatible_client_parses_tool_calls() {
 #[tokio::test]
 async fn openai_compatible_output_limit_does_not_synthesize_tool_identity() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: json!({
@@ -2374,6 +2421,7 @@ async fn openai_compatible_output_limit_does_not_synthesize_tool_identity() {
 async fn openai_compatible_non_stream_output_limit_preserves_complete_tool_identity() {
     let raw_args = r#"{"path":"unfinished"#;
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: json!({
@@ -2406,6 +2454,7 @@ async fn openai_compatible_stream_output_limit_preserves_complete_tool_identity_
     let raw_args = r#"{"path":"unfinished"#;
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -2439,6 +2488,7 @@ async fn openai_compatible_stream_output_limit_does_not_synthesize_tool_identity
     let raw_args = r#"{"path":"unfinished"#;
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -2469,6 +2519,7 @@ async fn openai_compatible_stream_output_limit_does_not_synthesize_tool_identity
 #[tokio::test]
 async fn openai_compatible_client_normalizes_vllm_reasoning() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: json!({
@@ -2499,6 +2550,7 @@ async fn openai_compatible_client_normalizes_vllm_reasoning() {
 #[tokio::test]
 async fn openai_compatible_client_rejects_conflicting_reasoning_fields() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: json!({
@@ -2528,6 +2580,7 @@ async fn openai_compatible_client_rejects_conflicting_reasoning_fields() {
 #[tokio::test]
 async fn openai_compatible_client_rejects_malformed_tool_arguments() {
     let malformed_response = JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: json!({
@@ -2574,6 +2627,7 @@ async fn openai_compatible_client_rejects_malformed_tool_arguments() {
 #[tokio::test]
 async fn openai_compatible_client_retries_malformed_tool_arguments_before_commit() {
     let malformed = JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: json!({
@@ -2595,6 +2649,7 @@ async fn openai_compatible_client_retries_malformed_tool_arguments_before_commit
         .to_string(),
     };
     let valid = JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: json!({
@@ -2633,6 +2688,7 @@ async fn openai_compatible_client_retries_malformed_tool_arguments_before_commit
 #[tokio::test]
 async fn openai_compatible_client_preserves_multiple_tool_calls_in_one_response() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: json!({
@@ -2685,6 +2741,7 @@ async fn openai_compatible_client_derives_input_tokens_from_deepseek_cache_usage
     // 真实 DeepSeek 命中率 smoke 需要先配置 DEEPSEEK_API_KEY 环境变量并允许网络访问；
     // 默认单测只验证 provider usage 字段解析，避免 CI 依赖外部 API。
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: "{\"id\":\"resp_cache\",\"choices\":[{\"message\":{\"content\":\"ok\"}}],\"usage\":{\"total_tokens\":30,\"prompt_cache_hit_tokens\":21,\"prompt_cache_miss_tokens\":3}}".to_string(),
@@ -2707,6 +2764,7 @@ async fn openai_compatible_client_derives_input_tokens_from_deepseek_cache_usage
 #[tokio::test]
 async fn openai_compatible_client_parses_standard_cached_tokens() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: "{\"id\":\"chatcmpl_cache\",\"choices\":[{\"message\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":42,\"total_tokens\":50,\"prompt_tokens_details\":{\"cached_tokens\":32}}}".to_string(),
@@ -2727,6 +2785,7 @@ async fn openai_compatible_client_parses_standard_cached_tokens() {
 async fn openai_compatible_client_projects_completed_tool_call_only() {
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -2789,6 +2848,7 @@ async fn openai_compatible_client_projects_completed_tool_call_only() {
 async fn openai_compatible_stream_projects_reasoning_as_one_thinking_status() {
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -2836,6 +2896,7 @@ async fn openai_compatible_stream_projects_reasoning_as_one_thinking_status() {
 async fn openai_compatible_stream_rejects_reasoning_field_switch() {
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -2864,6 +2925,7 @@ async fn openai_compatible_stream_rejects_reasoning_field_switch() {
 async fn openai_compatible_stream_rejects_noncanonical_tool_identity_before_execution() {
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -2921,11 +2983,13 @@ async fn openai_compatible_malformed_tool_arguments_do_not_commit_completion_eve
     let transport = MockJsonHttpTransport::with_sse_response_chunks(
         vec![
             Ok(JsonHttpResponse {
+                timings: None,
                 status_code: 200,
                 headers: HashMap::new(),
                 body_json: String::new(),
             }),
             Ok(JsonHttpResponse {
+                timings: None,
                 status_code: 200,
                 headers: HashMap::new(),
                 body_json: String::new(),
@@ -2978,6 +3042,7 @@ async fn openai_compatible_malformed_tool_arguments_do_not_commit_completion_eve
 async fn openai_compatible_stream_retry_replaces_partial_text_and_commits_only_valid_tools() {
     let response = || {
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -3105,6 +3170,7 @@ async fn openai_compatible_fragmented_tool_arguments_emit_bounded_events() {
     );
     let transport = MockJsonHttpTransport::with_sse_response_chunks(
         vec![Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -3144,6 +3210,7 @@ async fn openai_compatible_stream_projects_provider_waiting_status() {
     .to_string();
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -3182,8 +3249,9 @@ async fn openai_compatible_stream_retries_after_provider_waiting_only_failure() 
     .to_string();
     let transport = MockJsonHttpTransport::with_sse_response_chunks(
         vec![
-            Err("stream timeout after provider keep-alive".to_string()),
+            Err(crate::model::TransportError::Timeout("stream timeout after provider keep-alive".to_string())),
             Ok(JsonHttpResponse {
+                timings: None,
                 status_code: 200,
                 headers: HashMap::new(),
                 body_json: String::new(),
@@ -3256,8 +3324,11 @@ async fn openai_compatible_stream_discards_tentative_tool_events_before_retry() 
     ];
     let transport = MockJsonHttpTransport::with_sse_response_chunks(
         vec![
-            Err("socket connection was closed".to_string()),
+            Err(crate::model::TransportError::Network(
+                "socket connection was closed".to_string(),
+            )),
             Ok(JsonHttpResponse {
+                timings: None,
                 status_code: 200,
                 headers: HashMap::new(),
                 body_json: "transport summary must not replace adapter state".to_string(),
@@ -3296,11 +3367,13 @@ async fn openai_compatible_stream_retries_clean_early_end_before_terminal_event(
     let transport = MockJsonHttpTransport::with_sse_response_chunks(
         vec![
             Ok(JsonHttpResponse {
+                timings: None,
                 status_code: 200,
                 headers: HashMap::new(),
                 body_json: String::new(),
             }),
             Ok(JsonHttpResponse {
+                timings: None,
                 status_code: 200,
                 headers: HashMap::new(),
                 body_json: String::new(),
@@ -3335,11 +3408,13 @@ async fn openai_compatible_stream_retries_reasoning_only_empty_final_response() 
     let transport = MockJsonHttpTransport::with_sse_response_chunks(
         vec![
             Ok(JsonHttpResponse {
+                timings: None,
                 status_code: 200,
                 headers: HashMap::new(),
                 body_json: String::new(),
             }),
             Ok(JsonHttpResponse {
+                timings: None,
                 status_code: 200,
                 headers: HashMap::new(),
                 body_json: String::new(),
@@ -3417,11 +3492,13 @@ async fn openai_compatible_stream_loud_fails_after_empty_final_retry_exhaustion(
     let transport = MockJsonHttpTransport::with_sse_response_chunks(
         vec![
             Ok(JsonHttpResponse {
+                timings: None,
                 status_code: 200,
                 headers: HashMap::new(),
                 body_json: String::new(),
             }),
             Ok(JsonHttpResponse {
+                timings: None,
                 status_code: 200,
                 headers: HashMap::new(),
                 body_json: String::new(),
@@ -3455,6 +3532,7 @@ async fn openai_compatible_stream_loud_fails_after_empty_final_retry_exhaustion(
 #[tokio::test]
 async fn openai_compatible_client_maps_provider_queue_error() {
     let rate_limit_response = || JsonHttpResponse {
+        timings: None,
         status_code: 429,
         headers: HashMap::new(),
         body_json: "{\"error\":{\"message\":\"rate limited\",\"code\":\"rate_limit_exceeded\"}}"
@@ -3506,6 +3584,7 @@ async fn openai_compatible_client_maps_auth_and_provider_failures() {
 async fn deepseek_insufficient_system_resource_finish_is_retryable() {
     let response = || {
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: json!({
@@ -3540,6 +3619,7 @@ async fn deepseek_insufficient_system_resource_finish_is_retryable() {
 async fn deepseek_stream_insufficient_system_resource_finish_is_retryable() {
     let response = || {
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -3611,8 +3691,12 @@ async fn openai_responses_client_maps_provider_queue_error() {
 #[tokio::test]
 async fn openai_compatible_client_maps_response_body_interrupt() {
     let transport = MockJsonHttpTransport::with_responses(vec![
-        Err("read http body failed: error decoding response body".to_string()),
-        Err("read http body failed: error decoding response body".to_string()),
+        Err(crate::model::TransportError::StreamInterrupted(
+            "read http body failed: error decoding response body".to_string(),
+        )),
+        Err(crate::model::TransportError::StreamInterrupted(
+            "read http body failed: error decoding response body".to_string(),
+        )),
     ]);
     let client = OpenAiCompatibleModelClient::new(ModelProviderRegistry::new(), transport);
     let request = build_model_request("custom.openai_compatible");
@@ -3634,11 +3718,13 @@ async fn openai_compatible_client_maps_response_body_interrupt() {
 async fn openai_compatible_client_retries_retryable_http_status_before_success() {
     let transport = MockJsonHttpTransport::with_responses(vec![
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 429,
             headers: HashMap::new(),
             body_json: "{\"error\":{\"message\":\"rate limited\"}}".to_string(),
         }),
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json:
@@ -3663,6 +3749,7 @@ async fn openai_compatible_client_retries_retryable_http_status_before_success()
 #[tokio::test]
 async fn openai_responses_client_builds_responses_request() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: "{\"id\":\"resp_3\",\"output_text\":\"done\",\"usage\":{\"input_tokens\":12,\"output_tokens\":6,\"total_tokens\":18}}".to_string(),
@@ -3700,6 +3787,7 @@ fn openai_responses_rejects_unknown_effort() {
 #[tokio::test]
 async fn openai_responses_client_serializes_tool_context_as_function_output() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json:
@@ -3760,6 +3848,7 @@ async fn openai_responses_client_serializes_tool_context_as_function_output() {
 #[tokio::test]
 async fn openai_responses_client_parses_message_and_tool_calls() {
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::from([("x-request-id".to_string(), "req_123".to_string())]),
         body_json: "{\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Need to inspect the file first.\"}]},{\"type\":\"function_call\",\"call_id\":\"call_7\",\"name\":\"file_read\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"I will inspect the file.\"}]}],\"usage\":{\"input_tokens\":14,\"output_tokens\":9,\"input_tokens_details\":{\"cached_tokens\":6}}}".to_string(),
@@ -3795,6 +3884,7 @@ async fn openai_responses_client_parses_message_and_tool_calls() {
 #[tokio::test]
 async fn openai_responses_client_rejects_malformed_tool_arguments() {
     let malformed_response = JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: json!({
@@ -3834,6 +3924,7 @@ async fn openai_responses_client_rejects_malformed_tool_arguments() {
 async fn openai_responses_client_streams_text_deltas() {
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -3873,6 +3964,7 @@ async fn openai_responses_client_streams_text_deltas() {
 async fn openai_responses_non_stream_output_limit_preserves_complete_tool_identity() {
     let raw_args = r#"{"path":"unfinished"#;
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: json!({
@@ -3904,6 +3996,7 @@ async fn openai_responses_non_stream_output_limit_preserves_complete_tool_identi
 async fn openai_responses_non_stream_output_limit_does_not_synthesize_tool_identity() {
     let raw_args = r#"{"path":"unfinished"#;
     let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+        timings: None,
         status_code: 200,
         headers: HashMap::new(),
         body_json: json!({
@@ -3932,6 +4025,7 @@ async fn openai_responses_non_stream_output_limit_does_not_synthesize_tool_ident
 async fn openai_responses_output_limit_preserves_partial_stream_for_runtime_recovery() {
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -3970,6 +4064,7 @@ async fn openai_responses_output_limit_preserves_partial_stream_for_runtime_reco
 async fn openai_responses_output_limit_does_not_synthesize_tool_identity() {
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -4009,6 +4104,7 @@ async fn openai_responses_stream_output_limit_preserves_complete_tool_identity_w
     let raw_args = r#"{"path":"unfinished"#;
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -4042,6 +4138,7 @@ async fn openai_responses_stream_output_limit_preserves_complete_tool_identity_w
 async fn openai_responses_client_projects_completed_tool_call_only() {
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -4088,6 +4185,7 @@ async fn openai_responses_client_projects_completed_tool_call_only() {
 async fn openai_compatible_malformed_sse_frame_invalidates_attempt_and_replaces_partial_text() {
     let response = || {
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -4137,6 +4235,7 @@ async fn openai_compatible_malformed_sse_frame_invalidates_attempt_and_replaces_
 async fn openai_responses_malformed_sse_frame_loud_fails_without_terminal_commit() {
     let response = || {
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),
@@ -4189,6 +4288,7 @@ async fn openai_responses_malformed_sse_frame_loud_fails_without_terminal_commit
 async fn anthropic_malformed_sse_frame_invalidates_attempt_and_replaces_partial_text() {
     let response = || {
         Ok(JsonHttpResponse {
+            timings: None,
             status_code: 200,
             headers: HashMap::new(),
             body_json: String::new(),

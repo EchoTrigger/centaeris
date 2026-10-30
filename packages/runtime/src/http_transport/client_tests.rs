@@ -127,7 +127,7 @@ async fn send(
         sse_idle_timeout_ms: 5000,
         max_retries: 0,
         retry_backoff_ms: 0,
-        body_json: "{}".to_string(),
+        body_json: "{}".into(),
     };
     if streaming {
         let mut events = Vec::new();
@@ -148,14 +148,12 @@ async fn send(
 fn session_validation_is_provider_scoped() {
     for session in ["", "  ", "bad\nvalue"] {
         assert!(ReqwestJsonHttpTransport::for_session(
-            "validation".to_string(),
             session,
             "opencode-go.default",
             build_model_http_client,
         )
         .is_err());
         assert!(ReqwestJsonHttpTransport::for_session(
-            "validation".to_string(),
             session,
             "openai.default",
             build_model_http_client,
@@ -171,7 +169,6 @@ async fn session_headers_preserve_raw_values_and_explicit_case_variants() {
     for streaming in [false, true] {
         for explicit in [false, true] {
             let transport = ReqwestJsonHttpTransport::for_session(
-                "headers".to_string(),
                 "  session-a  ",
                 "opencode-go.default",
                 || hub.model_http_client(),
@@ -221,10 +218,8 @@ async fn different_session_transports_reuse_keepalive_connection_without_header_
         ("unused", "openai.default", false, "fake-c"),
     ] {
         let transport =
-            ReqwestJsonHttpTransport::for_session(session.to_string(), session, provider, || {
-                hub.model_http_client()
-            })
-            .unwrap();
+            ReqwestJsonHttpTransport::for_session(session, provider, || hub.model_http_client())
+                .unwrap();
         send(
             &transport,
             &url,
@@ -253,12 +248,9 @@ async fn different_session_transports_reuse_keepalive_connection_without_header_
         drop(transport);
     }
     let fresh_hub = RuntimeServerClientHub::default();
-    let fresh = ReqwestJsonHttpTransport::for_session(
-        "fresh".into(),
-        "session-c",
-        "opencode-go.default",
-        || fresh_hub.model_http_client(),
-    )
+    let fresh = ReqwestJsonHttpTransport::for_session("session-c", "opencode-go.default", || {
+        fresh_hub.model_http_client()
+    })
     .unwrap();
     send(&fresh, &url, false, HashMap::new()).await;
     let (fresh_connection, headers) = captures.recv().await.unwrap();
@@ -279,27 +271,18 @@ fn invalid_opencode_session_precedes_lazy_client_failure() {
         ("  ", "OpenCode requests require a conversation session ID"),
         ("bad\nvalue", "invalid conversation session ID for OpenCode"),
     ] {
-        let result = ReqwestJsonHttpTransport::for_session(
-            "validation".into(),
-            session,
-            "opencode-go.default",
-            || panic!("client must not be built for an invalid session"),
-        );
+        let result = ReqwestJsonHttpTransport::for_session(session, "opencode-go.default", || {
+            panic!("client must not be built for an invalid session")
+        });
         assert_eq!(result.err().expect("invalid session must fail"), expected);
     }
-    let result = ReqwestJsonHttpTransport::for_session(
-        "valid".into(),
-        "session",
-        "opencode-go.default",
-        || Err("injected build failure".into()),
-    );
+    let result = ReqwestJsonHttpTransport::for_session("session", "opencode-go.default", || {
+        Err("injected build failure".into())
+    });
     assert_eq!(result.err().unwrap(), "injected build failure");
-    let result = ReqwestJsonHttpTransport::for_session(
-        "other".into(),
-        "bad\nvalue",
-        "openai.default",
-        || Err("injected build failure".into()),
-    );
+    let result = ReqwestJsonHttpTransport::for_session("bad\nvalue", "openai.default", || {
+        Err("injected build failure".into())
+    });
     assert_eq!(result.err().unwrap(), "injected build failure");
 }
 
@@ -307,19 +290,19 @@ fn invalid_opencode_session_precedes_lazy_client_failure() {
 async fn concurrent_shared_pool_requests_keep_session_and_credentials_request_local() {
     let hub = RuntimeServerClientHub::default();
     let (url, mut captures, shutdown, server) = keepalive_server().await;
-    let a = ReqwestJsonHttpTransport::for_session("a".into(), "a", "opencode-go.default", || {
+    let a = ReqwestJsonHttpTransport::for_session("a", "opencode-go.default", || {
         hub.model_http_client()
     })
     .unwrap();
-    let b = ReqwestJsonHttpTransport::for_session("b".into(), "b", "opencode-go.default", || {
+    let b = ReqwestJsonHttpTransport::for_session("b", "opencode-go.default", || {
         hub.model_http_client()
     })
     .unwrap();
-    let c = ReqwestJsonHttpTransport::for_session("c".into(), "unused", "openai.default", || {
+    let c = ReqwestJsonHttpTransport::for_session("unused", "openai.default", || {
         hub.model_http_client()
     })
     .unwrap();
-    let d = ReqwestJsonHttpTransport::for_session("d".into(), "d", "opencode-go.default", || {
+    let d = ReqwestJsonHttpTransport::for_session("d", "opencode-go.default", || {
         hub.model_http_client()
     })
     .unwrap();
@@ -429,12 +412,9 @@ async fn proxy_snapshot_child() {
         let url = format!("http://{}", destination.local_addr().unwrap());
         std::env::set_var("HTTP_PROXY", proxy_a);
         let hub = RuntimeServerClientHub::default();
-        let first = ReqwestJsonHttpTransport::for_session(
-            "first".into(),
-            "first",
-            "opencode-go.default",
-            || hub.model_http_client(),
-        )
+        let first = ReqwestJsonHttpTransport::for_session("first", "opencode-go.default", || {
+            hub.model_http_client()
+        })
         .unwrap();
         send(
             &first,
@@ -446,13 +426,11 @@ async fn proxy_snapshot_child() {
         let (connection, headers) = a.recv().await.unwrap();
         assert_eq!(values(&headers, "x-api-key"), vec!["fake-first"]);
         std::env::set_var("HTTP_PROXY", proxy_b);
-        let same_owner = ReqwestJsonHttpTransport::for_session(
-            "same".into(),
-            "same",
-            "opencode-go.default",
-            || hub.model_http_client(),
-        )
-        .unwrap();
+        let same_owner =
+            ReqwestJsonHttpTransport::for_session("same", "opencode-go.default", || {
+                hub.model_http_client()
+            })
+            .unwrap();
         send(
             &same_owner,
             &url,
@@ -465,12 +443,9 @@ async fn proxy_snapshot_child() {
         assert_eq!(values(&headers, "x-api-key"), vec!["fake-same"]);
         assert!(b.try_recv().is_err());
         let fresh_hub = RuntimeServerClientHub::default();
-        let fresh = ReqwestJsonHttpTransport::for_session(
-            "fresh".into(),
-            "fresh",
-            "opencode-go.default",
-            || fresh_hub.model_http_client(),
-        )
+        let fresh = ReqwestJsonHttpTransport::for_session("fresh", "opencode-go.default", || {
+            fresh_hub.model_http_client()
+        })
         .unwrap();
         send(
             &fresh,
@@ -500,12 +475,9 @@ async fn proxy_snapshot_child() {
 #[tokio::test]
 async fn cancelled_or_failed_request_does_not_poison_shared_client() {
     let hub = RuntimeServerClientHub::default();
-    let transport = ReqwestJsonHttpTransport::for_session(
-        "recovery".into(),
-        "session",
-        "opencode-go.default",
-        || hub.model_http_client(),
-    )
+    let transport = ReqwestJsonHttpTransport::for_session("session", "opencode-go.default", || {
+        hub.model_http_client()
+    })
     .unwrap();
     let (url, mut captures, shutdown, server) = keepalive_server().await;
     let mut request = JsonHttpRequest {

@@ -22,6 +22,7 @@ async fn provider_reasoning_completion_corpus() {
             let streaming = mode != "json";
             let interrupted = mode == "interrupted";
             let response = JsonHttpResponse {
+                timings: None,
                 status_code: 200,
                 headers: HashMap::new(),
                 body_json: case["response"].to_string(),
@@ -155,6 +156,7 @@ async fn go_compatible_models_send_each_explicit_reasoning_effort() {
     for model in ["glm-5.3-flash", "deepseek-v4.1-flash"] {
         for effort in ["low", "high", "max"] {
             let transport = MockJsonHttpTransport::with_response(Ok(JsonHttpResponse {
+                timings: None,
                 status_code: 200,
                 headers: HashMap::new(),
                 body_json: json!({"choices":[{"message":{"content":"ok"}}]}).to_string(),

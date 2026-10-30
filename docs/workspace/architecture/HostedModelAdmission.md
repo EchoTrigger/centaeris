@@ -29,10 +29,10 @@ already-running synchronous SDK request; it remains bounded by its timeout.
 
 Provider status and `Retry-After` remain on `ModelProviderError`. Django does not
 sleep or automatically resend after an upstream rejection. Runtime retains its
-existing proxy retry loop: the current proxy error body does not forward
-`Retry-After`, and ambiguous network failures can still cause a later external
-attempt. No exactly-once provider execution is promised. Core's local in-process
-model admission is outside this hosted change.
+existing proxy retry loop: the proxy error body forwards optional
+`retryAfter` in JSON and SSE failures. Runtime honors that advice for this logical
+request; ambiguous network failures can still cause a later external attempt. No exactly-once provider execution is promised. The local Rust transport has no model concurrency admission. Local and hosted
+endpoints remain independently configured; a common gateway is not required.
 
 Retained transcript failures keep their original diagnostic codes. Retired
 quota reasons use the generic failure label rather than instructing operators
@@ -53,3 +53,14 @@ failure metadata, no local retry/cooldown and pre-dispatch cancellation.
 `test_model_database_leases.py` exercises real HTTPS calls and disconnects with
 a one-connection ordinary pool. The migration test upgrades populated legacy
 credentials and verifies retained models and upload occupancy.
+
+The existing Python SDKs remain the hosted protocol implementation, with SDK
+retries disabled. Runtime bounds its API response-header wait using the model
+request timeout, JSON calls use that timeout through response consumption, and SSE
+reads use the existing stream-idle budget. Cancellation retains stream ownership
+and close behavior. The optional retry advice requires updating API and Runtime
+together: strict older Runtime decoders reject unknown error fields.
+
+Runtime observations distinguish `modelResponseHeaders`, `modelFirstEvent`,
+`modelFirstText` and `modelHttp`. Proxy attempt counts describe calls to API,
+not a proven count of supplier dispatches after ambiguous network failures.

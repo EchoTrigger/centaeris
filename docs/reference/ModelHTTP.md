@@ -25,8 +25,7 @@ runs before obtaining/building the shared Client; other providers do not gain
 that validation. Raw session header values are preserved. Explicit session or
 User-Agent request headers override defaults case-insensitively, and multiple
 explicit case variants are not collapsed. Sharing a connection pool does not
-share a transport's Retry-After cooldown: each transport keeps its own cooldown
-and the existing shared local request-capacity admission.
+impose a model concurrency cap or shared provider cooldown. Retry-After delays only the rejected request's configured retry.
 
 The current locked Local Runtime uses environment-derived proxies, including
 HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY and their lowercase variants; reqwest's
@@ -61,8 +60,8 @@ These are explicit local transport safety ceilings, not supplier quotas or
 measured hardware capacity. There was no pre-existing maximum model response
 contract to derive a precise value from. 16 MiB is a conservative envelope with
 substantial room for text and structured tool output; an endpoint needing larger
-individual responses requires a deliberate contract/budget update. Four active
-attempts can each retain bounded line/event/body buffers; these ceilings do not
+individual responses requires a deliberate contract/budget update. Concurrent
+attempts each retain bounded line/event/body buffers; these ceilings do not
 bound memory retained later by model protocol adapters or application consumers.
 
 Overflow fails the transport without delivering a partial event. A declared
@@ -99,3 +98,26 @@ Candidate source and documentation:
 - <https://docs.rs/tokio_sse_codec/0.0.2/tokio_sse_codec/>
 - <https://docs.rs/crate/tokio_sse_codec/0.0.2/source/src/field_decoder.rs>
 - <https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream>
+
+## Typed failures, shared request bodies and observations
+
+The local client uses no model SDK. Request text is encoded once into
+`EncodedJsonBody`; clones share its owned allocation, and reqwest receives a
+zero-copy Bytes owner. No process-wide model slots or fair-admission queue remain.
+
+`TransportError` distinguishes timeout, connection, network, request-build, invalid
+response, response-too-large and interrupted-stream failures. Build, invalid-response
+and size-limit failures do not consume repeated attempts. Existing provider business
+classification and the configured finite retry budget remain in the protocol adapters.
+
+`RetryAfter` captures seconds or an HTTP date as a monotonic deadline. Only the
+rejected request waits; unrelated calls proceed, and dropping the waiting future
+cancels it. This is not an account-wide rate-limit or quota implementation.
+
+Completed local responses expose optional `HttpTimings`: response-header wait, first
+complete SSE event, response-body duration and total HTTP attempt time. Protocol
+adapters retain these as `ModelClientResponse.transport_timings` and populate
+`provider_latency_ms` from that attempt's total time. Header wait includes network
+and upstream scheduling. First SSE event includes comments and is not semantic TTFT.
+These observations exclude request encoding and previous retry waits; they add no
+Session schema or product-visible messages. Test transports may supply no timings.

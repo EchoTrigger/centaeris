@@ -1696,14 +1696,7 @@ async fn run_agent_query_loop(
         session_id: request.session_id.clone(),
         config: model_config.clone(),
     };
-    let run_id = request
-        .agent_run_identity
-        .as_ref()
-        .ok_or_else(|| "model admission requires AgentRun identity".to_string())?
-        .agent_run_id
-        .clone();
     let transport = ReqwestJsonHttpTransport::for_session(
-        run_id,
         &request.session_id,
         &model_config.provider_id,
         || event_writer.model_http_client(),
@@ -1773,12 +1766,10 @@ async fn run_manual_context_compaction(
         session_id: session_id.to_string(),
         config: model_config.clone(),
     };
-    let transport = ReqwestJsonHttpTransport::for_session(
-        format!("compact:{session_id}:{turn_id}"),
-        session_id,
-        &model_config.provider_id,
-        || event_writer.model_http_client(),
-    )?;
+    let transport =
+        ReqwestJsonHttpTransport::for_session(session_id, &model_config.provider_id, || {
+            event_writer.model_http_client()
+        })?;
     match model_config_wire_api(&registry, &model_config)? {
         WireApi::AnthropicMessages => {
             let client = AnthropicMessagesModelClient::new(registry, transport);
@@ -3474,7 +3465,6 @@ pub(crate) async fn test_model(
         session_config: config.clone(),
     };
     let transport = ModelTestTransport::new(ReqwestJsonHttpTransport::for_session(
-        "model-test".to_string(),
         &request.session_id,
         &config.provider_id,
         || event_writer.model_http_client(),
@@ -3534,7 +3524,7 @@ impl ModelTestTransport {
         }
     }
 
-    fn record(&self, response: &Result<JsonHttpResponse, String>) {
+    fn record(&self, response: &Result<JsonHttpResponse, centaeris_core::model::TransportError>) {
         if let Ok(response) = response {
             if let Ok(mut status) = self.http_status.lock() {
                 *status = Some(response.status_code);

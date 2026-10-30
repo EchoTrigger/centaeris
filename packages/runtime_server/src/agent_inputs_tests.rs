@@ -536,6 +536,7 @@ impl centaeris_core::model::ModelClient for NativeIntakeModel {
         Box::pin(async move {
             self.0.lock().unwrap().push(request.clone());
             Ok(centaeris_core::model::ModelClientResponse {
+                transport_timings: None,
                 generate_result: centaeris_core::model::GenerateResult {
                     content: "accepted task answer".into(),
                     tool_calls: vec![],
@@ -881,6 +882,7 @@ impl centaeris_core::model::ModelClient for InputModelProbe {
             }
             self.requests.lock().unwrap().push(request.clone());
             Ok(centaeris_core::model::ModelClientResponse {
+                transport_timings: None,
                 generate_result: centaeris_core::model::GenerateResult {
                     content: "completed synthetic input processing".into(),
                     tool_calls: vec![],

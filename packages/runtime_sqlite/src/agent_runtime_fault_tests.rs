@@ -159,6 +159,7 @@ impl DynamicToolProvider for SnapshotFailingProvider {
 
 fn model_response(content: &str, tool_calls: Vec<ToolCallEnvelope>) -> ModelClientResponse {
     ModelClientResponse {
+        transport_timings: None,
         generate_result: GenerateResult {
             content: content.to_string(),
             tool_calls,

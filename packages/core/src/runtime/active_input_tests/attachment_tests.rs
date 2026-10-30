@@ -149,6 +149,7 @@ impl ModelClient for AttachmentModel {
                 }
             }
             Ok(ModelClientResponse {
+                transport_timings: None,
                 generate_result: GenerateResult {
                     content: "Image answer".into(),
                     tool_calls: vec![],

@@ -22,6 +22,7 @@ impl ModelClient for TwoToolModel {
                 tool_calls.push(second);
             }
             Ok(ModelClientResponse {
+                transport_timings: None,
                 generate_result: GenerateResult {
                     content: String::new(),
                     tool_calls,

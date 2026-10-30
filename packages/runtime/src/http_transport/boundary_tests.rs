@@ -71,7 +71,6 @@ async fn redirects_never_reach_another_server_with_model_credentials() {
             )
             .await;
             let transport = ReqwestJsonHttpTransport::for_session(
-                "redirect-test".into(),
                 "test-session",
                 "opencode-go.default",
                 build_model_http_client,
@@ -134,6 +133,7 @@ async fn sse_success_requires_event_stream_media_type() {
             execute_sse_async(reqwest::Client::new(), request(url), &mut |_| {})
                 .await
                 .unwrap_err()
+                .to_string()
                 .contains("Content-Type")
         );
     }
@@ -176,7 +176,7 @@ async fn model_json_and_sse_error_bodies_are_bounded() {
                     Err(error) => error,
                     Ok(_) => panic!("oversized body must be rejected"),
                 };
-                assert!(error.contains("body exceeds"));
+                assert!(error.to_string().contains("body exceeds"));
             }
         }
     }
@@ -194,7 +194,7 @@ async fn declared_oversized_body_is_rejected_without_waiting_for_body_bytes() {
     let error = execute_json_async(reqwest::Client::new(), request(url))
         .await
         .unwrap_err();
-    assert!(error.contains("body exceeds"));
+    assert!(error.to_string().contains("body exceeds"));
 }
 
 #[test]
@@ -203,7 +203,8 @@ fn sse_limits_unterminated_lines() {
     assert!(decoder
         .push(&vec![b'x'; 16 * 1024 * 1024 + 1], &mut |_| {})
         .unwrap_err()
-        .contains("line exceeds"));
+        .to_string()
+        .contains("body exceeds"));
 }
 
 #[test]
@@ -217,7 +218,7 @@ fn sse_limits_multiline_event_without_blank_delimiter() {
             break;
         }
     }
-    assert!(result.unwrap_err().contains("event exceeds"));
+    assert!(result.unwrap_err().to_string().contains("body exceeds"));
 }
 
 #[test]
@@ -242,7 +243,7 @@ fn push_line_with_split_delimiters(
     line: &[u8],
     delimiter: &str,
     on_data: &mut (dyn FnMut(String) + Send),
-) -> Result<(), String> {
+) -> Result<(), TransportError> {
     for chunk in line.chunks(4093) {
         decoder.push(chunk, on_data)?;
     }
@@ -277,7 +278,7 @@ fn sse_accepts_exact_line_budget_and_rejects_overflow_with_split_delimiters() {
                 result.unwrap();
                 assert_eq!(delivered, 1, "delimiter={delimiter:?}");
             } else {
-                assert!(result.unwrap_err().contains("line exceeds"));
+                assert!(result.unwrap_err().to_string().contains("body exceeds"));
                 assert_eq!(delivered, 0, "oversized line must never be delivered");
             }
         }
@@ -321,7 +322,7 @@ fn sse_accepts_exact_multiline_event_budget_and_rejects_overflow_before_delivery
                 result.unwrap();
                 assert_eq!(delivered, 1, "delimiter={delimiter:?}");
             } else {
-                assert!(result.unwrap_err().contains("event exceeds"));
+                assert!(result.unwrap_err().to_string().contains("body exceeds"));
                 assert_eq!(delivered, 0, "oversized event must never be delivered");
             }
         }
@@ -359,5 +360,42 @@ async fn done_without_eof_keeps_existing_idle_timeout_contract() {
     let error = read_sse_chunks(chunks, 150, &mut |_| panic!("DONE is not data"))
         .await
         .unwrap_err();
-    assert!(error.contains("idle timeout"));
+    assert!(error.to_string().contains("idle timeout"));
+}
+
+#[tokio::test]
+async fn transport_timings_distinguish_headers_sse_events_and_body_completion() {
+    let url = response_server(
+        200,
+        "text/event-stream",
+        ": waiting\ndata: hello\n\n".into(),
+        String::new(),
+    )
+    .await;
+    let mut events = Vec::new();
+    let response = execute_sse_async(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        request(url),
+        &mut |event| events.push(event),
+    )
+    .await
+    .unwrap();
+    let timings = response
+        .timings
+        .expect("real HTTP response has observations");
+    assert!(timings.headers_wait_ms <= timings.first_event_ms.unwrap());
+    assert!(timings.first_event_ms.unwrap() <= timings.total_ms);
+    assert_eq!(
+        timings.response_body_ms,
+        timings.total_ms - timings.headers_wait_ms
+    );
+    assert_eq!(events.len(), 2, "comment is an event, not model text");
+    let url = response_server(200, "application/json", "{}".into(), String::new()).await;
+    let response = execute_json_async(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        request(url),
+    )
+    .await
+    .unwrap();
+    assert!(response.timings.unwrap().first_event_ms.is_none());
 }

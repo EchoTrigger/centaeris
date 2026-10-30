@@ -11,6 +11,7 @@ pub(super) fn parse_sse_json_frame(
     attempt: u32,
 ) -> Result<Value, ModelClientError> {
     serde_json::from_str(frame).map_err(|error| ModelClientError {
+        retry_after: None,
         kind: ModelClientErrorKind::ProviderResponseInterrupted,
         message: format!(
             "malformed_sse_frame: wireApi={wire_api} frameBytes={} frameSha256=sha256:{:x} jsonLine={} jsonColumn={} attempt={attempt}",

@@ -27,6 +27,7 @@ impl ModelClient for DeliveryModel {
                 vec![]
             };
             Ok(ModelClientResponse {
+                transport_timings: None,
                 generate_result: GenerateResult {
                     content: if tool_calls.is_empty() {
                         "Private candidate answer".into()
@@ -410,6 +411,7 @@ impl ModelClient for TerminalDeliveryModel {
     ) -> ModelClientFuture<'a, ModelClientResponse> {
         Box::pin(async move {
             Ok(ModelClientResponse {
+                transport_timings: None,
                 generate_result: GenerateResult {
                     content: String::new(),
                     tool_calls: vec![ToolCallEnvelope {
@@ -488,6 +490,7 @@ impl ModelClient for LargePrivateDraftModel {
         Box::pin(async move {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(ModelClientResponse {
+                transport_timings: None,
                 generate_result: GenerateResult {
                     content: "长".repeat(10000),
                     tool_calls: vec![],
@@ -763,6 +766,7 @@ impl ModelClient for SupplementDeliveryModel {
             }
             let tool_round = index.is_multiple_of(2) && !(index == 0 && self.initial_background);
             Ok(ModelClientResponse {
+                transport_timings: None,
                 generate_result: GenerateResult {
                     content: if !tool_round {
                         "Private Final".into()

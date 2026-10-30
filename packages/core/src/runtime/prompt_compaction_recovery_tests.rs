@@ -274,6 +274,7 @@ impl ModelClient for RecoveryFinalModel {
         Box::pin(async move {
             self.requests.fetch_add(1, Ordering::SeqCst);
             Ok(ModelClientResponse {
+                transport_timings: None,
                 generate_result: GenerateResult {
                     content: "continuation accepted".into(),
                     tool_calls: vec![],

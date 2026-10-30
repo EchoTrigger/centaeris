@@ -2,7 +2,7 @@ use centaeris_core::model::prepared_prompt::PreparedPromptV1;
 use centaeris_core::model::TruncatedToolCall;
 use centaeris_core::model::{
     validate_provider_tool_call_arguments, ModelClient, ModelClientError, ModelClientErrorKind,
-    ModelClientFuture, ModelClientRequest, ModelClientResponse, ModelClientStreamEvent,
+    ModelClientFuture, ModelClientRequest, ModelClientResponse, ModelClientStreamEvent, RetryAfter,
 };
 use centaeris_core::model::{GenerateResult, ToolCallEnvelope};
 use centaeris_core::runtime::contracts::RuntimeProcessState;
@@ -164,7 +164,11 @@ impl ApiModelClient {
         let model_run_request = self.model_run_request(request)?;
         let mut observation = self.timings.model_http(&request.turn_id, attempt, false);
         let result = self
-            .call_api_response(model_run_request, &mut observation)
+            .call_api_response(
+                model_run_request,
+                request.session_config.timeout_ms,
+                &mut observation,
+            )
             .await;
         match &result {
             Ok(response) => observation.complete(
@@ -182,6 +186,7 @@ impl ApiModelClient {
     async fn call_api_response(
         &self,
         model_run_request: ModelRunRequest<'_>,
+        timeout_ms: u64,
         observation: &mut crate::observations::ModelHttp,
     ) -> Result<ModelClientResponse, ModelClientError> {
         let url = format!(
@@ -191,6 +196,7 @@ impl ApiModelClient {
         let response = self
             .client
             .post(url)
+            .timeout(model_response_timeout(timeout_ms))
             .header("Content-Type", "application/json")
             .header("X-Internal-Token", self.internal_api_token.as_str())
             .json(&model_run_request)
@@ -198,11 +204,18 @@ impl ApiModelClient {
             .await
             .map_err(|error| {
                 ModelClientError::new(
-                    ModelClientErrorKind::Network,
+                    if error.is_timeout() {
+                        ModelClientErrorKind::Timeout
+                    } else if error.is_builder() {
+                        ModelClientErrorKind::InvalidRequest
+                    } else {
+                        ModelClientErrorKind::Network
+                    },
                     format!("api model run request failed: {error}"),
-                    true,
+                    !error.is_builder(),
                 )
             })?;
+        observation.headers_received();
         let status = response.status();
         let body = response.text().await.map_err(|error| {
             ModelClientError::new(
@@ -220,6 +233,7 @@ impl ApiModelClient {
                             event_type: "error".to_string(),
                             reason_type: failure.reason_type,
                             http_status: failure.http_status,
+                            retry_after: failure.retry_after,
                             truncated_tool_calls: failure.truncated_tool_calls,
                         })?);
                     }
@@ -266,6 +280,7 @@ impl ApiModelClient {
                     sleep_before_retry(
                         retry.saturating_add(1),
                         request.session_config.retry_backoff_ms,
+                        error.retry_after,
                     )
                     .await;
                 }
@@ -283,7 +298,12 @@ impl ApiModelClient {
         let model_run_request = self.model_run_request(request)?;
         let mut observation = self.timings.model_http(&request.turn_id, attempt, true);
         let result = self
-            .call_api_stream_response(model_run_request, sink, &mut observation)
+            .call_api_stream_response(
+                model_run_request,
+                request.session_config.timeout_ms,
+                sink,
+                &mut observation,
+            )
             .await;
         if result.is_err() {
             observation.finish(false);
@@ -294,6 +314,7 @@ impl ApiModelClient {
     async fn call_api_stream_response(
         &self,
         model_run_request: ModelRunRequest<'_>,
+        timeout_ms: u64,
         sink: &mut (dyn FnMut(ModelClientStreamEvent) + Send),
         observation: &mut crate::observations::ModelHttp,
     ) -> Result<ModelClientResponse, ModelClientError> {
@@ -301,16 +322,25 @@ impl ApiModelClient {
             "{}/internal/model-runs",
             self.api_internal_url.trim_end_matches('/')
         );
-        let mut response = self
+        let pending = self
             .client
             .post(url)
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
             .header("X-Internal-Token", self.internal_api_token.as_str())
             .json(&model_run_request)
-            .send()
+            .send();
+        let mut response = tokio::time::timeout(model_response_timeout(timeout_ms), pending)
             .await
+            .map_err(|_| {
+                ModelClientError::new(
+                    ModelClientErrorKind::Timeout,
+                    "api model stream response headers timed out",
+                    true,
+                )
+            })?
             .map_err(|error| stream_error("api model stream request failed", error))?;
+        observation.headers_received();
         if !response.status().is_success() {
             return Err(ModelClientError::new(
                 ModelClientErrorKind::Provider,
@@ -323,7 +353,21 @@ impl ApiModelClient {
         let mut result = None;
         let mut terminal_received = false;
         loop {
-            let chunk = match response.chunk().await {
+            let received = tokio::time::timeout(
+                std::time::Duration::from_millis(
+                    centaeris_core::model::DEFAULT_MODEL_SSE_IDLE_TIMEOUT_MS,
+                ),
+                response.chunk(),
+            )
+            .await
+            .map_err(|_| {
+                ModelClientError::new(
+                    ModelClientErrorKind::Timeout,
+                    "api model stream idle timeout",
+                    true,
+                )
+            })?;
+            let chunk = match received {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break,
                 Err(_) if terminal_received => break,
@@ -540,6 +584,7 @@ impl ApiModelClient {
                     sleep_before_retry(
                         retry.saturating_add(1),
                         request.session_config.retry_backoff_ms,
+                        error.retry_after,
                     )
                     .await;
                 }
@@ -572,7 +617,19 @@ impl ModelClient for ApiModelClient {
     }
 }
 
-async fn sleep_before_retry(attempt: u32, retry_backoff_ms: u64) {
+fn model_response_timeout(configured_ms: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(if configured_ms == 0 {
+        centaeris_core::model::DEFAULT_MODEL_RESPONSE_HEADERS_TIMEOUT_MS
+    } else {
+        configured_ms
+    })
+}
+
+async fn sleep_before_retry(attempt: u32, retry_backoff_ms: u64, advice: Option<RetryAfter>) {
+    if let Some(advice) = advice {
+        advice.wait().await;
+        return;
+    }
     let delay_ms = retry_backoff_ms.saturating_mul(u64::from(attempt));
     if delay_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -580,16 +637,23 @@ async fn sleep_before_retry(attempt: u32, retry_backoff_ms: u64) {
 }
 
 fn stream_error(label: &str, error: reqwest::Error) -> ModelClientError {
-    ModelClientError::new(
-        ModelClientErrorKind::ProviderResponseInterrupted,
-        format!("{label}: {error}"),
-        true,
-    )
+    let kind = if error.is_timeout() {
+        ModelClientErrorKind::Timeout
+    } else if error.is_builder() {
+        ModelClientErrorKind::InvalidRequest
+    } else if error.is_connect() {
+        ModelClientErrorKind::Network
+    } else {
+        ModelClientErrorKind::ProviderResponseInterrupted
+    };
+    ModelClientError::new(kind, format!("{label}: {error}"), !error.is_builder())
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ModelStreamFailure {
+    #[serde(default)]
+    retry_after: Option<String>,
     schema: String,
     #[serde(rename = "type")]
     event_type: String,
@@ -603,6 +667,8 @@ struct ModelStreamFailure {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ModelHttpFailure {
+    #[serde(default)]
+    retry_after: Option<String>,
     error: String,
     reason_type: String,
     #[serde(deserialize_with = "required_optional_http_status")]
@@ -823,6 +889,7 @@ fn hosted_model_error(failure: ModelStreamFailure) -> Result<ModelClientError, M
         .encoded(),
         retryable,
     );
+    error.retry_after = failure.retry_after.as_deref().and_then(RetryAfter::parse);
     error.provider_code = Some(failure.reason_type);
     error.truncated_tool_calls = failure
         .truncated_tool_calls
@@ -850,6 +917,7 @@ fn model_response(payload: ModelRunResponse) -> Result<ModelClientResponse, Mode
         .collect::<Vec<_>>();
     validate_provider_tool_call_arguments("api.model.run.v1", &tool_calls)?;
     Ok(ModelClientResponse {
+        transport_timings: None,
         generate_result: GenerateResult {
             content: payload.text,
             tool_calls,
@@ -982,30 +1050,31 @@ mod tests {
             }).await
         });
         assert_eq!(event_rx.recv().await.unwrap(), "reasoning");
-        assert_eq!(records.lock().unwrap().len(), 1);
-        assert_eq!(records.lock().unwrap()[0]["phase"], "modelFirstEvent");
+        assert_eq!(records.lock().unwrap().len(), 2);
+        assert_eq!(records.lock().unwrap()[1]["phase"], "modelFirstEvent");
         *elapsed.lock().unwrap() = Duration::from_millis(60);
         next_text.send(()).unwrap();
         assert_eq!(event_rx.recv().await.unwrap(), "text");
-        assert_eq!(records.lock().unwrap().len(), 2);
-        assert_eq!(records.lock().unwrap()[1]["phase"], "modelFirstText");
+        assert_eq!(records.lock().unwrap().len(), 3);
+        assert_eq!(records.lock().unwrap()[2]["phase"], "modelFirstText");
         *elapsed.lock().unwrap() = Duration::from_millis(200);
         next_result.send(()).unwrap();
         result_received.await.unwrap();
         assert!(!generation.is_finished());
-        assert_eq!(records.lock().unwrap().len(), 2);
+        assert_eq!(records.lock().unwrap().len(), 3);
         *elapsed.lock().unwrap() = Duration::from_millis(260);
         finish_body.send(()).unwrap();
         let response = generation.await.unwrap().unwrap();
         server.await.unwrap();
         assert_eq!(response.generate_result.content, "private response");
         let records = records.lock().unwrap();
-        assert_eq!(records.len(), 3);
-        assert_eq!(records[0]["elapsedMs"], 25.0);
-        assert_eq!(records[1]["elapsedMs"], 60.0);
-        assert_eq!(records[2]["elapsedMs"], 260.0);
-        assert_eq!(records[2]["phase"], "modelHttp");
-        assert_eq!(records[2]["outcome"], "ok");
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[0]["phase"], "modelResponseHeaders");
+        assert_eq!(records[1]["elapsedMs"], 25.0);
+        assert_eq!(records[2]["elapsedMs"], 60.0);
+        assert_eq!(records[3]["elapsedMs"], 260.0);
+        assert_eq!(records[3]["phase"], "modelHttp");
+        assert_eq!(records[3]["outcome"], "ok");
         for record in records.iter() {
             assert_eq!(record["requestId"], "model_request:observed");
             assert_eq!(record["jobId"], "agent_run.lifecycle:observed-run");
@@ -1509,6 +1578,49 @@ mod tests {
             thinking_mode,
             model_max_output_tokens,
         })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hosted_retry_after_is_carried_as_one_deadline() {
+        let failure: ModelStreamFailure = serde_json::from_value(serde_json::json!({
+            "schema": "api.model.stream.v1", "type": "error", "reasonType": "provider_rate_limited",
+            "httpStatus": 429, "retryAfter": "5"
+        }))
+        .unwrap();
+        let error = hosted_model_error(failure).unwrap();
+        assert!(error.retryable);
+        let advice = error.retry_after.expect("upstream advice retained");
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        let started = tokio::time::Instant::now();
+        sleep_before_retry(1, 600, Some(advice)).await;
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn hosted_stream_header_timeout_closes_the_pending_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            while socket.read(&mut bytes).await.unwrap() != 0 {}
+            let _ = socket.shutdown().await;
+        });
+        let client = model_client(format!("http://{address}"), None, 1024);
+        let mut request = model_request();
+        request.session_config.timeout_ms = 250;
+        request.session_config.max_retries = 0;
+        let error = client
+            .generate_stream(&request, &mut |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ModelClientErrorKind::Timeout);
+        assert_eq!(error.provider_attempts, 1);
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[test]

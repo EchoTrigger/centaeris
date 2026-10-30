@@ -114,7 +114,7 @@ impl<T: JsonHttpTransport> AnthropicMessagesModelClient<T> {
             sse_idle_timeout_ms: DEFAULT_MODEL_SSE_IDLE_TIMEOUT_MS,
             max_retries: resolved.effective_max_retries,
             retry_backoff_ms: resolved.effective_retry_backoff_ms,
-            body_json,
+            body_json: body_json.into(),
         })
     }
 
@@ -150,6 +150,7 @@ impl<T: JsonHttpTransport> AnthropicMessagesModelClient<T> {
         validate_provider_tool_call_arguments("anthropic-messages", &tool_calls)?;
         let usage = parsed.usage.as_ref();
         Ok(ModelClientResponse {
+            transport_timings: response.timings,
             generate_result: GenerateResult {
                 content: extract_anthropic_text(parsed.content.as_slice()),
                 tool_calls,
@@ -169,7 +170,7 @@ impl<T: JsonHttpTransport> AnthropicMessagesModelClient<T> {
             provider_request_id: parsed
                 .id
                 .or_else(|| response.headers.get("x-request-id").cloned()),
-            provider_latency_ms: None,
+            provider_latency_ms: response.timings.map(|timings| timings.total_ms),
             provider_attempts: 1,
         })
     }
@@ -323,6 +324,7 @@ impl<T: JsonHttpTransport> ModelClient for AnthropicMessagesModelClient<T> {
             let mut parsed_response = self
                 .parse_http_response(
                     JsonHttpResponse {
+                        timings: response.timings,
                         status_code: response.status_code,
                         headers: response.headers,
                         body_json: serde_json::to_string(&parsed).map_err(|error| {
@@ -1104,6 +1106,7 @@ pub(super) fn reject_anthropic_stop_reason(
 ) -> Result<(), ModelClientError> {
     match stop_reason {
         Some("max_tokens") => Err(ModelClientError {
+            retry_after: None,
             kind: ModelClientErrorKind::ProviderResponseInterrupted,
             message: "provider stopped generation at the output-token limit before producing a complete response".to_string(),
             retryable: false,
@@ -1160,6 +1163,7 @@ pub(super) fn map_anthropic_messages_http_error(
         _ => ModelClientErrorKind::Unknown,
     };
     ModelClientError {
+        retry_after: None,
         kind,
         message,
         retryable: is_retryable_model_client_error_kind(kind),

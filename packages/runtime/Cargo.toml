@@ -34,6 +34,7 @@ name = "centaeris-runtime-protocol-docs"
 path = "src/bin/runtime_protocol_docs.rs"
 
 [dependencies]
+bytes.workspace = true
 base64.workspace = true
 chrono.workspace = true
 fs2.workspace = true

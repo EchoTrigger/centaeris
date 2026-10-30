@@ -396,6 +396,7 @@ pub struct ModelClientRequest {
 
 #[derive(Debug, Clone)]
 pub struct ModelClientResponse {
+    pub transport_timings: Option<super::HttpTimings>,
     pub generate_result: GenerateResult,
     pub provider_request_id: Option<String>,
     pub provider_latency_ms: Option<u64>,
@@ -481,6 +482,7 @@ impl ModelClientErrorKind {
 
 #[derive(Debug, Clone)]
 pub struct ModelClientError {
+    pub retry_after: Option<super::RetryAfter>,
     pub kind: ModelClientErrorKind,
     pub message: String,
     pub retryable: bool,
@@ -496,6 +498,7 @@ impl ModelClientError {
             message: message.into(),
             retryable,
             provider_code: None,
+            retry_after: None,
             provider_attempts: 0,
             truncated_tool_calls: Vec::new(),
         }
@@ -522,25 +525,6 @@ pub(super) fn is_retryable_model_client_error_kind(kind: ModelClientErrorKind) -
             | ModelClientErrorKind::Network
             | ModelClientErrorKind::Provider
     )
-}
-
-pub(super) fn map_transport_model_client_error(message: String) -> ModelClientError {
-    let normalized = message.to_ascii_lowercase();
-    let kind = if normalized.contains("read http body failed")
-        || normalized.contains("error decoding response body")
-        || normalized.contains("response body")
-        || normalized.contains("stream ended before a terminal response event")
-    {
-        ModelClientErrorKind::ProviderResponseInterrupted
-    } else if normalized.contains("timeout")
-        || normalized.contains("timed out")
-        || normalized.contains("deadline has elapsed")
-    {
-        ModelClientErrorKind::Timeout
-    } else {
-        ModelClientErrorKind::Network
-    };
-    ModelClientError::new(kind, message, is_retryable_model_client_error_kind(kind))
 }
 
 pub type ModelClientFuture<'a, TValue> =

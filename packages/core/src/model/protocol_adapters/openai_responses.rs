@@ -102,7 +102,7 @@ impl<T: JsonHttpTransport> OpenAiResponsesModelClient<T> {
             sse_idle_timeout_ms: DEFAULT_MODEL_SSE_IDLE_TIMEOUT_MS,
             max_retries: resolved.effective_max_retries,
             retry_backoff_ms: resolved.effective_retry_backoff_ms,
-            body_json,
+            body_json: body_json.into(),
         })
     }
 
@@ -158,6 +158,7 @@ impl<T: JsonHttpTransport> OpenAiResponsesModelClient<T> {
         let tool_calls = extract_openai_responses_tool_calls(parsed.output.as_deref())?;
         validate_provider_tool_call_arguments("openai-responses", &tool_calls)?;
         Ok(ModelClientResponse {
+            transport_timings: response.timings,
             generate_result: GenerateResult {
                 content: extract_openai_responses_text(
                     parsed.output_text.clone(),
@@ -187,7 +188,7 @@ impl<T: JsonHttpTransport> OpenAiResponsesModelClient<T> {
                     .and_then(openai_responses_cache_miss_tokens),
             },
             provider_request_id,
-            provider_latency_ms: None,
+            provider_latency_ms: response.timings.map(|timings| timings.total_ms),
             provider_attempts: 1,
         })
     }
@@ -337,6 +338,7 @@ impl<T: JsonHttpTransport> ModelClient for OpenAiResponsesModelClient<T> {
             let parsed = stream_state.into_response();
             let mut parsed_response = self
                 .parse_http_response(JsonHttpResponse {
+                    timings: response.timings,
                     status_code: response.status_code,
                     headers: response.headers,
                     body_json: serde_json::to_string(&parsed).map_err(|err| {
@@ -1048,6 +1050,7 @@ fn reject_openai_responses_finish_reason(
 ) -> Result<(), ModelClientError> {
     match finish_reason {
         Some("max_output_tokens") => Err(ModelClientError {
+            retry_after: None,
             kind: ModelClientErrorKind::ProviderResponseInterrupted,
             message: "provider stopped generation at the output-token limit before producing a complete response".to_string(),
             retryable: false,
@@ -1056,6 +1059,7 @@ fn reject_openai_responses_finish_reason(
             truncated_tool_calls: Vec::new(),
         }),
         Some("incomplete") => Err(ModelClientError {
+            retry_after: None,
             kind: ModelClientErrorKind::ProviderResponseInterrupted,
             message: "openai-responses provider returned an incomplete response".to_string(),
             retryable: false,
@@ -1258,6 +1262,7 @@ pub(super) fn map_openai_responses_http_error(
     };
     let retryable = is_retryable_model_client_error_kind(kind);
     ModelClientError {
+        retry_after: None,
         kind,
         message,
         retryable,

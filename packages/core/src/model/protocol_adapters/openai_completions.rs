@@ -105,7 +105,7 @@ impl<T: JsonHttpTransport> OpenAiCompatibleModelClient<T> {
             sse_idle_timeout_ms: DEFAULT_MODEL_SSE_IDLE_TIMEOUT_MS,
             max_retries: resolved.effective_max_retries,
             retry_backoff_ms: resolved.effective_retry_backoff_ms,
-            body_json,
+            body_json: body_json.into(),
         })
     }
 
@@ -173,6 +173,7 @@ impl<T: JsonHttpTransport> OpenAiCompatibleModelClient<T> {
             finish_reason.as_deref(),
         )?;
         Ok(ModelClientResponse {
+            transport_timings: response.timings,
             generate_result: GenerateResult {
                 content,
                 tool_calls,
@@ -185,7 +186,7 @@ impl<T: JsonHttpTransport> OpenAiCompatibleModelClient<T> {
                 prompt_cache_miss_tokens: usage.and_then(openai_compatible_cache_miss_tokens),
             },
             provider_request_id,
-            provider_latency_ms: None,
+            provider_latency_ms: response.timings.map(|timings| timings.total_ms),
             provider_attempts: 1,
         })
     }
@@ -336,6 +337,7 @@ impl<T: JsonHttpTransport> ModelClient for OpenAiCompatibleModelClient<T> {
             let mut parsed_response = self
                 .parse_http_response(
                     JsonHttpResponse {
+                        timings: response.timings,
                         status_code: response.status_code,
                         headers: response.headers,
                         body_json: serde_json::to_string(&parsed).map_err(|err| {
@@ -972,6 +974,7 @@ pub(super) fn reject_openai_compatible_finish_reason(
 ) -> Result<(), ModelClientError> {
     match finish_reason {
         Some("insufficient_system_resource") => Err(ModelClientError {
+            retry_after: None,
             kind: ModelClientErrorKind::ProviderUnavailable,
             message: "provider stopped generation because system resources were insufficient"
                 .to_string(),
@@ -981,6 +984,7 @@ pub(super) fn reject_openai_compatible_finish_reason(
             truncated_tool_calls: Vec::new(),
         }),
         Some("length" | "max_tokens") => Err(ModelClientError {
+            retry_after: None,
             kind: ModelClientErrorKind::ProviderResponseInterrupted,
             message: "provider stopped generation at the output-token limit before producing a complete response"
                 .to_string(),
@@ -1003,6 +1007,7 @@ fn reject_openai_compatible_empty_final_response(
         return Ok(());
     }
     Err(ModelClientError {
+        retry_after: None,
         kind: ModelClientErrorKind::ProviderResponseInterrupted,
         message: format!(
             "empty_final_response: openai-compatible provider returned an empty final response (finish_reason={}, reasoning_content_present={has_reasoning_content})",
@@ -1398,6 +1403,7 @@ pub(super) fn map_openai_compatible_http_error(
     };
     let retryable = is_retryable_model_client_error_kind(kind);
     ModelClientError {
+        retry_after: None,
         kind,
         message,
         retryable,
