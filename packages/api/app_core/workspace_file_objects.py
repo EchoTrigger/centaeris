@@ -232,6 +232,25 @@ def _physical_groups(session, descriptors, files):
     return groups
 
 
+def _publish_file_ranges(files):
+    if not files:
+        return
+    meta = WorkspaceFileObject._meta
+    quote = connection.ops.quote_name
+    columns = [quote(meta.get_field(field).column)
+               for field in ("object", "pack", "packOffset", "verifiedPublicationToken")]
+    identity, pack, offset, token = columns
+    rows = ", ".join(["(%s, %s, %s::bigint, %s)"] * len(files))
+    parameters = [value for file in files
+                  for value in (file.pk, file.pack_id, file.packOffset, file.verifiedPublicationToken)]
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"UPDATE {quote(meta.db_table)} AS target "
+            f"SET {pack}=changes.{pack}, {offset}=changes.{offset}, {token}=changes.{token} "
+            f"FROM (VALUES {rows}) AS changes ({', '.join(columns)}) "
+            f"WHERE target.{identity}=changes.{identity}", parameters)
+
+
 def upload_files(source, body, descriptors, authorize):
     """Verify logical files once and durably publish bounded physical units."""
     descriptors = ordered_descriptors(descriptors, unique=True)
@@ -350,7 +369,7 @@ def upload_files(source, body, descriptors, authorize):
             for directory in directories:
                 _sync_directory(directory)
             WorkspaceFilePack.objects.bulk_update(verified_packs, ["verifiedPublicationToken"])
-            WorkspaceFileObject.objects.bulk_update(changed, ["pack", "packOffset", "verifiedPublicationToken"])
+            _publish_file_ranges(changed)
             WorkspaceSnapshotUpload.objects.filter(pk__in=uploads).update(state="committed", updatedAt=timezone.now())
         return descriptors
     finally:
