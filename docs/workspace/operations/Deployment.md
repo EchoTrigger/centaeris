@@ -31,7 +31,7 @@ global and Workspace environment counts are 8, memory budgets are 12 GiB, and
 workspace byte budgets are 32 GiB. Each environment retains its 2-CPU/4-GiB
 ceiling. Host-derived memory headroom and conservative unknown-allocation charges
 remain active, so eight concurrent environments are not guaranteed on every host.
-`DOCKER_CREATE_CONCURRENCY=2` bounds create calls per Runtime process.
+`DOCKER_CREATE_CONCURRENCY=4` bounds create calls per Runtime process.
 
 OverlayFS-backed Docker storage is required. Runtime refuses to start on `vfs`,
 a missing backend, or any unsupported storage driver. Use the matching

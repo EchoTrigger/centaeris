@@ -363,9 +363,9 @@ recovery are documented in [Garbage collection](../operations/GarbageCollection.
 ## Production review
 
 Runtime's `DOCKER_CREATE_CONCURRENCY` limits simultaneous Docker container-create
-calls (integer 1..16, default 2); invalid values fail startup. This does not change
+calls (integer 1..16, default 4); invalid values fail startup. This does not change
 worker slots, start/remove concurrency or execution limits. The production
-Compose configuration supplies 2 and passes explicit overrides through. Isolated
+Compose configuration supplies 4 and passes explicit overrides through. Isolated
 perf experiments use
 `PERF_DOCKER_CREATE_CONCURRENCY` in `perf/.state/test.env` through the perf overlay.
 

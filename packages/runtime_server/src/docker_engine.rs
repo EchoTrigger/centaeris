@@ -14,7 +14,7 @@ static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
 static IO_RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
 
 fn parse_create_limit(value: Option<&str>) -> Result<usize, String> {
-    let Some(value) = value else { return Ok(2) };
+    let Some(value) = value else { return Ok(4) };
     value
         .parse::<usize>()
         .ok()
@@ -547,8 +547,8 @@ mod tests {
     }
 
     #[test]
-    fn create_limit_defaults_to_two_and_rejects_invalid_values() {
-        assert_eq!(parse_create_limit(None).unwrap(), 2);
+    fn create_limit_defaults_to_four_and_rejects_invalid_values() {
+        assert_eq!(parse_create_limit(None).unwrap(), 4);
         for value in ["1", "2", "4", "16"] {
             assert_eq!(
                 parse_create_limit(Some(value)).unwrap(),
