@@ -112,6 +112,13 @@ RUSTFLAGS=-Ctarget-feature=+crt-static cargo rustc --locked --release \
   --bin execution_agent -- -C relocation-model=static
 ```
 
+The sandbox Docker build applies this same build contract through
+`build-static-helper.sh`. It derives the musl target from the native GNU compiler
+host and uses `musl-gcc` for both Rust linking and bundled SQLite C compilation.
+Only the verified static helper is copied into the final image; the supervisor
+and Runtime retain their GNU builds. Building outside Docker requires
+`musl-tools`, `binutils`, and the matching Rust musl target.
+
 Verify that `readelf -l` reports no `INTERP` segment before installation. The
 GNU static PIE helper can abort during glibc startup when runsc imports its
 sealed descriptor as an anonymous executable. The musl target alone is not
