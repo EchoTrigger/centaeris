@@ -34,6 +34,15 @@ pub(crate) fn charge(
     })
 }
 
+pub(crate) const DEFAULT_STARTUP_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
+
+pub(crate) fn startup_memory_bytes() -> Result<u64, String> {
+    crate::positive_u64_env(
+        "RESIDENT_STARTUP_MEMORY_BYTES",
+        DEFAULT_STARTUP_MEMORY_BYTES,
+    )
+}
+
 pub(crate) struct Admission {
     pub global_used: ResidentResourceUsage,
     pub tenant_used: ResidentResourceUsage,
@@ -42,6 +51,7 @@ pub(crate) struct Admission {
     pub limits: ResidentCapacity,
     pub host_available_bytes: u64,
     pub host_headroom_bytes: u64,
+    pub startup_memory_bytes: u64,
     pub unobserved_host_memory_bytes: u64,
 }
 
@@ -63,10 +73,14 @@ pub(crate) fn admits(r: &Admission) -> Result<bool, String> {
         }
         .fits(limit)
     };
+    // A new preparation uses a startup allowance, not its cgroup ceiling.
+    // Unknown attempts retain their full durable charge below; aggregate
+    // declaration checks and the actual cgroup ceiling remain unchanged.
+    let startup_memory = r.startup_memory_bytes.min(r.requested.memory_bytes);
     let required_available = r
         .host_headroom_bytes
         .checked_add(r.unobserved_host_memory_bytes)
-        .and_then(|value| value.checked_add(r.requested.memory_bytes))
+        .and_then(|value| value.checked_add(startup_memory))
         .ok_or("shared resident host memory accounting overflow")?;
     let cpu_ceiling = r
         .limits
@@ -150,6 +164,7 @@ mod tests {
             },
             host_available_bytes: 10 * GIB,
             host_headroom_bytes: 2 * GIB,
+            startup_memory_bytes: DEFAULT_STARTUP_MEMORY_BYTES,
             unobserved_host_memory_bytes: 0,
         }
     }
@@ -188,7 +203,28 @@ mod tests {
     #[test]
     fn real_host_pressure_blocks_new_creation_even_below_static_totals() {
         let mut r = request(Default::default());
-        r.host_available_bytes = 5 * GIB;
+        r.host_available_bytes = 2 * GIB;
+        assert!(!admits(&r).unwrap());
+    }
+    #[test]
+    fn cold_creation_uses_startup_headroom_without_reducing_the_runtime_ceiling() {
+        let mut r = request(Default::default());
+        r.host_available_bytes = 3 * GIB;
+        assert!(admits(&r).unwrap());
+        assert_eq!(r.requested.memory_bytes, 4 * GIB);
+        r.global_used.memory_bytes = 9 * GIB;
+        assert!(
+            !admits(&r).unwrap(),
+            "aggregate declaration checks remain enforced"
+        );
+    }
+    #[test]
+    fn startup_headroom_is_bounded_by_the_requested_cgroup_ceiling() {
+        let mut r = request(Default::default());
+        r.requested.memory_bytes = GIB / 8;
+        r.host_available_bytes = r.host_headroom_bytes + GIB / 8;
+        assert!(admits(&r).unwrap());
+        r.host_available_bytes -= 1;
         assert!(!admits(&r).unwrap());
     }
     #[test]
@@ -200,7 +236,7 @@ mod tests {
     #[test]
     fn unknown_creation_still_reserves_full_memory_against_host_headroom() {
         let mut r = request(declaration());
-        r.host_available_bytes = 8 * GIB;
+        r.host_available_bytes = 6 * GIB;
         r.unobserved_host_memory_bytes = 4 * GIB;
         assert!(!admits(&r).unwrap());
     }

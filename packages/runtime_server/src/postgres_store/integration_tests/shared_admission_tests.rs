@@ -174,7 +174,7 @@ fn postgres_four_independent_live_environments_share_observed_resources() {
                     sandboxes,
                     shared: Some(SharedHostInventory {
                         host_id: "host".into(),
-                        available_memory_bytes: 10 * GIB,
+                        available_memory_bytes: 3 * GIB,
                         memory_headroom_bytes: 2 * GIB,
                         valid_until: std::time::Instant::now() + std::time::Duration::from_secs(5),
                         measured_by_container,

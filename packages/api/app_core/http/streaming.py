@@ -1,6 +1,7 @@
 from django.http import JsonResponse
 from ninja import Router
 
+from app_core.api_memory import bind_agent_run
 from app_core.models import AgentRun, SessionEvent
 from app_core.app_delegations import session_authority_is_current
 from app_core.agent_run_stream import (
@@ -34,6 +35,7 @@ async def agent_run_events(request, session_id: str, agent_run_id: str):
     if isinstance(prepared, JsonResponse):
         return prepared
     agent_run, cursor = prepared
+    bind_agent_run(agent_run.id)
     user_id = request.user.id
     delegation = request.app_delegation
     delegation_id = delegation.id if delegation is not None else None

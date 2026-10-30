@@ -7,6 +7,7 @@ from django.http import JsonResponse
 from django.db import connection
 from ninja import Router
 
+from app_core.api_memory import bind_agent_run
 from app_core.model_adapter import (
     ModelProviderError,
     encode_model_stream_event,
@@ -82,6 +83,7 @@ async def model_runs(request):
         return prepared
     model_config_ref = prepared
     agent_run_id = str(body["agentRunId"])
+    bind_agent_run(agent_run_id)
     if request.headers.get("Accept") == "text/event-stream":
         response = OwnedAsyncStreamingHttpResponse(
             _model_stream_response(stream_model_async(agent_run_id, model_config_ref, body)),
