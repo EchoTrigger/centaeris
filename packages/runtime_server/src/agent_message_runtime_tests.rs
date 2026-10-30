@@ -227,7 +227,7 @@ impl ModelClient for SyntheticModel {
                 _ => panic!("unexpected model request"),
             };
             Ok(ModelClientResponse {
-                transport_timings: None,
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: if calls.is_empty() {
                         "Completed without repeating posted messages.".into()

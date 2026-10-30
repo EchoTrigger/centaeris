@@ -716,7 +716,7 @@ impl ModelClient for HostEventTestModelClient {
             let index = requests.len();
             requests.push(request.clone());
             Ok(ModelClientResponse {
-                transport_timings: None,
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: if index < self.tool_rounds {
                         String::new()

@@ -1382,7 +1382,7 @@ impl ModelClient for SubagentReadModelClient {
         Box::pin(async move {
             let request_index = self.request_count.fetch_add(1, Ordering::SeqCst);
             Ok(ModelClientResponse {
-                transport_timings: None,
+                request_timings: None,
                 generate_result: if request_index == 0 {
                     read_generate_result("call-subagent-read", "fixture.txt")
                 } else {
@@ -1434,7 +1434,7 @@ impl ModelClient for CompleteTurnTestModelClient {
                 }
             }
             Ok(ModelClientResponse {
-                transport_timings: None,
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: if tool_calls.is_empty() {
                         "finished after failed tool".to_string()
@@ -1532,7 +1532,7 @@ impl ModelClient for RuntimeJobWaitModelClient {
                 Vec::new()
             };
             Ok(ModelClientResponse {
-                transport_timings: None,
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: if tool_calls.is_empty() {
                         "finished from the durable background result".to_string()
@@ -1567,7 +1567,7 @@ impl AnswerNowBoundaryModelClient {
             Vec::new()
         };
         ModelClientResponse {
-            transport_timings: None,
+            request_timings: None,
             generate_result: GenerateResult {
                 content: if tool_calls.is_empty() {
                     if request_index == 0 {
@@ -1697,7 +1697,7 @@ impl ModelClient for CompleteBatchModelClient {
                 Vec::new()
             };
             Ok(ModelClientResponse {
-                transport_timings: None,
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: if tool_calls.is_empty() {
                         "verified all four tool results".to_string()
@@ -1732,7 +1732,7 @@ impl StreamExecutionBoundaryModelClient {
             Vec::new()
         };
         ModelClientResponse {
-            transport_timings: None,
+            request_timings: None,
             generate_result: GenerateResult {
                 content: if tool_calls.is_empty() {
                     "finished after tool result".to_string()
@@ -1846,7 +1846,7 @@ impl NoToolSupplementBoundaryModelClient {
             );
         }
         ModelClientResponse {
-            transport_timings: None,
+            request_timings: None,
             generate_result: GenerateResult {
                 content: if request_index == 0 {
                     "obsolete final".to_string()
@@ -2170,7 +2170,7 @@ impl ModelClient for UnboundedToolLoopModelClient {
                 vec![]
             };
             Ok(ModelClientResponse {
-                transport_timings: None,
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: if tool_calls.is_empty() {
                         "natural final after long tool loop".to_string()
@@ -2278,6 +2278,7 @@ impl ModelClient for OutputLimitRecoveryModelClient {
         let emit_incomplete_tool_identity = self.emit_incomplete_tool_identity;
         Box::pin(async move {
             Err(ModelClientError {
+                request_timings: None,
                 retry_after: None,
                 kind: ModelClientErrorKind::ProviderResponseInterrupted,
                 message: "provider stopped generation at the output-token limit".to_string(),
@@ -2320,7 +2321,7 @@ impl ModelClient for OutputLimitRecoveryModelClient {
             });
             return Box::pin(async {
                 Ok(ModelClientResponse {
-                    transport_timings: None,
+                    request_timings: None,
                     generate_result: GenerateResult {
                         content: "done".to_string(),
                         tool_calls: vec![],
@@ -2342,6 +2343,7 @@ impl ModelClient for OutputLimitRecoveryModelClient {
         });
         Box::pin(async move {
             Err(ModelClientError {
+                request_timings: None,
                 retry_after: None,
                 kind: ModelClientErrorKind::ProviderResponseInterrupted,
                 message: "provider stopped generation at the output-token limit".to_string(),
@@ -3019,7 +3021,7 @@ impl ModelClient for PromptCompactionModelClient {
                 .push(request.clone());
             match &self.behavior {
                 PromptCompactionModelClientBehavior::ValidSummary => Ok(ModelClientResponse {
-                    transport_timings: None,
+                    request_timings: None,
                     generate_result: GenerateResult {
                         content: test_model_compaction_summary_from_prompt(
                             request.prepared_prompt.messages[0].content.as_str(),
@@ -3177,7 +3179,7 @@ impl ModelClient for OnlinePromptCompactionModelClient {
                     .contains("[model_compaction_prompt_v1]")
             {
                 return Ok(ModelClientResponse {
-                    transport_timings: None,
+                    request_timings: None,
                     generate_result: GenerateResult {
                         content: self.compaction_summary_content(
                             request.prepared_prompt.messages[0].content.as_str(),
@@ -3199,7 +3201,7 @@ impl ModelClient for OnlinePromptCompactionModelClient {
             }
 
             Ok(ModelClientResponse {
-                transport_timings: None,
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: "main response after compaction".to_string(),
                     tool_calls: vec![],
@@ -12028,7 +12030,7 @@ impl ModelClient for LiveReasoningModel {
                 text: "second attempt".to_string(),
             });
             Ok(ModelClientResponse {
-                transport_timings: None,
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: "answer".to_string(),
                     tool_calls: vec![],
@@ -12181,7 +12183,7 @@ impl ModelClient for CountingToolLoopModelClient {
                 vec![]
             };
             Ok(ModelClientResponse {
-                transport_timings: None,
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: if tool_calls.is_empty() {
                         "natural final after long tool loop".to_string()

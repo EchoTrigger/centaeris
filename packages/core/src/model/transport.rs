@@ -64,16 +64,18 @@ impl TransportError {
             Self::Timeout(_) | Self::Connection(_) | Self::Network(_) | Self::StreamInterrupted(_)
         )
     }
-    pub(super) fn into_model_error(self) -> ModelClientError {
-        let kind = match &self {
+    fn model_kind(&self) -> ModelClientErrorKind {
+        match self {
             Self::Timeout(_) => ModelClientErrorKind::Timeout,
             Self::Build(_) => ModelClientErrorKind::InvalidRequest,
             Self::InvalidResponse(_)
             | Self::ResponseTooLarge { .. }
             | Self::StreamInterrupted(_) => ModelClientErrorKind::ProviderResponseInterrupted,
             Self::Connection(_) | Self::Network(_) => ModelClientErrorKind::Network,
-        };
-        ModelClientError::new(kind, self.to_string(), self.retryable())
+        }
+    }
+    pub(super) fn into_model_error(self) -> ModelClientError {
+        ModelClientError::new(self.model_kind(), self.to_string(), self.retryable())
     }
 }
 
@@ -99,6 +101,77 @@ pub struct HttpTimings {
     pub first_event_ms: Option<u64>,
     pub response_body_ms: u64,
     pub total_ms: u64,
+}
+
+/// One transport invocation, including failed invocations that received no HTTP status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpAttemptTimings {
+    pub elapsed_ms: u64,
+    pub status_code: Option<u16>,
+    pub error_kind: Option<ModelClientErrorKind>,
+    pub transport: Option<HttpTimings>,
+}
+
+/// The model-client call boundary, including preparation, all attempts and retry waits.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelRequestTimings {
+    pub prepare_ms: u64,
+    pub retry_wait_ms: u64,
+    pub total_ms: u64,
+    pub attempts: Vec<HttpAttemptTimings>,
+}
+
+struct RequestTimings {
+    started: tokio::time::Instant,
+    data: ModelRequestTimings,
+}
+impl RequestTimings {
+    fn new(started: tokio::time::Instant) -> Self {
+        Self {
+            started,
+            data: ModelRequestTimings {
+                prepare_ms: elapsed_ms(started),
+                ..Default::default()
+            },
+        }
+    }
+    fn record(
+        &mut self,
+        started: tokio::time::Instant,
+        result: &Result<JsonHttpResponse, TransportError>,
+    ) {
+        let (status_code, error_kind, transport) = match result {
+            Ok(response) => (Some(response.status_code), None, response.timings),
+            Err(error) => (None, Some(error.model_kind()), None),
+        };
+        self.data.attempts.push(HttpAttemptTimings {
+            elapsed_ms: elapsed_ms(started),
+            status_code,
+            error_kind,
+            transport,
+        });
+    }
+    fn snapshot(&self) -> ModelRequestTimings {
+        ModelRequestTimings {
+            total_ms: elapsed_ms(self.started),
+            ..self.data.clone()
+        }
+    }
+}
+fn elapsed_ms(started: tokio::time::Instant) -> u64 {
+    started.elapsed().as_millis() as u64
+}
+pub(super) fn preparation_failure(
+    mut error: ModelClientError,
+    started: tokio::time::Instant,
+) -> ModelClientError {
+    let elapsed = elapsed_ms(started);
+    error.request_timings = Some(Box::new(ModelRequestTimings {
+        prepare_ms: elapsed,
+        total_ms: elapsed,
+        ..Default::default()
+    }));
+    error
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,15 +229,17 @@ async fn sleep_before_http_retry(
     attempt: u32,
     retry_backoff_ms: u64,
     retry_after: Option<RetryAfter>,
-) {
+) -> u64 {
+    let started = tokio::time::Instant::now();
     if let Some(advice) = retry_after {
         advice.wait().await;
-        return;
+    } else {
+        let delay_ms = retry_backoff_ms.saturating_mul(u64::from(attempt.max(1)));
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
     }
-    let delay_ms = retry_backoff_ms.saturating_mul(u64::from(attempt.max(1)));
-    if delay_ms > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-    }
+    elapsed_ms(started)
 }
 
 pub(super) fn is_retryable_http_status(status_code: u16) -> bool {
@@ -174,16 +249,20 @@ pub(super) fn is_retryable_http_status(status_code: u16) -> bool {
 async fn execute_json_with_retries<T: JsonHttpTransport>(
     transport: &T,
     request: &JsonHttpRequest,
+    clock: &mut RequestTimings,
 ) -> Result<AttemptedHttpResponse, AttemptedTransportError> {
     let mut attempt = 0_u32;
     loop {
-        match transport.execute_json(request).await {
+        let started = tokio::time::Instant::now();
+        let result = transport.execute_json(request).await;
+        clock.record(started, &result);
+        match result {
             Ok(response)
                 if is_retryable_http_status(response.status_code)
                     && attempt < request.max_retries =>
             {
                 attempt = attempt.saturating_add(1);
-                sleep_before_http_retry(
+                clock.data.retry_wait_ms += sleep_before_http_retry(
                     attempt,
                     request.retry_backoff_ms,
                     RetryAfter::from_headers(&response.headers),
@@ -192,16 +271,19 @@ async fn execute_json_with_retries<T: JsonHttpTransport>(
             }
             Ok(response) => {
                 return Ok(AttemptedHttpResponse {
+                    request_timings: clock.snapshot(),
                     response,
                     attempts: attempt.saturating_add(1),
                 })
             }
             Err(error) if error.retryable() && attempt < request.max_retries => {
                 attempt = attempt.saturating_add(1);
-                sleep_before_http_retry(attempt, request.retry_backoff_ms, None).await;
+                clock.data.retry_wait_ms +=
+                    sleep_before_http_retry(attempt, request.retry_backoff_ms, None).await;
             }
             Err(error) => {
                 return Err(AttemptedTransportError {
+                    request_timings: clock.snapshot(),
                     message: error.to_string(),
                     attempts: attempt.saturating_add(1),
                     provider_error: Some(error.into_model_error()),
@@ -214,12 +296,14 @@ async fn execute_json_with_retries<T: JsonHttpTransport>(
 pub(super) async fn execute_json_model_response_with_retries<T, F>(
     transport: &T,
     request: &JsonHttpRequest,
+    started: tokio::time::Instant,
     mut parse_response: F,
 ) -> Result<ModelClientResponse, ModelClientError>
 where
     T: JsonHttpTransport,
     F: FnMut(JsonHttpResponse) -> Result<ModelClientResponse, ModelClientError>,
 {
+    let mut clock = RequestTimings::new(started);
     let maximum_attempts = request.max_retries.saturating_add(1);
     let mut provider_attempts = 0_u32;
     loop {
@@ -227,7 +311,7 @@ where
         attempt_request.max_retries = maximum_attempts
             .saturating_sub(provider_attempts)
             .saturating_sub(1);
-        let attempted = execute_json_with_retries(transport, &attempt_request)
+        let attempted = execute_json_with_retries(transport, &attempt_request, &mut clock)
             .await
             .map_err(|mut error| {
                 error.attempts = error.attempts.saturating_add(provider_attempts);
@@ -237,6 +321,7 @@ where
         match parse_response(attempted.response) {
             Ok(mut response) => {
                 response.provider_attempts = provider_attempts;
+                response.request_timings = Some(clock.snapshot());
                 return Ok(response);
             }
             Err(error)
@@ -245,12 +330,15 @@ where
                         || error.provider_code.as_deref()
                             == Some("malformed_tool_call_arguments")) =>
             {
-                sleep_before_http_retry(provider_attempts, request.retry_backoff_ms, None).await;
+                clock.data.retry_wait_ms +=
+                    sleep_before_http_retry(provider_attempts, request.retry_backoff_ms, None)
+                        .await;
             }
             Err(mut error) => {
                 if error.provider_code.as_deref() == Some("malformed_tool_call_arguments") {
                     error.retryable = false;
                 }
+                error.request_timings = Some(Box::new(clock.snapshot()));
                 return Err(error.with_provider_attempts(provider_attempts));
             }
         }
@@ -261,6 +349,7 @@ where
 pub(super) struct AttemptedHttpResponse {
     pub(super) response: JsonHttpResponse,
     pub(super) attempts: u32,
+    pub(super) request_timings: ModelRequestTimings,
 }
 
 #[derive(Debug)]
@@ -268,15 +357,18 @@ pub(super) struct AttemptedTransportError {
     message: String,
     attempts: u32,
     provider_error: Option<ModelClientError>,
+    request_timings: ModelRequestTimings,
 }
 
 pub(super) fn map_attempted_transport_error(error: AttemptedTransportError) -> ModelClientError {
-    match error.provider_error {
+    let mut mapped = match error.provider_error {
         Some(provider_error) => provider_error.with_provider_attempts(error.attempts),
         None => TransportError::StreamInterrupted(error.message)
             .into_model_error()
             .with_provider_attempts(error.attempts),
-    }
+    };
+    mapped.request_timings = Some(Box::new(error.request_timings));
+    mapped
 }
 
 pub(super) enum SseAttemptEvent {
@@ -293,13 +385,16 @@ pub(super) struct SseAttemptProgress {
 pub(super) async fn execute_sse_with_retries<T: JsonHttpTransport>(
     transport: &T,
     request: &JsonHttpRequest,
+    started: tokio::time::Instant,
     on_event: &mut (dyn FnMut(SseAttemptEvent) -> SseAttemptProgress + Send),
 ) -> Result<AttemptedHttpResponse, AttemptedTransportError> {
+    let mut clock = RequestTimings::new(started);
     let mut attempt = 0_u32;
     loop {
         let _ = on_event(SseAttemptEvent::Start { attempt });
         let mut terminal = false;
         let mut terminal_error = None;
+        let attempt_started = tokio::time::Instant::now();
         let result = transport
             .execute_sse(request, &mut |chunk| {
                 if terminal_error.is_some() {
@@ -315,13 +410,15 @@ pub(super) async fn execute_sse_with_retries<T: JsonHttpTransport>(
                 }
             })
             .await;
+        clock.record(attempt_started, &result);
         match result {
             Ok(_)
                 if terminal_error.as_ref().is_some_and(|error| error.retryable)
                     && attempt < request.max_retries =>
             {
                 attempt = attempt.saturating_add(1);
-                sleep_before_http_retry(attempt, request.retry_backoff_ms, None).await;
+                clock.data.retry_wait_ms +=
+                    sleep_before_http_retry(attempt, request.retry_backoff_ms, None).await;
             }
             Ok(_) if terminal_error.is_some() => {
                 let mut provider_error = terminal_error.expect("checked terminal error");
@@ -332,6 +429,7 @@ pub(super) async fn execute_sse_with_retries<T: JsonHttpTransport>(
                     provider_error.retryable = false;
                 }
                 return Err(AttemptedTransportError {
+                    request_timings: clock.snapshot(),
                     message: provider_error.message.clone(),
                     attempts: attempt.saturating_add(1),
                     provider_error: Some(provider_error),
@@ -342,7 +440,7 @@ pub(super) async fn execute_sse_with_retries<T: JsonHttpTransport>(
                     && attempt < request.max_retries =>
             {
                 attempt = attempt.saturating_add(1);
-                sleep_before_http_retry(
+                clock.data.retry_wait_ms += sleep_before_http_retry(
                     attempt,
                     request.retry_backoff_ms,
                     RetryAfter::from_headers(&response.headers),
@@ -353,10 +451,12 @@ pub(super) async fn execute_sse_with_retries<T: JsonHttpTransport>(
                 if response.status_code < 400 && !terminal && attempt < request.max_retries =>
             {
                 attempt = attempt.saturating_add(1);
-                sleep_before_http_retry(attempt, request.retry_backoff_ms, None).await;
+                clock.data.retry_wait_ms +=
+                    sleep_before_http_retry(attempt, request.retry_backoff_ms, None).await;
             }
             Ok(response) if response.status_code < 400 && !terminal => {
                 return Err(AttemptedTransportError {
+                    request_timings: clock.snapshot(),
                     message: "SSE stream ended before a terminal response event".to_string(),
                     attempts: attempt.saturating_add(1),
                     provider_error: None,
@@ -364,16 +464,19 @@ pub(super) async fn execute_sse_with_retries<T: JsonHttpTransport>(
             }
             Ok(response) => {
                 return Ok(AttemptedHttpResponse {
+                    request_timings: clock.snapshot(),
                     response,
                     attempts: attempt.saturating_add(1),
                 })
             }
             Err(error) if error.retryable() && attempt < request.max_retries => {
                 attempt = attempt.saturating_add(1);
-                sleep_before_http_retry(attempt, request.retry_backoff_ms, None).await;
+                clock.data.retry_wait_ms +=
+                    sleep_before_http_retry(attempt, request.retry_backoff_ms, None).await;
             }
             Err(error) => {
                 return Err(AttemptedTransportError {
+                    request_timings: clock.snapshot(),
                     message: error.to_string(),
                     attempts: attempt.saturating_add(1),
                     provider_error: Some(error.into_model_error()),

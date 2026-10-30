@@ -204,7 +204,7 @@ impl ModelClient for ConfirmationModel {
             let index = self.calls.fetch_add(1, Ordering::SeqCst);
             assert!(index < 2);
             Ok(ModelClientResponse {
-                transport_timings: None,
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: if index == 1 {
                         "Confirmation committed; one Final.".into()
@@ -486,7 +486,7 @@ impl ModelClient for SyntheticModel {
             let index = self.count.fetch_add(1, Ordering::SeqCst);
             assert!(index < 3);
             Ok(ModelClientResponse {
-                transport_timings: None,
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: if index == 2 {
                         "One Final after dispatch validation.".into()
@@ -552,7 +552,7 @@ impl ModelClient for RegistrationModel {
                     .collect(),
             );
             Ok(ModelClientResponse {
-                transport_timings: None,
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: "Registered tools observed; Final.".into(),
                     tool_calls: vec![],

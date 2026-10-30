@@ -20,7 +20,7 @@ impl ModelClient for ToolThenFailModel {
                 ));
             }
             Ok(ModelClientResponse {
-                transport_timings: None,
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: "execute the accepted tool batch".into(),
                     tool_calls: vec![crate::model::ToolCallEnvelope {

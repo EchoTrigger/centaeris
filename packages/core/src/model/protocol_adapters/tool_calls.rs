@@ -32,6 +32,7 @@ pub(super) fn truncated_tool_call(
 
 pub(super) fn invalid_provider_tool_call_identity(wire_api: &str) -> ModelClientError {
     ModelClientError {
+        request_timings: None,
         retry_after: None,
         kind: ModelClientErrorKind::Provider,
         message: format!("{wire_api} response contained an invalid tool call identity"),
@@ -80,6 +81,7 @@ pub(super) fn validate_provider_tool_call_arguments_with_retryability(
             let mut digest = Sha256::new();
             digest.update(call.args_json.as_bytes());
             return Err(ModelClientError {
+                request_timings: None,
                 retry_after: None,
                 kind: ModelClientErrorKind::Provider,
                 message: format!(

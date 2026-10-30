@@ -114,10 +114,36 @@ classification and the configured finite retry budget remain in the protocol ada
 rejected request waits; unrelated calls proceed, and dropping the waiting future
 cancels it. This is not an account-wide rate-limit or quota implementation.
 
-Completed local responses expose optional `HttpTimings`: response-header wait, first
-complete SSE event, response-body duration and total HTTP attempt time. Protocol
-adapters retain these as `ModelClientResponse.transport_timings` and populate
-`provider_latency_ms` from that attempt's total time. Header wait includes network
-and upstream scheduling. First SSE event includes comments and is not semantic TTFT.
-These observations exclude request encoding and previous retry waits; they add no
-Session schema or product-visible messages. Test transports may supply no timings.
+Completed HTTP exchanges expose optional `HttpTimings`: response-header wait,
+first complete SSE event, response-body duration and one HTTP attempt's total time.
+First SSE event includes comments and is not semantic TTFT. Missing failed-exchange
+phase measurements are absent rather than recorded as zero.
+
+`ModelClientResponse.request_timings` and `ModelClientError.request_timings` carry
+`ModelRequestTimings` for the logical local-client invocation: preparation, actual
+retry waiting, total elapsed time, and every transport invocation, including failed
+ones. Each attempt records elapsed time, optional HTTP status, typed transport error
+and any available HTTP phase measurements. The total includes final protocol parsing;
+SSE parsing performed in the transport callback also lies inside attempt time, so
+these intervals must not be added together. The total ends after protocol parsing,
+before final completion callbacks; synchronous incremental callbacks remain included.
+PreparedPrompt assembly and work outside this invocation are excluded. No supplier
+dispatch count is inferred from it.
+
+`provider_latency_ms` remains reserved for a provider-supplied metric and is not
+populated with a local HTTP duration. Cancellation drops the client future; Core's
+existing cancellation facts remain authoritative. A cancelled future returns no
+completed response/timing summary, and no completed measurement is synthesized.
+These observations add no Session schema or product-visible messages.
+
+## Reproducible loopback probe
+
+Run `cargo run -p centaeris-runtime --example model_transport_probe -- <label>`
+for bounded synthetic measurements of the actual local transport. The probe uses
+127.0.0.1, a no-proxy client, keep-alive and complete request-body reads. It measures
+100 request clones at 1/4/8 MiB, sequential 2-byte/1/4/8-MiB HTTP exchanges, and eight
+simultaneous requests with an explicitly artificial 25-ms server service interval.
+HTTP scenarios take 30 samples and discard the first three; outputs are JSON lines.
+Use identical build profiles and an otherwise quiet host for comparisons. Any
+process memory measurement includes the probe's in-process mock server. This probe
+does not exercise model inference, Core commits, production proxies or runsc.

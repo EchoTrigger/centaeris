@@ -90,7 +90,7 @@ impl ModelClient for CompactedRecoveryModel {
                 }
             };
             Ok(ModelClientResponse {
-                transport_timings: None,
+                request_timings: None,
                 generate_result: GenerateResult {
                     content,
                     tool_calls: vec![],

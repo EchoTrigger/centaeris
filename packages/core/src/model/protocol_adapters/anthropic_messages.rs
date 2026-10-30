@@ -150,7 +150,7 @@ impl<T: JsonHttpTransport> AnthropicMessagesModelClient<T> {
         validate_provider_tool_call_arguments("anthropic-messages", &tool_calls)?;
         let usage = parsed.usage.as_ref();
         Ok(ModelClientResponse {
-            transport_timings: response.timings,
+            request_timings: None,
             generate_result: GenerateResult {
                 content: extract_anthropic_text(parsed.content.as_slice()),
                 tool_calls,
@@ -170,7 +170,7 @@ impl<T: JsonHttpTransport> AnthropicMessagesModelClient<T> {
             provider_request_id: parsed
                 .id
                 .or_else(|| response.headers.get("x-request-id").cloned()),
-            provider_latency_ms: response.timings.map(|timings| timings.total_ms),
+            provider_latency_ms: None,
             provider_attempts: 1,
         })
     }
@@ -182,13 +182,21 @@ impl<T: JsonHttpTransport> ModelClient for AnthropicMessagesModelClient<T> {
         request: &'a ModelClientRequest,
     ) -> ModelClientFuture<'a, ModelClientResponse> {
         Box::pin(async move {
-            let http_request = self.build_http_request(request, false)?;
-            execute_json_model_response_with_retries(&self.transport, &http_request, |response| {
-                self.parse_http_response(
-                    response,
-                    is_minimax_provider(&request.session_config.provider_id),
-                )
-            })
+            let request_started = tokio::time::Instant::now();
+            let http_request = self
+                .build_http_request(request, false)
+                .map_err(|error| preparation_failure(error, request_started))?;
+            execute_json_model_response_with_retries(
+                &self.transport,
+                &http_request,
+                request_started,
+                |response| {
+                    self.parse_http_response(
+                        response,
+                        is_minimax_provider(&request.session_config.provider_id),
+                    )
+                },
+            )
             .await
         })
     }
@@ -199,13 +207,19 @@ impl<T: JsonHttpTransport> ModelClient for AnthropicMessagesModelClient<T> {
         sink: &'a mut (dyn FnMut(ModelClientStreamEvent) + Send),
     ) -> ModelClientFuture<'a, ModelClientResponse> {
         Box::pin(async move {
-            let http_request = self.build_http_request(request, true)?;
+            let request_started = tokio::time::Instant::now();
+            let http_request = self
+                .build_http_request(request, true)
+                .map_err(|error| preparation_failure(error, request_started))?;
             let mut stream_state = AnthropicMessagesStreamState::default();
             let mut pending_completion_events = Vec::<ModelClientStreamEvent>::new();
             let mut attempt_has_visible_content = false;
             let mut emitted_reasoning = String::new();
-            let attempted =
-                execute_sse_with_retries(&self.transport, &http_request, &mut |event| {
+            let attempted = execute_sse_with_retries(
+                &self.transport,
+                &http_request,
+                request_started,
+                &mut |event| {
                     let chunk = match event {
                         SseAttemptEvent::Start { attempt } => {
                             stream_state = AnthropicMessagesStreamState::default();
@@ -309,16 +323,18 @@ impl<T: JsonHttpTransport> ModelClient for AnthropicMessagesModelClient<T> {
                         }
                     }
                     progress
-                })
-                .await
-                .map_err(map_attempted_transport_error)?;
+                },
+            )
+            .await
+            .map_err(map_attempted_transport_error)?;
             let response = attempted.response;
             if response.status_code >= 400 {
                 return Err(map_anthropic_messages_http_error(
                     response.status_code,
                     response.body_json.as_str(),
                 )
-                .with_provider_attempts(attempted.attempts));
+                .with_provider_attempts(attempted.attempts)
+                .with_request_timings(attempted.request_timings));
             }
             let parsed = stream_state.into_response();
             let mut parsed_response = self
@@ -339,8 +355,16 @@ impl<T: JsonHttpTransport> ModelClient for AnthropicMessagesModelClient<T> {
                     },
                     is_minimax_provider(&request.session_config.provider_id),
                 )
-                .map_err(|error| error.with_provider_attempts(attempted.attempts))?;
+                .map_err(|mut error| {
+                    let mut timings = attempted.request_timings.clone();
+                    timings.total_ms = request_started.elapsed().as_millis() as u64;
+                    error.request_timings = Some(Box::new(timings));
+                    error.with_provider_attempts(attempted.attempts)
+                })?;
             parsed_response.provider_attempts = attempted.attempts;
+            let mut timings = attempted.request_timings;
+            timings.total_ms = request_started.elapsed().as_millis() as u64;
+            parsed_response.request_timings = Some(timings);
             for event in pending_completion_events {
                 sink(event);
             }
@@ -1106,6 +1130,7 @@ pub(super) fn reject_anthropic_stop_reason(
 ) -> Result<(), ModelClientError> {
     match stop_reason {
         Some("max_tokens") => Err(ModelClientError {
+            request_timings: None,
             retry_after: None,
             kind: ModelClientErrorKind::ProviderResponseInterrupted,
             message: "provider stopped generation at the output-token limit before producing a complete response".to_string(),
@@ -1163,6 +1188,7 @@ pub(super) fn map_anthropic_messages_http_error(
         _ => ModelClientErrorKind::Unknown,
     };
     ModelClientError {
+        request_timings: None,
         retry_after: None,
         kind,
         message,

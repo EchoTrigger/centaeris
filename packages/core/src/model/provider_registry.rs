@@ -396,9 +396,10 @@ pub struct ModelClientRequest {
 
 #[derive(Debug, Clone)]
 pub struct ModelClientResponse {
-    pub transport_timings: Option<super::HttpTimings>,
+    pub request_timings: Option<super::ModelRequestTimings>,
     pub generate_result: GenerateResult,
     pub provider_request_id: Option<String>,
+    /// Provider-supplied latency, distinct from locally observed request timing.
     pub provider_latency_ms: Option<u64>,
     pub provider_attempts: u32,
 }
@@ -482,6 +483,7 @@ impl ModelClientErrorKind {
 
 #[derive(Debug, Clone)]
 pub struct ModelClientError {
+    pub request_timings: Option<Box<super::ModelRequestTimings>>,
     pub retry_after: Option<super::RetryAfter>,
     pub kind: ModelClientErrorKind,
     pub message: String,
@@ -499,9 +501,15 @@ impl ModelClientError {
             retryable,
             provider_code: None,
             retry_after: None,
+            request_timings: None,
             provider_attempts: 0,
             truncated_tool_calls: Vec::new(),
         }
+    }
+
+    pub fn with_request_timings(mut self, timings: super::ModelRequestTimings) -> Self {
+        self.request_timings = Some(Box::new(timings));
+        self
     }
 
     pub fn with_provider_attempts(mut self, provider_attempts: u32) -> Self {
