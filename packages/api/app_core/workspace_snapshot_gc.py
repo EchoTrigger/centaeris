@@ -58,9 +58,8 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
 def _collect_purged_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcReport:
     """Collect the two precise key families owned by permanently deleted Sessions.
 
-    Both the Session or parent Agent tombstone and object modification time must
-    precede cutoff. A parent purge also covers children left active or in trash
-    by earlier releases, without changing their state or recovery references.
+    The Session tombstone and object modification time must precede cutoff.
+    Agent configuration retirement cannot reclaim Session-owned data.
     Unknown Run directories are reported as blocked, not interpreted as owned
     recovery data. This collector never accesses Runtime checkpoint tables.
     """
@@ -69,8 +68,7 @@ def _collect_purged_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSna
     if root is None:
         return report
     sessions = Session.objects.filter(
-        Q(status="deleted", purgedAt__lte=cutoff)
-        | Q(agent__status="deleted", agent__purgedAt__lte=cutoff),
+        status="deleted", purgedAt__lte=cutoff,
     ).only("id", "workspace_id", "agent_id")
     for session in sessions.order_by("id").iterator():
         try:
@@ -186,12 +184,11 @@ def _delete_observed_snapshot(key, *, session_id):
 
 def _owner_reclaimable(agent, owner, session, cutoff):
     session_purged = owner.status == "deleted" and owner.purgedAt is not None and owner.purgedAt <= cutoff
-    agent_purged = agent.status == "deleted" and agent.purgedAt is not None and agent.purgedAt <= cutoff
     return (
         owner.workspace_id == session.workspace_id
         and owner.agent_id == agent.id
         and agent.workspace_id == owner.workspace_id
-        and (session_purged or (agent_purged and not owner.agent_runs.filter(status__in={"queued", "running"}).exists()))
+        and session_purged
     )
 
 

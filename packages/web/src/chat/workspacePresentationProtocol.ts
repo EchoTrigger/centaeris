@@ -52,7 +52,7 @@ export function validatePresentationFrame(value: unknown, identity: Presentation
       const ids = new Set<string>();
       for (const row of value.sessions) {
         if (!isRecord(row) || !hasExactFields(row, SESSION_FIELDS) || typeof row.id !== 'string' || !row.id
-          || row.workspaceId !== identity.workspaceId || row.agentId !== identity.agentId
+          || row.workspaceId !== identity.workspaceId || typeof row.agentId !== 'string' || !row.agentId || row.agentId.trim() !== row.agentId
           || typeof row.isPinned !== 'boolean'
           || typeof row.hasActiveAgentRun !== 'boolean' || typeof row.title !== 'string' || ids.has(row.id)) invalid('invalid presentation navigation');
         try { validateSessionAttention(row); } catch { invalid("invalid presentation navigation attention"); }

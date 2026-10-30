@@ -119,7 +119,7 @@ def session_preview(request, response: HttpResponse, session_id: str, afterArtif
         if not 1 <= limit <= 100:
             raise PreviewRejected(400, 'preview_query_invalid')
         session = _authorized_transcript_session(request.user, session_id)
-        if session is None or session.status != 'active' or session.agent.status != 'active':
+        if session is None or session.status != 'active':
             raise PreviewRejected()
         rows = Artifact.objects.filter(session=session, agent_run__user=request.user,
             status='published', deletedAt__isnull=True).order_by('createdAt', 'id')
@@ -204,7 +204,7 @@ def _select_content(user, request, source_version, sha256, lang, *, session_id=N
     else:
         session = _authorized_transcript_session(user, session_id)
         item = _owner(user.id, 'artifact', artifact_id)
-        if session is None or session.status != 'active' or session.agent.status != 'active' or item is None or item.session_id != session_id:
+        if session is None or session.status != 'active' or item is None or item.session_id != session_id:
             raise PreviewRejected()
         kind, object_id = 'artifact', item.pk
         version, digest = str(item.contentGeneration), item.sha256

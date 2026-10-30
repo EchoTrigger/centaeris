@@ -11,6 +11,7 @@ from django.db import close_old_connections, connection
 from django.test import Client, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
+from app_core.testing import create_shared_agent
 from app_core.models import Agent, AgentRun, HostedOperationReceipt, ModelConfig, Session, Workspace, WorkspaceMembership
 
 
@@ -24,8 +25,8 @@ class OperationFixture:
         self.user = User.objects.create_user(username="operation-user")
         self.workspace = Workspace.objects.create(name="Operations", createdBy=self.user)
         self.workspace.members.add(self.user)
-        self.agent = Agent.objects.create(workspace=self.workspace, owner=self.user, name="Agent")
         self.model = ModelConfig.objects.create(displayName="Model")
+        self.agent = create_shared_agent(workspace=self.workspace, owner=self.user, name="Agent", model_config=self.model)
         self.client.force_login(self.user)
         self.create_url = f"/api/workspaces/{self.workspace.id}/sessions"
         self.submit_url = self.create_url + "/new/messages"
@@ -143,15 +144,16 @@ class HostedOperationTests(OperationFixture, TestCase):
         self.assertEqual(len({result.json()["sessionId"] for result in
                             (original, submitted, other_workspace_result, other_user_result)}), 4)
 
-    def test_deleted_agent_rejects_replay_before_payload_conflict(self):
+    def test_deleted_agent_preserves_session_receipt_and_payload_conflicts(self):
         first = self.create()
         self.assertEqual(first.status_code, 201, first.content)
         self.agent.status = "deleted"
         self.agent.deletedAt = timezone.now()
         self.agent.save(update_fields=["status", "deletedAt"])
         replay = self.create(agentId="different-agent")
-        self.assertEqual(replay.status_code, 410, replay.content)
-        self.assertEqual(self.query("createSession", "create-1").status_code, 410)
+        self.assertEqual(replay.status_code, 409, replay.content)
+        self.assertEqual(replay.json()["error"], "operation_conflict")
+        self.assertEqual(self.query("createSession", "create-1").json(), first.json())
         self.assertEqual(Session.objects.count(), 1)
 
     def test_rolled_back_acceptance_does_not_occupy_identity(self):

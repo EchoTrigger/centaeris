@@ -1,4 +1,4 @@
-"""Private custom avatars share the Agent profile's atomic save and access boundary."""
+"""Published avatars share workspace policy; legacy private images retain history."""
 import base64
 import hashlib
 import json
@@ -33,7 +33,7 @@ class AgentAvatarTests(TestCase):
         self.other = User.objects.create_user(username="avatar-other")
         self.operator = User.objects.create_superuser(username="avatar-operator", password="test")
         self.workspace = Workspace.objects.create(name="Avatars", createdBy=self.user)
-        self.membership = WorkspaceMembership.objects.create(workspace=self.workspace, user=self.user, role="member")
+        self.membership = WorkspaceMembership.objects.create(workspace=self.workspace, user=self.user, role="owner")
         WorkspaceMembership.objects.create(workspace=self.workspace, user=self.other, role="admin")
         self.client.force_login(self.user)
         self.base = f"/api/workspaces/{self.workspace.id}/agents"
@@ -64,8 +64,8 @@ class AgentAvatarTests(TestCase):
             self.assertEqual(avatar.format, "PNG")
             self.assertNotIn("private-note", avatar.info)
         agent = Agent.objects.get(pk=data["id"])
-        self.assertEqual(bytes(agent.avatar_image), response.content)
-        self.assertEqual(agent.avatar_digest, hashlib.sha256(response.content).hexdigest())
+        self.assertEqual(bytes(agent.definition.published_version.avatar_image), response.content)
+        self.assertEqual(agent.definition.published_version.avatar_digest, hashlib.sha256(response.content).hexdigest())
 
     def test_update_rename_preserves_avatar_replace_versions_it_and_reset_restores_builtin(self):
         data = self.create(avatarDataBase64=image_data())
@@ -82,8 +82,8 @@ class AgentAvatarTests(TestCase):
         self.assertIsNone(reset.json()["agent"]["avatarUrl"])
         self.assertEqual(reset.json()["agent"]["avatarKind"], "banana")
         agent = Agent.objects.get(pk=data["id"])
-        self.assertIsNone(agent.avatar_image)
-        self.assertEqual(agent.avatar_digest, "")
+        self.assertIsNone(agent.definition.published_version.avatar_image)
+        self.assertEqual(agent.definition.published_version.avatar_digest, "")
         self.assertEqual(self.client.get(replaced.json()["agent"]["avatarUrl"]).status_code, 404)
 
     def test_avatar_read_and_write_require_current_owner_and_workspace_membership(self):
@@ -104,7 +104,7 @@ class AgentAvatarTests(TestCase):
     def test_invalid_avatar_keeps_entire_profile_unchanged_and_creates_nothing(self):
         original = self.create(avatarDataBase64=image_data())
         agent = Agent.objects.get(pk=original["id"])
-        before = (agent.name, agent.description, agent.instructions, agent.avatar_digest, bytes(agent.avatar_image))
+        before = (agent.definition.published_version.name, agent.definition.published_version.description, agent.definition.published_version.instructions, agent.definition.published_version.avatar_digest, bytes(agent.definition.published_version.avatar_image))
         corrupted = bytearray(base64.b64decode(image_data()))
         idat = corrupted.index(b"IDAT")
         checksum = idat + 4 + int.from_bytes(corrupted[idat - 4:idat], "big")
@@ -127,7 +127,7 @@ class AgentAvatarTests(TestCase):
                 self.assertEqual(response.status_code, 400, response.content)
                 self.assertIn(response.json()["error"], {"agent_avatar_invalid", "agent_avatar_too_large", "agent_avatar_dimensions_invalid"})
                 agent.refresh_from_db()
-                self.assertEqual((agent.name, agent.description, agent.instructions, agent.avatar_digest, bytes(agent.avatar_image)), before)
+                self.assertEqual((agent.definition.published_version.name, agent.definition.published_version.description, agent.definition.published_version.instructions, agent.definition.published_version.avatar_digest, bytes(agent.definition.published_version.avatar_image)), before)
                 created = self.send("post", self.base, {"name": "Must not exist", "avatarDataBase64": encoded})
                 self.assertEqual(created.status_code, 400, created.content)
                 self.assertEqual(Agent.objects.count(), 1)
@@ -155,29 +155,27 @@ class AgentAvatarTests(TestCase):
             self.assertGreater(left[2], left[0])
             self.assertGreater(right[0], right[2])
 
-    def test_definition_schemas_do_not_accept_private_avatar_upload_fields(self):
-        self.membership.role = "owner"
-        self.membership.save(update_fields=["role"])
+    def test_definition_avatar_uploads_are_shared_draft_fields_requiring_publication(self):
         path = f"/api/workspaces/{self.workspace.pk}/agent-definitions"
-        for value in (None, image_data()):
-            response = self.send("post", path, {"name": "Managed", "avatarDataBase64": value})
-            self.assertEqual(response.status_code, 400, response.content)
-            self.assertEqual(response.json()["error"], "agent_definition_invalid")
-        response = self.send("post", path, {"name": "Managed"})
+        response = self.send("post", path, {"name": "Managed", "avatarDataBase64": image_data()})
         self.assertEqual(response.status_code, 201, response.content)
         definition = response.json()["definition"]
-        response = self.send("patch", path + "/" + definition["id"], {"avatarDataBase64": image_data()})
-        self.assertEqual(response.status_code, 400, response.content)
-        self.assertEqual(response.json()["error"], "agent_definition_invalid")
+        self.assertIsNotNone(definition["avatarUrl"])
+        self.assertIsNone(definition["publishedVersionId"])
+        response = self.send("patch", path + "/" + definition["id"], {"avatarDataBase64": None})
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIsNone(response.json()["definition"]["avatarUrl"])
 
     def test_managed_definition_configuration_cannot_be_overridden_with_custom_avatar(self):
         definition = AgentDefinition.objects.create(created_by=self.user, workspace=self.workspace, name="Managed")
         version = AgentDefinitionVersion.objects.create(definition=definition, version=1, name="Managed", description="", instructions="", avatar_kind="centaeris", published_by=self.user, published_at=timezone.now())
         definition.published_version = version; definition.save(update_fields=["published_version"])
         agent = Agent.objects.create(workspace=self.workspace, owner=self.user, definition=definition, name=version.name, description="", instructions="", avatar_kind=version.avatar_kind)
+        self.membership.role = "member"
+        self.membership.save(update_fields=["role"])
         result = self.send("patch", f"/api/agents/{agent.pk}", {"avatarDataBase64": image_data()})
-        self.assertEqual(result.status_code, 409, result.content)
-        self.assertEqual(result.json()["error"], "agent_configuration_managed")
+        self.assertEqual(result.status_code, 403, result.content)
+        self.assertEqual(result.json()["error"], "agent_configuration_forbidden")
         self.assertIsNone(self.client.get(f"/api/agents/{agent.pk}").json()["agent"]["avatarUrl"])
 
     def test_business_instance_cannot_accept_a_private_avatar_override(self):
@@ -189,8 +187,15 @@ class AgentAvatarTests(TestCase):
         self.assertIsNone(agent.avatar_image)
         self.assertEqual(agent.avatar_digest, "")
 
+    def create_legacy_avatar(self, **fields):
+        from .agent_avatars import normalize_avatar
+        image, digest = normalize_avatar(fields.pop("avatarDataBase64"))
+        agent = Agent.objects.create(workspace=self.workspace, owner=self.user, name="Legacy private avatar",
+            avatar_image=image, avatar_digest=digest, **fields)
+        return self.client.get(f"/api/agents/{agent.id}").json()["agent"]
+
     def test_soft_delete_retains_avatar_for_restore_and_permanent_delete_erases_bytes(self):
-        data = self.create(avatarDataBase64=image_data())
+        data = self.create_legacy_avatar(avatarDataBase64=image_data())
         path = f"/api/agents/{data['id']}"
         self.assertEqual(self.client.delete(path).status_code, 200)
         self.assertEqual(self.client.get(data["avatarUrl"]).status_code, 404)
@@ -204,8 +209,8 @@ class AgentAvatarTests(TestCase):
 
     def test_expired_agent_gc_erases_avatar_without_deleting_other_agents(self):
         from .deleted_resource_gc import expire_trash
-        expired = self.create(avatarDataBase64=image_data())
-        retained = self.create(avatarDataBase64=image_data(color="blue"))
+        expired = self.create_legacy_avatar(avatarDataBase64=image_data())
+        retained = self.create_legacy_avatar(avatarDataBase64=image_data(color="blue"))
         self.assertEqual(self.client.delete(f"/api/agents/{expired['id']}").status_code, 200)
         deleted_at = timezone.now() - timedelta(days=40)
         Agent.objects.filter(pk=expired["id"]).update(deletedAt=deleted_at)

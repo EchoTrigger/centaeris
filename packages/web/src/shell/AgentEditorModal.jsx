@@ -1,7 +1,7 @@
 
 import { useTranslation } from "../i18n";
 import { useEffect, useRef, useState } from "react";
-import { FileText, Lock, Pencil, Upload, X } from "lucide-react";
+import { FileText, Lock, Pencil, Upload, Users, X } from "lucide-react";
 import { useModalDialog } from "../components/useModalDialog";
 import { AgentMark } from "./AgentMark";
 
@@ -10,7 +10,7 @@ const AVATAR_CHOICES = [
   ["banana", "Banana"],
 ];
 
-export function AgentEditorModal({ agent, heading, submitLabel, busy = false, error = "", onClose, onSave }) {
+export function AgentEditorModal({ agent, heading, submitLabel, busy = false, error = "", readOnly = false, shared = Boolean(agent.definitionId), onClose, onSave }) {
   const { t } = useTranslation();
   const [view, setView] = useState("profile");
   const [name, setName] = useState(agent.name || "");
@@ -54,7 +54,7 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
   function submit(event) {
     event.preventDefault();
     const trimmedName = name.trim();
-    if (!trimmedName || readingAvatar || busy) return;
+    if (readOnly || !trimmedName || readingAvatar || busy) return;
     onSave({
       name: trimmedName,
       description: description.trim(),
@@ -141,9 +141,9 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
             <button type="button" onClick={() => setView("profile")}>{t("agentRunRow.agent")}</button>
             <span aria-hidden="true">/</span>
             <strong translate="no">SOUL.md</strong>
-            <small><Lock aria-hidden="true" />{t("agentRoute.private")}</small>
+            <small>{shared ? <Users aria-hidden="true" /> : <Lock aria-hidden="true" />}{t(agent.isBusinessRoot ? "agentSettings.businessAgent" : shared ? "agentSettings.workspaceAgent" : "agentRoute.private")}</small>
           </nav>
-          <button className="shSoulDocumentDone" type="button" onClick={() => setView("profile")}>{t("agentEditorModal.finishEditing")}</button>
+          <button className="shSoulDocumentDone" type="button" onClick={() => setView("profile")}>{t(readOnly ? "workspaceContextPanel.close" : "agentEditorModal.finishEditing")}</button>
         </header>
         <section className="libraryPreviewBody libraryNotePreview">
           <div className="libraryNoteEditor">
@@ -153,6 +153,7 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
               name="agentInstructions"
               autoComplete="off"
               maxLength={16000}
+              readOnly={readOnly}
               value={instructions}
               onChange={(event) => setInstructions(event.target.value)}
               placeholder={t("agentEditorModal.identityAndResponsibilitiesDescribeHowThisAgentShouldWork")}
@@ -180,7 +181,7 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
 
         <h1>{heading}</h1>
             <div className="shAgentIdentity">
-              <button className="shAgentAvatarEdit" type="button" disabled={busy} onClick={() => avatarInputRef.current?.click()} aria-label={t("agentEditorModal.uploadAvatar")} title={t("agentEditorModal.uploadAvatar")}>
+              <button className="shAgentAvatarEdit" type="button" disabled={busy || readOnly} onClick={() => avatarInputRef.current?.click()} aria-label={t("agentEditorModal.uploadAvatar")} title={t("agentEditorModal.uploadAvatar")}>
                 <AgentMark className="shAgentHeroMark" agent={{ avatarKind, avatarUrl: avatarDataBase64 === undefined ? agent.avatarUrl : null }} previewSrc={avatarPreview || undefined} />
                 <span><Pencil aria-hidden="true" /></span>
               </button>
@@ -189,22 +190,23 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
                 name="agentName"
                 autoComplete="off"
                 maxLength={255}
+                readOnly={readOnly}
                 value={name}
                 onChange={(event) => setName(event.target.value)}
                 placeholder={t("agentEditorModal.nameYourAgent")}
                 aria-label={t("agentEditorModal.agentName")}
               />
-              <span className="shAgentPrivate"><Lock aria-hidden="true" />{t("agentRoute.onlyYouCanSeeThis")}</span>
+              <span className="shAgentPrivate">{shared ? <Users aria-hidden="true" /> : <Lock aria-hidden="true" />}{t(agent.isBusinessRoot ? "agentSettings.businessAgent" : shared ? "agentSettings.workspaceAgent" : "agentRoute.onlyYouCanSeeThis")}</span>
             </div>
 
-            <fieldset className="shAvatarChoices">
+            {!readOnly ? <><fieldset className="shAvatarChoices">
               <legend>{t("agentEditorModal.chooseAvatar")}</legend>
               {AVATAR_CHOICES.map(([kind, label]) => (
                 <button
                   className={!hasCustomAvatar && avatarKind === kind ? "isActive" : ""}
                   type="button"
                   aria-pressed={!hasCustomAvatar && avatarKind === kind}
-                  disabled={busy}
+                  disabled={busy || readOnly}
                   onClick={() => chooseAvatar(kind)}
                   key={kind}
                 >
@@ -215,12 +217,12 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
             </fieldset>
 
             <div className="shAvatarUpload">
-              <input ref={avatarInputRef} type="file" accept="image/png,image/jpeg,image/webp" aria-label={t("agentEditorModal.uploadAvatar")} hidden disabled={busy} onChange={selectAvatar} />
-              <div><button type="button" disabled={busy} onClick={() => avatarInputRef.current?.click()}><Upload aria-hidden="true" />{t("agentEditorModal.uploadAvatar")}</button>{hasCustomAvatar ? <button type="button" disabled={busy} onClick={() => chooseAvatar("centaeris")}>{t("agentEditorModal.restoreAvatar")}</button> : null}</div>
+              <input ref={avatarInputRef} type="file" accept="image/png,image/jpeg,image/webp" aria-label={t("agentEditorModal.uploadAvatar")} hidden disabled={busy || readOnly} onChange={selectAvatar} />
+              <div><button type="button" disabled={busy || readOnly} onClick={() => avatarInputRef.current?.click()}><Upload aria-hidden="true" />{t("agentEditorModal.uploadAvatar")}</button>{hasCustomAvatar ? <button type="button" disabled={busy || readOnly} onClick={() => chooseAvatar("centaeris")}>{t("agentEditorModal.restoreAvatar")}</button> : null}</div>
               <small>{t("agentEditorModal.avatarHint")}</small>
               {avatarError ? <p className="errorBanner" role="alert">{avatarError}</p> : null}
               <span className="srOnly" role="status" aria-live="polite">{readingAvatar ? t("agentEditorModal.readingAvatar") : ""}</span>
-            </div>
+            </div></> : null}
 
             <label className="shCreateLabel" htmlFor="agentDescription">{t("agentEditorModal.overview")}</label>
             <input
@@ -229,6 +231,7 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
               name="agentDescription"
               autoComplete="off"
               maxLength={128}
+              readOnly={readOnly}
               value={description}
               onChange={(event) => setDescription(event.target.value)}
               placeholder={t("agentEditorModal.describeItsResponsibilitiesInOneSentence")}
@@ -237,24 +240,24 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
 
             <section className="shInstructionsSection" aria-labelledby="agentInstructionsHeading">
               <small id="agentInstructionsHeading">Instructions</small>
-              <button className="shSoulCard" type="button" onClick={() => setView("instructions")} aria-label={t("agentEditorModal.editSoulMd")}>
+              <button className="shSoulCard" type="button" onClick={() => setView("instructions")} aria-label={t(readOnly ? "agentSettings.viewSoulMd" : "agentEditorModal.editSoulMd")}>
                 <span className="shSoulCardIcon"><FileText aria-hidden="true" /></span>
                 <span className="shSoulCardCopy">
                   <strong translate="no">SOUL.md</strong>
                   <small>{instructions.trim().split("\n")[0] || t("agentRoute.noInstructionsYetTheAgentWillUseItsDefault")}</small>
                 </span>
-                <span className="shSoulCardAction"><Pencil aria-hidden="true" />{t("agentRunRow.edit")}</span>
+                {!readOnly ? <span className="shSoulCardAction"><Pencil aria-hidden="true" />{t("agentRunRow.edit")}</span> : null}
               </button>
             </section>
 
             {error ? <div className="errorBanner" role="alert">{error}</div> : null}
-            {confirmingClose ? <footer className="shAgentDiscardPrompt" role="alert">
+            {readOnly ? <footer><button type="button" onClick={onClose}>{t("workspaceContextPanel.close")}</button></footer> : confirmingClose ? <footer className="shAgentDiscardPrompt" role="alert">
               <span><strong>{t("agentEditorModal.discardUnsavedChanges")}</strong><small>{t("agentEditorModal.yourNameDescriptionAvatarAndSoulMdDraftsWill")}</small></span>
               <button ref={continueEditingRef} type="button" onClick={() => setConfirmingClose(false)}>{t("agentEditorModal.continueEditing")}</button>
               <button className="isDanger" type="button" onClick={onClose}>{t("agentEditorModal.discardChanges")}</button>
             </footer> : <footer>
               <span className="srOnly" role="status" aria-live="polite">{busy ? t("agentEditorModal.savingAgent") : ""}</span>
-              <button type="button" disabled={busy} onClick={reset}>{t("agentEditorModal.reset")}</button>
+              <button type="button" disabled={busy || readOnly} onClick={reset}>{t("agentEditorModal.reset")}</button>
               <button className="shPrimaryButton" type="submit" disabled={busy || readingAvatar || !name.trim()}>{busy ? t("modelSettings.saving") : submitLabel}</button>
             </footer>}
       </form>

@@ -12,7 +12,7 @@ from app_core.models import (
     WorkspaceGroup,
     WorkspaceMembership,
 )
-from app_core.agent_defaults import ensure_default_agent
+from app_core.agent_defaults import AgentPromotionRequired, ensure_default_agent
 
 
 DEFAULT_WORKSPACE_NAME = "Default"
@@ -85,7 +85,15 @@ class Command(BaseCommand):
                 raise CommandError(
                     "Default workspace all-members group must use the exact system name"
                 )
-            agent, agent_created = ensure_default_agent(workspace, user)
+            try:
+                agent, agent_created = ensure_default_agent(workspace, user)
+            except AgentPromotionRequired as error:
+                if str(error) != "agent_configuration_promotion_required":
+                    raise CommandError(str(error)) from error
+                # Identity bootstrap must allow the API/settings migration boundary
+                # to start without selecting an authoritative personal policy.
+                agent, agent_created = None, False
+                self.stdout.write("Workspace Agent configuration requires explicit owner/admin promotion in Agent settings")
 
         if user_created:
             self.stdout.write(self.style.SUCCESS(f"Created bootstrap superadmin {email}"))

@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createMemoryRouter } from "react-router";
-import { button, deferred, environment, nodes, renderer, subjectLoader } from "./componentHarness.mjs";
+import { button, deferred, environment as baseEnvironment, nodes, renderer, subjectLoader } from "./componentHarness.mjs";
 
-const load = subjectLoader();
+const environment = (overrides = {}) => baseEnvironment({ workspace: { id: "workspace", role: "admin" }, ...overrides });
+const pickers = `export const ModelPicker=()=>null; export const ThinkingPicker=()=>null;
+  export const thinkingModeLabels=t=>({low:t("appRoute.low"),high:t("appRoute.high")});`;
+const load = subjectLoader({ extraOverrides: [["../components/ModelSelectionPickers", `data:text/javascript;base64,${Buffer.from(pickers).toString("base64")}`]] });
 globalThis.document = { body: {} };
 const { default: AgentSettings } = await import(await load(fileURLToPath(new URL("../../src/routes/AgentSettings.jsx", import.meta.url))));
 const { default: AgentModelSettings } = await import(await load(fileURLToPath(new URL("../../src/routes/AgentModelSettings.jsx", import.meta.url))));
@@ -145,4 +148,116 @@ test("active profile save revalidates and navigates to exactly the accepted Agen
   subject.render(); subject.flush(); editProfile(subject.tree).props.onClick(); await subject.settle();
   await editor(subject.tree).onSave({ name: "Changed" });
   assert.equal(env.revalidationCount, 1); assert.deepEqual(env.navigations, ["/w/workspace/settings/agents?agentId=agent"]); subject.unmount();
+});
+
+
+test("members view shared profile and model in the existing settings without edit/create/trash actions", async () => {
+  const calls = [];
+  const env = environment({ workspace: { id: "workspace", role: "member" }, request: async (path, options) => {
+    calls.push([path, options?.method || "GET"]);
+    return path === "/api/models?workspaceId=workspace" ? { models: [model] } : settings;
+  } });
+  env.agents = [{ ...env.agents[0], definitionId: "definition" }];
+  const parent = renderer(AgentSettings, { onEditorOpenChange() {} }, env);
+  await parent.settle();
+  const modelProps = nodes(parent.tree, node => node.type.name === "AgentModelSettings")[0].props;
+  const actions = modelProps.renderProfileActions(() => {});
+  assert.equal(button(parent.tree, "agentCreateRoute.createAgent"), undefined);
+  assert.equal(button(actions, "agentRoute.editAgent"), undefined);
+  assert.equal(button(actions, "agentRoute.moveToTrash"), undefined);
+  button(actions, "agentSettings.viewAgent").props.onClick(); await parent.settle();
+  assert.equal(editor(parent.tree).readOnly, true);
+  assert.equal(editor(parent.tree).shared, true);
+  await editor(parent.tree).onSave({ name: "Unchanged" });
+  const subject = renderer(AgentModelSettings, modelProps, env);
+  await subject.settle();
+  assert.equal(effort(subject.tree).disabled, true);
+  assert.equal(effort(subject.tree).value, "high");
+  assert.equal(nodes(subject.tree, node => node.type.name === "ModelPicker")[0].props.disabled, true);
+  assert.equal(button(subject.tree, "agentRoute.saveChanges"), undefined);
+  assert.equal(button(subject.tree, "agentSettings.clearModel"), undefined);
+  assert.ok(calls.every(([, method]) => method === "GET"));
+  subject.unmount(); parent.unmount();
+});
+
+test("member create URLs do not open an editable Agent form", async () => {
+  const env = environment({ workspace: { id: "workspace", role: "member" }, location: { pathname: "/w/workspace/settings/agents", search: "?new=1" }, request: async () => { throw new Error("unexpected_mutation"); } });
+  const subject = renderer(AgentSettings, { onEditorOpenChange() {} }, env);
+  await subject.settle();
+  assert.equal(nodes(subject.tree, node => node.type.name === "AgentEditorModal").length, 0);
+  assert.equal(button(subject.tree, "agentCreateRoute.createAgent"), undefined);
+  subject.unmount();
+});
+
+for (const legacy of [true, false]) test(`administrator profile save ${legacy ? "promotes the selected legacy Agent" : "updates the published Agent"} and retains its identity`, async () => {
+  const requests = [];
+  const env = environment({ request: async (path, options) => {
+    requests.push({ path, method: options.method, body: JSON.parse(options.body) });
+    return { agent: { id: "agent", workspaceId: "workspace", definitionId: "definition", definitionVersionId: "version" } };
+  } });
+  env.agents = [{ ...env.agents[0], definitionId: legacy ? null : "definition" }];
+  const subject = renderer(AgentSettings, { onEditorOpenChange() {} }, env);
+  await subject.settle(); editProfile(subject.tree).props.onClick(); await subject.settle();
+  await editor(subject.tree).onSave({ name: "Shared profile" });
+  assert.deepEqual(requests, [
+    ...(legacy ? [{ path: "/api/agents/agent/promote", method: "POST", body: {} }] : []),
+    { path: "/api/agents/agent", method: "PATCH", body: { name: "Shared profile" } },
+  ]);
+  assert.deepEqual(env.navigations, ["/w/workspace/settings/agents?agentId=agent"]);
+  subject.unmount();
+});
+
+test("administrator legacy model Save promotes before publishing through the existing model endpoint", async () => {
+  const requests = [];
+  const env = environment({ request: async (path, options) => {
+    if (options?.method) requests.push([path, options.method]);
+    if (path.endsWith("/promote")) return { agent: { id: "agent", workspaceId: "workspace", definitionId: "definition", definitionVersionId: "version" } };
+    return path === "/api/models?workspaceId=workspace" ? { models: [model] } : options?.method === "PATCH" ? { ...settings, thinkingMode: "low" } : settings;
+  } });
+  env.agents = [{ ...env.agents[0], definitionId: null }];
+  const subject = renderer(AgentModelSettings, { agentId: "agent" }, env);
+  await subject.settle(); effort(subject.tree).onChange("low"); await subject.settle();
+  button(subject.tree, "agentRoute.saveChanges").props.onClick(); await subject.settle();
+  assert.deepEqual(requests, [["/api/agents/agent/promote", "POST"], ["/api/agents/agent/model-settings", "PATCH"]]);
+  assert.equal(effort(subject.tree).value, "low");
+  assert.equal(env.revalidationCount, 1);
+  subject.unmount();
+});
+
+
+for (const surface of ["profile", "model"]) test(`${surface} Save retains successful promotion when publishing fails and the next Save uses PATCH`, async () => {
+  const requests = []; let patches = 0;
+  const env = environment({ request: async (path, options) => {
+    if (options?.method) requests.push([path, options.method]);
+    if (path.endsWith("/promote")) return { agent: { id: "agent", workspaceId: "workspace", definitionId: "definition", definitionVersionId: "version" } };
+    if (options?.method === "PATCH" && ++patches === 1) throw new Error("synthetic_publish_failure");
+    return path === "/api/models?workspaceId=workspace" ? { models: [model] } : surface === "model" ? { ...settings, thinkingMode: options?.method ? "low" : "high" } : { agent: { id: "agent", workspaceId: "workspace" } };
+  } });
+  env.agents = [{ ...env.agents[0], definitionId: null }];
+  const subject = renderer(surface === "model" ? AgentModelSettings : AgentSettings, surface === "model" ? { agentId: "agent" } : { onEditorOpenChange() {} }, env);
+  await subject.settle();
+  if (surface === "profile") { editProfile(subject.tree).props.onClick(); await subject.settle(); await editor(subject.tree).onSave({ name: "New shared name" }); }
+  else { effort(subject.tree).onChange("low"); await subject.settle(); button(subject.tree, "agentRoute.saveChanges").props.onClick(); }
+  await subject.settle();
+  if (surface === "profile") { assert.equal(editor(subject.tree).shared, true); await editor(subject.tree).onSave({ name: "New shared name" }); }
+  else button(subject.tree, "agentRoute.saveChanges").props.onClick();
+  await subject.settle();
+  assert.deepEqual(requests.map(([,method]) => method), ["POST", "PATCH", "PATCH"]);
+  subject.unmount();
+});
+
+for (const surface of ["profile", "model"]) test(`business root ${surface} Save retains the existing policy endpoint without promoting`, async () => {
+  const requests = [];
+  const env = environment({ request: async (path, options) => {
+    if (options?.method) requests.push([path, options.method]);
+    return path === "/api/models?workspaceId=workspace" ? { models: [model] } : surface === "model" ? { ...settings, thinkingMode: options?.method ? "low" : "high" } : { agent: { id: "agent", workspaceId: "workspace" } };
+  } });
+  env.agents = [{ ...env.agents[0], definitionId: null, isBusinessRoot: true }];
+  const subject = renderer(surface === "model" ? AgentModelSettings : AgentSettings, surface === "model" ? { agentId: "agent" } : { onEditorOpenChange() {} }, env);
+  await subject.settle();
+  if (surface === "profile") { editProfile(subject.tree).props.onClick(); await subject.settle(); await editor(subject.tree).onSave({ name: "Business policy" }); }
+  else { effort(subject.tree).onChange("low"); await subject.settle(); button(subject.tree, "agentRoute.saveChanges").props.onClick(); }
+  await subject.settle();
+  assert.deepEqual(requests, [[surface === "profile" ? "/api/agents/agent" : "/api/agents/agent/model-settings", "PATCH"]]);
+  subject.unmount();
 });

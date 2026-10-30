@@ -246,6 +246,8 @@ class AgentResponse(StrictSchema):
     workspace_id: str
     definition_id: str | None
     definition_version_id: str | None
+    is_business_root: bool
+    plugin_names: list[str]
     name: str
     description: str
     instructions: str
@@ -272,6 +274,9 @@ class AgentDefinitionResponse(StrictSchema):
     description: str
     instructions: str
     plugin_names: list[str]
+    model_config_ref: str | None
+    thinking_mode: str | None
+    avatar_url: str | None
     avatar_kind: Literal["centaeris", "banana"]
     status: Literal["active", "disabled"]
     availability_scope: Literal["none", "workspace", "members"]
@@ -289,6 +294,9 @@ class AgentDefinitionVersionResponse(StrictSchema):
     description: str
     instructions: str
     plugin_names: list[str]
+    model_config_ref: str | None
+    thinking_mode: str | None
+    avatar_url: str | None
     avatar_kind: Literal["centaeris", "banana"]
     published_at: str
 

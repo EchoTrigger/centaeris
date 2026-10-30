@@ -134,13 +134,22 @@ class PresentationChangeTests(TransactionTestCase):
                 raise RuntimeError("rollback")
         self.assertEqual(self.versions(), committed)
 
-    def test_unrelated_agent_does_not_invalidate_current_content(self):
+    def test_cross_agent_session_creation_wakes_workspace_navigation_only(self):
         other = Agent.objects.create(workspace=self.workspace, owner=self.user, name="Other agent")
-        unrelated = create_session(workspace=self.workspace, owner=self.user, agent=other)
         before = self.versions()
-        Session.objects.filter(pk=unrelated.pk).update(title="unrelated title")
-        self.assertEqual(self.versions(), before)
-        self.assertGreater(self.versions(agent=other, session=unrelated)["navigation"], 0)
+        key = presentation_change_keys(self.workspace.pk, self.agent.pk)["navigation"]
+        cfg = connection.settings_dict
+        with psycopg.connect(dbname=cfg["NAME"], user=cfg["USER"], password=cfg["PASSWORD"],
+                host=cfg["HOST"], port=cfg["PORT"], autocommit=True) as listener:
+            listener.execute("LISTEN " + CHANNEL)
+            with transaction.atomic():
+                unrelated = create_session(workspace=self.workspace, owner=self.user, agent=other)
+                self.assertEqual(list(listener.notifies(timeout=.03, stop_after=1)), [])
+            notices = list(listener.notifies(timeout=.15))
+            self.assertIn(key, [notice.payload for notice in notices])
+        self.assertChangedOnly(before, "navigation")
+        self.assertEqual(self.versions(agent=other, session=unrelated)["navigation"],
+                         self.versions()["navigation"])
 
     def test_noop_writes_and_runtime_lease_churn_do_not_dirty_presentation(self):
         before = self.versions()
@@ -163,7 +172,7 @@ class PresentationChangeTests(TransactionTestCase):
                 Session.objects.filter(pk=self.session.pk).update(title="Private content must not be sent")
                 self.assertEqual(list(listener.notifies(timeout=.03, stop_after=1)), [])
             notices = list(listener.notifies(timeout=.15, stop_after=1))
-            self.assertEqual([notice.payload for notice in notices], [agent_change_key(self.agent.pk, "navigation")])
+            self.assertEqual([notice.payload for notice in notices], [presentation_change_keys(self.workspace.pk, self.agent.pk)["navigation"]])
             with self.assertRaises(RuntimeError):
                 with transaction.atomic():
                     self.event("assistant_message")
@@ -395,7 +404,7 @@ class PresentationChangeGcTests(TransactionTestCase):
 class PresentationChangeBackendTests(SimpleTestCase):
     def test_display_scope_tracks_only_its_five_data_views(self):
         self.assertEqual(presentation_change_keys('workspace', 'agent', 'session'), {
-            'navigation': 'agent:agent:navigation', 'history': 'agent:agent:history',
+            'navigation': 'workspace:workspace:navigation', 'history': 'agent:agent:history',
             'work': 'agent:agent:work', 'state': 'session:session:state',
             'context': 'session:session:context',
         })

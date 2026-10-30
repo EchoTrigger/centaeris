@@ -6,7 +6,7 @@ import SettingsRoute from "../../src/routes/SettingsRoute";
 
 // Synthetic frontend/API behavior only. This does not certify model connectivity,
 // input delivery, coordinator admission or the unrun backend database tests.
-const workspace = { id: "fixture-workspace", name: "Synthetic workspace", role: "member" };
+const workspace = { id: "fixture-workspace", name: "Synthetic workspace", role: "admin" };
 const agent = { id: "fixture-agent", workspaceId: workspace.id, name: "Synthetic Agent", description: "", instructions: "", avatarKind: "centaeris", avatarUrl: null, status: "active", deletedAt: null, createdAt: "2026-09-30T14:00:00Z", updatedAt: "2026-09-30T14:00:00Z" };
 const user = { id: "fixture-user", email: "fixture@example.invalid", isStaff: false, isSuperuser: false };
 const model = { id: "fixture-exact-model", displayName: "Exact synthetic model", providerId: "fixture-provider", providerDisplayName: "Synthetic provider", modelName: "synthetic-native", contextTokens: 1000, maxOutputTokens: 100, thinkingMode: "high", thinkingModes: ["low", "high"] };
@@ -46,7 +46,7 @@ const menuChoice = (label: string) => [...document.querySelectorAll<HTMLButtonEl
 const writes = () => requests.filter(item => item.method === "PATCH");
 try {
   await waitFor(() => Boolean(document.querySelector(".agentSettingsModelControls")));
-  check("regular member sees private Agent Settings", Boolean(document.querySelector('.workspaceSettingsNav a[aria-current="page"]')), true);
+  check("workspace admin sees Agent Settings", Boolean(document.querySelector('.workspaceSettingsNav a[aria-current="page"]')), true);
   check("global admin model catalog is not used", requests.some(item => item.path.startsWith("/api/admin/")), false);
   check("unconfigured settings never select first model", document.body.textContent!.includes(t("agentSettings.unconfigured")), true);
   check("loading settings makes no mutation", writes().length, 0);
@@ -95,7 +95,7 @@ try {
   layer.querySelector<HTMLButtonElement>(`button[aria-label="${t("workspaceContextPanel.close")}"]`)!.click();
   await waitFor(() => !document.querySelector(".agentSettingsEditorLayer"));
   button(t("agentCreateRoute.createAgent")).click();
-  await waitFor(() => Boolean(document.querySelector(`[role="dialog"][aria-label="${t("agentCreateRoute.createPrivateAgent")}"]`)));
+  await waitFor(() => Boolean(document.querySelector(`[role="dialog"][aria-label="${t("agentCreateRoute.createAgent")}"]`)));
   check("Agent creation opens from Settings", new URLSearchParams(router.state.location.search).get("new"), "1");
   check("no input submission or Run endpoint is called", requests.every(item => item.method === "GET" || item.path.endsWith("/model-settings")), true);
   check("all Agent Settings checks completed", true, true);

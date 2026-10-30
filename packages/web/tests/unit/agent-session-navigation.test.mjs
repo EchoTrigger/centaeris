@@ -36,15 +36,15 @@ test("Agent previews a Session in place; ordinary Session navigation and browser
     await subject.settle(); nodes(subject.tree, node => node.type.name === "AgentMessageList")[0].props.onPreviewSession("work"); await subject.settle();
     assert.equal(router.state.location.pathname, source);
     assert.equal(nodes(subject.tree, node => node.type.name === "AgentSessionPreviewShell")[0].props.onOpenChat, undefined);
-    await router.navigate(navigation.sessionChatPath("workspace", "worker", "work"));
+    await router.navigate(navigation.sessionChatPath("workspace", "work"));
     assert.equal(router.state.historyAction, "PUSH");
-    assert.equal(router.state.location.pathname + router.state.location.search, "/w/workspace/agents/worker?sessionId=work");
+    assert.equal(router.state.location.pathname + router.state.location.search, "/w/workspace/sessions/work");
     const breadcrumb = SessionAgentBreadcrumb({ workspaceId: "workspace", agent, session, sessionId: "work", label: "Current conversation" });
     const link = nodes(breadcrumb, node => typeof node.props.to === "string")[0].props;
     assert.equal(link.to, "/w/workspace/agents/worker"); assert.equal(link.replace, undefined);
     // Browser history is exercised only by this Node memory-router test.
     await router.navigate(-1); assert.equal(router.state.location.pathname, source);
-    await router.navigate(1); assert.equal(router.state.location.search, "?sessionId=work");
+    await router.navigate(1); assert.equal(router.state.location.pathname, "/w/workspace/sessions/work");
     await router.navigate(link.to); assert.equal(router.state.historyAction, "PUSH"); assert.equal(router.state.location.search, "");
     assert.equal(navigation.workspaceChatKind(agent.id, router.state.location.search), "agent");
   } finally { subject.unmount(); router.dispose(); }
@@ -73,4 +73,12 @@ test("Agent project New Chat retains the exact project identity and the current 
     nodes(sidebar.tree, node => node.type === "button" && node.props.children?.includes?.("shellSidebar.newConversation"))[0].props.onClick();
     assert.equal(new URL(navigations[1].path, "https://fixture.invalid").searchParams.has("projectId"), false);
   }
+});
+
+
+test("an independent Session breadcrumb keeps its title when its Agent configuration no longer exists", async () => {
+  const { SessionAgentBreadcrumb } = await import(await subjectLoader()(fileURLToPath(new URL("../../src/agent-chat/SessionAgentBreadcrumb.tsx", import.meta.url))));
+  const tree = SessionAgentBreadcrumb({ workspaceId: "workspace", agent: null, session, sessionId: "work", label: "Current conversation" });
+  assert.equal(nodes(tree, node => typeof node.props.to === "string").length, 0);
+  assert.equal(nodes(tree, node => node.type === "span")[0].props.children, session.title);
 });

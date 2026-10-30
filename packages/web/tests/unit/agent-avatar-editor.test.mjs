@@ -52,3 +52,20 @@ test("reset and unmount invalidate unfinished avatar reads", async () => {
   assert.equal(reads[0].aborted, true); assert.equal(Object.hasOwn(saves[0], "avatarDataBase64"), false);
   fileInput().props.onChange({ target: { files: [{ name: "new.png", type: "image/png", size: 7 }], value: "new.png" } }); await subject.settle(); subject.unmount(); assert.equal(reads[1].aborted, true);
 });
+
+
+test("read-only shared profile exposes SOUL without avatar edits, drafts or submission", async () => {
+  let saves = 0;
+  const subject = renderer(AgentEditorModal, { agent: { ...original, definitionId: "shared-definition" }, readOnly: true, heading: "View Agent", onClose() {}, onSave() { saves++; } }, environment());
+  await subject.settle();
+  assert.ok(nodes(subject.tree, node => node.type === "input" && node.props.name === "agentName")[0].props.readOnly);
+  assert.equal(nodes(subject.tree, node => node.type === "input" && node.props.type === "file").length, 0);
+  assert.equal(nodes(subject.tree, node => node.type === "button" && node.props.type === "submit").length, 0);
+  nodes(subject.tree, node => node.type === "form")[0].props.onSubmit({ preventDefault() {} });
+  assert.equal(saves, 0);
+  button(subject.tree, "agentSettings.viewSoulMd").props.onClick(); await subject.settle();
+  const soul = nodes(subject.tree, node => node.type === "textarea")[0].props;
+  assert.equal(soul.readOnly, true);
+  assert.equal(soul.value, original.instructions);
+  subject.unmount();
+});

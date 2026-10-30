@@ -25,6 +25,10 @@ export type AuthLoaderData = { user: AuthenticatedUser };
 export type AgentSummary = {
   id: string;
   workspaceId: string;
+  definitionId: string | null;
+  definitionVersionId: string | null;
+  pluginNames: string[];
+  isBusinessRoot: boolean;
   name: string;
   description: string;
   instructions: string;
@@ -35,10 +39,13 @@ export type AgentSummary = {
   createdAt: string;
   updatedAt: string;
 };
+export type SessionSummary = { id: string; workspaceId: string; agentId: string; status: string; title: string };
 export type WorkspaceLoaderData = {
   workspace: WorkspaceSummary;
   workspaces: WorkspaceSummary[];
   agents: AgentSummary[];
+  defaultAgentId: string | null;
+  selectedSession: SessionSummary | null;
 };
 export type AccountSettingsLoaderData = {
   workspace: WorkspaceSummary | null;
@@ -174,19 +181,35 @@ async function accountSettingsLoader({ request }: { request: Request }): Promise
   return { workspace, workspaces };
 }
 
-async function workspaceLoader({ params, request }: { params: { workspaceId?: string }; request: Request }): Promise<WorkspaceLoaderData> {
+async function workspaceLoader({ params, request }: { params: { workspaceId?: string; sessionId?: string }; request: Request }): Promise<WorkspaceLoaderData> {
   const workspaceId = params.workspaceId || "";
   const result = await apiJson<{ workspaces: unknown }>("/api/workspaces", { signal: request.signal });
   const workspaces = requireWorkspaces(result.workspaces);
   const workspace = workspaces.find((item) => item.id === workspaceId);
   if (!workspace) throw redirect("/workspaces");
   try {
+    let defaultAgentId: string | null = null;
+    try {
+      const result = await apiJson<{ agent: AgentSummary }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/default-agent`, { signal: request.signal });
+      defaultAgentId = result.agent.id;
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 409 && error.message === "agent_configuration_promotion_required")) throw error;
+    }
     const agentResult = await apiJson<{ agents: AgentSummary[] }>(
       `/api/workspaces/${encodeURIComponent(workspaceId)}/agents`,
       { signal: request.signal },
     );
     if (!Array.isArray(agentResult.agents)) throw new Error("agent_directory_invalid");
-    return { workspace, workspaces, agents: agentResult.agents };
+    const url = new URL(request.url);
+    const base = `/w/${encodeURIComponent(workspaceId)}`;
+    const sessionId = url.pathname.startsWith(`${base}/sessions/`) ? params.sessionId : url.pathname.startsWith(`${base}/agents/`) ? url.searchParams.get("sessionId") : null;
+    let selectedSession: SessionSummary | null = null;
+    if (sessionId) {
+      const result = await apiJson<{ session: SessionSummary }>(`/api/sessions/${encodeURIComponent(sessionId)}`, { signal: request.signal });
+      if (result.session.id !== sessionId || result.session.workspaceId !== workspaceId || result.session.status !== "active") throw new Error("session_identity_invalid");
+      selectedSession = result.session;
+    }
+    return { workspace, workspaces, agents: agentResult.agents, defaultAgentId, selectedSession };
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) throw redirect("/workspaces");
     throw error;
@@ -227,6 +250,7 @@ export function createRouter() {
                   children: [
                     { path: "app", element: <></> },
                     { path: "agents/:agentId", element: <></> },
+                    { path: "sessions/:sessionId", element: <></> },
                     ...["preferences", "security", "applications", "general", "members", "groups", "plugins", "models", "platform-models", "global-plugins", "workspace-resources", "agents", "environment"].map((section) => ({ path: `settings/${section}`, Component: SettingsRoute })),
                   ],
                 },

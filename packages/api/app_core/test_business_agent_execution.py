@@ -62,6 +62,28 @@ class BusinessAgentExecutionTests(TransactionTestCase):
         from .test_agent_work_validation import AgentWorkValidationTests
         return AgentWorkValidationTests.validate(self, self.run, sessionRefs=refs, **changes)
 
+    def test_workspace_admin_can_maintain_business_root_without_promoting_its_branch(self):
+        import json
+        membership = models.WorkspaceMembership.objects.get(workspace=self.workspace, user=self.user)
+        self.client.force_login(self.user)
+        url = f"/api/agents/{self.root.pk}/model-settings"
+        payload = {"schema": "agent.model_settings.update.v1", "modelConfigRef": self.model.pk, "thinkingMode": None}
+        membership.role = "member"
+        membership.save(update_fields=["role"])
+        response = self.client.patch(url, json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 403, response.content)
+        membership.role = "admin"
+        membership.save(update_fields=["role"])
+        response = self.client.patch(url, json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 200, response.content)
+        response = self.client.patch(f"/api/agents/{self.root.pk}", json.dumps({"instructions": "Maintained business policy"}), content_type="application/json")
+        self.assertEqual(response.status_code, 200, response.content)
+        self.root.refresh_from_db()
+        self.branch.agent.refresh_from_db()
+        self.assertIsNone(self.root.definition_id)
+        self.assertIsNone(self.branch.agent.definition_id)
+        self.assertEqual(self.root.instructions, "Maintained business policy")
+
     def test_branch_tools_reject_root_sibling_and_unbound_same_agent_sessions(self):
         sibling = self.new_branch("external-user-two")
         ordinary = models.Session.objects.create(workspace=self.workspace, owner=self.user, agent=self.agent)

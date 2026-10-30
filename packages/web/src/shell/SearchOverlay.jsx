@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router";
 import { Bot, FileText, MessageSquare, Search } from "lucide-react";
+import { sessionChatPath } from "../agent-chat/agentChatNavigation";
 import { apiJson } from "../api";
 import { useModalDialog } from "../components/useModalDialog";
 
@@ -24,8 +25,8 @@ export function SearchOverlay({ sessions, workspace, agents, agentId, onClose })
     apiJson("/api/library")
       .then((result) => { if (active) setLibrary(result.objects || []); })
       .catch(() => { if (active) setLibrary([]); });
-    if (!sessions.length && workspace.id && agentId) {
-      apiJson(`/api/workspaces/${workspace.id}/sessions?agentId=${encodeURIComponent(agentId)}`)
+    if (!sessions.length && workspace.id) {
+      apiJson(`/api/workspaces/${workspace.id}/sessions`)
         .then((result) => { if (active) setLoadedSessions(result.sessions || []); })
         .catch(() => { if (active) setLoadedSessions([]); });
     }
@@ -57,7 +58,7 @@ export function SearchOverlay({ sessions, workspace, agents, agentId, onClose })
         results: loadedSessions
           .filter((session) => matches(session.title || ""))
           .slice(0, 12)
-          .map((session) => ({ key: `session:${session.id}`, id: session.id, kind: "session", title: session.title || t("searchOverlay.untitledConversation"), detail: t("agentRunRow.agentSessions"), href: `/w/${encodeURIComponent(workspace.id)}/agents/${encodeURIComponent(session.agentId)}?sessionId=${encodeURIComponent(session.id)}` })),
+          .map((session) => ({ key: `session:${session.id}`, id: session.id, kind: "session", title: session.title || t("searchOverlay.untitledConversation"), detail: t("agentRunRow.agentSessions"), href: sessionChatPath(workspace.id, session.id) })),
       },
       {
         label: t("agentRunRow.agent"),

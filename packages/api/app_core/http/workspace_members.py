@@ -22,7 +22,7 @@ from app_core.models import (
     WorkspaceMembership,
     normalize_workspace_invitation_email,
 )
-from app_core.agent_defaults import ensure_default_agent
+from app_core.agent_defaults import AgentPromotionRequired, ensure_default_agent
 from app_core.workspace_access import (
     WORKSPACE_ADMIN_ROLES,
     locked_workspace_membership_for,
@@ -708,7 +708,11 @@ def accept_workspace_invitation(
             role=invitation.role,
             invited_by=invitation.invited_by,
         )
-        ensure_default_agent(invitation.workspace, accepted_user)
+        try:
+            ensure_default_agent(invitation.workspace, accepted_user)
+        except AgentPromotionRequired as error:
+            transaction.set_rollback(True)
+            return Status(409, {"error": str(error)})
         invitation.status = "accepted"
         invitation.accepted_by = accepted_user
         invitation.accepted_membership_ref = membership.id

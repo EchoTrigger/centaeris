@@ -66,12 +66,12 @@ def _recent_registry_keys(session, cutoff):
 def _owner_retained(agent, owner, session):
     return (owner.workspace_id == session.workspace_id and owner.agent_id == agent.pk
             and agent.workspace_id == owner.workspace_id and owner.purgedAt is None
-            and agent.purgedAt is None and owner.workspaceBaselineKnown)
+            and owner.workspaceBaselineKnown)
 
 
 def collect_reachable_workspace_gc(root, cutoff, dry_run, report):
     from . import workspace_snapshot_gc as gc
-    owners = Session.objects.filter(purgedAt__isnull=True, agent__purgedAt__isnull=True).only(
+    owners = Session.objects.filter(purgedAt__isnull=True).only(
         "id", "workspace_id", "agent_id", "workspaceBaselineKnown")
     for session in owners.order_by("id").iterator():
         prefix = gc._session_prefix(session)

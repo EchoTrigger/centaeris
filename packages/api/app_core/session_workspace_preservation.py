@@ -42,7 +42,6 @@ def _locked_preservation(body):
     session = run.session
     if (run.status not in {"completed", "failed", "cancelled"}
             or session.status != "active" or session.purgedAt is not None
-            or session.agent.status != "active" or session.agent.purgedAt is not None
             or run.workspace.status != "active" or session.current_environment_id != environment.pk
             or environment.controller_released or environment.controller_purpose != "cleanup"
             or environment.controller_run_id != run.pk

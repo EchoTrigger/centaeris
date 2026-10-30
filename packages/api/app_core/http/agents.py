@@ -15,13 +15,16 @@ from app_core.agent_identity import (
     normalize_agent_instructions,
     normalize_agent_name,
 )
-from app_core.models import Agent, AgentRun, AgentCoordinationSession, Session
-from app_core.agent_definitions import available_agent_definitions
+from app_core.models import Agent, AgentDefinition, AgentRun, AgentCoordinationSession, Session
+from app_core.agent_definitions import available_agent_definitions, publish_definition
+from app_core.plugin_catalog import selected_plugin_activation, validate_plugin_names, plugin_activation_for_workspace
 from app_core.agent_inputs import require_native_agent_delegation
 from app_core.app_delegations import require_request_delegation
 from app_core.business_agent_scope import branch_for_agent, BusinessAgentConfigurationUnavailable
 from app_core.trash_retention import trash_is_restorable
 from app_core.workspace_access import (
+    WORKSPACE_ADMIN_ROLES,
+    shared_submission_membership_for,
     locked_workspace_membership_for,
     workspace_membership_for,
 )
@@ -124,18 +127,31 @@ def update_model_settings(request, agent_id: str, payload: UpdateAgentModelSetti
         agent = _owned_agent(request.user, agent_id, lock=True)
         if agent is None or agent.status != "active":
             return Status(404, {"error": "agent_not_found"})
+        if workspace_membership_for(request.user, agent.workspace_id, allowed_roles=WORKSPACE_ADMIN_ROLES) is None:
+            return Status(403, {"error": "agent_configuration_forbidden"})
         if branch_for_agent(agent.pk) is not None:
             return Status(409, {"error": "agent_business_configuration_managed"})
+        business_root = agent.definition_id is None and agent.business_branches.exists()
+        if agent.definition_id is None and not business_root:
+            return Status(409, {"error": "agent_configuration_promotion_required"})
+        definition = agent if business_root else AgentDefinition.objects.select_for_update().get(pk=agent.definition_id)
         if payload.model_config_ref is None:
             if payload.thinking_mode is not None:
                 return Status(400, {"error": "agent_model_settings_invalid"})
-            agent.model_config, agent.thinking_mode = None, ""
+            definition.model_config, definition.thinking_mode = None, ""
         else:
             try:
-                agent.model_config, agent.thinking_mode = selected_model(payload.model_config_ref, payload.thinking_mode, workspace_id=agent.workspace_id)
+                definition.model_config, definition.thinking_mode = selected_model(payload.model_config_ref, payload.thinking_mode, workspace_id=agent.workspace_id)
             except AgentModelSettingsError as error:
                 return Status(400, {"error": str(error)})
-        agent.save(update_fields=["model_config", "thinking_mode", "updatedAt"])
+        definition.save(update_fields=["model_config", "thinking_mode", "updatedAt" if business_root else "updated_at"])
+        if not business_root:
+            try:
+                publish_definition(definition, request.user)
+            except ValueError as error:
+                transaction.set_rollback(True)
+                return Status(409, {"error": str(error)})
+            agent.definition = definition
         return serialize_model_settings(agent)
 
 
@@ -223,10 +239,12 @@ class AgentProfileUpdate(StrictSchema):
 
 class CreateAgentRequest(AgentProfileFields):
     avatar_data_base64: str | None = None
+    plugin_names: list[str] = Field(default_factory=list)
 
 
 class UpdateAgentRequest(AgentProfileUpdate):
     avatar_data_base64: str | None = None
+    plugin_names: list[str] | None = None
 
 
 @router.get(
@@ -242,7 +260,9 @@ def list_agents(request, workspace_id: str):
         workspace_id=workspace_id,
         owner=request.user,
         status="active",
-    ).select_related("definition__published_version").defer("avatar_image").order_by("createdAt", "id")
+    ).select_related("definition__published_version").defer(
+        "avatar_image", "definition__avatar_image", "definition__published_version__avatar_image",
+    ).order_by("createdAt", "id")
     if request.app_delegation is not None:
         agents = agents.filter(definition_id=request.app_delegation.definition_id)
         if request.app_delegation.agent_id is not None:
@@ -250,7 +270,14 @@ def list_agents(request, workspace_id: str):
         else:
             agents = agents.filter(is_business_instance=False)
     else:
-        agents = agents.filter(business_branch__isnull=True)
+        membership = workspace_membership_for(request.user, workspace_id)
+        for definition in available_agent_definitions(membership):
+            version = definition.published_version
+            Agent.objects.defer("avatar_image").get_or_create(workspace_id=workspace_id, owner=request.user, definition=definition,
+                is_business_instance=False, defaults={"name": version.name, "description": version.description,
+                    "instructions": version.instructions, "avatar_kind": version.avatar_kind})
+        agents = agents.filter(business_branch__isnull=True).filter(
+            Q(definition__isnull=True) | Q(definition_id__in=available_agent_definitions(membership).values("id")))
     return {"agents": [serialize_agent(agent) for agent in agents]}
 
 
@@ -261,24 +288,95 @@ def list_agents(request, workspace_id: str):
 )
 def create_agent(request, workspace_id: str, payload: CreateAgentRequest):
     with transaction.atomic():
-        membership = locked_workspace_membership_for(request.user, workspace_id)
+        membership = locked_workspace_membership_for(request.user, workspace_id, allowed_roles=WORKSPACE_ADMIN_ROLES)
         if membership is None:
             return Status(404, {"error": "workspace_not_found"})
         try:
+            validate_plugin_names(sorted(payload.plugin_names))
+            selected_plugin_activation(membership.workspace, sorted(payload.plugin_names))
             avatar_image, avatar_digest = normalize_avatar(payload.avatar_data_base64)
         except ValueError as error:
             return Status(400, {"error": str(error)})
-        agent = Agent.objects.create(
-            workspace=membership.workspace,
-            owner=request.user,
-            name=payload.name,
-            description=payload.description,
-            instructions=payload.instructions,
-            avatar_kind=payload.avatar_kind,
-            avatar_image=avatar_image,
-            avatar_digest=avatar_digest,
+        definition = AgentDefinition.objects.create(
+            workspace=membership.workspace, created_by=request.user, name=payload.name,
+            description=payload.description, instructions=payload.instructions,
+            avatar_kind=payload.avatar_kind, avatar_image=avatar_image, avatar_digest=avatar_digest,
+            plugin_names=sorted(payload.plugin_names), availability_scope="workspace",
         )
+        publish_definition(definition, request.user)
+        if membership.workspace.default_agent_definition_id is None:
+            membership.workspace.default_agent_definition = definition
+            membership.workspace.save(update_fields=["default_agent_definition", "updatedAt"])
+        agent = Agent.objects.create(workspace=membership.workspace, owner=request.user,
+            definition=definition, name=payload.name, description=payload.description,
+            instructions=payload.instructions, avatar_kind=payload.avatar_kind)
     return Status(201, {"agent": serialize_agent(agent)})
+
+
+class PromoteAgentRequest(StrictSchema):
+    bind_agent_ids: list[str] = Field(default_factory=list)
+    make_default: bool = True
+
+
+@router.post("/agents/{agent_id}/promote", auth=session_auth,
+    response={200: AgentEnvelope} | COMMON_ERROR_RESPONSES)
+def promote_agent(request, agent_id: str, payload: PromoteAgentRequest):
+    with transaction.atomic():
+        agent = _owned_agent(request.user, agent_id, lock=True)
+        if agent is None or agent.status != "active":
+            return Status(404, {"error": "agent_not_found"})
+        if workspace_membership_for(request.user, agent.workspace_id, allowed_roles=WORKSPACE_ADMIN_ROLES) is None:
+            return Status(403, {"error": "agent_configuration_forbidden"})
+        if agent.definition_id is not None or agent.is_business_instance or branch_for_agent(agent.pk) is not None or agent.business_branches.exists():
+            return Status(409, {"error": "agent_configuration_managed"})
+        identities = set(payload.bind_agent_ids) | {agent.id}
+        instances = list(Agent.objects.select_for_update(of=("self",)).filter(id__in=identities,
+            workspace_id=agent.workspace_id, definition__isnull=True,
+            is_business_instance=False, business_branch__isnull=True, business_branches__isnull=True))
+        if {item.id for item in instances} != identities:
+            return Status(400, {"error": "agent_promotion_instances_invalid"})
+        activation = plugin_activation_for_workspace(agent.workspace)
+        definition = AgentDefinition.objects.create(workspace=agent.workspace, created_by=request.user,
+            name=agent.name, description=agent.description, instructions=agent.instructions,
+            avatar_kind=agent.avatar_kind, avatar_image=agent.avatar_image, avatar_digest=agent.avatar_digest,
+            model_config=agent.model_config, thinking_mode=agent.thinking_mode,
+            plugin_names=sorted(item["name"] for item in activation["packages"]), availability_scope="workspace")
+        publish_definition(definition, request.user)
+        # The explicit bind list is the migration authority; no personal policy is inferred.
+        if len({item.owner_id for item in instances}) != len(instances):
+            transaction.set_rollback(True)
+            return Status(409, {"error": "agent_promotion_owner_conflict"})
+        # Ordinary model saves keep the binding immutable. This explicit promotion
+        # is the sole forward transition for released personal instances.
+        Agent.objects.filter(id__in=identities).update(definition=definition,
+            avatar_image=None, avatar_digest="", updatedAt=timezone.now())
+        if payload.make_default:
+            agent.workspace.default_agent_definition = definition
+            agent.workspace.save(update_fields=["default_agent_definition", "updatedAt"])
+        agent.definition = definition
+        agent.avatar_image, agent.avatar_digest = None, ""
+    return {"agent": serialize_agent(agent)}
+
+
+@router.get("/workspaces/{workspace_id}/default-agent", auth=session_auth,
+    response={200: AgentEnvelope} | COMMON_ERROR_RESPONSES)
+def get_default_agent(request, workspace_id: str):
+    from app_core.agent_defaults import AgentPromotionRequired, ensure_default_agent
+    current = workspace_membership_for(request.user, workspace_id)
+    if current is None:
+        return Status(404, {"error": "workspace_not_found"})
+    pin = locked_workspace_membership_for if current.workspace.default_agent_definition_id is None else shared_submission_membership_for
+    with transaction.atomic():
+        membership = pin(request.user, workspace_id)
+        if membership is None:
+            return Status(404, {"error": "workspace_not_found"})
+        try:
+            agent, _ = ensure_default_agent(membership.workspace, request.user)
+        except AgentPromotionRequired as error:
+            return Status(409, {"error": str(error)})
+    if agent.status == "deleted":
+        return Status(410, {"error": "agent_deleted"})
+    return {"agent": serialize_agent(agent)}
 
 
 @router.get(
@@ -289,7 +387,7 @@ def create_agent(request, workspace_id: str, payload: CreateAgentRequest):
 def get_agent(request, agent_id: str):
     require_request_delegation(request, "assistant:use", agent_id=agent_id)
     agent = _owned_agent(request.user, agent_id)
-    if agent is None or agent.status != "active":
+    if agent is None or agent.status != "active" or (agent.definition_id and agent.definition.status != "active"):
         return Status(404, {"error": "agent_not_found"})
     return {"agent": serialize_agent(agent)}
 
@@ -306,11 +404,12 @@ def get_agent_avatar(request, agent_id: str):
     if re.fullmatch(r"[0-9a-f]{64}", version) is None:
         return Status(400, {"error": "agent_avatar_request_invalid"})
     agent = _owned_agent(request.user, agent_id)
+    avatar = agent.definition.published_version if agent is not None and agent.definition_id else agent
     if (agent is None or agent.status != "active" or agent.purgedAt is not None
-            or agent.definition_id is not None or agent.is_business_instance
-            or not agent.avatar_digest or version != agent.avatar_digest):
+            or avatar is None or agent.is_business_instance
+            or not avatar.avatar_digest or version != avatar.avatar_digest):
         return Status(404, {"error": "agent_not_found"})
-    response = HttpResponse(bytes(agent.avatar_image), content_type="image/png")
+    response = HttpResponse(bytes(avatar.avatar_image), content_type="image/png")
     response["Cache-Control"] = "private, no-store"
     response["X-Content-Type-Options"] = "nosniff"
     return response
@@ -402,35 +501,33 @@ def update_agent(request, agent_id: str, payload: UpdateAgentRequest):
             return Status(410, {"error": "agent_deleted"})
         if agent.is_business_instance or branch_for_agent(agent.pk) is not None:
             return Status(409, {"error": "agent_business_configuration_managed"})
-        if agent.definition_id is not None:
-            return Status(409, {"error": "agent_configuration_managed"})
-        avatar_change = None
-        if "avatar_data_base64" in fields:
-            try:
-                avatar_change = normalize_avatar(payload.avatar_data_base64)
-            except ValueError as error:
-                return Status(400, {"error": str(error)})
-        ordinary_fields = fields - {"avatar_data_base64"}
-        if (all(getattr(agent, field) == getattr(payload, field) for field in ordinary_fields)
-                and (avatar_change is None or agent.avatar_digest == avatar_change[1])):
-            return Status(409, {"error": "agent_unchanged"})
+        if workspace_membership_for(request.user, agent.workspace_id, allowed_roles=WORKSPACE_ADMIN_ROLES) is None:
+            return Status(403, {"error": "agent_configuration_forbidden"})
+        business_root = agent.definition_id is None and agent.business_branches.exists()
+        if agent.definition_id is None and not business_root:
+            return Status(409, {"error": "agent_configuration_promotion_required"})
+        if business_root and "plugin_names" in fields:
+            return Status(409, {"error": "agent_business_configuration_managed"})
+        definition = agent if business_root else AgentDefinition.objects.select_for_update().get(pk=agent.definition_id)
         update_fields = []
-        if avatar_change is not None:
-            agent.avatar_image, agent.avatar_digest = avatar_change
-            update_fields.extend(["avatar_image", "avatar_digest"])
-        if "name" in fields:
-            agent.name = payload.name
-            update_fields.append("name")
-        if "description" in fields:
-            agent.description = payload.description
-            update_fields.append("description")
-        if "instructions" in fields:
-            agent.instructions = payload.instructions
-            update_fields.append("instructions")
-        if "avatar_kind" in fields:
-            agent.avatar_kind = payload.avatar_kind
-            update_fields.append("avatar_kind")
-        agent.save(update_fields=[*update_fields, "updatedAt"])
+        try:
+            if "avatar_data_base64" in fields:
+                definition.avatar_image, definition.avatar_digest = normalize_avatar(payload.avatar_data_base64)
+                update_fields.extend(["avatar_image", "avatar_digest"])
+            if "plugin_names" in fields:
+                validate_plugin_names(sorted(payload.plugin_names))
+                selected_plugin_activation(agent.workspace, sorted(payload.plugin_names))
+            for field in fields - {"avatar_data_base64"}:
+                setattr(definition, field, sorted(payload.plugin_names) if field == "plugin_names" else getattr(payload, field))
+                update_fields.append(field)
+            definition.save(update_fields=[*update_fields, "updatedAt" if business_root else "updated_at"])
+            if not business_root:
+                publish_definition(definition, request.user)
+        except ValueError as error:
+            transaction.set_rollback(True)
+            return Status(400, {"error": str(error)})
+        if not business_root:
+            agent.definition = definition
     return {"agent": serialize_agent(agent)}
 
 
@@ -444,6 +541,17 @@ def delete_agent(request, agent_id: str):
         agent = _owned_agent(request.user, agent_id, lock=True)
         if agent is None:
             return Status(404, {"error": "agent_not_found"})
+        if workspace_membership_for(request.user, agent.workspace_id, allowed_roles=WORKSPACE_ADMIN_ROLES) is None:
+            return Status(403, {"error": "agent_configuration_forbidden"})
+        if agent.definition_id is not None:
+            from app_core.agent_defaults import replace_retired_default
+            definition = AgentDefinition.objects.select_for_update().get(pk=agent.definition_id)
+            if definition.status == "disabled":
+                return Status(410, {"error": "agent_deleted"})
+            definition.status = "disabled"
+            definition.save(update_fields=["status", "updated_at"])
+            replace_retired_default(agent.workspace, request.user, definition)
+            return {"deleted": True}
         if agent.status == "deleted":
             return Status(410, {"error": "agent_deleted"})
         if AgentRun.objects.filter(Q(session__agent=agent)
@@ -466,6 +574,10 @@ def restore_agent(request, agent_id: str):
         agent = _owned_agent(request.user, agent_id, lock=True)
         if agent is None:
             return Status(404, {"error": "agent_not_found"})
+        if workspace_membership_for(request.user, agent.workspace_id, allowed_roles=WORKSPACE_ADMIN_ROLES) is None:
+            return Status(403, {"error": "agent_configuration_forbidden"})
+        if agent.definition_id is not None:
+            return Status(409, {"error": "agent_configuration_managed"})
         if agent.status != "deleted":
             return Status(409, {"error": "agent_not_deleted"})
         if not trash_is_restorable(agent.deletedAt, agent.purgedAt):
@@ -490,6 +602,10 @@ def permanently_delete_agent(request, agent_id: str):
         agent = _owned_agent(request.user, agent_id, lock=True)
         if agent is None:
             return Status(404, {"error": "agent_not_found"})
+        if workspace_membership_for(request.user, agent.workspace_id, allowed_roles=WORKSPACE_ADMIN_ROLES) is None:
+            return Status(403, {"error": "agent_configuration_forbidden"})
+        if agent.definition_id is not None:
+            return Status(409, {"error": "agent_configuration_managed"})
         if agent.status != "deleted":
             return Status(409, {"error": "agent_not_deleted"})
         if agent.purgedAt is not None:

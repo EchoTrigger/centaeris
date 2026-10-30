@@ -32,16 +32,26 @@ def selected_model(model_config_ref, thinking_mode, *, workspace_id=None):
     return model, mode
 
 
-def configured_agent_model(agent):
+def configured_agent_model(agent, *, definition_version=None):
     """Call under the Agent admission lock, then snapshot on the new Run."""
+    business_instance = agent.is_business_instance or agent.business_branches.exists()
     try:
         agent = agent_configuration(agent)
     except BusinessAgentConfigurationUnavailable as error:
         raise AgentModelSettingsError(str(error)) from error
+    workspace_id = agent.workspace_id
+    if definition_version is not None:
+        agent = definition_version
+    elif agent.definition_id is not None:
+        agent = agent.definition.published_version
+        if agent is None:
+            raise AgentModelSettingsError("agent_definition_not_available")
+    elif not business_instance:
+        raise AgentModelSettingsError("agent_configuration_promotion_required")
     if agent.model_config_id is None:
         raise AgentModelSettingsError("agent_model_not_configured")
     mode = agent.thinking_mode or None
-    model, resolved = selected_model(agent.model_config_id, mode, workspace_id=agent.workspace_id)
+    model, resolved = selected_model(agent.model_config_id, mode, workspace_id=workspace_id)
     # A saved empty effort is a pinned value, not a request to resolve a changed
     # catalog default. ModelConfig revisions must not mutate their meaning.
     if resolved != agent.thinking_mode:
@@ -51,6 +61,10 @@ def configured_agent_model(agent):
 
 def serialize_model_settings(agent):
     configuration = agent_configuration(agent)
+    if agent.definition_id is not None:
+        configuration = agent.definition.published_version
+        if configuration is None:
+            raise AgentModelSettingsError("agent_definition_not_available")
     status = "unconfigured"
     if configuration.model_config_id is not None:
         try:

@@ -1,4 +1,4 @@
-export function canOpenPrivateAgentSettings(workspace: { id: string; role: string } | null | undefined) {
+export function canOpenAgentSettings(workspace: { id: string; role: string } | null | undefined) {
   return Boolean(workspace?.id && ["owner", "admin", "member"].includes(workspace.role));
 }
 export function agentSettingsPath(workspaceId: string, agentId?: string) {

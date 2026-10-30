@@ -13,7 +13,7 @@ export function SessionNavigationRow({ workspaceId, session, actions, active = f
       onKeyDown={event => { if (event.key === "Enter" && event.nativeEvent.isComposing) event.preventDefault(); if (event.key === "Escape") { event.preventDefault(); event.currentTarget.value = session.title; event.currentTarget.blur(); } }} />
   </form>;
   return <div className={`workspaceSessionRow ${nested ? "isNested" : ""} ${menuOpen ? "hasOpenMenu" : ""}`}>
-    <Link className={`workspaceSessionButton ${active ? "isActive" : ""}`} to={sessionChatPath(workspaceId, session.agentId, session.id)} state={{ sidebarTab: "chat" }}
+    <Link className={`workspaceSessionButton ${active ? "isActive" : ""}`} to={sessionChatPath(workspaceId, session.id)} state={{ sidebarTab: "chat" }}
       aria-current={active ? "page" : undefined} data-testid={active ? "active-session" : undefined} data-session-id={session.id}
       onClick={event => { if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) onSelect?.(session); }}>
       {icon ? <MessageSquare className="workspaceSessionKindIcon" aria-hidden="true" /> : null}

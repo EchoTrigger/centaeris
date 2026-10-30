@@ -5,10 +5,18 @@ from django.test import TestCase
 from . import test_agent_messages
 from .agent_model_settings import AgentModelSettingsError, configured_agent_model
 from .models import AgentRun, ModelConfig
+from .testing import publish_agent_test_policy
 
 
 class AgentModelSettingsTests(TestCase):
-    setUp = test_agent_messages.AgentMessageTests.setUp
+    def setUp(self):
+        test_agent_messages.AgentMessageTests.setUp(self)
+        publish_agent_test_policy(self.agent)
+
+    def snapshot(self):
+        self.agent.refresh_from_db()
+        version = self.agent.definition.published_version
+        return {"definition_version": version, "agent_instructions": version.instructions}
     bind = test_agent_messages.AgentMessageTests.bind
 
     @property
@@ -28,7 +36,7 @@ class AgentModelSettingsTests(TestCase):
         self.model("First catalog model")
         session = self.bind()
         AgentRun.objects.create(workspace=self.workspace, user=self.user, session=session,
-            modelConfig=self.model("Recent Run model"), prompt="Old", status="completed")
+            modelConfig=self.model("Recent Run model"), prompt="Old", status="completed", **self.snapshot())
         response = self.client.get(self.settings_url)
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(response.json(), {"schema": "agent.model_settings.v1", "agentId": self.agent.pk,
@@ -43,7 +51,7 @@ class AgentModelSettingsTests(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(response.json()["thinkingMode"], "high")
         self.agent.refresh_from_db()
-        self.assertEqual((self.agent.model_config_id, self.agent.thinking_mode), (model.pk, "high"))
+        self.assertEqual((self.agent.definition.published_version.model_config_id, self.agent.definition.published_version.thinking_mode), (model.pk, "high"))
         selected, mode = configured_agent_model(self.agent)
         self.assertEqual((selected.pk, mode), (model.pk, "high"))
         self.assertEqual(self.client.get(self.settings_url).json(), response.json())
@@ -56,7 +64,7 @@ class AgentModelSettingsTests(TestCase):
         self.agent.refresh_from_db()
         model, mode = configured_agent_model(self.agent)
         run = AgentRun.objects.create(workspace=self.workspace, user=self.user, session=session,
-            modelConfig=model, thinkingMode=mode, prompt="Active", status="running")
+            modelConfig=model, thinkingMode=mode, prompt="Active", status="running", **self.snapshot())
         authorization = create_agent_run_authorization(run, image_digest="sha256:" + "a" * 64)
         before = (authorization.payload, authorization.digest, authorization.signature)
         self.assertEqual(self.update(second.pk, "low").status_code, 200)
@@ -93,7 +101,7 @@ class AgentModelSettingsTests(TestCase):
             "schema": "agent.model_settings.update.v1", "modelConfigRef": model.pk}),
             content_type="application/json").status_code, 400)
         self.agent.refresh_from_db()
-        self.assertIsNone(self.agent.model_config_id)
+        self.assertIsNone(self.agent.definition.published_version.model_config_id)
 
     def test_only_current_private_owner_can_read_or_change_model_policy(self):
         model = self.model("Selected")

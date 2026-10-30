@@ -50,7 +50,8 @@ class PresentationLoader:
         # Preserve the existing list authorization and delegated branch boundary.
         self.request = copy.copy(request)
         self.request.GET = QueryDict(mutable=True)
-        self.request.GET["agentId"] = scope.agent_id
+        if getattr(request, "app_delegation", None) is not None:
+            self.request.GET["agentId"] = scope.agent_id
         self.scope = scope
         self.user_id = request.user.id
         delegation = getattr(request, "app_delegation", None)

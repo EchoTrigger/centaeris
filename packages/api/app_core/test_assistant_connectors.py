@@ -52,7 +52,7 @@ class AssistantConnectorFixture(DefinitionFixture):
             display_name="Fixture account", encrypted_secret=encrypt_credential_secret("fixture-account-one"),
             created_by=self.custodian, updated_by=self.custodian)
         from app_core.models import ModelConfig
-        self.model = ModelConfig.objects.create(displayName="Fixture")
+        self.model = self.definition_model
         for target, value in (("request_execution_profile", PROFILE), ("schedule_agent_run_lifecycle", "inserted")):
             self.enterContext(patch("app_core.http.workspaces." + target, return_value=value))
 
@@ -105,6 +105,35 @@ class AssistantConnectorFixture(DefinitionFixture):
                                 HTTP_X_INTERNAL_TOKEN="test-internal-token")
 
 class AssistantConnectorTests(AssistantConnectorFixture, TestCase):
+    def test_default_continuation_connector_keeps_historical_identity_and_current_revocation_checks(self):
+        from app_core.models import AgentConnectorCredentialApproval, Session, Workspace, WorkspaceMembership
+        approval = self.ready_binding()
+        old = self.create_definition()
+        self.publish(old)
+        self.availability(old)
+        Workspace.objects.filter(pk=self.workspace.pk).update(default_agent_definition_id=self.definition["id"])
+        self.client.force_login(self.member)
+        historical = self.instance(old).json()["agent"]
+        session = Session.objects.create(workspace=self.workspace, owner=self.member, agent_id=historical["id"])
+        self.client.force_login(self.admin)
+        self.assertEqual(self.send("patch", self.base + f"/agent-definitions/{old['id']}", {"status": "disabled"}).status_code, 200)
+        self.client.force_login(self.member)
+        accepted = self.send("post", self.base + f"/sessions/{session.pk}/messages", {"operationId": "default-connector", "text": "fixture"})
+        self.assertEqual(accepted.status_code, 202, accepted.content)
+        run = AgentRun.objects.get(pk=accepted.json()["agentRunId"])
+        self.assertEqual(run.authorization.payload["agentId"], historical["id"])
+        self.assertEqual(run.definition_version.definition_id, self.definition["id"])
+        self.assertEqual(self.authorize(run).status_code, 200)
+        self.source.version += 1
+        self.source.save(update_fields=["version"])
+        self.assertEqual(self.authorize(run).status_code, 409)
+        self.source.version -= 1
+        self.source.save(update_fields=["version"])
+        AgentConnectorCredentialApproval.objects.filter(pk=approval["id"]).update(revoked_at=timezone.now())
+        self.assertEqual(self.authorize(run).status_code, 409)
+        WorkspaceMembership.objects.filter(workspace=self.workspace, user=self.member).delete()
+        self.assertEqual(self.authorize(run).status_code, 403)
+
     def test_selected_capability_excludes_another_workspace_enabled_plugin(self):
         WorkspacePluginEnablement.objects.create(workspace=self.workspace, pluginName="kiwi")
         self.selected_publication()
@@ -320,17 +349,17 @@ class AssistantConnectorTests(AssistantConnectorFixture, TestCase):
         self.publish(self.definition)
         self.assertEqual(self.authorize(run, operation="dispatch", bindingDigest=original["bindingDigest"]).status_code, 200)
 
-    def test_current_session_agent_and_run_state_are_checked_before_dispatch(self):
+    def test_session_and_run_state_revoke_dispatch_but_profile_retirement_keeps_frozen_authority(self):
         self.ready_binding()
         run = self.submit_run()
         original = self.authorize(run).json()
-        for object_, field, value in ((run.session, "status", "deleted"),
-                                      (run.session.agent, "status", "deleted"), (run, "status", "completed")):
+        for object_, field, value, expected in ((run.session, "status", "deleted", 409),
+                                      (run.session.agent, "status", "deleted", 200), (run, "status", "completed", 409)):
             with self.subTest(field=field, object=type(object_).__name__):
                 old = getattr(object_, field)
                 deleted_fields = {"deletedAt": timezone.now()} if value == "deleted" else {}
                 type(object_).objects.filter(pk=object_.pk).update(**{field: value}, **deleted_fields)
-                self.assertEqual(self.authorize(run, operation="dispatch", bindingDigest=original["bindingDigest"]).status_code, 409)
+                self.assertEqual(self.authorize(run, operation="dispatch", bindingDigest=original["bindingDigest"]).status_code, expected)
                 restored_fields = {"deletedAt": None} if value == "deleted" else {}
                 type(object_).objects.filter(pk=object_.pk).update(**{field: old}, **restored_fields)
 

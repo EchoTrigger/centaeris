@@ -147,46 +147,32 @@ class WorkspaceSnapshotGcTests(TestCase):
             self.checkpoint(session=session, run=run),
         )]
 
-    def test_parent_purge_reclaims_children_without_cascading_session_state(self):
+    def test_parent_purge_preserves_session_owned_snapshots_and_state(self):
         agent, children = self.agent_children()
         keys = self.child_keys(children)
         self.client.force_login(self.owner)
         with patch("app_core.http.agents.timezone.now", return_value=self.old):
             self.assertEqual(self.client.delete(f"/api/agents/{agent.id}").status_code, 200)
-            response = self.client.delete(f"/api/agents/{agent.id}/trash")
-        self.assertEqual(response.status_code, 200, response.content)
+            self.assertEqual(self.client.delete(f"/api/agents/{agent.id}/trash").status_code, 200)
         before = list(Session.objects.filter(agent=agent).values())
-        self.assertTrue(all(child["purgedAt"] is None for child in before))
-
-        preview = self.collect(dry_run=True, older_than_seconds=24 * 60 * 60)
-
-        for key in keys:
-            self.assertIn(key, preview)
-            self.assertTrue(default_storage.exists(key))
-        self.collect(older_than_seconds=24 * 60 * 60)
-        self.assertTrue(all(not default_storage.exists(key) for key in keys))
-        self.assertEqual(list(Session.objects.filter(agent=agent).values()), before)
-        self.assertIn("Cleaned 0 workspace snapshot keys", self.collect())
-
-    def test_parent_purge_honors_both_purge_and_file_retention(self):
-        agent, children = self.agent_children(trash=True)
-        keys = self.child_keys(children)
-        agent.purgedAt = self.now
-        agent.save(update_fields=["purgedAt", "updatedAt"])
         self.collect(older_than_seconds=24 * 60 * 60)
         self.assertTrue(all(default_storage.exists(key) for key in keys))
+        self.assertEqual(list(Session.objects.filter(agent=agent).values()), before)
+
+    def test_only_session_purge_reclaims_its_files_after_retention(self):
+        agent, children = self.agent_children(trash=True)
+        keys = self.child_keys(children)
         agent.purgedAt = self.old
         agent.save(update_fields=["purgedAt", "updatedAt"])
-        recent = self.snapshot(
-            session=children[0][0], run=children[0][1], generation=3,
-            content=b"recent child", modified=self.now,
-        )
-
-        output = self.collect(older_than_seconds=24 * 60 * 60)
-
-        self.assertTrue(all(not default_storage.exists(key) for key in keys))
+        deleted, deleted_run = children[1]
+        deleted.purgedAt = self.old
+        deleted.save(update_fields=["purgedAt"])
+        recent = self.snapshot(session=deleted, run=deleted_run, generation=3,
+            content=b"recent child", modified=self.now)
+        self.collect(older_than_seconds=24 * 60 * 60)
+        self.assertTrue(all(default_storage.exists(key) for key in keys[:3]))
+        self.assertTrue(all(not default_storage.exists(key) for key in keys[3:]))
         self.assertTrue(default_storage.exists(recent))
-        self.assertIn(f"Blocked workspace snapshot key {recent}", output)
         self.collect()
         self.assertFalse(default_storage.exists(recent))
 
@@ -202,7 +188,7 @@ class WorkspaceSnapshotGcTests(TestCase):
             self.assertTrue(default_storage.exists(key))
             self.assertNotIn(key, output)
 
-    def test_parent_purge_keeps_queued_or_running_children_until_terminal(self):
+    def test_parent_purge_preserves_session_roots_after_run_completion(self):
         agent, children = self.agent_children(trash=True)
         agent.purgedAt = self.old
         agent.save(update_fields=["purgedAt", "updatedAt"])
@@ -215,23 +201,23 @@ class WorkspaceSnapshotGcTests(TestCase):
 
         for key in keys:
             self.assertTrue(default_storage.exists(key))
-            self.assertIn(f"Blocked workspace snapshot key {key}", output)
         AgentRun.objects.filter(session__agent=agent).update(status="completed")
         self.collect()
-        self.assertTrue(all(not default_storage.exists(key) for key in keys))
+        self.assertTrue(all(default_storage.exists(key) for key in keys))
 
-    def test_parent_tombstone_is_rechecked_after_enumeration(self):
+    def test_session_tombstone_is_rechecked_after_enumeration(self):
         from . import workspace_snapshot_gc as gc
 
         agent, children = self.agent_children(trash=True)
-        agent.purgedAt = self.old
-        agent.save(update_fields=["purgedAt", "updatedAt"])
+        selected = children[0][0]
+        selected.status, selected.deletedAt, selected.purgedAt = "deleted", self.old, self.old
+        selected.save(update_fields=["status", "deletedAt", "purgedAt"])
         keys = self.child_keys(children)
         enumerate_keys = gc._snapshot_keys
 
         def changed_parent(*args):
             for key in enumerate_keys(*args):
-                Agent.objects.filter(id=agent.id).update(purgedAt=self.now)
+                Session.objects.filter(id=selected.id).update(purgedAt=self.now)
                 yield key
 
         with patch.object(gc, "_snapshot_keys", changed_parent):
@@ -241,7 +227,7 @@ class WorkspaceSnapshotGcTests(TestCase):
             self.assertTrue(default_storage.exists(key))
         self.assertIn(f"Blocked workspace snapshot key {keys[0]}", output)
 
-    def test_expired_agent_children_use_expiration_purge_retention(self):
+    def test_expired_agent_does_not_expire_retained_sessions(self):
         agent, children = self.agent_children(trash=True)
         agent.deletedAt = self.now - timedelta(days=31)
         agent.save(update_fields=["deletedAt", "updatedAt"])
@@ -260,7 +246,7 @@ class WorkspaceSnapshotGcTests(TestCase):
         with patch("app_core.deleted_resource_gc.timezone.now", return_value=self.now + timedelta(days=2)):
             self.collect(older_than_seconds=24 * 60 * 60)
 
-        self.assertTrue(all(not default_storage.exists(key) for key in keys))
+        self.assertTrue(all(default_storage.exists(key) for key in keys))
         self.assertEqual(list(Session.objects.filter(agent=agent).values()), before)
 
     def test_reclaims_all_snapshot_generations_and_execution_checkpoint_bytes(self):
@@ -583,6 +569,10 @@ class WorkspaceSnapshotGcTests(TestCase):
             sha256=artifact.sha256, storageKey=library_key, status="ready",
         )
         history_session, history_run = self.create_owner()
+        retained_key = self.snapshot(session=history_session, run=history_run, current=True)
+        parent = history_session.agent
+        parent.status, parent.deletedAt, parent.purgedAt = "deleted", self.old, self.old
+        parent.save(update_fields=["status", "deletedAt", "purgedAt"])
         event = SessionEvent.objects.create(
             eventId="event:snapshot-gc-history", workspace=self.workspace,
             session=history_session, agent_run=history_run, sequence=1,
@@ -607,6 +597,7 @@ class WorkspaceSnapshotGcTests(TestCase):
         self.collect()
 
         self.assertFalse(default_storage.exists(snapshot_key))
+        self.assertTrue(default_storage.exists(retained_key))
         self.assertEqual((self.root / artifact_key).read_bytes(), artifact_content)
         self.assertEqual((self.root / library_key).read_bytes(), artifact_content)
         self.assertEqual(Artifact.objects.values().get(id=artifact.id), before_artifact)

@@ -423,3 +423,14 @@ test('invalid derived notification state fails at the actual SSE boundary before
   assert.equal(published.length, 0);
   assert.equal(controller.lastCursor, null);
 });
+
+
+test('workspace navigation retains Sessions from retired and other Agents without weakening frame identity', () => {
+  const value = entry('navigation', { snapshotId: 'workspace-sessions', offset: 0, hasMore: false,
+    sessions: [navigationRow('current'), { ...navigationRow('retired-history'), agentId: 'retired-agent' }] });
+  const parsed = readPresentationSseBlock(wire([value]), identity);
+  assert.deepEqual(parsed.item.sessions.map(session => session.agentId), ['agent', 'retired-agent']);
+  assert.throws(() => readPresentationSseBlock(wire([{ ...value, item: { ...value.item, agentId: 'different-subscription' } }]), identity));
+  assert.throws(() => readPresentationSseBlock(wire([entry('navigation', { snapshotId: 'foreign', offset: 0, hasMore: false,
+    sessions: [{ ...navigationRow('foreign-history'), workspaceId: 'foreign' }] })]), identity));
+});

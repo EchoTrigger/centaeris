@@ -4,7 +4,7 @@ import { sessionAgentChatPath } from "./agentChatNavigation";
 
 type Props = Readonly<{
   workspaceId: string;
-  agent: AgentSummary;
+  agent: AgentSummary | null;
   session: Readonly<{ id: string; workspaceId: string; agentId: string; status: string; title: string }>;
   sessionId: string;
   label: string;
@@ -13,6 +13,7 @@ export function AgentBreadcrumb({ agent, label }: Readonly<{ agent: AgentSummary
   return <nav className="workspaceConversationBreadcrumb" aria-label={label}><strong aria-current="page">{agent.name}</strong></nav>;
 }
 export function SessionAgentBreadcrumb({ workspaceId, agent, session, sessionId, label }: Props) {
+  if (!agent) return <nav className="workspaceConversationBreadcrumb" aria-label={label}><span>{session.title}</span></nav>;
   const target = sessionAgentChatPath(workspaceId, agent, session, sessionId);
   return <nav className="workspaceConversationBreadcrumb" aria-label={label}>
     <Link to={target}>{agent.name}</Link><span>/</span><span>{session.title}</span>

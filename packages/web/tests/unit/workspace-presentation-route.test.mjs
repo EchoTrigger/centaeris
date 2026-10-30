@@ -203,7 +203,7 @@ test("new Session acceptance exposes Stop before its follow-up read and preserve
   await composer(f).onCancelActiveAgentRun();
   assert.equal(f.calls.filter(([path])=>path==="/api/sessions/session/agent-runs/run-new/cancel").length,1);
   releaseRead({json:async()=>({session:row()})});await tick();await f.subject.settle();
-  assert.ok(acceptedPath.endsWith("?sessionId=session"));
+  assert.ok(acceptedPath.endsWith("/sessions/session"));
   f.props.workspaceDraft=false;f.props.location.search="?sessionId=session";
   await f.subject.settle();
   assert.equal(composer(f).activeAgentRunId,"run-new");
@@ -447,7 +447,7 @@ test("a new Session terminal before its details still preserves the accepted nav
  assert.equal(transcript(f).pendingUserMessage.status,"cancelled");
  assert.equal(transcript(f).pendingUserMessage.sessionId,null);
  read();await settleUntil(f,()=>Boolean(acceptedPath));
- assert.ok(acceptedPath.endsWith("?sessionId=session"));
+ assert.ok(acceptedPath.endsWith("/sessions/session"));
  assert.equal(transcript(f).pendingUserMessage.sessionId,"session");
  assert.equal(transcript(f).pendingUserMessage.status,"cancelled");
 });

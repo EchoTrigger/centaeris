@@ -175,6 +175,17 @@ class SessionWorkspacePreservationTests(ExecutionPublicationFixture, Transaction
         self.authorization.refresh_from_db()
         self.assertEqual((self.authorization.payload,self.authorization.digest,self.authorization.signature),self.original_grant)
 
+    def test_retired_agent_does_not_revoke_original_cleanup_preservation(self):
+        from django.utils import timezone
+        from .models import Agent
+        Agent.objects.filter(pk=self.session.agent_id).update(status="deleted", deletedAt=timezone.now(), purgedAt=timezone.now())
+        body, snapshot = self.preserve_body()
+        response = self.preserve(body)
+        self.assertEqual(response.status_code, 200, response.content)
+        self._assert_snapshot(snapshot)
+        self.authorization.refresh_from_db()
+        self.assertEqual((self.authorization.payload, self.authorization.digest, self.authorization.signature), self.original_grant)
+
     def test_execute_authority_and_stale_target_are_rejected_without_baseline_changes(self):
         execute=build_environment_authorization(self.run,self.authorization,self.execute,execution_mode="retained")
         for changes in ({"environmentAuthorization":execute},{"containerId":"c"*64},
