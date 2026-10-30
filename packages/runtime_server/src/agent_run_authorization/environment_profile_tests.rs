@@ -5,7 +5,7 @@ fn wire() -> Value {
         "../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
     ))
     .unwrap();
-    let profile = serde_json::json!({"schema":"runtime.environment_profile.v1", "imageDigest":format!("sha256:{}", "a".repeat(64)), "workspaceRoot":"/mnt/data", "user":"10001:10001", "network":"disabled", "resources":{"memoryBytes":1073741824,"cpuMilli":1000,"pidsLimit":128,"dataTmpfsBytes":1073741824,"storageBytes":1073741824}});
+    let profile = serde_json::json!({"schema":"runtime.environment_profile.v1", "imageDigest":format!("sha256:{}", "a".repeat(64)), "workspaceRoot":"/mnt/data", "user":"10001:10001", "network":"disabled", "resources":{"memoryBytes":1073741824,"cpuMilli":1000,"pidsLimit":128,"workspaceBytes":1073741824,"storageBytes":1073741824}});
     value["schema"] = AGENT_RUN_AUTHORIZATION_SCHEMA.into();
     value["environmentProfileDigest"] = format!(
         "sha256:{:x}",
@@ -95,7 +95,7 @@ fn generic_environment_profile_rejects_unsafe_targets_and_unbounded_resources() 
         "cpuMilli",
         "memoryBytes",
         "pidsLimit",
-        "dataTmpfsBytes",
+        "workspaceBytes",
         "storageBytes",
     ] {
         for value in [
@@ -110,5 +110,23 @@ fn generic_environment_profile_rejects_unsafe_targets_and_unbounded_resources() 
                 assert!(profile.validate().is_err(), "{field}");
             }
         }
+    }
+}
+
+#[test]
+fn workspace_budget_has_one_current_wire_name() {
+    let current = wire()["environmentProfile"].clone();
+    let resources = current["resources"].as_object().unwrap();
+    assert!(serde_json::from_value::<EnvironmentProfile>(current.clone()).is_ok());
+    for retain_current in [false, true] {
+        let mut old_name = current.clone();
+        old_name["resources"]["dataTmpfsBytes"] = resources["workspaceBytes"].clone();
+        if !retain_current {
+            old_name["resources"]
+                .as_object_mut()
+                .unwrap()
+                .remove("workspaceBytes");
+        }
+        assert!(serde_json::from_value::<EnvironmentProfile>(old_name).is_err());
     }
 }

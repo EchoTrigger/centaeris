@@ -16,7 +16,7 @@ from .agent_run_authorization_factory import create_agent_run_authorization
 from .environment_lifecycle import acquire_environment_cleanup_controller, acquire_environment_controller, release_environment_controller
 from .models import AgentRun, Session, SessionWorkspacePreservation
 from .runtime_contract import session_workspace_for_session
-from .test_execution_publication_fencing import ExecutionPublicationFixture
+from .test_execution_publication_fencing import ExecutionPublicationFixture, prepare_workspace_files
 
 
 class SessionWorkspacePreservationTests(ExecutionPublicationFixture, TransactionTestCase):
@@ -59,19 +59,24 @@ class SessionWorkspacePreservationTests(ExecutionPublicationFixture, Transaction
             manifest = json.dumps({"schema":"workspace.snapshot.v1","files":[{"path":"notes.txt",
                 "sizeBytes":len(content),"sha256":"sha256:"+hashlib.sha256(content).hexdigest(),"executable":False}]},
                 separators=(",",":")).encode()
-            snapshot = len(manifest).to_bytes(4,"big")+manifest+content
-        metadata = {"schema":"runtime.session_workspace.preserve.v1","jobId":self.job_id,"leaseOwner":self.owner,
+            snapshot = manifest
+            contents = getattr(self, "_workspace_file_contents", {})
+            contents["sha256:"+hashlib.sha256(content).hexdigest()] = content
+            self._workspace_file_contents = contents
+        metadata = {"schema":"runtime.session_workspace.preserve.v2","jobId":self.job_id,"leaseOwner":self.owner,
             "agentRunId":self.run.pk,"authorizationDigest":self.authorization.digest,
             "environmentAuthorization":self.environment_authorization,"allocationExecutionId":self.allocation,
             "instanceId":self.instance,"containerId":self.container,
             "profileDigest":self.authorization.payload["environmentProfileDigest"],"baseline":self.baseline,
             "snapshotSha256":"sha256:"+hashlib.sha256(snapshot).hexdigest() if snapshot else "",
+            "snapshotEncoding":"fileManifestV1" if snapshot else "frameV1",
             "snapshotSizeBytes":len(snapshot),"expandedSizeBytes":len(content) if content is not None else 0,
             "fileCount":1 if content is not None else 0,**changes}
         encoded=json.dumps(metadata,separators=(",",":")).encode()
         return len(encoded).to_bytes(4,"big")+encoded+snapshot,snapshot
 
     def preserve(self, body):
+        prepare_workspace_files(self, body)
         return self.client.post("/internal/agent-runs/session-workspace/preserve",data=body,
             content_type="application/octet-stream",HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
 
@@ -111,7 +116,7 @@ class SessionWorkspacePreservationTests(ExecutionPublicationFixture, Transaction
                 self.cleanup, execution_mode="perRun")
         return key, archive
 
-    def assert_frame_publication(self, *, preserve, content):
+    def assert_snapshot_publication(self, *, preserve, content):
         original_key, archive = self.legacy_archive_baseline(cleanup=preserve)
         body, snapshot = self.preserve_body(content)
         if preserve:
@@ -122,32 +127,32 @@ class SessionWorkspacePreservationTests(ExecutionPublicationFixture, Transaction
             length = int.from_bytes(body[:4], "big")
             source = json.loads(body[4:4 + length])
             metadata = {name: source[name] for name in internal.SESSION_WORKSPACE_COMMIT_FIELDS}
-            metadata["schema"] = "runtime.session_workspace.commit.v1"
+            metadata["schema"] = "runtime.session_workspace.commit.v2"
             encoded = json.dumps(metadata, separators=(",", ":")).encode()
             response = self._post(len(encoded).to_bytes(4, "big") + encoded + snapshot)
             self.assertEqual(response.status_code, 201, response.content)
         self.session.refresh_from_db()
         self.assertEqual(self.session.workspaceGeneration, 2)
-        self.assertEqual(self.session.workspaceSnapshotEncoding, "frameV1")
+        self.assertEqual(self.session.workspaceSnapshotEncoding, "fileManifestV1" if content is not None else "frameV1")
         self.assertEqual(response.json()["sessionWorkspace"], session_workspace_for_session(self.session))
         if preserve:
             receipt = SessionWorkspacePreservation.objects.get(pk=response.json()["preservationReceiptId"])
-            self.assertEqual(receipt.snapshot_encoding, "frameV1")
+            self.assertEqual(receipt.snapshot_encoding, "fileManifestV1" if content is not None else "frameV1")
             self.assertEqual(receipt.workspace, response.json()["sessionWorkspace"])
         with default_storage.open(original_key, "rb") as stored:
             self.assertEqual(stored.read(), archive)
 
-    def test_regular_frame_commit_replaces_legacy_archive_encoding(self):
-        self.assert_frame_publication(preserve=False, content=b"new frame")
+    def test_regular_manifest_commit_replaces_legacy_archive_encoding(self):
+        self.assert_snapshot_publication(preserve=False, content=b"new frame")
 
     def test_regular_empty_commit_replaces_legacy_archive_encoding(self):
-        self.assert_frame_publication(preserve=False, content=None)
+        self.assert_snapshot_publication(preserve=False, content=None)
 
-    def test_preserved_frame_replaces_legacy_archive_encoding(self):
-        self.assert_frame_publication(preserve=True, content=b"new stopped frame")
+    def test_preserved_manifest_replaces_legacy_archive_encoding(self):
+        self.assert_snapshot_publication(preserve=True, content=b"new stopped frame")
 
     def test_preserved_empty_root_replaces_legacy_archive_encoding(self):
-        self.assert_frame_publication(preserve=True, content=None)
+        self.assert_snapshot_publication(preserve=True, content=None)
 
     def test_cleanup_commits_unknown_baseline_and_replays_lost_ack_without_changing_history(self):
         body,snapshot=self.preserve_body()
@@ -198,6 +203,18 @@ class SessionWorkspacePreservationTests(ExecutionPublicationFixture, Transaction
         self.session.refresh_from_db()
         self.assertTrue(self.session.workspaceBaselineKnown)
         self.assertEqual(self.session.workspaceStorageKey, "")
+
+    def test_control_cleanup_lease_preserves_and_pins_nonempty_file_content(self):
+        from .workspace_file_objects import file_key, live_reservation_keys
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE runtime.runtime_jobs SET lease_purpose='control' WHERE job_id=%s", [self.job_id])
+        content = b"control cleanup file"
+        body, snapshot = self.preserve_body(content)
+        response = self.preserve(body)
+        self.assertEqual(response.status_code, 200, response.content)
+        self._assert_snapshot(snapshot)
+        self.assertIn(file_key(self.session, "sha256:"+hashlib.sha256(content).hexdigest()),
+                      live_reservation_keys(self.session))
 
     def test_per_run_cleanup_authority_can_preserve_the_exact_releasing_retained_instance(self):
         self.environment_authorization = build_environment_authorization(self.run, self.authorization,
@@ -255,9 +272,9 @@ class SessionWorkspacePreservationTests(ExecutionPublicationFixture, Transaction
             with connection.cursor() as cursor:
                 cursor.execute("DELETE FROM runtime.runtime_jobs WHERE job_id=%s", [job])
         self.addCleanup(remove_later_job)
-        metadata = json.dumps({"schema":"runtime.session_workspace.commit.v1","jobId":job,"leaseOwner":owner,
+        metadata = json.dumps({"schema":"runtime.session_workspace.commit.v2","jobId":job,"leaseOwner":owner,
             "agentRunId":later.pk,"authorizationDigest":grant.digest,"snapshotSha256":"",
-            "snapshotSizeBytes":0,"expandedSizeBytes":0,"fileCount":0},separators=(",",":")).encode()
+            "snapshotEncoding":"frameV1","snapshotSizeBytes":0,"expandedSizeBytes":0,"fileCount":0},separators=(",",":")).encode()
         committed = self.client.post("/internal/agent-runs/session-workspace/commit",
             data=len(metadata).to_bytes(4,"big")+metadata,content_type="application/octet-stream",
             HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)

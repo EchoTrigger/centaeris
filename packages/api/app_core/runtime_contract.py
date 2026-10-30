@@ -235,8 +235,8 @@ def validate_agent_run_authorization_payload(payload: dict) -> None:
     if environment_profile_digest(payload["environmentProfile"]) != payload["environmentProfileDigest"]:
         raise ValueError("environment_profile_digest_invalid")
     resources = payload["environmentProfile"]["resources"]
-    if sum(item["sizeBytes"] for item in asset_refs) > resources["dataTmpfsBytes"] // 2:
-        raise ValueError("declared inputs must fit within half of dataTmpfsBytes")
+    if sum(item["sizeBytes"] for item in asset_refs) > resources["workspaceBytes"] // 2:
+        raise ValueError("declared inputs must fit within half of workspaceBytes")
 
 
 def authorization_network(payload: dict) -> str:

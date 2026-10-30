@@ -69,7 +69,7 @@ pub struct SandboxResources {
     pub memory_bytes: u64,
     pub cpu_milli: u32,
     pub pids_limit: u32,
-    pub data_tmpfs_bytes: u64,
+    pub workspace_bytes: u64,
 }
 
 impl WorkspaceAgentRunAuthorization {
@@ -143,8 +143,8 @@ impl WorkspaceAgentRunAuthorization {
             return Err("environment_profile_binding_mismatch".into());
         }
         validate_plugin_activation_snapshot(&self.plugin_activation)?;
-        if total_input_bytes > self.environment_profile.resources.data_tmpfs_bytes / 2 {
-            return Err("declared inputs must fit within half of dataTmpfsBytes".to_string());
+        if total_input_bytes > self.environment_profile.resources.workspace_bytes / 2 {
+            return Err("declared inputs must fit within half of workspaceBytes".to_string());
         }
         Ok(())
     }
@@ -409,12 +409,12 @@ mod tests {
     #[test]
     fn authorization_reserves_half_of_data_tmpfs_for_generated_files() {
         let mut authorization = authorization();
-        authorization.environment_profile.resources.data_tmpfs_bytes = 1;
+        authorization.environment_profile.resources.workspace_bytes = 1;
         authorization.environment_profile_digest =
             authorization.environment_profile.digest().unwrap();
         assert_eq!(
             authorization.validate().expect_err("input aggregate"),
-            "declared inputs must fit within half of dataTmpfsBytes"
+            "declared inputs must fit within half of workspaceBytes"
         );
     }
 

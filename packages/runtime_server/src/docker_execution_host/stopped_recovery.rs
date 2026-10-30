@@ -56,7 +56,7 @@ fn prepare_instance_with(
         Some(runsc_power::RunscPowerObservation::Stopped) => {
             let limit = profile
                 .resources
-                .data_tmpfs_bytes
+                .workspace_bytes
                 .checked_add(ARCHIVE_METADATA_BUDGET)
                 .ok_or("stopped_workspace_archive_budget_overflow")?;
             RecoveryContent::Captured(capture(allocation, profile, limit)?)
@@ -113,7 +113,7 @@ mod tests {
             "schema":"runtime.environment_profile.v1", "imageDigest":format!("sha256:{}","a".repeat(64)),
             "workspaceRoot":"/mnt/data", "user":"10001:10001", "network":"disabled",
             "resources":{"cpuMilli":2000,"memoryBytes":2147483648u64,"pidsLimit":512,
-                "dataTmpfsBytes":4294967296u64,"storageBytes":4294967296u64}
+                "workspaceBytes":4294967296u64,"storageBytes":4294967296u64}
         })).unwrap();
         let allocation = RetainedInstanceAllocation {
             allocation_execution_id: "execution:origin".into(),

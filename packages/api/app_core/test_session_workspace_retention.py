@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 import tempfile
 
 from django.conf import settings
@@ -18,6 +19,7 @@ from . import test_agent_messages
 from .test_hosted_operations import OperationFixture
 from .testing import leased_lifecycle_job_fixture
 from .workspace_snapshot_gc import collect_workspace_snapshot_gc
+from .test_execution_publication_fencing import prepare_workspace_files
 
 
 class SessionWorkspaceRetentionTests(OperationFixture, TestCase):
@@ -42,14 +44,17 @@ class SessionWorkspaceRetentionTests(OperationFixture, TestCase):
             "path": "notes.txt", "sizeBytes": len(content),
             "sha256": "sha256:" + hashlib.sha256(content).hexdigest(), "executable": False,
         }]}, separators=(",", ":")).encode()
-        snapshot = len(manifest).to_bytes(4, "big") + manifest + content
+        snapshot = manifest
+        self._workspace_file_contents = {"sha256:" + hashlib.sha256(content).hexdigest(): content}
         metadata = json.dumps({
-            "schema": "runtime.session_workspace.commit.v1",
+            "schema": "runtime.session_workspace.commit.v2",
+            "snapshotEncoding": "fileManifestV1",
             "jobId": f"agent_run.lifecycle:{run.pk}", "leaseOwner": lease_owner,
             "agentRunId": run.pk, "authorizationDigest": run.authorization.digest,
             "snapshotSha256": "sha256:" + hashlib.sha256(snapshot).hexdigest(),
             "snapshotSizeBytes": len(snapshot), "expandedSizeBytes": len(content), "fileCount": 1,
         }, separators=(",", ":")).encode()
+        prepare_workspace_files(self, len(metadata).to_bytes(4, "big") + metadata + snapshot)
         committed = self.client.post("/internal/agent-runs/session-workspace/commit",
             data=len(metadata).to_bytes(4, "big") + metadata + snapshot,
             content_type="application/octet-stream", HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
@@ -68,6 +73,13 @@ class SessionWorkspaceRetentionTests(OperationFixture, TestCase):
                  list(SessionAssetLink.objects.filter(session=session).values()),
                  list(WorkspaceMembership.objects.filter(workspace=self.workspace).values()))
 
+        roots = {"schema":"runtime.workspace_snapshot.roots.v1", "sessionId":session.pk,
+            "sessionSequence":0, "authorityFingerprint":"sha256:"+"a"*64,
+            "roots":[], "protectedAgentRunIds":[run.pk]}
+        self.enterContext(patch("app_core.workspace_snapshot_reachability_gc.request_workspace_snapshot_roots",
+                                return_value=roots))
+        self.enterContext(patch("app_core.workspace_snapshot_roots.current_witness",
+                                return_value=(0,"sha256:"+"a"*64)))
         report = collect_workspace_snapshot_gc(timezone.now() - timedelta(days=1), False)
         self.assertEqual((report.planned, report.cleaned, report.blocked, report.failures), ([], [], [], []))
         with default_storage.open(session.workspaceStorageKey, "rb") as stored:

@@ -257,10 +257,20 @@ override; it does not change this 12-GiB deployment default.
 ### Sandbox execution profile
 
 `SANDBOX_MEMORY_BYTES`, `SANDBOX_CPU_MILLI`, `SANDBOX_PIDS_LIMIT`, and
-`SANDBOX_DATA_TMPFS_BYTES` define the authorized AgentRun profile.
+`SANDBOX_WORKSPACE_BYTES` define the authorized AgentRun profile.
+`workspaceBytes` is a workspace data budget for admission, inputs and expanded
+snapshots; it does not select a tmpfs or impose a live OverlayFS disk quota.
 The deployment example sets new environments to 4 GiB of memory and 2000 CPU
 milli (two cores). These are upper bounds. Existing signed environment profiles
 keep their original resource limits.
+
+Before upgrading the resource contract, stop application writes and drain Runs,
+cleanup Jobs, maintenance operations and resident instances using the existing
+lifecycle. Then stop workers and run the forward migration with
+`SANDBOX_WORKSPACE_BYTES` configured. Unresolved creation dispatches block the
+migration. It creates a new current Environment binding with `workspaceBytes`;
+old Environments, Run bindings, signed grants and committed workspace descriptors
+remain unchanged. Start the matching API/Runtime version together after migration.
 Compose and the material Worker default `OCI_RUNTIME` to `runsc`. Install and
 register gVisor on the Docker host before using that profile. Hosts without
 gVisor, including local Docker Desktop test environments, must explicitly set

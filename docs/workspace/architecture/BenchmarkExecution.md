@@ -21,10 +21,11 @@ The reviewed static helper is launched from a sealed descriptor. Workloads have
 no host control socket, journal, Docker socket or writable host cgroup mount.
 See [supervisor installation](../../../packages/hosted_execution/deploy/README.md).
 
-Docker enforces CPU, memory and PID limits. `storageBytes` and `dataTmpfsBytes`
-declare capacity for admission; the common profile preserves the image's writable
-filesystem and does not mount a tmpfs over its workspace or enforce a writable
-layer quota. Missing workspace directories are initialized for the profile's
+Docker enforces CPU, memory and PID limits. `workspaceBytes` declares the workspace
+capacity used by admission and bounds expanded file, input and recovery data.
+`storageBytes` preserves the independent task storage declaration; the current host
+does not use it for admission or enforce it as a writable-layer quota. The common
+profile preserves the image's writable filesystem without mounting a workspace tmpfs. Missing workspace directories are initialized for the profile's
 user; existing directories retain the image's contents and permissions.
 `disabled` selects Docker `none`; `publicInternet` selects `bridge` and the
 configured execution proxy. GPU and multi-container task topologies remain

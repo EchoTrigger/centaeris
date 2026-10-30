@@ -14,7 +14,7 @@
     "schema": "workspace.environment_provision_authorization.v1",
     "operationKind": "provision",
     "operationId": "prepare_test",
-    "requestDigest": "sha256:e0f7c0627b1abf10ac605e7b9681ccb7c8b424192b62ce069b56656e26e4e0ab",
+    "requestDigest": "sha256:b39965d5e0a5d89855c6c6e36391115fd3b1c168c6e629b091071eb3132424d0",
     "environmentProfile": {
       "schema": "runtime.environment_profile.v1",
       "imageDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -25,11 +25,11 @@
         "cpuMilli": 1000,
         "memoryBytes": 2147483648,
         "pidsLimit": 512,
-        "dataTmpfsBytes": 67108864,
+        "workspaceBytes": 67108864,
         "storageBytes": 10737418240
       }
     },
-    "environmentProfileDigest": "sha256:002ce0c3f62ff192b630fef336d994812674e939332a7cc16f7f01c1f314024f",
+    "environmentProfileDigest": "sha256:a1671befc3f32ad602d88062289e14f44c8e2324b93a6fd9e0246c9fcaae78ee",
     "userId": "user_1",
     "agentId": "centaeris",
     "pluginActivation": {
@@ -38,7 +38,7 @@
       "packages": []
     }
   },
-  "signature": "hmac-sha256:7bded4e78430f78dd13f4535f675b4675b51c5c302424e28414523aec1ea6412",
+  "signature": "hmac-sha256:3734048eb3ac7b8068eb4c6a2db037d66bbaea4f9326584a74e6956f5cbeb199",
   "request": {
     "kind": "provisionEnvironment",
     "environmentProfile": {
@@ -51,11 +51,11 @@
         "cpuMilli": 1000,
         "memoryBytes": 2147483648,
         "pidsLimit": 512,
-        "dataTmpfsBytes": 67108864,
+        "workspaceBytes": 67108864,
         "storageBytes": 10737418240
       }
     },
-    "environmentProfileDigest": "sha256:002ce0c3f62ff192b630fef336d994812674e939332a7cc16f7f01c1f314024f",
+    "environmentProfileDigest": "sha256:a1671befc3f32ad602d88062289e14f44c8e2324b93a6fd9e0246c9fcaae78ee",
     "userId": "user_1",
     "agentId": "centaeris",
     "pluginActivation": {

@@ -1285,10 +1285,12 @@ class ApiVerticalSliceTests(TransactionTestCase):
         manifest_bytes = json.dumps(
             manifest, ensure_ascii=False, separators=(",", ":")
         ).encode()
-        snapshot = len(manifest_bytes).to_bytes(4, "big") + manifest_bytes + content
+        snapshot = manifest_bytes
+        self._workspace_file_contents = {"sha256:" + hashlib.sha256(content).hexdigest(): content}
         metadata = lease_request(
-            "runtime.session_workspace.commit.v1", agent_run, authorization
+            "runtime.session_workspace.commit.v2", agent_run, authorization
         ) | {
+            "snapshotEncoding": "fileManifestV1",
             "snapshotSha256": f"sha256:{hashlib.sha256(snapshot).hexdigest()}",
             "snapshotSizeBytes": len(snapshot),
             "expandedSizeBytes": len(content),
@@ -1298,8 +1300,9 @@ class ApiVerticalSliceTests(TransactionTestCase):
         body = len(encoded).to_bytes(4, "big") + encoded + snapshot
         checkpoint_id = "checkpoint:workspace-api-test"
         staged_metadata = lease_request(
-            "runtime.execution_workspace.stage.v1", agent_run, authorization
+            "runtime.execution_workspace.stage.v2", agent_run, authorization
         ) | {
+            "snapshotEncoding": "fileManifestV1",
             "checkpointId": checkpoint_id,
             "snapshotSha256": metadata["snapshotSha256"],
             "snapshotSizeBytes": metadata["snapshotSizeBytes"],
@@ -1307,6 +1310,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             "fileCount": metadata["fileCount"],
         }
         staged_encoded = json.dumps(staged_metadata, separators=(",", ":")).encode()
+        from .test_execution_publication_fencing import prepare_workspace_files
+        prepare_workspace_files(self, body)
         staged = self.client.post(
             "/internal/agent-runs/execution-workspace/stage",
             data=len(staged_encoded).to_bytes(4, "big") + staged_encoded + snapshot,

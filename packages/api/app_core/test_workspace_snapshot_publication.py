@@ -110,7 +110,7 @@ class WorkspaceSnapshotPublicationTests(ExecutionPublicationFixture, Transaction
         body, snapshot = self._body()
         response = self._post(body)
         self.assertEqual(response.status_code, 201, response.content)
-        upload = WorkspaceSnapshotUpload.objects.get(agent_run=self.run)
+        upload = WorkspaceSnapshotUpload.objects.get(agent_run=self.run, finalObject__kind="snapshot")
         self.assertEqual(upload.finalObject.storageKey, self.key(snapshot))
         self.assertEqual((upload.jobId, upload.leaseOwner, upload.authorizationDigest, upload.state),
             (self.job_id, self.owner, self.authorization.digest, "committed"))

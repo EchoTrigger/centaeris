@@ -14,7 +14,7 @@ from django.db import DatabaseError, connection
 from django.test import RequestFactory, SimpleTestCase, TransactionTestCase, override_settings
 
 from .http import internal
-from .test_execution_publication_fencing import ExecutionPublicationFixture
+from .test_execution_publication_fencing import ExecutionPublicationFixture, prepare_workspace_files
 from . import workspace_observations, workspace_snapshot_gc
 
 
@@ -70,7 +70,7 @@ class WorkspaceProtectionObservationTests(SimpleTestCase):
         with patch.dict(os.environ, {"WORKSPACE_PERF_OBSERVATIONS": "0"}), redirect_stderr(output):
             with workspace_observations.operation("test"):
                 with internal._workspace_snapshot_upload("disabled.snapshot") as upload:
-                    internal._store_workspace_snapshot(io.BytesIO(body), candidate, "disabled.snapshot", upload, {})
+                    internal._store_workspace_snapshot(io.BytesIO(body), candidate, "disabled.snapshot", upload, {"snapshotEncoding": "frameV1"})
                     self.assertTrue(internal._link_workspace_snapshot("disabled.snapshot", upload))
         self.assertEqual(output.getvalue(), "")
         self.assertEqual((self.root / "disabled.snapshot").read_bytes(), body)
@@ -82,7 +82,7 @@ class WorkspaceProtectionObservationTests(SimpleTestCase):
         with patch.dict(os.environ, {"WORKSPACE_PERF_OBSERVATIONS": "1"}), redirect_stderr(output):
             with self.assertRaises(internal.SessionWorkspaceError), workspace_observations.operation("test"):
                 with internal._workspace_snapshot_upload("invalid.snapshot") as upload:
-                    internal._store_workspace_snapshot(io.BytesIO(damaged), candidate, "invalid.snapshot", upload, {})
+                    internal._store_workspace_snapshot(io.BytesIO(damaged), candidate, "invalid.snapshot", upload, {"snapshotEncoding": "frameV1"})
         records = protection_records(output)
         self.assertEqual(total(records, "apiReceivedBytes"), len(damaged))
         self.assertEqual(total(records, "apiWrittenBytes"), 128 * 1024)
@@ -118,7 +118,7 @@ class WorkspaceProtectionObservationTests(SimpleTestCase):
             with self.assertRaisesRegex(OSError, "injected partial write"), workspace_observations.operation("test"):
                 with internal._workspace_snapshot_upload("partial.snapshot") as upload:
                     with patch.object(os, "fdopen", side_effect=PartialWriter):
-                        internal._store_workspace_snapshot(io.BytesIO(body), candidate, "partial.snapshot", upload, {})
+                        internal._store_workspace_snapshot(io.BytesIO(body), candidate, "partial.snapshot", upload, {"snapshotEncoding": "frameV1"})
         records = protection_records(output)
         self.assertEqual(total(records, "apiReceivedBytes"), len(body))
         self.assertEqual(total(records, "apiWrittenBytes"), 37)
@@ -200,7 +200,7 @@ class WorkspaceProtectionObservationTests(SimpleTestCase):
             with workspace_observations.operation("test"), self.assertLogs("app_core.workspace_observations", level="WARNING"):
                 with internal._workspace_snapshot_upload("sample.snapshot") as upload:
                     with patch.object(os, "stat", side_effect=failed_sample):
-                        internal._store_workspace_snapshot(io.BytesIO(body), candidate, "sample.snapshot", upload, {})
+                        internal._store_workspace_snapshot(io.BytesIO(body), candidate, "sample.snapshot", upload, {"snapshotEncoding": "frameV1"})
                     self.assertTrue(internal._link_workspace_snapshot("sample.snapshot", upload))
         records = protection_records(output)
         self.assertNotIn("apiWrittenBytes", {row["metric"] for row in records})
@@ -210,11 +210,16 @@ class WorkspaceProtectionObservationTests(SimpleTestCase):
 class ExecutionProtectionObservationTests(ExecutionPublicationFixture, TransactionTestCase):
     serialized_rollback = True
 
+    def post_manifest(self, body):
+        return self.client.post("/internal/agent-runs/session-workspace/commit", data=body,
+            content_type="application/octet-stream", HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
+
     def test_stage_then_replay_measures_upload_without_advancing_session_head(self):
         body, snapshot_body = self._body(b"staged recovery contents")
+        prepare_workspace_files(self, body)
         metadata_size = int.from_bytes(body[:4], "big")
         metadata = json.loads(body[4:4 + metadata_size])
-        metadata.update(schema="runtime.execution_workspace.stage.v1", checkpointId="checkpoint:observations")
+        metadata.update(schema="runtime.execution_workspace.stage.v2", checkpointId="checkpoint:observations")
         encoded = json.dumps(metadata, separators=(",", ":")).encode()
         stage_body = len(encoded).to_bytes(4, "big") + encoded + snapshot_body
         outputs, receipts = [], []
@@ -255,12 +260,13 @@ class ExecutionProtectionObservationTests(ExecutionPublicationFixture, Transacti
 
     def test_commit_then_replay_reports_actual_transfer_storage_and_link_cost(self):
         body, snapshot_body = self._body(b"protected contents")
+        prepare_workspace_files(self, body)
         outputs = []
         with patch.dict(os.environ, {"WORKSPACE_PERF_OBSERVATIONS": "1"}):
             for expected_status in (201, 200):
                 output = io.StringIO()
                 with redirect_stderr(output):
-                    response = self._post(body)
+                    response = self.post_manifest(body)
                 self.assertEqual(response.status_code, expected_status, response.content)
                 outputs.append(protection_records(output))
         first, replay = outputs
@@ -283,6 +289,7 @@ class ExecutionProtectionObservationTests(ExecutionPublicationFixture, Transacti
 
     def test_database_commit_failure_keeps_commit_result_unmeasured(self):
         body, snapshot_body = self._body(b"uploaded before commit failure")
+        prepare_workspace_files(self, body)
         real_commit = connection.commit
         commits = 0
         def fail_publication_commit():
@@ -295,7 +302,7 @@ class ExecutionProtectionObservationTests(ExecutionPublicationFixture, Transacti
         with patch.dict(os.environ, {"WORKSPACE_PERF_OBSERVATIONS": "1"}), redirect_stderr(output), \
                 patch.object(connection, "commit", side_effect=fail_publication_commit), \
                 self.assertLogs("app_core.workspace_observations", level="WARNING") as logs:
-            response = self._post(body)
+            response = self.post_manifest(body)
         self.assertEqual(response.status_code, 500)
         records = protection_records(output)
         self.assertEqual(total(records, "apiWrittenBytes"), len(snapshot_body))
@@ -308,6 +315,7 @@ class ExecutionProtectionObservationTests(ExecutionPublicationFixture, Transacti
 
     def test_lost_commit_acknowledgement_does_not_report_zero_committed_snapshots(self):
         body, snapshot_body = self._body(b"DO-NOT-LOG-COMMITTED-BODY")
+        prepare_workspace_files(self, body)
         real_commit = connection.commit
         commits = 0
         def lose_publication_acknowledgement():
@@ -320,7 +328,7 @@ class ExecutionProtectionObservationTests(ExecutionPublicationFixture, Transacti
         with patch.dict(os.environ, {"WORKSPACE_PERF_OBSERVATIONS": "1"}), redirect_stderr(output), \
                 patch.object(connection, "commit", side_effect=lose_publication_acknowledgement), \
                 self.assertLogs("app_core.workspace_observations", level="WARNING") as logs:
-            response = self._post(body)
+            response = self.post_manifest(body)
         self.assertEqual(response.status_code, 500)
         self._assert_snapshot(snapshot_body)
         records = protection_records(output)

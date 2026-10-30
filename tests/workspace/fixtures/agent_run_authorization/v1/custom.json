@@ -34,9 +34,9 @@
       "cpuMilli": 1000,
       "memoryBytes": 2147483648,
       "pidsLimit": 512,
-      "dataTmpfsBytes": 67108864,
+      "workspaceBytes": 67108864,
       "storageBytes": 10737418240
     }
   },
-  "environmentProfileDigest": "sha256:002ce0c3f62ff192b630fef336d994812674e939332a7cc16f7f01c1f314024f"
+  "environmentProfileDigest": "sha256:a1671befc3f32ad602d88062289e14f44c8e2324b93a6fd9e0246c9fcaae78ee"
 }

@@ -138,13 +138,15 @@ impl DockerExecutionHostRunner {
             &format!("sha256:{:x}", Sha256::digest(&bytes)),
         )?;
         let result = read_capture(&mut output, capture_request, |source| {
-            capture_snapshot_artifact_observed(
+            let mut artifact = capture_snapshot_artifact_observed(
                 source,
                 self.resources
-                    .data_tmpfs_bytes
+                    .workspace_bytes
                     .saturating_add(SESSION_WORKSPACE_MANIFEST_LIMIT as u64 + 4),
                 observation.clone(),
-            )
+            )?;
+            workspace_files::prepare(&mut artifact)?;
+            Ok(artifact)
         });
         finish_observed_capture(result, Ok(exit), &stderr, observation)
     }
