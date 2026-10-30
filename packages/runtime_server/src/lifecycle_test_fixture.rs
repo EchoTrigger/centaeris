@@ -4,10 +4,73 @@ use crate::postgres_store::cleanup_receipts::{
     CleanupAllocation, CleanupAuthorityRequest, CleanupTarget,
 };
 use crate::postgres_store::PostgresRuntimeStore;
-use centaeris_core::session::reliability::{CompleteRuntimeJobRequest, RuntimeJobStorePort};
+use centaeris_core::session::reliability::{
+    agent_run_lifecycle_job_id, CompleteRuntimeJobRequest, RuntimeJobRecord, RuntimeJobStorePort,
+    StartRuntimeJobRequest, AGENT_RUN_LIFECYCLE_JOB_KIND,
+};
 use centaeris_core::session::RuntimeJobLeaseFence;
 use serde_json::{json, Value};
 use std::time::Duration;
+
+/// Build a hosted worker lifecycle through the same scheduling and claim protocol.
+pub(crate) fn start_lifecycle_job(
+    store: &PostgresRuntimeStore,
+    start: &AgentRunStart,
+    worker_id: &str,
+) -> RuntimeJobLeaseFence {
+    let now = crate::now_ms().unwrap();
+    let job_id = agent_run_lifecycle_job_id(&start.agent_run_id).unwrap();
+    let schedule = serde_json::to_vec(&json!({
+        "schema": "runtime.job.schedule.v1",
+        "jobId": job_id,
+        "jobKind": AGENT_RUN_LIFECYCLE_JOB_KIND,
+        "runAtMs": now,
+        "maxRetries": 0,
+        "idempotencyKey": format!("{job_id}:{}", start.authorization_digest),
+        "sessionId": start.authorization.session_id,
+        "payloadRef": format!("record:agent_run:{}", start.agent_run_id),
+        "workspaceId": start.authorization.workspace_id,
+    }))
+    .unwrap();
+    let scheduled = crate::job_protocol::schedule(&schedule, store).unwrap();
+    assert_eq!(scheduled["disposition"], "inserted");
+    // A replay must retain both the original Job and its execution tenant.
+    let replayed = crate::job_protocol::schedule(&schedule, store).unwrap();
+    assert_eq!(replayed["disposition"], "existing");
+    assert_eq!(replayed["job"], scheduled["job"]);
+    let claimed = crate::job_protocol::claim(
+        &serde_json::to_vec(&json!({
+            "schema": "runtime.job.claim.v1",
+            "workerId": worker_id,
+            "jobId": job_id,
+            "jobKind": AGENT_RUN_LIFECYCLE_JOB_KIND,
+            "nowMs": now,
+            "leaseMs": 120_000,
+            "limit": 1,
+        }))
+        .unwrap(),
+        store,
+    )
+    .unwrap();
+    let mut jobs: Vec<RuntimeJobRecord> = serde_json::from_value(claimed["jobs"].clone()).unwrap();
+    assert_eq!(jobs.len(), 1, "the hosted lifecycle Job must be claimable");
+    let job = jobs.remove(0);
+    assert_eq!(job.job_id, job_id);
+    assert_eq!(job.job_kind, AGENT_RUN_LIFECYCLE_JOB_KIND);
+    let fence = RuntimeJobLeaseFence {
+        job_id: job.job_id,
+        job_kind: job.job_kind,
+        lease_owner: job.lease_owner.unwrap(),
+    };
+    store
+        .start_runtime_job(StartRuntimeJobRequest {
+            job_id: fence.job_id.clone(),
+            lease_owner: fence.lease_owner.clone(),
+            started_at_ms: now,
+        })
+        .unwrap();
+    fence
+}
 
 pub(crate) fn cleanup_and_release_unallocated_run(
     store: &PostgresRuntimeStore,

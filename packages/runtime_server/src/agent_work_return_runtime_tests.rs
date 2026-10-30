@@ -49,58 +49,13 @@ fn django_committed_work_return_facts() {
         let now = crate::now_ms().unwrap();
         let run = &start.agent_run_id;
         let session = &start.authorization.session_id;
-        let job = format!("agent_run.lifecycle:{run}");
-        store
-            .schedule_runtime_job(ScheduleRuntimeJobRequest {
-                job: RuntimeJobRecord {
-                    job_id: job.clone(),
-                    job_kind: "agent_run.lifecycle".into(),
-                    status: RuntimeJobStatus::Queued,
-                    run_at_ms: now,
-                    lease_owner: None,
-                    lease_expires_at_ms: None,
-                    heartbeat_at_ms: None,
-                    retry_count: 0,
-                    max_retries: 0,
-                    backoff_policy: RuntimeBackoffPolicy::default(),
-                    idempotency_key: format!("{job}:{}", start.authorization_digest),
-                    session_id: Some(session.clone()),
-                    branch_id: None,
-                    checkpoint_id: None,
-                    payload_ref: Some(format!("record:agent_run:{run}")),
-                    output_refs: vec![],
-                    last_error: None,
-                    created_at_ms: now,
-                    updated_at_ms: now,
-                },
-            })
-            .unwrap();
-        let owner = store
-            .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
-                now_ms: now,
-                worker_id: "work-return-fixture".into(),
-                job_id: Some(job.clone()),
-                job_kind: None,
-                session_id: None,
-                limit: 1,
-                lease_ms: 120_000,
-            })
-            .unwrap()
-            .remove(0)
-            .lease_owner
-            .unwrap();
-        store
-            .start_runtime_job(StartRuntimeJobRequest {
-                job_id: job.clone(),
-                lease_owner: owner.clone(),
-                started_at_ms: now,
-            })
-            .unwrap();
-        let fence = RuntimeJobLeaseFence {
-            job_id: job.clone(),
-            job_kind: "agent_run.lifecycle".into(),
-            lease_owner: owner.clone(),
-        };
+        let fence = crate::lifecycle_test_fixture::start_lifecycle_job(
+            &store,
+            &start,
+            "worker:work-return-fixture",
+        );
+        let job = fence.job_id.clone();
+        let owner = fence.lease_owner.clone();
         let stale = RuntimeJobLeaseFence {
             lease_owner: "stale-fixture-owner".into(),
             ..fence.clone()

@@ -15,13 +15,8 @@ use centaeris_core::runtime::{
     AgentRunInitialInput, AgentRunRequest, AgentRunStop, AgentRuntime, AgentRuntimeConfig,
     ToolConcurrencyCoordinator, ToolSafePoint,
 };
-use centaeris_core::session::reliability::{
-    ClaimDueRuntimeJobsRequest, CompleteRuntimeJobRequest, RuntimeBackoffPolicy, RuntimeJobRecord,
-    RuntimeJobStatus, RuntimeJobStorePort, ScheduleRuntimeJobRequest, StartRuntimeJobRequest,
-};
-use centaeris_core::session::{
-    AgentRunSessionState, RuntimeJobLeaseFence, RUNTIME_JOB_LEASE_FENCE_REJECTED,
-};
+use centaeris_core::session::reliability::{CompleteRuntimeJobRequest, RuntimeJobStorePort};
+use centaeris_core::session::{AgentRunSessionState, RUNTIME_JOB_LEASE_FENCE_REJECTED};
 use centaeris_core::tool::layer::ToolLayer;
 
 #[derive(Deserialize)]
@@ -293,58 +288,13 @@ fn run_message_runtime_contract(revocation_window: bool) {
     let now = crate::now_ms().unwrap();
     let session = &start.authorization.session_id;
     let run = &start.agent_run_id;
-    let job = format!("agent_run.lifecycle:{run}");
-    store
-        .schedule_runtime_job(ScheduleRuntimeJobRequest {
-            job: RuntimeJobRecord {
-                job_id: job.clone(),
-                job_kind: "agent_run.lifecycle".into(),
-                status: RuntimeJobStatus::Queued,
-                run_at_ms: now,
-                lease_owner: None,
-                lease_expires_at_ms: None,
-                heartbeat_at_ms: None,
-                retry_count: 0,
-                max_retries: 0,
-                backoff_policy: RuntimeBackoffPolicy::default(),
-                idempotency_key: format!("{job}:{}", start.authorization_digest),
-                session_id: Some(session.clone()),
-                branch_id: None,
-                checkpoint_id: None,
-                payload_ref: Some(format!("record:agent_run:{run}")),
-                output_refs: vec![],
-                last_error: None,
-                created_at_ms: now,
-                updated_at_ms: now,
-            },
-        })
-        .unwrap();
-    let owner = store
-        .claim_due_runtime_jobs(ClaimDueRuntimeJobsRequest {
-            now_ms: now,
-            worker_id: "message-contract-worker".into(),
-            job_id: Some(job.clone()),
-            job_kind: None,
-            session_id: None,
-            limit: 1,
-            lease_ms: 120_000,
-        })
-        .unwrap()
-        .remove(0)
-        .lease_owner
-        .unwrap();
-    store
-        .start_runtime_job(StartRuntimeJobRequest {
-            job_id: job.clone(),
-            lease_owner: owner.clone(),
-            started_at_ms: now,
-        })
-        .unwrap();
-    let fence = RuntimeJobLeaseFence {
-        job_id: job.clone(),
-        job_kind: "agent_run.lifecycle".into(),
-        lease_owner: owner.clone(),
-    };
+    let fence = crate::lifecycle_test_fixture::start_lifecycle_job(
+        &store,
+        start,
+        "worker:message-contract-fixture",
+    );
+    let job = fence.job_id.clone();
+    let owner = fence.lease_owner.clone();
     let log = store
         .session_log(
             start.authorization.workspace_id.clone(),
