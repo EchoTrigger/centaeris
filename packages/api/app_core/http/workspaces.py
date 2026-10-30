@@ -43,7 +43,6 @@ from app_core.models import (
 )
 from app_core.plugin_catalog import (
     activation_digest,
-    load_plugin_catalog,
     load_plugin_bearer_credential_refs,
     load_plugin_interfaces,
     plugin_lifecycle_lock,
