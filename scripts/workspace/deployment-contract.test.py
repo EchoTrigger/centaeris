@@ -26,16 +26,16 @@ REQUIRED_TEST_UPLOAD_LIMITS = {
     "WORK_RETURN_AUDIT_INTERVAL_SECONDS": "3600",
 }
 RESIDENT_LIMIT_DEFAULTS = {
-    "RESIDENT_GLOBAL_COUNT": "16",
-    "RESIDENT_GLOBAL_MEMORY_BYTES": "34359738368",
-    "RESIDENT_GLOBAL_CPU_MILLI": "16000",
+    "RESIDENT_GLOBAL_COUNT": "8",
+    "RESIDENT_GLOBAL_MEMORY_BYTES": "12884901888",
+    "RESIDENT_GLOBAL_CPU_MILLI": "8000",
     "RESIDENT_GLOBAL_PIDS": "8192",
     "RESIDENT_GLOBAL_WORKSPACE_BYTES": "34359738368",
-    "RESIDENT_TENANT_COUNT": "4",
-    "RESIDENT_TENANT_MEMORY_BYTES": "8589934592",
+    "RESIDENT_TENANT_COUNT": "8",
+    "RESIDENT_TENANT_MEMORY_BYTES": "12884901888",
     "RESIDENT_TENANT_CPU_MILLI": "4000",
     "RESIDENT_TENANT_PIDS": "2048",
-    "RESIDENT_TENANT_WORKSPACE_BYTES": "8589934592",
+    "RESIDENT_TENANT_WORKSPACE_BYTES": "34359738368",
 }
 RESIDENT_HEADROOM_VARIABLES = (
     "RESIDENT_HOST_MEMORY_HEADROOM_BYTES", "RESIDENT_HOST_CPU_HEADROOM_MILLI",
@@ -294,7 +294,9 @@ sys.stdout.write(re.sub(pattern,replace,text))
                     self.assertEqual(services[service]["environment"]["OCI_RUNTIME"], "runsc")
 
     def test_explicit_runc_override_reaches_both_execution_services(self):
-        services = compose_config(OCI_RUNTIME="runc")["services"]
+        services = compose_config(OCI_RUNTIME="runc", RUNTIME_NATIVE_SHARED_ADMISSION="0",
+            RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS="", RUNTIME_RUNSC_IDLE_PAUSE_MS="")["services"]
+        self.assertEqual(services["runtime"]["environment"]["RUNTIME_NATIVE_SHARED_ADMISSION"], "0")
         for service in ("runtime", "material-worker"):
             with self.subTest(service=service):
                 self.assertEqual(services[service]["environment"]["OCI_RUNTIME"], "runc")
@@ -307,12 +309,19 @@ sys.stdout.write(re.sub(pattern,replace,text))
                     self.assertEqual(services[service]["environment"]["OCI_RUNTIME"], value)
 
     def test_default_sandbox_resources_reach_authorization_service(self):
-        services = compose_config()["services"]
-        for service in ("api", "api-init"):
-            with self.subTest(service=service):
-                environment = services[service]["environment"]
-                self.assertEqual(environment["SANDBOX_CPU_MILLI"], "4000")
-                self.assertEqual(environment["SANDBOX_MEMORY_BYTES"], "8589934592")
+        for overrides in ({}, {"RUNTIME_NATIVE_SHARED_ADMISSION": None, "DOCKER_CREATE_CONCURRENCY": None,
+                              "RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS": None, "RUNTIME_RUNSC_IDLE_PAUSE_MS": None}):
+            services = compose_config(**overrides)["services"]
+            self.assertEqual(services["runtime"]["environment"]["RUNTIME_NATIVE_SHARED_ADMISSION"], "1")
+            self.assertEqual(services["runtime"]["environment"]["DOCKER_CREATE_CONCURRENCY"], "2")
+            self.assertEqual(services["runtime"]["environment"]["RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS"], "8")
+            self.assertEqual(services["runtime"]["environment"]["RUNTIME_RUNSC_IDLE_PAUSE_MS"], "3000")
+            self.assertEqual(services["worker"]["environment"]["AGENT_RUN_EXECUTION_MODE"], "perRun")
+            for service in ("api", "api-init"):
+                with self.subTest(service=service, overrides=overrides):
+                    environment = services[service]["environment"]
+                    self.assertEqual(environment["SANDBOX_CPU_MILLI"], "2000")
+                    self.assertEqual(environment["SANDBOX_MEMORY_BYTES"], "4294967296")
 
     def test_worker_slot_configuration_reaches_container(self):
         self.assertEqual(compose_config()["services"]["worker"]["environment"]["WORKER_SLOT_COUNT"], "8")
@@ -322,11 +331,19 @@ sys.stdout.write(re.sub(pattern,replace,text))
         environment = compose_config()["services"]["runtime"]["environment"]
         self.assertEqual(environment["RUNTIME_POSTGRES_POOL_SIZE"], "10")
         self.assertEqual(environment["RUNTIME_POSTGRES_CONTROL_POOL_SIZE"], "2")
+        self.assertEqual(environment["RUNTIME_POSTGRES_CLEANUP_POOL_SIZE"], "2")
+        self.assertEqual(environment["RUNTIME_HTTP_CLEANUP_LIMIT"], "2")
         self.assertEqual(environment["RUNTIME_POSTGRES_LISTENER_LIMIT"], "8")
         self.assertEqual(environment["RUNTIME_POSTGRES_CHECKOUT_TIMEOUT_MS"], "5000")
         self.assertEqual(environment["RUNTIME_POSTGRES_CONNECT_TIMEOUT_MS"], "3000")
 
     def test_resident_limits_keep_finite_defaults_with_example_or_unset_inputs(self):
+        documented = {}
+        for line in (ROOT / "docs/workspace/reference/Configuration.md").read_text(encoding="utf-8").splitlines():
+            columns = [column.strip().strip("`") for column in line.split("|")]
+            if len(columns) >= 4 and columns[1] in RESIDENT_LIMIT_DEFAULTS:
+                documented[columns[1]] = columns[2]
+        self.assertEqual(documented, RESIDENT_LIMIT_DEFAULTS)
         for overrides in ({}, dict.fromkeys(RESIDENT_LIMIT_DEFAULTS)):
             environment = compose_config(**overrides)["services"]["runtime"]["environment"]
             for name, expected in RESIDENT_LIMIT_DEFAULTS.items():

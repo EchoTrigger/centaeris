@@ -74,6 +74,18 @@ against the same Run. This is command acceptance deduplication, not an
 exactly-once guarantee for model calls or external tool effects. Existing
 commands without operation identities are not reconstructed from message text.
 
+Public message submission pins Workspace and membership authorization with
+shared row locks in each of its two transactions, including the recheck after
+Runtime profile resolution. Other environments can retain the same authorization
+pins while submission proceeds. Management and coordination-binding writers
+retain exclusive Workspace locks, so revocation and binding changes still
+serialize with acceptance. A transaction-scoped operation mutex covers exactly
+the receipt identity above; neither the payload digest nor target Agent/Session
+creates a separate mutex for a conflicting reuse of that identity. Agent and
+existing Session locks are acquired before the global queue-admission decision.
+Queue contention remains HTTP 503 `execution_admission_busy` with `Retry-After: 5`;
+it commits no Run or receipt, and a retry retains the same operation identity.
+
 The browser retains pending identity and input digests in tab-scoped storage,
 without persisting prompts or file bytes. Uncertain retries keep the same ID,
 including when a later retry is rejected. Explicit correction of an unresolved

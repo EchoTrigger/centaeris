@@ -385,6 +385,94 @@ fn capture_protection_records<T>(operation: impl FnOnce() -> T) -> (T, Protectio
     (result, records)
 }
 
+mod run_timings;
+pub use run_timings::{ModelHttp, RunTimings, StartupProfile};
+
+fn emit_explicit(mut event: serde_json::Value) {
+    if !enabled() {
+        return;
+    }
+    event["schema"] = "workspace.perf.v1".into();
+    event["source"] = "runtime".into();
+    event["atUnixMs"] = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64)
+        .into();
+    let _ = writeln!(std::io::stderr().lock(), "{event}");
+}
+
+#[cfg(test)]
+thread_local! {
+    static OPERATION_RECORDS: RefCell<Option<Vec<serde_json::Value>>> = const { RefCell::new(None) };
+}
+
+/// Capture synchronous operation observations without enabling process-wide logging.
+#[cfg(test)]
+pub(crate) fn capture_operation_records<T>(
+    operation: impl FnOnce() -> T,
+) -> (T, Vec<serde_json::Value>) {
+    struct Reset(Option<Vec<serde_json::Value>>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            OPERATION_RECORDS.with(|records| records.replace(self.0.take()));
+        }
+    }
+    let reset = Reset(OPERATION_RECORDS.with(|records| records.replace(Some(Vec::new()))));
+    let result = operation();
+    let records = OPERATION_RECORDS.with(|records| records.borrow_mut().take().unwrap_or_default());
+    drop(reset);
+    (result, records)
+}
+
+/// Whether the host command wrapper should collect observation-only identities.
+pub fn operation_timing_enabled() -> bool {
+    #[cfg(test)]
+    if OPERATION_RECORDS.with(|records| records.borrow().is_some()) {
+        return true;
+    }
+    enabled()
+}
+
+/// Host command execution uses explicit identities; observation failure never affects execution.
+pub fn operation_timing(
+    phase: &'static str,
+    elapsed: std::time::Duration,
+    outcome: &'static str,
+    run_id: &str,
+    operation_id: &str,
+    task_id: &str,
+) {
+    if !operation_timing_enabled() {
+        return;
+    }
+    let job_id = format!("agent_run.lifecycle:{run_id}");
+    if phase != "hostCommand"
+        || !matches!(outcome, "ok" | "error")
+        || ![run_id, &job_id, operation_id, task_id]
+            .into_iter()
+            .all(run_timings::safe_id)
+    {
+        return;
+    }
+    let record = serde_json::json!({
+        "phase":phase, "elapsedMs":elapsed.as_secs_f64()*1000.0, "outcome":outcome,
+        "runId":run_id, "jobId":job_id, "operationId":operation_id, "taskId":task_id,
+    });
+    #[cfg(test)]
+    if OPERATION_RECORDS.with(|records| {
+        if let Some(records) = records.borrow_mut().as_mut() {
+            records.push(record.clone());
+            true
+        } else {
+            false
+        }
+    }) {
+        return;
+    }
+    emit_explicit(record);
+}
+
 thread_local! { static JOB: RefCell<Option<String>> = const { RefCell::new(None) }; }
 static IN_FLIGHT: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
 const LANES: [&str; 3] = ["ordinary", "control", "listener"];

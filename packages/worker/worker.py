@@ -2,6 +2,7 @@ import json
 import hashlib
 import re
 import os
+import random
 import http.client
 import signal
 import socket
@@ -24,6 +25,7 @@ if AGENT_RUN_EXECUTION_MODE not in {"perRun", "retained"}:
     raise ValueError("AGENT_RUN_EXECUTION_MODE must be perRun or retained")
 LEASE_MS = int(os.environ.get("WORKER_LEASE_MS", "60000"))
 AGENT_RUN_LIFECYCLE_RECHECK_MS = int(os.environ.get("AGENT_RUN_LIFECYCLE_RECHECK_MS", "30000"))
+ENVIRONMENT_CONTROLLER_RECHECK_MS = 1000
 RUNTIME_JOB_WAIT_RECHECK_MS = 5 * 60 * 1000
 JOB_WAIT_MS = 20_000
 JOB_WAIT_HTTP_TIMEOUT_SECONDS = 25
@@ -42,7 +44,10 @@ except ValueError:
 if not 1 <= WORKER_SLOT_COUNT <= 16:
     raise ValueError("WORKER_SLOT_COUNT must be an integer between 1 and 16")
 AGENT_RUN_WAITING_TRANSITION_REASONS = {
+    "execution_host_preparation_wait",
+    "execution_host_admission_wait",
     "execution_resident_capacity_wait",
+    "runsc_environment_capacity_wait",
     "execution_recovery_checkpoint_committed",
     "question_wait",
     "runtime_job_wait",
@@ -67,10 +72,20 @@ class RuntimeLeaseLost(RuntimeError):
 _lease_context = threading.local()
 
 
+class YieldHandoffUnknown(RuntimeError):
+    """The old owner stopped; delivery was not confirmed by Runtime."""
+    def __init__(self, error=None):
+        super().__init__("job_yield_handoff_unknown")
+        self.error_type = type(error).__name__ if error is not None else None
+        status = getattr(error, "http_status", None)
+        self.http_status = status if type(status) is int else None
+
+
 class DependencyUnavailable(RuntimeError):
     def __init__(self, reason, http_status=None):
         super().__init__(reason)
         self.http_status = http_status
+        self.http_error_code = None
 
 
 class RuntimeStepFailed(RuntimeError):
@@ -187,13 +202,16 @@ def _json_request(url, body, token_header, token, default_reason, timeout=10):
             raise RuntimeStepFailed(
                 reason, payload["retryable"], payload["agentRunId"], http_status=status
             ) from error
+        public_code = (payload["error"]
+                       if isinstance(payload, dict) and set(payload) == {"error"}
+                       and isinstance(payload["error"], str) else None)
         if status in {500, 502, 503, 504}:
-            raise DependencyUnavailable(reason, http_status=status) from error
+            failure = DependencyUnavailable(reason, http_status=status)
+            failure.http_error_code = public_code
+            raise failure from error
         failure = RuntimeError(reason)
         failure.http_status = status
-        failure.http_error_code = (payload["error"]
-                                   if isinstance(payload, dict) and set(payload) == {"error"}
-                                   and isinstance(payload["error"], str) else None)
+        failure.http_error_code = public_code
         raise failure from error
     except (
         urllib.error.URLError,
@@ -370,6 +388,7 @@ def lease_heartbeats(job_id, lease_owner):
             state["status"] = "graceful_stop"
             changed.notify_all()
             observe(time.monotonic(), "graceful_stop")
+            return state["deadline"]
 
     _lease_context.guard = (job_id, lease_owner, terminal_handoff)
     try:
@@ -390,7 +409,7 @@ def _lease_terminal_handoff(job_id, lease_owner):
     if guard is not None:
         if guard[:2] != (job_id, lease_owner):
             raise RuntimeError("worker_lease_guard_identity_mismatch")
-        guard[2]()
+        return guard[2]()
 
 
 def complete_job(job_id, lease_owner, output_refs):
@@ -426,21 +445,70 @@ def start_job(job_id, lease_owner):
 
 
 def yield_job(job_id, lease_owner, run_at_ms, transition_reason):
-    _lease_terminal_handoff(job_id, lease_owner)
-    try:
-        runtime_request(
-            "/internal/jobs/yield",
-            {
-                "schema": "runtime.job.yield.v1",
-                "jobId": job_id,
-                "leaseOwner": lease_owner,
-                "yieldedAtMs": now_ms(),
-                "runAtMs": run_at_ms,
-                "transitionReason": transition_reason,
-            },
-        )
-    except RuntimeError as error:
-        raise_if_job_cancelled(job_id, error, "job_yield_rejected")
+    yielded_at_ms = now_ms()
+    request = {
+        "schema": "runtime.job.yield.v1", "jobId": job_id, "leaseOwner": lease_owner,
+        "yieldedAtMs": yielded_at_ms, "runAtMs": max(run_at_ms, yielded_at_ms),
+        "transitionReason": transition_reason,
+    }
+    deadline = _lease_terminal_handoff(job_id, lease_owner)
+    # A stopped guard cannot be restarted to repair an uncertain reply. Reuse
+    # the exact request only within its last confirmed, conservative window.
+    attempts = 3 if deadline is not None else 1
+    if deadline is None:
+        deadline = time.monotonic() + min(10, CONTROL_HTTP_TIMEOUT_SECONDS)
+    delivery_unknown = False
+    last_error = None
+    for _attempt in range(attempts):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            response = runtime_request("/internal/jobs/yield", request, timeout=min(10, remaining))
+            if (isinstance(response, dict) and set(response) == {"ok", "runAtMs", "transitionReason"}
+                    and response["ok"] is True and type(response["runAtMs"]) is int
+                    and response["runAtMs"] == request["runAtMs"]
+                    and response["transitionReason"] == request["transitionReason"]):
+                return
+            last_error = RuntimeError("runtime_job_yield_response_invalid")
+            delivery_unknown = True
+        except (RuntimeError, urllib.error.URLError, OSError) as error:
+            retryable_delivery = isinstance(error, (DependencyUnavailable, urllib.error.URLError, OSError)) or (
+                getattr(error, "http_status", None) == 409 and str(error) == "job_yield_rejected"
+            )
+            if not retryable_delivery:
+                if delivery_unknown:
+                    raise YieldHandoffUnknown(error) from None
+                raise
+            delivery_unknown = True
+            last_error = error
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            response = runtime_request(f"/internal/jobs/{job_id}", timeout=min(CONTROL_HTTP_TIMEOUT_SECONDS, remaining))
+        except (DependencyUnavailable, urllib.error.URLError, OSError) as error:
+            last_error = error
+            continue
+        except RuntimeError as error:
+            raise YieldHandoffUnknown(error) from None
+        current = response.get("job") if isinstance(response, dict) else None
+        if not isinstance(current, dict) or current.get("jobId") != job_id:
+            break
+        status = current.get("status")
+        if status == "cancelled":
+            raise RuntimeJobCancelled("job_cancelled_during_worker_lease")
+        if status in {"leased", "running"}:
+            if current.get("leaseOwner") != lease_owner:
+                raise RuntimeLeaseLost()
+            expires = current.get("leaseExpiresAtMs")
+            if type(expires) is not int or expires <= now_ms():
+                break
+        elif status != "queued" or current.get("leaseOwner") is not None:
+            break
+        # Queued alone proves no delivery identity. Only Runtime's exact replay
+        # acknowledgement can confirm that this yield committed.
+    raise YieldHandoffUnknown(last_error) from None
 
 
 def raise_if_job_cancelled(job_id, error, rejected_reason):
@@ -553,7 +621,47 @@ def agent_run_lifecycle_binding(job):
     return agent_run_id, digest
 
 
+def is_environment_controller_wait(error):
+    return getattr(error, "http_status", None) == 409 and getattr(error, "http_error_code", None) in {
+        "environment_controller_owned", "environment_controller_busy",
+    }
+
+
+def is_environment_host_busy(error):
+    return (getattr(error, "http_status", None) == 409
+            and getattr(error, "http_error_code", None) == "environment_host_busy")
+
+
+def environment_cleanup_wait_reason(error):
+    if (isinstance(error, DependencyUnavailable)
+            and type(getattr(error, "http_status", None)) is int
+            and error.http_status == 503
+            and getattr(error, "http_error_code", None) == "runtime_busy"
+            and getattr(error, "route", None) == "/agent-runs/teardown"):
+        return "execution_host_admission_wait"
+    if is_environment_controller_wait(error):
+        return "environment_controller_wait"
+    if is_environment_host_busy(error):
+        return "execution_host_admission_wait"
+    if (getattr(error, "http_status", None) == 409
+            and getattr(error, "http_error_code", None) == "execution_resident_capacity_wait"):
+        return "execution_resident_capacity_wait"
+    return None
+
+
 def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
+    try:
+        return _execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease)
+    except RuntimeError as error:
+        reason = environment_cleanup_wait_reason(error)
+        if reason is None:
+            raise
+        require_healthy_lease()
+        yield_job(job["jobId"], lease_owner, now_ms() + ENVIRONMENT_CONTROLLER_RECHECK_MS, reason)
+        return False
+
+
+def _execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
     agent_run_id, digest = agent_run_lifecycle_binding(job)
     resolved = resolve_agent_run_lifecycle(job, lease_owner, agent_run_id, digest)
     if resolved["disposition"] in {"terminal", "released"}:
@@ -611,6 +719,8 @@ def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
             # Runtime derives this deadline from its recovery boundary.
             # Waiting releases the slot; retries never sleep inside a worker.
             next_run_at_ms = max(yielded_at_ms, result["retryAtMs"])
+        elif result["transitionReason"] == "execution_host_admission_wait":
+            next_run_at_ms = yielded_at_ms + ENVIRONMENT_CONTROLLER_RECHECK_MS
         elif result["transitionReason"] == "runtime_job_wait":
             next_run_at_ms = yielded_at_ms + RUNTIME_JOB_WAIT_RECHECK_MS
         else:
@@ -680,7 +790,8 @@ def finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, req
     try:
         return _finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, require_healthy_lease)
     except (RuntimeError, urllib.error.URLError, OSError) as error:
-        if str(error) == "agent_run_lifecycle_lease_lost":
+        if (isinstance(error, YieldHandoffUnknown) or environment_cleanup_wait_reason(error) is not None
+                or str(error) == "agent_run_lifecycle_lease_lost"):
             raise
         # Never include untrusted response bodies or transport credentials.
         reason = str(error) if isinstance(error, RuntimeError) else "retained_cleanup_unavailable"
@@ -833,6 +944,10 @@ def _execute_claimed_job(job, lease_owner):
             if completed:
                 require_healthy_lease()
                 complete_job(job["jobId"], lease_owner, output_refs)
+    except YieldHandoffUnknown as error:
+        print(f"worker handoff unconfirmed: jobId={job['jobId']}; transitionReason=job_yield_handoff_unknown; "
+              f"errorType={error.error_type}; httpStatus={error.http_status}", flush=True)
+        return
     except RuntimeLeaseLost:
         print(f"worker lease stopped: jobId={job['jobId']}; transitionReason=lease_lost", flush=True)
         return
@@ -1306,9 +1421,11 @@ def run_job_loop(slot_index, stopped):
 
 
 def _run_job_loop(slot_index, stopped):
+    claim_contention_streak = 0
     while not stopped.is_set():
         try:
             worked = execute_next_job(slot_index)
+            claim_contention_streak = 0
             if not worked:
                 wait_for_jobs()
         except Exception as error:
@@ -1317,11 +1434,134 @@ def _run_job_loop(slot_index, stopped):
                 file=sys.stderr,
                 flush=True,
             )
-            delay = 5 if str(error) in {"runtime_busy", "execution_claim_busy"} else JOB_WAIT_FAILURE_BACKOFF_SECONDS
+            if (isinstance(error, DependencyUnavailable)
+                    and type(getattr(error, "http_status", None)) is int
+                    and error.http_status == 503
+                    and getattr(error, "http_error_code", None) == "execution_claim_busy"
+                    and getattr(error, "route", None) == "/internal/jobs/claim"):
+                # A rejected pre-claim owns no Job. Retry the short transaction
+                # contention without spending its queued Job's failure budget.
+                ceiling = min(.05 * (2 ** claim_contention_streak), .8)
+                claim_contention_streak = min(claim_contention_streak + 1, 4)
+                delay = random.uniform(ceiling / 2, ceiling)
+            else:
+                claim_contention_streak = 0
+                delay = 5 if str(error) in {"runtime_busy", "execution_claim_busy"} else JOB_WAIT_FAILURE_BACKOFF_SECONDS
             with observations.measure("backoff", requestedMs=delay * 1000,
                     route=getattr(error, "route", None),
                     errorCode=str(error) if str(error) in {"runtime_busy", "execution_claim_busy"} else "other"):
                 stopped.wait(delay)
+
+
+def claim_control_job(stage, worker_id):
+    if stage not in {"advance", "cleanup"}:
+        raise RuntimeError("control_stage_invalid")
+    response = runtime_request("/internal/jobs/control/claim", {
+        "schema": "runtime.job.control.claim.v1", "workerId": worker_id,
+        "jobId": None, "jobKind": "agent_run.lifecycle", "nowMs": now_ms(),
+        "leaseMs": LEASE_MS, "limit": 1, "stage": stage,
+    })
+    if not isinstance(response, dict) or set(response) != {"jobs"}:
+        raise RuntimeError("control_claim_response_invalid")
+    jobs = response["jobs"]
+    if not isinstance(jobs, list) or len(jobs) > 1:
+        raise RuntimeError("control_claim_response_invalid")
+    if not jobs:
+        return None
+    job = jobs[0]
+    if (not isinstance(job, dict) or job.get("jobKind") != "agent_run.lifecycle"
+            or job.get("status") != "leased" or job.get("leasePurpose") != "control"
+            or job.get("controlStage") != stage or not valid_runtime_job_id(job.get("jobId"))
+            or not valid_lease_owner(job.get("leaseOwner"))):
+        raise RuntimeError("control_claim_response_invalid")
+    agent_run_lifecycle_binding(job)
+    return job
+
+
+def execute_control_job(job):
+    run_id, digest = agent_run_lifecycle_binding(job)
+    owner = job["leaseOwner"]
+    try:
+        runtime_request("/internal/jobs/control/start", {
+            "schema": "runtime.job.control.start.v1", "jobId": job["jobId"],
+            "leaseOwner": owner, "atMs": now_ms(),
+        })
+        with lease_heartbeats(job["jobId"], owner) as healthy:
+            try:
+                _execute_control_job(job, run_id, digest, owner, healthy)
+            except (RuntimeLeaseLost, YieldHandoffUnknown):
+                raise
+            except (RuntimeError, urllib.error.URLError, OSError) as error:
+                # Keep the verifier until recovery hands off the same Job.
+                healthy()
+                reason = environment_cleanup_wait_reason(error) or "control_retry_pending"
+                yield_job(job["jobId"], owner, now_ms() + ENVIRONMENT_CONTROLLER_RECHECK_MS, reason)
+    except YieldHandoffUnknown as error:
+        print(f"worker handoff unconfirmed: jobId={job['jobId']}; transitionReason=job_yield_handoff_unknown; "
+              f"errorType={error.error_type}; httpStatus={error.http_status}", flush=True)
+    except (RuntimeError, urllib.error.URLError, OSError):
+        # An unconfirmed start or a lost lease leaves the durable intent to its
+        # current owner or Runtime's existing lease-reclaim policy.
+        return
+
+
+def _execute_control_job(job, run_id, digest, owner, healthy):
+    resolved = api_request("/internal/agent-run-lifecycle/control", {
+        "schema": "runtime.agent_run_lifecycle.control.resolve.v1",
+        "jobId": job["jobId"], "leaseOwner": owner,
+        "agentRunId": run_id, "authorizationDigest": digest,
+    }, "agent_run_control_unavailable")
+    if (not isinstance(resolved, dict)
+            or set(resolved) != {"schema", "agentRunControl"}
+            or resolved["schema"] != "runtime.agent_run_lifecycle.control.resolved.v1"
+            or not isinstance(resolved["agentRunControl"], dict)
+            or resolved["agentRunControl"].get("agentRunId") != run_id):
+        raise RuntimeError("agent_run_control_response_invalid")
+    healthy()
+    result = runtime_request("/agent-runs/control", {
+        "schema": "runtime.agent_run.control.v1", "jobId": job["jobId"],
+        "leaseOwner": owner, "agentRunControl": resolved["agentRunControl"],
+    })
+    if (not isinstance(result, dict)
+            or result.get("schema") != "runtime.agent_run.control.result.v1"
+            or result.get("agentRunId") != run_id
+            or result.get("terminalState") not in {"completed", "failed", "cancelled"}
+            or result.get("disposition") not in {"terminal", "released"}):
+        raise RuntimeError("agent_run_control_response_invalid")
+    healthy()
+    transition_agent_run(run_id, result["terminalState"], "runtime_session_terminal_committed")
+    if result["disposition"] == "released":
+        if (set(result) != {"schema", "agentRunId", "terminalState", "disposition",
+                           "cleanupReceiptId", "releaseReceiptId"}
+                or not valid_runtime_job_id(result["cleanupReceiptId"])
+                or not valid_runtime_job_id(result["releaseReceiptId"])):
+            raise RuntimeError("agent_run_control_response_invalid")
+        complete_job(job["jobId"], owner, [])
+    else:
+        if set(result) != {"schema", "agentRunId", "terminalState", "disposition"}:
+            raise RuntimeError("agent_run_control_response_invalid")
+        # The same Job yields before the bounded slow-cleanup workers claim it.
+        # Its authoritative terminal fact determines that lane's eligibility.
+        if job["controlStage"] == "cleanup":
+            resolved = resolve_agent_run_lifecycle(job, owner, run_id, digest)
+            if resolved["disposition"] not in {"terminal", "released"}:
+                raise RuntimeError("control_execution_forbidden")
+            finish_environment_agent_run(job, owner, run_id, digest, resolved, healthy)
+        else:
+            yield_job(job["jobId"], owner, now_ms(), "control_cleanup_pending")
+
+
+def run_control_loop(stage, slot, stopped):
+    worker_id = "worker:control:" + stage + ":" + str(slot) + ":" + uuid.uuid4().hex
+    while not stopped.is_set():
+        try:
+            job = claim_control_job(stage, worker_id)
+            if job is not None:
+                execute_control_job(job)
+                continue
+        except (RuntimeError, urllib.error.URLError, OSError):
+            pass
+        stopped.wait(0.25)
 
 
 def run_worker_service():
@@ -1365,7 +1605,12 @@ def run_worker_service():
         )
         for slot_index in range(WORKER_SLOT_COUNT)
     ]
-    for thread in control_threads + job_threads:
+    lifecycle_threads = [
+        threading.Thread(target=run_control_loop, args=(stage, slot, stopped),
+                         name=f"workspace-control-{stage}-{slot}", daemon=True)
+        for stage in ("advance", "cleanup") for slot in range(2)
+    ]
+    for thread in control_threads + job_threads + lifecycle_threads:
         thread.start()
     try:
         stopped.wait()

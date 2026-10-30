@@ -84,3 +84,6 @@ api.add_router("/internal", internal_agent_work_validation_router)
 api.add_router("/internal", internal_model_router)
 api.add_router("/internal", internal_mcp_credentials_router)
 api.add_router("/internal", internal_assistant_connectors_router)
+
+from app_core.http.workspace_resources import router as workspace_resources_router
+api.add_router("/api", workspace_resources_router)

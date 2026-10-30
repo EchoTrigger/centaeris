@@ -15,6 +15,7 @@ from . import test_agent_work_returns as returns_fixture
 from .models import AgentRun, AgentWorkReturn, AgentWorkSession, HostedOperationReceipt
 from .testing import fenced_start_fixture
 from .runtime_schema_test_helpers import remove_runtime_trigger_functions
+from .runtime_lifecycle_test_helpers import persisted_runtime_cleanup_receipts
 
 
 class WorkReturnRuntimeTests(LiveServerTestCase):
@@ -46,13 +47,15 @@ class WorkReturnRuntimeTests(LiveServerTestCase):
                     cursor.execute("DROP SCHEMA IF EXISTS runtime")
         self.addCleanup(cleanup_runtime_tables)
         database = settings.DATABASES["default"]
-        runtime_fixture = {"database": {key: database[key] for key in ("NAME", "USER", "PASSWORD", "HOST", "PORT")},
+        runtime_fixture = {"liveServerUrl": self.live_server_url, "internalToken": settings.INTERNAL_API_TOKEN,
+            "database": {key: database[key] for key in ("NAME", "USER", "PASSWORD", "HOST", "PORT")},
             "cases": [{"kind": kind, "agentRunStart": fenced_start_fixture(child)} for kind, child in cases]}
-        result = subprocess.run(["cargo", "test", "--locked", "-p", "runtime_server",
-            "agent_work::tests::returns::django_committed_work_return_facts", "--", "--ignored", "--exact", "--nocapture"],
-            cwd=Path(__file__).resolve().parents[3],
-            env={**os.environ, "CARGO_BUILD_JOBS": "1", "CENTAERIS_WORK_RETURN_FIXTURE": json.dumps(runtime_fixture)},
-            capture_output=True, text=True, encoding="utf-8", timeout=300)
+        with persisted_runtime_cleanup_receipts():
+            result = subprocess.run(["cargo", "test", "--locked", "-p", "runtime_server",
+                "agent_work::tests::returns::django_committed_work_return_facts", "--", "--ignored", "--exact", "--nocapture"],
+                cwd=Path(__file__).resolve().parents[3],
+                env={**os.environ, "CARGO_BUILD_JOBS": "1", "CENTAERIS_WORK_RETURN_FIXTURE": json.dumps(runtime_fixture)},
+                capture_output=True, text=True, encoding="utf-8", timeout=300)
         diagnostic = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, diagnostic)
         for kind, _ in cases:

@@ -77,7 +77,8 @@ def expire_trash(cutoff, dry_run: bool) -> TrashExpirationReport:
     if dry_run:
         return report
     now = timezone.now()
-    Agent.objects.filter(id__in=agent_ids, purgedAt__isnull=True).update(purgedAt=now)
+    Agent.objects.filter(id__in=agent_ids, purgedAt__isnull=True).update(
+        purgedAt=now, avatar_image=None, avatar_digest="")
     Session.objects.filter(id__in=session_ids, purgedAt__isnull=True).update(purgedAt=now)
     # Includes already-purged owners, so an interrupted GC pass is repairable.
     owners = Session.objects.filter(

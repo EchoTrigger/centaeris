@@ -9,10 +9,12 @@ import { groupSessionNavigation, sortSessionNavigation } from "./sessionNavigati
 import { SessionNavigationRow } from "./SessionNavigationRow";
 import { useSessionNavigationActions } from "./useSessionNavigationActions";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { useAgentDocumentIdentity } from "./useAgentDocumentIdentity";
 
 /** @param {{ children: import("react").ReactNode, initialTab?: string, activeAgent?: import("../router").AgentSummary | null, mainClassName?: string, showRecentSessions?: boolean, recentRevision?: string, presentationNavigation?: readonly import("../chat/workspacePresentationProtocol").PresentationSession[] | null, onNavigationRetry?: () => void }} props */
 export function ShellPage({ children, initialTab = "home", activeAgent = null, mainClassName = "", showRecentSessions = false, recentRevision = "", presentationNavigation, onNavigationRetry }) {
   const { t } = useTranslation();
+  useAgentDocumentIdentity(activeAgent);
   const location = useLocation();
   const { workspace, agents } = useRouteLoaderData("workspace");
   const [sidebarOpen, setSidebarOpen] = useState(() => !showRecentSessions || typeof window === "undefined" || !window.matchMedia("(max-width: 760px)").matches);

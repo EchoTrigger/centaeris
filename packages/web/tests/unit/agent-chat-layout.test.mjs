@@ -36,7 +36,7 @@ test("ordinary Session preview starts at navigation width and preserves intentio
   globalThis.sessionStorage = { getItem: () => null };
   context.after(() => { globalThis.window = previousWindow; globalThis.sessionStorage = previousStorage; });
   const env = environment({ location: { search: "?new=1", state: { sidebarTab: "chat" } }, request: async path => {
-    const data = path === "/api/models" ? { models: [] } : path.includes("session-projects") ? { projects: [] } : { sessions: [] };
+    const data = path === "/api/models?workspaceId=workspace" ? { models: [] } : path.includes("session-projects") ? { projects: [] } : { sessions: [] };
     return { ...data, json: async () => data };
   } });
   const subject = renderer(AppPageContent, { agentId: "agent", workspaceDraft: false, location: env.location, modelsVersion: 0 }, env);
@@ -183,7 +183,7 @@ test("ordinary Session rows retain running, unread and pin indicators and all me
   const calls = [];
   const env = environment({ location: { search: "?new=1", state: { sidebarTab: "chat" } }, request: async (path, options = {}) => {
     calls.push([path, options]);
-    const data = path === "/api/models" ? { models: [] } : path.includes("session-projects") ? { projects: [] }
+    const data = path === "/api/models?workspaceId=workspace" ? { models: [] } : path.includes("session-projects") ? { projects: [] }
       : options.method === "PATCH" ? { session: { ...item, ...JSON.parse(options.body), isManuallyUnread:JSON.parse(options.body).isUnread??item.isManuallyUnread, attentionRevision:"1" } } : { sessions: [item] };
     return { ...data, json: async () => data };
   } });
@@ -222,6 +222,10 @@ test("ordinary Session rows retain running, unread and pin indicators and all me
 });
 
 test("the Session sidebar refreshes background work without changing the open draft or rereading projects", async context => {
+  const previousStorage = globalThis.sessionStorage;
+  const stored = new Map();
+  globalThis.sessionStorage = { getItem:key=>stored.get(key)??null, setItem:(key,value)=>stored.set(key,value), removeItem:key=>stored.delete(key) };
+  context.after(() => { globalThis.sessionStorage = previousStorage; });
   const previousWindow = globalThis.window;
   globalThis.window = { addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {} };
   context.after(() => { globalThis.window = previousWindow; });
@@ -229,7 +233,7 @@ test("the Session sidebar refreshes background work without changing the open dr
   let records = [{ ...session, agentId:"agent", hasActiveAgentRun: true }];
   const env = environment({ presentation:options=>{subscription=options;return new Promise(resolve=>options.signal.addEventListener("abort",resolve,{once:true}));}, location: { search: "?new=1", state: null }, request: async path => {
     calls.push(path);
-    const data = path === "/api/models" ? { models: [] } : path.includes("session-projects") ? { projects: [] } : { sessions: records };
+    const data = path === "/api/models?workspaceId=workspace" ? { models: [] } : path.includes("session-projects") ? { projects: [] } : { sessions: records };
     return { json: async () => data };
   } });
   const subject = renderer(AppPageContent, { agentId: "agent", workspaceDraft: false, location: env.location, modelsVersion: 0 }, env);
@@ -365,5 +369,21 @@ test("pushed Agent navigation updates sessions without rereading the list or pro
     props.presentationNavigation = [{ ...item, title: "Renamed by stream" }]; await subject.settle();
     assert.equal(nodes(subject.tree, node => node.type.name === "ShellSidebar")[0].props.recentNavigation.sessions[0].title, "Renamed by stream");
     assert.equal(calls.length, 1);
+  } finally { subject.unmount(); }
+});
+for (const view of [
+  { name: "workspace welcome", workspaceDraft: true, search: "" },
+  { name: "new Agent conversation", workspaceDraft: false, search: "?new=1" },
+  { name: "existing Agent Session", workspaceDraft: false, search: "?sessionId=work" },
+]) test(`${view.name} presents its actual Agent identity without selecting the first directory entry`, context => {
+  const previousWindow = globalThis.window; const previousStorage = globalThis.sessionStorage;
+  globalThis.window = { innerWidth: 1280, addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {} };
+  globalThis.sessionStorage = { getItem: () => null };
+  context.after(() => { globalThis.window = previousWindow; globalThis.sessionStorage = previousStorage; });
+  const env = environment(); const selected = { ...env.agents[0], id: "selected", name: "Navigator" }; env.agents.push(selected);
+  const subject = renderer(AppPageContent, { agentId: selected.id, workspaceDraft: view.workspaceDraft, location: { search: view.search, state: null }, modelsVersion: 0 }, env);
+  try {
+    subject.render();
+    assert.equal(component(subject.tree, "AgentDocumentIdentity")?.props.agent, selected, "the rendered page hands its actual Agent to the browser identity component");
   } finally { subject.unmount(); }
 });

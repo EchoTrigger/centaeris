@@ -8,7 +8,7 @@ class AgentModelSettingsError(ValueError):
     pass
 
 
-def selected_model(model_config_ref, thinking_mode):
+def selected_model(model_config_ref, thinking_mode, *, workspace_id=None):
     try:
         require_opaque_ref("modelConfigRef", model_config_ref)
         if "\0" in model_config_ref:
@@ -16,7 +16,8 @@ def selected_model(model_config_ref, thinking_mode):
     except ValueError as error:
         raise AgentModelSettingsError("agent_model_not_available") from error
     try:
-        model = ModelConfig.objects.get(pk=model_config_ref, enabled=True, isCurrent=True)
+        from .workspace_resources import models_for_workspace
+        model = models_for_workspace(workspace_id).get(pk=model_config_ref, enabled=True, isCurrent=True)
     except ModelConfig.DoesNotExist as error:
         raise AgentModelSettingsError("agent_model_not_available") from error
     mode = model.thinkingMode
@@ -40,7 +41,7 @@ def configured_agent_model(agent):
     if agent.model_config_id is None:
         raise AgentModelSettingsError("agent_model_not_configured")
     mode = agent.thinking_mode or None
-    model, resolved = selected_model(agent.model_config_id, mode)
+    model, resolved = selected_model(agent.model_config_id, mode, workspace_id=agent.workspace_id)
     # A saved empty effort is a pinned value, not a request to resolve a changed
     # catalog default. ModelConfig revisions must not mutate their meaning.
     if resolved != agent.thinking_mode:

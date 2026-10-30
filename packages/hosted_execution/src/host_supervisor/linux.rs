@@ -1,6 +1,10 @@
 use super::*;
 use crate::task_service::linux::{launcher::OciTarget, HelperBinary, NativeManager};
+pub(crate) mod commands;
 mod helpers;
+mod idle_pause;
+pub(crate) mod probe;
+mod resource_sampler;
 mod retirement;
 use sha2::{Digest, Sha256};
 use std::{
@@ -8,7 +12,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     os::{
-        fd::AsRawFd,
+        fd::{AsFd, AsRawFd},
         unix::{
             fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
             net::{UnixListener, UnixStream},
@@ -24,11 +28,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(crate) static COMMAND_LOCK: Mutex<()> = Mutex::new(());
-pub(crate) static MANAGED_PIDS: Mutex<std::collections::BTreeSet<u32>> =
-    Mutex::new(std::collections::BTreeSet::new());
+static PROBE_ADMISSION: probe::ProbeAdmission = probe::ProbeAdmission::new();
 const MAX_REQUEST: usize = 128 * 1024;
 const MAX_RESPONSE: usize = 1024 * 1024;
+// Header readers and dispatched operations consume independent bounded slots.
+const HEADER_LIMIT: usize = 8;
+const EXECUTION_LIMIT: usize = 8;
+const HEADER_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -132,58 +138,105 @@ pub(crate) fn read_bundle_spec(bundle: &Path) -> Result<serde_json::Value, Strin
     serde_json::from_slice(&bytes).map_err(|_| "host_bundle_unknown".into())
 }
 fn command_json(path: &str, args: &[&str]) -> Result<serde_json::Value, String> {
-    let _lock = COMMAND_LOCK.lock().map_err(|_| "host_command_failed")?;
-    command_json_unlocked(path, args)
+    command_json_with_budget(path, args, None)
 }
 pub(crate) fn command_json_unlocked(
     path: &str,
     args: &[&str],
 ) -> Result<serde_json::Value, String> {
-    serde_json::from_slice(&command_bytes_unlocked(path, args)?)
+    command_json(path, args)
+}
+fn command_json_with_budget(
+    path: &str,
+    args: &[&str],
+    budget: Option<&probe::ProbeBudget<'_>>,
+) -> Result<serde_json::Value, String> {
+    serde_json::from_slice(&command_bytes_with_budget(path, args, budget)?)
         .map_err(|_| "host_command_response_invalid".into())
 }
 pub(crate) fn command_bytes_unlocked(path: &str, args: &[&str]) -> Result<Vec<u8>, String> {
-    let mut child = Command::new(path)
+    command_bytes_with_budget(path, args, None)
+}
+fn command_bytes_with_budget(
+    path: &str,
+    args: &[&str],
+    budget: Option<&probe::ProbeBudget<'_>>,
+) -> Result<Vec<u8>, String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let check = || {
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
+        if Instant::now() >= deadline {
+            return Err("host_command_timeout".into());
+        }
+        Ok(())
+    };
+    let mut command = Command::new(path);
+    command
         .args(args)
         .env_clear()
         .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| "host_command_failed")?;
-    let mut stdout = child.stdout.take().ok_or("host_command_failed")?;
-    let reader = thread::spawn(move || {
-        let mut data = Vec::new();
-        stdout
-            .by_ref()
-            .take(MAX_RESPONSE as u64 + 1)
-            .read_to_end(&mut data)
-            .map(|_| data)
-    });
-    let began = Instant::now();
-    let status = loop {
-        match child.try_wait().map_err(|_| "host_command_failed")? {
-            Some(status) => break status,
-            None if began.elapsed() < Duration::from_secs(5) => {
-                thread::sleep(Duration::from_millis(10))
-            }
-            None => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return Err("host_command_timeout".into());
-            }
+        .stderr(Stdio::null());
+    let mut child = commands::OwnedChild::spawn_checked(&mut command, check)?;
+    let result = (|| {
+        let mut stdout = child.stdout.take().ok_or("host_command_failed")?;
+        // Nonblocking reads keep inherited pipe writers within the same deadline;
+        // a reader thread joined after child exit could otherwise wait forever.
+        let fd = stdout.as_raw_fd();
+        // SAFETY: stdout owns this live descriptor; only its nonblocking flag changes.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err("host_command_failed".into());
         }
-    };
-    let data = reader
-        .join()
-        .map_err(|_| "host_command_failed")?
-        .map_err(|_| "host_command_failed")?;
-    if !status.success() || data.len() > MAX_RESPONSE {
-        return Err("host_command_failed".into());
+        let mut bytes = Vec::new();
+        let mut status = None;
+        let mut eof = false;
+        loop {
+            check()?;
+            if status.is_none() {
+                status = child.try_wait().map_err(|_| "host_command_failed")?;
+            }
+            if !eof {
+                let mut buffer = [0u8; 16 * 1024];
+                loop {
+                    check()?;
+                    match stdout.read(&mut buffer) {
+                        Ok(0) => {
+                            eof = true;
+                            break;
+                        }
+                        Ok(count) => {
+                            bytes.extend_from_slice(&buffer[..count]);
+                            if bytes.len() > MAX_RESPONSE {
+                                return Err("host_command_failed".into());
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => return Err("host_command_failed".into()),
+                    }
+                }
+            }
+            if let Some(status) = status {
+                if eof {
+                    return if status.success() {
+                        Ok(bytes)
+                    } else {
+                        Err("host_command_failed".into())
+                    };
+                }
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    })();
+    if result.is_err() {
+        // Ownership stays with this handle or the cleanup worker until reaped.
+        let _ = child.kill();
     }
-    Ok(data)
+    result
 }
 
 pub(crate) fn start_time(pid: u32) -> Result<u64, String> {
@@ -194,13 +247,51 @@ pub(crate) fn start_time(pid: u32) -> Result<u64, String> {
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| "host_target_unknown".into())
 }
+#[derive(Clone, Copy)]
+enum AttestationPower {
+    Running,
+    Live,
+}
 fn attest(
     config: &HostSupervisorConfig,
     target: &HostLaunchTarget,
 ) -> Result<Registration, String> {
+    attest_with_power(config, target, AttestationPower::Running)
+}
+fn attest_observation(
+    config: &HostSupervisorConfig,
+    target: &HostLaunchTarget,
+    budget: &probe::ProbeBudget<'_>,
+) -> Result<Registration, String> {
+    attest_power_with_budget(config, target, AttestationPower::Live, Some(budget))
+        .map(|(registration, _)| registration)
+}
+fn attest_with_power(
+    config: &HostSupervisorConfig,
+    target: &HostLaunchTarget,
+    power: AttestationPower,
+) -> Result<Registration, String> {
+    attest_power(config, target, power).map(|(registration, _)| registration)
+}
+fn attest_power(
+    config: &HostSupervisorConfig,
+    target: &HostLaunchTarget,
+    power: AttestationPower,
+) -> Result<(Registration, bool), String> {
+    attest_power_with_budget(config, target, power, None)
+}
+fn attest_power_with_budget(
+    config: &HostSupervisorConfig,
+    target: &HostLaunchTarget,
+    power: AttestationPower,
+    budget: Option<&probe::ProbeBudget<'_>>,
+) -> Result<(Registration, bool), String> {
+    if let Some(budget) = budget {
+        budget.check()?;
+    }
     target.validate()?;
     let endpoint = format!("unix://{}", config.docker_socket);
-    let values = command_json(
+    let values = command_json_with_budget(
         &config.docker_path,
         &[
             "--host",
@@ -210,6 +301,7 @@ fn attest(
             "container",
             &target.container_id,
         ],
+        budget,
     )?;
     let value = values
         .as_array()
@@ -269,7 +361,7 @@ fn attest(
             return Err("host_namespace_isolation_required".into());
         }
     }
-    let state = command_json(
+    let state = command_json_with_budget(
         &config.runtime_path,
         &[
             "--root",
@@ -277,10 +369,19 @@ fn attest(
             "state",
             &target.container_id,
         ],
+        budget,
     )?;
-    if state["id"] != target.container_id || state["pid"] != pid || state["status"] != "running" {
+    let live = state["status"] == "running"
+        || (matches!(power, AttestationPower::Live) && state["status"] == "paused");
+    if state["id"] != target.container_id || state["pid"] != pid || !live {
         return Err("host_runtime_identity_rejected".into());
     }
+    let paused = idle_pause::confirmed_power(
+        value["State"]["Paused"]
+            .as_bool()
+            .ok_or("host_power_unknown")?,
+        state["status"].as_str(),
+    )?;
     let bundle = state["bundle"]
         .as_str()
         .filter(|p| absolute_path(p))
@@ -348,18 +449,21 @@ fn attest(
         return Err("host_target_cgroup_rejected".into());
     }
     let init_start_time = start_time(pid)?;
-    Ok(Registration {
-        target: target.clone(),
-        init_pid: pid,
-        init_start_time,
-        bundle: bundle.into(),
-        cgroup,
-        spec_digest: format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(&spec).map_err(|_| "host_state_invalid")?)
-        ),
-        process,
-    })
+    Ok((
+        Registration {
+            target: target.clone(),
+            init_pid: pid,
+            init_start_time,
+            bundle: bundle.into(),
+            cgroup,
+            spec_digest: format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&spec).map_err(|_| "host_state_invalid")?)
+            ),
+            process,
+        },
+        paused,
+    ))
 }
 
 struct Host {
@@ -374,11 +478,35 @@ impl Host {
         Path::new(&self.config.control_root).join(format!("{id}.target.json"))
     }
     fn manager(&self, target: &HostLaunchTarget) -> Result<Arc<NativeManager>, String> {
+        self.manager_with_budget(target, None)
+    }
+    fn manager_with_budget(
+        &self,
+        target: &HostLaunchTarget,
+        budget: Option<&probe::ProbeBudget<'_>>,
+    ) -> Result<Arc<NativeManager>, String> {
+        if let Some(budget) = budget {
+            budget.check()?;
+        }
         if self.retirement.blocks(&target.environment_instance_id)? {
             return Err("host_retirement_pending".into());
         }
-        let actual = attest(&self.config, target)?;
-        let mut managers = self.managers.lock().map_err(|_| "host_service_failed")?;
+        let actual = if let Some(budget) = budget {
+            attest_power_with_budget(
+                &self.config,
+                target,
+                AttestationPower::Running,
+                Some(budget),
+            )?
+            .0
+        } else {
+            attest(&self.config, target)?
+        };
+        let mut managers = if let Some(budget) = budget {
+            budget.lock(&self.managers)?
+        } else {
+            self.managers.lock().map_err(|_| "host_service_failed")?
+        };
         if self.retirement.blocks(&target.environment_instance_id)? {
             return Err("host_retirement_pending".into());
         }
@@ -462,6 +590,53 @@ impl Host {
         }
         self.manager(&registration.target)
     }
+    fn inspect_with_budget(
+        &self,
+        id: &str,
+        budget: &probe::ProbeBudget<'_>,
+    ) -> Result<serde_json::Value, String> {
+        budget.check()?;
+        let saved: Registration = serde_json::from_value(read_json(&self.registration_path(id))?)
+            .map_err(|_| "host_state_invalid")?;
+        if saved.target.environment_instance_id != id {
+            return Err("host_registered_target_changed".into());
+        }
+        let existing = {
+            let managers = budget.lock(&self.managers)?;
+            managers
+                .get(id)
+                .map(|(registration, manager)| (registration.clone(), manager.clone()))
+        };
+        let manager = if let Some((expected, manager)) = existing {
+            if expected.target != saved.target {
+                return Err("host_registered_target_changed".into());
+            }
+            if self.retirement.blocks(id)? {
+                return Err("host_retirement_pending".into());
+            }
+            let actual = attest_power_with_budget(
+                &self.config,
+                &expected.target,
+                AttestationPower::Running,
+                Some(budget),
+            )?
+            .0;
+            if actual != expected {
+                return Err("host_registered_target_changed".into());
+            }
+            if self.retirement.blocks(id)? {
+                return Err("host_retirement_pending".into());
+            }
+            manager
+        } else {
+            budget.check()?;
+            // Reopening a persisted manager may reconcile task ownership. Once
+            // admitted, that recovery retains its responsibility across disconnect.
+            self.manager_with_budget(&saved.target, Some(budget))?
+        };
+        budget.check()?;
+        manager.inspection_with_budget(budget)
+    }
     fn retire(&self, target: &HostLaunchTarget) -> Result<(), String> {
         self.retire_with_probe(target, || retirement::docker_absent(&self.config, target))
     }
@@ -492,9 +667,28 @@ impl Host {
         managers.remove(&target.environment_instance_id);
         Ok(())
     }
-    fn handle(&self, envelope: HostSupervisorEnvelope) -> Result<HostSupervisorResult, String> {
+    fn handle(
+        &self,
+        envelope: HostSupervisorEnvelope,
+        budget: &probe::ProbeBudget<'_>,
+    ) -> Result<HostSupervisorResult, String> {
         envelope.validate()?;
         match envelope.request {
+            HostSupervisorRequest::ObserveResources {
+                expected_host_id,
+                targets,
+            } => Ok(HostSupervisorResult::ResourceObservation {
+                observation: Box::new(resource_sampler::observe(
+                    &self.config,
+                    &expected_host_id,
+                    &targets,
+                    budget,
+                )?),
+            }),
+            HostSupervisorRequest::PauseIfIdle { target } => {
+                let outcome = self.pause_if_idle(&target)?;
+                Ok(HostSupervisorResult::IdlePause { target, outcome })
+            }
             HostSupervisorRequest::Register { target } => {
                 self.manager(&target)?;
                 Ok(HostSupervisorResult::Registered { target })
@@ -505,12 +699,9 @@ impl Host {
             }
             HostSupervisorRequest::Inspect {
                 environment_instance_id,
-            } => {
-                let manager = self.existing(&environment_instance_id)?;
-                Ok(HostSupervisorResult::Inspection {
-                    inspection: manager.inspection()?,
-                })
-            }
+            } => Ok(HostSupervisorResult::Inspection {
+                inspection: self.inspect_with_budget(&environment_instance_id, budget)?,
+            }),
             HostSupervisorRequest::Task { envelope } => {
                 let id = request_instance(&envelope.request);
                 let manager = self.existing(id)?;
@@ -580,36 +771,120 @@ pub fn serve(config_path: &Path) -> Result<(), String> {
         helper_binary,
     });
     retirement::start_retries(&host)?;
-    let active = Arc::new(AtomicUsize::new(0));
+    let admission = Arc::new(ClientAdmission::new());
     for stream in listener.incoming() {
         let stream = stream.map_err(|_| "host_socket_accept_failed")?;
-        if active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < 8).then_some(n + 1)
-            })
-            .is_err()
-        {
-            continue;
-        }
-        let permit = ClientPermit(active.clone());
-        let host = host.clone();
-        thread::Builder::new()
-            .name("host-control".into())
-            .spawn(move || {
-                let _permit = permit;
-                let _ = exchange(&host, stream);
-            })
-            .map_err(|_| "host_worker_unavailable")?;
+        start_client(host.clone(), stream, Instant::now(), admission.clone())?;
     }
     Ok(())
 }
+struct ClientAdmission {
+    headers: Arc<AtomicUsize>,
+    executing: Arc<AtomicUsize>,
+}
+impl ClientAdmission {
+    fn new() -> Self {
+        Self {
+            headers: Arc::new(AtomicUsize::new(0)),
+            executing: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+fn start_client(
+    host: Arc<Host>,
+    stream: UnixStream,
+    accepted_at: Instant,
+    admission: Arc<ClientAdmission>,
+) -> Result<Option<thread::JoinHandle<()>>, String> {
+    let Some(header) = ClientPermit::acquire(&admission.headers, HEADER_LIMIT) else {
+        // An unparsed peer has no proof that a valid operation was rejected.
+        return Ok(None);
+    };
+    thread::Builder::new()
+        .name("host-control".into())
+        .spawn(move || {
+            let _ = exchange(&host, stream, accepted_at, &admission, header);
+        })
+        .map(Some)
+        .map_err(|_| "host_worker_unavailable".into())
+}
 struct ClientPermit(Arc<AtomicUsize>);
+impl ClientPermit {
+    fn acquire(counter: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
+        counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < limit).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Self(counter.clone()))
+    }
+}
 impl Drop for ClientPermit {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
-fn exchange(host: &Arc<Host>, mut stream: UnixStream) -> Result<(), String> {
+fn read_envelope(
+    reader: &mut BufReader<UnixStream>,
+    deadline: Instant,
+) -> Result<HostSupervisorEnvelope, String> {
+    let mut data = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("host_request_invalid".into());
+        }
+        reader
+            .get_ref()
+            .set_read_timeout(Some(remaining))
+            .map_err(|_| "host_socket_failed")?;
+        let bytes = reader.fill_buf().map_err(|_| "host_request_invalid")?;
+        if bytes.is_empty() {
+            return Err("host_request_invalid".into());
+        }
+        let count = bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |position| position + 1);
+        if data.len() + count > MAX_REQUEST {
+            return Err("host_request_invalid".into());
+        }
+        data.extend_from_slice(&bytes[..count]);
+        reader.consume(count);
+        if data.last() == Some(&b'\n') {
+            break;
+        }
+    }
+    let envelope: HostSupervisorEnvelope =
+        serde_json::from_slice(&data).map_err(|_| "host_request_invalid")?;
+    envelope.validate()?;
+    Ok(envelope)
+}
+fn helper_input_ready(stream: &mut UnixStream, helper: &HostHelperRequest) -> Result<(), String> {
+    let response = HostSupervisorResponse::Success {
+        schema: HOST_SUPERVISOR_SCHEMA.into(),
+        result: HostSupervisorResult::HelperInputReady {
+            operation_id: helper.operation_id.clone(),
+            input_length: helper.input_length,
+            input_digest: helper.input_digest.clone(),
+        },
+    };
+    let mut bytes = serde_json::to_vec(&response).map_err(|_| "host_response_invalid")?;
+    bytes.push(b'\n');
+    stream
+        .write_all(&bytes)
+        .and_then(|()| stream.flush())
+        .map_err(|_| "host_response_unknown".into())
+}
+fn exchange(
+    host: &Arc<Host>,
+    mut stream: UnixStream,
+    accepted_at: Instant,
+    admission: &ClientAdmission,
+    header: ClientPermit,
+) -> Result<(), String> {
+    let mut header = Some(header);
+    let mut _execution = None;
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of_val(&cred) as libc::socklen_t;
     // SAFETY: socket FD and credential output storage are valid.
@@ -633,20 +908,32 @@ fn exchange(host: &Arc<Host>, mut stream: UnixStream) -> Result<(), String> {
         .set_write_timeout(Some(Duration::from_secs(2)))
         .map_err(|_| "host_socket_failed")?;
     let mut response_started = false;
+    let peer = stream.try_clone().map_err(|_| "host_socket_failed")?;
+    let budget = probe::ProbeBudget::new(accepted_at + Duration::from_secs(30), Some(peer.as_fd()));
+    let mut read_only_probe = false;
     let result = (|| {
-        let mut data = Vec::new();
         let mut reader = BufReader::new(stream.try_clone().map_err(|_| "host_socket_failed")?);
-        (&mut reader)
-            .take(MAX_REQUEST as u64 + 1)
-            .read_until(b'\n', &mut data)
-            .map_err(|_| "host_request_invalid")?;
-        if data.len() > MAX_REQUEST || data.last() != Some(&b'\n') {
-            return Err("host_request_invalid".into());
-        }
-        let envelope: HostSupervisorEnvelope =
-            serde_json::from_slice(&data).map_err(|_| "host_request_invalid")?;
-        envelope.validate()?;
+        let envelope = read_envelope(&mut reader, accepted_at + HEADER_TIMEOUT)?;
+        _execution =
+            Some(ClientPermit::acquire(&admission.executing, EXECUTION_LIMIT).ok_or("host_busy")?);
+        // The execution slot now owns the full request, including response transfer.
+        drop(header.take());
+        read_only_probe = matches!(
+            &envelope.request,
+            HostSupervisorRequest::ObserveResources { .. } | HostSupervisorRequest::Inspect { .. }
+        );
+        // Bound full resource walks separately; task inspection does not consume
+        // these permits because production cleanup also uses it.
+        let _probe_permit = if matches!(
+            &envelope.request,
+            HostSupervisorRequest::ObserveResources { .. }
+        ) {
+            Some(PROBE_ADMISSION.try_acquire(&budget)?)
+        } else {
+            None
+        };
         if let HostSupervisorRequest::Helper { helper } = envelope.request {
+            helper_input_ready(&mut stream, &helper)?;
             let manager = host.existing(&helper.fence.environment_instance_id)?;
             stream
                 .set_read_timeout(Some(Duration::from_secs(30)))
@@ -678,7 +965,7 @@ fn exchange(host: &Arc<Host>, mut stream: UnixStream) -> Result<(), String> {
             result?;
             Ok(None)
         } else {
-            host.handle(envelope).map(Some)
+            host.handle(envelope, &budget).map(Some)
         }
     })();
     let response = match result {
@@ -693,14 +980,33 @@ fn exchange(host: &Arc<Host>, mut stream: UnixStream) -> Result<(), String> {
             error,
         },
     };
+    if read_only_probe {
+        budget.check()?;
+    }
     let mut data = serde_json::to_vec(&response).map_err(|_| "host_response_invalid")?;
     if data.len() >= MAX_RESPONSE {
         return Err("host_response_oversized".into());
     }
     data.push(b'\n');
-    stream
-        .write_all(&data)
-        .map_err(|_| "host_response_unknown".into())
+    if read_only_probe {
+        let mut pending = data.as_slice();
+        while !pending.is_empty() {
+            stream
+                .set_write_timeout(Some(budget.remaining()?.min(Duration::from_secs(2))))
+                .map_err(|_| "host_socket_failed")?;
+            match stream.write(pending) {
+                Ok(0) => return Err("host_response_unknown".into()),
+                Ok(count) => pending = &pending[count..],
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err("host_response_unknown".into()),
+            }
+        }
+        Ok(())
+    } else {
+        stream
+            .write_all(&data)
+            .map_err(|_| "host_response_unknown".into())
+    }
 }
 struct TrackedWriter<'a> {
     stream: &'a mut UnixStream,
@@ -716,3 +1022,9 @@ impl Write for TrackedWriter<'_> {
         self.stream.flush()
     }
 }
+
+#[cfg(test)]
+mod command_budget_tests;
+
+#[cfg(test)]
+mod admission_tests;

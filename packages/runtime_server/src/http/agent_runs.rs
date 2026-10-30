@@ -1,5 +1,7 @@
 use super::*;
+mod control;
 pub(crate) mod retained_cleanup;
+pub(super) use control::advance as advance_control;
 
 pub(super) fn cleanup_receipt(
     state: HttpServerState,
@@ -200,7 +202,14 @@ fn teardown_owned_tasks(
     };
     let signing_key = match env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY") {
         Ok(key) => key,
-        Err(_) => return json_error_response(503, "retained_cleanup_unavailable"),
+        Err(_) => {
+            return cleanup_unavailable_response(
+                &cleanup.agent_run_id,
+                "teardown_signing_key",
+                "cleanup_signing_key_unavailable",
+                "retained_cleanup_unavailable",
+            )
+        }
     };
     let cleanup = match cleanup.validate(signing_key.as_bytes()) {
         Ok(cleanup) => cleanup,
@@ -220,32 +229,42 @@ fn teardown_owned_tasks(
     }
     // The short pin above has ended: these operations use separate connections.
     // Physical cleanup below pins and rechecks the current lease and epoch.
-    if state
-        .job_store
-        .close_turn_supplement_queue(CloseTurnSupplementQueueRequest {
-            agent_run_id: cleanup.agent_run_id.clone(),
-            lifecycle_job_id: lease.job_id.clone(),
-            session_id: cleanup.authorization.session_id.clone(),
-            authorization_digest: cleanup.authorization_digest.clone(),
-            lease_owner: Some(lease.lease_owner.clone()),
-            reason: "agent_run_terminal".into(),
-            closed_at_ms: now_ms()?,
-        })
-        .is_err()
+    if let Err(error) =
+        state
+            .job_store
+            .close_turn_supplement_queue(CloseTurnSupplementQueueRequest {
+                agent_run_id: cleanup.agent_run_id.clone(),
+                lifecycle_job_id: lease.job_id.clone(),
+                session_id: cleanup.authorization.session_id.clone(),
+                authorization_digest: cleanup.authorization_digest.clone(),
+                lease_owner: Some(lease.lease_owner.clone()),
+                reason: "agent_run_terminal".into(),
+                closed_at_ms: now_ms()?,
+            })
     {
-        return json_error_response(503, "agent_run_supplement_cleanup_failed");
-    }
-    if state
-        .runtime
-        .block_on(terminal_subagents::settle_terminal_parent_subagent_jobs(
-            state.store.as_ref(),
-            &cleanup.authorization.session_id,
+        return cleanup_unavailable_response(
             &cleanup.agent_run_id,
-            now_ms()?,
-        ))
-        .is_err()
+            "teardown_supplement_queue",
+            &error.to_string(),
+            "agent_run_supplement_cleanup_failed",
+        );
+    }
+    if let Err(error) =
+        state
+            .runtime
+            .block_on(terminal_subagents::settle_terminal_parent_subagent_jobs(
+                state.store.as_ref(),
+                &cleanup.authorization.session_id,
+                &cleanup.agent_run_id,
+                now_ms()?,
+            ))
     {
-        return json_error_response(503, "terminal_subagent_cleanup_unavailable");
+        return cleanup_unavailable_response(
+            &cleanup.agent_run_id,
+            "teardown_terminal_subagents",
+            &error,
+            "terminal_subagent_cleanup_unavailable",
+        );
     }
     let host_context = || {
         #[cfg(test)]
@@ -256,7 +275,14 @@ fn teardown_owned_tasks(
     };
     let host_id = match host_context() {
         Ok((host_id, _)) => host_id,
-        Err(_) => return json_error_response(503, "retained_cleanup_unavailable"),
+        Err(error) => {
+            return cleanup_unavailable_response(
+                &cleanup.agent_run_id,
+                "teardown_host_context",
+                &error,
+                "retained_cleanup_unavailable",
+            )
+        }
     };
     let receipt = match state.job_store.with_cleanup_authority(
         &CleanupAuthorityRequest {
@@ -265,15 +291,19 @@ fn teardown_owned_tasks(
             lease: &lease,
             host_id: &host_id,
         },
-        || {
-            #[cfg(test)]
-            if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
-                return crate::native_consumption_tests::owned_inventory();
-            }
-            crate::docker_execution_host::observed_resident_sandboxes()
-        },
+        crate::resident_capacity::FilteredResidentInventory(
+            |preparing: &[crate::resident_capacity::PreparingResidentSandbox]| {
+                #[cfg(test)]
+                if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
+                    return crate::native_consumption_tests::owned_inventory();
+                }
+                crate::docker_execution_host::observed_resident_sandboxes_excluding(preparing)
+            },
+        ),
         |target, verified| match target {
-            CleanupTarget::NeverAllocated | CleanupTarget::Destroyed { .. } => {
+            CleanupTarget::NeverAllocated
+            | CleanupTarget::Destroyed { .. }
+            | CleanupTarget::Unmaterialized { .. } => {
                 Ok(crate::postgres_store::cleanup_receipts::CleanupPhysicalResult::Retained)
             }
             CleanupTarget::Instance {
@@ -329,15 +359,12 @@ fn teardown_owned_tasks(
     ) {
         Ok(receipt) => receipt,
         Err(error) => {
-            #[cfg(test)]
-            if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
-                eprintln!(
-                    "native-consume-owned-cleanup-failed:agentRunId={}; error={error}",
-                    cleanup.agent_run_id
-                );
-            }
-            let _ = error;
-            return json_error_response(503, "retained_cleanup_unconfirmed");
+            failure_diagnostics::report_cleanup(
+                &cleanup.agent_run_id,
+                "teardown_cleanup_authority",
+                &error,
+            );
+            return cleanup_failure_response(&error);
         }
     };
     let mut contexts = state
@@ -386,6 +413,12 @@ pub(super) fn step(
             return json_error_response(400, error.as_str());
         }
     };
+    if job_store
+        .require_execute_lease(&agent_run_step.job_id, &agent_run_step.lease_owner)
+        .is_err()
+    {
+        return json_error_response(409, "agent_run_execute_lease_required");
+    }
     if let Err(error) = validate_agent_run_lifecycle_job(
         agent_run_step.job_id.as_str(),
         agent_run_step.lease_owner.as_str(),
@@ -412,6 +445,11 @@ pub(super) fn step(
             tool_layers.clone(),
         )
     });
+    if let Ok(Err(error)) = &execution {
+        if let Some(response) = execution_control_failure_response(&agent_run_id, error) {
+            return response;
+        }
+    }
     let outcome = match execution {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(error)) if error == "agent_run_lifecycle_lease_lost" => {
@@ -501,6 +539,45 @@ pub(super) fn step(
     step_response(&agent_run_id, outcome)
 }
 
+fn cleanup_unavailable_response(
+    agent_run_id: &str,
+    stage: &'static str,
+    error: &str,
+    public_code: &'static str,
+) -> Result<Response<Body>, String> {
+    failure_diagnostics::report_cleanup(agent_run_id, stage, error);
+    json_error_response(503, public_code)
+}
+
+fn cleanup_failure_response(error: &str) -> Result<Response<Body>, String> {
+    if error == "environment_host_busy" || error == crate::resident_capacity::RESIDENT_CAPACITY_WAIT
+    {
+        json_error_response(409, error)
+    } else {
+        json_error_response(503, "retained_cleanup_unconfirmed")
+    }
+}
+
+fn execution_control_failure_response(
+    agent_run_id: &str,
+    error: &str,
+) -> Option<Result<Response<Body>, String>> {
+    error
+        .starts_with("run_execution_control_probe_failed:")
+        .then(|| {
+            agent_run_step_failure_response(
+                agent_run_id,
+                "execution_control_unavailable",
+                true,
+                "execution_control_unavailable",
+            )
+            .map(|mut response| {
+                *response.status_mut() = axum::http::StatusCode::SERVICE_UNAVAILABLE;
+                response
+            })
+        })
+}
+
 fn step_response(
     agent_run_id: &str,
     outcome: AgentRunStepOutcome,
@@ -524,6 +601,90 @@ fn step_response(
 #[cfg(test)]
 mod cleanup_receipt_http_tests {
     use super::*;
+    #[test]
+    fn host_admission_busy_cleanup_is_an_exact_conflict_without_a_false_receipt() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for (reason, expected_status, expected_code) in [
+            ("environment_host_busy", 409, "environment_host_busy"),
+            (
+                "execution_resident_capacity_wait",
+                409,
+                "execution_resident_capacity_wait",
+            ),
+            (
+                "execution_resident_capacity_wait:detail",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            (
+                "execution_host_preparation_wait",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            (
+                "cleanup_container_identity_missing",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            (
+                "cleanup_physical_identity_rejected",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            (
+                "cleanup_physical_absence_unconfirmed",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            (
+                "cleanup_physical_release_unconfirmed",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            ("host_busy", 503, "retained_cleanup_unconfirmed"),
+            (
+                "environment_host_busy:unknown",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+            (
+                "environment_host_transport_unavailable",
+                503,
+                "retained_cleanup_unconfirmed",
+            ),
+        ] {
+            let response = cleanup_failure_response(reason).unwrap();
+            assert_eq!(response.status(), expected_status);
+            let body = runtime
+                .block_on(axum::body::to_bytes(response.into_body(), 4096))
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value, json!({"error": expected_code}));
+        }
+    }
+
+    #[test]
+    fn unavailable_fresh_control_returns_retryable_503_before_terminalization() {
+        let response = execution_control_failure_response(
+            "run-a",
+            "run_execution_control_probe_failed:offline",
+        )
+        .expect("a control uncertainty must bypass terminalization")
+        .unwrap();
+        assert_eq!(response.status(), 503);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let bytes = runtime
+            .block_on(axum::body::to_bytes(response.into_body(), 4096))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["retryable"], true);
+        assert_eq!(value["failureClass"], "execution_control_unavailable");
+        assert!(execution_control_failure_response(
+            "run-a",
+            "private error mentions run_execution_control_probe_failed:offline"
+        )
+        .is_none());
+    }
     #[test]
     fn current_step_response_matches_the_worker_contract() {
         let response = step_response(

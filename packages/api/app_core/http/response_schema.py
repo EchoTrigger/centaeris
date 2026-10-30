@@ -176,6 +176,8 @@ class WorkspaceHookResponse(StrictSchema):
 
 
 class WorkspacePluginResponse(StrictSchema):
+    scope: Literal["workspace", "platform"] = "platform"
+    writable: bool = False
     name: str
     display_name: str
     short_description: str
@@ -248,6 +250,7 @@ class AgentResponse(StrictSchema):
     description: str
     instructions: str
     avatar_kind: Literal["centaeris", "banana"]
+    avatar_url: str | None
     status: Literal["active", "deleted"]
     deleted_at: str | None
     created_at: str

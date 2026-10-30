@@ -477,9 +477,10 @@ Size concurrency against sandbox memory, host CPU, and database capacity. The
 configuration ceiling is not a claim that a host can sustain sixteen jobs.
 
 The example deployment sets each execution sandbox's resource ceilings to
-4 CPU cores (`SANDBOX_CPU_MILLI=4000`) and 8 GiB of memory
-(`SANDBOX_MEMORY_BYTES=8589934592`). These are per-sandbox limits, not reserved
-resources or a shared budget for the deployment.
+2 CPU cores (`SANDBOX_CPU_MILLI=2000`) and 4 GiB of memory
+(`SANDBOX_MEMORY_BYTES=4294967296`). These are per-environment hard limits.
+Resident admission has its own resource policy; changing the example does not
+resize an existing environment or replace a private deployment setting.
 
 For capacity comparisons, hold the revision, workload, replica count, and
 historical-data baseline fixed while varying slots. Compare completed throughput,

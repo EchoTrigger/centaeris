@@ -1,4 +1,5 @@
 use super::*;
+use crate::host_supervisor::linux::commands;
 use std::{
     ffi::CString,
     os::{
@@ -1257,6 +1258,14 @@ fn supervise(
     m.live.remove(&id);
 }
 
+/// Outcome of an idle-only physical operation under this instance's admission fence.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IdleEnvironmentOperation<T> {
+    Completed(T),
+    NotIdle,
+    Unknown,
+}
+
 /// A manager is always bound to a physically attested native target.
 pub(crate) struct NativeManager {
     manager: Arc<Mutex<Manager>>,
@@ -1325,8 +1334,84 @@ impl NativeManager {
         &self,
         request: EnvironmentTaskRequest,
     ) -> Result<EnvironmentTaskResult, String> {
+        // Trusted helpers already hold this same fence before entering Manager.
+        // Query, input receipts and termination retain their independent control path.
+        let _admission = if matches!(&request, EnvironmentTaskRequest::Start { .. }) {
+            Some(
+                self.helper_admission
+                    .lock()
+                    .map_err(|_| "task_service_failed")?,
+            )
+        } else {
+            None
+        };
         Manager::handle(&self.manager, request)
     }
+
+    /// Keep every new Start/helper outside the idle check and physical callback.
+    /// The caller verifies physical identity and records authoritative power facts.
+    /// This gate creates no paused marker and does not change task deadlines.
+    pub(crate) fn with_idle_environment_operation<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<IdleEnvironmentOperation<T>, String> {
+        let _admission = match self.helper_admission.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Ok(IdleEnvironmentOperation::NotIdle)
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Ok(IdleEnvironmentOperation::Unknown)
+            }
+        };
+        let manager = match self.manager.lock() {
+            Ok(manager) => manager,
+            Err(_) => return Ok(IdleEnvironmentOperation::Unknown),
+        };
+        if manager.journal.poisoned
+            || manager.journal.takeover_pending
+            || manager.container_absent
+            || manager.stop_reaper
+            || manager
+                .journal
+                .receipts
+                .values()
+                .any(|receipt| receipt.result.is_none())
+            || manager.journal.tasks.values().any(|record| {
+                record.snapshot.state == EnvironmentTaskState::Unknown
+                    && !record.snapshot.cleanup_complete
+            })
+        {
+            return Ok(IdleEnvironmentOperation::Unknown);
+        }
+        if !manager.live.is_empty()
+            || manager.drain_workers.load(Ordering::Acquire) != 0
+            || manager
+                .journal
+                .tasks
+                .values()
+                .any(|record| !record.snapshot.cleanup_complete || !record.snapshot.output_complete)
+        {
+            return Ok(IdleEnvironmentOperation::NotIdle);
+        }
+        // Preserve query/termination and reconciliation while the bounded physical
+        // operation runs. Only execution admission remains fenced per instance.
+        drop(manager);
+        operation().map(IdleEnvironmentOperation::Completed)
+    }
+
+    pub(crate) fn inspection_with_budget(
+        &self,
+        budget: &crate::host_supervisor::linux::probe::ProbeBudget<'_>,
+    ) -> Result<serde_json::Value, String> {
+        let _guard = budget.lock(&self.manager)?;
+        budget.check()?;
+        let value = store::inspection(&self.control, &self.output)?;
+        budget.check()?;
+        Ok(value)
+    }
+
+    #[cfg(test)]
     pub(crate) fn inspection(&self) -> Result<serde_json::Value, String> {
         let _guard = self.manager.lock().map_err(|_| "task_service_failed")?;
         store::inspection(&self.control, &self.output)
@@ -1456,14 +1541,10 @@ fn spawn_local(
             Ok(())
         });
     }
-    let mut child = command.spawn().map_err(|_| "task_launch_unknown")?;
+    let mut child = commands::OwnedChild::spawn(&mut command).map_err(|_| "task_launch_unknown")?;
     let input = child.stdin.take();
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
-    crate::host_supervisor::linux::MANAGED_PIDS
-        .lock()
-        .map_err(|_| "task_service_failed")?
-        .insert(child.id());
     Ok(Spawned {
         child: TaskChild::Local(child),
         input,
@@ -1514,56 +1595,13 @@ fn start_reaper(manager: &Arc<Mutex<Manager>>) -> Result<thread::JoinHandle<()>,
                             let _ = m.persist();
                         }
                     }
-                    // All managers share one wait registry. A reaper cannot steal
-                    // another task's leader or a host control-command child.
-                    if let Ok(_commands) = crate::host_supervisor::linux::COMMAND_LOCK.try_lock() {
-                        let direct = crate::host_supervisor::linux::MANAGED_PIDS
-                            .lock()
-                            .expect("managed pid registry")
-                            .clone();
-                        if let Ok(entries) = fs::read_dir("/proc") {
-                            for entry in entries.flatten() {
-                                let Some(pid) = entry
-                                    .file_name()
-                                    .to_str()
-                                    .and_then(|s| s.parse::<u32>().ok())
-                                else {
-                                    continue;
-                                };
-                                if direct.contains(&pid) {
-                                    continue;
-                                }
-                                let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
-                                    continue;
-                                };
-                                let Some((_, fields)) = stat.rsplit_once(')') else {
-                                    continue;
-                                };
-                                if fields
-                                    .split_whitespace()
-                                    .nth(1)
-                                    .and_then(|s| s.parse::<u32>().ok())
-                                    == Some(std::process::id())
-                                {
-                                    // SAFETY: only reap our adopted children; direct Child handles retain exclusive wait ownership.
-                                    unsafe {
-                                        libc::waitpid(
-                                            pid as i32,
-                                            std::ptr::null_mut(),
-                                            libc::WNOHANG,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        // Retiring managers make one final adopted-child pass
-                        // after leaders and all I/O workers have released ownership.
-                        if m.stop_reaper
-                            && m.live.is_empty()
-                            && m.drain_workers.load(Ordering::Acquire) == 0
-                        {
-                            break;
-                        }
+                    commands::reap_adopted();
+                    // Retiring managers make one final adopted-child pass after leaders and I/O workers finish.
+                    if m.stop_reaper
+                        && m.live.is_empty()
+                        && m.drain_workers.load(Ordering::Acquire) == 0
+                    {
+                        break;
                     }
                 }
                 drop(manager);

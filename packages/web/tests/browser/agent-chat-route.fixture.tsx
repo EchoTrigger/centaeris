@@ -18,7 +18,7 @@ const nextHistoryCursor = "fixture-ignored-source/all+opaque=components";
 const workspace = { id: "fixture-workspace", name: "Synthetic workspace", role: "owner" };
 const agents = ["main", "worker", "empty", "invalid", "long"].map(id => ({
   id: `fixture-${id}`, workspaceId: workspace.id, name: `Synthetic ${id}`, description: "", instructions: "",
-  avatarKind: "centaeris", status: "active", deletedAt: null, createdAt: "2026-09-30T14:00:00Z", updatedAt: "2026-09-30T14:00:00Z",
+  avatarKind: "centaeris", avatarUrl: null, status: "active", deletedAt: null, createdAt: "2026-09-30T14:00:00Z", updatedAt: "2026-09-30T14:00:00Z",
 }));
 const user = { id: "fixture-user", email: "fixture@example.invalid", isStaff: false, isSuperuser: false };
 const requests: { path: string; method: string }[] = [];

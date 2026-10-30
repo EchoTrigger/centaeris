@@ -32,6 +32,9 @@ def initialize(root, oci_runtime=None):
     values = read_env(root / '.env.example')
     if oci_runtime is not None:
         values['OCI_RUNTIME'] = oci_runtime
+    if values.get('OCI_RUNTIME') == 'runc':
+        values.update(RUNTIME_NATIVE_SHARED_ADMISSION='0',
+                      RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS='', RUNTIME_RUNSC_IDLE_PAUSE_MS='')
     for key in ('DJANGO_SECRET_KEY', 'INTERNAL_API_TOKEN', 'AGENT_RUN_AUTHORIZATION_SIGNING_KEY',
                 'POSTGRES_PASSWORD', 'BOOTSTRAP_SUPERADMIN_PASSWORD'):
         values[key] = secrets.token_hex(32)
@@ -207,7 +210,7 @@ def load(stack, output, rate, seconds):
            'PERF_ADMIN_PASSWORD': stack.values['BOOTSTRAP_SUPERADMIN_PASSWORD'],
            'RATE': str(rate), 'DURATION': f'{seconds}s', 'VERBOSE': '1'}
     command = [str(binary), 'run', '--summary-export', str(output / 'k6-summary.json'),
-               str(ROOT / 'perf/k6/scenarios/s2-runs.js')]
+               str(ROOT / 'perf/k6/scenarios/run-arrival-load.js')]
     failures = []
     private = [value for key, value in stack.values.items() if any(word in key for word in ("PASSWORD", "SECRET", "TOKEN", "KEY"))]
     started = time.monotonic()
@@ -260,7 +263,7 @@ def load(stack, output, rate, seconds):
             f'FROM app_core_agentrun WHERE id IN ({ids}) ORDER BY "createdAt") t'))
         (output / 'runs.json').write_text(json.dumps(rows, indent=2), encoding='utf-8')
         k6_summary = json.loads((output / 'k6-summary.json').read_text(encoding='utf-8'))
-        account_runs(accepted, rows, k6_summary['metrics']['s2_runs_accepted']['count'])
+        account_runs(accepted, rows, k6_summary['metrics']['run_arrival_runs_accepted']['count'])
     except Exception as error:
         failures.append(failure_record('accounting', error, private))
     summary = summarize_runs(rows)
@@ -342,7 +345,16 @@ class Stack:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['init', 'check', 'build', 'up', 'slots', 'smoke', 'sample', 'load', 'stop'])
+    parser.add_argument('action', choices=['init', 'check', 'build', 'up', 'slots', 'smoke', 'sample', 'load', 'stop', 'workload'])
+    parser.add_argument('--fixture', type=Path, help='Prepared owned native perf fixture outside source; workload mode only')
+    parser.add_argument('--output', type=Path, help='New external workload result directory')
+    parser.add_argument('--k6-binary', type=Path, help='Existing pinned Linux K6 binary')
+    parser.add_argument('--environments', type=int, default=4)
+    parser.add_argument('--iterations', type=int, default=3)
+    parser.add_argument('--timeout', type=int, default=900)
+    parser.add_argument('--between-run-ms', type=int, default=0)
+    parser.add_argument('--initial-stagger-ms', type=int, default=0)
+    parser.add_argument('--run-terminal-timeout-seconds', type=int, default=120)
     parser.add_argument('--slots', type=int)
     parser.add_argument('--experiment-id')
     parser.add_argument('--seconds', type=int, default=1)
@@ -350,6 +362,16 @@ def main():
     parser.add_argument('--oci-runtime', choices=['runsc', 'runc'],
                         help='Explicit sandbox runtime for init; runc supports hosts without runsc.')
     args = parser.parse_args()
+    if args.action == 'workload':
+        if not args.fixture or not args.output or not args.k6_binary:
+            parser.error('workload requires --fixture, --output and --k6-binary')
+        if __package__:
+            from .fixture_workload import run as run_workload
+        else:
+            from fixture_workload import run as run_workload
+        report = run_workload(args.fixture, args.output, args.k6_binary, environments=args.environments, iterations=args.iterations, timeout=args.timeout, between_run_ms=args.between_run_ms, initial_stagger_ms=args.initial_stagger_ms, run_terminal_timeout_seconds=args.run_terminal_timeout_seconds)
+        print(json.dumps(report))
+        return
     if args.oci_runtime is not None and args.action != 'init':
         parser.error('--oci-runtime only applies to init; it does not change an existing stack')
     if args.action == 'init':

@@ -1,6 +1,9 @@
 //! These tests require an explicitly delegated, disposable cgroup subtree.
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+mod capacity_history_tests;
+mod idle_pause_gate_tests;
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[test]
@@ -24,10 +27,8 @@ fn retirement_preserves_a_confirmed_exit_while_the_supervisor_handle_is_still_pr
     snapshot.state = EnvironmentTaskState::Exited;
     snapshot.exit_code = Some(7);
     snapshot.output_complete = true;
-    let mut child = Command::new("/bin/sh")
-        .args(["-c", "exit 7"])
-        .spawn()
-        .unwrap();
+    let mut child =
+        commands::OwnedChild::spawn(Command::new("/bin/sh").args(["-c", "exit 7"])).unwrap();
     child.wait().unwrap();
     let supervisor = thread::spawn(|| ());
     while !supervisor.is_finished() {
@@ -251,10 +252,8 @@ fn supervisor_commits_eof_before_domain_cleanup_without_rewriting_unchanged_fact
     manager.journal.tasks.get_mut(&id).unwrap().snapshot.state = EnvironmentTaskState::Running;
     fs::create_dir(groups.join(&id)).unwrap();
     fs::write(groups.join(&id).join("cgroup.events"), "populated 1\n").unwrap();
-    let child = Command::new("/bin/sh")
-        .args(["-c", "exec sleep 5"])
-        .spawn()
-        .unwrap();
+    let child =
+        commands::OwnedChild::spawn(Command::new("/bin/sh").args(["-c", "exec sleep 5"])).unwrap();
     let pid = child.id();
     let manager = Arc::new(Mutex::new(manager));
     let mut guard = manager.lock().unwrap();
@@ -2103,5 +2102,35 @@ sleep 30
             .unwrap()
             .lines()
             .any(|line| line == "populated 1")
+    );
+}
+
+#[test]
+fn inspection_expires_while_the_same_environment_manager_is_busy() {
+    let root = lock_root();
+    let control = root.join("control");
+    let output = root.join("output");
+    fs::create_dir(&control).unwrap();
+    fs::create_dir(&output).unwrap();
+    let manager = Arc::new(NativeManager::retirement_fixture(control, output, "i").unwrap());
+    let guard = manager.manager.lock().unwrap();
+    let inspecting = manager.clone();
+    let (send, receive) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        let budget = crate::host_supervisor::linux::probe::ProbeBudget::new(
+            Instant::now() + Duration::from_millis(30),
+            None,
+        );
+        send.send(inspecting.inspection_with_budget(&budget))
+            .unwrap();
+    });
+    let result = receive.recv_timeout(Duration::from_secs(1));
+    drop(guard);
+    worker.join().unwrap();
+    drop(manager);
+    fs::remove_dir_all(root).unwrap();
+    assert_eq!(
+        result.expect("inspection remained queued past its deadline"),
+        Err("host_probe_timeout".into())
     );
 }

@@ -11,7 +11,7 @@ from app_core.models import Agent, AgentDefinition, AgentDefinitionMember, Agent
 from app_core.plugin_catalog import selected_plugin_activation, validate_plugin_names
 from app_core.workspace_access import WORKSPACE_ADMIN_ROLES, locked_workspace_membership_for, workspace_membership_for
 
-from .agents import CreateAgentRequest, UpdateAgentRequest
+from .agents import AgentProfileFields, AgentProfileUpdate
 from .response_schema import (
     AgentDefinitionEnvelope, AgentDefinitionsEnvelope, AgentDefinitionVersionEnvelope,
     AgentDefinitionVersionsEnvelope, AgentEnvelope, AvailableAgentDefinitionsEnvelope, COMMON_ERROR_RESPONSES,
@@ -24,7 +24,7 @@ from .serialization import serialize_agent, serialize_agent_definition, serializ
 router = Router(tags=["agent definitions"], by_alias=True)
 
 
-class CreateAgentDefinitionRequest(CreateAgentRequest):
+class CreateAgentDefinitionRequest(AgentProfileFields):
     plugin_names: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -34,7 +34,7 @@ class CreateAgentDefinitionRequest(CreateAgentRequest):
         return self
 
 
-class UpdateAgentDefinitionRequest(UpdateAgentRequest):
+class UpdateAgentDefinitionRequest(AgentProfileUpdate):
     status: Literal["active", "disabled"] | None = None
     plugin_names: list[str] | None = Field(default=None)
 

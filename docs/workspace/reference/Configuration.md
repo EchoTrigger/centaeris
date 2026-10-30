@@ -138,8 +138,8 @@ Invalid or unsafe budgets fail instead of falling back to an unbounded value.
 
 | Variable | Default | Scope |
 | --- | ---: | --- |
+| `AGENT_RUN_EXECUTION_MODE` | `perRun` | Worker physical lifetime: destroy the original instance after confirmed Run cleanup; `retained` explicitly keeps it for reuse |
 | `EXECUTION_GLOBAL_LIMIT` | 8 | Leased/running hosted AgentRun lifecycle steps across worker and Runtime replicas |
-| `EXECUTION_TENANT_LIMIT` | 4 | The same execution leases within one Workspace |
 | `EXECUTION_GLOBAL_QUEUE_LIMIT` | 128 | Queued and running AgentRuns across API replicas |
 | `EXECUTION_TENANT_QUEUE_LIMIT` | 32 | The same nonterminal obligations within one Workspace |
 | `EXECUTION_QUEUE_WAIT_SECONDS` | 300 | Maximum age before first execution; expiry requests semantic cancellation |
@@ -149,6 +149,12 @@ Invalid or unsafe budgets fail instead of falling back to an unbounded value.
 | `RUNTIME_HTTP_REQUEST_TIMEOUT_SECONDS` | 30 | Absolute handler response deadline for short ordinary RPCs |
 | `RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS` | 5 | Absolute control handler response deadline; also used by API/worker control clients |
 | `WORK_RETURN_AUDIT_INTERVAL_SECONDS` | required | Deployment-selected delay between shared work-return repair pages; a whole pass spans all retained source pages |
+
+`perRun` keeps the original instance through retries and lease takeover of the same Run.
+Published artifacts remain in artifact storage; the destroyed instance provides no
+cross-Run process or workspace continuity. Changing this process setting does not
+retire existing instances: follow the [coordinated exit procedure](../eval/EnvironmentTaskService.md#supported-configuration-and-coordinated-exit)
+before switching a retained cohort.
 
 All replicas sharing one database must use the same execution/admission limits.
 Run admission retains its slot while Runtime capacity is unavailable or a Run
@@ -163,12 +169,20 @@ independent material-processing backlog.
 
 The runtime job lease is the execution permit: yield and terminal transitions
 release it; expired leases remain counted until lifecycle reconciliation.
-`WORKER_SLOT_COUNT` remains a local worker-thread limit. The execution limits do
-not count suspended sandbox containers, knowledge-processing jobs, or a parent's
-internal subagents; they are not a total-container or total-process memory budget.
-Parent logical waits release the lifecycle lease, avoiding a parent/child permit
-deadlock. A single-Workspace perf run reaches the tenant limit before the global
-limit; change its isolated environment explicitly when measuring another capacity.
+`WORKER_SLOT_COUNT` remains a local worker-thread limit (default 8). It describes
+one deployment's ordinary Job handling capacity, not tools within an environment.
+Execution admission has no per-Workspace quota: one Workspace can use all eight
+global permits. Its persisted Workspace binding remains an identity fact. The
+execution limit does not count suspended environments, knowledge-processing jobs,
+or a parent's internal subagents; it is not a memory budget or a limit on all
+nonterminal AgentRuns. Parent logical waits release the lifecycle lease.
+
+Hosted Runtime explicitly selects tool parallelism 64; Core's generic default
+remains 16. A parent and its hosted child runtimes share their tool coordinator.
+This capacity bounds eligible parallel tools; tools requiring serial execution,
+including the default bash/write/edit policies, still share one serial permit.
+The current hosted subagent batch budget is three across a Runtime process,
+not three per Session; that separate scheduling boundary remains to be revised.
 
 Queue expiry is checked under the same AgentRun row lock as the first running
 transition, and by the bounded lifecycle reconciler. Logical waits and recovery
@@ -200,24 +214,27 @@ yielding an execution lease does not free its resident sandbox capacity.
 
 | Variable | Default | Scope |
 | --- | ---: | --- |
-| `RESIDENT_GLOBAL_COUNT` | 16 | Resident sandbox count across Runtime hosts sharing the database |
-| `RESIDENT_GLOBAL_MEMORY_BYTES` | 34359738368 | Global declared memory ceiling (32 GiB) |
-| `RESIDENT_GLOBAL_CPU_MILLI` | 16000 | Global declared CPU ceiling (16 cores) |
-| `RESIDENT_GLOBAL_PIDS` | 8192 | Global declared process ceiling |
-| `RESIDENT_GLOBAL_WORKSPACE_BYTES` | 34359738368 | Global workspace tmpfs ceiling (32 GiB) |
-| `RESIDENT_TENANT_COUNT` | 4 | Resident sandbox count within one Workspace |
-| `RESIDENT_TENANT_MEMORY_BYTES` | 8589934592 | Workspace declared memory ceiling (8 GiB) |
-| `RESIDENT_TENANT_CPU_MILLI` | 4000 | Workspace declared CPU ceiling (4 cores) |
-| `RESIDENT_TENANT_PIDS` | 2048 | Workspace declared process ceiling |
-| `RESIDENT_TENANT_WORKSPACE_BYTES` | 8589934592 | Workspace tmpfs ceiling (8 GiB) |
+| `RESIDENT_GLOBAL_COUNT` | 8 | Resident sandbox count across Runtime hosts sharing the database |
+| `RESIDENT_GLOBAL_MEMORY_BYTES` | 12884901888 | Global admission memory budget (12 GiB) |
+| `RESIDENT_GLOBAL_CPU_MILLI` | 8000 | Global CPU ceiling (8 cores); shared admission checks each request |
+| `RESIDENT_GLOBAL_PIDS` | 8192 | Global process budget |
+| `RESIDENT_GLOBAL_WORKSPACE_BYTES` | 34359738368 | Global workspace byte budget (32 GiB) |
+| `RESIDENT_TENANT_COUNT` | 8 | Resident sandbox count within one Workspace |
+| `RESIDENT_TENANT_MEMORY_BYTES` | 12884901888 | Workspace admission memory budget (12 GiB) |
+| `RESIDENT_TENANT_CPU_MILLI` | 4000 | Workspace CPU ceiling (4 cores); shared admission checks each request |
+| `RESIDENT_TENANT_PIDS` | 2048 | Workspace process budget |
+| `RESIDENT_TENANT_WORKSPACE_BYTES` | 34359738368 | Workspace byte budget (32 GiB) |
 | `RESIDENT_HOST_MEMORY_HEADROOM_BYTES` | Greater of 20% of Docker host RAM or 512 MiB | Memory reserved for host services |
 | `RESIDENT_HOST_CPU_HEADROOM_MILLI` | 100 per Docker host CPU core | CPU reserved for host services |
 
-Runtime derives host capacity from the Docker daemon's reported resources, then
-caps the host's memory, CPU, and workspace ceilings by both the global limits and
-the resources left after host headroom. Workspace tmpfs is capped by available
-RAM separately; it is not added to declared cgroup memory a second time. Headroom
-that leaves no capacity fails rather than allowing overbooking.
+These are Compose deployment defaults for the accepted eight-environment,
+12-GiB admission profile. Runtime also derives host capacity from Docker and
+retains host headroom; eight is a count ceiling, not guaranteed physical capacity.
+The shared policy charges fresh observed memory plus swap and PID usage for known
+residents. Pending or unknown creations keep their full declared charge; unknown
+workspace usage keeps the declared workspace byte budget. CPU remains a
+per-environment ceiling and is not summed as a reservation. Headroom that leaves
+no capacity fails rather than allowing overbooking.
 
 Compose supplies the ten finite global and Workspace defaults and passes explicit
 overrides to Runtime. All Runtime replicas sharing one database must use the same
@@ -228,20 +245,27 @@ or headroom override must be a positive integer. Empty values, zero, negative
 values, and non-integers reach Runtime and
 fail validation instead of silently selecting a default.
 
-Capacity planning must account for retained containers, not only active execution
-steps. The default Workspace memory and CPU ceilings fit one default authorized
-sandbox profile; independent AgentRuns sharing that Workspace may therefore wait
-for capacity even when the resident count limit has not been reached. Capacity
-waiting defers execution until resources become available.
+Compose and `.env.example` set `RUNTIME_NATIVE_SHARED_ADMISSION=1` for the
+matching Docker/runsc HostSupervisor. Direct Runtime launches still require an
+explicit shared-admission switch and resource budgets; an unset switch retains
+declaration-based admission. Capacity planning includes reservations and
+containers awaiting confirmed removal, not only active execution leases. A
+known capacity wait preserves the original Run/Job without consuming failed
+retry budget. The dense-memory acceptance uses an explicit 8-GiB Workspace
+override; it does not change this 12-GiB deployment default.
 
 ### Sandbox execution profile
 
 `SANDBOX_MEMORY_BYTES`, `SANDBOX_CPU_MILLI`, `SANDBOX_PIDS_LIMIT`, and
 `SANDBOX_DATA_TMPFS_BYTES` define the authorized AgentRun profile.
+The deployment example sets new environments to 4 GiB of memory and 2000 CPU
+milli (two cores). These are upper bounds. Existing signed environment profiles
+keep their original resource limits.
 Compose and the material Worker default `OCI_RUNTIME` to `runsc`. Install and
 register gVisor on the Docker host before using that profile. Hosts without
 gVisor, including local Docker Desktop test environments, must explicitly set
-`OCI_RUNTIME=runc`. Runtime selection accepts exactly `runsc` or `runc`; an empty,
+`OCI_RUNTIME=runc`, `RUNTIME_NATIVE_SHARED_ADMISSION=0`, and explicitly empty
+values for both runsc scheduling variables. Runtime selection accepts exactly `runsc` or `runc`; an empty,
 invalid or unregistered selection fails rather than falling back. Existing
 private `.env` values are not replaced when the default changes.
 
@@ -335,7 +359,8 @@ recovery are documented in [Garbage collection](../operations/GarbageCollection.
 Runtime's `DOCKER_CREATE_CONCURRENCY` limits simultaneous Docker container-create
 calls (integer 1..16, default 2); invalid values fail startup. This does not change
 worker slots, start/remove concurrency or execution limits. The production
-Compose configuration retains the default. Isolated perf experiments use
+Compose configuration supplies 2 and passes explicit overrides through. Isolated
+perf experiments use
 `PERF_DOCKER_CREATE_CONCURRENCY` in `perf/.state/test.env` through the perf overlay.
 
 Before deployment, set `DJANGO_DEBUG=0`, use explicit allowed hosts and web
@@ -345,3 +370,30 @@ complete Compose configuration with:
 ```powershell
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.prod.yml config
 ```
+
+
+### Native retained-memory scheduling
+
+Compose and `.env.example` enable automatic idle pause and demand resume with
+`RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS=8` and `RUNTIME_RUNSC_IDLE_PAUSE_MS=3000`,
+matching the accepted eight-environment profile. Explicitly empty both values in
+Compose to disable it; direct Runtime launches can leave both unset. The
+running-environment limit applies per Docker host. Idle eligibility requires
+released controller authority and no queued demand. An active Run is not paused
+merely because it is waiting for a model response. `perRun` still removes its
+instance after terminal cleanup rather than retaining it between Runs. Pausing preserves the original
+container, memory and files, and every resident memory/PID/storage/count debit.
+Only an exact observed pause releases its running slot. Unknown outcomes remain
+charged; restart reconciles persisted power state before admission starts.
+
+Execution permits remain independent: `EXECUTION_GLOBAL_LIMIT=8` counts only
+execute lifecycle leases; there is no per-Workspace execution quota.
+`WORKER_SLOT_COUNT=8` limits local ordinary worker threads. Hosted tool concurrency
+is 64 while Core's existing default remains 16. Resident tenant limits are separate
+resource budgets. Control and cleanup do not consume execute permits.
+
+The native activation guard preserves released provider history and refuses
+activation while old physical, power, cleanup or creator-job responsibilities
+remain unsettled. It never interprets a timeout or missing inventory as removal.
+Historical API migrations and snapshot references must be preserved when upgrading
+previously deployed databases; see the native migration acceptance gate.

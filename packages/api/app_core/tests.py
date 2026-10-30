@@ -83,6 +83,7 @@ from .models import (
     WorkspaceGroup,
     WorkspaceMembership,
     WorkspacePluginEnablement,
+    WorkspacePluginInstallation,
 )
 from .material_identity import (
     validate_processing_specification,
@@ -277,6 +278,45 @@ def append_session_records(agent_run, items) -> None:
             payload={**event, "sequence": latest_sequence + 1},
             createdAtMs=event["createdAtMs"],
         )
+
+
+def plugin_projection_fixture(test, name, resources, *, workspace=None):
+    """Read real shared or workspace package metadata; mock only Runtime inspection."""
+    temporary = tempfile.TemporaryDirectory(prefix="workspace-plugin-projection-")
+    test.addCleanup(temporary.cleanup)
+    root = Path(temporary.name)
+    package = {
+        "name": name, "version": "1.0.0", "packageDigest": "sha256:" + "a" * 64,
+        "skills": [], "cli": [], "mcpServers": [], "hooks": [],
+    }
+    package_root = root / package["name"]
+    manifest = package_root / ".centaeris-plugin/plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({
+        "name": package["name"], "version": package["version"], "paths": {},
+        "interface": {"displayName": package["name"].title()},
+    }), encoding="utf-8")
+    for contribution, path, document in resources:
+        content = json.dumps(document).encode("utf-8")
+        target = package_root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        digest = hashlib.sha256(b"centaeris.plugin.tree.v1\0")
+        for data in (path.encode("utf-8"), content):
+            digest.update(len(data).to_bytes(8, "big"))
+            digest.update(data)
+        package[contribution].append({"path": path, "digest": f"sha256:{digest.hexdigest()}"})
+    shared = [] if workspace is not None else [package]
+    (root / "catalog.snapshot.json").write_text(json.dumps({
+        "schema": "plugin_activation_snapshot_v1",
+        "digest": activation_digest(shared), "packages": shared,
+    }), encoding="utf-8")
+    if workspace is not None:
+        WorkspacePluginInstallation.objects.create(workspace=workspace, plugin_name=package["name"],
+            package=package, updated_by=workspace.createdBy)
+    test.enterContext(override_settings(PLUGIN_CATALOG_ROOT=root))
+    return package
+
 
 @override_settings(INTERNAL_API_TOKEN="test-internal-token")
 class ApiVerticalSliceTests(TransactionTestCase):
@@ -1182,7 +1222,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             cursor.execute("CREATE SCHEMA IF NOT EXISTS runtime")
             cursor.execute(
                 "CREATE TABLE IF NOT EXISTS runtime.runtime_jobs("
-                "job_id text PRIMARY KEY, job_kind text NOT NULL, status text NOT NULL, "
+                "job_id text PRIMARY KEY, job_kind text NOT NULL, status text NOT NULL, lease_purpose text NOT NULL DEFAULT 'execute', "
                 "lease_owner text, lease_expires_at_ms bigint, idempotency_key text NOT NULL, "
                 "session_id text, payload_ref text)"
             )
@@ -2262,6 +2302,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             prompt="hello",
         )
         authorization = create_agent_run_authorization(agent_run)
+        from app_core.testing import leased_lifecycle_job_fixture
+        leased_lifecycle_job_fixture(self, agent_run)
 
         unauthorized = self.client.post(
             "/internal/model-runs",
@@ -2334,6 +2376,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             prompt="hello",
         )
         authorization = create_agent_run_authorization(agent_run)
+        from app_core.testing import leased_lifecycle_job_fixture
+        leased_lifecycle_job_fixture(self, agent_run)
         body = {
             "schema": MODEL_RUN_SCHEMA,
             "agentRunId": agent_run.id,
@@ -2381,6 +2425,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             prompt="hello",
         )
         authorization = create_agent_run_authorization(agent_run)
+        from app_core.testing import leased_lifecycle_job_fixture
+        leased_lifecycle_job_fixture(self, agent_run)
 
         response = self.client.post(
             "/internal/model-runs",
@@ -2421,6 +2467,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             prompt="hello",
         )
         authorization = create_agent_run_authorization(agent_run)
+        from app_core.testing import leased_lifecycle_job_fixture
+        leased_lifecycle_job_fixture(self, agent_run)
 
         response = self.client.post(
             "/internal/model-runs",
@@ -2479,6 +2527,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             prompt="hello",
         )
         authorization = create_agent_run_authorization(agent_run)
+        from app_core.testing import leased_lifecycle_job_fixture
+        leased_lifecycle_job_fixture(self, agent_run)
         response = self.client.post(
             "/internal/model-runs",
             data=json.dumps(
@@ -2522,6 +2572,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             prompt="strict",
         )
         authorization = create_agent_run_authorization(agent_run)
+        from app_core.testing import leased_lifecycle_job_fixture
+        leased_lifecycle_job_fixture(self, agent_run)
 
         def submit(preparedPrompt: dict, **extraFields):
             return self.client.post(
@@ -4051,12 +4103,10 @@ class ApiVerticalSliceTests(TransactionTestCase):
             WorkspacePluginEnablement.objects.filter(workspace=workspace).exists()
         )
 
-    @patch("app_core.http.workspaces.load_plugin_bearer_credential_refs")
-    @patch("app_core.http.workspaces.load_plugin_catalog")
     @patch("app_core.http.workspaces.request_workspace_hook_catalog")
     @patch("app_core.http.workspaces.request_workspace_mcp_catalog")
     def test_workspace_plugin_projects_mcp_and_bearer_state_without_secret(
-        self, mcp_catalog, hook_catalog, plugin_catalog, credential_refs
+        self, mcp_catalog, hook_catalog
     ):
         user = User.objects.create_superuser(
             username="mcp-admin@example.com",
@@ -4065,23 +4115,12 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
         workspace = Workspace.objects.create(name="MCP workspace", createdBy=user)
         workspace.members.add(user)
-        package = {
-            "name": "banana",
-            "version": "1.0.0",
-            "packageDigest": f"sha256:{'a' * 64}",
-            "skills": [],
-            "cli": [],
-            "mcpServers": [
-                {"path": "mcp.json", "digest": f"sha256:{'b' * 64}"}
-            ],
-            "hooks": [],
-        }
-        plugin_catalog.return_value = {
-            "schema": "plugin_activation_snapshot_v1",
-            "digest": activation_digest([package]),
-            "packages": [package],
-        }
-        credential_refs.return_value = ["banana-token"]
+        plugin_projection_fixture(self, "banana", [("mcpServers", "mcp.json", {
+            "schema": "mcp_servers_v1", "servers": [{
+                "id": "banana-source", "transport": {"type": "streamableHttp",
+                    "url": "https://banana.invalid/mcp", "bearerCredentialRef": "banana-token"},
+            }],
+        })])
         McpBearerCredential.objects.create(
             plugin_name="banana",
             credential_ref="banana-token",
@@ -4135,6 +4174,9 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(response.status_code, 200, response.content)
         banana_plugin = response.json()["plugin"]
         self.assertEqual(banana_plugin["name"], "banana")
+        self.assertEqual(banana_plugin["errors"], [])
+        self.assertEqual((banana_plugin["scope"], banana_plugin["writable"]), ("platform", False))
+        self.assertEqual(banana_plugin["mcpCredentialRefs"], ["banana-token"])
         self.assertTrue(banana_plugin["mcpServers"][0]["auth"]["credentialConfigured"])
         self.assertEqual(
             banana_plugin["mcpServers"][0]["tools"][0]["name"],
@@ -4144,35 +4186,19 @@ class ApiVerticalSliceTests(TransactionTestCase):
 
     @patch("app_core.http.workspaces.request_workspace_hook_catalog")
     @patch("app_core.http.workspaces.request_workspace_mcp_catalog")
-    @patch("app_core.http.workspaces.load_plugin_interfaces")
-    @patch("app_core.http.workspaces.load_plugin_catalog")
     def test_workspace_plugin_projects_safe_hook_metadata(
-        self, plugin_catalog, plugin_interfaces, mcp_catalog, hook_catalog
+        self, mcp_catalog, hook_catalog
     ):
         user = User.objects.create_user(
             username="hook-owner@example.com", password="password"
         )
         workspace = Workspace.objects.create(name="Hook workspace", createdBy=user)
         workspace.members.add(user)
-        package = {
-            "name": "wiki",
-            "version": "1.0.0",
-            "packageDigest": f"sha256:{'a' * 64}",
-            "skills": [],
-            "cli": [],
-            "mcpServers": [],
-            "hooks": [
-                {"path": "hooks/hooks.json", "digest": f"sha256:{'b' * 64}"}
-            ],
-        }
-        plugin_catalog.return_value = {
-            "schema": "plugin_activation_snapshot_v1",
-            "digest": activation_digest([package]),
-            "packages": [package],
-        }
-        plugin_interfaces.return_value = {
-            "wiki": {"displayName": "Wiki", "shortDescription": "", "capabilities": []}
-        }
+        plugin_projection_fixture(self, "wiki", [("hooks", "hooks/hooks.json", {
+            "schema": "plugin_hooks_v1", "handlers": [{"id": "guard_write", "event": "PreToolUse",
+                "matcher": "write", "program": "hooks/private-guard", "args": ["private-hook-argument"],
+                "timeoutMs": 5000}],
+        })], workspace=workspace)
         mcp_catalog.return_value = {
             "schema": "workspace.mcp.catalog.result.v1",
             "plugins": [{"pluginName": "wiki", "servers": []}],
@@ -4198,7 +4224,11 @@ class ApiVerticalSliceTests(TransactionTestCase):
         response = self.client.get(f"/api/workspaces/{workspace.id}/plugins/wiki")
 
         self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(response.json()["plugin"]["hooks"], hook_catalog.return_value["plugins"][0]["hooks"])
+        plugin = response.json()["plugin"]
+        self.assertEqual(plugin["errors"], [])
+        self.assertEqual(plugin["displayName"], "Wiki")
+        self.assertEqual((plugin["scope"], plugin["writable"]), ("workspace", True))
+        self.assertEqual(plugin["hooks"], hook_catalog.return_value["plugins"][0]["hooks"])
         self.assertNotIn("program", response.content.decode("utf-8"))
         self.assertNotIn("args", response.content.decode("utf-8"))
 
@@ -5122,6 +5152,8 @@ class ModelAdminAcceptanceTests(TestCase):
             prompt="hello",
         )
         authorization = create_agent_run_authorization(agent_run)
+        from app_core.testing import leased_lifecycle_job_fixture
+        leased_lifecycle_job_fixture(self, agent_run)
         model.enabled = False
         model.save()
         response = self.client.post(

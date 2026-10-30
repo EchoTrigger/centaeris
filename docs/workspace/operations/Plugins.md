@@ -2,7 +2,11 @@
 
 ## Package carrier
 
-Workspace currently accepts a ZIP uploaded by a superuser. ZIP is a transport
+Workspace accepts Plugin ZIPs through separate platform and workspace
+management APIs. Platform uploads require a superuser; workspace uploads require
+the current workspace owner/admin or explicit platform resource authority.
+See [Workspace resource administration](WorkspaceResourceAdministration.md) for
+shared packages, local overrides, and the forward migration. ZIP is a transport
 carrier, not the installed package identity. The archive may contain the Plugin
 root directly or one wrapping directory and must contain
 `.centaeris-plugin/plugin.json`.
@@ -40,15 +44,19 @@ still be able to disable an enabled package whose connection or contract fails.
 ## Credentials
 
 Plugin declarations contain credential references, never secret values.
-Superusers create, rotate, test, or delete the corresponding encrypted
-credential through management APIs. Browser responses remain masked, and
+Platform operators manage shared credentials. Workspace owners/admins create,
+rotate, or delete their workspace credentials through scoped management APIs;
+local credentials override the shared reference only inside that workspace.
+Management responses contain metadata and never existing plaintext, and
 secrets do not enter AgentRun authorization, Session events, logs, prompts, or
 the package volume.
 
 ## Uninstall
 
-Uninstall checks active-run and enablement constraints, removes the installed
-directory, and regenerates the catalog atomically. It does not delete unrelated
+Platform uninstall checks active-run and enablement constraints, removes the
+installed directory, and regenerates the catalog atomically. Workspace uninstall
+removes its local installation and enablement while retaining immutable bytes
+needed by existing signed references. It does not delete unrelated
 packages, workspace data, Session history, or user files. Credentials have a
 separate explicit deletion path.
 

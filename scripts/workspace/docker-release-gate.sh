@@ -29,6 +29,10 @@ env_file="$fixture_directory/compose.env"
 helper_path="$fixture_directory/execution_agent"
 socket_directory="$fixture_directory/host"
 helper_container_id_file="$fixture_directory/helper-container.id"
+supervisor_container_id_file="$fixture_directory/supervisor-container.id"
+supervisor_image="centaeris-fresh-start-builder:$(basename "$fixture_directory" | tr '[:upper:]' '[:lower:]')"
+supervisor_process=""
+supervisor_input=""
 unset ENVIRONMENT_EXECUTION_HELPER ENVIRONMENT_HOST_SOCKET_DIRECTORY
 compose=(docker compose --parallel 1 --env-file "$env_file")
 
@@ -40,9 +44,17 @@ cleanup() {
     "${compose[@]}" logs --no-color --tail=200
   fi
   "${compose[@]}" down --volumes --remove-orphans
-  if [[ -s "$helper_container_id_file" ]]; then
-    docker rm -f "$(cat "$helper_container_id_file")"
+  if [[ -n "$supervisor_process" ]]; then
+    (printf 'stop\n' >&"$supervisor_input") 2>/dev/null
+    exec {supervisor_input}>&-
+    wait "$supervisor_process"
+    supervisor_status=$?
+    if [[ $status -eq 0 && $supervisor_status -ne 0 ]]; then status=$supervisor_status; fi
   fi
+  for container_id_file in "$helper_container_id_file" "$supervisor_container_id_file"; do
+    if [[ -s "$container_id_file" ]]; then docker rm -f "$(cat "$container_id_file")"; fi
+  done
+  docker image rm "$supervisor_image" >/dev/null 2>&1
   rm -rf -- "$fixture_directory"
   exit "$status"
 }
@@ -105,12 +117,35 @@ for service in document-processor workspace-general runtime api worker web; do
   "${compose[@]}" build --pull "$service"
 done
 "${compose[@]}" config --format json | python3 scripts/workspace/verify-deployment-images.py
-# This gate checks startup and migrations; its private socket directory has no
-# supervisor. Extract the real helper without running an AgentRun or container.
+# Reuse the workspace-general builder's cached compile, keeping host binaries out
+# of the final sandbox image. The supervisor must match the source under test.
+docker build --target build --tag "$supervisor_image" --file packages/hosted_execution/Dockerfile.agent .
+docker create --cidfile "$supervisor_container_id_file" "$supervisor_image" >/dev/null
+docker cp "$(cat "$supervisor_container_id_file"):/src/target/release/environment_host_supervisor" "$fixture_directory/environment_host_supervisor"
+# Extract the real helper without dispatching an AgentRun.
 helper_image="$("${compose[@]}" config --format json | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["workspace-general"]["image"])')"
 docker create --cidfile "$helper_container_id_file" "$helper_image" >/dev/null
 docker cp "$(cat "$helper_container_id_file"):/opt/centaeris/bin/execution_agent" "$helper_path"
 chmod 500 "$helper_path"
+# The root launcher retains its exact child and removes its own /run tree only
+# after Compose has stopped. Closing the control pipe also stops the child.
+daemon_id="$(docker info --format '{{.ID}}')"
+coproc FRESH_HOST { sudo -n -- python3 scripts/workspace/docker-fresh-start-host.py --supervisor "$fixture_directory/environment_host_supervisor" --helper "$helper_path" --daemon-id "$daemon_id"; }
+supervisor_process="$FRESH_HOST_PID"
+exec {supervisor_input}>&"${FRESH_HOST[1]}"
+exec {supervisor_output}<&"${FRESH_HOST[0]}"
+read -r host_directory <&"$supervisor_output"
+exec {supervisor_output}<&-
+python3 - "$env_file" "$host_directory" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+root = Path(sys.argv[2])
+values = {"ENVIRONMENT_EXECUTION_HELPER": str(root / "execution_agent"),
+          "ENVIRONMENT_HOST_SOCKET_DIRECTORY": str(root / "host")}
+path.write_text("\n".join(f"{key}={values[key]}" if (key := line.partition("=")[0]) in values else line
+                          for line in path.read_text().splitlines()) + "\n")
+PY
 "${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime worker material-worker web
 
 for service in postgres redis api runtime worker material-worker web; do

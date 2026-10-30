@@ -12,7 +12,8 @@ from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase, override_settings
 
 from .models import SessionEnvironment, Workspace
-from .testing import create_session
+from .runtime_schema_test_helpers import isolate_runtime_schema
+from .testing import create_session, leased_lifecycle_job_fixture
 
 
 TOKEN = 'maintenance-fixture-' + 'm' * 32
@@ -24,6 +25,7 @@ class EnvironmentMaintenanceTests(TransactionTestCase):
 
     def setUp(self):
         super().setUp()
+        isolate_runtime_schema(self)
         user = User.objects.create_user(username='maintenance-owner')
         self.workspace = Workspace.objects.create(name='Maintenance', createdBy=user)
         self.session = create_session(workspace=self.workspace, owner=user)
@@ -57,13 +59,6 @@ class EnvironmentMaintenanceTests(TransactionTestCase):
             cursor.execute('INSERT INTO runtime.resident_sandboxes(execution_id,instance_id,environment_id,host_id,workspace_id,container_id,state) VALUES '
                 "('origin',%s,%s,'host',%s,%s,'resident')",
                 [self.instance, self.environment.pk, self.workspace.pk, self.container])
-        self.addCleanup(self.drop_runtime)
-
-    def drop_runtime(self):
-        with connection.cursor() as cursor:
-            for table in ('environment_maintenance_completions', 'environment_retirements',
-                          'resident_sandboxes', 'execution_instances'):
-                cursor.execute('DROP TABLE IF EXISTS runtime.' + table)
 
     def issue(self, body=None, token=TOKEN):
         headers = {} if token is None else {'HTTP_X_ENVIRONMENT_MAINTENANCE_TOKEN': token}
@@ -264,32 +259,35 @@ class EnvironmentMaintenanceTests(TransactionTestCase):
         self.workspace.members.add(self.session.owner)
         run = AgentRun.objects.create(workspace=self.workspace, session=self.session, user=self.session.owner,
             modelConfig=ModelConfig.objects.create(displayName='Maintenance fencing'), prompt='next', status='running')
-        grant = create_agent_run_authorization(run, image_digest='sha256:' + 'e' * 64)
+        create_agent_run_authorization(run, image_digest='sha256:' + 'e' * 64)
+        lease_owner = leased_lifecycle_job_fixture(self, run, isolate_schema=False)
+        return run, lease_owner
+
+    def test_run_fixture_preserves_named_lease_fields_with_a_different_column_order(self):
+        with connection.cursor() as cursor:
+            cursor.execute('CREATE TABLE runtime.runtime_jobs(job_id text PRIMARY KEY,job_kind text,status text,'
+                "lease_owner text,lease_purpose text NOT NULL DEFAULT 'execute',lease_expires_at_ms bigint,idempotency_key text,"
+                'session_id text,payload_ref text)')
+        run, lease_owner = self.run_fixture()
         job = f'agent_run.lifecycle:{run.pk}'
         with connection.cursor() as cursor:
-            cursor.execute('CREATE TABLE IF NOT EXISTS runtime.runtime_jobs(job_id text PRIMARY KEY,job_kind text,status text,'
-                'lease_owner text,lease_expires_at_ms bigint,idempotency_key text,session_id text,payload_ref text)')
-            cursor.execute('INSERT INTO runtime.runtime_jobs VALUES(%s,%s,%s,%s,'
-                '(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint+60000,%s,%s,%s)',
-                [job, 'agent_run.lifecycle', 'running', 'worker-test', f'{job}:{grant.digest}',
-                 self.session.pk, f'record:agent_run:{run.pk}'])
-        def cleanup():
-            with connection.cursor() as cursor:
-                cursor.execute('DELETE FROM runtime.runtime_jobs WHERE job_id=%s', [job])
-        self.addCleanup(cleanup)
-        return run
+            cursor.execute('SELECT lease_owner,lease_purpose,idempotency_key,session_id,payload_ref,'
+                'lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint '
+                'FROM runtime.runtime_jobs WHERE job_id=%s', [job])
+            self.assertEqual(cursor.fetchone(), (lease_owner, 'execute', f'{job}:{run.authorization.digest}',
+                self.session.pk, f'record:agent_run:{run.pk}', True))
 
     def test_run_and_maintenance_controllers_are_mutually_exclusive(self):
         grant = self.issue().json()
-        run = self.run_fixture()
+        run, lease_owner = self.run_fixture()
         from .environment_lifecycle import acquire_environment_controller
         with self.assertRaisesRegex(ValueError, 'owned'):
-            acquire_environment_controller(run.pk, 'worker-test')
+            acquire_environment_controller(run.pk, lease_owner)
         with transaction.atomic(), self.assertRaises(IntegrityError):
             SessionEnvironment.objects.filter(pk=self.environment.pk).update(controller_run=run)
         self.complete(grant)
         self.assertEqual(self.release(grant).status_code, 200)
-        authority = acquire_environment_controller(run.pk, 'worker-test')
+        authority = acquire_environment_controller(run.pk, lease_owner)
         self.environment.refresh_from_db()
         self.assertIsNone(self.environment.controller_maintenance_operation_id)
         self.assertEqual(self.environment.controller_run_id, run.pk)

@@ -26,6 +26,10 @@ const page = text => ({
 });
 
 async function setup(context, tailPage = page("Retained authoritative answer"), idle = false) {
+  const oldStorage = globalThis.sessionStorage;
+  const stored = new Map();
+  globalThis.sessionStorage = { getItem:key=>stored.get(key)??null, setItem:(key,value)=>stored.set(key,value), removeItem:key=>stored.delete(key) };
+  context.after(() => { globalThis.sessionStorage = oldStorage; });
   const oldWindow = globalThis.window, oldDocument = globalThis.document;
   globalThis.window = { addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {}, location: { pathname: "/w/workspace/agents/agent" } };
   globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {} };
@@ -33,11 +37,11 @@ async function setup(context, tailPage = page("Retained authoritative answer"), 
   const attempt = deferred();
   const session = { id: "session", workspaceId: "workspace", agentId: "agent", projectId: null, title: "Synthetic Session", origin: "user", status: "active", deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: true, updatedAt: "2026-10-05T00:00:00Z", initialInputOrigin: null, currentEnvironmentId: null, executionMode: "perRun", latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", isManuallyUnread: false };
   const env = environment({ location: { search: "?sessionId=session", state: null },
-    request: async path => ({ json: async () => path === "/api/models" ? { models: idle ? [{ id: "model", providerId: "provider", modelName: "synthetic", displayName: "Synthetic", thinkingModes: [] }] : [] }
+    request: async path => ({ json: async () => path === "/api/models?workspaceId=workspace" ? { models: idle ? [{ id: "model", providerId: "provider", modelName: "synthetic", displayName: "Synthetic", thinkingModes: [] }] : [] }
       : path.includes("session-projects") ? { projects: [] }
       : path.endsWith("/assets") ? { assets: [] }
       : path === "/api/sessions/session" ? { session } : { sessions: [session] } }),
-    transport: { loadOlder: async () => { throw new Error("unexpected older history request"); } },
+    transport: { loadActiveAgentRun: async () => ({agentRun: idle ? null : {agentRunId:"run",status:"running",streamCursor:"cursor:0"}}), loadOlder: async () => { throw new Error("unexpected older history request"); } },
     stream: options => { env.streamOptions = options; const pending = env.nextAttempt ?? attempt; env.nextAttempt = null; return pending.promise; },
   });
   const subject = renderer(AppPageContent, { agentId: "agent", workspaceDraft: false, location: env.location, modelsVersion: 0 }, env);

@@ -9,9 +9,11 @@ private `.env`. Do not invoke Compose manually to change slots.
 
 Initialization uses `runsc`, requiring a Docker host with gVisor registered.
 On hosts without it, explicitly initialize with
-`python perf/harness/control.py init --oci-runtime runc`. The option applies only
-to initialization; it does not rewrite an existing test environment or the root
-private `.env`. A configured runtime failure never selects another runtime.
+`python perf/harness/control.py init --oci-runtime runc`. This explicit profile
+also disables runsc shared admission and clears its pause/resume settings. The
+option applies only to initialization; it does not rewrite an existing test
+environment or the root private `.env`. A configured runtime failure never
+selects another runtime.
 
 ```powershell
 python perf/harness/control.py init
@@ -95,7 +97,55 @@ The controller's smoke requires a completed run. It does not establish throughpu
 capacity, fairness, restart recovery, or historical-cost independence. Run failures
 must remain visible; cancellation must not count as successful draining.
 
+## K6 scenarios
+
+| Capability | Entrypoint |
+| --- | --- |
+| Single Run smoke | `k6/scenarios/run-smoke.js` |
+| Event stream load | `k6/scenarios/event-stream-load.js` |
+| Event stream reconnect | `k6/scenarios/event-stream-reconnect.js` |
+| Run arrival load | `k6/scenarios/run-arrival-load.js` |
+| Tool execution load | `k6/scenarios/tool-execution-load.js` |
+| Mixed workload soak | `k6/scenarios/mixed-workload-soak.js` |
+
+Event stream connection-open and first actual event have separate millisecond
+Trends. Committed frames use the real API `session.stream.item.v1` contract and
+must match the requested Run/session. Run and artifact timings are milliseconds.
+
+Every K6 workload requires `API_BASE`, `PERF_WORKSPACE_ID`, `PERF_AGENT_ID` and
+`PERF_MODEL_REFS` (JSON object with `short`, `tools` and/or `long` model IDs).
+Only models needed by that scenario are required. There is no first-workspace
+selection and the K6 workloads never create global providers or models. Prepare
+workspace-local providers/models through the existing workspace management APIs.
+Keep fixture state, credentials and results outside the source checkout.
+
+`run-smoke.js` and `tool-execution-load.js` additionally require
+`PERF_ARTIFACT_EXPECTATION`, a JSON object containing exactly `filename`,
+`sizeBytes` and `sha256` (`sha256:` plus 64 lowercase hex digits). The expectation
+comes from the fixed external workload input, never from model output. The mock
+`perf-file-workload` profile requests the configured real Bash command, then
+`publish_artifact({path: "/mnt/data/perf-result.bin"})`, then finishes. Configure
+its Bash command to create the expected file; the mock does not create bytes.
+
+Completion requires paired successful tool calls/results, at least one actual
+Bash result, the publication fact bound by `toolCallId`, and a public artifact
+download whose bytes match the external size/hash. Changed downloaded bytes,
+missing publication, a failed tool or another Run's event fail the sample even
+when the model emits `agent_run_completed`. Every smoke attempt records a
+success/failure sample so an uncaught JavaScript error cannot silently exit K6
+successfully with an empty checks series.
+
+These checks establish client/contract behavior until run against a real owned
+product fixture. Unit HTTP fixtures do not establish product acceptance,
+physical concurrency, cleanup or retirement.
+
 ## Tests
+
+Set `CENTAERIS_K6_BINARY` to an existing pinned K6 binary and
+`CENTAERIS_TEST_PYTHON` to a Python interpreter when running the Node tests.
+The stream fixtures execute the real API's pure committed-item producer.
+No binary needs to be copied into the checkout. Real K6 tests use only bounded
+local synthetic HTTP servers and leave no product resources running.
 
 For the separate bounded native runsc process-recovery experiment, see
 [Durable execution probe](../docs/workspace/eval/DurableExecutionProbe.md).
@@ -244,3 +294,73 @@ stdout-byte measurements do not estimate physical disk or complete API cost.
 - Keep background VM activity and continuous-history growth in the report. They
   can affect medians and trends, not only maxima. No capacity/extrapolation claim
   is justified by these uncontrolled Windows runs alone.
+
+
+## Lightweight tool latency
+
+Use `k6/scenarios/light-experience.js` with `perf-light-experience` for the
+model-independent tool comparison. `single-tool` runs the first real Bash command;
+`multi-step` measures two real commands and file continuity in one Run. Keep
+`PERF_EXPERIENCE_SAME_SESSION=true` for rolling Session tests. In `perRun` mode
+those iterations still create distinct physical instances after prior cleanup.
+Do not run a preparation command before the measured first tool.
+
+Enable `WORKSPACE_PERF_OBSERVATIONS=1` on the Runtime and HostSupervisor before
+starting the isolated fixture. This adds no execution permission or persistent
+ready state. The Runtime emits `startupProfile`, model-attempt timings,
+`toolService`, and `hostCommand`; the Host emits `taskReady` and
+`taskLeaderExited` when it receives each valid runner receipt. Host markers do
+not measure the guest's first instruction. Successful command completion still
+requires leader exit, complete output, consumed output pages, and cleanup.
+
+After the existing k6 runner has written its safe `run-records.jsonl`, analyze
+the matching Runtime and Host observation logs without starting services:
+
+```sh
+python -B perf/harness/experience_timing.py \
+  --client-records /tmp/experience/run-records.jsonl \
+  --runtime-observations /tmp/experience/runtime-observations.jsonl \
+  --host-observations /tmp/experience/host-observations.jsonl \
+  --execution-mode perRun --model-kind immediateMock \
+  --output /tmp/experience/timing-report.json
+```
+
+The output path must be new; inputs may be bare observation JSONL or Docker
+JSON logs. The reader bounds input bytes and selected record counts, filters to
+original admitted Jobs, and writes only approved scalar fields. Use the existing
+fixture-owned paths and credentials; this command does not load credentials,
+submit Runs, generate model requests, or collect arbitrary log prose.
+
+Interpret the measurements independently:
+
+- `newRunToFirstToolSuccessMs` is submission to the client's first successful
+  tool result. It includes normal queueing, preparation and consistency work.
+- Per-call `serviceMs` is the Runtime's monotonic interval from the tool-call
+  safe point to a successful durable tool-result commit. Error, failed commit,
+  unpaired, or ambiguous observations do not become successful durations.
+- `secondToolClientCallToResultMs` measures the second command in the same Run
+  on the client clock. It is not a reused container across different Runs.
+- Request-local model `firstEventMs`, `firstTextMs`, and `httpMs` remain separate.
+  `httpMs` measures the HTTP attempt through response validation, including body
+  reads after a terminal streaming result. The existing client may accept that
+  result after a subsequent body-read error, so this metric does not establish
+  clean HTTP EOF. Tool-only model responses have no text TTFT. Request identity
+  is captured at HTTP-attempt start; retries are separate attempts. Existing
+  `firstModelTextMs` is Run submission to
+  first observed assistant text and may occur after tools; it is not model TTFT.
+- Startup components and child spans can overlap. `runtimeCoveredMs` is only
+  the union of recorded Runtime intervals, never their sum or a reconstructed
+  causal critical path. Wall-clock end markers place approximate intervals;
+  durations come from producer-local monotonic clocks. Do not subtract client,
+  Runtime, Host, or event `createdAtMs` timestamps across clock domains.
+
+The report is explicitly `latencyOnly`, with missing evidence listed as
+`notObserved`; neither the execution mode argument nor a fast command proves
+physical instance policy. It cannot pass the four-environment, sparse, or dense
+acceptance gates. Keep independent artifact download/size/hash, original Run/Job
+identity and retry counts, sustained physical CPU overlap, exact cleanup receipt,
+physical absence, resource release, and controller release evidence. Report
+queue-free service samples separately from user latency including congestion.
+Use matched source/configuration/workspace sizes for comparisons and adequate
+repetitions for p50/p95. The 500 ms value is an investigation target, not an
+unmeasured pass threshold.

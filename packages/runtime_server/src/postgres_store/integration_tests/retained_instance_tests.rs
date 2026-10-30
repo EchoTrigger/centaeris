@@ -16,10 +16,13 @@ use std::sync::{Arc, Mutex};
 
 pub(super) const KEY: &[u8] = b"retained-test-key";
 mod allocation_mode_tests;
+mod authorization_digest_tests;
 mod cleanup_authority_tests;
 mod cleanup_receipt_tests;
+mod concurrent_preparation_tests;
 mod lease_contention_tests;
 mod pre_admission_failure_tests;
+mod preparation_tests;
 mod retirement_tests;
 fn controller_lease_digest(owner: &str) -> String {
     let mut hash = Sha256::new();
@@ -553,16 +556,18 @@ fn postgres_retained_physical_guard_pins_authority_and_global_host_admission() {
                 assert!(rival
                     .batch_execute("UPDATE runtime.runtime_jobs SET lease_owner='rival'")
                     .is_err());
-                assert!(store
-                    .prepare_retained_instance(
-                        &r,
-                        limits(&a),
-                        || panic!("host lock rejects before inventory"),
-                        |_, _| panic!("second fact"),
-                        |_| panic!("second writer")
-                    )
-                    .unwrap_err()
-                    .contains("capacity_wait"));
+                assert_eq!(
+                    store
+                        .prepare_retained_instance(
+                            &r,
+                            limits(&a),
+                            || panic!("environment gate rejects before inventory"),
+                            |_, _| panic!("second fact"),
+                            |_| panic!("second writer")
+                        )
+                        .unwrap_err(),
+                    crate::resident_capacity::HOST_PREPARATION_WAIT
+                );
                 Ok("one-container".into())
             },
         )

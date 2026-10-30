@@ -434,7 +434,18 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
         self.exercise_parallel_child_executions()
 
     def test_capacity_claim_busy_uses_worker_backoff_before_parallel_child_execution(self):
-        self.exercise_parallel_child_executions(controlled_claim_busy=True)
+        self.exercise_parallel_child_executions(controlled_claim_busy=True, controlled_preparation_wait=True)
+
+    def initialize_parallel_child_observations(self, children):
+        self.parallel_mutex = threading.Lock()
+        self.child_model_intervals = []
+        self.child_leases = {}
+        self.child_lease_attempts = {}
+        self.child_cleanup_retries = {}
+        self.child_preparation_waits = {}
+        self.child_preparation_wait_counts = Counter()
+        self.child_preparation_yielded = {child.pk: threading.Event() for child in children}
+        self.child_claim_busy = []
 
     def execute_parallel_child(self, worker, slot, children, busy_seen):
         """One completed job per real worker loop, with bounded diagnostic failure."""
@@ -449,6 +460,10 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
         original_execute = worker.execute_claimed_job
         original_step = worker.agent_run_step_request
         original_wait = worker.wait_for_jobs
+        original_json_request = worker.json_request
+        step_results = {}
+        executing_jobs = {}
+        observed_handoffs = {}
 
         def request(path, body=None, **kwargs):
             nonlocal last_empty_claim
@@ -460,7 +475,8 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
                     self.assertGreater(progress, last_empty_claim,
                         "an empty child claim must wait or execute another claimed job before polling again")
                 try:
-                    response = original_request(path, body, **kwargs)
+                    with self.parallel_mutex:
+                        response = original_request(path, body, **kwargs)
                     last_empty_claim = None if response["jobs"] else progress
                     return response
                 except worker.DependencyUnavailable as error:
@@ -470,7 +486,23 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
                             self.child_claim_busy.append(slot)
                         busy_seen.set()
                     raise
+            preparation = path == "/internal/jobs/yield" and body.get("transitionReason") == "execution_host_preparation_wait"
+            cleanup = path == "/internal/jobs/fail" and body.get("error") == "retained_cleanup_pending"
+            if preparation or cleanup:
+                # Observe durable handoff before another slot can claim an
+                # immediately eligible Job. Never hold this lock across a step.
+                with self.parallel_mutex:
+                    response = original_request(path, body, **kwargs)
+                    observe_handoff(body["jobId"], preparation)
+                return response
             return original_request(path, body, **kwargs) if body is not None else original_request(path, **kwargs)
+
+        def bounded_json_request(url, *args, **kwargs):
+            if url == worker.RUNTIME_INTERNAL_URL + "/agent-runs/step":
+                remaining = deadline - time.monotonic()
+                self.assertGreater(remaining, 0, "parallel child step deadline exceeded")
+                kwargs["timeout"] = min(kwargs.get("timeout") or remaining, remaining)
+            return original_json_request(url, *args, **kwargs)
 
         def wait_for_jobs():
             nonlocal progress
@@ -485,12 +517,43 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
                     .order_by("agent_run_sequence").values_list("eventId", flat=True)),
             }
 
+        def observe_handoff(job_id, preparation):
+            run, job = executing_jobs[job_id]
+            run.refresh_from_db()
+            current = original_request("/internal/jobs/" + job_id)["job"]
+            reason = "execution_host_preparation_wait" if preparation else "retained_cleanup_pending"
+            self.assertEqual((current["status"], current["lastError"]), ("queued", reason))
+            for field in ("jobId", "jobKind", "sessionId", "payloadRef", "idempotencyKey"):
+                self.assertEqual(current[field], job[field], field)
+            self.assertEqual((current["leaseOwner"], current["leaseExpiresAtMs"]), (None, None))
+            self.assertIs(type(current["runAtMs"]), int)
+            self.assertGreaterEqual(current["runAtMs"], current["updatedAtMs"])
+            if preparation:
+                self.assertEqual(step_results[run.pk]["transitionReason"], reason)
+                self.assertEqual((run.status, run.transitionReason), ("running", reason))
+                self.assertEqual(current["retryCount"], job["retryCount"])
+                self.assertLessEqual(current["runAtMs"], current["updatedAtMs"] + worker.AGENT_RUN_LIFECYCLE_RECHECK_MS)
+                self.child_preparation_waits[run.pk] = {"job": current, "work": work_state(run)}
+                self.child_preparation_wait_counts[run.pk] += 1
+                self.child_preparation_yielded[run.pk].set()
+            else:
+                self.assertEqual(run.status, "completed")
+                self.assertEqual(current["retryCount"], job["retryCount"] + 1)
+                self.assertLessEqual(current["retryCount"], current["maxRetries"])
+                self.assertGreater(current["runAtMs"], current["updatedAtMs"])
+                self.child_cleanup_retries[run.pk] = {"job": current, "work": work_state(run)}
+            observed_handoffs[job_id] = reason
+
         def step(body):
             run = children[body["agentRunStart"]["agentRunId"]]
             self.assertEqual(body["agentRunStart"], fenced_start_fixture(run))
             self.steps.append(deepcopy(body))
             result = original_step(body)
-            self.assertEqual(result["terminalState"], "completed", self.lifecycle_diagnostic(run, result))
+            expected = (("waiting", None, "execution_host_preparation_wait") if result["disposition"] == "waiting"
+                else ("terminal", "completed", result["transitionReason"]))
+            self.assertEqual((result["disposition"], result["terminalState"], result["transitionReason"]),
+                expected, self.lifecycle_diagnostic(run, result))
+            step_results[run.pk] = result
             return result
 
         def execute(job, owner):
@@ -512,35 +575,40 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             self.assertEqual((current["status"], current["leaseOwner"]), ("leased", owner))
             with self.parallel_mutex:
                 retry = self.child_cleanup_retries.pop(run_id, None)
+                preparation = self.child_preparation_waits.pop(run_id, None)
+                self.assertFalse(retry is not None and preparation is not None)
+                previous = retry or preparation
                 if run_id in self.child_leases:
-                    self.assertIsNotNone(retry, "another child lease requires a durable cleanup retry")
-                    self.assertEqual(job["retryCount"], retry["job"]["retryCount"])
-                    self.assertEqual(job["lastError"], "retained_cleanup_pending")
-                    self.assertEqual((job["payloadRef"], job["idempotencyKey"]),
-                        (retry["job"]["payloadRef"], retry["job"]["idempotencyKey"]))
+                    self.assertIsNotNone(previous, "another child lease requires a durable preparation yield or cleanup retry")
+                    self.assertEqual(job["retryCount"], previous["job"]["retryCount"], "reclaim must preserve retryCount")
+                    self.assertEqual(job["lastError"],
+                        "retained_cleanup_pending" if retry is not None else "execution_host_preparation_wait")
+                    for field in ("jobId", "jobKind", "sessionId", "payloadRef", "idempotencyKey"):
+                        self.assertEqual(job[field], previous["job"][field], field)
                 else:
-                    self.assertIsNone(retry)
+                    self.assertIsNone(previous)
                     self.assertEqual(job["retryCount"], 0)
                     self.child_leases[run_id] = owner
                 self.assertNotIn(owner, [lease for leases in self.child_lease_attempts.values() for lease in leases])
                 self.child_lease_attempts.setdefault(run_id, []).append(owner)
-            if retry is not None:
-                self.assertEqual(work_state(run), retry["work"])
+            if previous is not None:
+                self.assertEqual(work_state(run), previous["work"])
+            step_results.pop(run_id, None)
+            executing_jobs[job["jobId"]] = (run, job)
             original_execute(job, owner)
-            run.refresh_from_db()
-            self.assertEqual(run.status, "completed")
             if retry is not None:
                 self.assertEqual(work_state(run), retry["work"], "cleanup retries must not reexecute a model or step")
-            current = original_request("/internal/jobs/" + job["jobId"])["job"]
-            if current["status"] == "queued":
-                self.assertEqual(current["lastError"], "retained_cleanup_pending", current)
-                self.assertEqual(current["retryCount"], job["retryCount"] + 1, current)
-                self.assertLessEqual(current["retryCount"], current["maxRetries"])
-                self.assertEqual((current["leaseOwner"], current["leaseExpiresAtMs"]), (None, None))
-                self.assertGreater(current["runAtMs"], current["updatedAtMs"])
-                with self.parallel_mutex:
-                    self.child_cleanup_retries[run_id] = {"job": current, "work": work_state(run)}
+            executing_jobs.pop(job["jobId"])
+            result = step_results.pop(run_id, None)
+            if observed_handoffs.pop(job["jobId"], None) is not None:
+                # Another slot may already own or have completed the Job.
+                # The acknowledged queued snapshot is this attempt's boundary.
                 return
+            self.assertFalse(result is not None and result["disposition"] == "waiting",
+                "a preparation wait requires a confirmed durable yield")
+            run.refresh_from_db()
+            self.assertEqual(run.status, "completed")
+            current = original_request("/internal/jobs/" + job["jobId"])["job"]
             self.assertEqual(current["status"], "succeeded", json.dumps({"job": current,
                 "agentRunId": run.pk, "transitionReason": run.transitionReason,
                 "runtimeLogTail": self.runtime_lines[-50:]}))
@@ -562,6 +630,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
         timer.start()
         try:
             with patch.object(worker, "runtime_request", side_effect=request), \
+                 patch.object(worker, "json_request", side_effect=bounded_json_request), \
                  patch.object(worker, "agent_run_step_request", side_effect=step), \
                  patch.object(worker, "execute_claimed_job", side_effect=execute), \
                  patch.object(worker, "wait_for_jobs", side_effect=wait_for_jobs), \
@@ -575,7 +644,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             raise failures[0]
         self.assertEqual(len(completed), 1, "bounded worker loop did not complete one child")
 
-    def exercise_parallel_child_executions(self, controlled_claim_busy=False):
+    def exercise_parallel_child_executions(self, controlled_claim_busy=False, controlled_preparation_wait=False):
         self.parallel_children = True
         # This scenario needs two execution slots in the same hosted tenant.
         with patch.dict(os.environ, {"EXECUTION_GLOBAL_LIMIT": "8", "EXECUTION_TENANT_LIMIT": "4"}):
@@ -594,12 +663,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             self.assertEqual(len(children), 2)
             self.assertNotEqual(children[0].session_id, children[1].session_id)
             self.child_barrier = threading.Barrier(2)
-            self.parallel_mutex = threading.Lock()
-            self.child_model_intervals = []
-            self.child_leases = {}
-            self.child_lease_attempts = {}
-            self.child_cleanup_retries = {}
-            self.child_claim_busy = []
+            self.initialize_parallel_child_observations(children)
             # Import-time environment/path patches are process-wide. Prepare
             # both modules before starting their independent job executions.
             child_workers = [self.load_worker(runtime_url) for _ in children]
@@ -614,17 +678,28 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 def start_children():
                     return [pool.submit(execute, child_worker, slot) for slot, child_worker in enumerate(child_workers)]
-                if controlled_claim_busy:
-                    # Hold the actual capacity transaction lock until both real
-                    # claims fail busy, then release it before worker backoff ends.
-                    self.assertTrue(connection.settings_dict["NAME"].startswith("test_"))
-                    with transaction.atomic(), connection.cursor() as cursor:
-                        cursor.execute("SELECT pg_advisory_xact_lock(731946,2)")
-                        futures = start_children()
-                        for observed in busy_seen:
-                            self.assertTrue(observed.wait(timeout=10), "real claim did not report execution_claim_busy")
-                else:
-                    futures = start_children()
+                self.assertTrue(connection.settings_dict["NAME"].startswith("test_"))
+                with connection.cursor() as preparation_cursor:
+                    if controlled_preparation_wait:
+                        preparation_cursor.execute("SELECT pg_advisory_lock(731946,3)")
+                    try:
+                        if controlled_claim_busy:
+                            # Claim contention owns no Job; release its transaction
+                            # lock before observing actual preparation yields.
+                            with transaction.atomic(), connection.cursor() as cursor:
+                                cursor.execute("SELECT pg_advisory_xact_lock(731946,2)")
+                                futures = start_children()
+                                for observed in busy_seen:
+                                    self.assertTrue(observed.wait(timeout=10), "real claim did not report execution_claim_busy")
+                        else:
+                            futures = start_children()
+                        if controlled_preparation_wait:
+                            for observed in self.child_preparation_yielded.values():
+                                self.assertTrue(observed.wait(timeout=10), "real preparation wait did not yield its original Job")
+                    finally:
+                        if controlled_preparation_wait:
+                            preparation_cursor.execute("SELECT pg_advisory_unlock(731946,3)")
+                            self.assertIs(preparation_cursor.fetchone()[0], True)
                 for future in futures:
                     future.result(timeout=90)
             for child in children:
@@ -634,6 +709,9 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             self.assertEqual(set(self.child_leases), set(child_by_id))
             self.assertEqual(len(set(self.child_leases.values())), 2)
             self.assertFalse(self.child_cleanup_retries, "all child cleanup retries must reach succeeded")
+            self.assertFalse(self.child_preparation_waits, "all preparation waits must reach succeeded")
+            if controlled_preparation_wait:
+                self.assertEqual(set(self.child_preparation_wait_counts), set(child_by_id))
             self.assertEqual(len(self.child_model_intervals), 2)
             self.assertEqual({item[0] for item in self.child_model_intervals}, set(child_by_id))
             self.assertGreater(min(item[2] for item in self.child_model_intervals),
@@ -643,7 +721,8 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
             execution_ids = []
             for child in children:
                 self.assertEqual(sum(request["agentRunId"] == child.pk for request in self.requests), 1)
-                self.assertEqual(sum(step["agentRunStart"]["agentRunId"] == child.pk for step in self.steps), 1)
+                self.assertEqual(sum(step["agentRunStart"]["agentRunId"] == child.pk for step in self.steps),
+                    1 + self.child_preparation_wait_counts[child.pk])
                 self.assertEqual(child.events.filter(payload__type="agent_run_started").count(), 1)
                 self.assertEqual(child.events.filter(payload__type="model_request_started").count(), 1)
                 self.assertFalse(child.events.filter(payload__type__in=["tool_call", "tool_result"]).exists())
@@ -660,6 +739,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
                     payload__payload__toolName="send_message").count(), 1)
             print("native-parallel-claims-ok:" + json.dumps({
                 "controlledClaimBusy": controlled_claim_busy, "busySlots": self.child_claim_busy,
+                "preparationYields": dict(self.child_preparation_wait_counts),
                 "childLeases": {run_id: hashlib.sha256(owner.encode()).hexdigest() for run_id, owner in self.child_leases.items()},
                 "childLeaseAttempts": {run_id: len(leases) for run_id, leases in self.child_lease_attempts.items()},
                 "executionIds": execution_ids, "modelOverlapNs": min(item[2] for item in self.child_model_intervals)
@@ -779,6 +859,7 @@ class NativeProductionJobClaimTests(SimpleTestCase):
 
 class ParallelChildWorkerFixtureTests(SimpleTestCase):
     def test_parallel_worker_requires_wait_or_claimed_work_between_empty_polls(self):
+        NativeConsumptionProductionTests.initialize_parallel_child_observations(self, [])
         self.live_server_url = "http://api.invalid"
         worker = NativeConsumptionProductionTests.load_worker(self, "http://runtime.invalid")
 
@@ -808,10 +889,7 @@ class ParallelChildWorkerFixtureTests(SimpleTestCase):
         owner = "child-owner"
         state = {"status": "leased"}
         heartbeats = []
-        self.parallel_mutex = threading.Lock()
-        self.child_leases = {}
-        self.child_lease_attempts = {}
-        self.child_cleanup_retries = {}
+        NativeConsumptionProductionTests.initialize_parallel_child_observations(self, [run])
         self.runtime_lines = []
 
         def request(path, body=None, *, timeout=None):
@@ -847,3 +925,116 @@ class ParallelChildWorkerFixtureTests(SimpleTestCase):
         self.assertEqual(len(heartbeats), 1)
         self.assertEqual(self.child_leases, {"child-run": owner})
         self.assertEqual((run.status, state["status"]), ("completed", "succeeded"))
+
+    def exercise_preparation_handoff(self, corruption=None, early_reclaim=False):
+        self.live_server_url = "http://api.invalid"
+        worker = NativeConsumptionProductionTests.load_worker(self, "http://runtime.invalid")
+        events = Mock()
+        events.filter.return_value.order_by.return_value.values_list.return_value = []
+        run = SimpleNamespace(pk="child-run", session_id="child-session", status="queued", events=events,
+            refresh_from_db=Mock(), transitionReason="queued", authorization=SimpleNamespace(digest="child-digest"))
+        job = {"jobId": "child-job", "jobKind": "agent_run.lifecycle", "status": "leased",
+            "sessionId": run.session_id, "retryCount": 0, "payloadRef": "record:agent_run:child-run",
+            "idempotencyKey": "child-key", "leaseOwner": "worker:fixture-first-owner"}
+        state = deepcopy(job)
+        reclaimed_jobs = []
+        NativeConsumptionProductionTests.initialize_parallel_child_observations(self, [run])
+        self.requests, self.steps, self.runtime_lines = [], [], []
+        self.lifecycle_diagnostic = lambda run, result: repr(result)
+        start = {"schema": "workspace.agent_run.start.v1", "agentRunId": run.pk,
+            "authorizationDigest": run.authorization.digest,
+            "environmentAuthorization": {"payload": {"controllerPurpose": "execute"}}}
+        waiting = {"schema": "runtime.agent_run.step.result.v1", "agentRunId": run.pk,
+            "disposition": "waiting", "terminalState": None, "transitionReason": "execution_host_preparation_wait"}
+        if corruption == "terminal":
+            waiting["terminalState"] = "completed"
+        terminal = dict(waiting, disposition="terminal", terminalState="completed",
+            transitionReason="runtime_session_terminal_committed")
+
+        def request(path, body=None, **kwargs):
+            if path == "/internal/jobs/heartbeat":
+                return {"ok": True}
+            if path == "/internal/jobs/claim":
+                state.update(status="leased", leaseOwner="worker:fixture-second-owner")
+                reclaimed_jobs.append(deepcopy(state))
+                return {"jobs": [deepcopy(state)]}
+            if path == "/internal/jobs/yield":
+                state.update(status="running" if corruption == "missing_queue" else "queued",
+                    leaseOwner=None, leaseExpiresAtMs=None, updatedAtMs=body["yieldedAtMs"],
+                    runAtMs=body["yieldedAtMs"] if early_reclaim else body["runAtMs"],
+                    lastError=body["transitionReason"])
+                return {"ok": True, "runAtMs": body["runAtMs"], "transitionReason": body["transitionReason"]}
+            if path == "/internal/jobs/complete":
+                state["status"] = "succeeded"
+                return {"ok": True}
+            self.assertEqual(path, "/internal/jobs/" + job["jobId"])
+            return {"job": deepcopy(state)}
+
+        def resolve(*args):
+            return ({"disposition": "terminal", "terminalState": "completed"}
+                if run.status == "completed" else {"disposition": "ready", "agentRunStart": start})
+
+        def transition(run_id, status, reason):
+            self.assertEqual(run_id, run.pk)
+            run.status, run.transitionReason = status, reason
+
+        def execute(claimed, owner):
+            with worker.lease_heartbeats(claimed["jobId"], owner) as healthy:
+                worker.execute_agent_run_lifecycle_job(claimed, owner, healthy)
+            if early_reclaim and owner == job["leaseOwner"]:
+                barrier = threading.Barrier(2)
+                def reclaim():
+                    barrier.wait(timeout=1)
+                    worker.runtime_request("/internal/jobs/claim", {"jobKind": "agent_run.lifecycle"})
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    reclaimed = pool.submit(reclaim)
+                    barrier.wait(timeout=1)
+                    reclaimed.result(timeout=1)
+                self.assertEqual(state["status"], "leased", "the new owner precedes the old execute return")
+
+        def loop(slot, stopped):
+            worker.execute_claimed_job(job, job["leaseOwner"])
+            self.assertFalse(stopped.is_set(), "a preparation yield must not complete the child")
+            worker.wait_for_jobs()
+            reclaimed = (reclaimed_jobs[0] if early_reclaim else
+                dict(state, status="leased", leaseOwner="worker:fixture-second-owner"))
+            if corruption == "identity":
+                reclaimed["idempotencyKey"] = "replacement-key"
+            if corruption == "retry":
+                reclaimed["retryCount"] += 1
+            state.update(reclaimed)
+            worker.execute_claimed_job(reclaimed, reclaimed["leaseOwner"])
+            self.assertTrue(stopped.is_set())
+
+        with patch.object(worker, "runtime_request", side_effect=request), \
+             patch.object(worker, "agent_run_step_request", side_effect=[waiting, terminal]), \
+             patch.object(worker, "execute_claimed_job", side_effect=execute), \
+             patch.object(worker, "run_job_loop", side_effect=loop), \
+             patch.object(worker, "wait_for_jobs"), \
+             patch.object(worker, "resolve_agent_run_lifecycle", side_effect=resolve), \
+             patch.object(worker, "transition_agent_run", side_effect=transition), \
+             patch.object(worker, "finish_environment_agent_run", side_effect=lambda job, owner, *args:
+                 worker.complete_job(job["jobId"], owner, [])), \
+             patch.object(worker, "agent_run_lifecycle_binding", return_value=(run.pk, run.authorization.digest)), \
+             patch(__name__ + ".fenced_start_fixture", return_value=start):
+            NativeConsumptionProductionTests.execute_parallel_child(self, worker, 0, {run.pk: run}, threading.Event())
+        return run, state
+
+    def test_parallel_worker_preparation_wait_reclaims_the_same_job_without_retry(self):
+        run, job = self.exercise_preparation_handoff()
+        self.assertEqual((run.status, job["status"], job["retryCount"]), ("completed", "succeeded", 0))
+        self.assertEqual(self.child_preparation_wait_counts, {run.pk: 1})
+        self.assertFalse(self.child_preparation_waits)
+        self.assertEqual(len(self.child_lease_attempts[run.pk]), 2)
+        self.assertEqual(len(self.steps), 2)
+
+    def test_parallel_worker_accepts_early_reclaim_before_the_old_execute_returns(self):
+        run, job = self.exercise_preparation_handoff(early_reclaim=True)
+        self.assertEqual((run.status, job["status"], job["retryCount"]), ("completed", "succeeded", 0))
+        self.assertEqual(len(self.child_lease_attempts[run.pk]), 2)
+
+    def test_parallel_worker_rejects_invalid_preparation_handoffs(self):
+        for corruption, message in {"identity": "idempotencyKey", "retry": "retryCount",
+                "missing_queue": "queued", "terminal": "waiting"}.items():
+            with self.subTest(corruption=corruption), self.assertRaisesRegex(AssertionError, message):
+                self.exercise_preparation_handoff(corruption)

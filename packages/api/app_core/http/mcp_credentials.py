@@ -77,7 +77,7 @@ class McpBearerCredentialsEnvelope(StrictSchema):
     response={200: McpBearerCredentialsEnvelope} | COMMON_ERROR_RESPONSES,
 )
 def list_mcp_bearer_credentials(request):
-    credentials = McpBearerCredential.objects.order_by(
+    credentials = McpBearerCredential.objects.filter(workspace__isnull=True).order_by(
         "plugin_name", "credential_ref"
     )
     return {"credentials": [_serialize_credential(item) for item in credentials]}
@@ -134,7 +134,7 @@ def rotate_mcp_bearer_credential(
         secret = normalize_bearer_token_input(payload.secret)
         with transaction.atomic():
             credential = McpBearerCredential.objects.select_for_update().get(
-                id=credential_id
+                id=credential_id, workspace__isnull=True
             )
             credential.encrypted_secret = encrypt_credential_secret(secret)
             credential.version += 1
@@ -164,7 +164,7 @@ def delete_mcp_bearer_credential(request, credential_id: str):
     with transaction.atomic():
         try:
             credential = McpBearerCredential.objects.select_for_update().get(
-                id=credential_id
+                id=credential_id, workspace__isnull=True
             )
         except McpBearerCredential.DoesNotExist:
             return Status(404, {"error": "mcp_bearer_credential_not_found"})
@@ -233,10 +233,8 @@ def resolve_mcp_bearer_credential(request):
         )
     try:
         with transaction.atomic():
-            credential = McpBearerCredential.objects.select_for_update().get(
-                plugin_name=plugin_name,
-                credential_ref=credential_ref,
-            )
+            from app_core.workspace_resources import credential_for_workspace
+            credential = credential_for_workspace(authorization.agent_run.workspace_id, plugin_name, credential_ref, lock=True)
             token = validate_bearer_token(
                 decrypt_credential_secret(credential.encrypted_secret)
             )
@@ -275,6 +273,9 @@ def _authorization_allows_plugin(authorization, plugin_name: str) -> bool:
             authorization.signature,
         )
         agent_run = authorization.agent_run
+        from app_core.workspace_access import agent_run_membership_is_current
+        if not agent_run_membership_is_current(agent_run):
+            return False
         if agent_run.session.agent.definition_id is not None or agent_run.definition_version_id is not None:
             return False
         if (

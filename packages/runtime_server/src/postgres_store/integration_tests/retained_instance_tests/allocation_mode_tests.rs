@@ -129,11 +129,11 @@ fn postgres_per_run_in_flight_admission_returns_wait_and_reuses_after_release() 
     let rejected = second.join().unwrap();
     assert_eq!(
         while_in_flight.unwrap().unwrap_err(),
-        crate::resident_capacity::RESIDENT_CAPACITY_WAIT
+        crate::resident_capacity::HOST_PREPARATION_WAIT
     );
     assert_eq!(
         rejected.unwrap_err(),
-        crate::resident_capacity::RESIDENT_CAPACITY_WAIT
+        crate::resident_capacity::HOST_PREPARATION_WAIT
     );
     let second = prepare(&retry_store, &replay, "recovery-execution", &physical).unwrap();
     assert_eq!(first.instance_id, second.instance_id);

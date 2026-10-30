@@ -550,6 +550,18 @@ class WorkspacePluginEnablement(models.Model):
         ]
 
 
+class WorkspacePluginInstallation(models.Model):
+    """A workspace pins immutable package bytes; it never replaces the platform catalog."""
+    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT, related_name="plugin_installations")
+    plugin_name = models.CharField(max_length=64)
+    package = models.JSONField()
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["workspace", "plugin_name"], name="workspace_plugin_installation_unique")]
+
+
 class WorkspaceGroup(models.Model):
     id = models.CharField(primary_key=True, max_length=64, default=new_workspace_group_id)
     workspace = models.ForeignKey(
@@ -587,6 +599,8 @@ class WorkspaceGroup(models.Model):
 
 
 class ModelProvider(models.Model):
+    # NULL is the explicit platform/shared scope preserved for released data.
+    workspace = models.ForeignKey(Workspace, null=True, blank=True, on_delete=models.PROTECT, related_name="model_providers")
     id = models.CharField(primary_key=True, max_length=64, default=new_provider_id)
     displayName = models.CharField(max_length=160)
     template_id = models.CharField(max_length=64, null=True, blank=True)
@@ -601,9 +615,10 @@ class ModelProvider(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["template_id"],
-                condition=models.Q(template_id__isnull=False, archivedAt__isnull=True),
+                condition=models.Q(template_id__isnull=False, archivedAt__isnull=True, workspace__isnull=True),
                 name="model_provider_active_template_unique",
             ),
+            models.UniqueConstraint(fields=["workspace", "template_id"], condition=models.Q(template_id__isnull=False, archivedAt__isnull=True, workspace__isnull=False), name="workspace_provider_template_unique"),
         ]
 
     def save(self, *args, **kwargs):
@@ -967,6 +982,8 @@ class Agent(models.Model):
     description = models.CharField(max_length=128, blank=True, default="")
     instructions = models.TextField(blank=True, default="")
     avatar_kind = models.CharField(max_length=16, default="centaeris")
+    avatar_image = models.BinaryField(null=True, blank=True, editable=False)
+    avatar_digest = models.CharField(max_length=64, blank=True, default="", editable=False)
     status = models.CharField(max_length=16, default="active")
     model_config = models.ForeignKey(ModelConfig, on_delete=models.PROTECT, null=True, blank=True, related_name="configured_agents")
     thinking_mode = models.CharField(max_length=64, blank=True, default="")
@@ -988,6 +1005,11 @@ class Agent(models.Model):
                 condition=models.Q(is_business_instance=False), name="agent_definition_owner_unique"),
             models.CheckConstraint(condition=models.Q(model_config__isnull=False) | models.Q(thinking_mode=""),
                 name="agent_unconfigured_model_no_effort"),
+            models.CheckConstraint(
+                condition=(models.Q(avatar_image__isnull=True, avatar_digest="")
+                    | (models.Q(avatar_image__isnull=False) & ~models.Q(avatar_digest=""))),
+                name="agent_avatar_image_consistent",
+            ),
             models.CheckConstraint(
                 condition=models.Q(avatar_kind__in=("centaeris", "banana")),
                 name="agent_avatar_kind_valid",
@@ -1021,6 +1043,8 @@ class Agent(models.Model):
         self.description = normalize_agent_description(self.description)
         self.instructions = normalize_agent_instructions(self.instructions)
         require_enum("Agent.avatar_kind", self.avatar_kind, {"centaeris", "banana"})
+        if (self.definition_id is not None or self.is_business_instance) and self.avatar_digest:
+            raise ValueError("Agent managed configuration cannot have a private avatar")
         require_enum("Agent.status", self.status, {"active", "deleted"})
         if (
             (self.status == "active")
@@ -1054,6 +1078,7 @@ class Agent(models.Model):
 
 
 class McpBearerCredential(models.Model):
+    workspace = models.ForeignKey(Workspace, null=True, blank=True, on_delete=models.PROTECT, related_name="mcp_credentials")
     id = models.CharField(
         primary_key=True,
         max_length=64,
@@ -1082,8 +1107,10 @@ class McpBearerCredential(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["plugin_name", "credential_ref"],
+                condition=models.Q(workspace__isnull=True),
                 name="mcp_bearer_credential_plugin_ref_unique",
-            )
+            ),
+            models.UniqueConstraint(fields=["workspace", "plugin_name", "credential_ref"], condition=models.Q(workspace__isnull=False), name="workspace_mcp_credential_unique")
         ]
 
     def save(self, *args, **kwargs):
@@ -1123,8 +1150,14 @@ class AgentConnectorCredentialApproval(models.Model):
         if self.workspace_id != self.definition.workspace_id or self.plugin_name != self.credential.plugin_name:
             raise ValueError("Connector approval scope mismatch")
         if self._state.adding:
-            if self.approved_by_id != self.credential.created_by_id or not self.approved_by.is_superuser:
-                raise ValueError("Connector approval requires the credential custodian")
+            if self.credential.workspace_id is None:
+                if self.approved_by_id != self.credential.created_by_id or not self.approved_by.is_superuser:
+                    raise ValueError("Connector approval requires the credential custodian")
+            else:
+                if self.credential.workspace_id != self.workspace_id:
+                    raise ValueError("Connector credential workspace mismatch")
+                from .workspace_resources import workspace_resource_admin
+                workspace_resource_admin(self.approved_by, self.workspace_id)
             if self.credential_version != self.credential.version:
                 raise ValueError("Connector approval credential version mismatch")
         else:
@@ -1868,6 +1901,8 @@ class AgentRun(models.Model):
 
     def save(self, *args, **kwargs):
         self.agent_instructions = normalize_agent_instructions(self.agent_instructions)
+        if self.modelConfig_id and self.modelConfig.provider_id and self.modelConfig.provider.workspace_id not in (None,self.workspace_id):
+            raise ValueError("AgentRun model workspace mismatch")
         if (self.acting_app_id is None) != (self.app_delegation_id is None):
             raise ValueError("AgentRun application origin is incomplete")
         if self.app_delegation_id:
@@ -1877,7 +1912,11 @@ class AgentRun(models.Model):
                     or delegation.definition_id != self.session.agent.definition_id):
                 raise ValueError("AgentRun application origin binding mismatch")
         if not self._state.adding:
-            if type(self).objects.values_list("acting_app_id", "app_delegation_id").get(pk=self.pk) != (self.acting_app_id, self.app_delegation_id):
+            stored_snapshot = type(self).objects.values_list(
+                "acting_app_id", "app_delegation_id", "definition_version_id", "agent_instructions",
+                "session_id", "environment_id",
+            ).get(pk=self.pk)
+            if stored_snapshot[:2] != (self.acting_app_id, self.app_delegation_id):
                 raise ValueError("AgentRun application origin is immutable")
         if self._state.adding:
             definition_id = self.session.agent.definition_id
@@ -1887,10 +1926,7 @@ class AgentRun(models.Model):
             elif definition_id:
                 raise ValueError("Managed AgentRun requires a published definition version")
         else:
-            stored_snapshot = type(self).objects.values_list(
-                "definition_version_id", "agent_instructions", "session_id", "environment_id",
-            ).get(pk=self.pk)
-            if stored_snapshot[:2] != (self.definition_version_id, self.agent_instructions):
+            if stored_snapshot[2:4] != (self.definition_version_id, self.agent_instructions):
                 raise ValueError("AgentRun configuration snapshot is immutable")
         if self.thinkingMode:
             validate_thinking_mode(self.thinkingMode)
@@ -1938,7 +1974,7 @@ class AgentRun(models.Model):
                     raise ValueError("agent_run_environment_binding_invalid")
                 self.environment = session.current_environment
                 return super().save(*args, **kwargs)
-        if stored_snapshot[2:] != (self.session_id, self.environment_id):
+        if stored_snapshot[4:] != (self.session_id, self.environment_id):
             raise ValueError("agent_run_environment_binding_immutable")
         return super().save(*args, **kwargs)
 

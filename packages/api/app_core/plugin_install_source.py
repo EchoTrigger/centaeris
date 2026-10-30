@@ -52,6 +52,54 @@ class UploadedZip:
             raise PluginInstallSourceError("plugin_archive_invalid") from error
 
 
+@dataclass(frozen=True)
+class UploadedWorkspaceZip:
+    """Accept a Plugin ZIP or one standalone Skill directory, using the same limits.
+
+    Core inspection remains authoritative for manifests and Skill content. The
+    wrapper only packages a Skill carrier; it does not implement a second parser.
+    """
+    upload: object
+
+    def normalize_into(self, staging_root: Path) -> Path:
+        import json
+        from .credentials import validate_lower_kebab
+        archive = staging_root / "upload.zip"
+        expanded = staging_root / "expanded"
+        package = staging_root / "package"
+        staging_root.mkdir(parents=True, exist_ok=False)
+        try:
+            _copy_upload(self.upload, archive)
+            expanded.mkdir()
+            _extract_zip(archive, expanded)
+            children = list(expanded.iterdir())
+            wrapped = children[0] if len(children) == 1 and children[0].is_dir() else None
+            if (expanded / PLUGIN_MANIFEST_PATH).is_file() or (wrapped is not None and (wrapped / PLUGIN_MANIFEST_PATH).is_file()):
+                os.replace(_plugin_package_root(expanded), package)
+            else:
+                skill_root = expanded if (expanded / "SKILL.md").is_file() else wrapped
+                if skill_root is None or not (skill_root / "SKILL.md").is_file() or (skill_root / ".centaeris-plugin").exists():
+                    raise PluginInstallSourceError("plugin_archive_invalid")
+                name = skill_root.name if skill_root != expanded else Path(getattr(self.upload, "name", "")).stem
+                try:
+                    validate_lower_kebab("Skill package name", name)
+                except ValueError as error:
+                    raise PluginInstallSourceError("skill_package_name_invalid") from error
+                (package / "skills").mkdir(parents=True)
+                os.replace(skill_root, package / "skills" / name)
+                (package / ".centaeris-plugin").mkdir()
+                (package / ".centaeris-plugin" / "plugin.json").write_text(json.dumps({
+                    "name": name, "version": "1.0.0", "paths": {"skills": ["skills"]},
+                    "interface": {"displayName": name},
+                }), encoding="utf-8")
+            archive.unlink(missing_ok=True)
+            return package
+        except PluginInstallSourceError:
+            raise
+        except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as error:
+            raise PluginInstallSourceError("plugin_archive_invalid") from error
+
+
 def _copy_upload(upload, destination: Path) -> None:
     declared_size = getattr(upload, "size", None)
     if type(declared_size) is int and declared_size > MAX_PLUGIN_ARCHIVE_BYTES:

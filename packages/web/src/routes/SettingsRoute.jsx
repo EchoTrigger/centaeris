@@ -11,6 +11,7 @@ import { ExternalIdentitySettings } from "../components/ExternalLogin";
 import { useEnterStartsNewLine, writeEnterStartsNewLine } from "../preferences";
 import ModelSettings from "./ModelSettings";
 import GlobalPluginSettings from "./GlobalPluginSettings";
+import OperatorWorkspaceResources from "./OperatorWorkspaceResources";
 import PluginSettings from "./PluginSettings";
 import WorkspaceGroupsRoute from "./WorkspaceGroupsRoute";
 import WorkspaceMembersRoute from "./WorkspaceMembersRoute";
@@ -28,9 +29,11 @@ const SECTIONS = () => ({
   members: { label: t("invitationActivationRoute.member"), title: t("settingsRoute.membersAndPermissions"), icon: Users, group: t("settingsRoute.workspace") },
   environment: { label: t("environmentSettings.title"), title: t("environmentSettings.title"), icon: Settings2, group: t("settingsRoute.workspace") },
   groups: { label: t("settingsRoute.groups"), title: t("settingsRoute.groups"), icon: UsersRound, group: t("settingsRoute.workspace"), hiddenInNav: true },
-  plugins: { label: t("libraryRoute.plugins"), title: t("settingsRoute.workspacePlugins"), icon: Plug, group: t("settingsRoute.workspace") },
+  plugins: { label: t("libraryRoute.plugins"), title: t("settingsRoute.workspacePlugins"), icon: Plug, group: t("settingsRoute.workspace"), resourceManagement: true },
   security: { label: t("settingsRoute.security"), title: t("settingsRoute.security"), icon: ShieldCheck, group: t("invitationActivationRoute.administrator"), account: true },
-  models: { label: t("appRoute.models"), title: t("appRoute.models"), icon: Cpu, group: t("invitationActivationRoute.administrator"), superuser: true },
+  models: { label: t("appRoute.models"), title: t("appRoute.models"), icon: Cpu, group: t("settingsRoute.workspace"), resourceManagement: true },
+  "workspace-resources": { label: t("workspaceResources.platformWorkspaces"), title: t("workspaceResources.platformWorkspaces"), icon: Boxes, group: t("invitationActivationRoute.administrator"), superuser: true },
+  "platform-models": { label: t("workspaceResources.platformModels"), title: t("workspaceResources.platformModels"), icon: Cpu, group: t("invitationActivationRoute.administrator"), superuser: true },
   "global-plugins": { label: t("settingsRoute.platformPlugins"), title: t("settingsRoute.platformPlugins"), icon: Boxes, group: t("invitationActivationRoute.administrator"), superuser: true },
 });
 
@@ -144,30 +147,33 @@ export default function SettingsPage() {
   const home = workspace ? `/w/${encodeURIComponent(workspace.id)}/app` : "/";
   const closeTo = safeReturnTo(chat?.returnTo, workspace) || safeReturnTo(location.state?.returnTo, workspace) || home;
   const canManageWorkspace = Boolean(workspace && ADMIN_ROLES.has(workspace.role));
+  const canManageResources = Boolean(workspace && (canManageWorkspace || user?.isSuperuser));
   const canManagePrivateAgents = Boolean(workspaceData && canOpenPrivateAgentSettings(workspace));
   const [agentEditorOpen, setAgentEditorOpen] = useState(false);
   const visibleSections = Object.entries(SECTIONS()).filter(([, item]) => (
-    item.privateAgents ? canManagePrivateAgents : item.account || (canManageWorkspace && (!item.superuser || user?.isSuperuser))
+    item.privateAgents ? canManagePrivateAgents : item.account || (item.superuser ? Boolean(user?.isSuperuser) : item.resourceManagement ? canManageResources : canManageWorkspace)
   ));
   const dialogRef = useModalDialog({ open: !agentEditorOpen, preserveOpener: section === "agents", onClose: () => navigate(closeTo) });
 
-  if (SECTIONS()[section]?.privateAgents ? !canManagePrivateAgents : !SECTIONS()[section]?.account && !canManageWorkspace) return <Navigate replace to={home} state={{ workspaceNotice: t("settingsRoute.youDoNotHaveAccessToWorkspaceSettings") }} />;
+  if (SECTIONS()[section]?.privateAgents ? !canManagePrivateAgents : !SECTIONS()[section]?.account && !SECTIONS()[section]?.superuser && !(SECTIONS()[section]?.resourceManagement ? canManageResources : canManageWorkspace)) return <Navigate replace to={home} state={{ workspaceNotice: t("settingsRoute.youDoNotHaveAccessToWorkspaceSettings") }} />;
   if (!SECTIONS()[section] || (SECTIONS()[section].superuser && !user?.isSuperuser)) {
     return <Navigate replace to={isAccountRoute ? "/settings/preferences" : `${home.replace(/\/app$/, "")}/settings/general`} />;
   }
 
   const body = section === "preferences" ? <Preferences userId={user.id} />
     : section === "security" ? <AccountSecurity />
+    : section === "workspace-resources" ? <OperatorWorkspaceResources isSuperuser={Boolean(user?.isSuperuser)} />
     : section === "applications" ? <AppDelegations isSuperuser={Boolean(user?.isSuperuser)} />
     : section === "agents" ? <AgentSettings key={`${workspace.id}:${location.search}`} onEditorOpenChange={setAgentEditorOpen} />
     : section === "members" ? <WorkspaceMembersRoute embedded />
     : section === "environment" ? <EnvironmentSettings key={workspace.id} workspace={workspace} />
       : section === "groups" ? <WorkspaceGroupsRoute embedded />
-        : section === "plugins" ? <PluginSettings workspace={workspace} isSuperuser={Boolean(user?.isSuperuser)} />
+        : section === "plugins" ? <PluginSettings key={workspace.id} workspace={workspace} isSuperuser={Boolean(user?.isSuperuser)} />
           : section === "global-plugins" ? <GlobalPluginSettings />
-          : section === "models" ? <ModelSettings onClose={() => navigate(closeTo)} onModelsChanged={() => chat?.onModelsChanged()} />
+          : section === "platform-models" ? <ModelSettings key="platform" onClose={() => navigate(closeTo)} onModelsChanged={() => chat?.onModelsChanged?.()} />
+          : section === "models" ? <ModelSettings key={workspace.id} workspace={workspace} onClose={() => navigate(closeTo)} onModelsChanged={() => chat?.onModelsChanged?.()} />
             : <GeneralSettings />;
-  const content = ["plugins", "models", "global-plugins"].includes(section) ? <div className={`workspaceSettingsFeature ${section === "models" ? "isModels" : "isCapabilities"}`}>
+  const content = ["plugins", "models", "platform-models", "global-plugins"].includes(section) ? <div className={`workspaceSettingsFeature ${["models", "platform-models"].includes(section) ? "isModels" : "isCapabilities"}`}>
     <header><h1>{SECTIONS()[section].title}</h1></header>
     <div>{body}</div>
   </div> : body;
@@ -180,7 +186,7 @@ export default function SettingsPage() {
             const entries = visibleSections.filter(([, item]) => item.group === group && !item.hiddenInNav);
             return entries.length ? <section key={group || "preferences"}>{group ? <h2>{group}</h2> : null}<nav>{entries.map(([key, item]) => {
               const Icon = item.icon;
-              const target = item.account && !workspaceData
+              const target = (item.account || item.superuser) && !workspaceData
                 ? `/settings/${key}${workspace ? `?${new URLSearchParams({ workspaceId: workspace.id })}` : ""}`
                 : `/w/${encodeURIComponent(workspace.id)}/settings/${key}`;
               const active = key === section || (key === "members" && section === "groups");

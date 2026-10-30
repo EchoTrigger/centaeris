@@ -25,9 +25,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
   onDraftChange,
   enterStartsNewLine,
   activeAgentName,
-  workspaceAvailable,
   sending,
-  loadingHistory,
   hasActiveAgentRun,
   uploadingAttachment,
   onUploadAttachment,
@@ -39,8 +37,8 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
   modelGroups,
   modelId,
   onModelIdChange,
-  activeAgentRunId,
   cancellingAgentRunId,
+  controlBusy = false,
   onCancelActiveAgentRun,
 }) {
   const { t } = useTranslation();
@@ -72,7 +70,6 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
           }
         }}
         placeholder={t("appRoute.describeATaskForValue", { value1: activeAgentName })}
-        disabled={!workspaceAvailable || sending || loadingHistory}
       />
       <div className="workspaceComposerFooter">
         <div className="workspaceComposerControlGroup">
@@ -106,7 +103,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
                 className="workspaceSendButton"
                 type="button"
                 aria-label={t("appRoute.stop")}
-                disabled={!activeAgentRunId || Boolean(cancellingAgentRunId)}
+                aria-busy={controlBusy || Boolean(cancellingAgentRunId)}
                 onClick={onCancelActiveAgentRun}
               >
                 {cancellingAgentRunId ? <LoaderCircle className="statusIcon" aria-hidden="true" /> : <Square aria-hidden="true" />}
@@ -116,7 +113,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
                 className="workspaceSendButton"
                 type="submit"
                 aria-label={t("appRoute.input")}
-                disabled={!workspaceAvailable || !draft.trim() || !modelId || sending || loadingHistory}
+                aria-busy={controlBusy || sending}
               >
                 {sending ? <LoaderCircle className="statusIcon" aria-hidden="true" /> : <ArrowUp aria-hidden="true" />}
               </button>

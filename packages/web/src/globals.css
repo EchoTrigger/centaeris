@@ -54,7 +54,7 @@ body { margin: 0; background: var(--surface-color); color: var(--text); font-fam
 button, input, select, textarea { font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
 button { cursor: pointer; }
-button:disabled, textarea:disabled, select:disabled { cursor: not-allowed; opacity: .5; }
+button:disabled, textarea:disabled, select:disabled { cursor: default; opacity: .5; }
 button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid #6e91c4; outline-offset: 2px; }
 .quietCloseButton { display: grid; width: 24px; height: 24px; flex: none; place-items: center; border: 0; border-radius: 50%; background: var(--surface-variant); color: var(--process-text); }
 .quietCloseButton:hover { background: var(--surface-container); color: var(--on-surface); }
@@ -238,7 +238,7 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .librarySelectionBar button:hover:not(:disabled), .librarySelectionBar a:hover:not(.disabled) { background: var(--surface-container); }
 .librarySelectionBar .primary, .libraryDialogActions .primary { border-color: var(--outline); background: var(--solid-surface); color: var(--solid-text); }
 .librarySelectionBar .danger { border-color: var(--error); color: var(--error); }
-.librarySelectionBar .disabled, .librarySelectionBar button:disabled { cursor: not-allowed; opacity: .45; }
+.librarySelectionBar .disabled, .librarySelectionBar button:disabled { cursor: default; opacity: .45; }
 .librarySelectionBar svg { width: 15px; height: 15px; }
 .libraryDialogBackdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 18px; background: var(--scrim); }
 .libraryDialog { display: grid; width: min(460px, 100%); gap: 14px; padding: 22px; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--surface); box-shadow: 0 20px 60px rgba(21, 27, 34, .2); }
@@ -248,7 +248,7 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .libraryDialog input:focus, .libraryDialog textarea:focus, .libraryDialog select:focus { border-color: var(--primary-color); box-shadow: 0 0 0 3px rgba(110, 145, 196, .13); }
 .libraryDialogActions { display: flex; justify-content: flex-end; gap: 8px; }
 .libraryDialogActions button { min-height: 34px; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--surface); color: var(--text); padding: 0 14px; }
-.libraryDialogActions button:disabled { cursor: not-allowed; opacity: .5; }
+.libraryDialogActions button:disabled { cursor: default; opacity: .5; }
 .libraryUploadDialog { width: min(560px, 100%); gap: 16px; }
 .libraryUploadHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .libraryUploadHeader div { display: grid; gap: 5px; }
@@ -297,7 +297,7 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .libraryMoveObject.file svg { color: var(--process-text); }
 .libraryMoveActions { display: flex; align-items: center; gap: 10px; margin-top: auto; }
 .libraryMoveActions > span { flex: 1; }
-.libraryMoveActions button:disabled { cursor: not-allowed; opacity: .5; }
+.libraryMoveActions button:disabled { cursor: default; opacity: .5; }
 .libraryWorkspace { display: flex; width: 100%; height: 100vh; min-width: 0; min-height: 0; overflow: hidden; }
 .libraryWorkspace > .libraryMain { min-width: 0; min-height: 0; height: 100vh; flex: 1 1 auto; }
 .libraryPreviewMain { min-width: 0; min-height: 100vh; background: var(--surface-color); }
@@ -823,6 +823,27 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .workspaceSettingsFeature.isCapabilities > div { overflow: auto; }
 .workspaceSettingsFeature.isCapabilities > div:has(> .pluginSettings) { scrollbar-gutter: stable; overflow-anchor: none; }
 .workspaceSettingsFeature.isCapabilities > header h1 { font-size: 22px; font-weight: 650; letter-spacing: -.02em; }
+.operatorWorkspaceResources { display: grid; height: 100%; min-width: 0; min-height: 0; grid-template-rows: auto auto minmax(0, 1fr); container-type: inline-size; }
+.operatorWorkspaceResources > header { padding: 38px 36px 20px; }
+.operatorWorkspaceResources > header h1 { margin: 0; color: var(--on-surface); font-size: 22px; font-weight: 650; letter-spacing: -.02em; }
+.operatorWorkspaceResources > header p { margin: 9px 0 0; color: var(--process-text); font-size: 12px; line-height: 1.6; }
+.operatorResourceControls { display: flex; min-width: 0; flex-wrap: wrap; align-items: flex-end; gap: 16px 24px; padding: 0 36px 20px; border-bottom: 1px solid var(--outline-variant); }
+.operatorResourceControls > .capabilitySettingsError { flex-basis: 100%; margin: 0; }
+.operatorResourceControls > label { flex: 1 1 220px; max-width: 360px; min-width: 0; margin: 0; }
+.operatorResourceTabs { display: flex; flex: none; gap: 3px; padding: 3px; border-radius: 7px; background: var(--surface-variant); }
+.operatorResourceTabs button { min-height: 31px; border: 0; border-radius: 5px; background: transparent; color: var(--process-text); padding: 0 16px; font: inherit; font-size: 12px; cursor: pointer; }
+.operatorResourceTabs button[aria-pressed="true"] { background: var(--surface-color); color: var(--on-surface); box-shadow: 0 1px 3px color-mix(in srgb, var(--on-surface) 10%, transparent); font-weight: 600; }
+.operatorResourceTabs button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+.operatorResourcePanel { min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; overflow-anchor: none; }
+.operatorResourcePanel.isPlugins > .pluginSettings { width: min(760px, calc(100% - 72px)); margin-inline: auto; padding-top: 18px; }
+.operatorResourcePanel.isModels > .workspaceModelsLayout { height: 100%; min-height: 300px; }
+@container (max-width: 560px) {
+  .operatorWorkspaceResources > header { padding: 32px 20px 18px; }
+  .operatorResourceControls { padding-inline: 20px; }
+  .operatorResourceControls > label { max-width: none; flex-basis: 100%; }
+  .operatorResourcePanel.isPlugins > .pluginSettings { width: calc(100% - 40px); }
+  .operatorResourcePanel.isModels > .workspaceModelsLayout { grid-template-columns: minmax(120px, .8fr) minmax(0, 1.5fr); }
+}
 .capabilitySettingsError { margin: 10px 0; color: var(--danger); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .capabilitySettingsEmpty { display: grid; min-height: 120px; place-items: center; align-content: center; color: var(--process-text); padding: 24px; font-size: 12px; text-align: center; }
 .pluginSettings { min-width: 0; padding: 7px 0 40px; container-type: inline-size; }
@@ -904,6 +925,9 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .globalPluginUpload button:focus-visible { outline: 2px solid rgba(68, 108, 196, .45); outline-offset: 2px; }
 .globalPluginUpload button:disabled { opacity: .45; }
 .globalPluginUpload svg { width: 13px; height: 13px; }
+.globalPluginUpload.pluginPackageUpload { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); justify-content: stretch; gap: 6px; padding: 3px 4px 16px; }
+.pluginPackageUpload > button { justify-self: end; flex-shrink: 0; white-space: nowrap; }
+.pluginPackageUpload > small { display: block; min-width: 0; color: var(--process-text); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .globalPluginNotice { margin: 10px 0; color: var(--process-text); font-size: 11px; line-height: 1.5; }
 .globalPluginRows { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.3fr) minmax(145px, .8fr) auto; column-gap: 18px; }
 .globalPluginEntry { min-width: 0; display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center; border-bottom: 1px solid var(--outline-variant); padding: 16px 4px; }

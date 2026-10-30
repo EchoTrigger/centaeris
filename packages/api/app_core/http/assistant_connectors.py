@@ -83,7 +83,7 @@ def approve_assistant_credential(request, credential_id: str, payload: Connector
         if workspace is None:
             return Status(404, {"error": "workspace_not_found"})
         definition = AgentDefinition.objects.filter(id=payload.definition_id, workspace=workspace).select_related("published_version").first()
-        source = McpBearerCredential.objects.select_for_update().filter(id=credential_id, created_by=request.user).first()
+        source = McpBearerCredential.objects.select_for_update().filter(id=credential_id, workspace__isnull=True, created_by=request.user).first()
         if definition is None or source is None:
             return Status(404, {"error": "mcp_credential_approval_scope_not_found"})
         if definition.published_version is None:

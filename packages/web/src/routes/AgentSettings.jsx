@@ -5,6 +5,7 @@ import { Plus, Pencil, Trash2 } from "lucide-react";
 import { apiJson, jsonOptions } from "../api";
 import { useTranslation } from "../i18n";
 import { AgentMark } from "../shell/AgentMark";
+import { AgentDocumentIdentity } from "../shell/useAgentDocumentIdentity";
 import { AgentEditorModal } from "../shell/AgentEditorModal";
 import { agentSettingsPath, agentSettingsSelection } from "../agent-chat/agentSettingsNavigation";
 import AgentModelSettings from "./AgentModelSettings";
@@ -39,7 +40,7 @@ export default function AgentSettings({ onEditorOpenChange }) {
       if (controller.signal.aborted) return;
       setEditing(false);
       navigateSettings(agentSettingsPath(workspace.id, result.agent.id));
-    } catch { if (!controller.signal.aborted) setError(t("agentSettings.profileError")); }
+    } catch (failure) { if (!controller.signal.aborted) setError(t(["agent_avatar_invalid", "agent_avatar_too_large", "agent_avatar_dimensions_invalid"].includes(failure.message) ? "agentEditorModal.avatarInvalid" : "agentSettings.profileError")); }
     finally { if (!controller.signal.aborted) setBusy(false); }
   }
   async function remove() {
@@ -55,6 +56,7 @@ export default function AgentSettings({ onEditorOpenChange }) {
     finally { if (!controller.signal.aborted) setBusy(false); }
   }
   return <div className="agentSettingsLayout">
+    <AgentDocumentIdentity agent={selected} />
     <header><h1>{t("agentSettings.agents")}</h1><button className="shPrimaryButton" type="button" disabled={busy} onClick={() => navigateSettings(`${base}?new=1`)}><Plus aria-hidden="true" />{t("agentCreateRoute.createAgent")}</button></header>
     <nav className="agentSettingsList" aria-label={t("agentSettings.privateAgents")}>
       {agents.map(agent => <Link className={selected?.id === agent.id ? "isActive" : ""} aria-current={selected?.id === agent.id ? "page" : undefined} to={agentSettingsPath(workspace.id, agent.id)} state={location.state} key={agent.id}><AgentMark agent={agent} /><span>{agent.name}</span></Link>)}

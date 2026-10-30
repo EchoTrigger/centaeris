@@ -312,3 +312,43 @@ for (const name of ["TimeoutError", "AbortError"]) test(`an uncertain ${name} re
   assert.deepEqual(calls, ["POST", "GET"]);
   assert.equal(operation.pending().operationId, id);
 });
+test("submission preparation can stop before dispatch without creating pending acceptance", async () => {
+  const store = storage(); let requests = 0;
+  const operation = client(store, async (_path, options) => { requests++; return accepted(JSON.parse(options.body).operationId); });
+  await assert.rejects(operation.submit("/submit", input, [], [], false, { shouldDispatch: () => false }), /operation_dispatch_stopped/);
+  assert.equal(requests, 0);
+  assert.equal(operation.pending(), null);
+});
+
+test("stopping after durable identity preparation prevents POST and clears only the undispatched identity", async () => {
+  const store = storage(); let requests = 0; let stop = false; let operationId;
+  const operation = client(store, async (_path, options) => { requests++; return accepted(JSON.parse(options.body).operationId); });
+  await assert.rejects(operation.submit("/submit", input, [], [], false, {
+    shouldDispatch: () => !stop,
+    onOperationId: id => { operationId = id; assert.equal(operation.pending().operationId, id); stop = true; },
+  }), /operation_dispatch_stopped/);
+  assert.ok(operationId);
+  assert.equal(requests, 0);
+  assert.equal(operation.pending(), null);
+});
+
+test("a stopped retry preserves an earlier uncertain operation and does not replay its POST", async () => {
+  const store = storage();
+  const original = client(store, async () => { throw new TypeError("unknown"); });
+  await assert.rejects(original.submit("/submit", input));
+  const operationId = original.pending().operationId; const requests = [];
+  const operation = client(store, async (_path, options) => { requests.push(options?.method || "GET"); throw new ApiError("operation_not_found", 404); });
+  await assert.rejects(operation.submit("/submit", input, [], [], false, { shouldDispatch: () => false }), /operation_dispatch_stopped/);
+  assert.equal(operation.pending().operationId, operationId);
+  assert.deepEqual(requests, []);
+});
+
+test("dispatch hooks expose the exact operation before its single POST", async () => {
+  const order = []; let operationId;
+  const operation = client(storage(), async (_path, options) => { order.push("post"); assert.equal(JSON.parse(options.body).operationId, operationId); return accepted(operationId); });
+  await operation.submit("/submit", input, [], [], false, {
+    onOperationId: id => { operationId = id; order.push("identity"); },
+    onDispatch: () => order.push("dispatch"),
+  });
+  assert.deepEqual(order, ["identity", "dispatch", "post"]);
+});

@@ -1,9 +1,12 @@
+mod admission_wait;
 mod environment;
 mod environment_container;
 mod maintenance;
 mod network;
 mod retained;
 mod retained_commands;
+pub(crate) mod runsc_power;
+pub(crate) mod shared_inventory;
 mod snapshot_capture;
 pub(crate) use maintenance::{
     maintenance_helper, maintenance_task, observe_environment, provision_environment,
@@ -201,6 +204,7 @@ fn validate_docker_volume_name(name: &str, value: &str) -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PluginMount {
     package_name: String,
+    source_subpath: String,
     destination: String,
 }
 
@@ -262,13 +266,41 @@ fn set_private_directory_permissions(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn plugin_mounts(activation: &PluginActivationSnapshotV1) -> Vec<PluginMount> {
+fn plugin_mounts(activation: &PluginActivationSnapshotV1) -> Result<Vec<PluginMount>, String> {
+    plugin_mounts_at(
+        activation,
+        Path::new(crate::skill_projection::PLUGIN_CATALOG_ROOT),
+    )
+}
+
+fn plugin_mounts_at(
+    activation: &PluginActivationSnapshotV1,
+    catalog_root: &Path,
+) -> Result<Vec<PluginMount>, String> {
+    let roots =
+        crate::skill_projection::verified_plugin_package_roots_at(activation, catalog_root)?;
+    if roots.is_empty() {
+        return Ok(Vec::new());
+    }
+    let catalog_root = catalog_root
+        .canonicalize()
+        .map_err(|error| format!("Plugin root unavailable: {error}"))?;
     activation
         .packages
         .iter()
-        .map(|package| PluginMount {
-            package_name: package.name.clone(),
-            destination: format!("{PLUGIN_CONTAINER_ROOT}/{}", package.name),
+        .zip(roots)
+        .map(|(package, root)| {
+            let source_subpath = root
+                .strip_prefix(&catalog_root)
+                .map_err(|_| "plugin_mount_scope_rejected")?
+                .to_str()
+                .ok_or("plugin_mount_path_invalid")?
+                .replace('\\', "/");
+            Ok(PluginMount {
+                package_name: package.name.clone(),
+                source_subpath,
+                destination: format!("{PLUGIN_CONTAINER_ROOT}/{}", package.name),
+            })
         })
         .collect()
 }
@@ -460,7 +492,7 @@ impl DockerExecutionHostRunner {
                 "fresh execution required by native fixture"
             );
             validate_plugin_activation_snapshot(request.plugin_activation)?;
-            assert!(plugin_mounts(request.plugin_activation).is_empty());
+            assert!(request.plugin_activation.packages.is_empty());
             let allocation =
                 crate::native_consumption_tests::prepare_owned_allocation(&request, before_create)?;
             crate::native_consumption_tests::register_owned_run(&request.agent_run_id);
@@ -540,7 +572,7 @@ impl DockerExecutionHostRunner {
             crate::postgres_store::execution_instances::instance_id(&execution_id);
         validate_plugin_activation_snapshot(plugin_activation)?;
         let plugin_volume_name = docker_volume_name_from_environment(PLUGIN_VOLUME_NAME_ENV)?;
-        let plugin_mounts = plugin_mounts(plugin_activation);
+        let plugin_mounts = plugin_mounts(plugin_activation)?;
         let memory_mount = memory_mount(
             user_id.as_str(),
             agent_id.as_str(),
@@ -588,15 +620,28 @@ impl DockerExecutionHostRunner {
                 resources: declared_usage(resources),
                 lease: &lease,
             };
-            let allocation = resident_store.prepare_retained_instance(
+            let allocation = resident_store.prepare_retained_instance_then_initialize(
                 &request,
                 resident_limits,
-                observed_resident_sandboxes,
+                crate::resident_capacity::FilteredResidentInventory(
+                    |preparing: &[crate::resident_capacity::PreparingResidentSandbox]| {
+                        shared_inventory::collect_excluding(&resident_host_id, preparing)
+                    },
+                ),
                 |client, _| before_create(client),
                 |allocation| {
                     prepare_memory_scope(&memory_mount)?;
                     let name = self::container_name(&allocation.allocation_execution_id);
                     let physical = retained::origin_expectation(&expected, allocation, &name);
+                    if allocation.reused && crate::runsc_rotation::Config::from_env()?.is_some() {
+                        runsc_power::set_power(
+                            allocation,
+                            environment_profile
+                                .as_ref()
+                                .ok_or("environment_profile_required")?,
+                            runsc_power::RunscPowerAction::Resume,
+                        )?;
+                    }
                     ensure_container(&physical, allocation.reused || has_execution_fact)?;
                     let facts =
                         inspect_container(&name)?.ok_or("retained container disappeared")?;
@@ -607,10 +652,18 @@ impl DockerExecutionHostRunner {
                     {
                         return Err("retained container incarnation mismatch".into());
                     }
+                    Ok(facts.id)
+                },
+                |allocation| {
+                    let name = self::container_name(&allocation.allocation_execution_id);
+                    let physical = retained::origin_expectation(&expected, allocation, &name);
+                    let id = allocation
+                        .container_id
+                        .as_deref()
+                        .ok_or("retained container unconfirmed")?;
                     let fence =
                         retained::fence(&environment_authorization, &allocation.instance_id)?;
-                    retained::takeover(&physical, &facts.id, &fence)?;
-                    Ok(facts.id)
+                    retained::takeover(&physical, id, &fence)
                 },
             )?;
             instance_id = allocation.instance_id.clone();
@@ -847,7 +900,7 @@ impl DockerExecutionHostRunner {
             &self.command_path,
             |request| self.environment_task_rpc(request),
         )
-        .map_err(|_| "lifecycle_hook_outcome_unknown")?;
+        .map_err(lifecycle_hook_command_failure)?;
         let mut stdout = output.process.stdout;
         let mut stderr = output.process.stderr;
         let stdout_truncated = output.process.stdout_decode.raw_byte_length > stdout.len()
@@ -914,7 +967,12 @@ impl DockerExecutionHostRunner {
 
     pub(crate) fn reconcile_residency(resident_store: &PostgresRuntimeStore) -> Result<(), String> {
         let (host_id, _) = resident_host_context()?;
-        resident_store.reconcile_resident_sandboxes(&host_id, observed_resident_sandboxes)
+        resident_store.reconcile_resident_sandboxes(
+            &host_id,
+            crate::resident_capacity::FilteredResidentInventory(
+                observed_resident_sandboxes_excluding,
+            ),
+        )
     }
 
     pub(crate) fn retire_recovery_execution(
@@ -2120,6 +2178,16 @@ impl DockerExecutionHostRunner {
     }
 }
 
+fn lifecycle_hook_command_failure(error: ExecutionError) -> &'static str {
+    match error {
+        ExecutionError::CapacityRejected {
+            stage: centaeris_core::execution::ExecutionOperationStage::Start,
+            reason,
+        } if reason == "environment_host_busy" => "lifecycle_hook_start_busy",
+        _ => "lifecycle_hook_outcome_unknown",
+    }
+}
+
 impl LifecycleHookRunner for DockerExecutionHostRunner {
     fn run_hook(
         &self,
@@ -2231,8 +2299,12 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                 error.to_string(),
             )
         })?;
-        let plugin_path =
-            authorized_plugin_path(self.plugin_mounts.as_slice(), request.model_path.as_str())?;
+        let plugin_read_path = projected_plugin_read_path_at(
+            self.plugin_mounts.as_slice(),
+            Path::new(crate::skill_projection::PLUGIN_CATALOG_ROOT),
+            &request,
+        )?;
+        let plugin_path = plugin_read_path.is_some();
         let system_skill_path = authorized_system_skill_path(request.model_path.as_str())?;
         let read_only_path = plugin_path || system_skill_path;
         if read_only_path
@@ -2269,6 +2341,9 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
             );
         }
         let mut request = request;
+        if let Some(guest_path) = plugin_read_path {
+            request.model_path = guest_path;
+        }
         request.policy = self.execution_policy();
         if read_only_path {
             request
@@ -2368,6 +2443,71 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
     }
 }
 
+fn projected_plugin_read_path_at(
+    mounts: &[PluginMount],
+    catalog_root: &Path,
+    request: &ExecutionFileSystemRequest,
+) -> Result<Option<String>, ExecutionFileSystemError> {
+    let model_path = request.model_path.as_str();
+    let source_path = Path::new(model_path);
+    let source_scoped = source_path.starts_with(catalog_root);
+    let guest_scoped = model_path.starts_with(&format!("{PLUGIN_CONTAINER_ROOT}/"));
+    if !source_scoped && !guest_scoped {
+        return Ok(None);
+    }
+    if model_path.chars().any(char::is_control)
+        || model_path
+            .split(['/', '\\'])
+            .any(|part| matches!(part, "." | ".."))
+        || (guest_scoped && model_path.contains('\\'))
+    {
+        return Err(ExecutionFileSystemError::new(
+            ExecutionFileSystemErrorKind::InvalidPath,
+            "Plugin path is invalid",
+        ));
+    }
+    // The original model-visible source must belong to this Run's exact
+    // activated digest. No catalog lookup, fallback version, or name-only grant.
+    let translated = mounts.iter().find_map(|mount| {
+        let source = catalog_root.join(&mount.source_subpath);
+        let relative = source_path.strip_prefix(&source).ok()?;
+        let suffix = relative.to_str()?.replace('\\', "/");
+        Some(if suffix.is_empty() {
+            mount.destination.clone()
+        } else {
+            format!("{}/{suffix}", mount.destination)
+        })
+    });
+    let guest = if let Some(guest) = translated {
+        guest
+    } else if authorized_plugin_path(mounts, model_path)? {
+        model_path.to_string()
+    } else {
+        return Err(ExecutionFileSystemError::new(
+            ExecutionFileSystemErrorKind::PermissionDenied,
+            "Plugin package is not activated for this AgentRun",
+        ));
+    };
+    // Validate the translated destination as well as the original source scope.
+    if !authorized_plugin_path(mounts, &guest)? {
+        return Err(ExecutionFileSystemError::new(
+            ExecutionFileSystemErrorKind::PermissionDenied,
+            "Plugin destination is not activated",
+        ));
+    }
+    if !matches!(
+        request.operation,
+        ExecutionFileSystemOperation::ReadFile { .. }
+            | ExecutionFileSystemOperation::ListDirectory { .. }
+    ) {
+        return Err(ExecutionFileSystemError::new(
+            ExecutionFileSystemErrorKind::PermissionDenied,
+            "projected Skill and Plugin files are read-only",
+        ));
+    }
+    Ok(Some(guest))
+}
+
 fn authorized_plugin_path(
     plugin_mounts: &[PluginMount],
     model_path: &str,
@@ -2434,6 +2574,11 @@ fn ensure_container_inner(
 ) -> Result<(), String> {
     let body = container_create_body(expected)?;
     if let Some(facts) = inspect_container(expected.name)? {
+        require_plugin_mounts_match(
+            &facts.mounts,
+            expected.plugin_volume_name,
+            expected.plugin_mounts,
+        )?;
         if !facts.matches_configuration(expected) {
             return Err("sandbox container configuration mismatch; refusing replacement".into());
         }
@@ -2529,8 +2674,93 @@ pub(crate) fn resident_host_context() -> Result<(String, ResidentCapacity), Stri
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn observed_resident_sandboxes() -> Result<Vec<ObservedResidentSandbox>, String> {
-    observe_resident_container_ids(crate::docker_engine::list_managed(None)?)
+    observed_resident_sandboxes_excluding(&[])
+}
+
+pub(crate) fn observed_resident_sandboxes_excluding(
+    preparing: &[crate::resident_capacity::PreparingResidentSandbox],
+) -> Result<Vec<ObservedResidentSandbox>, String> {
+    let mut sandboxes = Vec::new();
+    let mut filter = PreparingInventoryFilter::new(preparing);
+    for id in crate::docker_engine::list_managed(None)? {
+        let Some(facts) = inspect_container(&id)? else {
+            continue;
+        };
+        let sandbox = observed_resident_sandbox(&facts)?;
+        if !filter.should_skip(&facts, &sandbox)? {
+            sandboxes.push(sandbox);
+        }
+    }
+    Ok(sandboxes)
+}
+
+struct PreparingInventoryFilter<'a> {
+    preparing: &'a [crate::resident_capacity::PreparingResidentSandbox],
+    containers_by_execution: HashMap<String, String>,
+}
+impl<'a> PreparingInventoryFilter<'a> {
+    fn new(preparing: &'a [crate::resident_capacity::PreparingResidentSandbox]) -> Self {
+        Self {
+            preparing,
+            containers_by_execution: HashMap::new(),
+        }
+    }
+
+    fn should_skip(
+        &mut self,
+        facts: &ContainerFacts,
+        sandbox: &ObservedResidentSandbox,
+    ) -> Result<bool, String> {
+        if !preparing_resident(facts, sandbox, self.preparing)? {
+            return Ok(false);
+        }
+        // One durable pending declaration can cover only one physical container.
+        // Keep this responsibility local to this inventory, before either collector
+        // omits the container from reconciliation or resource observation.
+        if let Some(container_id) = self.containers_by_execution.get(&sandbox.execution_id) {
+            if container_id != &facts.id {
+                return Err("managed preparing sandbox has duplicate physical containers; admission blocked".into());
+            }
+        } else {
+            self.containers_by_execution
+                .insert(sandbox.execution_id.clone(), facts.id.clone());
+        }
+        Ok(true)
+    }
+}
+
+fn preparing_resident(
+    facts: &ContainerFacts,
+    sandbox: &ObservedResidentSandbox,
+    preparing: &[crate::resident_capacity::PreparingResidentSandbox],
+) -> Result<bool, String> {
+    let Some(pending) = preparing
+        .iter()
+        .find(|pending| pending.execution_id == sandbox.execution_id)
+    else {
+        return Ok(false);
+    };
+    let label_matches =
+        |name: &str, expected: &str| facts.labels.get(name).map(String::as_str) == Some(expected);
+    if pending.allocation_owner != sandbox.allocation_owner
+        || pending.resources != sandbox.resources
+        || pending
+            .container_id
+            .as_ref()
+            .is_some_and(|id| id != &facts.id)
+        || !label_matches("centaeris.instance_id", &pending.instance_id)
+        || !label_matches("centaeris.environment_id", &pending.environment_id)
+        || !label_matches(
+            "centaeris.environment_profile_digest",
+            &pending.profile_digest,
+        )
+        || facts.image != pending.image_digest
+    {
+        return Err("managed preparing sandbox identity mismatch; admission blocked".into());
+    }
+    Ok(true)
 }
 
 fn observed_resident_sandboxes_for_run(
@@ -2664,7 +2894,9 @@ impl ContainerFacts {
     }
 
     fn matches(&self, expected: &ContainerExpectation<'_>) -> bool {
-        self.running && self.matches_configuration(expected)
+        self.running
+            && self.raw["State"]["Paused"].as_bool() != Some(true)
+            && self.matches_configuration(expected)
     }
 
     fn matches_configuration(&self, expected: &ContainerExpectation<'_>) -> bool {
@@ -2698,6 +2930,18 @@ impl ContainerFacts {
     }
 }
 
+fn require_plugin_mounts_match(
+    actual: &[ContainerMountFacts],
+    volume: &str,
+    expected: &[PluginMount],
+) -> Result<(), String> {
+    if plugin_mounts_match(actual, volume, expected) {
+        Ok(())
+    } else {
+        Err("environment_plugin_version_mismatch".into())
+    }
+}
+
 fn plugin_mounts_match(
     actual: &[ContainerMountFacts],
     plugin_volume_name: &str,
@@ -2721,7 +2965,7 @@ fn plugin_mounts_match(
                     && mount
                         .volume_options
                         .as_ref()
-                        .is_some_and(|options| options.subpath == expected.package_name)
+                        .is_some_and(|options| options.subpath == expected.source_subpath)
             })
         })
 }
@@ -5276,7 +5520,11 @@ mod tests {
                 hooks: vec![],
             }],
         };
-        let mounts = plugin_mounts(&activation);
+        let mounts = vec![PluginMount {
+            package_name: "demo".into(),
+            source_subpath: "demo".into(),
+            destination: format!("{PLUGIN_CONTAINER_ROOT}/demo"),
+        }];
         assert_eq!(mounts[0].destination, "/opt/centaeris/plugins/demo");
         assert_eq!(
             plugin_command_path(&activation).expect("plugin PATH"),
@@ -5317,6 +5565,274 @@ mod tests {
             authorized_system_skill_path("/opt/centaeris/system-skills/../banana/SKILL.md")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn immutable_skill_mapping_rejects_foreign_digest_traversal_and_mutation() {
+        let mounts = vec![PluginMount {
+            package_name: "banana".into(),
+            source_subpath: format!(".packages/{}/banana", "a".repeat(64)),
+            destination: format!("{PLUGIN_CONTAINER_ROOT}/banana"),
+        }];
+        let own = format!(
+            "{PLUGIN_CONTAINER_ROOT}/{}/skills/banana/SKILL.md",
+            mounts[0].source_subpath
+        );
+        let request = |path: String, operation| ExecutionFileSystemRequest {
+            operation_id: None,
+            cwd: WORKSPACE_DATA_ROOT.into(),
+            policy: ExecutionPolicy::workspace_write_no_network(WORKSPACE_DATA_ROOT),
+            model_path: path,
+            operation,
+        };
+        let read = || ExecutionFileSystemOperation::ReadFile { max_bytes: 4096 };
+        for path in [
+            own.replace(&"a".repeat(64), &"b".repeat(64)),
+            own.replace("/skills/", "/../skills/"),
+            own.replace("/skills/", "/./skills/"),
+            own.replace("/skills/", "/skills\\"),
+        ] {
+            assert!(
+                projected_plugin_read_path_at(
+                    &mounts,
+                    Path::new(PLUGIN_CONTAINER_ROOT),
+                    &request(path.clone(), read())
+                )
+                .is_err(),
+                "foreign or noncanonical source must not be translated: {path}"
+            );
+        }
+        for path in [
+            own.clone(),
+            format!("{PLUGIN_CONTAINER_ROOT}/banana/skills/banana/SKILL.md"),
+        ] {
+            let error = projected_plugin_read_path_at(
+                &mounts,
+                Path::new(PLUGIN_CONTAINER_ROOT),
+                &request(
+                    path,
+                    ExecutionFileSystemOperation::WriteFile {
+                        content: Vec::new(),
+                        observed_file_hash: None,
+                        create_only: false,
+                    },
+                ),
+            )
+            .expect_err("no projected write");
+            assert_eq!(error.kind, ExecutionFileSystemErrorKind::PermissionDenied);
+        }
+        assert_eq!(
+            projected_plugin_read_path_at(
+                &mounts,
+                Path::new(PLUGIN_CONTAINER_ROOT),
+                &request(own, read())
+            )
+            .unwrap(),
+            Some("/opt/centaeris/plugins/banana/skills/banana/SKILL.md".into())
+        );
+    }
+
+    struct MountedSkillReadRunner {
+        mounts: Vec<PluginMount>,
+        catalog_root: PathBuf,
+        reads: AtomicUsize,
+        dispatched_paths: Mutex<Vec<String>>,
+    }
+
+    impl ExecutionHostRunner for MountedSkillReadRunner {
+        fn status(&self, _policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
+            Ok(ExecutionHostStatus::remote(
+                true,
+                ExecutionHostHealth::Ready,
+                None,
+            ))
+        }
+        fn run_file_system_operation(
+            &self,
+            request: ExecutionFileSystemRequest,
+        ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
+            let guest = projected_plugin_read_path_at(&self.mounts, &self.catalog_root, &request)?
+                .ok_or_else(|| {
+                    ExecutionFileSystemError::new(
+                        ExecutionFileSystemErrorKind::PermissionDenied,
+                        "unmounted Skill path",
+                    )
+                })?;
+            assert!(authorized_plugin_path(&self.mounts, &guest)?);
+            let mount = self
+                .mounts
+                .iter()
+                .find(|mount| guest.starts_with(&format!("{}/", mount.destination)))
+                .unwrap();
+            let relative = guest
+                .strip_prefix(&format!("{}/", mount.destination))
+                .unwrap();
+            let source = self.catalog_root.join(&mount.source_subpath).join(relative);
+            let bytes =
+                std::fs::read(source).map_err(|error| filesystem_unavailable(error.to_string()))?;
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.dispatched_paths.lock().unwrap().push(guest.clone());
+            Ok(ExecutionFileSystemOutput::ReadFile(
+                ExecutionFileReadOutput {
+                    identity: ExecutionFileIdentity {
+                        key: guest.clone(),
+                        display_path: guest,
+                    },
+                    file_hash: format!("sha256:{:x}", Sha256::digest(&bytes)),
+                    bytes,
+                },
+            ))
+        }
+        fn run_host_command(
+            &self,
+            _operation_id: Option<&str>,
+            _request: ExecutionCommandRequest,
+            _probe: Option<&ExecutionCancellationProbe>,
+        ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+            unreachable!("Skill read never invokes a command")
+        }
+    }
+
+    #[tokio::test]
+    async fn immutable_skill_advertised_location_reads_only_the_activated_workspace_version() {
+        use centaeris_core::extension::skills::{render_available_skills, SkillIndex};
+        let root = tempfile::tempdir().unwrap();
+        let catalog = root.path().join("plugins");
+        let system = root.path().join("system");
+        let workspace = root.path().join("workspace");
+        for path in [&catalog, &system, &workspace] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let mut versions = Vec::new();
+        for body in ["workspace one instructions", "workspace two instructions"] {
+            let candidate = root.path().join("candidate");
+            std::fs::create_dir_all(candidate.join(".centaeris-plugin")).unwrap();
+            std::fs::create_dir_all(candidate.join("skills/banana")).unwrap();
+            std::fs::write(
+                candidate.join(".centaeris-plugin/plugin.json"),
+                r#"{"name":"banana","version":"1.0.0","paths":{"skills":["skills"]}}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                candidate.join("skills/banana/SKILL.md"),
+                format!("---\nname: banana\ndescription: Workspace fixture.\n---\n{body}\n"),
+            )
+            .unwrap();
+            let activation = centaeris_core::extension::build_plugin_activation_snapshot(
+                std::slice::from_ref(&candidate),
+            )
+            .unwrap();
+            let digest = activation.packages[0]
+                .package_digest
+                .strip_prefix("sha256:")
+                .unwrap();
+            let installed = catalog.join(".packages").join(digest).join("banana");
+            std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+            std::fs::rename(&candidate, &installed).unwrap();
+            let config = crate::skill_projection::workspace_skill_catalog_config_at(
+                &activation,
+                &catalog,
+                &system,
+            )
+            .unwrap();
+            let index = SkillIndex::load(config.clone()).unwrap();
+            let location = index
+                .catalog_items()
+                .into_iter()
+                .find(|skill| skill.name == "banana")
+                .unwrap()
+                .location;
+            assert!(render_available_skills(&index, 8000)
+                .unwrap()
+                .unwrap()
+                .contains(&location));
+            versions.push((activation, config, location, body));
+        }
+        // Core advertises canonical model paths without Windows' verbatim
+        // prefix. Give this disposable host fixture that same catalog identity.
+        let canonical_catalog = catalog.canonicalize().unwrap();
+        let raw_catalog = canonical_catalog.to_string_lossy();
+        let model_catalog_root = PathBuf::from(
+            raw_catalog
+                .strip_prefix(r"\\?\")
+                .unwrap_or(raw_catalog.as_ref())
+                .replace('\\', "/"),
+        );
+        for (position, (activation, config, location, body)) in versions.iter().enumerate() {
+            let runner = Arc::new(MountedSkillReadRunner {
+                mounts: plugin_mounts_at(activation, &catalog).unwrap(),
+                catalog_root: model_catalog_root.clone(),
+                reads: AtomicUsize::new(0),
+                dispatched_paths: Mutex::new(Vec::new()),
+            });
+            let binding = Arc::new(
+                ExecutionHostBinding::new(
+                    ExecutionHostMode::Remote,
+                    runner.clone(),
+                    workspace.clone(),
+                    ExecutionPolicy::workspace_write_no_network(&workspace),
+                )
+                .unwrap(),
+            );
+            let digest = format!("sha256:{}", "d".repeat(64));
+            let manifest = Arc::new(
+                ResolvedInputState::new(
+                    "run".into(),
+                    digest.clone(),
+                    Vec::new(),
+                    ResolvedInputManifest {
+                        schema: RESOLVED_INPUT_MANIFEST_SCHEMA.into(),
+                        agent_run_id: "run".into(),
+                        authorization_digest: digest,
+                        inputs: Vec::new(),
+                    },
+                    None,
+                )
+                .unwrap(),
+            );
+            let layer = ToolLayer::try_new_with_skill_catalog_config_and_execution_host_binding(
+                config.clone(),
+                binding,
+            )
+            .unwrap()
+            .with_resolved_input_manifest(manifest);
+            let read = layer
+                .execute_async(ToolInvocationRequest {
+                    tool_call_id: "read-own".into(),
+                    tool_name: "read".into(),
+                    args_json: serde_json::json!({"path":location}).to_string(),
+                })
+                .await;
+            assert_eq!(read.status, "ok", "{read:#?}");
+            assert!(read.content.contains(body));
+            assert!(!read.content.contains(versions[1 - position].3));
+            assert_eq!(
+                *runner.dispatched_paths.lock().unwrap(),
+                ["/opt/centaeris/plugins/banana/skills/banana/SKILL.md"]
+            );
+            let foreign = layer
+                .execute_async(ToolInvocationRequest {
+                    tool_call_id: "foreign".into(),
+                    tool_name: "read".into(),
+                    args_json: serde_json::json!({"path":versions[1-position].2}).to_string(),
+                })
+                .await;
+            assert_ne!(
+                foreign.status, "ok",
+                "foreign workspace digest must not be mounted"
+            );
+            let write = layer
+                .execute_async(ToolInvocationRequest {
+                    tool_call_id: "write".into(),
+                    tool_name: "write".into(),
+                    args_json: serde_json::json!({"path":location,"content":"overwritten"})
+                        .to_string(),
+                })
+                .await;
+            assert_ne!(write.status, "ok", "projected Skills are read-only");
+            assert_eq!(runner.reads.load(Ordering::SeqCst), 1);
+            assert!(std::fs::read_to_string(location).unwrap().contains(body));
+        }
     }
 
     struct ActivatedPluginReadRunner {
@@ -5388,7 +5904,11 @@ mod tests {
             }],
         };
         let runner = Arc::new(ActivatedPluginReadRunner {
-            mounts: plugin_mounts(&activation),
+            mounts: vec![PluginMount {
+                package_name: activation.packages[0].name.clone(),
+                source_subpath: activation.packages[0].name.clone(),
+                destination: format!("{PLUGIN_CONTAINER_ROOT}/banana"),
+            }],
             reads: AtomicUsize::new(0),
         });
         let workspace = std::env::temp_dir();
@@ -6131,6 +6651,7 @@ mod tests {
             plugin_volume_name: "centaeris-workspace-plugin-data".to_string(),
             plugin_mounts: vec![PluginMount {
                 package_name: "banana".to_string(),
+                source_subpath: "banana".to_string(),
                 destination: "/opt/centaeris/plugins/banana".to_string(),
             }],
             memory_mount: MemoryMount {

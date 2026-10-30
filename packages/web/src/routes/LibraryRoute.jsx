@@ -562,6 +562,7 @@ function LibraryPageContent() {
               {!visibleAgents.length && normalizedCatalogQuery ? <p className="libraryCatalogNoMatch">{t("libraryRoute.noMatchingAgents")}</p> : null}
             </div>
               : <>
+                  {(["owner", "admin"].includes(workspace.role) || user.isSuperuser) ? <Link to={`${base}/settings/plugins`}>{t("workspaceResources.manageSkills")}</Link> : null}
                   {catalogError ? <div className="errorBanner libraryError" role="alert">{catalogError}</div> : null}
                   {skills === null && !catalogError ? <div className="libraryCatalogEmpty" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.loadingSkills")}</div> : null}
                   {skills?.length === 0 && !catalogError ? <div className="libraryCatalogEmpty"><Layers aria-hidden="true" /><strong>{t("libraryRoute.noSkillsAvailableInThisWorkspace")}</strong><span>{t("libraryRoute.enableAPluginContainingSkillsToSeeThemHere")}</span></div> : null}

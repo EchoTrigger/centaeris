@@ -139,3 +139,14 @@ test("confirmed terminal time is passed to unresolved tool groups without invent
   assert.match(render([user, tool], { completedAtMs: 10000 }), /data-tool-run-ended="true"/);
   assert.match(render([user, tool], { running: true }), /data-tool-run-ended="false"/);
 });
+
+test("an uncommitted terminal submission keeps its input and stops working without a Core event", () => {
+  for (const status of ["failed", "cancelled", "completed"]) {
+    const markup = render([], { pendingUserMessage: { ...pending, status, completedAtMs: 10000 }, running: false });
+    assert.ok(markup.includes(pending.text));
+    assert.ok(!markup.includes("workProgress.working"));
+    assert.equal((markup.match(/workProgress.worked/g) || []).length, 1);
+    assert.equal(markup.includes('role="status"'),false);
+    assert.equal(markup.includes("agentChat.retry"), false);
+  }
+});

@@ -33,7 +33,7 @@ pub(super) fn provision(
         Ok(value) => value,
         Err(_) => return json_error_response(503, "provision_host_unavailable"),
     };
-    match state.job_store.provision_environment(&body.authorization,key.as_bytes(),&host,limits,crate::docker_execution_host::observed_resident_sandboxes,|allocation|crate::docker_execution_host::provision_environment(&body.authorization.payload,allocation)){
+    match state.job_store.provision_environment(&body.authorization,key.as_bytes(),&host,limits,crate::resident_capacity::FilteredResidentInventory(crate::docker_execution_host::observed_resident_sandboxes_excluding),|allocation|crate::docker_execution_host::provision_environment(&body.authorization.payload,allocation)){
         Ok(allocation)=>Ok(http_response(200,"application/json",serde_json::to_vec(&json!({"schema":"runtime.environment.provision.result.v1","operationId":body.authorization.payload.operation_id,"environmentId":allocation.environment_id,"instanceId":allocation.instance_id,"containerId":allocation.container_id,"profileDigest":allocation.profile_digest,"status":"resident"})).map_err(|_|"provision_response_invalid")?)),
         Err(_)=>json_error_response(409,"provision_outcome_unconfirmed"),
     }

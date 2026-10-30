@@ -258,7 +258,7 @@
 }
 .shHomeAvatar { width: 64px; height: 64px; }
 .shHomeAvatar svg { width: 28px; }
-.shHome h1 { margin: 8px 0 0; color: var(--on-surface); font-size: 27px; font-weight: 650; letter-spacing: -.02em; }
+.shHome h1 { max-width: 100%; overflow-wrap: anywhere; margin: 8px 0 0; color: var(--on-surface); font-size: 27px; font-weight: 650; letter-spacing: -.02em; }
 .shHome p { margin: 0; color: var(--process-text); font-size: 13px; }
 .shQuickActions { display: flex; flex-wrap: wrap; grid-row: 3; justify-content: center; gap: 24px; margin: 14px auto 0; color: var(--process-text); }
 .shQuickAction {
@@ -373,6 +373,18 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shAgentCreate button:focus-visible, .shAgentCreate input:focus-visible, .shAgentCreate textarea:focus-visible { outline: 2px solid #2f6fbd; outline-offset: 2px; }
 .shAgentIdentity { display: grid; justify-items: center; gap: 9px; padding-top: 2px; }
 .shAgentHeroMark { width: 112px; height: 112px; border-radius: 24px !important; box-shadow: 0 14px 30px rgba(3, 32, 67, .14); }
+.shAgentAvatarEdit { position: relative; display: grid; border: 0; border-radius: 24px; background: transparent; padding: 0; cursor: pointer; }
+.shAgentAvatarEdit > span:last-child { position: absolute; right: -4px; bottom: -2px; display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--outline-variant); border-radius: 50%; background: var(--surface-color); color: var(--on-surface); }
+.shAgentAvatarEdit > span:last-child svg { width: 13px; height: 13px; }
+.shAgentAvatarEdit:disabled { cursor: default; opacity: .6; }
+.shAvatarUpload { display: grid; justify-items: center; gap: 8px; margin-top: -8px; }
+.shAvatarUpload > div { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; }
+.shAvatarUpload button { display: inline-flex; min-height: 32px; align-items: center; gap: 6px; border: 1px solid var(--outline-variant); border-radius: 6px; background: var(--surface-color); color: var(--on-surface); padding: 0 10px; font: inherit; font-size: 11px; cursor: pointer; }
+.shAvatarUpload button:hover:not(:disabled) { background: var(--surface-variant); }
+.shAvatarUpload button:disabled { opacity: .6; cursor: default; }
+.shAvatarUpload button svg { width: 13px; height: 13px; }
+.shAvatarUpload > small { color: var(--process-text); font-size: 10px; line-height: 1.5; text-align: center; }
+.shAvatarUpload > p { margin: 0; }
 .shAgentNameInput { width: min(420px, 100%); height: 46px; margin: 0 auto; border: 0; border-bottom: 1px solid var(--outline-variant); border-radius: 0; background: transparent; color: var(--on-surface); padding: 0 10px; font: inherit; font-size: 21px; font-weight: 600; line-height: 1.2; text-align: center; }
 .shAgentNameInput::placeholder { color: var(--process-text); }
 .shAgentNameInput:focus-visible { border-bottom-color: var(--primary-color); outline: 0; box-shadow: 0 1px #2f6fbd; }
@@ -453,7 +465,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shDeletedPage { width: min(720px, calc(100% - 64px)); margin: 0 auto; padding: 100px 0; }
 .shDeletedPage h1 { margin: 0; font-size: 44px; }
 
-.shAgentMark { display: inline-grid; place-items: center; overflow: hidden; border-radius: 9px !important; background: var(--primary-color); }
+.shAgentMark { display: inline-grid; place-items: center; overflow: hidden; border-radius: 9px !important; background: transparent; }
 .shAgentMark img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .workspaceConversationBreadcrumb a { color: var(--on-surface); font-weight: 600; text-decoration: none; }
 .shAgentTopbar > a { margin-left: auto; color: var(--primary-color); text-decoration: none; }

@@ -77,6 +77,7 @@ pub struct ApiModelClient {
     thinking_mode: Option<String>,
     model_max_output_tokens: u32,
     client: reqwest::Client,
+    timings: crate::observations::RunTimings,
 }
 
 pub struct ApiModelClientConfig {
@@ -92,6 +93,10 @@ pub struct ApiModelClientConfig {
 
 impl ApiModelClient {
     pub fn new(config: ApiModelClientConfig) -> Self {
+        let timings = crate::observations::RunTimings::new(
+            &format!("agent_run.lifecycle:{}", config.agent_run_id),
+            &config.agent_run_id,
+        );
         Self {
             api_internal_url: config.api_internal_url,
             internal_api_token: config.internal_api_token,
@@ -102,7 +107,13 @@ impl ApiModelClient {
             thinking_mode: config.thinking_mode,
             model_max_output_tokens: config.model_max_output_tokens,
             client: reqwest::Client::new(),
+            timings,
         }
+    }
+
+    pub fn with_timings(mut self, timings: crate::observations::RunTimings) -> Self {
+        self.timings = timings;
+        self
     }
 
     fn prepared_prompt_max_output_tokens(
@@ -148,8 +159,31 @@ impl ApiModelClient {
     async fn call_api(
         &self,
         request: &ModelClientRequest,
+        attempt: u32,
     ) -> Result<ModelClientResponse, ModelClientError> {
         let model_run_request = self.model_run_request(request)?;
+        let mut observation = self.timings.model_http(&request.turn_id, attempt, false);
+        let result = self
+            .call_api_response(model_run_request, &mut observation)
+            .await;
+        match &result {
+            Ok(response) => observation.complete(
+                response
+                    .generate_result
+                    .tool_calls
+                    .iter()
+                    .map(|call| call.id.as_str()),
+            ),
+            Err(_) => observation.finish(false),
+        }
+        result
+    }
+
+    async fn call_api_response(
+        &self,
+        model_run_request: ModelRunRequest<'_>,
+        observation: &mut crate::observations::ModelHttp,
+    ) -> Result<ModelClientResponse, ModelClientError> {
         let url = format!(
             "{}/internal/model-runs",
             self.api_internal_url.trim_end_matches('/')
@@ -204,7 +238,9 @@ impl ApiModelClient {
                 false,
             )
         })?;
-        model_response(payload)
+        let response = model_response(payload)?;
+        observation.first_event();
+        Ok(response)
     }
 
     async fn call_api_with_retries(
@@ -213,7 +249,7 @@ impl ApiModelClient {
     ) -> Result<ModelClientResponse, ModelClientError> {
         let max_retries = request.session_config.max_retries;
         for retry in 0..=max_retries {
-            match self.call_api(request).await {
+            match self.call_api(request, retry.saturating_add(1)).await {
                 Ok(mut response) => {
                     response.provider_attempts = retry.saturating_add(1);
                     return Ok(response);
@@ -242,8 +278,25 @@ impl ApiModelClient {
         &self,
         request: &ModelClientRequest,
         sink: &mut (dyn FnMut(ModelClientStreamEvent) + Send),
+        attempt: u32,
     ) -> Result<ModelClientResponse, ModelClientError> {
         let model_run_request = self.model_run_request(request)?;
+        let mut observation = self.timings.model_http(&request.turn_id, attempt, true);
+        let result = self
+            .call_api_stream_response(model_run_request, sink, &mut observation)
+            .await;
+        if result.is_err() {
+            observation.finish(false);
+        }
+        result
+    }
+
+    async fn call_api_stream_response(
+        &self,
+        model_run_request: ModelRunRequest<'_>,
+        sink: &mut (dyn FnMut(ModelClientStreamEvent) + Send),
+        observation: &mut crate::observations::ModelHttp,
+    ) -> Result<ModelClientResponse, ModelClientError> {
         let url = format!(
             "{}/internal/model-runs",
             self.api_internal_url.trim_end_matches('/')
@@ -319,7 +372,9 @@ impl ApiModelClient {
                                 )
                             },
                         )?;
-                        return Err(hosted_model_error(failure)?);
+                        let error = hosted_model_error(failure)?;
+                        observation.first_event();
+                        return Err(error);
                     }
                     Some("reasoning") => {
                         if event.as_object().is_none_or(|fields| fields.len() != 3) {
@@ -339,6 +394,7 @@ impl ApiModelClient {
                                     false,
                                 )
                             })?;
+                        observation.first_event();
                         sink(ModelClientStreamEvent::Reasoning {
                             text: text.to_string(),
                         });
@@ -354,6 +410,8 @@ impl ApiModelClient {
                                     false,
                                 )
                             })?;
+                        observation.first_event();
+                        observation.text_delta(delta);
                         streamed_text.push_str(delta);
                         sink(ModelClientStreamEvent::Token {
                             content: delta.to_string(),
@@ -373,6 +431,7 @@ impl ApiModelClient {
                                 )
                             },
                         )?);
+                        observation.first_event();
                         terminal_received = true;
                     }
                     _ => {
@@ -407,6 +466,13 @@ impl ApiModelClient {
             ));
         }
         let response = model_response(payload)?;
+        observation.complete(
+            response
+                .generate_result
+                .tool_calls
+                .iter()
+                .map(|call| call.id.as_str()),
+        );
         for call in &response.generate_result.tool_calls {
             sink(ModelClientStreamEvent::ToolCallReady {
                 call_id: call.id.clone(),
@@ -440,7 +506,8 @@ impl ApiModelClient {
                     }
                     sink(event);
                 };
-                self.call_api_stream(request, &mut attempt_sink).await
+                self.call_api_stream(request, &mut attempt_sink, retry.saturating_add(1))
+                    .await
             };
             match result {
                 Ok(mut response) => {
@@ -854,6 +921,97 @@ mod tests {
     use centaeris_core::model::ModelSessionConfig;
     use centaeris_core::tool::ModelToolChoice;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn model_observations_follow_valid_events_nonempty_text_and_full_response() {
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+        let base = Instant::now();
+        let elapsed = Arc::new(Mutex::new(Duration::ZERO));
+        let clock = elapsed.clone();
+        let (timings, records) = crate::observations::RunTimings::for_test(
+            "agent_run.lifecycle:observed-run",
+            "observed-run",
+            Arc::new(move || base + *clock.lock().unwrap()),
+        );
+        timings.request_started("turn-1", "model_request:observed");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (next_text, text_ready) = tokio::sync::oneshot::channel();
+        let (next_result, result_ready) = tokio::sync::oneshot::channel();
+        let (result_sent, result_received) = tokio::sync::oneshot::channel();
+        let (finish_body, finish_ready) = tokio::sync::oneshot::channel();
+        let server_clock = elapsed.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_request(&mut stream).await;
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await.unwrap();
+            async fn frame(stream: &mut tokio::net::TcpStream, value: serde_json::Value) {
+                let body = format!("data: {value}\n\n");
+                stream
+                    .write_all(format!("{:X}\r\n{body}\r\n", body.len()).as_bytes())
+                    .await
+                    .unwrap();
+            }
+            *server_clock.lock().unwrap() = Duration::from_millis(25);
+            frame(&mut stream, serde_json::json!({"schema":"api.model.stream.v1","type":"reasoning","text":"private reasoning"})).await;
+            text_ready.await.unwrap();
+            frame(
+                &mut stream,
+                serde_json::json!({"schema":"api.model.stream.v1","type":"delta","delta":""}),
+            )
+            .await;
+            frame(&mut stream, serde_json::json!({"schema":"api.model.stream.v1","type":"delta","delta":"private response"})).await;
+            result_ready.await.unwrap();
+            frame(&mut stream, serde_json::json!({"schema":"api.model.stream.v1","type":"result","text":"private response","reasoningContent":null,"toolCalls":[],"usage":null})).await;
+            result_sent.send(()).unwrap();
+            finish_ready.await.unwrap();
+            stream.write_all(b"0\r\n\r\n").await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = model_client(format!("http://{address}"), None, 1_024).with_timings(timings);
+        let generation = tokio::spawn(async move {
+            client.generate_stream(&model_request(), &mut |event| {
+                if matches!(&event, ModelClientStreamEvent::Reasoning { .. }) {
+                    event_tx.send("reasoning").unwrap();
+                }
+                if matches!(&event, ModelClientStreamEvent::Token { content } if !content.is_empty()) {
+                    event_tx.send("text").unwrap();
+                }
+            }).await
+        });
+        assert_eq!(event_rx.recv().await.unwrap(), "reasoning");
+        assert_eq!(records.lock().unwrap().len(), 1);
+        assert_eq!(records.lock().unwrap()[0]["phase"], "modelFirstEvent");
+        *elapsed.lock().unwrap() = Duration::from_millis(60);
+        next_text.send(()).unwrap();
+        assert_eq!(event_rx.recv().await.unwrap(), "text");
+        assert_eq!(records.lock().unwrap().len(), 2);
+        assert_eq!(records.lock().unwrap()[1]["phase"], "modelFirstText");
+        *elapsed.lock().unwrap() = Duration::from_millis(200);
+        next_result.send(()).unwrap();
+        result_received.await.unwrap();
+        assert!(!generation.is_finished());
+        assert_eq!(records.lock().unwrap().len(), 2);
+        *elapsed.lock().unwrap() = Duration::from_millis(260);
+        finish_body.send(()).unwrap();
+        let response = generation.await.unwrap().unwrap();
+        server.await.unwrap();
+        assert_eq!(response.generate_result.content, "private response");
+        let records = records.lock().unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0]["elapsedMs"], 25.0);
+        assert_eq!(records[1]["elapsedMs"], 60.0);
+        assert_eq!(records[2]["elapsedMs"], 260.0);
+        assert_eq!(records[2]["phase"], "modelHttp");
+        assert_eq!(records[2]["outcome"], "ok");
+        for record in records.iter() {
+            assert_eq!(record["requestId"], "model_request:observed");
+            assert_eq!(record["jobId"], "agent_run.lifecycle:observed-run");
+            assert!(!record.to_string().contains("private"));
+        }
+    }
 
     #[tokio::test]
     async fn api_output_limit_reaches_core_recovery_without_transport_retry_or_ready_tool() {

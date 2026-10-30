@@ -353,7 +353,6 @@ pub(super) fn docker_absent(
     config: &HostSupervisorConfig,
     target: &HostLaunchTarget,
 ) -> Result<bool, String> {
-    let _lock = COMMAND_LOCK.lock().map_err(|_| "host_command_failed")?;
     let endpoint = format!("unix://{}", config.docker_socket);
     let filter = format!("id={}", target.container_id);
     let bytes = command_bytes_unlocked(

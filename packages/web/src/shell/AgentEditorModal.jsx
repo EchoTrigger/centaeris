@@ -1,13 +1,13 @@
 
 import { useTranslation } from "../i18n";
 import { useEffect, useRef, useState } from "react";
-import { FileText, Lock, Pencil, X } from "lucide-react";
+import { FileText, Lock, Pencil, Upload, X } from "lucide-react";
 import { useModalDialog } from "../components/useModalDialog";
 import { AgentMark } from "./AgentMark";
 
 const AVATAR_CHOICES = [
   ["centaeris", "Centaeris"],
-  ["banana", "none"],
+  ["banana", "Banana"],
 ];
 
 export function AgentEditorModal({ agent, heading, submitLabel, busy = false, error = "", onClose, onSave }) {
@@ -17,12 +17,24 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
   const [description, setDescription] = useState(agent.description || "");
   const [instructions, setInstructions] = useState(agent.instructions || "");
   const [avatarKind, setAvatarKind] = useState(agent.avatarKind);
+  const [avatarDataBase64, setAvatarDataBase64] = useState(undefined);
+  const [avatarPreview, setAvatarPreview] = useState("");
+  const [avatarError, setAvatarError] = useState("");
+  const [readingAvatar, setReadingAvatar] = useState(false);
+  const avatarInputRef = useRef(null);
+  const avatarReaderRef = useRef(null);
+  const hasCustomAvatar = Boolean(avatarPreview || (avatarDataBase64 === undefined && agent.avatarUrl));
+  useEffect(() => () => {
+    const reader = avatarReaderRef.current;
+    avatarReaderRef.current = null;
+    reader?.abort();
+  }, []);
   const [confirmingClose, setConfirmingClose] = useState(false);
   const continueEditingRef = useRef(null);
   const dirty = name !== (agent.name || "")
     || description !== (agent.description || "")
     || instructions !== (agent.instructions || "")
-    || avatarKind !== agent.avatarKind;
+    || avatarKind !== agent.avatarKind || avatarDataBase64 !== undefined;
   const dialogRef = useModalDialog({
     focusKey: view,
     busy,
@@ -42,16 +54,70 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
   function submit(event) {
     event.preventDefault();
     const trimmedName = name.trim();
-    if (!trimmedName) return;
+    if (!trimmedName || readingAvatar || busy) return;
     onSave({
       name: trimmedName,
       description: description.trim(),
       instructions: instructions.trim(),
       avatarKind,
+      ...(avatarDataBase64 === undefined ? {} : { avatarDataBase64 }),
     });
   }
 
+  function cancelAvatarRead() {
+    const reader = avatarReaderRef.current;
+    avatarReaderRef.current = null;
+    reader?.abort();
+    setReadingAvatar(false);
+  }
+
+  function chooseAvatar(kind) {
+    cancelAvatarRead();
+    setAvatarKind(kind);
+    setAvatarDataBase64(agent.avatarUrl ? null : undefined);
+    setAvatarPreview("");
+    setAvatarError("");
+  }
+
+  function selectAvatar(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || busy) return;
+    cancelAvatarRead();
+    if (file.size > 1024 * 1024 || !["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+      setAvatarError(t("agentEditorModal.avatarInvalid"));
+      return;
+    }
+    setAvatarError("");
+    setReadingAvatar(true);
+    const reader = new FileReader();
+    avatarReaderRef.current = reader;
+    reader.onload = () => {
+      if (avatarReaderRef.current !== reader) return;
+      avatarReaderRef.current = null;
+      setReadingAvatar(false);
+      const result = reader.result;
+      if (typeof result !== "string" || !result.startsWith(`data:${file.type};base64,`)) {
+        setAvatarError(t("agentEditorModal.avatarInvalid"));
+        return;
+      }
+      setAvatarDataBase64(result.slice(result.indexOf(",") + 1));
+      setAvatarPreview(result);
+    };
+    reader.onerror = () => {
+      if (avatarReaderRef.current !== reader) return;
+      avatarReaderRef.current = null;
+      setReadingAvatar(false);
+      setAvatarError(t("agentEditorModal.avatarInvalid"));
+    };
+    reader.readAsDataURL(file);
+  }
+
   function reset() {
+    cancelAvatarRead();
+    setAvatarDataBase64(undefined);
+    setAvatarPreview("");
+    setAvatarError("");
     setName(agent.name || "");
     setDescription(agent.description || "");
     setInstructions(agent.instructions || "");
@@ -114,7 +180,10 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
 
         <h1>{heading}</h1>
             <div className="shAgentIdentity">
-              <AgentMark className="shAgentHeroMark" agent={{ avatarKind }} />
+              <button className="shAgentAvatarEdit" type="button" disabled={busy} onClick={() => avatarInputRef.current?.click()} aria-label={t("agentEditorModal.uploadAvatar")} title={t("agentEditorModal.uploadAvatar")}>
+                <AgentMark className="shAgentHeroMark" agent={{ avatarKind, avatarUrl: avatarDataBase64 === undefined ? agent.avatarUrl : null }} previewSrc={avatarPreview || undefined} />
+                <span><Pencil aria-hidden="true" /></span>
+              </button>
               <input
                 className="shAgentNameInput"
                 name="agentName"
@@ -132,10 +201,11 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
               <legend>{t("agentEditorModal.chooseAvatar")}</legend>
               {AVATAR_CHOICES.map(([kind, label]) => (
                 <button
-                  className={avatarKind === kind ? "isActive" : ""}
+                  className={!hasCustomAvatar && avatarKind === kind ? "isActive" : ""}
                   type="button"
-                  aria-pressed={avatarKind === kind}
-                  onClick={() => setAvatarKind(kind)}
+                  aria-pressed={!hasCustomAvatar && avatarKind === kind}
+                  disabled={busy}
+                  onClick={() => chooseAvatar(kind)}
                   key={kind}
                 >
                   <AgentMark agent={{ avatarKind: kind }} />
@@ -143,6 +213,14 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
                 </button>
               ))}
             </fieldset>
+
+            <div className="shAvatarUpload">
+              <input ref={avatarInputRef} type="file" accept="image/png,image/jpeg,image/webp" aria-label={t("agentEditorModal.uploadAvatar")} hidden disabled={busy} onChange={selectAvatar} />
+              <div><button type="button" disabled={busy} onClick={() => avatarInputRef.current?.click()}><Upload aria-hidden="true" />{t("agentEditorModal.uploadAvatar")}</button>{hasCustomAvatar ? <button type="button" disabled={busy} onClick={() => chooseAvatar("centaeris")}>{t("agentEditorModal.restoreAvatar")}</button> : null}</div>
+              <small>{t("agentEditorModal.avatarHint")}</small>
+              {avatarError ? <p className="errorBanner" role="alert">{avatarError}</p> : null}
+              <span className="srOnly" role="status" aria-live="polite">{readingAvatar ? t("agentEditorModal.readingAvatar") : ""}</span>
+            </div>
 
             <label className="shCreateLabel" htmlFor="agentDescription">{t("agentEditorModal.overview")}</label>
             <input
@@ -177,7 +255,7 @@ export function AgentEditorModal({ agent, heading, submitLabel, busy = false, er
             </footer> : <footer>
               <span className="srOnly" role="status" aria-live="polite">{busy ? t("agentEditorModal.savingAgent") : ""}</span>
               <button type="button" disabled={busy} onClick={reset}>{t("agentEditorModal.reset")}</button>
-              <button className="shPrimaryButton" type="submit" disabled={busy || !name.trim()}>{busy ? t("modelSettings.saving") : submitLabel}</button>
+              <button className="shPrimaryButton" type="submit" disabled={busy || readingAvatar || !name.trim()}>{busy ? t("modelSettings.saving") : submitLabel}</button>
             </footer>}
       </form>
     </div>

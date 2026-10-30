@@ -23,7 +23,8 @@ const transcript = subject => nodes(subject.tree, n => n.type.name === "Transcri
 function setup(context, detail, overrides = {}) {
   const previousWindow = globalThis.window, previousDocument = globalThis.document; const previousStorage = globalThis.sessionStorage;
   globalThis.window = { innerWidth: 1280, addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {} };
-  globalThis.sessionStorage = { getItem: () => null };
+  const stored = new Map();
+  globalThis.sessionStorage = { getItem:key=>stored.get(key)??null, setItem:(key,value)=>stored.set(key,value), removeItem:key=>stored.delete(key) };
   globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {} };
   context.after(() => { globalThis.window = previousWindow; globalThis.document = previousDocument; globalThis.sessionStorage = previousStorage; });
   const requests = [];
@@ -44,7 +45,7 @@ function setup(context, detail, overrides = {}) {
   }, request: async path => {
     requests.push(path);
     let data;
-    if (path === "/api/models") data = { models: [] };
+    if (path === "/api/models?workspaceId=workspace") data = { models: [] };
     else if (path.includes("session-projects")) data = { projects: [] };
     else if (path.includes("/workspaces/")) data = { sessions: [session("work", origin), session("manual", null)] };
     else if (path.endsWith("/assets")) data = { assets: [] };

@@ -487,6 +487,19 @@ test("active AgentRun discovery is bound to the page waterline", async () => {
   ]);
 });
 
+test("current queued Run discovery works before a transcript page is available", async () => {
+  const paths=[];
+  const transport=createWorkspaceTranscriptTransport({request:async path=>{
+    paths.push(path);
+    return new Response(JSON.stringify({schema:"workspace.transcript.active_agent_run.v1",sessionId,
+      agentRun:{agentRunId:"queued-run",status:"queued",streamCursor:"cursor:0"}}));
+  }});
+  const result=await transport.loadActiveAgentRun({sessionId,sourceHighWater:"0"},new AbortController().signal);
+  assert.equal(result.agentRun.agentRunId,"queued-run");
+  assert.equal(result.agentRun.status,"queued");
+  assert.deepEqual(paths,[`/api/sessions/${sessionId}/transcript/active-agent-run?sourceHighWater=0`]);
+});
+
 test("optional tool detail failures do not block committed text or advance the cursor before patches", async () => {
   const store = createTranscriptViewStore();
   const epoch = store.openTail(page({ blocks: [block("tail", 1, 10)] }));

@@ -23,6 +23,41 @@ The start script builds required images, runs initialization, and starts the
 persistent stack. One-shot image checks confirm required binaries exist; they
 do not remain as background services.
 
+## Execution defaults
+
+The deployment template uses `perRun`, Docker/runsc and measured shared admission
+(`RUNTIME_NATIVE_SHARED_ADMISSION=1`). Worker slots and execute leases are both 8;
+global and Workspace environment counts are 8, memory budgets are 12 GiB, and
+workspace byte budgets are 32 GiB. Each environment retains its 2-CPU/4-GiB
+ceiling. Host-derived memory headroom and conservative unknown-allocation charges
+remain active, so eight concurrent environments are not guaranteed on every host.
+`DOCKER_CREATE_CONCURRENCY=2` bounds create calls per Runtime process.
+
+Use the matching HostSupervisor with cgroup v2 and an OverlayFS-backed Docker
+store, with automatic idle pause and demand resume enabled. The running limit
+is 8 and idle grace is 3000 ms, matching the accepted eight-environment profile.
+Pause eligibility requires released controller authority and no queued demand;
+it does not pause an active Run merely because the model is waiting. Pausing
+retains memory and all resident resource charges. Docker may report `overlayfs`
+with the containerd image store or `overlay2` with the classic image store. Check the target daemon before rollout:
+
+```sh
+docker info --format '{{.Driver}} {{.CgroupVersion}}'
+```
+
+The application does not select or migrate Docker storage. A host using `vfs`
+needs a separately planned storage transition; do not change its storage driver
+in place during an application rollout. Explicit runc deployments must disable
+shared admission with `RUNTIME_NATIVE_SHARED_ADMISSION=0` and explicitly clear
+both `RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS` and `RUNTIME_RUNSC_IDLE_PAUSE_MS`.
+
+Existing private `.env` files are not overwritten by these defaults. Reconcile
+the listed variables explicitly and preserve secrets and existing signed
+environment profiles. `perRun` still destroys an instance after terminal cleanup;
+enabling rotation does not turn it into cross-Run retained execution. The
+dense-memory fixture separately overrides the Workspace memory budget to 8 GiB. See
+[configuration](../reference/Configuration.md#resident-sandbox-capacity) for limits.
+
 ## Initialization
 
 `api-init` runs before API replicas. It validates or creates the installed
@@ -30,11 +65,17 @@ Plugin catalog, applies Django migrations, and bootstraps the configured
 administrator. Initialization failure blocks rollout and must not clear the
 Plugin volume.
 
-The first-release `app_core` schema is one `0001_initial` migration, including
-the PostgreSQL tool-result lookup index. It initializes a fresh database; it
-does not convert development migration histories or change existing volumes.
-Choose and confirm a data retention strategy before replacing a development
-database with a fresh first-release database.
+For this native runsc revision, `api-init` applies the forward Django migration
+chain through `0032_agent_avatar_image`; `0031_workspace_resource_scope` adds the
+Workspace resource authority used by this deployment. Run the same migration
+chain against fresh and existing supported databases. Runtime performs its own
+published-schema upgrade to store version 17 when the matching service starts.
+
+Drain existing workers and complete their cleanup responsibilities before
+changing execution mode or replacing the HostSupervisor. Preserve database and
+file volumes, historical authorizations and signed environment profiles. Existing
+bindings keep their original configuration; stopped instances retain their
+file-protection and cleanup responsibilities throughout the upgrade.
 
 The `gc` service runs the server-side lifecycle collector. Worker and Runtime
 start only after their required dependencies become healthy.

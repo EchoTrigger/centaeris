@@ -6,6 +6,7 @@ use centaeris_core::execution::{
 };
 use sha2::{Digest, Sha256};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MaintenanceTarget {
     pub fence: EnvironmentTaskFence,
     pub profile: crate::agent_run_authorization::EnvironmentProfile,
@@ -14,6 +15,7 @@ pub(crate) struct MaintenanceTarget {
     pub allocation_execution_id: String,
     pub allocation_agent_run_id: Option<String>,
     pub allocation_owner: centaeris_core::execution::EnvironmentTaskOwner,
+    pub authorization_digest: String,
     pub binding_digest: String,
     pub image_digest: String,
     pub profile_digest: String,
@@ -149,30 +151,68 @@ fn locked_target(
         allocation_agent_run_id: allocation.get(4),
         allocation_owner: serde_json::from_str(&allocation.get::<_, String>(12))
             .map_err(|_| "allocation_owner_invalid")?,
+        authorization_digest: allocation.get(5),
         binding_digest: allocation.get(6),
         image_digest: allocation.get(7),
         profile_digest: b.profile_digest.clone(),
     })
 }
 
+impl MaintenanceTarget {
+    pub(crate) fn allocation(
+        &self,
+        binding: &MaintenanceBinding,
+    ) -> super::execution_instances::RetainedInstanceAllocation {
+        super::execution_instances::RetainedInstanceAllocation {
+            allocation_execution_id: self.allocation_execution_id.clone(),
+            allocation_agent_run_id: self.allocation_agent_run_id.clone(),
+            allocation_owner: self.allocation_owner.clone(),
+            instance_id: self.fence.environment_instance_id.clone(),
+            environment_id: binding.environment_id.clone(),
+            host_id: self.host_id.clone(),
+            image_digest: self.image_digest.clone(),
+            authorization_digest: self.authorization_digest.clone(),
+            binding_digest: self.binding_digest.clone(),
+            profile_digest: self.profile_digest.clone(),
+            container_id: Some(self.container_id.clone()),
+            reused: true,
+        }
+    }
+    fn running_binding(&self, binding: &MaintenanceBinding) -> super::runsc_rotation::RunscBinding {
+        super::runsc_rotation::RunscBinding::from(&self.allocation(binding))
+    }
+}
+
+fn reserve_maintenance_running(
+    client: &mut postgres::Client,
+    auth: &MaintenanceAuthorization,
+    key: &[u8],
+    limit: Option<u32>,
+) -> Result<Option<MaintenanceTarget>, String> {
+    let Some(limit) = limit else {
+        return Ok(None);
+    };
+    let mut tx = client
+        .transaction()
+        .map_err(|_| "maintenance_store_unavailable")?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    let target = locked_target(&mut tx, auth, key)?;
+    super::runsc_rotation::reserve_running(&mut tx, &target.running_binding(&auth.payload), limit)?;
+    tx.commit()
+        .map_err(|_| "maintenance_running_reservation_unavailable")?;
+    Ok(Some(target))
+}
+
 impl PostgresRuntimeStore {
-    /// The closure performs only a bounded dispatch or receipt query and must
-    /// verify physical host/container facts before touching the task service.
+    /// Keep current maintenance authority pinned throughout bounded dispatch.
     pub(crate) fn with_current_maintenance<T: Send>(
         &self,
         auth: &MaintenanceAuthorization,
         key: &[u8],
         action: impl FnOnce(&MaintenanceTarget) -> Result<T, String> + Send,
     ) -> Result<T, String> {
-        self.with_client(|client| {
-            let mut tx = client
-                .transaction()
-                .map_err(|_| "maintenance_store_unavailable")?;
-            let target = locked_target(&mut tx, auth, key)?;
-            let result = action(&target)?;
-            tx.commit().map_err(|_| "maintenance_store_unavailable")?;
-            Ok(result)
-        })
+        let limit = crate::runsc_rotation::Config::from_env()?.map(|config| config.max_running);
+        self.with_current_maintenance_with_running_limit(auth, key, limit, action)
     }
 
     pub(crate) fn with_maintenance_completion<T: Send>(
@@ -181,20 +221,81 @@ impl PostgresRuntimeStore {
         key: &[u8],
         action: impl FnOnce(&MaintenanceTarget) -> Result<(T, EnvironmentTaskResult), String> + Send,
     ) -> Result<T, String> {
+        let limit = crate::runsc_rotation::Config::from_env()?.map(|config| config.max_running);
+        self.with_maintenance_completion_with_running_limit(auth, key, limit, action)
+    }
+
+    // Explicit limit is a narrow seam for owned-database behavior tests; production
+    // uses the same validated startup configuration as execution admission.
+    pub(super) fn with_current_maintenance_with_running_limit<T: Send>(
+        &self,
+        auth: &MaintenanceAuthorization,
+        key: &[u8],
+        limit: Option<u32>,
+        action: impl FnOnce(&MaintenanceTarget) -> Result<T, String> + Send,
+    ) -> Result<T, String> {
         self.with_client(|client| {
+            let reserved = reserve_maintenance_running(client, auth, key, limit)?;
+            let mut tx = client
+                .transaction()
+                .map_err(|_| "maintenance_store_unavailable")?;
+            if limit.is_some() {
+                super::resource_commit::require_durable_resource_commit(&mut tx)?;
+            }
+            let target = locked_target(&mut tx, auth, key)?;
+            if reserved
+                .as_ref()
+                .is_some_and(|original| original != &target)
+            {
+                return Err("maintenance_running_target_changed".into());
+            }
+            let result = action(&target)?;
+            if limit.is_some() {
+                super::runsc_rotation::observe_running(
+                    &mut tx,
+                    &target.running_binding(&auth.payload),
+                    &target.container_id,
+                )?;
+            }
+            tx.commit().map_err(|_| "maintenance_store_unavailable")?;
+            Ok(result)
+        })
+    }
+
+    pub(super) fn with_maintenance_completion_with_running_limit<T: Send>(
+        &self,
+        auth: &MaintenanceAuthorization,
+        key: &[u8],
+        limit: Option<u32>,
+        action: impl FnOnce(&MaintenanceTarget) -> Result<(T, EnvironmentTaskResult), String> + Send,
+    ) -> Result<T, String> {
+        self.with_client(|client| {
+            let reserved = reserve_maintenance_running(client, auth, key, limit)?;
             let mut tx = client
                 .transaction()
                 .map_err(|_| "maintenance_store_unavailable")?;
             super::resource_commit::require_durable_resource_commit(&mut tx)?;
             let target = locked_target(&mut tx, auth, key)?;
+            if reserved
+                .as_ref()
+                .is_some_and(|original| original != &target)
+            {
+                return Err("maintenance_running_target_changed".into());
+            }
             let (output, result) = action(&target)?;
+            if limit.is_some() {
+                super::runsc_rotation::observe_running(
+                    &mut tx,
+                    &target.running_binding(&auth.payload),
+                    &target.container_id,
+                )?;
+            }
             write_completion(&mut tx, auth, &result)?;
             tx.commit()
                 .map_err(|_| "maintenance_completion_unavailable")?;
             Ok(output)
         })
     }
-
     /// Called only with a confirmed EndOperation result from the trusted service.
     /// An HTTP caller cannot upload a completion or release authority by assertion.
     pub(crate) fn record_maintenance_completion(

@@ -7,7 +7,7 @@ import SettingsRoute from "../../src/routes/SettingsRoute";
 // Synthetic frontend/API behavior only. This does not certify model connectivity,
 // input delivery, coordinator admission or the unrun backend database tests.
 const workspace = { id: "fixture-workspace", name: "Synthetic workspace", role: "member" };
-const agent = { id: "fixture-agent", workspaceId: workspace.id, name: "Synthetic Agent", description: "", instructions: "", avatarKind: "centaeris", status: "active", deletedAt: null, createdAt: "2026-09-30T14:00:00Z", updatedAt: "2026-09-30T14:00:00Z" };
+const agent = { id: "fixture-agent", workspaceId: workspace.id, name: "Synthetic Agent", description: "", instructions: "", avatarKind: "centaeris", avatarUrl: null, status: "active", deletedAt: null, createdAt: "2026-09-30T14:00:00Z", updatedAt: "2026-09-30T14:00:00Z" };
 const user = { id: "fixture-user", email: "fixture@example.invalid", isStaff: false, isSuperuser: false };
 const model = { id: "fixture-exact-model", displayName: "Exact synthetic model", providerId: "fixture-provider", providerDisplayName: "Synthetic provider", modelName: "synthetic-native", contextTokens: 1000, maxOutputTokens: 100, thinkingMode: "high", thinkingModes: ["low", "high"] };
 let saved: { schema: string; agentId: string; modelConfigRef: string | null; thinkingMode: string | null; status: string } = { schema: "agent.model_settings.v1", agentId: agent.id, modelConfigRef: null, thinkingMode: null, status: "unconfigured" };

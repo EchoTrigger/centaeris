@@ -1,3 +1,4 @@
+mod execution_capacity_tests;
 use centaeris_core::runtime::contracts::{CheckpointRecord, EventVisibility, RuntimeEvent};
 use centaeris_core::session::external_context::{
     ExternalContextObject, ExternalContextObjectLink, ExternalContextStorePort,
@@ -51,7 +52,9 @@ mod maintenance_completion_schema_tests;
 mod owned_database;
 mod provision_authority_tests;
 mod residency_tests;
+mod resource_lifecycle_tests;
 pub(super) mod retained_instance_tests;
+mod shared_admission_tests;
 mod snapshot_cas_tests;
 mod tool_result_storage_tests;
 mod wait_handoff_tests;
@@ -1647,22 +1650,34 @@ fn postgres_hosted_worker_reclaim_changes_claim_identity() {
     assert!(store
         .complete_runtime_job(CompleteRuntimeJobRequest {
             job_id: id.into(),
-            lease_owner: old,
+            lease_owner: old.clone(),
             output_refs: vec![],
             completed_at_ms: now + 1
         })
         .is_err());
+    assert!(
+        store
+            .start_runtime_job(StartRuntimeJobRequest {
+                job_id: id.into(),
+                lease_owner: old,
+                started_at_ms: now + 1,
+            })
+            .is_err(),
+        "the replaced claim cannot start work"
+    );
+    // A new lease permits starting this scheduling-only fixture. It does not
+    // supply the terminal/cleanup/release facts required for lifecycle completion;
+    // resource_lifecycle_tests exercises that complete contract with real grants.
     store
-        .complete_runtime_job(CompleteRuntimeJobRequest {
+        .start_runtime_job(StartRuntimeJobRequest {
             job_id: id.into(),
             lease_owner: current,
-            output_refs: vec![],
-            completed_at_ms: now + 1,
+            started_at_ms: now + 1,
         })
         .unwrap();
     assert_eq!(
         store.get_runtime_job(id).unwrap().unwrap().status,
-        RuntimeJobStatus::Succeeded
+        RuntimeJobStatus::Running
     );
 }
 
@@ -2707,7 +2722,7 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
     assert_eq!(outbox_generation, 0);
     let tables = audit
         .query(
-            "SELECT table_name FROM information_schema.tables WHERE table_schema='runtime'",
+            "SELECT table_name FROM information_schema.tables WHERE table_schema='runtime' AND table_type='BASE TABLE'",
             &[],
         )
         .expect("tables");
@@ -2929,6 +2944,10 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             r#"
             DROP TABLE IF EXISTS public.app_core_sessionevent;
             DROP TABLE IF EXISTS public.app_core_session CASCADE;
+            DROP TABLE IF EXISTS public.app_core_agentrunenvironmentrelease;
+            DROP TABLE IF EXISTS public.app_core_agentrun CASCADE;
+            CREATE TABLE public.app_core_agentrun(id text PRIMARY KEY,session_id text NOT NULL,"preAdmissionCancelledAt" timestamptz);
+            CREATE TABLE public.app_core_agentrunenvironmentrelease(agent_run_id text PRIMARY KEY,environment_id text NOT NULL,authorization_digest text NOT NULL,controller_epoch bigint NOT NULL);
             CREATE TABLE public.app_core_session(
                 id varchar(64) PRIMARY KEY,
                 workspace_id varchar(64) NOT NULL
@@ -2950,6 +2969,7 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             );
             INSERT INTO public.app_core_session(id, workspace_id)
             VALUES('session_fenced_terminal', 'workspace_fenced_terminal');
+            INSERT INTO public.app_core_agentrun(id,session_id) VALUES('agent_run_fenced_terminal','session_fenced_terminal');
             "#,
         )
         .expect("create session event table");
@@ -2997,7 +3017,10 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
     };
     let mut lifecycle_job = job(
         "agent_run.lifecycle:agent_run_fenced_terminal",
-        "fenced-terminal",
+        &format!(
+            "agent_run.lifecycle:agent_run_fenced_terminal:{}",
+            start.authorization_digest
+        ),
     );
     lifecycle_job.job_kind = "agent_run.lifecycle".to_string();
     lifecycle_job.session_id = Some(session_id.to_string());
@@ -3299,14 +3322,31 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
         Some(expected_state),
         "committed terminal history is authoritative before any terminal outbox"
     );
-    store
-        .complete_runtime_job(CompleteRuntimeJobRequest {
-            job_id: "agent_run.lifecycle:agent_run_fenced_terminal".into(),
-            lease_owner: new_owner,
-            output_refs: vec![],
-            completed_at_ms: now_ms + 14,
-        })
+    let completion = CompleteRuntimeJobRequest {
+        job_id: "agent_run.lifecycle:agent_run_fenced_terminal".into(),
+        lease_owner: new_owner,
+        output_refs: vec![],
+        completed_at_ms: now_ms + 14,
+    };
+    assert!(
+        store
+            .complete_runtime_job(completion.clone())
+            .unwrap_err()
+            .contains("cleanup and release receipts required"),
+        "terminal history alone cannot complete a lifecycle Job"
+    );
+    // This transcript fixture never allocated a physical instance. Supply its
+    // matching never-allocated cleanup and controller release before exercising
+    // terminal outbox publication and acknowledgement below.
+    let environment = &start.environment_authorization.payload.environment_id;
+    audit.execute("INSERT INTO runtime.agent_run_cleanup_receipts(receipt_id,agent_run_id,environment_id,authorization_digest,controller_epoch,allocation_kind,instance_id,cleanup_complete,file_protection,recorded_at_ms,physical_removed,removed_container_id) VALUES('cleanup:fenced_terminal',$1,$2,$3,1,'neverAllocated',NULL,true,'deferred',$4,false,NULL)",&[&agent_run_id,&environment,&start.authorization_digest,&(now_ms+14)]).unwrap();
+    audit
+        .execute(
+            "INSERT INTO public.app_core_agentrunenvironmentrelease VALUES($1,$2,$3,1)",
+            &[&agent_run_id, &environment, &start.authorization_digest],
+        )
         .unwrap();
+    store.complete_runtime_job(completion).unwrap();
     let pending = store.list_pending_runtime_job_outbox(10).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(
@@ -3845,7 +3885,7 @@ fn postgres_runtime_store_rejects_schema_drift() {
 fn hosted_execution_capacity_is_shared_across_replicas_and_released_on_yield() {
     let _guard = TEST_LOCK.lock().unwrap();
     let limits = crate::execution_capacity::ExecutionCapacity::from_env().unwrap();
-    assert_eq!((limits.global, limits.tenant), (8, 4));
+    assert_eq!(limits.global, 8);
     let url = test_url();
     reset_store(&url);
     let replicas = [
@@ -3906,20 +3946,6 @@ fn hosted_execution_capacity_is_shared_across_replicas_and_released_on_yield() {
         assert!(claimed.len() <= 8);
     }
     assert_eq!(claimed.len(), 8);
-    assert_eq!(
-        claimed
-            .iter()
-            .filter(|job| job.job_id.contains("_a_"))
-            .count(),
-        4
-    );
-    assert_eq!(
-        claimed
-            .iter()
-            .filter(|job| job.job_id.contains("_b_"))
-            .count(),
-        4
-    );
     let waiting = replicas[1]
         .wait_for_runtime_jobs(
             &["agent_run.lifecycle".to_string()],
@@ -4871,7 +4897,9 @@ fn postgres_fenced_rewrite_tombstones_completed_dispatch_request() {
         "SELECT count(*) FROM public.app_core_sessionevent WHERE agent_run_id=$1 AND NOT projects_to_agent_run_stream", &[&source_run],
     ).unwrap().get(0);
     assert_eq!(inactive, 6);
-    println!("completed-dispatch-rewrite-ok: real Core planner and fenced PostgreSQL rewrite invalidate committed call/result after a terminal Final; Session lock serializes replacement");
+    println!(
+        "completed-dispatch-rewrite-ok: real Core planner and fenced PostgreSQL rewrite invalidate committed call/result after a terminal Final; Session lock serializes replacement"
+    );
 }
 
 #[test]
@@ -4921,3 +4949,10 @@ fn postgres_runtime_store_recovery_pages_preserve_bytes_and_fixed_watermark() {
     Ok(())
     }).unwrap();
 }
+
+/// Require an explicitly owned database before restoring migration fixtures.
+pub(in crate::postgres_store) fn require_owned_migration_fixture(db: &mut Client) {
+    owned_database::require_owned_database(db);
+}
+
+mod runsc_rotation_tests;

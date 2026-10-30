@@ -6,6 +6,8 @@ use centaeris_core::execution::{
     ENVIRONMENT_TASK_SCHEMA,
 };
 
+mod busy_retry;
+
 pub(super) fn signing_key() -> Result<String, String> {
     env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
         .ok()
@@ -94,50 +96,57 @@ pub(super) fn takeover(
     id: &str,
     fence: &EnvironmentTaskFence,
 ) -> Result<(), String> {
-    let result = relay(
-        expected,
-        id,
-        EnvironmentTaskRequest::Takeover {
-            environment_instance_id: fence.environment_instance_id.clone(),
-            controller_owner: fence.controller_owner.clone(),
-            controller_epoch: fence.controller_epoch,
-            controller_purpose: fence.controller_purpose.clone(),
-        },
-    )?;
-    if matches!(result,EnvironmentTaskResult::TakenOver{fence:ref actual} if actual==fence) {
-        use hosted_execution::host_supervisor::{
-            HostHelperRequest, HostLaunchTarget, TrustedHelperKind,
-        };
-        let scope = match &fence.controller_owner {
-            EnvironmentTaskOwner::AgentRun { run_id } => {
-                centaeris_core::execution::EnvironmentTaskScope::Run {
-                    run_id: run_id.clone(),
-                }
+    crate::observations::timed("controllerTakeover", || {
+        let result = relay(
+            expected,
+            id,
+            EnvironmentTaskRequest::Takeover {
+                environment_instance_id: fence.environment_instance_id.clone(),
+                controller_owner: fence.controller_owner.clone(),
+                controller_epoch: fence.controller_epoch,
+                controller_purpose: fence.controller_purpose.clone(),
+            },
+        )?;
+        if !matches!(result, EnvironmentTaskResult::TakenOver { fence: ref actual } if actual == fence)
+        {
+            return Err("retained takeover acknowledgement mismatch".into());
+        }
+        Ok(())
+    })?;
+    use hosted_execution::host_supervisor::{
+        HostHelperRequest, HostLaunchTarget, TrustedHelperKind,
+    };
+    let scope = match &fence.controller_owner {
+        EnvironmentTaskOwner::AgentRun { run_id } => {
+            centaeris_core::execution::EnvironmentTaskScope::Run {
+                run_id: run_id.clone(),
             }
-            EnvironmentTaskOwner::MaintenanceOperation { operation_id } => {
-                centaeris_core::execution::EnvironmentTaskScope::Operation {
-                    operation_id: operation_id.clone(),
-                }
+        }
+        EnvironmentTaskOwner::MaintenanceOperation { operation_id } => {
+            centaeris_core::execution::EnvironmentTaskScope::Operation {
+                operation_id: operation_id.clone(),
             }
-        };
-        let request = HostHelperRequest {
-            fence: fence.clone(),
-            operation_id: fence.operation_id("prepare-workspace"),
-            scope,
-            kind: TrustedHelperKind::PrepareWorkspace,
-            input_digest: format!("sha256:{:x}", Sha256::digest([])),
-            input_length: 0,
-        };
-        let target = HostLaunchTarget {
-            environment_instance_id: expected.instance_id.into(),
-            container_id: id.into(),
-            environment_id: expected.environment_id.into(),
-            profile_digest: expected
-                .profile_digest
-                .ok_or("environment_profile_required")?
-                .into(),
-            image_digest: expected.image_digest.into(),
-        };
+        }
+    };
+    let request = HostHelperRequest {
+        fence: fence.clone(),
+        operation_id: fence.operation_id("prepare-workspace"),
+        scope,
+        kind: TrustedHelperKind::PrepareWorkspace,
+        input_digest: format!("sha256:{:x}", Sha256::digest([])),
+        input_length: 0,
+    };
+    let target = HostLaunchTarget {
+        environment_instance_id: expected.instance_id.into(),
+        container_id: id.into(),
+        environment_id: expected.environment_id.into(),
+        profile_digest: expected
+            .profile_digest
+            .ok_or("environment_profile_required")?
+            .into(),
+        image_digest: expected.image_digest.into(),
+    };
+    crate::observations::timed("workspacePreparation", || {
         let mut error = "environment_workspace_preparation_unknown".to_owned();
         for _ in 0..2 {
             match crate::environment_supervisor::helper(
@@ -153,10 +162,9 @@ pub(super) fn takeover(
             }
         }
         Err(error)
-    } else {
-        Err("retained takeover acknowledgement mismatch".into())
-    }
+    })
 }
+
 impl DockerExecutionHostRunner {
     pub(crate) fn is_hot_reuse(&self) -> bool {
         self.retained_allocation.as_ref().is_some_and(|a| a.reused)
@@ -191,15 +199,21 @@ impl DockerExecutionHostRunner {
             return Err("retained task fence mismatch".into());
         }
         request.validate_authority()?;
-        self.with_supervisor_target(|target| {
-            crate::environment_supervisor::task(
-                target.clone(),
-                EnvironmentTaskEnvelope {
-                    schema: ENVIRONMENT_TASK_SCHEMA.into(),
-                    request,
-                },
-            )
-        })
+        busy_retry::call(
+            &request,
+            |request| {
+                self.with_supervisor_target(|target| {
+                    crate::environment_supervisor::task(
+                        target.clone(),
+                        EnvironmentTaskEnvelope {
+                            schema: ENVIRONMENT_TASK_SCHEMA.into(),
+                            request: request.clone(),
+                        },
+                    )
+                })
+            },
+            thread::sleep,
+        )
     }
     pub(super) fn with_supervisor_target<T: Send>(
         &self,
@@ -261,19 +275,44 @@ impl DockerExecutionHostRunner {
         request: &hosted_execution::host_supervisor::HostHelperRequest,
         input: &mut (impl Read + Seek + Send),
     ) -> Result<EnvironmentTaskSnapshot, String> {
-        let mut error = "environment_helper_start_unknown".to_owned();
-        for _ in 0..2 {
+        let mut attempt = || {
             input
                 .rewind()
                 .map_err(|_| "environment_helper_input_unavailable")?;
-            match self.with_supervisor_target(|target| {
+            self.with_supervisor_target(|target| {
                 crate::environment_supervisor::helper_start(target, request.clone(), input)
-            }) {
-                Ok(task) => return Ok(task),
-                Err(e) => error = e,
-            }
+            })
+        };
+        if request.fence.controller_purpose != EnvironmentTaskControllerPurpose::Execute {
+            return busy_retry::call(request, |_| attempt(), thread::sleep);
         }
-        Err(error)
+        super::admission_wait::start(
+            attempt,
+            || {
+                let store = self
+                    .resident_store
+                    .as_ref()
+                    .ok_or("retained control store missing")?;
+                let lease = self
+                    .resident_lease
+                    .as_ref()
+                    .ok_or("retained control lease missing")?;
+                let state = store.agent_run_execution_control_state(
+                    &self.agent_run_id,
+                    &lease.job_id,
+                    &lease.lease_owner,
+                    crate::now_ms()?,
+                )?;
+                Ok(if state.cancellation_requested {
+                    Some("agent_run_cancel_requested".into())
+                } else if !state.lifecycle_lease_current {
+                    Some("agent_run_lifecycle_lease_lost".into())
+                } else {
+                    None
+                })
+            },
+            thread::sleep,
+        )
     }
     fn finish_helper_current(
         &self,
@@ -309,7 +348,14 @@ impl DockerExecutionHostRunner {
                 task_id: task.task_id.clone(),
                 cursor: 0,
                 max_bytes: centaeris_core::execution::ENVIRONMENT_TASK_READ_BYTES as u32,
-            })?;
+            });
+            let response = match response {
+                Ok(response) => response,
+                // Only this Query was rejected. Keep observing the same helper
+                // until its existing deadline; never create another helper.
+                Err(error) if error == "environment_host_busy" => continue,
+                Err(error) => return Err(error),
+            };
             let EnvironmentTaskResult::Task { task: current, .. } = response else {
                 return Err("environment_helper_outcome_unknown".into());
             };
@@ -322,13 +368,19 @@ impl DockerExecutionHostRunner {
             task = current;
         }
         // Authorize the bounded response header, then release DB pins before raw I/O.
-        self.with_supervisor_target(|target| {
-            crate::environment_supervisor::prepare_helper_output(
-                target,
-                request.clone(),
-                &task.task_id,
-            )
-        })
+        busy_retry::call(
+            &task.task_id,
+            |task_id| {
+                self.with_supervisor_target(|target| {
+                    crate::environment_supervisor::prepare_helper_output(
+                        target,
+                        request.clone(),
+                        task_id,
+                    )
+                })
+            },
+            thread::sleep,
+        )
     }
     fn helper_request(
         &self,
@@ -487,7 +539,7 @@ impl crate::http::agent_runs::retained_cleanup::RetainedCleanupHost
         }
         validate_plugin_activation_snapshot(&origin.plugin_activation)?;
         let plugin_volume_name = docker_volume_name_from_environment(PLUGIN_VOLUME_NAME_ENV)?;
-        let mounts = plugin_mounts(&origin.plugin_activation);
+        let mounts = plugin_mounts(&origin.plugin_activation)?;
         let name = container_name(&self.allocation.allocation_execution_id);
         let helper = environment_container::helper_path()?;
         let expected = ContainerExpectation {

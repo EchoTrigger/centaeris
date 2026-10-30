@@ -4,6 +4,8 @@ import hashlib
 import json
 import unicodedata
 
+from django.db import connection
+
 from app_core.assets import MAX_DIRECT_INPUT_BYTES, safe_filename
 from app_core.app_delegations import require_delegated_session
 from app_core.models import Agent, AgentRun, HostedOperationReceipt, Session
@@ -51,8 +53,25 @@ def request_digest(payload, *, session_id=None, uploads=()):
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def lock_operation_identity(user, workspace_id, command, operation_id):
+    """Serialize the exact receipt unique domain, before taking Agent/Session locks.
+
+    Public submitters hold Workspace SHARE. Other receipt writers retain Workspace
+    UPDATE and therefore already exclude them; those paths do not acquire this
+    mutex late. A hash collision can only serialize unrelated identities; receipt
+    lookup and its database unique constraint still compare the complete identity.
+    """
+    if not connection.in_atomic_block:
+        raise RuntimeError("hosted_operation_lock_requires_transaction")
+    identity = json.dumps([user.pk, workspace_id, command, operation_id], ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(b"workspace:hosted-operation-lock:v1\0" + identity.encode("utf-8")).digest()
+    key = int.from_bytes(digest[:8], "big", signed=True)
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [key])
+
+
 def replay_operation(user, workspace_id, command, operation_id, digest=None, *, app_delegation=None):
-    """Caller holds the Workspace/membership lock; authorize before digest comparison."""
+    """Caller pins Workspace authorization and serializes identity; authorize before digest comparison."""
     receipt = HostedOperationReceipt.objects.filter(
         user=user, workspace_id=workspace_id, command=command, operationId=operation_id,
     ).first()

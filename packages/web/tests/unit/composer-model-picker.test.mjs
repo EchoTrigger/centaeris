@@ -45,3 +45,42 @@ test("ordinary Session sending and active-Run states retain existing picker rest
   assert.equal(control(subject({ modelGroups: [], currentModel: undefined }), "model").props.disabled, true);
   assert.equal(control(subject({ currentModel: { ...model, thinkingModes: [] } }), "thinking").props.disabled, true);
 });
+
+
+test("a known Run keeps an enabled Stop control during submission and history loading", () => {
+  let stops=0;
+  const tree=subject({hasActiveAgentRun:true,activeAgentRunId:"queued-run",sending:true,loadingHistory:true,onCancelActiveAgentRun:()=>stops++});
+  const stop=elements(tree,node=>node.type==="button" && node.props["aria-label"]==="appRoute.stop")[0];
+  assert.ok(stop);
+  assert.equal(Boolean(stop.props.disabled),false);
+  stop.props.onClick();assert.equal(stops,1);
+});
+
+test("a pending cancellation remains actionable with the existing compact controls", () => {
+  let stops = 0;
+  const tree=subject({hasActiveAgentRun:true,activeAgentRunId:"queued-run",cancellingAgentRunId:"queued-run", onCancelActiveAgentRun:()=>stops++});
+  const stop=elements(tree,node=>node.type==="button" && node.props["aria-label"]==="appRoute.stop")[0];
+  assert.equal(Boolean(stop.props.disabled),false);
+  assert.equal(stop.props["aria-busy"],true);
+  stop.props.onClick();
+  assert.equal(stops,1);
+  assert.equal(elements(tree,node=>node.props?.role==="status").length,0);
+});
+
+test("send and draft remain actionable while validation or submission is pending", () => {
+  for (const state of [{draft:""}, {modelId:""}, {sending:true}, {loadingHistory:true}, {workspaceAvailable:false}]) {
+    const tree=subject(state);
+    const send=elements(tree,node=>node.type==="button" && node.props.type==="submit")[0];
+    assert.equal(Boolean(send.props.disabled),false);
+    assert.equal(Boolean(elements(tree,node=>node.type==="textarea")[0].props.disabled),false);
+  }
+});
+
+test("a submission awaiting its Run identity still offers Stop", () => {
+  let stops=0;
+  const tree=subject({hasActiveAgentRun:true,activeAgentRunId:"",controlBusy:true,onCancelActiveAgentRun:()=>stops++});
+  const stop=elements(tree,node=>node.type==="button" && node.props["aria-label"]==="appRoute.stop")[0];
+  assert.equal(Boolean(stop.props.disabled),false);
+  assert.equal(stop.props["aria-busy"],true);
+  stop.props.onClick();assert.equal(stops,1);
+});

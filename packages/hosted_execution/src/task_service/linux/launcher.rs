@@ -1,6 +1,7 @@
 //! Launch into an attested OCI container, never onto the supervisor host.
 use super::*;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use crate::host_supervisor::linux::commands::{self, AdoptedHandoff, OwnedChild, OwnedPid};
+use std::os::unix::process::CommandExt;
 
 #[derive(Clone)]
 pub(crate) struct OciTarget {
@@ -25,19 +26,17 @@ pub(super) struct TaskProcess<'a> {
 }
 pub(super) enum TaskChild {
     #[cfg(test)]
-    Local(Child),
-    Native {
-        pid: u32,
-        status: Option<std::process::ExitStatus>,
-    },
+    Local(OwnedChild),
+    Native(OwnedPid),
     Runsc(super::runsc::RunscChild),
 }
 impl TaskChild {
+    #[cfg(test)]
     pub(super) fn id(&self) -> u32 {
         match self {
             #[cfg(test)]
             Self::Local(child) => child.id(),
-            Self::Native { pid, .. } => *pid,
+            Self::Native(child) => child.id(),
             Self::Runsc(child) => child.id(),
         }
     }
@@ -46,21 +45,7 @@ impl TaskChild {
             Self::Runsc(child) => child.try_wait(),
             #[cfg(test)]
             Self::Local(child) => child.try_wait(),
-            Self::Native { pid, status } => {
-                if status.is_some() {
-                    return Ok(*status);
-                }
-                let mut raw = 0;
-                // SAFETY: this supervisor is the subreaper; this PID is exclusively owned by this handle.
-                let result = unsafe { libc::waitpid(*pid as i32, &mut raw, libc::WNOHANG) };
-                if result < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if result > 0 {
-                    *status = Some(std::process::ExitStatus::from_raw(raw));
-                }
-                Ok(*status)
-            }
+            Self::Native(child) => child.try_wait(),
         }
     }
 }
@@ -124,9 +109,9 @@ impl OciTarget {
             cwd,
             env,
         } = request;
-        let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-            .lock()
-            .map_err(|_| "host_command_failed")?;
+        let gate =
+            commands::instance_gate(&self.runtime_path, &self.runtime_root, &self.container_id);
+        let _commands = gate.lock().map_err(|_| "host_command_failed")?;
         self.verify_identity()?;
         let process = match trusted {
             Some(launch) => launch.process(&self.process)?,
@@ -178,7 +163,9 @@ impl OciTarget {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            let mut launcher = command.spawn().map_err(|_| "task_launch_unknown")?;
+            let handoff = AdoptedHandoff::begin().map_err(|_| "task_launch_unknown")?;
+            let mut launcher =
+                OwnedChild::spawn(&mut command).map_err(|_| "task_launch_unknown")?;
             let input = launcher.stdin.take();
             let stdout = launcher.stdout.take().expect("piped stdout");
             let stderr = launcher.stderr.take().expect("piped stderr");
@@ -241,12 +228,12 @@ impl OciTarget {
                 let _ = cgroup_kill(cgroup);
                 return Err("task_leader_cgroup_rejected".into());
             }
-            crate::host_supervisor::linux::MANAGED_PIDS
-                .lock()
-                .map_err(|_| "task_service_failed")?
-                .insert(pid);
             Ok(Spawned {
-                child: TaskChild::Native { pid, status: None },
+                child: TaskChild::Native(
+                    handoff
+                        .adopt(pid)
+                        .map_err(|_| "task_leader_ownership_unknown")?,
+                ),
                 input,
                 stdout,
                 stderr,
@@ -255,12 +242,5 @@ impl OciTarget {
         let _ = fs::remove_file(spec);
         let _ = fs::remove_file(pidfile);
         result
-    }
-}
-impl Drop for TaskChild {
-    fn drop(&mut self) {
-        if let Ok(mut pids) = crate::host_supervisor::linux::MANAGED_PIDS.lock() {
-            pids.remove(&self.id());
-        }
     }
 }

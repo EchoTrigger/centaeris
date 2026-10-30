@@ -32,7 +32,7 @@ window.fetch = async (input, init) => {
   requests.push(url.pathname);
   return Response.json({ schema: "session.preview.v1", sessionId: url.pathname.split("/")[3], runFact: null, outputs: [], nextAfterArtifactId: null, hasMore: false });
 };
-const agent = { id: "synthetic-agent", name: "Synthetic Agent", avatarKind: "centaeris" } as AgentSummary;
+const agent = { id: "synthetic-agent", name: "Synthetic Agent", avatarKind: "centaeris", avatarUrl: null } as AgentSummary;
 const sessions: ReferencedSession[] = Array.from({ length: 40 }, (_, i) => ({ sessionId: `synthetic-${i}`, title: `Work ${i}: a complete independently opened Session`, agentId: agent.id, workspaceId: "synthetic-workspace", runState: "unknown" }));
 const noop = () => {};
 const digest = `sha256:${"a".repeat(64)}`;

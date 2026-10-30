@@ -35,6 +35,8 @@ def serialize_agent(agent: Agent) -> dict:
         "description": version.description if version else configuration.description,
         "instructions": version.instructions if version else configuration.instructions,
         "avatarKind": version.avatar_kind if version else configuration.avatar_kind,
+        "avatarUrl": (f"/api/agents/{agent.id}/avatar?v={agent.avatar_digest}"
+            if agent.avatar_digest and not agent.definition_id and not agent.is_business_instance else None),
         "status": agent.status,
         "deletedAt": agent.deletedAt.isoformat() if agent.deletedAt else None,
         "createdAt": agent.createdAt.isoformat(),

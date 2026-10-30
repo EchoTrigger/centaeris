@@ -11,21 +11,30 @@
 profile 由 model 名后缀决定：
   *instant    立即吐完（纯编排极限）
   *paced      固定 TTFT 300ms + 20 chunk × 50ms（真实流式生命周期）
-  *marathon   第二次请求起 TTFT 500ms + 长 chunk 流（默认 300×1s，供 S1 挂观察者）
-  *toolstorm  连续 4 轮 function_call（bash）再收尾（供 S4 沙箱 exec 风暴）
+  *marathon   第二次请求起 TTFT 500ms + 长 chunk 流（默认 300×1s，供事件流负载挂观察者）
+  *toolstorm  连续 4 轮 function_call（bash）再收尾（供工具执行负载）
 
 行为脚本（无状态、按请求内容判定）：
   input 里没有 function_call_output → 返回 function_call
   input 里有 function_call_output   → 按 profile 决定续调或收尾
-usage 形状为标准 OpenAI Responses 结构，字段路径以 B1 冒烟实测为准。
+usage 形状为标准 OpenAI Responses 结构，字段路径以单Run冒烟实测为准。
 """
 
 import json
 import os
 import ssl
 import shlex
+import importlib.util
+import http.client
+import socket
+import re
+from pathlib import Path
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+_workload_spec = importlib.util.spec_from_file_location('perf_fixed_workload', Path(__file__).with_name('fixed_workload.py'))
+_fixed_workload = importlib.util.module_from_spec(_workload_spec)
+_workload_spec.loader.exec_module(_fixed_workload)
 
 TOOL_NAME = os.environ.get("MOCK_TOOL_NAME", "bash")
 TOOL_ARGS = os.environ.get("MOCK_TOOL_ARGS", '{"command":"echo perf"}')
@@ -34,6 +43,18 @@ TLS_PEM = "/opt/mock/tls.pem"
 FINAL_TEXT = "Perf run complete. The deterministic mock has nothing further to add."
 WAITING_MARKER = "restart-matrix parent waiting"
 WAITING_CHILD_MARKER = "Restart matrix durable wait child"
+
+
+class UnixHTTPConnection(http.client.HTTPConnection):
+    """Private opt-in bridge; no caller headers or network destination cross it."""
+    def __init__(self, path):
+        super().__init__("localhost", timeout=180)
+        self.socket_path = path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self.socket_path)
 
 
 def capture_command(rounds):
@@ -180,7 +201,7 @@ class Handler(BaseHTTPRequestHandler):
     def streams(request: dict):
         return request.get("stream", False) is True
 
-    def emit_final(self, response_id: str, model: str):
+    def emit_final(self, response_id: str, model: str, final_text: str = FINAL_TEXT):
         """输出收尾 assistant message 并返回 (items, usage)。"""
         profile = "paced" if model.endswith("paced") else "instant"
         if model.endswith("marathon") or model.endswith("waitchild"):
@@ -222,7 +243,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             items = [{
                 "type": "message", "id": "msg_1", "role": "assistant",
-                "content": [{"type": "output_text", "text": FINAL_TEXT}],
+                "content": [{"type": "output_text", "text": final_text}],
             }]
             self.wfile.write(sse("response.output_item.added", {
                 "type": "response.output_item.added", "output_index": 0,
@@ -234,7 +255,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(sse("response.output_text.delta", {
                     "type": "response.output_text.delta", "item_id": "msg_1",
                     "output_index": 0, "content_index": 0,
-                    "delta": FINAL_TEXT if profile == "instant" else FINAL_TEXT[: 12] + f" chunk {index} ",
+                    "delta": final_text if profile == "instant" else final_text[: 12] + f" chunk {index} ",
                 }))
             self.wfile.write(sse("response.output_item.done", {
                 "type": "response.output_item.done", "output_index": 0, "item": items[0],
@@ -246,7 +267,28 @@ class Handler(BaseHTTPRequestHandler):
             }
         return items, usage
 
+    @staticmethod
+    def experience_contract(prompt):
+        marker = r"PERF_EXPERIENCE_[a-f0-9]{32}"
+        text = re.fullmatch(r"Synthetic performance task\. Do not call any tools\. Reply with exactly (" + marker + r"_TEXT_OK)", prompt)
+        if text:
+            return [], text[1]
+        tools = re.fullmatch(
+            r"Synthetic performance task\. Invoke bash exactly ([12]) time\(s\), sequentially, with the following exact command\(s\)\. "
+            r"Do not combine commands, add other tool calls, or publish artifacts\. Use timeout_ms=10000 for each bash call\. "
+            r"Command 1:\n([^\n]+)(?:\nCommand 2:\n([^\n]+))?"
+            r"\nAfter checking the tool outputs, reply with exactly (" + marker + r"_(?:TOOL_OK|MULTI_OK:42))", prompt)
+        if not tools:
+            return None
+        commands = [command for command in (tools[2], tools[3]) if command is not None]
+        if len(commands) != int(tools[1]) or not tools[4].endswith("_TOOL_OK" if len(commands) == 1 else "_MULTI_OK:42"):
+            return None
+        return commands, tools[4]
+
     def do_POST(self):
+        if self.path == "/real/v1/chat/completions":
+            self.forward_real_model()
+            return
         if not self.path.endswith("/responses"):
             self.send_error(404)
             return
@@ -262,6 +304,12 @@ class Handler(BaseHTTPRequestHandler):
         print(f"REQ model={model} tool_rounds={tool_rounds} input_types={item_types}", flush=True)
 
         waiting_role = self.waiting_role(request, model)
+        experience = None
+        if model == "perf-light-experience":
+            experience = self.experience_contract(self.latest_user_text(request))
+            if experience is None:
+                self.send_error(422, "unknown synthetic experience prompt")
+                return
         if model.endswith("waiting"):
             print(f"WAIT role={waiting_role} latest_user={self.latest_user_text(request)[:160]!r}",
                   flush=True)
@@ -308,7 +356,46 @@ class Handler(BaseHTTPRequestHandler):
         waiting_parent = waiting_role == "parent"
         waiting_child = waiting_role == "child"
         waiting_phase, waiting_ref = self.waiting_phase(request) if waiting_parent else (None, None)
-        if model.endswith("transcript-capture"):
+        if model == "perf-light-experience":
+            latest_user_index = max((index for index, item in enumerate(request.get("input", []))
+                                     if isinstance(item, dict) and item.get("role") == "user"
+                                     and item.get("type") in (None, "message")), default=-1)
+            rounds = sum(1 for item in request.get("input", [])[latest_user_index + 1:]
+                         if isinstance(item, dict) and item.get("type") == "function_call_output")
+            commands, final_text = experience
+            if rounds < len(commands):
+                items, usage = self.emit_named_function_call("bash", {"command": commands[rounds], "timeout_ms": 10000})
+            else:
+                items, usage = self.emit_final(response_id, "perf-instant", final_text)
+        elif model == "perf-fixed-workload":
+            current_input = request.get("input", [])
+            latest_user_index = max((index for index, item in enumerate(current_input)
+                                     if isinstance(item, dict) and item.get("role") == "user"
+                                     and item.get("type") in (None, "message")), default=-1)
+            tool_rounds = sum(1 for item in current_input[latest_user_index + 1:]
+                              if isinstance(item, dict) and item.get("type") == "function_call_output")
+            sample = _fixed_workload.sample_from_text(self.latest_user_text(request))
+            model_wait_ms = int(os.environ.get("MOCK_FIXED_MODEL_WAIT_MS", "0"))
+            if not 0 <= model_wait_ms <= 120000:
+                raise ValueError("fixed model wait must be between 0 and 120000 milliseconds")
+            if tool_rounds == 0:
+                if model_wait_ms:
+                    time.sleep(model_wait_ms / 1000)
+                items, usage = self.emit_named_function_call("bash", {"command": _fixed_workload.command_for(sample), "timeout_ms": 300000})
+            elif tool_rounds == 1:
+                items, usage = self.emit_named_function_call("publish_artifact", {"path": "/mnt/data/" + _fixed_workload.FILENAME})
+            else:
+                items, usage = self.emit_final(response_id, "perf-instant")
+        elif model == "perf-file-workload":
+            # The mock requests tools; only the real bash/provider path creates
+            # bytes or publishes an artifact. K6 independently downloads them.
+            if tool_rounds == 0:
+                items, usage = self.emit_function_call(response_id)
+            elif tool_rounds == 1:
+                items, usage = self.emit_named_function_call("publish_artifact", {"path": "/mnt/data/perf-result.bin"})
+            else:
+                items, usage = self.emit_final(response_id, "perf-instant")
+        elif model.endswith("transcript-capture"):
             command = capture_command(tool_rounds)
             if command is None:
                 items, usage = self.emit_final(response_id, "perf-instant")
@@ -346,6 +433,50 @@ class Handler(BaseHTTPRequestHandler):
         }
         self.wfile.write(sse("response.completed", completed))
         self.wfile.flush()
+
+    def forward_real_model(self):
+        path = os.environ.get("MOCK_REAL_MODEL_SOCKET")
+        if not path:
+            self.send_error(503, "real model bridge is disabled")
+            return
+        connection = None
+        started = False
+        try:
+            length = int(self.headers.get("content-length", "0"))
+            if not 0 < length <= 4 * 1024 * 1024:
+                self.send_error(413, "invalid bridge request size")
+                return
+            body = self.rfile.read(length)
+            if len(body) != length:
+                self.send_error(400, "incomplete bridge request")
+                return
+            connection = UnixHTTPConnection(path)
+            connection.request("POST", "/v1/chat/completions", body=body,
+                               headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            if response.status != 200:
+                self.send_error(response.status, "real model bridge refused request")
+                return
+            content_type = response.getheader("Content-Type", "application/json")
+            if content_type.split(";", 1)[0] not in ("text/event-stream", "application/json"):
+                self.send_error(502, "invalid bridge response")
+                return
+            self.send_response(200)
+            self.send_header("content-type", content_type)
+            self.send_header("connection", "close")
+            self.close_connection = True
+            self.end_headers()
+            started = True
+            while chunk := response.read1(65536):
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (OSError, ValueError, http.client.HTTPException):
+            if not started:
+                self.send_error(502, "real model bridge unavailable")
+            self.close_connection = True
+        finally:
+            if connection is not None:
+                connection.close()
 
 
 def main():

@@ -1,5 +1,6 @@
 //! gVisor's private cgroup v2 task domains and sealed, identity-isolated runner.
 use super::*;
+use crate::host_supervisor::linux::commands::{self, OwnedChild};
 use crate::{
     host_supervisor::HostOciRuntime,
     runsc_task::{RunnerAction, RunnerEvent, RunnerRequest},
@@ -14,9 +15,10 @@ use std::{
             process::{CommandExt, ExitStatusExt},
         },
     },
-    process::Child,
     sync::atomic::AtomicU64,
 };
+
+mod timing;
 
 const CGROUP_ROOT: &str = "/centaeris-tasks";
 static SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -79,6 +81,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runner_receipt_observations_use_host_receive_clock_and_reject_duplicates() {
+        use std::io::Write;
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        guest.write_all(b"{\"kind\":\"ready\",\"pid\":42}\n{\"kind\":\"leaderExited\",\"waitStatus\":0}\n{\"kind\":\"leaderExited\",\"waitStatus\":0}\n").unwrap();
+        drop(guest);
+        let state = Arc::new(Mutex::new(Events::default()));
+        let mut times = [11_u64, 29, 31].into_iter();
+        let mut records = Vec::new();
+        read_events_with_observer(
+            host,
+            state.clone(),
+            || times.next().unwrap(),
+            |phase, at| {
+                assert!(
+                    state.try_lock().is_ok(),
+                    "observation must not hold the event state lock"
+                );
+                records.push((phase, at));
+            },
+        );
+        assert_eq!(records, vec![("taskReady", 11), ("taskLeaderExited", 29)]);
+        let state = state.lock().unwrap();
+        assert!(state.ready && state.leader == Some(0) && state.failed);
+    }
+
+    #[test]
+    fn invalid_runner_receipt_never_becomes_a_timing_record() {
+        use std::io::Write;
+        for receipt in [
+            b"{\"kind\":\"ready\",\"pid\":1}\n".as_slice(),
+            b"{\"kind\":\"leaderExited\",\"waitStatus\":0}\n",
+            b"not-json\n",
+        ] {
+            let (host, mut guest) = UnixStream::pair().unwrap();
+            guest.write_all(receipt).unwrap();
+            drop(guest);
+            let state = Arc::new(Mutex::new(Events::default()));
+            let mut records = Vec::new();
+            read_events_with_observer(
+                host,
+                state.clone(),
+                || 17,
+                |phase, at| {
+                    assert!(
+                        state.try_lock().is_ok(),
+                        "observation must not hold the event state lock"
+                    );
+                    records.push((phase, at));
+                },
+            );
+            assert!(records.is_empty());
+            assert!(state.lock().unwrap().failed);
+        }
+    }
+
+    #[test]
     fn task_controls_use_the_attested_containers_cgroup_namespace() {
         let first = "a".repeat(64);
         let second = "b".repeat(64);
@@ -88,12 +146,145 @@ mod tests {
         assert_eq!(control_path(&second, &task), format!("/{second}{task}"));
         assert_ne!(control_path(&first, &task), control_path(&second, &task));
     }
+
+    #[test]
+    fn exited_proxy_preserves_buffered_short_task_receipts() {
+        use std::{io::Write, sync::Barrier};
+
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        let state = Arc::new(Mutex::new(Events::default()));
+        let release_reader = Arc::new(Barrier::new(2));
+        let read_state = state.clone();
+        let read_stream = host.try_clone().unwrap();
+        let read_release = release_reader.clone();
+        let reader = thread::spawn(move || {
+            read_release.wait();
+            read_events(read_stream, read_state);
+        });
+        guest
+            .write_all(
+                b"{\"kind\":\"ready\",\"pid\":42}\n{\"kind\":\"leaderExited\",\"waitStatus\":0}\n",
+            )
+            .unwrap();
+        drop(guest);
+        let mut proxy = OwnedChild::spawn(Command::new("/bin/sh").args(["-c", "exit 0"])).unwrap();
+        assert!(proxy.wait().unwrap().success());
+        let mut child = RunscChild {
+            proxy: Some(proxy),
+            state,
+            stream: host,
+            reader: Some(reader),
+        };
+        let mut released = false;
+        let outcome = wait_until_ready(&mut child, Duration::from_secs(1), |proxy| {
+            let status = proxy.try_wait()?;
+            if status.is_some() && !released {
+                released = true;
+                release_reader.wait();
+            }
+            Ok(status)
+        });
+        assert!(
+            released,
+            "test must observe proxy exit before releasing receipts"
+        );
+        assert_eq!(outcome, Ok(()), "buffered Ready survives proxy exit");
+        let began = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                began.elapsed() < Duration::from_secs(1),
+                "leader receipt missing"
+            );
+            thread::yield_now();
+        };
+        assert_eq!(status.code(), Some(0));
+    }
+
+    fn exited_proxy_with_event_channel() -> (RunscChild, UnixStream) {
+        let (host, guest) = UnixStream::pair().unwrap();
+        let state = Arc::new(Mutex::new(Events::default()));
+        let read_stream = host.try_clone().unwrap();
+        let read_state = state.clone();
+        let reader = thread::spawn(move || read_events(read_stream, read_state));
+        let mut proxy = OwnedChild::spawn(Command::new("/bin/sh").args(["-c", "exit 0"])).unwrap();
+        assert!(proxy.wait().unwrap().success());
+        (
+            RunscChild {
+                proxy: Some(proxy),
+                state,
+                stream: host,
+                reader: Some(reader),
+            },
+            guest,
+        )
+    }
+
+    #[test]
+    fn event_eof_before_ready_rejects_launch_without_waiting_for_timeout() {
+        let (mut child, guest) = exited_proxy_with_event_channel();
+        drop(guest);
+        let began = Instant::now();
+        assert_eq!(
+            wait_until_ready(&mut child, Duration::from_secs(5), OwnedChild::try_wait),
+            Err("task_launch_unknown".into())
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "closed event channel waited for the launch timeout"
+        );
+    }
+
+    #[test]
+    fn malformed_or_out_of_order_startup_receipts_reject_launch() {
+        use std::io::Write;
+
+        let receipts: &[&[u8]] = &[
+            b"not-json\n",
+            b"{\"kind\":\"ready\",\"pid\":42,\"extra\":true}\n",
+            b"{\"kind\":\"leaderExited\",\"waitStatus\":0}\n",
+            b"{\"kind\":\"ready\",\"pid\":1}\n",
+            b"{\"kind\":\"ready\",\"pid\":42}",
+        ];
+        for receipt in receipts {
+            let (mut child, mut guest) = exited_proxy_with_event_channel();
+            guest.write_all(receipt).unwrap();
+            drop(guest);
+            assert_eq!(
+                wait_until_ready(&mut child, Duration::from_secs(1), OwnedChild::try_wait),
+                Err("task_launch_unknown".into()),
+                "invalid startup receipt was accepted: {receipt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exited_proxy_without_receipts_waits_for_the_bounded_startup_budget() {
+        let (mut child, _guest) = exited_proxy_with_event_channel();
+        let timeout = Duration::from_millis(30);
+        let began = Instant::now();
+        assert_eq!(
+            wait_until_ready(&mut child, timeout, OwnedChild::try_wait),
+            Err("task_launch_unknown".into())
+        );
+        let elapsed = began.elapsed();
+        assert!(elapsed >= timeout, "proxy exit bypassed the receipt budget");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "missing startup receipt exceeded its bounded budget"
+        );
+    }
 }
 
 pub(super) fn events(target: &OciTarget, path: &Path) -> Result<String, String> {
-    let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-        .lock()
-        .map_err(|_| "host_command_failed")?;
+    let gate = commands::instance_gate(
+        &target.runtime_path,
+        &target.runtime_root,
+        &target.container_id,
+    );
+    let _commands = gate.lock().map_err(|_| "host_command_failed")?;
     target.verify_identity()?;
     control_unlocked(
         target,
@@ -112,17 +303,23 @@ fn kill_unlocked(target: &OciTarget, id: &str) -> Result<bool, String> {
 }
 
 pub(super) fn kill(target: &OciTarget, path: &Path) -> Result<bool, String> {
-    let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-        .lock()
-        .map_err(|_| "host_command_failed")?;
+    let gate = commands::instance_gate(
+        &target.runtime_path,
+        &target.runtime_root,
+        &target.container_id,
+    );
+    let _commands = gate.lock().map_err(|_| "host_command_failed")?;
     target.verify_identity()?;
     kill_unlocked(target, task_id(path)?)
 }
 
 pub(super) fn initialize(target: &OciTarget) -> Result<(), String> {
-    let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-        .lock()
-        .map_err(|_| "host_command_failed")?;
+    let gate = commands::instance_gate(
+        &target.runtime_path,
+        &target.runtime_root,
+        &target.container_id,
+    );
+    let _commands = gate.lock().map_err(|_| "host_command_failed")?;
     if target.helper_binary.is_none() {
         return Err("host_runsc_runner_required".into());
     }
@@ -263,9 +460,12 @@ pub(super) fn administer(
     path: &Path,
     action: RunnerAction,
 ) -> Result<(), String> {
-    let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-        .lock()
-        .map_err(|_| "host_command_failed")?;
+    let gate = commands::instance_gate(
+        &target.runtime_path,
+        &target.runtime_root,
+        &target.container_id,
+    );
+    let _commands = gate.lock().map_err(|_| "host_command_failed")?;
     target.verify_identity()?;
     let request = RunnerRequest {
         action,
@@ -282,12 +482,11 @@ pub(super) fn administer(
         .custom_flags(libc::O_NOFOLLOW)
         .open(&diagnostic_path)
         .map_err(|_| "runsc_control_failed")?;
-    let mut child = command
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::from(diagnostic))
-        .spawn()
-        .map_err(|_| "runsc_control_failed")?;
+        .stderr(Stdio::from(diagnostic));
+    let mut child = OwnedChild::spawn(&mut command).map_err(|_| "runsc_control_failed")?;
     let began = Instant::now();
     loop {
         match child.try_wait().map_err(|_| "runsc_control_failed")? {
@@ -324,12 +523,13 @@ struct Events {
 }
 
 pub(super) struct RunscChild {
-    proxy: Option<Child>,
+    proxy: Option<OwnedChild>,
     state: Arc<Mutex<Events>>,
     stream: UnixStream,
     reader: Option<thread::JoinHandle<()>>,
 }
 impl RunscChild {
+    #[cfg(test)]
     pub(super) fn id(&self) -> u32 {
         self.proxy.as_ref().expect("launched proxy").id()
     }
@@ -361,11 +561,9 @@ impl Drop for RunscChild {
             if matches!(proxy.try_wait(), Ok(None)) {
                 let _ = proxy.kill();
             }
-            let _ = proxy.wait();
-            if let Ok(mut pids) = crate::host_supervisor::linux::MANAGED_PIDS.lock() {
-                pids.remove(&proxy.id());
-            }
         }
+        // Preserve the proxy grace period; the cleanup worker owns any outstanding wait.
+        self.proxy.take();
         let _ = self.stream.shutdown(Shutdown::Both);
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
@@ -373,7 +571,17 @@ impl Drop for RunscChild {
     }
 }
 
+#[cfg(test)]
 fn read_events(stream: UnixStream, state: Arc<Mutex<Events>>) {
+    read_events_with_observer(stream, state, || (), |_, ()| {});
+}
+
+fn read_events_with_observer<T>(
+    stream: UnixStream,
+    state: Arc<Mutex<Events>>,
+    mut now: impl FnMut() -> T,
+    mut observe: impl FnMut(&'static str, T),
+) {
     let mut reader = BufReader::new(stream);
     loop {
         let mut bytes = Vec::new();
@@ -383,6 +591,7 @@ fn read_events(stream: UnixStream, state: Arc<Mutex<Events>>) {
         if matches!(result, Ok(0)) {
             break;
         }
+        let received_at = now();
         let parsed = if result.is_ok() && bytes.len() <= 1024 && bytes.last() == Some(&b'\n') {
             serde_json::from_slice::<RunnerEvent>(&bytes).ok()
         } else {
@@ -391,22 +600,56 @@ fn read_events(stream: UnixStream, state: Arc<Mutex<Events>>) {
         let Ok(mut state) = state.lock() else {
             return;
         };
-        match parsed {
+        let phase = match parsed {
             Some(RunnerEvent::Ready { pid })
                 if pid > 1 && !state.ready && state.leader.is_none() =>
             {
-                state.ready = true
+                state.ready = true;
+                "taskReady"
             }
             Some(RunnerEvent::LeaderExited { wait_status })
                 if state.ready && state.leader.is_none() =>
             {
-                state.leader = Some(wait_status)
+                state.leader = Some(wait_status);
+                "taskLeaderExited"
             }
             _ => {
                 state.failed = true;
                 break;
             }
+        };
+        drop(state);
+        observe(phase, received_at);
+    }
+}
+
+fn wait_until_ready(
+    child: &mut RunscChild,
+    timeout: Duration,
+    mut poll_proxy: impl FnMut(&mut OwnedChild) -> std::io::Result<Option<std::process::ExitStatus>>,
+) -> Result<(), String> {
+    let began = Instant::now();
+    loop {
+        // Read completion before state: a finished reader has published all buffered events.
+        let reader_finished = child
+            .reader
+            .as_ref()
+            .is_some_and(|reader| reader.is_finished());
+        let (ready, failed) = {
+            let state = child.state.lock().map_err(|_| "task_service_failed")?;
+            (state.ready, state.failed)
+        };
+        if ready && !failed {
+            return Ok(());
         }
+        if failed || reader_finished || began.elapsed() >= timeout {
+            return Err("task_launch_unknown".into());
+        }
+        // Proxy exit does not establish that its buffered Ready receipt has been consumed.
+        // Keep sole wait ownership while allowing the event reader the remaining budget.
+        let _ = poll_proxy(child.proxy.as_mut().expect("owned proxy"))
+            .map_err(|_| "task_launch_unknown")?;
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -417,12 +660,16 @@ pub(super) fn spawn(
     domain: &Path,
     trusted: Option<&TrustedLaunch>,
 ) -> Result<Spawned, String> {
+    let observation = timing::TaskTiming::new(id);
     if target.runtime != HostOciRuntime::Runsc {
         return Err("runsc_backend_required".into());
     }
-    let _commands = crate::host_supervisor::linux::COMMAND_LOCK
-        .lock()
-        .map_err(|_| "host_command_failed")?;
+    let gate = commands::instance_gate(
+        &target.runtime_path,
+        &target.runtime_root,
+        &target.container_id,
+    );
+    let _commands = gate.lock().map_err(|_| "host_command_failed")?;
     target.verify_identity()?;
     let process = match trusted {
         Some(launch) => launch.process(&target.process)?,
@@ -442,7 +689,14 @@ pub(super) fn spawn(
     let read_state = state.clone();
     let reader = thread::Builder::new()
         .name("runsc-task-events".into())
-        .spawn(move || read_events(read_stream, read_state))
+        .spawn(move || {
+            read_events_with_observer(
+                read_stream,
+                read_state,
+                || observation.sample(),
+                |phase, received_at| observation.record(phase, received_at),
+            )
+        })
         .map_err(|_| "task_thread_capacity")?;
     let mut child = RunscChild {
         proxy: None,
@@ -456,44 +710,19 @@ pub(super) fn spawn(
         process: Some(process),
     };
     let (mut command, _imports) = command(target, &input, Some(guest.as_raw_fd()))?;
-    let mut proxy = command
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|_| "task_launch_unknown")?;
+        .stderr(Stdio::piped());
+    let mut proxy = OwnedChild::spawn(&mut command).map_err(|_| "task_launch_unknown")?;
     let input = proxy.stdin.take();
     let stdout = proxy.stdout.take().expect("piped stdout");
     let stderr = proxy.stderr.take().expect("piped stderr");
-    crate::host_supervisor::linux::MANAGED_PIDS
-        .lock()
-        .map_err(|_| "task_service_failed")?
-        .insert(proxy.id());
     child.proxy = Some(proxy);
     drop(guest);
-    let began = Instant::now();
-    loop {
-        let (ready, failed) = {
-            let state = child.state.lock().map_err(|_| "task_service_failed")?;
-            (state.ready, state.failed)
-        };
-        if ready && !failed {
-            break;
-        }
-        if failed
-            || began.elapsed() >= Duration::from_secs(5)
-            || child
-                .proxy
-                .as_mut()
-                .expect("owned proxy")
-                .try_wait()
-                .map_err(|_| "task_launch_unknown")?
-                .is_some()
-        {
-            let _ = kill_unlocked(target, task_id(domain)?);
-            return Err("task_launch_unknown".into());
-        }
-        thread::sleep(Duration::from_millis(5));
+    if let Err(error) = wait_until_ready(&mut child, Duration::from_secs(5), OwnedChild::try_wait) {
+        let _ = kill_unlocked(target, task_id(domain)?);
+        return Err(error);
     }
     if let Err(error) = target.verify_identity() {
         let _ = kill_unlocked(target, id);

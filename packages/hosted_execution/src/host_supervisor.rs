@@ -3,6 +3,7 @@
 use centaeris_core::execution::{EnvironmentTaskEnvelope, EnvironmentTaskResponse};
 use serde::{Deserialize, Serialize};
 mod helper;
+pub mod resources;
 pub use helper::{HostHelperRequest, TrustedHelperKind, HELPER_STREAM_LIMIT};
 
 pub const HOST_SUPERVISOR_SCHEMA: &str = "environment.host.v1";
@@ -64,6 +65,13 @@ pub struct HostSupervisorEnvelope {
     deny_unknown_fields
 )]
 pub enum HostSupervisorRequest {
+    PauseIfIdle {
+        target: HostLaunchTarget,
+    },
+    ObserveResources {
+        expected_host_id: String,
+        targets: Vec<HostLaunchTarget>,
+    },
     Register {
         target: HostLaunchTarget,
     },
@@ -111,6 +119,13 @@ pub enum HostSupervisorResponse {
     deny_unknown_fields
 )]
 pub enum HostSupervisorResult {
+    IdlePause {
+        target: HostLaunchTarget,
+        outcome: IdlePauseOutcome,
+    },
+    ResourceObservation {
+        observation: Box<resources::HostResourceObservation>,
+    },
     Registered {
         target: HostLaunchTarget,
     },
@@ -123,11 +138,31 @@ pub enum HostSupervisorResult {
     Inspection {
         inspection: serde_json::Value,
     },
+    /// The validated upload has execution capacity; no input or helper was dispatched yet.
+    HelperInputReady {
+        operation_id: String,
+        input_length: u64,
+        input_digest: String,
+    },
     HelperFinished {
         task: centaeris_core::execution::EnvironmentTaskSnapshot,
         stdout_length: u64,
         stderr_length: u64,
     },
+}
+
+/// A positive pause observation is distinct from busy or uncertain task state.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(
+    tag = "state",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum IdlePauseOutcome {
+    Paused,
+    Busy,
+    Unknown { reason: String },
 }
 
 impl HostSupervisorConfig {
@@ -194,7 +229,12 @@ impl HostSupervisorEnvelope {
             return Err("host_schema_unsupported".into());
         }
         match &self.request {
-            HostSupervisorRequest::Register { target }
+            HostSupervisorRequest::ObserveResources {
+                expected_host_id,
+                targets,
+            } => resources::validate_resource_request(expected_host_id, targets),
+            HostSupervisorRequest::PauseIfIdle { target }
+            | HostSupervisorRequest::Register { target }
             | HostSupervisorRequest::Retire { target } => target.validate(),
             HostSupervisorRequest::Task { envelope } => {
                 envelope.validate()?;

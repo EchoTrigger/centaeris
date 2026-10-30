@@ -19,7 +19,7 @@ class PreparationTests(unittest.TestCase):
         source.mkdir()
         (source / '.git').write_text('fixture placeholder; git calls are isolated by mocks')
         bins.mkdir()
-        (source / '.env.example').write_text('POSTGRES_DB=old\n')
+        (source / '.env.example').write_text('POSTGRES_DB=old\nRUNTIME_NATIVE_SHARED_ADMISSION=1\nRUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS=8\nRUNTIME_RUNSC_IDLE_PAUSE_MS=3000\n')
         for name in ('runtime_server','execution_agent','environment_task_service'):
             (bins / name).write_bytes(name.encode())
         model = root / 'model.py'
@@ -71,6 +71,10 @@ class PreparationTests(unittest.TestCase):
             config = json.loads((root / 'result/compose.json').read_text())
             manifest = json.loads((root / 'result/manifest.json').read_text())
             self.assertEqual(set(config['services']), {'api', 'worker', 'runtime', 'postgres', 'redis', 'catalog-init'})
+            values = dict(line.split('=', 1) for line in (root / 'result/synthetic.env').read_text().splitlines())
+            self.assertEqual(values['RUNTIME_NATIVE_SHARED_ADMISSION'], '0')
+            self.assertEqual(values['RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS'], '')
+            self.assertEqual(values['RUNTIME_RUNSC_IDLE_PAUSE_MS'], '')
             self.assertTrue(config['name'].startswith('tbworkspace'))
             self.assertTrue(manifest['benchmarkMode'])
             self.assertIn(str((root / 'source/scripts/workspace/retained_acceptance/benchmark_seed.py').resolve()) +

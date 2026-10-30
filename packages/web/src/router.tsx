@@ -29,6 +29,7 @@ export type AgentSummary = {
   description: string;
   instructions: string;
   avatarKind: "centaeris" | "banana";
+  avatarUrl: string | null;
   status: "active" | "deleted";
   deletedAt: string | null;
   createdAt: string;
@@ -213,7 +214,7 @@ export function createRouter() {
               Component: WorkspaceEntry,
             },
             { path: "workspaces", loader: workspacesLoader, Component: WorkspaceEntry },
-            ...["general", "preferences", "security", "applications"].map((section) => ({ path: `settings/${section}`, loader: accountSettingsLoader, Component: SettingsRoute })),
+            ...["general", "preferences", "security", "applications", "platform-models", "global-plugins", "workspace-resources"].map((section) => ({ path: `settings/${section}`, loader: accountSettingsLoader, Component: SettingsRoute })),
             {
               id: "workspace",
               path: "w/:workspaceId",
@@ -226,7 +227,7 @@ export function createRouter() {
                   children: [
                     { path: "app", element: <></> },
                     { path: "agents/:agentId", element: <></> },
-                    ...["preferences", "security", "applications", "general", "members", "groups", "plugins", "models", "global-plugins", "agents", "environment"].map((section) => ({ path: `settings/${section}`, Component: SettingsRoute })),
+                    ...["preferences", "security", "applications", "general", "members", "groups", "plugins", "models", "platform-models", "global-plugins", "workspace-resources", "agents", "environment"].map((section) => ({ path: `settings/${section}`, Component: SettingsRoute })),
                   ],
                 },
                 { path: "trash/sessions/:sessionId", Component: TrashSessionRoute },

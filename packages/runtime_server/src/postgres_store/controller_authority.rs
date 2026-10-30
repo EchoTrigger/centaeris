@@ -41,7 +41,7 @@ pub(crate) fn verify_controller_authority(
     r: &ControllerAuthorityRequest<'_>,
 ) -> Result<VerifiedOriginalGrant, String> {
     let b = &r.environment_authorization.payload;
-    b.digest()?;
+    b.validate()?;
     let c = b
         .controller
         .as_ref()
@@ -161,16 +161,17 @@ pub(crate) fn verify_controller_authority(
             .ok_or("environment_profile_missing")?,
     )
     .map_err(|_| "environment_profile_invalid")?;
+    // checked_binding already validated the original profile and its digest.
+    // Exact profile equality binds the persisted copy to that verified result.
     if bound_profile != original.environment_profile
         || env.get::<_, Option<String>>(7).as_deref() != Some(&original.environment_profile_digest)
-        || bound_profile.digest()? != original.environment_profile_digest
     {
         return Err("environment_profile_binding_rejected".into());
     }
     pin_lifecycle_job(tx, &r.lease.job_id)?;
     // This is a separate statement after lock acquisition. A predicate evaluated
     // before a pure lock wait cannot prove that an unchanged lease is unexpired.
-    let job=tx.query_opt("SELECT 1 FROM runtime.runtime_jobs j JOIN runtime.execution_job_tenants t ON t.job_id=j.job_id WHERE j.job_id=$1 AND j.job_kind='agent_run.lifecycle' AND j.status IN('leased','running') AND j.lease_owner=$2 AND j.lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND j.session_id=$3 AND j.idempotency_key=$4 AND j.payload_ref=$5 AND t.workspace_id=$6", &[&r.lease.job_id,&r.lease.lease_owner,&b.session_id,&format!("{}:{digest}",r.lease.job_id),&format!("record:agent_run:{}",b.agent_run_id),&tenant]).map_err(|e|format!("retained job fence busy or rejected: {e}"))?;
+    let job=tx.query_opt("SELECT 1 FROM runtime.runtime_jobs j JOIN runtime.execution_job_tenants t ON t.job_id=j.job_id WHERE j.job_id=$1 AND j.job_kind='agent_run.lifecycle' AND j.status IN('leased','running') AND j.lease_owner=$2 AND j.lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND j.session_id=$3 AND j.idempotency_key=$4 AND j.payload_ref=$5 AND t.workspace_id=$6 AND ($7::text='cleanup' OR j.lease_purpose='execute')", &[&r.lease.job_id,&r.lease.lease_owner,&b.session_id,&format!("{}:{digest}",r.lease.job_id),&format!("record:agent_run:{}",b.agent_run_id),&tenant,&r.purpose.as_str()]).map_err(|e|format!("retained job fence busy or rejected: {e}"))?;
     if job.is_none() {
         return Err("retained job fence rejected".into());
     }

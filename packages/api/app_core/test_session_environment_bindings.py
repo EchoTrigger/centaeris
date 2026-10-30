@@ -226,6 +226,26 @@ class SessionEnvironmentPersistenceTests(OperationFixture, TestCase):
         session.refresh_from_db()
         self.assertEqual(session.title, "A title update")
 
+    def test_status_only_save_still_rejects_changed_configuration_and_environment(self):
+        original = (self.run.status, self.run.agent_instructions, self.run.session_id, self.run.environment_id)
+        for values, error in (
+            ({"agent_instructions": "replacement snapshot"}, "configuration snapshot is immutable"),
+            ({"environment_id": self.other.environment_id}, "environment_binding_immutable"),
+            ({"session": self.other.session}, "environment_binding_immutable"),
+        ):
+            with self.subTest(values=values):
+                self.run.refresh_from_db()
+                self.run.status = "completed"
+                for field, value in values.items():
+                    setattr(self.run, field, value)
+                with self.assertRaisesRegex(ValueError, error):
+                    self.run.save(update_fields=["status"])
+                self.run.refresh_from_db()
+                self.assertEqual(
+                    (self.run.status, self.run.agent_instructions, self.run.session_id, self.run.environment_id),
+                    original,
+                )
+
     def test_run_status_save_keeps_the_existing_identity_check_and_write_query_budget(self):
         _ = self.run.session
         self.run.status = "completed"

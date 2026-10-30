@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.core.files.storage import default_storage
-from django.db import connection, transaction
+from django.db import DatabaseError, connection, transaction
 from django.db.models import F, Q
 from django.http import JsonResponse
 from django.utils import timezone
@@ -55,7 +55,7 @@ from app_core.runtime_job_client import get_runtime_job
 from app_core.environment_lifecycle import (
     EnvironmentControllerBusy, EnvironmentControllerTerminal,
     acquire_environment_controller, acquire_environment_cleanup_controller,
-    get_environment_release_receipt, release_environment_controller,
+    get_environment_release_receipt, release_environment_controller, read_control_authorization,
 )
 from app_core.session_event import (
     committed_session_terminal_state,
@@ -548,7 +548,7 @@ def _require_workspace_eof(request) -> None:
 def _locked_session_workspace_agent_run(body: dict) -> tuple[AgentRun, Session, dict]:
     lease_query = (
         "SELECT session_id FROM runtime.runtime_jobs "
-        "WHERE job_id=%s AND job_kind='agent_run.lifecycle' AND status='running' "
+        "WHERE job_id=%s AND job_kind='agent_run.lifecycle' AND status='running' AND lease_purpose='execute' "
         "AND lease_owner=%s AND payload_ref=%s AND idempotency_key=%s "
         "AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint"
     )
@@ -1520,6 +1520,24 @@ def materialize_agent_work(request):
         return JsonResponse({"error": "agent_work_materialize_invalid"}, status=400)
 
 
+@_internal_post("/agent-run-lifecycle/control")
+def resolve_agent_run_control(request):
+    try:
+        body = decode_json_object(request)
+        _retained_lifecycle_binding(body, "runtime.agent_run_lifecycle.control.resolve.v1")
+        control = read_control_authorization(body["agentRunId"], body["leaseOwner"])
+        if control["authorizationDigest"] != body["authorizationDigest"]:
+            raise ValueError("agent_run_lifecycle_binding_mismatch")
+        return JsonResponse({"schema": "runtime.agent_run_lifecycle.control.resolved.v1",
+                             "agentRunControl": control})
+    except AgentRun.DoesNotExist:
+        return JsonResponse({"error": "agent_run_not_found"}, status=404)
+    except EnvironmentControllerBusy:
+        return JsonResponse({"error": "environment_controller_busy"}, status=409)
+    except (RuntimeError, ValueError, TypeError, KeyError):
+        return JsonResponse({"error": "agent_run_control_rejected"}, status=409)
+
+
 @_internal_post("/agent-run-lifecycle/resolve")
 def resolve_agent_run_lifecycle(request):
     try:
@@ -1542,16 +1560,21 @@ def _retained_lifecycle_binding(body, schema, extra=()):
 def _retained_run_projection(run_id, digest):
     """Only project semantic facts in this short transaction; no network calls."""
     session_id = AgentRun.objects.values_list("session_id", flat=True).get(pk=run_id)
-    with transaction.atomic():
-        Session.objects.select_for_update(of=("self",)).get(pk=session_id)
-        run = AgentRun.objects.select_for_update(of=("self",)).select_related("authorization", "session", "environment").get(pk=run_id)
-        if run.authorization.digest != digest:
-            raise ValueError("agent_run_lifecycle_binding_mismatch")
-        terminal = committed_session_terminal_state(run)
-        if terminal is not None:
-            project_committed_agent_run(run, terminal)
-        elif run.status not in {"queued", "running"}:
-            raise ValueError("agent_run_semantic_terminal_missing")
+    try:
+        with transaction.atomic():
+            Session.objects.select_for_update(of=("self",), nowait=True).get(pk=session_id)
+            run = AgentRun.objects.select_for_update(of=("self",), nowait=True).select_related("authorization", "session", "environment").get(pk=run_id)
+            if run.authorization.digest != digest:
+                raise ValueError("agent_run_lifecycle_binding_mismatch")
+            terminal = committed_session_terminal_state(run)
+            if terminal is not None:
+                project_committed_agent_run(run, terminal)
+            elif run.status not in {"queued", "running"}:
+                raise ValueError("agent_run_semantic_terminal_missing")
+    except DatabaseError as error:
+        if getattr(error.__cause__, "sqlstate", None) == "55P03":
+            raise EnvironmentControllerBusy("environment_controller_busy") from error
+        raise
     run.refresh_from_db()
     return run, terminal
 
@@ -1622,6 +1645,8 @@ def release_agent_run_lifecycle(request):
             "releaseReceiptId": released["releaseReceiptId"]})
     except AgentRun.DoesNotExist:
         return JsonResponse({"error": "agent_run_not_found"}, status=404)
+    except EnvironmentControllerBusy:
+        return JsonResponse({"error": "environment_controller_busy"}, status=409)
     except (urllib.error.URLError, TimeoutError, OSError):
         return JsonResponse({"error": "agent_run_cleanup_receipt_unavailable"}, status=503)
     except (RuntimeError, ValueError, TypeError, KeyError):

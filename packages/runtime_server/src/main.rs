@@ -26,6 +26,8 @@ mod host_retirement;
 mod http;
 mod job_protocol;
 mod lifecycle_hooks;
+#[cfg(test)]
+mod lifecycle_test_fixture;
 mod mcp;
 #[cfg(test)]
 mod native_consumption_tests;
@@ -37,9 +39,11 @@ mod recovery_upload;
 mod request_capacity;
 mod resident_capacity;
 mod retained_tasks;
+mod runsc_rotation;
 #[cfg(test)]
 mod runtime_http_tests;
 mod session_delivery;
+mod shared_resident_admission;
 mod skill_projection;
 mod terminal_subagents;
 mod transcript_capture;
@@ -158,6 +162,9 @@ const HTTP_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_RUN_WAITING_TRANSITION_REASONS: &[&str] = &[
     "execution_resident_capacity_wait",
+    "execution_host_preparation_wait",
+    "execution_host_admission_wait",
+    "runsc_environment_capacity_wait",
     "execution_recovery_checkpoint_committed",
     "question_wait",
     "runtime_job_wait",
@@ -401,6 +408,16 @@ fn cached_execution_control_reason(
     Ok(reason)
 }
 
+fn fresh_execution_control_reason(
+    cache: &Mutex<Option<(Instant, Option<String>)>>,
+    probe: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
+    *cache.lock().map_err(|_| {
+        "run_execution_control_probe_failed:execution control cache lock poisoned"
+    })? = None;
+    probe()
+}
+
 fn main() -> Result<(), String> {
     DockerExecutionHostRunner::validate_host()?;
     let execution_profile = Arc::new(RuntimeExecutionProfile {
@@ -426,29 +443,50 @@ fn main() -> Result<(), String> {
     let store = Arc::new(store);
     let job_store = Arc::new(job_store);
     DockerExecutionHostRunner::reconcile_residency(job_store.as_ref())?;
-    runtime.spawn(host_retirement::run(
-        job_store.clone(),
-        docker_execution_host::resident_host_context()?.0,
-    ));
     let tool_layers = Arc::new(Mutex::new(HashMap::<String, HostedRuntimeContext>::new()));
-    let resolver_layers = tool_layers.clone();
-    let resolver_jobs = job_store.clone();
-    let resolver: ProviderPollingToolLayerResolver = Arc::new(move |job| {
-        resolve_provider_polling_tool_layer(job, resolver_layers.as_ref(), resolver_jobs.as_ref())
-    });
-    let provider_polling = StoreBackedProviderPollingScheduler::new_with_tool_layer_resolver(
-        (*job_store).clone(),
-        resolver,
-        ProviderPollingSchedulerConfig::default(),
-    );
-    provider_polling.start()?;
-    runtime.spawn(run_hosted_subagent_worker(
-        store.clone(),
-        job_store.clone(),
-        tool_layers.clone(),
-    ));
-    execution_capacity::ExecutionCapacity::from_env()?;
-    docker_engine::create_limit_from_env()?;
+    activate_hosted_workers(
+        || {
+            execution_capacity::ExecutionCapacity::from_env()?;
+            docker_engine::create_limit_from_env()?;
+            if shared_resident_admission::enabled()? {
+                let host = docker_execution_host::resident_host_context()?.0;
+                docker_execution_host::shared_inventory::collect(&host)?;
+            }
+            if runsc_rotation::Config::from_env()?.is_some() {
+                let host = docker_execution_host::resident_host_context()?.0;
+                runsc_rotation::reconcile_startup(&job_store, &host)?;
+            }
+            Ok(())
+        },
+        || {
+            runtime.spawn(host_retirement::run(
+                job_store.clone(),
+                docker_execution_host::resident_host_context()?.0,
+            ));
+            let resolver_layers = tool_layers.clone();
+            let resolver_jobs = job_store.clone();
+            let resolver: ProviderPollingToolLayerResolver = Arc::new(move |job| {
+                resolve_provider_polling_tool_layer(
+                    job,
+                    resolver_layers.as_ref(),
+                    resolver_jobs.as_ref(),
+                )
+            });
+            let provider_polling =
+                StoreBackedProviderPollingScheduler::new_with_tool_layer_resolver(
+                    (*job_store).clone(),
+                    resolver,
+                    ProviderPollingSchedulerConfig::default(),
+                );
+            provider_polling.start()?;
+            runtime.spawn(run_hosted_subagent_worker(
+                store.clone(),
+                job_store.clone(),
+                tool_layers.clone(),
+            ));
+            Ok(())
+        },
+    )?;
     let state = HttpServerState {
         runtime: runtime.clone(),
         store,
@@ -458,6 +496,15 @@ fn main() -> Result<(), String> {
         request_capacity: request_capacity::RequestCapacity::from_env()?,
     };
     runtime.block_on(serve_http(listener, state))
+}
+
+// One admission boundary for every execution-capable background consumer.
+fn activate_hosted_workers(
+    reconcile: impl FnOnce() -> Result<(), String>,
+    start_workers: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    reconcile()?;
+    start_workers()
 }
 
 fn resolve_provider_polling_tool_layer(
@@ -1089,7 +1136,59 @@ async fn serve_http(
     listener: tokio::net::TcpListener,
     state: HttpServerState,
 ) -> Result<(), String> {
+    serve_http_with_shutdown(listener, state, runtime_shutdown_signal()).await
+}
+
+async fn runtime_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        if let Ok(mut terminate) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = terminate.recv() => {},
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+async fn serve_http_with_shutdown<S>(
+    listener: tokio::net::TcpListener,
+    state: HttpServerState,
+    shutdown: S,
+) -> Result<(), String>
+where
+    S: std::future::Future<Output = ()>,
+{
+    let mut rotation = if let Some(config) = runsc_rotation::Config::from_env()? {
+        let host = docker_execution_host::resident_host_context()?.0;
+        Some(runsc_rotation::RotationTask::start(
+            state.runtime.as_ref(),
+            state.job_store.clone(),
+            host,
+            config,
+        ))
+    } else {
+        None
+    };
     let router = http_router(state);
+    let result = tokio::select! {
+        result = accept_http_connections(listener, router) => result,
+        _ = shutdown => Ok(()),
+    };
+    if let Some(task) = rotation.as_mut() {
+        task.shutdown().await.map_err(str::to_owned)?;
+    }
+    result
+}
+
+async fn accept_http_connections(
+    listener: tokio::net::TcpListener,
+    router: axum::Router,
+) -> Result<(), String> {
     let connection_slots = Arc::new(Semaphore::new(MAX_HTTP_CONNECTIONS));
     loop {
         let connection_slot = connection_slots
@@ -1447,6 +1546,14 @@ fn execution_recovery_waiting(retry_at_ms: i64) -> AgentRunStepOutcome {
     }
 }
 
+fn preparation_waiting_reason(reason: &str) -> &str {
+    if reason == "environment_host_busy" {
+        "execution_host_admission_wait"
+    } else {
+        reason
+    }
+}
+
 fn recovery_preparation_waiting(reason: &str) -> AgentRunStepOutcome {
     AgentRunStepOutcome {
         disposition: "waiting",
@@ -1724,6 +1831,20 @@ fn register_workspace_agent_tool_providers(
     Ok(())
 }
 
+fn hosted_agent_runtime_config(start: &AgentRunStart) -> AgentRuntimeConfig {
+    AgentRuntimeConfig {
+        tool_parallelism: centaeris_core::runtime::MAX_TOOL_PARALLELISM,
+        required_completion_tool: start
+            .coordination_session_id
+            .is_some()
+            .then(|| "send_message".to_string()),
+        agent_instructions: start.agent_instructions.clone(),
+        model_context_tokens: start.model_context_tokens,
+        model_max_output_tokens: start.model_max_output_tokens,
+        ..AgentRuntimeConfig::default()
+    }
+}
+
 fn execute_agent_run(
     agent_run_start: AgentRunStart,
     runtime: Arc<tokio::runtime::Runtime>,
@@ -1774,6 +1895,9 @@ fn execute_agent_run(
             transition_reason: "runtime_session_terminal_committed".to_string(),
         });
     }
+    let run_timings =
+        observations::RunTimings::new(&lifecycle_job_id, &agent_run_start.agent_run_id);
+    let _unpaired_timings = run_timings.unpaired_guard();
     let model_client = ApiModelClient::new(ApiModelClientConfig {
         api_internal_url: api_url.clone(),
         internal_api_token: token.clone(),
@@ -1783,7 +1907,8 @@ fn execute_agent_run(
         authorization_digest: agent_run_start.authorization_digest.clone(),
         thinking_mode: agent_run_start.authorization.thinking_mode.clone(),
         model_max_output_tokens: agent_run_start.model_max_output_tokens,
-    });
+    })
+    .with_timings(run_timings.clone());
     let session_log = job_store
         .session_log(
             agent_run_start.authorization.workspace_id.clone(),
@@ -1832,9 +1957,10 @@ fn execute_agent_run(
     let cancellation_agent_run_id = agent_run_start.agent_run_id.clone();
     let cancellation_lifecycle_job_id = lifecycle_job_id.clone();
     let cancellation_lifecycle_lease_owner = lifecycle_lease_owner.clone();
-    let cancellation_probe_cache = Mutex::new(None);
+    let cancellation_probe_cache = Arc::new(Mutex::new(None));
+    let cached_cancellation_probe = cancellation_probe_cache.clone();
     let cancellation_probe: Arc<ExecutionCancellationProbe> = Arc::new(move || {
-        cached_execution_control_reason(&cancellation_probe_cache, || {
+        cached_execution_control_reason(&cached_cancellation_probe, || {
             let now =
                 now_ms().map_err(|error| format!("run_execution_control_probe_failed:{error}"))?;
             let state = cancellation_job_store
@@ -2175,11 +2301,19 @@ fn execute_agent_run(
     }
     let docker_execution = match docker_execution {
         Ok(runner) => runner,
-        Err(error) if error == resident_capacity::RESIDENT_CAPACITY_WAIT => {
+        Err(error)
+            if matches!(
+                error.as_str(),
+                resident_capacity::RESIDENT_CAPACITY_WAIT
+                    | resident_capacity::HOST_PREPARATION_WAIT
+                    | "runsc_environment_capacity_wait"
+                    | "environment_host_busy"
+            ) =>
+        {
             return Ok(AgentRunStepOutcome {
                 disposition: "waiting",
                 terminal_state: None,
-                transition_reason: resident_capacity::RESIDENT_CAPACITY_WAIT.into(),
+                transition_reason: preparation_waiting_reason(&error).into(),
                 retry_at_ms: None,
             });
         }
@@ -2413,7 +2547,7 @@ fn execute_agent_run(
                 "mcp_start_failed",
                 &AssistantTextProjection::default(),
                 &terminal_lease_fence,
-            )
+            );
         }
     };
     let mut dynamic_tool_contracts = workspace_agent_tool_contracts(&agent_run_start);
@@ -2466,16 +2600,7 @@ fn execute_agent_run(
             agent_run_start.authorization.session_id.clone(),
             agent_run_start.agent_run_id.clone(),
         )?));
-    let agent_runtime_config = AgentRuntimeConfig {
-        required_completion_tool: agent_run_start
-            .coordination_session_id
-            .is_some()
-            .then(|| "send_message".to_string()),
-        agent_instructions: agent_run_start.agent_instructions.clone(),
-        model_context_tokens: agent_run_start.model_context_tokens,
-        model_max_output_tokens: agent_run_start.model_max_output_tokens,
-        ..AgentRuntimeConfig::default()
-    };
+    let agent_runtime_config = hosted_agent_runtime_config(&agent_run_start);
     let tool_concurrency = ToolConcurrencyCoordinator::global_for_scope(
         format!("session:{}", agent_run_start.authorization.session_id),
         agent_runtime_config.tool_parallelism,
@@ -2853,20 +2978,18 @@ fn execute_agent_run(
         session_start_commit_ms = session_start_commit_started.elapsed().as_millis();
     }
 
-    eprintln!(
-        "agent_run_startup_profile: agentRunId={}; serverCount={}; credentialCount={}; mcpConnectionCount={}; runtimePreludeMs={}; sandboxEnsureMs={}; mcpCredentialResolveMs={}; mcpDiscoveryMs={}; workspaceRestoreMs={}; sessionStartCommitMs={}; startupTotalMs={}",
-        agent_run_start.agent_run_id,
-        mcp_startup_metrics.server_count,
-        mcp_startup_metrics.credential_count,
-        mcp_startup_metrics.connection_count,
+    run_timings.startup_profile(observations::StartupProfile {
+        server_count: mcp_startup_metrics.server_count,
+        credential_count: mcp_startup_metrics.credential_count,
+        mcp_connection_count: mcp_startup_metrics.connection_count,
         runtime_prelude_ms,
         sandbox_ensure_ms,
-        mcp_startup_metrics.credential_resolve_ms,
-        mcp_startup_metrics.discovery_ms,
+        mcp_credential_resolve_ms: mcp_startup_metrics.credential_resolve_ms,
+        mcp_discovery_ms: mcp_startup_metrics.discovery_ms,
         workspace_restore_ms,
         session_start_commit_ms,
-        startup_started.elapsed().as_millis(),
-    );
+        startup_total_ms: startup_started.elapsed().as_millis(),
+    });
     let supplement_session_log = session_log.clone();
     let supplement_agent_run_start = agent_run_start.clone();
     let supplement_sequence = session_record_sequence.clone();
@@ -2992,6 +3115,25 @@ fn execute_agent_run(
     };
     let mut commit_tool_safe_point = |safe_point: ToolSafePoint| {
         let safe_point_started = Instant::now();
+        let observed_call = match &safe_point {
+            ToolSafePoint::ModelRequestStarted(started) => {
+                run_timings.request_started(started.turn_id(), started.request_id());
+                None
+            }
+            ToolSafePoint::DurableToolCall { call, .. } => {
+                run_timings.tool_started(&call.id);
+                Some((call.id.clone(), None))
+            }
+            ToolSafePoint::DurableReceipt { call, result, .. }
+                if call.id == result.tool_call_id =>
+            {
+                Some((
+                    call.id.clone(),
+                    Some(result.status == "ok" && result.error.is_none()),
+                ))
+            }
+            _ => None,
+        };
         let stage = match &safe_point {
             ToolSafePoint::ModelRequestStarted(_) => "model_request_safe_point",
             ToolSafePoint::DurableToolCall { .. } => "tool_call_safe_point",
@@ -3385,6 +3527,9 @@ fn execute_agent_run(
                 &terminal_lease_fence,
                 work_trigger.as_ref(),
             )?;
+            if let Some((call_id, Some(tool_ok))) = &observed_call {
+                run_timings.tool_committed(call_id, *tool_ok);
+            }
             accept_session_commit(
                 &mut committed_sequence,
                 &mut *session_stream_guard(&safe_point_stream)?,
@@ -3442,6 +3587,11 @@ fn execute_agent_run(
             }
             Ok(())
         });
+        if result.is_err() {
+            if let Some((call_id, _)) = &observed_call {
+                run_timings.tool_commit_failed(call_id);
+            }
+        }
         observations::timing(
             stage,
             safe_point_started,
@@ -3692,7 +3842,9 @@ fn execute_agent_run(
             );
         }
     }
-    let cancellation_reason = cancellation_probe.as_ref()()?;
+    let cancellation_reason = fresh_execution_control_reason(&cancellation_probe_cache, || {
+        cancellation_probe.as_ref()()
+    })?;
     if cancellation_reason.as_deref() == Some("agent_run_lifecycle_lease_lost") {
         return Err("agent_run_lifecycle_lease_lost".to_string());
     }
@@ -5128,10 +5280,18 @@ fn public_agent_failure_reason<'a>(internal_error: &'a str, transition_reason: &
         }
     }
     match internal_error {
-        "read AGENTS.md failed: execution start outcome is unknown; do not repeat the operation" => return "execution_start_unknown",
-        "read AGENTS.md failed: execution input outcome is unknown; do not repeat the operation" => return "execution_input_unknown",
-        "read AGENTS.md failed: execution query outcome is unknown; do not repeat the operation" => return "execution_query_unknown",
-        "read AGENTS.md failed: execution output unavailable; do not repeat the command" => return "execution_output_unavailable",
+        "read AGENTS.md failed: execution start outcome is unknown; do not repeat the operation" => {
+            return "execution_start_unknown";
+        }
+        "read AGENTS.md failed: execution input outcome is unknown; do not repeat the operation" => {
+            return "execution_input_unknown";
+        }
+        "read AGENTS.md failed: execution query outcome is unknown; do not repeat the operation" => {
+            return "execution_query_unknown";
+        }
+        "read AGENTS.md failed: execution output unavailable; do not repeat the command" => {
+            return "execution_output_unavailable";
+        }
         _ => {}
     }
     if api_model_client::hosted_model_failure(internal_error).is_some()
@@ -6082,6 +6242,40 @@ fn agent_run_step_failure_response(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn runsc_startup_reconciliation_precedes_every_worker() {
+        let events = std::cell::RefCell::new(Vec::new());
+        super::activate_hosted_workers(
+            || {
+                events.borrow_mut().push("reconciled");
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("workers");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(*events.borrow(), ["reconciled", "workers"]);
+    }
+
+    #[test]
+    fn runsc_startup_reconciliation_failure_never_starts_workers() {
+        let started = std::cell::Cell::new(false);
+        let result = super::activate_hosted_workers(
+            || Err("physical observation unavailable".into()),
+            || {
+                started.set(true);
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err("physical observation unavailable".into()));
+        assert!(
+            !started.get(),
+            "uncertain paused residents must be charged before any worker can admit work"
+        );
+    }
+
+    #[test]
     fn retained_task_provider_matches_the_host_tool_contracts() {
         use super::*;
         struct NoDispatch;
@@ -6531,6 +6725,27 @@ mod tests {
     }
 
     #[test]
+    fn host_admission_busy_preparation_uses_a_safe_waiting_contract() {
+        assert_eq!(
+            preparation_waiting_reason("environment_host_busy"),
+            "execution_host_admission_wait"
+        );
+        recovery_preparation_waiting(preparation_waiting_reason("environment_host_busy"))
+            .validate()
+            .expect("host admission rejection remains pending");
+        for reason in [
+            "execution_resident_capacity_wait",
+            "execution_host_preparation_wait",
+            "runsc_environment_capacity_wait",
+            "host_busy",
+            "environment_host_busy:unknown",
+            "environment_host_transport_unavailable",
+        ] {
+            assert_eq!(preparation_waiting_reason(reason), reason);
+        }
+    }
+
+    #[test]
     fn recovery_checkpoint_wait_requires_its_retry_deadline() {
         let outcome = |reason: &str, deadline| AgentRunStepOutcome {
             disposition: "waiting",
@@ -6949,6 +7164,41 @@ mod tests {
         log_live_supersession_result(Err(LiveTextError::Fatal(
             "simulated Redis command failure".to_string(),
         )));
+    }
+
+    #[test]
+    fn hosted_runtime_uses_full_tool_capacity_without_changing_core_default() {
+        let mut start = agent_run_start();
+        start.agent_instructions = "hosted capacity fixture".into();
+        start.model_context_tokens = 123456;
+        start.model_max_output_tokens = 64000;
+        start.coordination_session_id = Some("coordination-fixture".into());
+        let config = hosted_agent_runtime_config(&start);
+        let effective = ToolConcurrencyCoordinator::new(config.tool_parallelism);
+        assert_eq!(
+            effective.capacity(),
+            64,
+            "hosted Runtime must explicitly select the supported tool ceiling"
+        );
+        assert_eq!(
+            AgentRuntimeConfig::default().tool_parallelism,
+            16,
+            "Core's general default is independent"
+        );
+        assert_eq!(config.agent_instructions, start.agent_instructions);
+        assert_eq!(config.model_context_tokens, start.model_context_tokens);
+        assert_eq!(
+            config.model_max_output_tokens,
+            start.model_max_output_tokens
+        );
+        assert_eq!(
+            config.required_completion_tool.as_deref(),
+            Some("send_message")
+        );
+        start.coordination_session_id = None;
+        assert!(hosted_agent_runtime_config(&start)
+            .required_completion_tool
+            .is_none());
     }
 
     pub(super) fn agent_run_start() -> AgentRunStart {
@@ -7706,6 +7956,37 @@ mod tests {
         assert_eq!(cached_execution_control_reason(&cache, load), Ok(None));
         assert_eq!(cached_execution_control_reason(&cache, load), Ok(None));
         assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn helper_cancel_or_lease_loss_is_fresh_before_a_failed_core_result_can_terminalize() {
+        for stop in [
+            "agent_run_cancel_requested",
+            "agent_run_lifecycle_lease_lost",
+        ] {
+            let cache = Mutex::new(None);
+            assert_eq!(
+                cached_execution_control_reason(&cache, || Ok(None)),
+                Ok(None)
+            );
+            let reason = fresh_execution_control_reason(&cache, || {
+                cached_execution_control_reason(&cache, || Ok(Some(stop.into())))
+            })
+            .unwrap();
+            assert_eq!(reason.as_deref(), Some(stop));
+        }
+    }
+
+    #[test]
+    fn fresh_control_failure_never_becomes_an_empty_cancellation_reason() {
+        let cache = Mutex::new(None);
+        cached_execution_control_reason(&cache, || Ok(None)).unwrap();
+        let result = fresh_execution_control_reason(&cache, || {
+            cached_execution_control_reason(&cache, || {
+                Err("run_execution_control_probe_failed:offline".into())
+            })
+        });
+        assert!(result.is_err());
     }
 
     #[test]
@@ -8711,7 +8992,10 @@ mod tests {
         .unwrap();
         let payload = &events.last().unwrap().event.payload;
         assert_eq!(payload["reasonType"], "provider_rate_limited");
-        assert_eq!(payload["message"], "exceeded retry limit after 3 attempts, last status: 429 Too Many Requests · provider_rate_limited");
+        assert_eq!(
+            payload["message"],
+            "exceeded retry limit after 3 attempts, last status: 429 Too Many Requests · provider_rate_limited"
+        );
         assert!(!provider_response_was_interrupted(&format!(
             "model_client_error(kind=provider_response_interrupted,retryable=false): {detail}"
         )));

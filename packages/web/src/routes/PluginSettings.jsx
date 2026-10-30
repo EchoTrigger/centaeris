@@ -1,7 +1,7 @@
 import { t } from "../i18n";
 import { useTranslation } from "../i18n";
 import { useEffect, useRef, useState } from "react";
-import { Blocks, ChevronRight } from "lucide-react";
+import { Blocks, ChevronRight, Upload } from "lucide-react";
 import { apiJson, jsonOptions } from "../api";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
@@ -31,6 +31,10 @@ function canEnable(plugin) {
 export default function PluginSettings({ workspace, isSuperuser }) {
   const { t } = useTranslation();
   const [plugins, setPlugins] = useState(null);
+  const [pluginRevision, setPluginRevision] = useState(0);
+  const [notice, setNotice] = useState("");
+  const [removePlugin, setRemovePlugin] = useState(null);
+  const uploadInputRef = useRef(null);
   const [credentials, setCredentials] = useState(null);
   const [credentialError, setCredentialError] = useState("");
   const [credentialRevision, setCredentialRevision] = useState(0);
@@ -43,7 +47,8 @@ export default function PluginSettings({ workspace, isSuperuser }) {
   const pluginRowsRef = useRef(null);
   const activeWorkspace = useRef(workspace?.id);
   activeWorkspace.current = workspace?.id;
-  const canManage = ["owner", "admin"].includes(workspace?.role);
+  const canManage = Boolean(workspace && (isSuperuser || ["owner", "admin"].includes(workspace.role)));
+  const apiBase = `/api/workspaces/${encodeURIComponent(workspace?.id || "")}`;
   const hasExpandedPlugins = expandedPluginNames.length > 0;
 
   useEffect(() => {
@@ -55,6 +60,7 @@ export default function PluginSettings({ workspace, isSuperuser }) {
     return () => document.removeEventListener("pointerdown", collapseOutside, true);
   }, [hasExpandedPlugins, deleteCredential]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Package mutations explicitly refresh this workspace catalog.
   useEffect(() => {
     let active = true;
     setPlugins(null);
@@ -82,7 +88,7 @@ export default function PluginSettings({ workspace, isSuperuser }) {
       })
       .catch((requestError) => active && setError(errorText(requestError)));
     return () => { active = false; };
-  }, [workspace?.id]);
+  }, [workspace?.id, pluginRevision]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: The revision is the retry button's explicit credential refresh signal.
   useEffect(() => {
@@ -90,12 +96,12 @@ export default function PluginSettings({ workspace, isSuperuser }) {
     setCredentials(null);
     setCredentialError("");
     setCredentialDrafts({});
-    if (!isSuperuser) return () => { active = false; };
-    apiJson("/api/admin/mcp-bearer-credentials")
+    if (!canManage) return () => { active = false; };
+    apiJson(`${apiBase}/mcp-bearer-credentials`)
       .then((result) => active && setCredentials(result.credentials))
       .catch((requestError) => active && setCredentialError(errorText(requestError)));
     return () => { active = false; };
-  }, [isSuperuser, credentialRevision]);
+  }, [canManage, apiBase, credentialRevision]);
 
   async function setEnabled(plugin, enabled) {
     const workspaceId = workspace.id;
@@ -124,47 +130,87 @@ export default function PluginSettings({ workspace, isSuperuser }) {
   }
 
   async function saveCredential(pluginName, credentialRef, existing) {
+    if (!canManage) return;
+    const workspaceId = workspace.id;
     const key = credentialKey(pluginName, credentialRef);
     const draft = credentialDrafts[key] || {};
     setBusyCredential(key);
     setCredentialError("");
     try {
       let result;
-      if (existing) {
+      if (existing && existing.scope !== "platform" && existing.writable !== false) {
         result = await apiJson(
-          `/api/admin/mcp-bearer-credentials/${existing.id}/rotate`,
+          `${apiBase}/mcp-bearer-credentials/${existing.id}/rotate`,
           jsonOptions("POST", { secret: draft.secret || "" }),
         );
       } else {
-        result = await apiJson("/api/admin/mcp-bearer-credentials", jsonOptions("POST", {
+        result = await apiJson(`${apiBase}/mcp-bearer-credentials`, jsonOptions("POST", {
           pluginName,
           credentialRef,
           displayName: `${pluginName} · ${credentialRef}`,
           secret: draft.secret || "",
         }));
       }
+      if (activeWorkspace.current !== workspaceId) return;
       setCredentialDrafts((current) => ({ ...current, [key]: { secret: "" } }));
       setCredentials((items) => [...(items || []).filter((item) => item.id !== result.credential.id), result.credential]);
     } catch (requestError) {
-      setCredentialError(errorText(requestError));
+      if (activeWorkspace.current === workspaceId) setCredentialError(errorText(requestError));
     } finally {
-      setBusyCredential("");
+      if (activeWorkspace.current === workspaceId) setBusyCredential("");
     }
   }
 
   async function confirmDeleteCredential() {
-    if (!deleteCredential) return;
+    if (!deleteCredential || !canManage || deleteCredential.scope === "platform" || deleteCredential.writable === false) return;
+    const workspaceId = workspace.id;
     const key = credentialKey(deleteCredential.pluginName, deleteCredential.credentialRef);
     setBusyCredential(key);
     setCredentialError("");
     try {
-      await apiJson(`/api/admin/mcp-bearer-credentials/${deleteCredential.id}`, { method: "DELETE" });
+      await apiJson(`${apiBase}/mcp-bearer-credentials/${deleteCredential.id}`, { method: "DELETE" });
+      if (activeWorkspace.current !== workspaceId) return;
       setDeleteCredential(null);
       setCredentials((items) => items.filter((item) => item.id !== deleteCredential.id));
     } catch (requestError) {
-      setCredentialError(errorText(requestError));
+      if (activeWorkspace.current === workspaceId) setCredentialError(errorText(requestError));
     } finally {
-      setBusyCredential("");
+      if (activeWorkspace.current === workspaceId) setBusyCredential("");
+    }
+  }
+
+  async function upload(file) {
+    if (!file || !canManage) return;
+    const workspaceId = workspace.id;
+    const body = new FormData();
+    body.append("file", file);
+    setBusyPlugin("upload"); setError(""); setNotice("");
+    try {
+      await apiJson(`${apiBase}/plugins/upload`, { method: "POST", body });
+      if (activeWorkspace.current !== workspaceId) return;
+      setPluginRevision(value => value + 1);
+      setNotice(t("workspaceResources.packageUploaded"));
+    } catch (requestError) {
+      if (activeWorkspace.current === workspaceId) setError(errorText(requestError));
+    } finally {
+      if (activeWorkspace.current === workspaceId) {
+        setBusyPlugin("");
+        if (uploadInputRef.current) uploadInputRef.current.value = "";
+      }
+    }
+  }
+  async function uninstall() {
+    if (!removePlugin || !canManage || removePlugin.scope !== "workspace" || removePlugin.writable === false) return;
+    const workspaceId = workspace.id;
+    setBusyPlugin(removePlugin.name); setError("");
+    try {
+      await apiJson(`${apiBase}/plugins/${encodeURIComponent(removePlugin.name)}/installation`, { method: "DELETE" });
+      if (activeWorkspace.current !== workspaceId) return;
+      setRemovePlugin(null); setPluginRevision(value => value + 1);
+    } catch (requestError) {
+      if (activeWorkspace.current === workspaceId) setError(errorText(requestError));
+    } finally {
+      if (activeWorkspace.current === workspaceId) setBusyPlugin("");
     }
   }
 
@@ -172,8 +218,10 @@ export default function PluginSettings({ workspace, isSuperuser }) {
 
   return (
     <div className="pluginSettings">
+      {canManage ? <div className="globalPluginUpload pluginPackageUpload"><input ref={uploadInputRef} type="file" accept=".zip,application/zip" aria-label={t("workspaceResources.choosePackage")} disabled={Boolean(busyPlugin)} onChange={(event) => upload(event.target.files?.[0])} /><button type="button" disabled={Boolean(busyPlugin)} onClick={() => uploadInputRef.current?.click()}><Upload aria-hidden="true" />{t("workspaceResources.uploadPackage")}</button><small>{t("workspaceResources.skillPackageHint")}</small><small>{t("workspaceResources.environmentVersionHint")}</small></div> : null}
+      {notice ? <p className="globalPluginNotice" role="status">{notice}</p> : null}
       {error ? <div className="capabilitySettingsError" role="alert">{t("pluginSettings.unableToLoadPlugin")}{error}</div> : null}
-      {isSuperuser && credentialError ? <div className="capabilitySettingsError" role="alert">{t("pluginSettings.credentialActionFailed")}{credentialError} <button className="pluginEnableButton" type="button" disabled={Boolean(busyCredential)} onClick={() => setCredentialRevision((value) => value + 1)}>{t("pluginSettings.reloadCredentials")}</button></div> : null}
+      {canManage && credentialError ? <div className="capabilitySettingsError" role="alert">{t("pluginSettings.credentialActionFailed")}{credentialError} <button className="pluginEnableButton" type="button" disabled={Boolean(busyCredential)} onClick={() => setCredentialRevision((value) => value + 1)}>{t("pluginSettings.reloadCredentials")}</button></div> : null}
       {plugins === null && !error ? <div className="capabilitySettingsEmpty">{t("pluginSettings.loadingPlugins")}</div> : null}
       {plugins?.length === 0 && !error ? <div className="capabilitySettingsEmpty">{t("pluginSettings.thisDistributionHasNoPlugins")}</div> : null}
       <div className="pluginSettingsRows" ref={pluginRowsRef} role="list" aria-label={t("pluginSettings.availablePlugins")}>
@@ -206,6 +254,8 @@ export default function PluginSettings({ workspace, isSuperuser }) {
 
                 <section className="pluginSettingsSection" aria-labelledby={`${detailId}-general-heading`}>
                   <h3 id={`${detailId}-general-heading`}>{t("pluginSettings.general")}</h3>
+                  {plugin.scope === "platform" ? <p>{t("workspaceResources.sharedReadOnly")}</p> : null}
+                  {canManage && plugin.scope === "workspace" && plugin.writable !== false ? <button className="pluginEnableButton is-danger" type="button" disabled={Boolean(busyPlugin)} onClick={() => setRemovePlugin(plugin)}>{t("globalPluginSettings.remove")}</button> : null}
                   <div className="pluginSettingsProperty">
                     <strong>{t("pluginSettings.capabilities")}</strong>
                     <p>{plugin.capabilities.length ? plugin.capabilities.join("、") : t("pluginSettings.notDeclared")}</p>
@@ -216,21 +266,22 @@ export default function PluginSettings({ workspace, isSuperuser }) {
                   <h3 id={`${detailId}-connections-heading`}>{t("pluginSettings.connection")}</h3>
                   {plugin.mcpServers === null ? <p className="pluginSettingsMuted">{t("pluginSettings.mcpConnectionDetailsHaveNotBeenValidatedAConnection")}</p> : plugin.mcpServers.length ? <div className="pluginConnectionRows">{plugin.mcpServers.map((server) => <div className="pluginConnectionRow" key={server.id}>
                     <span><strong>{server.id}</strong><small>{server.transport.type === "streamableHttp" ? t("pluginSettings.networkService") : t("pluginSettings.localService")}</small></span>
-                    <em>{server.auth.type === "none" ? t("pluginSettings.noConfigurationNeeded") : isSuperuser && credentials === null ? t("pluginSettings.credentialStatusUnknown") : (isSuperuser ? credentials.some((item) => item.pluginName === plugin.name && item.credentialRef === server.auth.credentialRef) : server.auth.credentialConfigured) ? t("pluginSettings.credentialsSaved") : t("pluginSettings.credentialsRequired")}</em>
+                    <em>{server.auth.type === "none" ? t("pluginSettings.noConfigurationNeeded") : canManage && credentials === null ? t("pluginSettings.credentialStatusUnknown") : (canManage ? credentials.some((item) => item.pluginName === plugin.name && item.credentialRef === server.auth.credentialRef) : server.auth.credentialConfigured) ? t("pluginSettings.credentialsSaved") : t("pluginSettings.credentialsRequired")}</em>
                   </div>)}</div> : <p className="pluginSettingsMuted">{t("pluginSettings.thisPluginNeedsNoAdditionalConnection")}</p>}
-                  {isSuperuser && credentialRefs.length ? <div className="pluginCredentialSection">
+                  {canManage && credentialRefs.length ? <div className="pluginCredentialSection">
                     {credentialRefs.map((credentialRef) => {
                       const key = credentialKey(plugin.name, credentialRef);
-                      const existing = credentials?.find((credential) => credential.pluginName === plugin.name && credential.credentialRef === credentialRef);
+                      const matches = credentials?.filter(credential => credential.pluginName === plugin.name && credential.credentialRef === credentialRef) || [];
+                      const existing = matches.find(credential => credential.scope !== "platform" && credential.writable !== false) || matches[0];
                       const draft = credentialDrafts[key] || {};
                       return <form className="pluginCredentialForm" key={credentialRef} onSubmit={(event) => {
                         event.preventDefault();
                         void saveCredential(plugin.name, credentialRef, existing);
                       }}>
-                        <div><strong>{credentialRef}</strong><small>{existing ? t("pluginSettings.configuredVValue", { value1: existing.version }) : t("modelSettings.notConfiguredYet")}</small></div>
+                        <div><strong>{credentialRef}</strong>{existing?.scope === "platform" ? <small>{t("workspaceResources.sharedReadOnly")}</small> : null}<small>{existing ? t("pluginSettings.configuredVValue", { value1: existing.version }) : t("modelSettings.notConfiguredYet")}</small></div>
                         <input aria-label={`${credentialRef} Bearer Token`} type="password" autoComplete="new-password" placeholder={existing ? t("pluginSettings.newTokenOrBearer") : t("pluginSettings.tokenOrBearer")} value={draft.secret || ""} onChange={(event) => updateCredentialDraft(key, { secret: event.target.value })} />
-                        <button type="submit" disabled={credentials === null || busyCredential === key || !draft.secret}>{busyCredential === key ? t("libraryObjectRoute.saving") : existing ? t("pluginSettings.rotate") : t("modelSettings.save")}</button>
-                        {existing ? <button type="button" className="is-danger" disabled={busyCredential === key} onClick={() => setDeleteCredential(existing)}>{t("appRoute.delete")}</button> : null}
+                        <button type="submit" disabled={credentials === null || busyCredential === key || !draft.secret}>{busyCredential === key ? t("libraryObjectRoute.saving") : existing && existing.scope !== "platform" && existing.writable !== false ? t("pluginSettings.rotate") : t("modelSettings.save")}</button>
+                        {existing && existing.scope !== "platform" && existing.writable !== false ? <button type="button" className="is-danger" disabled={busyCredential === key} onClick={() => setDeleteCredential(existing)}>{t("appRoute.delete")}</button> : null}
                       </form>;
                     })}
                   </div> : null}
@@ -266,6 +317,7 @@ export default function PluginSettings({ workspace, isSuperuser }) {
           </article>;
         })}
       </div>
+      <ConfirmDialog open={Boolean(removePlugin)} title={t("workspaceResources.removePackage")} message={t("workspaceResources.removePackageHint")} confirmLabel={t("globalPluginSettings.remove")} onCancel={() => setRemovePlugin(null)} onConfirm={() => void uninstall()} busy={Boolean(busyPlugin)} />
       <ConfirmDialog
         open={Boolean(deleteCredential)}
         title={t("pluginSettings.deleteBearerCredential")}
