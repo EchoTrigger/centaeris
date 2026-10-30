@@ -31,7 +31,7 @@ export function SearchOverlay({ sessions, workspace, agents, agentId, onClose })
         .catch(() => { if (active) setLoadedSessions([]); });
     }
     return () => { active = false; };
-  }, [sessions, workspace.id, agentId]);
+  }, [sessions, workspace.id]);
 
   const groups = useMemo(() => {
     const text = query.trim().toLocaleLowerCase();

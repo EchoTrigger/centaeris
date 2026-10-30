@@ -474,7 +474,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
         setLoadingHistory(false);
       });
     return () => { active = false; };
-  }, [workspace.id, workspaceDraft, requestedSessionId, requestScopeKey, startFresh, conversationAgentId, clearConversationProjection, clearContextPanel, clearRunControl, setEditingSessionId, setOpenSessionMenuId]);
+  }, [workspace.id, workspaceDraft, requestedSessionId, requestScopeKey, startFresh, initialSession, clearConversationProjection, clearContextPanel, clearRunControl, setEditingSessionId, setOpenSessionMenuId]);
 
   useEffect(() => {
     if (requestedPrompt) setDraft(requestedPrompt);

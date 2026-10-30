@@ -46,7 +46,7 @@ export function ShellPage({ children, initialTab = "home", activeAgent = null, m
       })
       .catch(() => { if (!controller.signal.aborted) setRecent({ scope, refreshKey, sessions: [], projects: [], loading: false, error: true }); });
     return () => controller.abort();
-  }, [showRecentSessions, workspace.id, selectedAgentId, scope, refreshKey, pushedNavigation]);
+  }, [showRecentSessions, workspace.id, scope, refreshKey, pushedNavigation]);
   useEffect(() => {
     if (!showRecentSessions || presentationNavigation === undefined || presentationNavigation === null) return;
     setRecent(previous => ({ scope, refreshKey,

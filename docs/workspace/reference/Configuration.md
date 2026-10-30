@@ -51,8 +51,9 @@ published definition; each accepted Run freezes its selected version.
 
 Migration 0035 adds the shared configuration and Workspace default binding.
 For an existing Workspace, an administrator explicitly promotes the chosen
-existing Agent through its settings and selects the personal Agent identities
-that should share it. Migration and bootstrap do not guess which legacy
+existing Agent through its settings. Explicitly binding additional legacy
+personal identities uses the promotion API's `bindAgentIds` list. Migration and
+bootstrap do not guess which legacy
 configuration should become the default. A Workspace without a selected default
 requires an administrator to select it before ordinary execution.
 

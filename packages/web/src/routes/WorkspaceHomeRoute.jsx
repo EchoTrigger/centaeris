@@ -10,7 +10,7 @@ import { ShellPage } from "../shell/ShellPage";
 
 export default function WorkspaceChatLayout() {
   const { t } = useTranslation();
-  const { workspace, agents, defaultAgentId, selectedSession } = useRouteLoaderData("workspace");
+  const { workspace, defaultAgentId, selectedSession } = useRouteLoaderData("workspace");
   const location = useLocation();
   const locationRef = useRef(location);
   locationRef.current = location;
