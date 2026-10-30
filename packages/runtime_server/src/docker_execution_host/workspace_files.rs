@@ -2,6 +2,7 @@
 use super::*;
 
 pub(super) const ENCODING: &str = "fileManifestV1";
+const FILE_BATCH_SIZE: usize = 32;
 pub(super) fn encoding(snapshot_size_bytes: u64) -> &'static str {
     if snapshot_size_bytes == 0 {
         "frameV1"
@@ -181,32 +182,43 @@ impl<'a> FileAccess<'a> {
         if missing.schema != MISSING_RESULT_SCHEMA {
             return Err("workspace missing files response schema mismatch".into());
         }
-        let ranges: HashMap<_, _> = source
+        let mut missing_hashes = HashSet::new();
+        for hash in missing.missing {
+            if !unique.contains(hash.as_str()) || !missing_hashes.insert(hash) {
+                return Err("workspace missing file identity mismatch".into());
+            }
+        }
+        let selected: Vec<_> = source
             .ranges
             .iter()
-            .map(|range| (range.sha256.as_str(), range))
+            .filter(|range| missing_hashes.remove(range.sha256.as_str()))
             .collect();
-        let mut sent = HashSet::new();
-        for hash in missing.missing {
-            let range = ranges
-                .get(hash.as_str())
-                .ok_or("workspace missing file identity mismatch")?;
-            if !sent.insert(hash) {
-                return Err("workspace missing files repeated an identity".into());
-            }
+        for batch in selected.chunks(FILE_BATCH_SIZE) {
             let metadata = serde_json::to_vec(&UploadRequest {
                 identity: self.identity(UPLOAD_SCHEMA),
-                sha256: &range.sha256,
-                size_bytes: range.size_bytes,
+                files: batch
+                    .iter()
+                    .map(|range| FileIdentityDescriptor {
+                        sha256: &range.sha256,
+                        size_bytes: range.size_bytes,
+                    })
+                    .collect(),
             })
             .map_err(|error| format!("workspace file metadata invalid: {error}"))?;
             let mut prefix = (metadata.len() as u32).to_be_bytes().to_vec();
             prefix.extend(metadata);
-            let length = prefix.len() as u64 + range.size_bytes;
-            let mut file = source.frame.try_clone().map_err(spool_error)?;
-            file.seek(std::io::SeekFrom::Start(range.offset))
-                .map_err(spool_error)?;
-            let body = Cursor::new(prefix).chain(file.take(range.size_bytes));
+            let length =
+                prefix.len() as u64 + batch.iter().map(|range| range.size_bytes).sum::<u64>();
+            let bodies = FileBatchReader {
+                frame: source.frame.try_clone().map_err(spool_error)?,
+                ranges: batch
+                    .iter()
+                    .map(|range| (range.offset, range.size_bytes))
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+                remaining: 0,
+            };
+            let body = Cursor::new(prefix).chain(bodies);
             artifact
                 .observation
                 .count(ProtectionMetric::UploadAttempts, 1, true);
@@ -235,8 +247,10 @@ impl<'a> FileAccess<'a> {
                 .json::<UploadResponse>()
                 .map_err(|error| format!("workspace file upload response invalid: {error}"))?;
             if uploaded.schema != UPLOAD_RESULT_SCHEMA
-                || uploaded.sha256 != range.sha256
-                || uploaded.size_bytes != range.size_bytes
+                || uploaded.files.len() != batch.len()
+                || uploaded.files.iter().zip(batch).any(|(uploaded, range)| {
+                    uploaded.sha256 != range.sha256 || uploaded.size_bytes != range.size_bytes
+                })
             {
                 return Err("workspace file upload response binding mismatch".into());
             }
@@ -249,8 +263,9 @@ impl<'a> FileAccess<'a> {
     fn download(
         &self,
         snapshot: &WorkspaceSnapshotDescriptor,
-        file: &SandboxWorkspaceSnapshotFile,
+        files: &[SandboxWorkspaceSnapshotFile],
     ) -> Result<reqwest::blocking::Response, String> {
+        let size_bytes = files.iter().map(|file| file.size_bytes).sum();
         let response = self
             .client
             .post(format!(
@@ -267,20 +282,18 @@ impl<'a> FileAccess<'a> {
                     expanded_size_bytes: snapshot.expanded_size_bytes,
                     file_count: snapshot.file_count,
                 },
-                sha256: &file.sha256,
-                size_bytes: file.size_bytes,
+                files: files
+                    .iter()
+                    .map(|file| FileIdentityDescriptor {
+                        sha256: &file.sha256,
+                        size_bytes: file.size_bytes,
+                    })
+                    .collect(),
             })
             .timeout(Duration::from_secs(300))
             .send()
             .map_err(|error| format!("workspace file download failed: {error}"))?;
-        if !response.status().is_success()
-            || response.content_length() != Some(file.size_bytes)
-            || response
-                .headers()
-                .get("x-content-sha256")
-                .and_then(|value| value.to_str().ok())
-                != Some(file.sha256.as_str())
-        {
+        if !response.status().is_success() || response.content_length() != Some(size_bytes) {
             return Err("workspace file download binding mismatch".into());
         }
         Ok(response)
@@ -325,14 +338,19 @@ struct MissingResponse {
 struct UploadRequest<'a> {
     #[serde(flatten)]
     identity: FileIdentity<'a>,
-    sha256: &'a str,
-    size_bytes: u64,
+    files: Vec<FileIdentityDescriptor<'a>>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UploadResponse {
     schema: String,
+    files: Vec<UploadedFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UploadedFile {
     sha256: String,
     size_bytes: u64,
 }
@@ -344,8 +362,7 @@ struct DownloadRequest<'a> {
     identity: FileIdentity<'a>,
     checkpoint_id: Option<&'a str>,
     snapshot: StoredSnapshotDescriptor<'a>,
-    sha256: &'a str,
-    size_bytes: u64,
+    files: Vec<FileIdentityDescriptor<'a>>,
 }
 
 #[derive(Serialize)]
@@ -364,17 +381,72 @@ pub(super) fn restore_from_api(
     observation: WorkspaceProtection,
     access: &FileAccess<'_>,
 ) -> Result<workspace_restore::PreparedWorkspaceRestore, String> {
-    restore(source, stored, expanded_limit, observation, |file| {
-        access.download(stored, file)
-    })
+    let download_observation = observation.clone();
+    restore_with_writer(
+        source,
+        stored,
+        expanded_limit,
+        observation,
+        |manifest, output| {
+            for batch in manifest.files.chunks(FILE_BATCH_SIZE) {
+                let mut input = access.download(stored, batch)?;
+                download_observation.download(&mut input, |input| {
+                    write_download_batch(input, batch, output)
+                })?;
+            }
+            Ok(())
+        },
+    )
 }
 
+fn write_download_batch(
+    input: &mut impl Read,
+    files: &[SandboxWorkspaceSnapshotFile],
+    output: &mut FrameWriter<'_>,
+) -> Result<(), String> {
+    for file in files {
+        let mut body = input.by_ref().take(file.size_bytes);
+        copy_exact(&mut body, output, file.size_bytes, &file.sha256)?;
+    }
+    let mut trailing = [0; 1];
+    if input.read(&mut trailing).map_err(spool_error)? != 0 {
+        return Err("workspace file batch has trailing bytes".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn restore<R: Read>(
     source: &mut impl Read,
     stored: &WorkspaceSnapshotDescriptor,
     expanded_limit: u64,
     observation: WorkspaceProtection,
     mut open: impl FnMut(&SandboxWorkspaceSnapshotFile) -> Result<R, String>,
+) -> Result<workspace_restore::PreparedWorkspaceRestore, String> {
+    restore_with_writer(
+        source,
+        stored,
+        expanded_limit,
+        observation,
+        |manifest, output| {
+            for file in &manifest.files {
+                let mut input = open(file)?;
+                copy_exact(&mut input, output, file.size_bytes, &file.sha256)?;
+            }
+            Ok(())
+        },
+    )
+}
+
+fn restore_with_writer(
+    source: &mut impl Read,
+    stored: &WorkspaceSnapshotDescriptor,
+    expanded_limit: u64,
+    observation: WorkspaceProtection,
+    write_files: impl FnOnce(
+        &SandboxWorkspaceSnapshotManifest,
+        &mut FrameWriter<'_>,
+    ) -> Result<(), String>,
 ) -> Result<workspace_restore::PreparedWorkspaceRestore, String> {
     if stored.size_bytes > SESSION_WORKSPACE_MANIFEST_LIMIT as u64
         || stored.expanded_size_bytes > expanded_limit
@@ -409,12 +481,7 @@ fn restore<R: Read>(
         .write_all(&(bytes.len() as u32).to_be_bytes())
         .map_err(spool_error)?;
     output.write_all(&bytes).map_err(spool_error)?;
-    for file in &manifest.files {
-        let mut input = open(file)?;
-        observation.download(&mut input, |input| {
-            copy_exact(input, &mut output, file.size_bytes, &file.sha256)
-        })?;
-    }
+    write_files(&manifest, &mut output)?;
     let descriptor = WorkspaceSnapshotDescriptor {
         sha256: format!("sha256:{:x}", output.digest.finalize()),
         size_bytes: frame_size,
@@ -433,6 +500,37 @@ fn restore<R: Read>(
             file_source: None,
         },
     })
+}
+
+struct FileBatchReader {
+    frame: fs::File,
+    ranges: std::vec::IntoIter<(u64, u64)>,
+    remaining: u64,
+}
+
+impl Read for FileBatchReader {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        while self.remaining == 0 {
+            let Some((offset, size)) = self.ranges.next() else {
+                return Ok(0);
+            };
+            self.frame.seek(std::io::SeekFrom::Start(offset))?;
+            self.remaining = size;
+        }
+        let wanted = self.remaining.min(bytes.len() as u64) as usize;
+        let count = self.frame.read(&mut bytes[..wanted])?;
+        if count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "workspace captured file is truncated",
+            ));
+        }
+        self.remaining -= count as u64;
+        Ok(count)
+    }
 }
 
 struct FrameWriter<'a> {
@@ -639,13 +737,15 @@ mod tests {
             let length = u32::from_be_bytes(body[..4].try_into().unwrap()) as usize;
             let metadata: serde_json::Value = serde_json::from_slice(&body[4..4 + length]).unwrap();
             assert_eq!(metadata["schema"], UPLOAD_SCHEMA);
-            assert_eq!(metadata["sha256"], missing_hash);
-            assert_eq!(metadata["sizeBytes"], 3);
+            assert_eq!(
+                metadata["files"],
+                serde_json::json!([{"sha256": missing_hash, "sizeBytes": 3}])
+            );
             assert_eq!(&body[4 + length..], b"new");
             respond(
                 &mut socket,
                 &serde_json::json!({
-                    "schema": UPLOAD_RESULT_SCHEMA, "sha256": missing_hash, "sizeBytes": 3,
+                    "schema": UPLOAD_RESULT_SCHEMA, "files": [{"sha256": missing_hash, "sizeBytes": 3}],
                 }),
             );
         });
@@ -686,31 +786,36 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let worker = std::thread::spawn(move || {
-            for file in &manifest.files {
-                let (mut socket, _) = listener.accept().unwrap();
-                let (path, body) = read_request(&mut socket);
-                assert!(path.starts_with("POST /internal/agent-runs/workspace-files/download "));
-                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(request["schema"], DOWNLOAD_SCHEMA);
-                assert_eq!(request["checkpointId"], "selected-checkpoint");
-                assert_eq!(
-                    request["snapshot"]["snapshotSha256"],
-                    expected_snapshot.sha256
-                );
-                assert_eq!(
-                    request["snapshot"]["snapshotSizeBytes"],
-                    expected_snapshot.size_bytes
-                );
-                assert_eq!(request["sha256"], file.sha256);
-                assert_eq!(request["sizeBytes"], file.size_bytes);
-                let content = if file.path == "next.txt" {
-                    b"new"
-                } else {
-                    b"old"
-                };
-                write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nX-Content-Sha256: {}\r\nConnection: close\r\n\r\n", file.sha256).unwrap();
-                socket.write_all(content).unwrap();
-            }
+            let (mut socket, _) = listener.accept().unwrap();
+            let (path, body) = read_request(&mut socket);
+            assert!(path.starts_with("POST /internal/agent-runs/workspace-files/download "));
+            let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(request["schema"], DOWNLOAD_SCHEMA);
+            assert_eq!(request["checkpointId"], "selected-checkpoint");
+            assert_eq!(
+                request["snapshot"]["snapshotSha256"],
+                expected_snapshot.sha256
+            );
+            assert_eq!(
+                request["snapshot"]["snapshotSizeBytes"],
+                expected_snapshot.size_bytes
+            );
+            let expected_files: Vec<_> = manifest
+                .files
+                .iter()
+                .map(|file| {
+                    serde_json::json!({
+                        "sha256": file.sha256, "sizeBytes": file.size_bytes,
+                    })
+                })
+                .collect();
+            assert_eq!(request["files"], serde_json::json!(expected_files));
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            socket.write_all(b"oldnewold").unwrap();
         });
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
@@ -742,5 +847,176 @@ mod tests {
         result.helper_frame.file.read_to_end(&mut frame).unwrap();
         assert_eq!(frame, expected_frame);
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn batches_stream_65_missing_files_and_restore_them_in_three_requests_each() {
+        let contents: Vec<Vec<u8>> = (0..65_u32)
+            .map(|index| {
+                if index == 0 {
+                    Vec::new()
+                } else {
+                    index.to_be_bytes().to_vec()
+                }
+            })
+            .collect();
+        let manifest = SandboxWorkspaceSnapshotManifest {
+            schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
+            files: contents
+                .iter()
+                .enumerate()
+                .map(|(index, bytes)| SandboxWorkspaceSnapshotFile {
+                    path: format!("file-{index:03}.bin"),
+                    sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+                    size_bytes: bytes.len() as u64,
+                    executable: false,
+                })
+                .collect(),
+        };
+        let bodies: Vec<u8> = contents.iter().flatten().copied().collect();
+        let expected_frame = encode_frame(&manifest, &bodies).unwrap();
+        let mut artifact =
+            capture_snapshot_artifact(&mut Cursor::new(&expected_frame), 16384).unwrap();
+        prepare(&mut artifact).unwrap();
+        let expected_snapshot = artifact.descriptor.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let (path, body) = read_request(&mut socket);
+            assert!(path.starts_with("POST /internal/agent-runs/workspace-files/missing "));
+            let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(request["files"].as_array().unwrap().len(), 65);
+            let missing: Vec<_> = manifest
+                .files
+                .iter()
+                .rev()
+                .map(|file| file.sha256.clone())
+                .collect();
+            respond(
+                &mut socket,
+                &serde_json::json!({"schema": MISSING_RESULT_SCHEMA, "missing": missing}),
+            );
+            drop(socket);
+            for (batch_index, batch) in manifest.files.chunks(FILE_BATCH_SIZE).enumerate() {
+                let expected_files: Vec<_> = batch
+                    .iter()
+                    .map(|file| {
+                        serde_json::json!({
+                            "sha256": file.sha256, "sizeBytes": file.size_bytes,
+                        })
+                    })
+                    .collect();
+                let expected_body: Vec<u8> = contents
+                    [batch_index * FILE_BATCH_SIZE..batch_index * FILE_BATCH_SIZE + batch.len()]
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .collect();
+                let (mut socket, _) = listener.accept().unwrap();
+                let (path, body) = read_request(&mut socket);
+                assert!(path.starts_with("POST /internal/agent-runs/workspace-files/upload "));
+                let prefix_size = u32::from_be_bytes(body[..4].try_into().unwrap()) as usize;
+                let metadata: serde_json::Value =
+                    serde_json::from_slice(&body[4..4 + prefix_size]).unwrap();
+                assert_eq!(metadata["schema"], UPLOAD_SCHEMA);
+                assert_eq!(metadata["files"], serde_json::json!(expected_files));
+                assert_eq!(&body[4 + prefix_size..], expected_body);
+                respond(
+                    &mut socket,
+                    &serde_json::json!({"schema": UPLOAD_RESULT_SCHEMA, "files": expected_files}),
+                );
+            }
+            for (batch_index, batch) in manifest.files.chunks(FILE_BATCH_SIZE).enumerate() {
+                let expected_files: Vec<_> = batch
+                    .iter()
+                    .map(|file| {
+                        serde_json::json!({
+                            "sha256": file.sha256, "sizeBytes": file.size_bytes,
+                        })
+                    })
+                    .collect();
+                let (mut socket, _) = listener.accept().unwrap();
+                let (path, body) = read_request(&mut socket);
+                assert!(path.starts_with("POST /internal/agent-runs/workspace-files/download "));
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    request["snapshot"]["snapshotSha256"],
+                    expected_snapshot.sha256
+                );
+                assert_eq!(request["files"], serde_json::json!(expected_files));
+                let response_body: Vec<u8> = contents
+                    [batch_index * FILE_BATCH_SIZE..batch_index * FILE_BATCH_SIZE + batch.len()]
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .collect();
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                )
+                .unwrap();
+                socket.write_all(&response_body).unwrap();
+            }
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        let lease = SessionWorkspaceLease {
+            job_id: "original-job".into(),
+            lease_owner: "original-lease".into(),
+        };
+        let api_url = format!("http://{address}");
+        let access = FileAccess::new(
+            &client,
+            &api_url,
+            "token",
+            "original-run",
+            "original-digest",
+            &lease,
+            None,
+        );
+        access.upload_missing(&mut artifact).unwrap();
+        let mut restored = restore_from_api(
+            &mut artifact.file,
+            &artifact.descriptor,
+            256,
+            WorkspaceProtection::new(),
+            &access,
+        )
+        .unwrap();
+        let mut restored_frame = Vec::new();
+        restored
+            .helper_frame
+            .file
+            .read_to_end(&mut restored_frame)
+            .unwrap();
+        assert_eq!(restored_frame, expected_frame);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn download_batch_rejects_truncation_per_file_corruption_and_trailing_bytes() {
+        for (body, valid) in [
+            (b"oldnewold".as_slice(), true),
+            (b"oldne".as_slice(), false),
+            (b"oldBADold".as_slice(), false),
+            (b"oldnewold-extra".as_slice(), false),
+        ] {
+            let mut artifact = captured();
+            prepare(&mut artifact).unwrap();
+            let result = restore_with_writer(
+                &mut artifact.file,
+                &artifact.descriptor,
+                9,
+                WorkspaceProtection::new(),
+                |manifest, output| {
+                    write_download_batch(&mut Cursor::new(body), &manifest.files, output)
+                },
+            );
+            assert_eq!(result.is_ok(), valid);
+        }
     }
 }

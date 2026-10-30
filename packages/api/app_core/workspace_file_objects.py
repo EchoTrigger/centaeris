@@ -12,15 +12,15 @@ import uuid
 
 from django.core.files.storage import default_storage
 from django.db import connection, transaction
-from django.db.models import F
+from django.db.models import F, Q, Case, When, Value
+from django.utils import timezone
 
 from .assets import _sync_directory
-from .models import (WorkspaceFileObject, WorkspaceFileReservation, WorkspaceSnapshotFileReference,
+from .models import (Agent, Session, WorkspaceFileObject, WorkspaceFileReservation, WorkspaceSnapshotFileReference,
                      WorkspaceSnapshotObject, WorkspaceSnapshotUpload, StorageCleanupRetry)
 from .resource_commit import require_durable_commit
 from .runtime_contract import require_sha256
-from .workspace_snapshot_publication import (_object, finish_upload, key_digest, mark_published,
-                                             require_upload_live)
+from .workspace_snapshot_publication import _object, key_digest
 from . import workspace_observations as observations
 
 
@@ -116,86 +116,162 @@ def reserve_files(session, run, body, files):
     return missing
 
 
-def _reserved_file(session, run, body, descriptor):
-    descriptor = _descriptors([descriptor])[0]
-    file = WorkspaceFileObject.objects.select_related("object").filter(
-        pk=key_digest(file_key(session, descriptor["sha256"])), object__session=session,
-        object__kind="file", object__state="live", sha256=descriptor["sha256"],
-        sizeBytes=descriptor["sizeBytes"], reservations__agent_run=run,
-        reservations__jobId=body["jobId"], reservations__leaseOwner=body["leaseOwner"],
+def ordered_descriptors(files, *, unique=False):
+    validated = _descriptors(files)
+    if unique and len(validated) != len(files):
+        raise _error(status=400)
+    return list(files)
+
+
+def _reserved_files(session, run, body, descriptors):
+    keys = {key_digest(file_key(session, item["sha256"])): item for item in descriptors}
+    found = list(WorkspaceFileObject.objects.select_related("object").filter(
+        pk__in=keys, object__session=session, object__kind="file", object__state="live",
+        reservations__agent_run=run, reservations__jobId=body["jobId"],
+        reservations__leaseOwner=body["leaseOwner"],
         reservations__authorizationDigest=body["authorizationDigest"],
-        reservations__publicationToken=F("object__publicationToken")).first()
-    if file is None:
+        reservations__publicationToken=F("object__publicationToken")))
+    if len(found) != len(keys) or any(
+            file.sha256 != keys[file.pk]["sha256"] or file.sizeBytes != keys[file.pk]["sizeBytes"] for file in found):
         raise _error("workspace_file_reservation_lost")
-    return file
+    return {file.sha256: file for file in found}
+
+
+def _publication_lost():
+    from .http.internal import SessionWorkspaceError
+    return SessionWorkspaceError("session_workspace_publication_collected")
+
+
+def _finish_file_uploads(entries, owner):
+    absent = []
+    cleanup_error = None
+    for entry in entries:
+        if entry["fd"] is not None:
+            os.close(entry["fd"])
+            entry["fd"] = None
+        try:
+            os.unlink(entry["path"])
+        except FileNotFoundError:
+            absent.append(entry)
+        except OSError as error:
+            cleanup_error = cleanup_error or error
+        else:
+            absent.append(entry)
+    uploads = [entry["upload"] for entry in entries if entry.get("upload") is not None]
+    if uploads:
+        with transaction.atomic():
+            Agent.objects.select_for_update().get(pk=owner.agent_id)
+            Session.objects.select_for_update().get(pk=owner.pk)
+            now = timezone.now()
+            WorkspaceSnapshotUpload.objects.filter(pk__in=[upload.pk for upload in uploads]).update(
+                state=Case(When(state="streaming", then=Value("abandoned")), default=F("state")),
+                finishedAt=now, updatedAt=now)
+            matching = Q(pk__in=[])
+            for entry in absent:
+                temporary = entry.get("temporary")
+                if temporary is not None:
+                    matching |= Q(pk=temporary.pk, publicationToken=temporary.publicationToken)
+            WorkspaceSnapshotObject.objects.filter(matching, state="live").update(
+                state="collected", collectedAt=now, updatedAt=now)
+    observations.gauge("temporaryBytes", 0)
+    if cleanup_error is not None:
+        raise cleanup_error
+
+
+def upload_files(source, body, descriptors, authorize):
+    """Receive ordered bodies under one request fence and one publication fence."""
+    descriptors = ordered_descriptors(descriptors, unique=True)
+    entries = []
+    owner = None
+    try:
+        with transaction.atomic():
+            run, owner, *_ = authorize(body)
+            require_durable_commit(connection, _error("session_workspace_durability_required"))
+            files = _reserved_files(owner, run, body, descriptors)
+            temporaries, uploads = [], []
+            for descriptor in descriptors:
+                file = files[descriptor["sha256"]]
+                final_path = Path(default_storage.path(file.object.storageKey))
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                fd, path = tempfile.mkstemp(prefix=".centaeris-immutable-", suffix=".tmp", dir=final_path.parent)
+                temporary_key = Path(path).relative_to(Path(default_storage.path(""))).as_posix()
+                temporary = WorkspaceSnapshotObject(keyDigest=key_digest(temporary_key), storageKey=temporary_key,
+                    session=owner, kind="temporary", registered=True)
+                upload = WorkspaceSnapshotUpload(id=uuid.uuid4().hex, finalObject=file.object,
+                    temporaryObject=temporary, agent_run=run, jobId=body["jobId"], leaseOwner=body["leaseOwner"],
+                    authorizationDigest=body["authorizationDigest"], finalPublicationToken=file.object.publicationToken,
+                    temporaryPublicationToken=temporary.publicationToken)
+                entries.append({"descriptor": descriptor, "fd": fd, "path": path,
+                                "temporary": temporary, "upload": upload})
+                temporaries.append(temporary)
+                uploads.append(upload)
+            WorkspaceSnapshotObject.objects.bulk_create(temporaries)
+            WorkspaceSnapshotUpload.objects.bulk_create(uploads)
+        temporary_bytes = 0
+        for entry in entries:
+            descriptor = entry["descriptor"]
+            digest = hashlib.sha256()
+            remaining = descriptor["sizeBytes"]
+            fd, entry["fd"] = entry["fd"], None
+            with os.fdopen(fd, "wb") as output:
+                while remaining:
+                    chunk = source.read(min(remaining, IO_BYTES))
+                    observations.increment("apiReceivedBytes", len(chunk))
+                    if not chunk or len(chunk) > remaining:
+                        raise _error(status=400)
+                    output.write(chunk)
+                    observations.increment("apiWrittenBytes", len(chunk))
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                if "sha256:" + digest.hexdigest() != descriptor["sha256"]:
+                    raise _error(status=400)
+                output.flush()
+                os.fsync(output.fileno())
+            temporary_bytes += descriptor["sizeBytes"]
+            observations.gauge("temporaryBytes", temporary_bytes)
+        extra = source.read(1)
+        observations.increment("apiReceivedBytes", len(extra))
+        if extra:
+            raise _error(status=400)
+        with transaction.atomic():
+            run, session, *_ = authorize(body)
+            files = _reserved_files(session, run, body, descriptors)
+            uploads = {upload.pk: upload for upload in WorkspaceSnapshotUpload.objects.select_related(
+                "finalObject", "temporaryObject").filter(pk__in=[entry["upload"].pk for entry in entries])}
+            cleaned = set(StorageCleanupRetry.objects.filter(pk__in=[file.pk for file in files.values()],
+                collector="workspaceSnapshot", state="cleaned").values_list("pk", "publicationToken"))
+            # Validate the entire batch before the first immutable rename.
+            for entry in entries:
+                file = files[entry["descriptor"]["sha256"]]
+                upload = uploads.get(entry["upload"].pk)
+                if (upload is None or upload.state == "abandoned"
+                        or upload.finalObject_id != file.pk
+                        or upload.finalObject.state != "live" or upload.temporaryObject.state != "live"
+                        or upload.finalPublicationToken != file.object.publicationToken
+                        or upload.temporaryPublicationToken != upload.temporaryObject.publicationToken
+                        or (file.pk, file.object.publicationToken) in cleaned):
+                    raise _publication_lost()
+            changed = []
+            directories = set()
+            for entry in entries:
+                file = files[entry["descriptor"]["sha256"]]
+                if file.verifiedPublicationToken != file.object.publicationToken:
+                    os.replace(entry["path"], default_storage.path(file.object.storageKey))
+                    directories.add(str(Path(entry["path"]).parent))
+                    file.verifiedPublicationToken = file.object.publicationToken
+                    changed.append(file)
+            for directory in directories:
+                _sync_directory(directory)
+            WorkspaceFileObject.objects.bulk_update(changed, ["verifiedPublicationToken"])
+            WorkspaceSnapshotUpload.objects.filter(pk__in=uploads).update(state="committed", updatedAt=timezone.now())
+        return descriptors
+    finally:
+        _finish_file_uploads(entries, owner)
 
 
 def upload_file(source, body, descriptor, authorize):
-    """Accept one body, hash while writing once, then publish under fresh authority.
-
-    authorize(body) runs inside transaction.atomic and returns (run, session, ...).
-    It owns the actual membership/controller/job semantics, including cleanup lanes.
-    """
-    descriptor = _descriptors([descriptor])[0]
-    temporary_path = None
-    upload_id = None
-    fd = None
-    try:
-        with transaction.atomic():
-            run, session, *_ = authorize(body)
-            require_durable_commit(connection, _error("session_workspace_durability_required"))
-            file = _reserved_file(session, run, body, descriptor)
-            final = file.object
-            final_path = Path(default_storage.path(final.storageKey))
-            final_path.parent.mkdir(parents=True, exist_ok=True)
-            fd, temporary_path = tempfile.mkstemp(prefix=".centaeris-immutable-", suffix=".tmp", dir=final_path.parent)
-            temporary_key = Path(temporary_path).relative_to(Path(default_storage.path(""))).as_posix()
-            temporary = _object(session, run, temporary_key, "temporary")
-            upload_id = WorkspaceSnapshotUpload.objects.create(id=uuid.uuid4().hex,
-                finalObject=final, temporaryObject=temporary, agent_run=run,
-                jobId=body["jobId"], leaseOwner=body["leaseOwner"],
-                authorizationDigest=body["authorizationDigest"], finalPublicationToken=final.publicationToken,
-                temporaryPublicationToken=temporary.publicationToken).pk
-        digest = hashlib.sha256()
-        remaining = descriptor["sizeBytes"]
-        opened_fd, fd = fd, None
-        with os.fdopen(opened_fd, "wb") as output:
-            while remaining:
-                chunk = source.read(min(remaining, IO_BYTES))
-                observations.increment("apiReceivedBytes", len(chunk))
-                if not chunk or len(chunk) > remaining:
-                    raise _error(status=400)
-                output.write(chunk)
-                observations.increment("apiWrittenBytes", len(chunk))
-                digest.update(chunk)
-                remaining -= len(chunk)
-            extra = source.read(1)
-            observations.increment("apiReceivedBytes", len(extra))
-            if extra or "sha256:" + digest.hexdigest() != descriptor["sha256"]:
-                raise _error(status=400)
-            output.flush()
-            os.fsync(output.fileno())
-        with transaction.atomic():
-            run, session, *_ = authorize(body)
-            file = _reserved_file(session, run, body, descriptor)
-            require_upload_live(upload_id, file.object.storageKey)
-            if file.verifiedPublicationToken != file.object.publicationToken:
-                os.replace(temporary_path, default_storage.path(file.object.storageKey))
-                _sync_directory(str(Path(temporary_path).parent))
-                file.verifiedPublicationToken = file.object.publicationToken
-                file.save(update_fields=["verifiedPublicationToken"])
-            mark_published(upload_id, "committed")
-        return descriptor
-    finally:
-        if fd is not None:
-            os.close(fd)
-        if temporary_path is not None:
-            try:
-                os.unlink(temporary_path)
-            except FileNotFoundError:
-                pass
-        if upload_id is not None:
-            finish_upload(upload_id)
+    """Private single-file convenience; the HTTP contract always uses batches."""
+    return upload_files(source, body, [descriptor], authorize)[0]
 
 
 def require_manifest_files(session, run, body, manifest):
@@ -225,6 +301,84 @@ def register_snapshot_files(snapshot_object, files):
         ignore_conflicts=True)
 
 
+class FileSequence:
+    """Own ordered accepted file handles through EOF, failure or cancellation."""
+    def __init__(self, handles):
+        self.handles = handles
+        self.index = 0
+        self.remaining = handles[0][1] if handles else 0
+        self.closed = False
+
+    def read(self, size=-1):
+        if self.closed or size == 0:
+            return b""
+        parts = []
+        wanted = None if size is None or size < 0 else size
+        try:
+            while self.index < len(self.handles) and (wanted is None or wanted > 0):
+                handle, _length = self.handles[self.index]
+                if not self.remaining:
+                    handle.close()
+                    self.index += 1
+                    if self.index < len(self.handles):
+                        self.remaining = self.handles[self.index][1]
+                    continue
+                chunk = handle.read(self.remaining if wanted is None else min(wanted, self.remaining))
+                if not chunk:
+                    raise OSError("workspace file stream truncated")
+                parts.append(chunk)
+                self.remaining -= len(chunk)
+                if wanted is not None:
+                    wanted -= len(chunk)
+            if self.index == len(self.handles):
+                self.close()
+            return b"".join(parts)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        failure = None
+        for handle, _length in self.handles:
+            try:
+                handle.close()
+            except OSError as error:
+                failure = failure or error
+        if failure is not None:
+            raise failure
+
+
+def open_manifest_files(session, snapshot_key, descriptors):
+    """Bulk-check selected manifest membership, then open in request order."""
+    descriptors = ordered_descriptors(descriptors)
+    keys = {key_digest(file_key(session, item["sha256"])): item for item in descriptors}
+    found = list(WorkspaceFileObject.objects.select_related("object").filter(
+        pk__in=keys, object__session=session, object__state="live", object__kind="file",
+        verifiedPublicationToken=F("object__publicationToken"),
+        snapshotReferences__snapshot__storageKey=snapshot_key,
+        snapshotReferences__snapshot__session=session, snapshotReferences__snapshot__state="live",
+        snapshotReferences__snapshot__snapshotEncoding=FILE_MANIFEST_ENCODING))
+    if len(found) != len(keys) or any(
+            file.sha256 != keys[file.pk]["sha256"] or file.sizeBytes != keys[file.pk]["sizeBytes"] for file in found):
+        raise _error("workspace_file_reference_not_found", 404)
+    files = {file.sha256: file for file in found}
+    handles = []
+    try:
+        for descriptor in descriptors:
+            file = files[descriptor["sha256"]]
+            handle = default_storage.open(file.object.storageKey, "rb")
+            handles.append((handle, file.sizeBytes))
+            if os.fstat(handle.fileno()).st_size != file.sizeBytes:
+                raise _error("workspace_file_identity_invalid")
+        return FileSequence(handles)
+    except BaseException:
+        FileSequence(handles).close()
+        raise
+
+
 def open_file(session, sha256):
     """Open after the caller proved a selected snapshot/reference or reservation."""
     file = WorkspaceFileObject.objects.select_related("object").filter(
@@ -239,9 +393,11 @@ def open_file(session, sha256):
     return handle
 
 
-def referenced_file_keys(snapshot_keys):
-    return set(WorkspaceSnapshotFileReference.objects.filter(snapshot__storageKey__in=snapshot_keys)
-               .values_list("file__object__storageKey", flat=True))
+def referenced_file_keys(snapshot_keys, candidate_keys=None):
+    references = WorkspaceSnapshotFileReference.objects.filter(snapshot__storageKey__in=snapshot_keys)
+    if candidate_keys is not None:
+        references = references.filter(file__object__storageKey__in=candidate_keys)
+    return set(references.values_list("file__object__storageKey", flat=True).distinct())
 
 
 def live_reservation_keys(session):

@@ -50,14 +50,17 @@ def prepare_workspace_files(test, body):
     if response.status_code != 200:
         return  # Retain the original endpoint's authority-rejection assertions.
     contents = getattr(test, "_workspace_file_contents", {})
-    for sha256 in response.json()["missing"]:
-        if sha256 not in contents:
-            return
-        content = contents[sha256]
+    missing = response.json()["missing"]
+    if any(sha256 not in contents for sha256 in missing):
+        return
+    for offset in range(0, len(missing), 32):
+        batch = [contents[sha256] for sha256 in missing[offset:offset + 32]]
+        files = [{"sha256": "sha256:"+hashlib.sha256(content).hexdigest(), "sizeBytes": len(content)}
+                 for content in batch]
         encoded = json.dumps({"schema": "runtime.workspace_files.upload.v1", **identity,
-            "sha256": sha256, "sizeBytes": len(content)}, separators=(",", ":")).encode()
+            "files": files}, separators=(",", ":")).encode()
         uploaded = Client().post("/internal/agent-runs/workspace-files/upload",
-            data=len(encoded).to_bytes(4, "big") + encoded + content,
+            data=len(encoded).to_bytes(4, "big") + encoded + b"".join(batch),
             content_type="application/octet-stream", HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
         test.assertEqual(uploaded.status_code, 201, uploaded.content)
 

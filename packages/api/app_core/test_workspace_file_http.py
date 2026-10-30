@@ -53,20 +53,26 @@ class WorkspaceFileHttpFixture(ExecutionPublicationFixture):
             files=[file_descriptor(content) for content in contents] if files is None else files)
         return self.post_json("workspace-files/missing", body | identity)
 
-    def upload(self, content, *, received=None, **identity):
-        metadata = canonical(self.identity("runtime.workspace_files.upload.v1", **file_descriptor(content)) | identity)
-        payload = len(metadata).to_bytes(4, "big") + metadata + (content if received is None else received)
+    def upload_batch(self, contents, *, received=None, **identity):
+        metadata = canonical(self.identity("runtime.workspace_files.upload.v1",
+            files=[file_descriptor(content) for content in contents]) | identity)
+        payload = len(metadata).to_bytes(4, "big") + metadata + (b"".join(contents) if received is None else received)
         return self.client.post(PREFIX + "workspace-files/upload", data=payload,
             content_type="application/octet-stream", HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
+
+    def upload(self, content, *, received=None, **identity):
+        return self.upload_batch([content], received=received, **identity)
 
     def store_files(self, contents):
         missing = self.missing(contents)
         self.assertEqual(missing.status_code, 200, missing.content)
         requested = set(missing.json()["missing"])
-        for content in contents:
-            if digest(content) in requested:
-                uploaded = self.upload(content)
-                self.assertEqual(uploaded.status_code, 201, uploaded.content)
+        unique = list({digest(content): content for content in contents if digest(content) in requested}.values())
+        for offset in range(0, len(unique), 32):
+            batch = unique[offset:offset + 32]
+            uploaded = self.upload_batch(batch)
+            self.assertEqual(uploaded.status_code, 201, uploaded.content)
+            self.assertEqual(uploaded.json()["files"], [file_descriptor(content) for content in batch])
         return missing
 
     def snapshot_upload(self, value, *, checkpoint_id=None, metadata_changes=None, received=None):
@@ -106,13 +112,16 @@ class WorkspaceFileHttpFixture(ExecutionPublicationFixture):
         self.addCleanup(delete_job)
         return {"jobId": job, "leaseOwner": owner, "agentRunId": reader.pk, "authorizationDigest": grant.digest}
 
-    def download(self, content, snapshot, *, identity=None, checkpoint_id=None, **changes):
+    def download_batch(self, contents, snapshot, *, identity=None, checkpoint_id=None, **changes):
         body = self.identity("runtime.workspace_files.download.v1", checkpointId=checkpoint_id,
-                             snapshot=snapshot, **file_descriptor(content))
+                             snapshot=snapshot, files=[file_descriptor(content) for content in contents])
         body.update(identity or {})
         body.update(changes)
         response = self.post_json("workspace-files/download", body)
         return response, streaming_response_bytes(response) if response.streaming else response.content
+
+    def download(self, content, snapshot, **kwargs):
+        return self.download_batch([content], snapshot, **kwargs)
 
     def checkpoint(self, checkpoint_id, staged):
         snapshot = {key: staged[key] for key in
@@ -162,7 +171,6 @@ class WorkspaceFileHttpTests(WorkspaceFileHttpFixture, TransactionTestCase):
         for content in contents:
             response, received = self.download(content, snapshot, identity=reader)
             self.assertEqual(response.status_code, 200, received)
-            self.assertEqual(response["X-Content-Sha256"], digest(content))
             self.assertEqual(response["Content-Length"], str(len(content)))
             self.assertEqual(received, content)
         manifest_response = self.post_json("session-workspace/download", {
@@ -244,7 +252,7 @@ class WorkspaceFileHttpTests(WorkspaceFileHttpFixture, TransactionTestCase):
         content = b"measured workspace file body"
         reserved = self.missing([content])
         self.assertEqual(reserved.status_code, 200, reserved.content)
-        metadata = canonical(self.identity("runtime.workspace_files.upload.v1", **file_descriptor(content)))
+        metadata = canonical(self.identity("runtime.workspace_files.upload.v1", files=[file_descriptor(content)]))
         output = io.StringIO()
         with patch.dict(os.environ, {"WORKSPACE_PERF_OBSERVATIONS": "1"}), redirect_stderr(output):
             uploaded = self.upload(content)
@@ -258,6 +266,18 @@ class WorkspaceFileHttpTests(WorkspaceFileHttpFixture, TransactionTestCase):
                             and row["sessionId"] == self.session.pk and row["runId"] == self.run.pk
                             and row["jobId"] == self.job_id and row["outcome"] == "ok" for row in records))
         self.assertEqual(len({row["operationId"] for row in records}), 1)
+
+    def test_batch_download_preserves_order_repeated_content_and_empty_files(self):
+        first, last = b"shared object", b"different body"
+        self.store_files([first, last, b""])
+        committed, snapshot, _ = self.snapshot_upload(document([
+            ("a", first, False), ("copy", first, True), ("empty", b"", False), ("z", last, False)]))
+        self.assertEqual(committed.status_code, 201, committed.content)
+        requested = [last, first, b"", first]
+        response, received = self.download_batch(requested, snapshot, identity=self.new_reader())
+        self.assertEqual(response.status_code, 200, received)
+        self.assertEqual(response["Content-Length"], str(sum(map(len, requested))))
+        self.assertEqual(received, b"".join(requested))
 
     def test_missing_request_respects_the_current_workspace_budget(self):
         budget = self.authorization.payload["environmentProfile"]["resources"]["workspaceBytes"]

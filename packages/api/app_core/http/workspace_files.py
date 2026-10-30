@@ -6,7 +6,7 @@ from django.db import DatabaseError, transaction
 from django.http import JsonResponse
 
 from app_core import workspace_file_objects as objects
-from app_core.models import AgentRun, WorkspaceSnapshotFileReference
+from app_core.models import AgentRun
 from app_core.runtime_contract import validate_session_workspace, require_opaque_ref
 from app_core.workspace_snapshot_roots import (
     WorkspaceRootsUnavailable, request_workspace_snapshot_roots, require_current_roots,
@@ -94,14 +94,12 @@ def upload_file(request):
         if not 0 < size <= internal.MAX_SESSION_WORKSPACE_METADATA_BYTES:
             raise ValueError("metadata length")
         body = _identity(json.loads(internal._read_workspace_bytes(request, size).decode("utf-8")),
-                         UPLOAD, {"sha256", "sizeBytes"})
-        if type(body["sizeBytes"]) is not int or body["sizeBytes"] < 0:
-            raise ValueError("file length")
-        if int(request.META.get("CONTENT_LENGTH", -1)) != 4 + size + body["sizeBytes"]:
+                         UPLOAD, {"files"})
+        files = objects.ordered_descriptors(body["files"], unique=True)
+        if int(request.META.get("CONTENT_LENGTH", -1)) != 4 + size + sum(file["sizeBytes"] for file in files):
             raise ValueError("content length")
-        result = objects.upload_file(request, body,
-            {"sha256": body["sha256"], "sizeBytes": body["sizeBytes"]}, _authorize)
-        return JsonResponse({"schema": "runtime.workspace_files.upload.result.v1", **result}, status=201)
+        result = objects.upload_files(request, body, files, _authorize)
+        return JsonResponse({"schema": "runtime.workspace_files.upload.result.v1", "files": result}, status=201)
     except Exception as error:
         return _failure(error)
 
@@ -110,9 +108,10 @@ def _selected_source(body):
     from . import internal
     roots = None
     if body["checkpointId"] is not None:
-        with transaction.atomic():
-            _run, session, _frozen = _authorize(body)
-        roots = request_workspace_snapshot_roots(session)
+        run = AgentRun.objects.select_related("session").filter(pk=body["agentRunId"]).first()
+        if run is None:
+            raise internal.SessionWorkspaceError("session_workspace_agent_run_not_found", 404)
+        roots = request_workspace_snapshot_roots(run.session)
     return roots
 
 
@@ -135,34 +134,20 @@ def _open_authorized(body):
             key = snapshot.pop("objectRef")
         if snapshot != body["snapshot"]:
             raise internal.SessionWorkspaceError("workspace_file_snapshot_rejected")
-        linked = WorkspaceSnapshotFileReference.objects.filter(
-            snapshot__session=session, snapshot__storageKey=key, snapshot__state="live",
-            snapshot__snapshotEncoding=objects.FILE_MANIFEST_ENCODING,
-            file__sha256=body["sha256"], file__sizeBytes=body["sizeBytes"]).exists()
-        if not linked:
-            raise internal.SessionWorkspaceError("workspace_file_reference_not_found", 404)
-        return objects.open_file(session, body["sha256"])
+        return objects.open_manifest_files(session, key, body["files"])
 
 
 async def download_file(request):
     try:
-        body = _identity(decode_json_object(request), DOWNLOAD,
-                         {"checkpointId", "snapshot", "sha256", "sizeBytes"})
+        body = _identity(decode_json_object(request), DOWNLOAD, {"checkpointId", "snapshot", "files"})
         validate_session_workspace({"generation": 1, **body["snapshot"]})
-        objects._descriptors([{"sha256": body["sha256"], "sizeBytes": body["sizeBytes"]}])
+        body["files"] = objects.ordered_descriptors(body["files"])
         if body["checkpointId"] is not None:
             require_opaque_ref("checkpointId", body["checkpointId"])
-        # Metadata lookup supplies the response key only; authorized_open owns
-        # the current lease/source proof and opens the actual content handle.
-        session = await sync_to_async(lambda: AgentRun.objects.select_related("session").get(
-            pk=body["agentRunId"]).session, thread_sensitive=True)()
-        key = objects.file_key(session, body["sha256"])
         async def authorized_open():
             return await sync_to_async(_open_authorized, thread_sensitive=True)(body)
-        response = await stored_file_response(key, "application/octet-stream", "workspace.file",
-            as_attachment=False, content_length=body["sizeBytes"], authorized_open=authorized_open)
-        if response.status_code == 200:
-            response["X-Content-Sha256"] = body["sha256"]
-        return response
+        return await stored_file_response("workspace-files", "application/octet-stream", "workspace.files",
+            as_attachment=False, content_length=sum(file["sizeBytes"] for file in body["files"]),
+            authorized_open=authorized_open)
     except Exception as error:
         return _failure(error)

@@ -29,6 +29,7 @@ SCENARIOS = ("firstsave", "unchanged", "onefilechanged", "versions", "allchanged
 TABLES = ("WorkspaceSnapshotObject", "WorkspaceSnapshotUpload", "WorkspaceFileObject",
           "WorkspaceFileReservation", "WorkspaceSnapshotFileReference", "StorageCleanupRetry")
 IO_BYTES = 64 * 1024
+BATCH_FILES = 32
 MAX_ITERATION_BYTES = 1536 * 1024**2
 
 
@@ -196,6 +197,7 @@ def build_case(options, results):
             super().setUp()
             self.records = []
             self.post_bytes = 0
+            self.post_requests = 0
             self.file_body_bytes = 0
             self.download_bytes = 0
             self.created_entries = {}
@@ -246,11 +248,13 @@ def build_case(options, results):
                 return executemany(cursor, sql, params)
             start, cpu = time.perf_counter(), time.process_time()
             wire, bodies, downloads = self.post_bytes, self.file_body_bytes, self.download_bytes
+            requests = self.post_requests
             with patch.object(CursorWrapper, "execute", one), patch.object(CursorWrapper, "executemany", many):
                 yield
             self.records.append({"phase": name, "wallMs": (time.perf_counter() - start) * 1000,
                 "processCpuMs": (time.process_time() - cpu) * 1000, **counts,
                 "requestBodyBytes": self.post_bytes - wire,
+                "postRequestCount": self.post_requests - requests,
                 "uploadedFileBodyBytes": self.file_body_bytes - bodies,
                 "downloadedStorageBytes": self.download_bytes - downloads,
                 "processRssHighWaterBytes": rss_high_water()})
@@ -258,6 +262,7 @@ def build_case(options, results):
         def post(self, endpoint, body, *, binary=False):
             encoded = body if binary else canonical(body)
             self.post_bytes += len(encoded)
+            self.post_requests += 1
             response = self.client.post("/internal/agent-runs/" + endpoint, data=encoded,
                 content_type="application/octet-stream" if binary else "application/json",
                 HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
@@ -317,12 +322,15 @@ def build_case(options, results):
                         files=[{"sha256": key, "sizeBytes": len(entry.content)} for key, entry in by_hash.items()]))
                     missing = response.json()["missing"]
                 with self.phase(name + ".files"):
-                    for key in missing:
-                        entry = by_hash[key]
-                        metadata = canonical(self.identity("runtime.workspace_files.upload.v1", sha256=key, sizeBytes=len(entry.content)))
-                        body = len(metadata).to_bytes(4, "big") + metadata + entry.content
-                        self.file_body_bytes += len(entry.content)
-                        self.post("workspace-files/upload", body, binary=True)
+                    for offset in range(0, len(missing), BATCH_FILES):
+                        entries_batch = [by_hash[key] for key in missing[offset:offset + BATCH_FILES]]
+                        descriptors = [{"sha256": entry.digest, "sizeBytes": len(entry.content)} for entry in entries_batch]
+                        metadata = canonical(self.identity("runtime.workspace_files.upload.v1", files=descriptors))
+                        body = len(metadata).to_bytes(4, "big") + metadata + b"".join(entry.content for entry in entries_batch)
+                        self.file_body_bytes += sum(len(entry.content) for entry in entries_batch)
+                        uploaded = self.post("workspace-files/upload", body, binary=True).json()
+                        self.assertEqual(uploaded["schema"], "runtime.workspace_files.upload.result.v1")
+                        self.assertEqual(uploaded["files"], descriptors)
                 schema = "runtime.session_workspace.commit.v2"
             else:
                 schema = "runtime.session_workspace.commit.v1"
@@ -367,23 +375,29 @@ def build_case(options, results):
                 else:
                     restored_manifest = json.loads(reader.exact(snapshot["snapshotSizeBytes"]))
                 self.assertEqual(restored_manifest, document(self.current_entries))
-                for entry in self.current_entries:
-                    target = Path(directory) / entry.path
-                    target.parent.mkdir(parents=True, exist_ok=True)
+                groups = ([self.current_entries] if options.encoding == "frameV1" else
+                          [self.current_entries[offset:offset + BATCH_FILES]
+                           for offset in range(0, len(self.current_entries), BATCH_FILES)])
+                for entries_batch in groups:
                     if options.encoding == "fileManifestV1":
+                        descriptors = [{"sha256": entry.digest, "sizeBytes": len(entry.content)} for entry in entries_batch]
                         response = self.post("workspace-files/download", self.identity("runtime.workspace_files.download.v1",
-                            checkpointId=None, snapshot=snapshot, sha256=entry.digest, sizeBytes=len(entry.content)))
+                            checkpointId=None, snapshot=snapshot, files=descriptors))
+                        self.assertEqual(int(response["Content-Length"]), sum(entry["sizeBytes"] for entry in descriptors))
                         body_reader = StreamReader(response_chunks(response))
                     else:
                         body_reader = reader
-                    remaining, actual = len(entry.content), hashlib.sha256()
-                    with target.open("wb") as handle:
-                        while remaining:
-                            chunk = body_reader.exact(min(remaining, IO_BYTES))
-                            actual.update(chunk)
-                            handle.write(chunk)
-                            remaining -= len(chunk)
-                    self.assertEqual("sha256:" + actual.hexdigest(), entry.digest)
+                    for entry in entries_batch:
+                        target = Path(directory) / entry.path
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        remaining, actual = len(entry.content), hashlib.sha256()
+                        with target.open("wb") as handle:
+                            while remaining:
+                                chunk = body_reader.exact(min(remaining, IO_BYTES))
+                                actual.update(chunk)
+                                handle.write(chunk)
+                                remaining -= len(chunk)
+                        self.assertEqual("sha256:" + actual.hexdigest(), entry.digest)
                     if options.encoding == "fileManifestV1":
                         self.assertEqual(body_reader.read(1), b"")
                         self.download_bytes += body_reader.bytes
@@ -450,6 +464,7 @@ def build_case(options, results):
                 "files": count, "fileBytes": size, "versionsSaved": len(self.saved),
                 "fixtureGenerationMs": generation_ms, "phases": self.records,
                 "uploadedFileBodyBytes": self.file_body_bytes, "requestBodyBytes": self.post_bytes,
+                "postRequestCount": self.post_requests,
                 "uniqueFileBodyBytes": unique,
                 "theoreticalFullSnapshotFileBodyBytes": sum(saved["descriptor"]["expandedSizeBytes"] for saved in self.saved),
                 "downloadedStorageBytes": self.download_bytes,
@@ -559,6 +574,7 @@ def run(options):
         "maxWallMs": max(values)} for key, values in groups.items()]
     report = {"schema": "workspace.storage_benchmark.v1", "sourceSha": sha, "sourceDirty": dirty, "sourceIdentity": identity,
         "encoding": options.encoding, "smoke": options.smoke, "workspaceBudgetBytes": options.workspace_budget_bytes,
+        "fileBatchSize": BATCH_FILES if options.encoding == "fileManifestV1" else None,
         "gcScalingCaveat": "Session-wide recent/reference sets may be reread per batch; query counts alone do not establish linear complexity",
         "summary": summary,
         "host": {"system": platform.system(), "release": platform.release(), "machine": platform.machine(), "cpuCount": os.cpu_count()},

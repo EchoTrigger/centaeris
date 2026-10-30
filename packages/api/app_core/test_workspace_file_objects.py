@@ -6,14 +6,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from django.db import connection, transaction
-from django.test import TransactionTestCase
+from django.test import SimpleTestCase, TransactionTestCase
 
 from .http import internal
 from .models import Agent, Session, WorkspaceFileObject, WorkspaceSnapshotObject
 from .test_execution_publication_fencing import ExecutionPublicationFixture
 from .testing import create_session
 from .workspace_file_objects import (WorkspaceFileError, file_key, live_reservation_keys, open_file,
-    referenced_file_keys, register_snapshot_files, require_manifest_files, reserve_files, upload_file)
+    referenced_file_keys, register_snapshot_files, require_manifest_files, reserve_files, upload_file, upload_files, FileSequence)
 from .workspace_snapshot_publication import _object, collect_key
 
 
@@ -171,8 +171,61 @@ class WorkspaceFileObjectTests(ExecutionPublicationFixture, TransactionTestCase)
         with open_file(self.session, descriptor(b"")["sha256"]) as stored:
             self.assertEqual(stored.read(), b"")
 
+    def test_batch_tampering_never_publishes_any_file(self):
+        contents = [b"first", b"second"]
+        files = [descriptor(content) for content in contents]
+        self.reserve(files)
+        with self.assertRaises(WorkspaceFileError):
+            upload_files(io.BytesIO(contents[0] + b"broken"), self.identity(), files, self.authorized)
+        self.assertTrue(all(file.verifiedPublicationToken == "" for file in WorkspaceFileObject.objects.all()))
+        self.assertEqual(list(self.storage_root.rglob("*.file")), [])
+        self.assertEqual(list(self.storage_root.rglob(".centaeris-immutable-*.tmp")), [])
+
+    def test_batch_lease_loss_after_stream_prevents_every_publish(self):
+        contents = [b"first", b"second"]
+        files = [descriptor(content) for content in contents]
+        self.reserve(files)
+        source = OnEnd(b"".join(contents), lambda: self._lease(self.owner, expired=True))
+        with self.assertRaisesMessage(internal.SessionWorkspaceError, "session_workspace_lease_lost"):
+            upload_files(source, self.identity(), files, self.authorized)
+        self.assertTrue(all(file.verifiedPublicationToken == "" for file in WorkspaceFileObject.objects.all()))
+        self.assertEqual(list(self.storage_root.rglob("*.file")), [])
+
+    def test_one_replaced_incarnation_fences_the_entire_batch_before_rename(self):
+        contents = [b"first", b"second"]
+        files = [descriptor(content) for content in contents]
+        self.reserve(files)
+        def replace_second():
+            self.collect(file_key(self.session, files[1]["sha256"]))
+            self.reserve(files)
+        source = OnEnd(b"".join(contents), replace_second)
+        with self.assertRaisesMessage(internal.SessionWorkspaceError, "session_workspace_publication_collected"):
+            upload_files(source, self.identity(), files, self.authorized)
+        self.assertTrue(all(file.verifiedPublicationToken == "" for file in WorkspaceFileObject.objects.all()))
+        self.assertEqual(list(self.storage_root.rglob("*.file")), [])
+
     def test_conflicting_size_for_one_content_identity_is_rejected(self):
         content = descriptor(b"identity")
         with self.assertRaises(WorkspaceFileError):
             self.reserve([content, content | {"sizeBytes": content["sizeBytes"] + 1}])
         self.assertEqual(WorkspaceFileObject.objects.count(), 0)
+
+
+class WorkspaceFileSequenceTests(SimpleTestCase):
+    def test_early_close_releases_every_accepted_handle(self):
+        handles = [io.BytesIO(b"one"), io.BytesIO(b"two"), io.BytesIO()]
+        owner = FileSequence([(handle, len(handle.getvalue())) for handle in handles])
+        self.assertEqual(owner.read(1), b"o")
+        owner.close()
+        self.assertTrue(all(handle.closed for handle in handles))
+        owner.close()
+
+    def test_read_failure_closes_current_and_remaining_handles(self):
+        class FailedRead(io.BytesIO):
+            def read(self, size=-1):
+                raise OSError("accepted file read failed")
+        first, failed, last = io.BytesIO(b"one"), FailedRead(b"two"), io.BytesIO(b"three")
+        owner = FileSequence([(first, 3), (failed, 3), (last, 5)])
+        with self.assertRaisesMessage(OSError, "accepted file read failed"):
+            owner.read()
+        self.assertTrue(all(handle.closed for handle in (first, failed, last)))

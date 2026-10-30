@@ -78,7 +78,7 @@ def _batch_roots(session, manifest, keys, cutoff):
     # Grace-period manifests retain their content as well as their own bytes.
     roots.update(_recent_registry_keys(session, cutoff))
     roots.update(live_reservation_keys(session))
-    roots.update(referenced_file_keys(roots))
+    roots.update(referenced_file_keys(roots, keys))
     registered = set(WorkspaceSnapshotObject.objects.filter(session=session, storageKey__in=keys,
         registered=True).values_list("storageKey", flat=True))
     for key in set(keys) - registered:
