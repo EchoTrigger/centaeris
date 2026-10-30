@@ -59,6 +59,14 @@ A daemon configuration change does not prove the backing of an older container,
 and must not be used to add the marker retroactively. Legacy recovery requires
 an independently committed Session snapshot when its guest writes cannot be read.
 Direct runc execution does not use gVisor overlay arguments.
+
+Shared admission also requires host pressure stall information (PSI). Verify that
+`/proc/pressure/memory` and `/proc/pressure/cpu` are readable before rollout. A
+kernel built with `CONFIG_PSI_DEFAULT_DISABLED=y` requires `psi=1` in its boot
+parameters and a host reboot before these files become available. Runtime cannot
+start shared admission without the required host resource observations; enabling
+cgroup v2 alone does not enable PSI.
+
 The application does not select or migrate Docker storage. A host using `vfs`
 needs a separately planned storage transition; do not change its storage driver
 in place during an application rollout. Explicit runc deployments must disable
@@ -80,9 +88,10 @@ administrator. Initialization failure blocks rollout and must not clear the
 Plugin volume.
 
 For this native runsc revision, `api-init` applies the forward Django migration
-chain through `0032_agent_avatar_image`; `0031_workspace_resource_scope` adds the
-Workspace resource authority used by this deployment. Run the same migration
-chain against fresh and existing supported databases. Runtime performs its own
+chain through `0034_workspace_snapshot_publication`. Migration
+`0033_session_workspace_authority` distinguishes an unknown legacy file baseline
+from a committed empty workspace; `0034` fences snapshot publication and GC. Run
+the same migration chain against fresh and existing supported databases. Runtime performs its own
 published-schema upgrade to store version 17 when the matching service starts.
 
 Drain existing workers and complete their cleanup responsibilities before
