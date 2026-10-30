@@ -2,7 +2,7 @@
 use super::*;
 
 pub(super) const ENCODING: &str = "fileManifestV1";
-const FILE_BATCH_SIZE: usize = 32;
+const FILE_BATCH_SIZE: usize = 256;
 pub(super) fn encoding(snapshot_size_bytes: u64) -> &'static str {
     if snapshot_size_bytes == 0 {
         "frameV1"
@@ -850,8 +850,9 @@ mod tests {
     }
 
     #[test]
-    fn batches_stream_65_missing_files_and_restore_them_in_three_requests_each() {
-        let contents: Vec<Vec<u8>> = (0..65_u32)
+    fn batches_stream_missing_files_and_restore_them_in_multiple_requests() {
+        let file_count = 2 * FILE_BATCH_SIZE + 1;
+        let contents: Vec<Vec<u8>> = (0..file_count as u32)
             .map(|index| {
                 if index == 0 {
                     Vec::new()
@@ -875,8 +876,11 @@ mod tests {
         };
         let bodies: Vec<u8> = contents.iter().flatten().copied().collect();
         let expected_frame = encode_frame(&manifest, &bodies).unwrap();
-        let mut artifact =
-            capture_snapshot_artifact(&mut Cursor::new(&expected_frame), 16384).unwrap();
+        let mut artifact = capture_snapshot_artifact(
+            &mut Cursor::new(&expected_frame),
+            expected_frame.len() as u64,
+        )
+        .unwrap();
         prepare(&mut artifact).unwrap();
         let expected_snapshot = artifact.descriptor.clone();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -886,7 +890,7 @@ mod tests {
             let (path, body) = read_request(&mut socket);
             assert!(path.starts_with("POST /internal/agent-runs/workspace-files/missing "));
             let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(request["files"].as_array().unwrap().len(), 65);
+            assert_eq!(request["files"].as_array().unwrap().len(), file_count);
             let missing: Vec<_> = manifest
                 .files
                 .iter()
@@ -982,7 +986,7 @@ mod tests {
         let mut restored = restore_from_api(
             &mut artifact.file,
             &artifact.descriptor,
-            256,
+            bodies.len() as u64,
             WorkspaceProtection::new(),
             &access,
         )

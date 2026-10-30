@@ -897,7 +897,9 @@ small file or a larger file remains a loose object. File identities in manifests
 stay the SHA256 of their individual bytes. The file index records its pack and
 byte offset, and the API exposes the same bounded file stream to Runtime. This
 reduces physical publication/fsync count without changing the public manifest,
-file hashes, upload batches, or helper frame protocol.
+file hashes, file transport schemas, or helper frame protocol. A transport batch
+may contain multiple bounded physical packs; streaming transfer does not load
+the entire batch into memory.
 
 `snapshotSha256` and `snapshotSizeBytes` identify the exact stored manifest bytes;
 `expandedSizeBytes` sums file bodies across paths, including repeated content.

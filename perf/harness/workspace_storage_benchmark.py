@@ -26,10 +26,10 @@ from unittest.mock import patch
 import uuid
 
 SCENARIOS = ("firstsave", "unchanged", "onefilechanged", "versions", "allchanged", "smallfiles", "restore", "gc")
-TABLES = ("WorkspaceSnapshotObject", "WorkspaceSnapshotUpload", "WorkspaceFileObject",
+TABLES = ("WorkspaceSnapshotObject", "WorkspaceSnapshotUpload", "WorkspaceFileObject", "WorkspaceFilePack",
           "WorkspaceFileReservation", "WorkspaceSnapshotFileReference", "StorageCleanupRetry")
 IO_BYTES = 64 * 1024
-BATCH_FILES = 32
+BATCH_FILES = 256
 MAX_ITERATION_BYTES = 1536 * 1024**2
 
 
