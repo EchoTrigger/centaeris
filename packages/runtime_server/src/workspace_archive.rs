@@ -1,4 +1,4 @@
-//! Candidate tar/zstd codec. Not connected to workspace capture or storage.
+//! Tar/zstd workspace codec used by the host restore adapter. Stored identities remain unchanged.
 //!
 //! Consumers must write to an isolated destination and publish only after the
 //! entire decode succeeds. An error can leave partial output. This module does

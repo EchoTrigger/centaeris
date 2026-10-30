@@ -36,7 +36,23 @@ class StorageCleanupResult:
     failure: str = ""
 
 
-def claim_storage_key(storage_key, collector):
+def rearm_storage_key(storage_key, collector, publication_token):
+    """A freshly authorized object incarnation supersedes earlier cleanup claims."""
+    digest = hashlib.sha256(storage_key.encode("utf-8")).hexdigest()
+    retry = StorageCleanupRetry.objects.select_for_update().filter(pk=digest).first()
+    if retry is None or retry.publicationToken == publication_token:
+        return
+    if retry.storageKey != storage_key or retry.collector != collector:
+        raise RuntimeError("storage_cleanup_identity_conflict")
+    retry.publicationToken = publication_token
+    retry.state, retry.cleanupAttempts = "pending", 0
+    retry.nextCleanupAt = retry.quarantinedAt = retry.leaseExpiresAt = retry.cleanedAt = None
+    retry.leaseOwner = retry.lastFailure = ""
+    retry.save(update_fields=["publicationToken","state","cleanupAttempts","nextCleanupAt","quarantinedAt",
+        "leaseExpiresAt","cleanedAt","leaseOwner","lastFailure","updatedAt"])
+
+
+def claim_storage_key(storage_key, collector, *, publication_token=None):
     digest = hashlib.sha256(storage_key.encode("utf-8")).hexdigest()
     lease_owner = f"gc_{uuid.uuid4().hex}"
     now = timezone.now()
@@ -48,6 +64,15 @@ def claim_storage_key(storage_key, collector):
         retry = StorageCleanupRetry.objects.select_for_update().get(pk=digest)
         if retry.storageKey != storage_key or retry.collector != collector:
             raise RuntimeError("storage_cleanup_identity_conflict")
+        if publication_token is not None:
+            from .models import WorkspaceSnapshotObject
+            if not WorkspaceSnapshotObject.objects.filter(pk=digest,state="collected",publicationToken=publication_token).exists():
+                return None
+            if retry.publicationToken == "":
+                retry.publicationToken = publication_token
+                retry.save(update_fields=["publicationToken","updatedAt"])
+            elif retry.publicationToken != publication_token:
+                return None
         if retry.state in {"cleaned", "quarantined"}:
             return None
         if retry.nextCleanupAt is not None and retry.nextCleanupAt > now:
@@ -71,18 +96,21 @@ def claim_storage_key(storage_key, collector):
         return retry
 
 
-def clean_storage_key(storage_key, collector, delete, *, claim=None):
+def clean_storage_key(storage_key, collector, delete, *, claim=None, publication_token=None):
     """The caller first verifies the key; claims precede physical I/O.
 
     Snapshot collectors claim outside their owner-fencing transaction, so a
     process crash cannot roll back the attempt count. Return failures so that
     owner transactions commit backoff even when a physical delete fails.
     """
-    retry = claim if claim is not None else claim_storage_key(storage_key, collector)
+    retry = claim if claim is not None else claim_storage_key(storage_key, collector, publication_token=publication_token)
     if retry is None:
         return StorageCleanupResult("blocked")
     if retry.storageKey != storage_key or retry.collector != collector:
         raise RuntimeError("storage_cleanup_identity_conflict")
+    if (publication_token is not None and retry.publicationToken != publication_token) or not StorageCleanupRetry.objects.filter(
+            pk=retry.pk,state="cleaning",leaseOwner=retry.leaseOwner,publicationToken=retry.publicationToken).exists():
+        raise RuntimeError("storage_cleanup_lease_lost")
 
     failure = ""
     try:
@@ -93,7 +121,7 @@ def clean_storage_key(storage_key, collector, delete, *, claim=None):
     exhausted = bool(failure) and retry.cleanupAttempts >= cleanup_attempt_limit()
     state = "quarantined" if exhausted else "failed" if failure else "cleaned"
     changed = StorageCleanupRetry.objects.filter(
-        pk=retry.pk, state="cleaning", leaseOwner=retry.leaseOwner,
+        pk=retry.pk, state="cleaning", leaseOwner=retry.leaseOwner, publicationToken=retry.publicationToken,
     ).update(
         state=state, lastFailure=failure, leaseOwner="", leaseExpiresAt=None,
         nextCleanupAt=next_cleanup_time(retry.cleanupAttempts, now) if failure and not exhausted else None,

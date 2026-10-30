@@ -314,9 +314,8 @@ class ControllerHandoffTests(unittest.TestCase):
                       rejection('environment_controller_lease_rejected')):
             with self.subTest(error=str(error)), patch.object(worker, 'resolve_agent_run_lifecycle', return_value=terminal), \
                     patch.object(worker, 'runtime_teardown_request', side_effect=error), patch.object(worker, 'yield_job') as yielded:
-                with self.assertRaises(worker.RetainedCleanupPending):
-                    worker.execute_agent_run_lifecycle_job(job, 'worker:fixture-owner', lambda: None)
-                yielded.assert_not_called()
+                self.assertFalse(worker.execute_agent_run_lifecycle_job(job, 'worker:fixture-owner', lambda: None))
+                self.assertEqual(yielded.call_args.args[-1], 'retained_cleanup_pending')
 
 
 if __name__ == '__main__':

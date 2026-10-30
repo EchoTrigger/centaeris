@@ -56,6 +56,7 @@ impl RequestCapacity {
                 path,
                 "/agent-runs/cancel"
                     | "/agent-runs/control"
+                    | "/internal/workspace-snapshots/roots"
                     | "/internal/jobs/control/ready"
                     | "/internal/jobs/control/claim"
                     | "/internal/jobs/control/start"
@@ -158,6 +159,7 @@ mod tests {
             ("POST", "/internal/environments/retire"),
             ("POST", "/agent-runs/cancel"),
             ("POST", "/internal/jobs/heartbeat"),
+            ("POST", "/internal/workspace-snapshots/roots"),
             ("GET", "/internal/jobs/job_1"),
         ] {
             let control = limits.lane(method, path);

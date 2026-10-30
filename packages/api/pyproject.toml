@@ -34,7 +34,7 @@ dev = ["httpx==0.28.1"]
 include = ["api*", "app_core*"]
 
 [tool.setuptools.package-data]
-app_core = ["generated/*.json", "contracts/*.json"]
+app_core = ["generated/*.json", "contracts/*.json", "workspace_snapshot_gc_witness.sql"]
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "api.settings"

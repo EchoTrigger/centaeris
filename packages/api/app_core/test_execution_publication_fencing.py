@@ -537,6 +537,14 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
                 cursor.execute("DELETE FROM runtime.checkpoints WHERE checkpoint_id=%s", [checkpoint_id])
 
         self.addCleanup(delete_checkpoint)
+        self.workspace_root_manifest = {"schema":"runtime.workspace_snapshot.roots.v1",
+            "sessionId":self.session.pk,"sessionSequence":1,"authorityFingerprint":"sha256:"+"a"*64,
+            "protectedAgentRunIds":[self.run.pk],"roots":[{"agentRunId":self.run.pk,
+                "authorizationDigest":self.authorization.digest,"checkpointId":checkpoint_id,**stored_snapshot}]}
+        self.enterContext(patch("app_core.workspace_snapshot_roots.request_workspace_snapshot_roots",
+            return_value=self.workspace_root_manifest))
+        self.enterContext(patch("app_core.workspace_snapshot_roots.current_witness",
+            return_value=(1,"sha256:"+"a"*64)))
         return {
             "schema": "runtime.execution_workspace.download.v1", "checkpointId": checkpoint_id,
             "jobId": self.job_id, "leaseOwner": self.owner,

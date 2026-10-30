@@ -38,6 +38,7 @@ pub(super) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 mod checkpoint_requests;
 mod cleanup_migration_tests;
+mod cleanup_recovery_tests;
 mod cold_append_fault_tests;
 mod cold_append_fence_tests;
 mod cold_append_lease_tests;
@@ -58,6 +59,7 @@ mod shared_admission_tests;
 mod snapshot_cas_tests;
 mod tool_result_storage_tests;
 mod wait_handoff_tests;
+mod workspace_snapshot_roots_tests;
 
 fn outbox_protocol(
     store: &PostgresRuntimeStore,

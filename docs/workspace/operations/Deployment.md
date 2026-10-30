@@ -31,10 +31,11 @@ global and Workspace environment counts are 8, memory budgets are 12 GiB, and
 workspace byte budgets are 32 GiB. Each environment retains its 2-CPU/4-GiB
 ceiling. Host-derived memory headroom and conservative unknown-allocation charges
 remain active, so eight concurrent environments are not guaranteed on every host.
-`DOCKER_CREATE_CONCURRENCY=2` bounds create calls per Runtime process.
+`DOCKER_CREATE_CONCURRENCY=4` bounds create calls per Runtime process.
 
-Use the matching HostSupervisor with cgroup v2 and an OverlayFS-backed Docker
-store, with automatic idle pause and demand resume enabled. The running limit
+OverlayFS-backed Docker storage is required. Runtime refuses to start on `vfs`,
+a missing backend, or any unsupported storage driver. Use the matching
+HostSupervisor with cgroup v2, automatic idle pause, and demand resume enabled. The running limit
 is 8 and idle grace is 3000 ms, matching the accepted eight-environment profile.
 Pause eligibility requires released controller authority and no queued demand;
 it does not pause an active Run merely because the model is waiting. Pausing
@@ -44,6 +45,27 @@ with the containerd image store or `overlay2` with the classic image store. Chec
 ```sh
 docker info --format '{{.Driver}} {{.CgroupVersion}}'
 ```
+
+For runsc, the registered Docker runtime must also contain exactly one explicit
+`--overlay2=none` argument in `runtimeArgs`. Keep its other required runtime
+arguments. Runtime rejects missing or conflicting overlay arguments at startup.
+gVisor's default `--overlay2=root:self` keeps guest writes in a separate overlay;
+Docker's filesystem archive can then expose an empty or stale lower view instead
+of those writes. See [gVisor filesystem configuration](https://gvisor.dev/docs/user_guide/filesystem/).
+
+New environments record `centaeris.workspace_backing=dockerOverlayfs` under this
+validated policy. Stopped workspace export requires that original creation marker.
+A daemon configuration change does not prove the backing of an older container,
+and must not be used to add the marker retroactively. Legacy recovery requires
+an independently committed Session snapshot when its guest writes cannot be read.
+Direct runc execution does not use gVisor overlay arguments.
+
+Shared admission also requires host pressure stall information (PSI). Verify that
+`/proc/pressure/memory` and `/proc/pressure/cpu` are readable before rollout. A
+kernel built with `CONFIG_PSI_DEFAULT_DISABLED=y` requires `psi=1` in its boot
+parameters and a host reboot before these files become available. Runtime cannot
+start shared admission without the required host resource observations; enabling
+cgroup v2 alone does not enable PSI.
 
 The application does not select or migrate Docker storage. A host using `vfs`
 needs a separately planned storage transition; do not change its storage driver
@@ -66,9 +88,10 @@ administrator. Initialization failure blocks rollout and must not clear the
 Plugin volume.
 
 For this native runsc revision, `api-init` applies the forward Django migration
-chain through `0032_agent_avatar_image`; `0031_workspace_resource_scope` adds the
-Workspace resource authority used by this deployment. Run the same migration
-chain against fresh and existing supported databases. Runtime performs its own
+chain through `0034_workspace_snapshot_publication`. Migration
+`0033_session_workspace_authority` distinguishes an unknown legacy file baseline
+from a committed empty workspace; `0034` fences snapshot publication and GC. Run
+the same migration chain against fresh and existing supported databases. Runtime performs its own
 published-schema upgrade to store version 17 when the matching service starts.
 
 Drain existing workers and complete their cleanup responsibilities before

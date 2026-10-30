@@ -61,7 +61,7 @@ class UnifiedEnvironmentAuthorizationTests(SimpleTestCase):
         run = SimpleNamespace(id=value["agentRunId"], workspace_id=value["workspaceId"],
             user_id=value["userId"], session_id=value["sessionId"], modelConfig_id=value["modelConfigRef"],
             thinkingMode=None, definition_version_id=None, workspace=object(),
-            session=SimpleNamespace(agent_id=value["agentId"]), environment=SimpleNamespace(
+            session=SimpleNamespace(agent_id=value["agentId"], workspaceBaselineKnown=True), environment=SimpleNamespace(
                 environment_profile=value["environmentProfile"], environment_profile_digest=value["environmentProfileDigest"],
                 network="disabled", benchmark_profile=None))
         with patch("app_core.runtime_contract.session_workspace_for_session", return_value=value["sessionWorkspace"]), \

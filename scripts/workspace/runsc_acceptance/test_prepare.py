@@ -4,6 +4,16 @@ from unittest.mock import patch
 with patch.object(sys,'path',[str(Path(__file__).parent),*sys.path]):
  spec=importlib.util.spec_from_file_location('native_prepare',Path(__file__).with_name('prepare.py'));prepare=importlib.util.module_from_spec(spec);spec.loader.exec_module(prepare)
 class PreparationTests(unittest.TestCase):
+ def test_recovery_preparation_records_explicit_protocol_and_preserves_existing_shared_fixture(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);argv=self.fixture(root)+['--shared-workload','--environment-count','2','--workspace-recovery']
+   model=root/'source/perf/mock-model';model.mkdir(parents=True)
+   for name in ('server.py','fixed_workload.py'):(model/name).write_text('# deterministic test input')
+   with patch.object(sys,'argv',argv),patch.object(prepare,'verify_owner',return_value={'root':'/run/owned'}),patch.object(prepare.subprocess,'run',side_effect=self.outputs()),patch('builtins.print'):prepare.main()
+   manifest=json.loads((root/'result/manifest.json').read_text())
+   env=dict(v.split('=',1) for v in (root/'result/synthetic.env').read_text().splitlines())
+   self.assertIs(manifest['workspaceRecovery'],True)
+   self.assertEqual(env['CENTAERIS_ACCEPTANCE_WORKSPACE_RECOVERY'],'1')
  def fixture(self,root):
   source=root/'source';source.mkdir();(source/'.env.example').write_text('EXECUTION_GLOBAL_LIMIT=8\nWORKER_SLOT_COUNT=8\nRUNTIME_NATIVE_SHARED_ADMISSION=1\nRESIDENT_GLOBAL_PIDS=8192\nRESIDENT_TENANT_PIDS=2048\n')
   bins=root/'bins';bins.mkdir()

@@ -91,6 +91,10 @@ pub(super) fn router(state: HttpServerState) -> Router {
             "/hooks/catalog",
             on_blocking(MethodFilter::POST, catalogs::hooks_catalog),
         )
+        .route(
+            "/internal/workspace-snapshots/roots",
+            post_job(postgres_store::workspace_snapshot_roots::resolve),
+        )
         .route("/internal/jobs/schedule", post_job(job_protocol::schedule))
         .route("/internal/jobs/claim", post_job(job_protocol::claim))
         .route(

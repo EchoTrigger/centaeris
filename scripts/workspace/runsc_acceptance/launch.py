@@ -3,7 +3,7 @@ import argparse,hashlib,json,os,re,struct,subprocess,sys,threading,time,urllib.r
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from runsc_acceptance.daemon import PrivateDocker,command
-from runsc_acceptance.isolation import STORAGE_DRIVERS,verify_owner
+from runsc_acceptance.isolation import LAUNCH_STORAGE_DRIVERS,verify_owner
 from runsc_acceptance.workload_budget import workload_budget
 from runsc_acceptance.memory_profile import memory_profile,workspace_memory_budget
 
@@ -131,7 +131,8 @@ def main():
     parser.add_argument('--root',required=True,type=Path);parser.add_argument('--source',required=True,type=Path);parser.add_argument('--git-dir',type=Path)
     parser.add_argument('--api-port',type=int,default=18083);parser.add_argument('--runtime-port',type=int,default=19003);parser.add_argument('--execute',action='store_true')
     parser.add_argument('--shared-workload',action='store_true')
-    parser.add_argument('--storage-driver',choices=STORAGE_DRIVERS,default='overlay2')
+    parser.add_argument('--workspace-recovery',action='store_true')
+    parser.add_argument('--storage-driver',choices=LAUNCH_STORAGE_DRIVERS,default='overlay2')
     parser.add_argument('--execution-mode',choices=('perRun','retained'),default='perRun')
     parser.add_argument('--environment-count',type=int,default=4)
     parser.add_argument('--iterations',type=int,default=3)
@@ -147,6 +148,11 @@ def main():
     parser.add_argument('--k6-binary',type=Path)
     for name in ('api','worker','runtime','general','postgres','redis'):parser.add_argument('--'+name+'-image',required=True)
     args=parser.parse_args()
+    if args.workspace_recovery and (not args.shared_workload or args.execution_mode!='perRun'):
+        parser.error('workspace recovery requires explicit shared perRun fixture')
+    if args.workspace_recovery and (args.environment_count!=2 or args.iterations!=3 or args.memory_mib
+            or args.minimum_hold_ms or args.model_wait_ms or args.initial_stagger_ms):
+        parser.error('workspace recovery uses two fixture slots, one Session, three Runs and no artificial work/wait')
     if not args.shared_workload and (args.memory_mib or args.minimum_hold_ms or args.workspace_memory_budget_bytes is not None or args.model_wait_ms or args.initial_stagger_ms or args.expected_working_environments is not None or args.run_terminal_timeout_seconds!=120 or args.between_run_ms!=6000):parser.error('workload timing and overlap parameters require shared mode')
     if not args.shared_workload and args.execution_mode!='retained':parser.error('rotation requires retained execution mode')
     shared=[]
@@ -194,6 +200,7 @@ def main():
         if args.shared_workload:
             argv+=['--shared-workload','--environment-count',str(args.environment_count),'--iterations',str(args.iterations)]+shared
             if args.workspace_memory_budget_bytes is not None:argv+=['--workspace-memory-budget-bytes',str(args.workspace_memory_budget_bytes)]
+        if args.workspace_recovery:argv+=['--workspace-recovery']
         for name,image in images.items():argv+=['--'+name+'-image',image]
         call(argv);config=json.loads((fixture/'compose.json').read_text());docker.record(project=config['name'],sourceRevision=build['sourceRevision'])
         # The containing network namespace has no uplink. A non-internal bridge
@@ -219,8 +226,12 @@ def main():
             except Exception:
                 if time.monotonic()>end:raise RuntimeError('owned API readiness failed')
                 time.sleep(.3)
-        docker.record(status='product-twelve-runs');print(json.dumps({'phase':'product-twelve-runs', **({'budgets':budget} if args.shared_workload else {})}),flush=True)
-        if args.shared_workload:
+        product_phase='product-workspace-recovery' if args.workspace_recovery else 'product-twelve-runs'
+        docker.record(status=product_phase);print(json.dumps({'phase':product_phase, **({'budgets':budget} if args.shared_workload else {})}),flush=True)
+        if args.workspace_recovery:
+            output=call(['python3','-B',str(tools/'workspace_recovery.py'),'--fixture',str(fixture),
+                '--result',str(root/'results'),'--k6-binary',str(args.k6_binary)],1800)
+        elif args.shared_workload:
             output=call(['python3','-B',str(tools/'shared_workload.py'),'--fixture',str(fixture),'--result',str(root/'results'),
                 '--k6-binary',str(args.k6_binary),'--environment-count',str(args.environment_count),'--iterations',str(args.iterations),'--work-units',str(args.work_units),'--run-terminal-timeout-seconds',str(args.run_terminal_timeout_seconds),'--between-run-ms',str(args.between_run_ms),'--execution-mode',args.execution_mode]+shared,budget['coordinatorSeconds'])
         else:

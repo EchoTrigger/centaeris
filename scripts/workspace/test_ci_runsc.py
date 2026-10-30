@@ -104,7 +104,10 @@ else:
     event["action"] = args[0]
     record()
     if args[0] == "info":
-        print("fixture-daemon" if "{{.ID}}" in args else '{"runsc": {}}')
+        if "{{.Driver}}" in args:
+            print("overlay2")
+        else:
+            print("fixture-daemon" if "{{.ID}}" in args else '{"runsc": {}}')
     elif args[0] == "create":
         name = "owned-helper-container" if args[-1] == "built-workspace-general" else "owned-supervisor-container"
         pathlib.Path(args[args.index("--cidfile") + 1]).write_text(name)
@@ -230,6 +233,26 @@ class HostConfigurationTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("host", ROOT / "scripts/workspace/docker-fresh-start-host.py")
         self.host = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.host)
+
+    def test_ci_registration_preserves_host_visible_workspace_and_cgroup_v2(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        installation = next(shlex.split(line.strip())[2:] for line in workflow.splitlines()
+                            if line.strip().startswith('sudo "$runsc_directory/runsc" install '))
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "daemon.json"
+            register = """import json,sys
+from pathlib import Path
+arguments=sys.argv[2:]
+assert arguments[:2]==["install","--"]
+Path(sys.argv[1]).write_text(json.dumps({"runtimes":{"runsc":{"runtimeArgs":arguments[2:]}}}))
+"""
+            subprocess.run([sys.executable, "-c", register, str(config), *installation],
+                           check=True, capture_output=True)
+            arguments = json.loads(config.read_text())["runtimes"]["runsc"]["runtimeArgs"]
+            self.assertEqual([value for value in arguments if value.startswith("--overlay")],
+                             ["--overlay2=none"])
+            self.assertIn("--in-sandbox-cgroup=v2", arguments)
+            self.assertIn("--platform=systrap", arguments)
 
     @unittest.skipIf(os.name == "nt", "native runner installation requires Unix file permissions")
     def test_ci_runsc_install_has_trusted_ancestry_even_with_writable_node_bin(self):

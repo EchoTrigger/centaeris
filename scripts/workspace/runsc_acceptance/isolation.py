@@ -2,7 +2,9 @@
 import json,os,re
 from pathlib import Path,PurePosixPath
 
+# Historical ownership records remain inspectable for safe cleanup.
 STORAGE_DRIVERS=('vfs','overlay2')
+LAUNCH_STORAGE_DRIVERS=('overlay2',)
 
 def option(argv,name):
     values=[]

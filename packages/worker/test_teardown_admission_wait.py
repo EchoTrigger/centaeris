@@ -100,7 +100,7 @@ class TeardownAdmissionWaitTests(unittest.TestCase):
             with self.subTest(control=control):
                 self.exercise("perRun", control=control, yield_error=worker.YieldHandoffUnknown(worker.DependencyUnavailable("unavailable")))
 
-    def test_nearby_teardown_errors_keep_original_failure_path(self):
+    def test_unclassified_teardown_errors_yield_original_cleanup_responsibility(self):
         for status, payload in [(500, {"error": "runtime_busy"}), (502, {"error": "runtime_busy"}),
                 (409, {"error": "runtime_busy"}), (503.0, {"error": "runtime_busy"}),
                 (503, {"error": "other"}), (503, {"error": "runtime_busy", "extra": True}),
@@ -115,8 +115,9 @@ class TeardownAdmissionWaitTests(unittest.TestCase):
                         patch.object(worker, "fail_job", return_value=False) as failed, \
                         patch.object(worker, "yield_job") as yielded, patch.object(worker, "transition_agent_run") as transition:
                     worker.execute_claimed_job(job, "worker:fixture-owner")
-                failed.assert_called_once_with(job, "worker:fixture-owner", "retained_cleanup_pending", True)
-                yielded.assert_not_called();transition.assert_not_called()
+                failed.assert_not_called()
+                self.assertEqual(yielded.call_args.args[-1], "retained_cleanup_pending")
+                transition.assert_not_called()
 
     def test_step_and_api_runtime_busy_keep_dependency_failure(self):
         for route in ("/agent-runs/step", "/internal/agent-run-lifecycle/resolve"):

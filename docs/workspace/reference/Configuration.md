@@ -269,6 +269,12 @@ values for both runsc scheduling variables. Runtime selection accepts exactly `r
 invalid or unregistered selection fails rather than falling back. Existing
 private `.env` values are not replaced when the default changes.
 
+The Docker `runsc` registration must explicitly include exactly one
+`--overlay2=none` runtime argument. This makes guest workspace writes reach the
+Docker OverlayFS layer used by stopped-instance preservation. Missing, duplicate,
+or conflicting overlay arguments fail Runtime startup. New instances carry a
+fixed workspace-backing marker; existing containers are not relabeled. This
+runsc setting does not apply to direct `runc` execution.
 `RUNTIME_EXECUTION_RECOVERY_MAX_ATTEMPTS` defaults to 5 replacement preparation
 attempts per AgentRun; the initial execution is excluded. Each attempt is recorded
 under the current lifecycle lease before preparing a replacement. A failed
@@ -357,9 +363,9 @@ recovery are documented in [Garbage collection](../operations/GarbageCollection.
 ## Production review
 
 Runtime's `DOCKER_CREATE_CONCURRENCY` limits simultaneous Docker container-create
-calls (integer 1..16, default 2); invalid values fail startup. This does not change
+calls (integer 1..16, default 4); invalid values fail startup. This does not change
 worker slots, start/remove concurrency or execution limits. The production
-Compose configuration supplies 2 and passes explicit overrides through. Isolated
+Compose configuration supplies 4 and passes explicit overrides through. Isolated
 perf experiments use
 `PERF_DOCKER_CREATE_CONCURRENCY` in `perf/.state/test.env` through the perf overlay.
 

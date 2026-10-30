@@ -1,11 +1,12 @@
-"""Reclaim local workspace bytes after their Session or Agent is permanently deleted.
+"""Reclaim unreachable Session bytes and permanently purged-owner payloads.
 
 The upload and download paths take the same Agent and Session locks while creating a local
 temporary file, publishing its immutable name, or opening an authorized reader.
 Snapshot payload copying stays outside those transactions. Permanent deletion
 therefore prevents new names from appearing after a GC pass has enumerated them;
 an interrupted upload can leave only a temporary file for a later pass to reclaim.
-Active Sessions and restorable trash under retained Agents never enter this collector.
+Retained owners use Runtime-selected recovery roots and a shared relational witness;
+purged owners retain their existing cutoff and exact-prefix cleanup policy.
 """
 
 from dataclasses import dataclass
@@ -46,6 +47,15 @@ class WorkspaceSnapshotGcReport:
 
 
 def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcReport:
+    report = _collect_purged_workspace_snapshot_gc(cutoff, dry_run)
+    root = _local_storage_root()
+    if root is not None:
+        from .workspace_snapshot_reachability_gc import collect_reachable_workspace_gc
+        collect_reachable_workspace_gc(root, cutoff, dry_run, report)
+    return report
+
+
+def _collect_purged_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcReport:
     """Collect the two precise key families owned by permanently deleted Sessions.
 
     Both the Session or parent Agent tombstone and object modification time must
@@ -86,7 +96,10 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
                         if not _owner_reclaimable(agent, owner, session, cutoff):
                             report.blocked.append(key)
                             continue
-                    claim = claim_storage_key(key, "workspaceSnapshot")
+                        from .workspace_snapshot_publication import collect_key
+                        object=collect_key(owner, key, kind="temporary" if _TEMPORARY_FILE.fullmatch(path.name) else "snapshot")
+                        token=object.publicationToken
+                    claim = claim_storage_key(key, "workspaceSnapshot",publication_token=token)
                     if claim is None:
                         report.blocked.append(key)
                         continue
@@ -114,8 +127,12 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
                     if dry_run:
                         report.planned.append(key)
                     else:
+                        from .workspace_snapshot_publication import require_collected_incarnation
+                        if not require_collected_incarnation(owner,key,token):
+                            report.blocked.append(key)
+                            continue
                         delete = partial(_delete_observed_snapshot, session_id=str(session.id))
-                        result = clean_storage_key(key, "workspaceSnapshot", delete, claim=claim)
+                        result = clean_storage_key(key, "workspaceSnapshot", delete, claim=claim,publication_token=token)
                         if result.state == "cleaned":
                             report.cleaned.append(key)
                         elif result.state == "blocked":

@@ -1,7 +1,7 @@
 """Owned Docker/containerd lifecycle for native validation only."""
 import json,os,re,subprocess,time,uuid
 from pathlib import Path,PurePosixPath
-from runsc_acceptance.isolation import STORAGE_DRIVERS,validate_vectors,process_arguments
+from runsc_acceptance.isolation import LAUNCH_STORAGE_DRIVERS,validate_vectors,process_arguments
 SHARED=['docker','--host','unix:///var/run/docker.sock']
 
 def command(argv,timeout=30):
@@ -14,6 +14,22 @@ def runtime_flags(path):
     result=subprocess.run([path,'flags'],stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=10)
     if result.returncode:raise RuntimeError('installed runtime flags unavailable')
     return result.stdout+result.stderr
+
+def workspace_backing_arguments(arguments,help_text):
+    if not re.search(r'^\s*-overlay2(?:\s|$)',help_text,re.M):raise RuntimeError('installed runtime workspace backing capability missing')
+    if not isinstance(arguments,list) or any(not isinstance(value,str) for value in arguments):raise RuntimeError('runtime workspace backing arguments malformed')
+    selected=[];index=0
+    while index<len(arguments):
+        value=arguments[index];index+=1
+        if value in ('--overlay2','-overlay2','--overlay','-overlay'):
+            if index==len(arguments) or arguments[index].startswith('-'):raise RuntimeError('runtime workspace backing arguments malformed')
+            index+=1
+        elif value.startswith(('--overlay2=','-overlay2=','--overlay=','-overlay=')):
+            pass
+        elif value.lstrip('-').startswith('overlay'):
+            raise RuntimeError('runtime workspace backing argument unsupported')
+        else:selected.append(value)
+    return [*selected,'--overlay2=none']
 
 def runtime_logging(arguments,root,help_text):
     for flag in ('panic-log','log','log-format'):
@@ -49,7 +65,7 @@ def cgroup_pids(container,pid,limit,proc_root=Path('/proc'),cgroup_root=Path('/s
 
 class PrivateDocker:
     def __init__(self,root,network=False,*,storage_driver='overlay2'):
-        if storage_driver not in STORAGE_DRIVERS:raise ValueError('supported private storage driver required')
+        if storage_driver not in LAUNCH_STORAGE_DRIVERS:raise ValueError('supported private storage driver required')
         if Path(root).is_symlink():raise RuntimeError('private root symlink rejected')
         self.root=Path(root).resolve(strict=True)
         if self.root.parent!=Path('/var/tmp') or not self.root.name.startswith('centaeris-runsc-') or self.root.is_symlink():raise RuntimeError('fresh owned disk-backed root required')
@@ -75,6 +91,7 @@ class PrivateDocker:
         runtime=runtimes['runsc'];path=runtime.get('path',runtime.get('Path'));arguments=runtime.get('runtimeArgs',runtime.get('Args',[]))
         if path!='/usr/bin/runsc' or not isinstance(arguments,list):raise RuntimeError('installed explicit runsc runtime required')
         help_text=runtime_flags(path);version=command([path,'--version']).splitlines()
+        arguments=workspace_backing_arguments(arguments,help_text)
         arguments=runtime_logging(arguments,self.root,help_text)
         config=self.root/'daemon.json';config.write_text(json.dumps({'runtimes':{'runsc':{'path':path,'runtimeArgs':arguments}}}));config.chmod(0o600)
         ctr=['/usr/bin/containerd','--config','/dev/null','--address',str(self.root/'containerd.sock'),'--root',str(self.root/'containerd-data'),'--state',str(self.root/'containerd-state')]

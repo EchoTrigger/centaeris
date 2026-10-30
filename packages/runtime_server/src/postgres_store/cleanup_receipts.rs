@@ -49,6 +49,12 @@ pub(crate) enum CleanupTarget {
     NeverAllocated,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CleanupResolutionScope {
+    RunOnly,
+    EnvironmentRecovery,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct CleanupReceiptQuery {
@@ -126,6 +132,60 @@ impl PostgresRuntimeStore {
             Ok(Some(receipt))
         })
     }
+    /// Capture an exact cleanup target without acknowledging cleanup or release.
+    /// All database pins and physical locks are released before returning the capture.
+    pub(crate) fn with_cleanup_target<T: Send>(
+        &self,
+        request: &CleanupAuthorityRequest<'_>,
+        inventory: impl crate::resident_capacity::ResidentInventorySource<Vec<ObservedResidentSandbox>>,
+        capture: impl FnOnce(&CleanupTarget, &VerifiedOriginalGrant) -> Result<T, String> + Send,
+    ) -> Result<T, String> {
+        request.cleanup.clone().validate(request.signing_key)?;
+        let authority = ControllerAuthorityRequest {
+            environment_authorization: &request.cleanup.environment_authorization,
+            signing_key: request.signing_key,
+            workspace_id: &request.cleanup.authorization.workspace_id,
+            lease: request.lease,
+            purpose: ControllerPurpose::Cleanup,
+        };
+        self.with_client(|client| {
+            let mut tx = client.transaction().map_err(|error| error.to_string())?;
+            verify_controller_authority(&mut tx, &authority)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            let mut environment = super::residency::lock_environment(
+                client,
+                request.host_id,
+                &request
+                    .cleanup
+                    .environment_authorization
+                    .payload
+                    .environment_id,
+            )?;
+            let physical = super::residency::with_environment_inventory(
+                &mut environment,
+                inventory,
+                |_, physical| Ok(physical.to_vec()),
+            )?;
+            // Inventory accounting is settled before archive I/O. The Session,
+            // controller and exact resident pins protect this target while other
+            // environments can use the host's global preparation opportunity.
+            let mut tx = environment
+                .client
+                .transaction()
+                .map_err(|error| error.to_string())?;
+            let verified = verify_controller_authority(&mut tx, &authority)?;
+            let target = resolve_target(
+                &mut tx,
+                request,
+                &physical,
+                CleanupResolutionScope::EnvironmentRecovery,
+            )?;
+            let captured = capture(&target, &verified)?;
+            verify_controller_authority(&mut tx, &authority)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(captured)
+        })
+    }
     pub(crate) fn with_cleanup_authority<P: Into<CleanupPhysicalResult>>(
         &self,
         request: &CleanupAuthorityRequest<'_>,
@@ -156,6 +216,47 @@ impl PostgresRuntimeStore {
             + Send,
         cleanup: impl FnOnce(&CleanupTarget, &VerifiedOriginalGrant) -> Result<P, String> + Send,
     ) -> Result<CleanupReceipt, String> {
+        self.with_cleanup_authority_inner(request, inventory, None, observe_paused, cleanup)
+    }
+    /// Settle an original perRun allocation only after exact preservation or
+    /// independently confirmed physical absence. No network I/O runs in this pin.
+    pub(crate) fn with_recovery_cleanup_authority<P: Into<CleanupPhysicalResult>>(
+        &self,
+        request: &CleanupAuthorityRequest<'_>,
+        inventory: impl crate::resident_capacity::ResidentInventorySource<Vec<ObservedResidentSandbox>>,
+        recovery: &super::cleanup_preservation::CleanupRecovery,
+        cleanup: impl FnOnce(&CleanupTarget, &VerifiedOriginalGrant) -> Result<P, String> + Send,
+    ) -> Result<CleanupReceipt, String> {
+        self.with_cleanup_authority_inner(
+            request,
+            inventory,
+            Some(recovery),
+            |_, _| Err("cleanup_recovery_pause_shortcut_rejected".into()),
+            cleanup,
+        )
+    }
+    fn with_cleanup_authority_inner<P: Into<CleanupPhysicalResult>>(
+        &self,
+        request: &CleanupAuthorityRequest<'_>,
+        inventory: impl crate::resident_capacity::ResidentInventorySource<Vec<ObservedResidentSandbox>>,
+        recovery: Option<&super::cleanup_preservation::CleanupRecovery>,
+        observe_paused: impl FnOnce(
+                &RetainedInstanceAllocation,
+                &crate::agent_run_authorization::EnvironmentProfile,
+            ) -> Result<bool, String>
+            + Send,
+        cleanup: impl FnOnce(&CleanupTarget, &VerifiedOriginalGrant) -> Result<P, String> + Send,
+    ) -> Result<CleanupReceipt, String> {
+        if recovery.is_some()
+            && request
+                .cleanup
+                .environment_authorization
+                .payload
+                .execution_mode
+                != "perRun"
+        {
+            return Err("cleanup_recovery_mode_rejected".into());
+        }
         request.cleanup.clone().validate(request.signing_key)?;
         let authority = ControllerAuthorityRequest {
             environment_authorization: &request.cleanup.environment_authorization,
@@ -172,6 +273,7 @@ impl PostgresRuntimeStore {
             if let Some(receipt)=load_receipt(&mut tx,&request.cleanup.agent_run_id)? {
                 validate_replay(&receipt,request,&verified)?;
                 require_physical_replay(&mut tx,request,&receipt)?;
+                if let Some(recovery)=recovery {super::cleanup_preservation::verify_completed_recovery(&mut tx,&receipt,recovery)?;}
                 tx.commit().map_err(|e|e.to_string())?;
                 return Ok(receipt);
             }
@@ -184,10 +286,13 @@ impl PostgresRuntimeStore {
                 if let Some(receipt)=load_receipt(&mut tx,&request.cleanup.agent_run_id)? {
                     validate_replay(&receipt,request,&verified)?;
                 require_physical_replay(&mut tx,request,&receipt)?;
+                if let Some(recovery)=recovery {super::cleanup_preservation::verify_completed_recovery(&mut tx,&receipt,recovery)?;}
                     tx.commit().map_err(|e|e.to_string())?;
                     return Ok(receipt);
                 }
-                let target=resolve_target(&mut tx,request,physical)?;
+                let scope=if recovery.is_some() {CleanupResolutionScope::EnvironmentRecovery} else {CleanupResolutionScope::RunOnly};
+                let mut target=resolve_target(&mut tx,request,physical,scope)?;
+                if let Some(recovery)=recovery {super::cleanup_preservation::verify_recovery(&mut tx,request,&target,recovery)?;}
                 let per_run=request.cleanup.environment_authorization.payload.execution_mode=="perRun";
                 if per_run{
                     if let CleanupTarget::Instance{allocation,..}=&target{
@@ -195,6 +300,10 @@ impl PostgresRuntimeStore {
                         tx.commit().map_err(|e|e.to_string())?;
                         tx=client.transaction().map_err(|e|e.to_string())?;super::resource_commit::require_durable_resource_commit(&mut tx)?;
                         verify_controller_authority(&mut tx,&authority)?;
+                        if let Some(recovery)=recovery {
+                            target=resolve_target(&mut tx,request,physical,scope)?;
+                            super::cleanup_preservation::verify_recovery(&mut tx,request,&target,recovery)?;
+                        }
                     }
                 }
                 // A reused association can commit before its pre-host callback
@@ -203,7 +312,7 @@ impl PostgresRuntimeStore {
                 let unstarted_paused = if let CleanupTarget::Instance {
                     allocation, origin_authorization, ..
                 } = &target {
-                    if unstarted_reused_resume(&mut tx, request, allocation)? {
+                    if recovery.is_none() && unstarted_reused_resume(&mut tx, request, allocation)? {
                         observe_paused(allocation, &origin_authorization.environment_profile)?
                     } else { false }
                 } else { false };
@@ -303,9 +412,9 @@ fn unstarted_reused_resume(
         &request.cleanup.authorization_digest,
     )?;
     let unexplained: bool = db.query_one(
-        "SELECT EXISTS(SELECT 1 FROM runtime.runtime_events WHERE task_id=$1 AND NOT($2 AND event_id=$3 AND event_type=$4 AND session_id=$5))",
+        "SELECT EXISTS(SELECT 1 FROM runtime.runtime_events WHERE task_id=$1 AND NOT(($2 AND event_id=$3 AND event_type=$4 AND session_id=$5) OR (event_id='agent_run_control_pending:'||$1 AND event_type='runtime.agent_run.control_pending.v1' AND session_id=$5 AND visibility='internal' AND payload_json::jsonb->>'schema'='runtime.agent_run.control_pending.v1' AND payload_json::jsonb->>'agentRunId'=$1 AND payload_json::jsonb->>'authorizationDigest'=$6)))",
         &[current, &failed, &super::pre_admission_failure::event_id(current),
-          &super::pre_admission_failure::SCHEMA, &request.cleanup.authorization.session_id],
+          &super::pre_admission_failure::SCHEMA, &request.cleanup.authorization.session_id, &request.cleanup.authorization_digest],
     ).map_err(|e| e.to_string())?.get(0);
     Ok(!unexplained)
 }
@@ -393,6 +502,7 @@ fn resolve_target(
     db: &mut impl GenericClient,
     r: &CleanupAuthorityRequest<'_>,
     physical: &[ObservedResidentSandbox],
+    scope: CleanupResolutionScope,
 ) -> Result<CleanupTarget, String> {
     let b = &r.cleanup.environment_authorization.payload;
     // Unknown reservations cannot be silently treated as absent allocations.
@@ -509,7 +619,13 @@ fn resolve_target(
                 && p.allocation_owner == allocation.allocation_owner
                 && Some(&p.container_id) == allocation.container_id.as_ref()
                 && p.resources == resources
-        }) || (b.execution_mode == "perRun" && row.get::<_, String>(15) == "releasing"))
+        }) || (b.execution_mode == "perRun" && row.get::<_, String>(15) == "releasing")
+            || (scope == CleanupResolutionScope::EnvironmentRecovery
+                && b.execution_mode == "perRun"
+                && !physical.iter().any(|p| {
+                    p.execution_id == execution
+                        || Some(&p.container_id) == allocation.container_id.as_ref()
+                })))
     {
         return Err("cleanup live environment unconfirmed".into());
     }
@@ -533,7 +649,8 @@ fn resolve_target(
     // A queued Run that never acquired an execution association has no task to
     // close in an older paused environment. Keep the original physical holding,
     // signed origin and pause acknowledgement intact; only this Run is settled.
-    if associations.is_empty()
+    if scope == CleanupResolutionScope::RunOnly
+        && associations.is_empty()
         && db.query_one("SELECT EXISTS(SELECT 1 FROM runtime.runsc_environment_power WHERE environment_id=$1 AND host_id=$2 AND allocation_execution_id=$3 AND instance_id=$4 AND container_id=$5 AND state='paused')", &[&allocation.environment_id,&allocation.host_id,&allocation.allocation_execution_id,&allocation.instance_id,&allocation.container_id]).map_err(|e|e.to_string())?.get::<_,bool>(0)
     {
         return Ok(CleanupTarget::NeverAllocated);

@@ -367,6 +367,23 @@ class Handler(BaseHTTPRequestHandler):
                 items, usage = self.emit_named_function_call("bash", {"command": commands[rounds], "timeout_ms": 10000})
             else:
                 items, usage = self.emit_final(response_id, "perf-instant", final_text)
+        elif model == "perf-workspace-recovery":
+            sample = _fixed_workload.recovery_sample(self.latest_user_text(request))
+            current_input = request.get("input", [])
+            latest_user_index = max((i for i, item in enumerate(current_input)
+                                     if isinstance(item, dict) and item.get('role') == 'user'), default=-1)
+            rounds = sum(1 for item in current_input[latest_user_index + 1:]
+                         if isinstance(item, dict) and item.get('type') == 'function_call_output')
+            if rounds == 0:
+                items, usage = self.emit_named_function_call('bash', {
+                    'command': _fixed_workload.recovery_command(sample), 'timeout_ms': 10000})
+            elif rounds == 1:
+                items, usage = self.emit_named_function_call('publish_artifact', {
+                    'path': '/mnt/data/' + _fixed_workload.recovery_expectation(sample['caseId'])['filename']})
+            elif rounds == 2:
+                items, usage = self.emit_final(response_id, 'perf-instant')
+            else:
+                raise ValueError('workspace recovery tool budget exceeded')
         elif model == "perf-fixed-workload":
             current_input = request.get("input", [])
             latest_user_index = max((index for index, item in enumerate(current_input)

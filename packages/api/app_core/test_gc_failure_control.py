@@ -81,7 +81,7 @@ print(json.dumps({"results": results, "calls": calls, "attempts": retry.cleanupA
                   "state": retry.state, "next": retry.nextCleanupAt.isoformat() if retry.nextCleanupAt else None}))
 connections.close_all()
 '''
-        with isolated_migration_database([("app_core", "0009_storage_gc_backoff")]) as database:
+        with isolated_migration_database([("app_core", "0034_workspace_snapshot_publication")]) as database:
             self.assertEqual(database.vendor, "postgresql")
             with tempfile.TemporaryDirectory(prefix="gc-process-retry-") as directory:
                 with override_settings(MEDIA_ROOT=directory):

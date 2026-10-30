@@ -13,16 +13,21 @@ pub(crate) enum RunscPowerAction {
 pub(crate) enum RunscPowerObservation {
     Running,
     Paused,
+    Stopped,
 }
 
 trait PowerIo {
     fn host_id(&mut self) -> Result<String, String>;
     fn inspect(&mut self, id: &str) -> Result<Option<serde_json::Value>, String>;
     fn change(&mut self, id: &str, action: RunscPowerAction) -> Result<(), String>;
+    fn remove_stopped(&mut self, id: &str) -> Result<(), String>;
 }
 
 struct DockerPowerIo;
 impl PowerIo for DockerPowerIo {
+    fn remove_stopped(&mut self, id: &str) -> Result<(), String> {
+        crate::docker_engine::remove_stopped(id)
+    }
     fn host_id(&mut self) -> Result<String, String> {
         resident_host_id()
     }
@@ -43,9 +48,19 @@ pub(crate) fn observe_power(
     allocation: &RetainedInstanceAllocation,
     profile: &EnvironmentProfile,
 ) -> Result<RunscPowerObservation, String> {
-    let mut io = DockerPowerIo;
-    let id = validate_target(&mut io, allocation, profile)?;
-    observe_with(&mut io, id, allocation, profile)
+    observe_power_with(&mut DockerPowerIo, allocation, profile)
+}
+
+fn observe_power_with(
+    io: &mut impl PowerIo,
+    allocation: &RetainedInstanceAllocation,
+    profile: &EnvironmentProfile,
+) -> Result<RunscPowerObservation, String> {
+    let id = validate_target(io, allocation, profile)?;
+    match observe_with(io, id, allocation, profile)? {
+        RunscPowerObservation::Stopped => Err("runsc_power_container_stopped".into()),
+        observed => Ok(observed),
+    }
 }
 
 /// Change power while the caller holds the durable idle-or-demand authority pin.
@@ -85,8 +100,10 @@ fn pause_if_idle_with(
     pause: impl FnOnce(HostLaunchTarget) -> Result<IdlePauseOutcome, String>,
 ) -> Result<IdlePauseOutcome, String> {
     let id = validate_target(io, allocation, profile)?;
-    if observe_with(io, id, allocation, profile)? == RunscPowerObservation::Paused {
-        return Ok(IdlePauseOutcome::Paused);
+    match observe_with(io, id, allocation, profile)? {
+        RunscPowerObservation::Paused => return Ok(IdlePauseOutcome::Paused),
+        RunscPowerObservation::Stopped => return Err("runsc_power_container_stopped".into()),
+        RunscPowerObservation::Running => {}
     }
     let outcome = pause(HostLaunchTarget {
         environment_instance_id: allocation.instance_id.clone(),
@@ -153,7 +170,11 @@ fn set_power_with(
         RunscPowerAction::Pause => RunscPowerObservation::Paused,
         RunscPowerAction::Resume => RunscPowerObservation::Running,
     };
-    if observe_with(io, id, allocation, profile)? == desired {
+    let observed = observe_with(io, id, allocation, profile)?;
+    if observed == RunscPowerObservation::Stopped {
+        return Err("runsc_power_container_stopped".into());
+    }
+    if observed == desired {
         return Ok(desired);
     }
     // Even a transport error can follow a completed mutation. Conversely, an ACK
@@ -169,7 +190,7 @@ fn set_power_with(
     }
 }
 
-fn physical_state(
+pub(super) fn physical_state(
     facts: &serde_json::Value,
     allocation: &RetainedInstanceAllocation,
     profile: &EnvironmentProfile,
@@ -183,9 +204,6 @@ fn physical_state(
     if facts["Id"].as_str() != allocation.container_id.as_deref()
         || facts["Image"].as_str() != Some(allocation.image_digest.as_str())
         || facts["HostConfig"]["Runtime"].as_str() != Some("runsc")
-        || facts["State"]["Running"] != true
-        || facts["State"]["Restarting"] != false
-        || facts["State"]["Dead"] != false
         || facts["Config"]["User"].as_str() != Some(profile.user.as_str())
         || facts["Config"]["WorkingDir"].as_str() != Some("/")
         || facts["HostConfig"]["Memory"].as_u64() != Some(profile.resources.memory_bytes)
@@ -223,12 +241,80 @@ fn physical_state(
     {
         return Err("runsc_power_physical_identity_rejected".into());
     }
-    match facts["State"]["Paused"].as_bool() {
-        Some(true) => Ok(RunscPowerObservation::Paused),
-        Some(false) => Ok(RunscPowerObservation::Running),
-        None => Err("runsc_power_observation_unknown".into()),
+    match (
+        facts["State"]["Running"].as_bool(),
+        facts["State"]["Paused"].as_bool(),
+        facts["State"]["Restarting"].as_bool(),
+        facts["State"]["Dead"].as_bool(),
+    ) {
+        (Some(true), Some(true), Some(false), Some(false)) => Ok(RunscPowerObservation::Paused),
+        (Some(true), Some(false), Some(false), Some(false)) => Ok(RunscPowerObservation::Running),
+        (Some(false), Some(false), Some(false), Some(false)) => Ok(RunscPowerObservation::Stopped),
+        _ => Err("runsc_power_observation_unknown".into()),
     }
 }
 
+/// Inspect only the original host/container under the caller's recovery authority pin.
+/// Absence means an exact-ID Docker 404; inventory omission is never consulted.
+pub(crate) fn observe_recovery_target(
+    allocation: &RetainedInstanceAllocation,
+    profile: &EnvironmentProfile,
+) -> Result<Option<RunscPowerObservation>, String> {
+    observe_recovery_target_with(&mut DockerPowerIo, allocation, profile)
+}
+
+fn observe_recovery_target_with(
+    io: &mut impl PowerIo,
+    allocation: &RetainedInstanceAllocation,
+    profile: &EnvironmentProfile,
+) -> Result<Option<RunscPowerObservation>, String> {
+    let id = validate_target(io, allocation, profile)?;
+    io.inspect(id)
+        .map_err(|_| "runsc_power_observation_unknown".to_string())?
+        .map(|facts| physical_state(&facts, allocation, profile))
+        .transpose()
+}
+
+/// Remove an exact stopped original only after the caller commits its file baseline.
+/// The caller must hold current cleanup authority and the original allocation pin
+/// throughout preservation and removal. This does not change the environment mode.
+pub(crate) fn remove_stopped_after_preservation(
+    allocation: &RetainedInstanceAllocation,
+    profile: &EnvironmentProfile,
+    preserve: impl FnOnce() -> Result<(), String>,
+) -> Result<crate::postgres_store::cleanup_receipts::CleanupPhysicalResult, String> {
+    remove_stopped_after_preservation_with(&mut DockerPowerIo, allocation, profile, preserve)
+}
+
+fn remove_stopped_after_preservation_with(
+    io: &mut impl PowerIo,
+    allocation: &RetainedInstanceAllocation,
+    profile: &EnvironmentProfile,
+    preserve: impl FnOnce() -> Result<(), String>,
+) -> Result<crate::postgres_store::cleanup_receipts::CleanupPhysicalResult, String> {
+    let id = validate_target(io, allocation, profile)?;
+    let removed = || crate::postgres_store::cleanup_receipts::CleanupPhysicalResult::Removed {
+        instance_id: allocation.instance_id.clone(),
+        container_id: id.into(),
+    };
+    match observe_recovery_target_with(io, allocation, profile)? {
+        None => return Ok(removed()),
+        Some(RunscPowerObservation::Stopped) => {}
+        Some(_) => return Err("cleanup_stopped_target_required".into()),
+    }
+    preserve()?;
+    // Preservation can take time. Revalidate immutable host/configuration and
+    // power afterwards; a raced start must never be forcefully terminated.
+    match observe_recovery_target_with(io, allocation, profile)? {
+        None => return Ok(removed()),
+        Some(RunscPowerObservation::Stopped) => {}
+        Some(_) => return Err("cleanup_stopped_target_required".into()),
+    }
+    let _ = io.remove_stopped(id);
+    if observe_recovery_target_with(io, allocation, profile)?.is_some() {
+        return Err("cleanup_physical_absence_unconfirmed".into());
+    }
+    Ok(removed())
+}
 #[cfg(test)]
 mod tests;

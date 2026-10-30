@@ -79,6 +79,8 @@ def build_agent_run_authorization_payload(
 ) -> dict:
     from .assets import deferred_input_refs
 
+    if not agent_run.session.workspaceBaselineKnown:
+        raise ValueError("session_workspace_baseline_unavailable")
     asset_refs = deferred_input_refs(agent_run) if declared_inputs is None else declared_inputs
     available_input_refs = {item["inputRef"] for item in asset_refs}
     normalized_message_asset_refs = sorted(set(message_asset_refs or []))

@@ -14,7 +14,7 @@ static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
 static IO_RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
 
 fn parse_create_limit(value: Option<&str>) -> Result<usize, String> {
-    let Some(value) = value else { return Ok(2) };
+    let Some(value) = value else { return Ok(4) };
     value
         .parse::<usize>()
         .ok()
@@ -54,7 +54,7 @@ fn shared() -> Result<&'static Engine, String> {
                 _ => {
                     return Err(
                         "Docker API supports only a local unix socket or named pipe".to_string()
-                    )
+                    );
                 }
             }
             .map_err(|error| error.to_string())?;
@@ -124,6 +124,60 @@ pub(crate) fn info() -> Result<Value, String> {
     })
 }
 
+/// Download only the authorized subtree of an immutable container into an
+/// anonymous bounded spool. An empty or failed HTTP response is never a snapshot.
+pub(crate) fn download_archive(id: &str, path: &str, limit: u64) -> Result<std::fs::File, String> {
+    if id.len() != 64
+        || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || limit == 0
+        || !path.starts_with('/')
+        || path.len() > 4096
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || (path != "/"
+            && path
+                .split('/')
+                .skip(1)
+                .any(|part| matches!(part, "" | "." | "..")))
+    {
+        return Err("Docker archive requires exact container identity, canonical absolute path and positive budget".into());
+    }
+    let engine = shared()?;
+    engine.run(Duration::from_secs(60), async {
+        use futures::StreamExt;
+        let stream = engine
+            .docker
+            .download_from_container(id, Some(DownloadFromContainerOptions { path: path.into() }))
+            .map(|chunk| chunk.map_err(|_| "Docker archive download failed".to_string()));
+        futures::pin_mut!(stream);
+        spool_archive_stream(stream, limit).await
+    })
+}
+
+async fn spool_archive_stream(
+    mut stream: impl futures::Stream<Item = Result<bytes::Bytes, String>> + Unpin,
+    limit: u64,
+) -> Result<std::fs::File, String> {
+    use futures::StreamExt;
+    use std::io::{Seek, Write};
+    let mut file = tempfile::tempfile().map_err(|_| "Docker archive spool unavailable")?;
+    let mut size = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        size = size
+            .checked_add(chunk.len() as u64)
+            .filter(|size| *size <= limit)
+            .ok_or("Docker archive byte budget exceeded")?;
+        file.write_all(&chunk)
+            .map_err(|_| "Docker archive spool unavailable")?;
+    }
+    if size == 0 {
+        return Err("Docker archive response was empty".into());
+    }
+    file.rewind()
+        .map_err(|_| "Docker archive spool unavailable")?;
+    Ok(file)
+}
 pub(crate) fn image_id(image: &str) -> Result<String, String> {
     let engine = shared()?;
     engine.run(QUERY_TIMEOUT, async {
@@ -493,8 +547,8 @@ mod tests {
     }
 
     #[test]
-    fn create_limit_defaults_to_two_and_rejects_invalid_values() {
-        assert_eq!(parse_create_limit(None).unwrap(), 2);
+    fn create_limit_defaults_to_four_and_rejects_invalid_values() {
+        assert_eq!(parse_create_limit(None).unwrap(), 4);
         for value in ["1", "2", "4", "16"] {
             assert_eq!(
                 parse_create_limit(Some(value)).unwrap(),
@@ -650,5 +704,63 @@ mod tests {
         remove(&id, true).unwrap();
         assert!(inspect(&id).unwrap().is_none());
         result.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn archive_target_requires_exact_id_absolute_root_and_positive_budget_before_connecting() {
+        for (id, path, limit) in [
+            ("name", "/app", 1024),
+            ("short", "/app", 1024),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "relative",
+                1024,
+            ),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "/app/../etc",
+                1024,
+            ),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "/app",
+                0,
+            ),
+        ] {
+            assert!(download_archive(id, path, limit).is_err());
+        }
+    }
+    #[test]
+    fn archive_stream_spools_exact_bytes_and_rejects_late_errors_empty_and_over_budget() {
+        let chunks = vec![
+            Ok(bytes::Bytes::from_static(b"abc")),
+            Ok(bytes::Bytes::from_static(b"def")),
+        ];
+        let mut file =
+            futures::executor::block_on(spool_archive_stream(futures::stream::iter(chunks), 6))
+                .unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"abcdef");
+        for chunks in [
+            vec![],
+            vec![Ok(bytes::Bytes::from_static(b"abcdefg"))],
+            vec![
+                Ok(bytes::Bytes::from_static(b"abc")),
+                Err("download lost".into()),
+            ],
+        ] {
+            assert!(futures::executor::block_on(spool_archive_stream(
+                futures::stream::iter(chunks),
+                6
+            ))
+            .is_err());
+        }
     }
 }

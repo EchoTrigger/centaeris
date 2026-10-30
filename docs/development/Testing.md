@@ -15,6 +15,20 @@ gate and inspection of its final artifacts.
 
 ## Test quality
 
+Reuse existing behavioral coverage before adding tests. Add a focused regression
+when a reported defect or new behavior lacks coverage; refactors, extractions and
+component splits do not automatically require new characterization tests.
+Consolidate overlapping cases around their observable contract.
+
+During implementation, run directly affected tests and necessary compile or type
+checks. Reuse passing results while their relevant inputs remain unchanged. A
+commit, handoff or change of agent does not require another test run. The lead
+coordinates integrated validation at a stable candidate; full suites, query-loop
+gates and end-to-end acceptance run when affected semantics or the actual CI and
+release requirements call for them. Generic skill checklists do not expand the
+agreed scope. Sub-agents receive a bounded validation scope and report existing
+results for reuse instead of repeating each other's checks.
+
 Frontend visual design uses manual appearance acceptance rather than TDD.
 Implement and iterate on layout, icons, spacing, color and typography directly.
 Focused behavioral tests still protect parsing, validation, requests, state
@@ -95,9 +109,9 @@ visibility, alignment, and containment rather than incidental class names or
 exact pixel values unless those values are an explicit product contract.
 
 Before replacing a brittle test, identify equivalent existing coverage or add
-the smallest missing behavioral test. Verify that a representative broken
-behavior fails the replacement, and that a harmless implementation change does
-not. Retain security and public-contract checks when consolidating tests. Do not
+the smallest missing behavioral test. Retain security and public-contract checks
+when consolidating tests; a separate mutation campaign or new validation
+framework is not required to remove an incidental assertion. Do not
 implement this policy as another blacklist of source patterns in tests; enforce
 it through review and evidence.
 
@@ -114,8 +128,9 @@ Upload alias tests retain their no-refund assertion on both platforms: Unix uses
 a dangling symlink, and Windows uses a dangling directory junction without
 requiring the symlink privilege. Neither case skips the resource-safety check.
 
-HTTP transport refactors first characterize actual request dispatch, rejection
-order, response envelopes/headers and cancellation/timeout resource ownership.
+HTTP transport refactors reuse coverage of actual request dispatch, rejection
+order, response envelopes/headers and cancellation/timeout resource ownership;
+add characterization tests only for observable behavior not already covered.
 Protocol-function and storage tests remain necessary but do not substitute for
 the complete HTTP path. For hosted Runtime endpoints, use the protected
 behaviors and coverage gaps in [Runtime HTTP](../workspace/reference/RuntimeHTTP.md).
@@ -211,6 +226,53 @@ uv run --frozen --package api python packages/api/manage.py test \
   app_core.test_http_query_contract app_core.test_http_error_contract \
   --settings=api.test_settings --noinput
 ```
+
+## Session workspace authority and stopped-instance preservation
+
+Use the isolated synthetic PostgreSQL configuration through `TEST_POSTGRES_*`:
+
+```sh
+uv run --frozen --package api python packages/api/manage.py test \
+  app_core.test_session_workspace_authority \
+  app_core.test_session_workspace_authority_migration \
+  app_core.test_session_workspace_retention \
+  app_core.test_session_workspace_preservation \
+  app_core.test_workspace_snapshot_publication \
+  app_core.test_workspace_snapshot_publication_migration \
+  app_core.test_workspace_snapshot_reachability app_core.test_workspace_snapshot_roots \
+  app_core.test_workspace_snapshot_download_roots app_core.test_gc_failure_control \
+  app_core.test_workspace_snapshot_download_encoding \
+  app_core.test_execution_publication_fencing app_core.test_environment_lifecycle \
+  --settings=api.test_settings --noinput
+```
+
+The migration distinguishes a committed baseline from missing legacy evidence;
+new Sessions explicitly start with an empty baseline. Unknown legacy state must
+not produce signed empty-workspace authority. The idle-time test commits real
+snapshot bytes, advances the fixture by 35 days, runs GC, and admits a continuation
+of the original Session while preserving its history, attachment identities,
+membership, profile and prior signature.
+
+Preservation tests exercise terminal cleanup authority, exact allocation and
+original grant bindings, lease replacement during streaming, empty captures,
+atomic immutable receipts, lost acknowledgements and newer-head CAS conflicts.
+Legacy archive fixtures also verify that nonempty and explicit-empty frame
+publication update the head encoding atomically and preserve the old archive.
+These tests use synthetic physical records. Physical stopped-state inspection, bounded
+export without starting the guest, actual restore into a replacement instance,
+and deployed original-Session continuation remain separate acceptance gates.
+
+Reachability fixtures preserve heads, protected frozen baselines and selected
+Runtime roots while reclaiming old generations and unselected checkpoint bytes.
+They check unknown baselines, witness changes, grace, dry-run, an old open stream
+with a valid lease, outstanding preservation ownership and metadata retirement.
+Publication tests cover GC followed by legitimate identical-content reuse,
+rejection of the older upload/GC token, retry rearming, and a second successful
+collection. Download tests reject a historical checkpoint which Core no longer
+selects. Encoding tests require the exact `X-Workspace-Snapshot-Encoding` header
+from the locked Session head or immutable frame-stage contract, preserving stored
+bytes, SHA-256 and size. Runtime's separate gates validate Core root selection and the shared
+SQL witness; these API fixtures isolate that dependency and exercise its fences.
 
 ## Focused Core gate
 

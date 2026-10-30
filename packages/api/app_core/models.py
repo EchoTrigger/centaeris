@@ -1297,6 +1297,7 @@ class Session(models.Model):
     latestAttentionSequence = models.PositiveBigIntegerField(default=0, db_default=0)
     readThroughSequence = models.PositiveBigIntegerField(default=0, db_default=0)
     workspaceGeneration = models.PositiveBigIntegerField(default=0)
+    workspaceBaselineKnown = models.BooleanField(default=True, db_default=True, editable=False)
     workspaceStorageKey = models.CharField(max_length=1000, blank=True, default="")
     workspaceSnapshotSha256 = models.CharField(max_length=71, blank=True, default="")
     workspaceSnapshotEncoding = models.CharField(max_length=16, default="frameV1")
@@ -1344,6 +1345,10 @@ class Session(models.Model):
                     & models.Q(workspaceFileCount__gte=0)
                 ),
                 name="session_workspace_nonnegative",
+            ),
+            models.CheckConstraint(
+                condition=(models.Q(workspaceBaselineKnown=True) | models.Q(workspaceGeneration=0)),
+                name="session_workspace_authority_consistent",
             ),
             models.CheckConstraint(
                 condition=(
@@ -2120,6 +2125,34 @@ class AgentWorkConsumeAttempt(models.Model):
                 or self.operation.sessionId != self.notice.work.coordination_session_id
                 or (self.coordinator_run_id and self.coordinator_run.session_id != self.operation.sessionId)):
             raise ValueError("agent_work_consume_binding_rejected")
+        kwargs["force_insert"] = True
+        return super().save(*args, **kwargs)
+
+
+class SessionWorkspacePreservation(models.Model):
+    """Immutable proof that one exact stopped allocation reached Session storage."""
+    id = models.CharField(primary_key=True, max_length=71)
+    session = models.ForeignKey(Session, on_delete=models.PROTECT, related_name="workspacePreservations")
+    agent_run = models.ForeignKey(AgentRun, on_delete=models.PROTECT, related_name="workspacePreservations")
+    origin_agent_run = models.ForeignKey(AgentRun, on_delete=models.PROTECT, related_name="originWorkspacePreservations")
+    environment = models.ForeignKey(SessionEnvironment, on_delete=models.PROTECT, related_name="workspacePreservations")
+    authorization_digest = models.CharField(max_length=71)
+    origin_authorization_digest = models.CharField(max_length=71)
+    allocation_execution_id = models.CharField(max_length=160)
+    instance_id = models.CharField(max_length=80)
+    container_id = models.CharField(max_length=64)
+    profile_digest = models.CharField(max_length=71)
+    baseline = models.JSONField()
+    workspace = models.JSONField()
+    snapshot_encoding = models.CharField(max_length=16, default="frameV1")
+    storage_key = models.CharField(max_length=1000, blank=True)
+    creator_lease_digest = models.CharField(max_length=71)
+    creator_controller_epoch = models.PositiveBigIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError("session_workspace_preservation_immutable")
         kwargs["force_insert"] = True
         return super().save(*args, **kwargs)
 
@@ -3039,12 +3072,60 @@ class BrowserLoginSession(AbstractBaseSession):
         return SessionStore
 
 
+def new_workspace_publication_token():
+    return uuid.uuid4().hex
+
+
+class WorkspaceSnapshotObject(models.Model):
+    """An exact Session-owned object key and its current publication incarnation."""
+    keyDigest = models.CharField(primary_key=True, max_length=64)
+    storageKey = models.CharField(max_length=1000, unique=True)
+    session = models.ForeignKey(Session, on_delete=models.PROTECT, related_name="workspaceSnapshotObjects")
+    kind = models.CharField(max_length=16)
+    state = models.CharField(max_length=16, default="live")
+    publicationToken = models.CharField(max_length=32, default=new_workspace_publication_token)
+    registered = models.BooleanField(default=False)
+    collectedAt = models.DateTimeField(null=True, blank=True)
+    createdAt = models.DateTimeField(auto_now_add=True)
+    updatedAt = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=models.Q(kind__in=["snapshot", "temporary"]), name="workspace_object_kind"),
+            models.CheckConstraint(condition=(models.Q(state="live", collectedAt__isnull=True)
+                | models.Q(state="collected", collectedAt__isnull=False)), name="workspace_object_state"),
+        ]
+
+
+class WorkspaceSnapshotUpload(models.Model):
+    """Durable ownership of streaming and staged bytes before a recovery reference."""
+    id = models.CharField(primary_key=True, max_length=32)
+    finalObject = models.ForeignKey(WorkspaceSnapshotObject, on_delete=models.PROTECT, related_name="finalUploads")
+    temporaryObject = models.OneToOneField(WorkspaceSnapshotObject, on_delete=models.PROTECT, related_name="temporaryUpload")
+    agent_run = models.ForeignKey(AgentRun, on_delete=models.PROTECT, related_name="workspaceSnapshotUploads")
+    jobId = models.CharField(max_length=256)
+    leaseOwner = models.CharField(max_length=160)
+    authorizationDigest = models.CharField(max_length=71)
+    finalPublicationToken = models.CharField(max_length=32)
+    temporaryPublicationToken = models.CharField(max_length=32)
+    state = models.CharField(max_length=16, default="streaming")
+    createdAt = models.DateTimeField(auto_now_add=True)
+    updatedAt = models.DateTimeField(auto_now=True)
+    finishedAt = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.CheckConstraint(condition=models.Q(state__in=["streaming", "staged", "committed", "abandoned"]),
+            name="workspace_upload_state")]
+        indexes = [models.Index(fields=["jobId", "authorizationDigest"], name="workspace_upload_job")]
+
+
 class StorageCleanupRetry(models.Model):
     """Retry ownership for exact storage keys without a DerivedResource owner."""
 
     keyDigest = models.CharField(primary_key=True, max_length=64)
     storageKey = models.CharField(max_length=1000)
     collector = models.CharField(max_length=32)
+    publicationToken = models.CharField(max_length=32, blank=True, default="")
     state = models.CharField(max_length=32, default="pending")
     cleanupAttempts = models.PositiveIntegerField(default=0)
     nextCleanupAt = models.DateTimeField(null=True, blank=True)

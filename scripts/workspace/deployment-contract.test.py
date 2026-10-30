@@ -313,7 +313,7 @@ sys.stdout.write(re.sub(pattern,replace,text))
                               "RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS": None, "RUNTIME_RUNSC_IDLE_PAUSE_MS": None}):
             services = compose_config(**overrides)["services"]
             self.assertEqual(services["runtime"]["environment"]["RUNTIME_NATIVE_SHARED_ADMISSION"], "1")
-            self.assertEqual(services["runtime"]["environment"]["DOCKER_CREATE_CONCURRENCY"], "2")
+            self.assertEqual(services["runtime"]["environment"]["DOCKER_CREATE_CONCURRENCY"], "4")
             self.assertEqual(services["runtime"]["environment"]["RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS"], "8")
             self.assertEqual(services["runtime"]["environment"]["RUNTIME_RUNSC_IDLE_PAUSE_MS"], "3000")
             self.assertEqual(services["worker"]["environment"]["AGENT_RUN_EXECUTION_MODE"], "perRun")
