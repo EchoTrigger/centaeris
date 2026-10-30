@@ -244,6 +244,10 @@ impl ModelHttp {
         self.run.emit(record);
     }
 
+    pub fn headers_received(&self) {
+        self.emit("modelResponseHeaders", "ok");
+    }
+
     pub fn first_event(&mut self) {
         if !self.first_event {
             self.first_event = true;

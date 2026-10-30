@@ -37,52 +37,23 @@ Session truth.
 6. Desktop and TUI render the same canonical events. They may differ in layout,
    but not in runtime meaning.
 
-## Model request admission
+## Model transport
 
-Core's `model::admission` owns fixed concurrency, round-robin selection across
-waiting runs, FIFO within each run, cancellation cleanup, and shared Retry-After
-cooldown. Hosts explicitly share one `ModelAdmission` instance per quota domain;
-provider/model labels or credentials are not used to infer domain identity.
+Core owns model contracts, protocol adaptation and the existing retry budget.
+The experimental local Rust client uses reqwest and Tokio directly. Model requests
+have no process-wide concurrency cap, request-slot queue or shared supplier cooldown.
+Session agent composition belongs to Agent scheduling; it does not limit model HTTP
+requests made by other sessions, compaction or connectivity checks.
 
-The Local Runtime uses one conservative process-wide local capacity budget with four
-slots, shared by main AgentRuns, subagent jobs, automatic/manual compaction and
-model connectivity checks. Main AgentRuns and subagent jobs use their existing
-run identities; manual compaction uses its Session/turn identity, and connectivity
-checks share a diagnostic queue. Supplier Retry-After does not pause unrelated
-transports. There is no account/project quota configuration, adaptive concurrency,
-persistent admission state, or coordination across Runtime processes/machines.
+Transport errors retain typed categories. Request construction, invalid media types
+and response-limit failures are terminal; transient failures use the configured
+attempt budget. Retry-After applies only to the rejected logical request and is
+captured as a deadline so passing it between layers does not restart the wait.
+Encoded request text is shared across clones and sent without another full copy.
+Dropping generation still cancels its transport future through the existing Core
+cancellation path. Protocol adapters retain their tentative-output replacement and
+validated-completion boundaries.
 
-`AdmittedJsonHttpTransport` wraps each actual HTTP attempt inside the existing
-protocol-adapter retry loops. A slot covers the complete JSON response body or
-SSE stream, including idle time. Success, transport error, stream cancellation,
-or dropping the caller's future releases it once. Dropping a queued future removes
-its queue entry without sending a request. Core's existing cancellation path
-drops the generation future, so Stop also cancels admission waiting. HTTP timeouts
-start after admission; admission waiting itself has no new deadline.
-
-Retry backoff and response parsing do not hold a slot; every retry joins the
-queue again. A completed retryable HTTP response (408, 429 or 5xx) with a valid
-`Retry-After` installs a cooldown before releasing its slot, even when
-no retries remain. Delay-seconds and HTTP dates are accepted; expired dates mean
-zero delay, malformed/unrepresentable values are ignored, and a later shorter
-cooldown cannot shorten an existing deadline. Cooldown stops new attempts and
-does not interrupt streams already in flight. A failed body read does not return
-response headers through the current transport contract, so it cannot contribute
-a Retry-After cooldown. Core retains explicit shared-domain coordination for hosts
-that choose it. The Local Runtime instead uses `with_transport_cooldown`: each
-transport observes its own responses, waits before admission, and does not infer
-a supplier/account identity. Requests already queued recheck their transport
-deadline before sending; waiting never retains local capacity. New transports do
-not share supplier cooldowns. No request/event/persistent schema changes are involved.
-
-Behavioral tests use controlled transports and paused time for admission, retry,
-cooldown and cancellation, plus a query-loop cancellation test and a Local Runtime
-shared-domain wiring test. These establish local coordination behavior, not a
-provider-specific rate limit or throughput claim.
-
-Outbound response budgets and credential isolation are documented in
-[Model HTTP](../reference/ModelHTTP.md); file publication and parser replacement
-acceptance are described in [Runtime boundary maintenance](../development/RuntimeBoundaries.md).
 
 ## Outbound HTTP product identity
 

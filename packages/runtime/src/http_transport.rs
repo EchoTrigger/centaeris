@@ -1,38 +1,21 @@
-use centaeris_core::model::admission::{AdmittedJsonHttpTransport, ModelAdmission};
 use centaeris_core::model::{
-    JsonHttpFuture, JsonHttpRequest, JsonHttpResponse, JsonHttpTransport,
-    MODEL_PROVIDER_WAITING_STREAM_EVENT_TYPE,
+    HttpTimings, JsonHttpFuture, JsonHttpRequest, JsonHttpResponse, JsonHttpTransport,
+    TransportError, MODEL_PROVIDER_WAITING_STREAM_EVENT_TYPE,
 };
 use futures::StreamExt;
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
-use std::sync::OnceLock;
 use std::time::Duration;
 
-// One process-wide local resource budget, shared across providers and runs.
-// Supplier Retry-After remains transport-local; no account quota is inferred.
-const LOCAL_MODEL_IN_FLIGHT_LIMIT: usize = 4;
 // Wire-buffer safety ceilings, independently bounded per response/line/event.
 const MODEL_BODY_MAX_BYTES: usize = 16 * 1024 * 1024;
 const SSE_LINE_MAX_BYTES: usize = 16 * 1024 * 1024;
 const SSE_EVENT_MAX_BYTES: usize = 16 * 1024 * 1024;
-fn admit_runtime_transport<T>(inner: T, run_id: String) -> AdmittedJsonHttpTransport<T> {
-    static DOMAIN: OnceLock<ModelAdmission> = OnceLock::new();
-    let admission = DOMAIN.get_or_init(|| {
-        ModelAdmission::new(
-            NonZeroUsize::new(LOCAL_MODEL_IN_FLIGHT_LIMIT).expect("positive attempt limit"),
-        )
-    });
-    AdmittedJsonHttpTransport::with_transport_cooldown(inner, admission.clone(), run_id)
-}
-
 pub(crate) struct ReqwestJsonHttpTransport {
-    inner: AdmittedJsonHttpTransport<ReqwestHttpClient>,
+    inner: ReqwestHttpClient,
 }
 
 impl ReqwestJsonHttpTransport {
     pub(crate) fn for_session(
-        run_id: String,
         session_id: &str,
         provider_id: &str,
         client: impl FnOnce() -> Result<reqwest::Client, String>,
@@ -50,13 +33,10 @@ impl ReqwestJsonHttpTransport {
         // Preserve provider/session validation before lazy Client construction.
         let client = client()?;
         Ok(Self {
-            inner: admit_runtime_transport(
-                ReqwestHttpClient {
-                    client,
-                    session_header,
-                },
-                run_id,
-            ),
+            inner: ReqwestHttpClient {
+                client,
+                session_header,
+            },
         })
     }
 }
@@ -126,21 +106,38 @@ impl JsonHttpTransport for ReqwestHttpClient {
     }
 }
 
+fn elapsed_ms(start: tokio::time::Instant) -> u64 {
+    start.elapsed().as_millis() as u64
+}
+
 async fn execute_json_async(
     client: reqwest::Client,
     request: JsonHttpRequest,
-) -> Result<JsonHttpResponse, String> {
+) -> Result<JsonHttpResponse, TransportError> {
+    let started = tokio::time::Instant::now();
     let response = send_with_total_timeout(client, request).await?;
-    response_to_json(response).await
+    let headers_wait_ms = elapsed_ms(started);
+    let mut response = response_to_json(response).await?;
+    let total_ms = elapsed_ms(started);
+    response.timings = Some(HttpTimings {
+        headers_wait_ms,
+        first_event_ms: None,
+        response_body_ms: total_ms.saturating_sub(headers_wait_ms),
+        total_ms,
+    });
+    Ok(response)
 }
 
 async fn execute_sse_async(
     client: reqwest::Client,
     request: JsonHttpRequest,
     on_data: &mut (dyn FnMut(String) + Send),
-) -> Result<JsonHttpResponse, String> {
+) -> Result<JsonHttpResponse, TransportError> {
+    let started = tokio::time::Instant::now();
     let sse_idle_timeout_ms = request.sse_idle_timeout_ms.max(1);
     let response = send_sse_headers(client, request).await?;
+    let headers_wait_ms = elapsed_ms(started);
+    let mut first_event_ms = None;
     let status_code = response.status().as_u16();
     let headers = response_headers(&response);
     if !response.status().is_success() {
@@ -149,8 +146,19 @@ async fn execute_sse_async(
             read_bounded_body(response, "SSE error"),
         )
         .await
-        .map_err(|_| format!("read SSE error body idle timeout after {sse_idle_timeout_ms}ms"))??;
+        .map_err(|_| {
+            TransportError::Timeout(format!(
+                "read SSE error body idle timeout after {sse_idle_timeout_ms}ms"
+            ))
+        })??;
+        let total_ms = elapsed_ms(started);
         return Ok(JsonHttpResponse {
+            timings: Some(HttpTimings {
+                headers_wait_ms,
+                first_event_ms: None,
+                response_body_ms: total_ms.saturating_sub(headers_wait_ms),
+                total_ms,
+            }),
             status_code,
             headers,
             body_json,
@@ -162,7 +170,9 @@ async fn execute_sse_async(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next());
     if !media_type.is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream")) {
-        return Err("successful model SSE response requires Content-Type text/event-stream".into());
+        return Err(TransportError::InvalidResponse(
+            "successful model SSE response requires Content-Type text/event-stream".into(),
+        ));
     }
     read_sse_chunks(
         futures::stream::try_unfold(response, |mut response| async move {
@@ -173,11 +183,21 @@ async fn execute_sse_async(
             Ok(bytes.map(|bytes| (bytes, response)))
         }),
         sse_idle_timeout_ms,
-        on_data,
+        &mut |event| {
+            first_event_ms.get_or_insert_with(|| elapsed_ms(started));
+            on_data(event);
+        },
     )
     .await?;
 
+    let total_ms = elapsed_ms(started);
     Ok(JsonHttpResponse {
+        timings: Some(HttpTimings {
+            headers_wait_ms,
+            first_event_ms,
+            response_body_ms: total_ms.saturating_sub(headers_wait_ms),
+            total_ms,
+        }),
         status_code,
         headers,
         body_json: String::new(),
@@ -185,10 +205,10 @@ async fn execute_sse_async(
 }
 
 async fn read_sse_chunks<B: AsRef<[u8]>>(
-    chunks: impl futures::Stream<Item = Result<B, String>>,
+    chunks: impl futures::Stream<Item = Result<B, TransportError>>,
     sse_idle_timeout_ms: u64,
     on_data: &mut (dyn FnMut(String) + Send),
-) -> Result<(), String> {
+) -> Result<(), TransportError> {
     let mut decoder = SseDecoder::default();
     futures::pin_mut!(chunks);
 
@@ -197,7 +217,9 @@ async fn read_sse_chunks<B: AsRef<[u8]>>(
             tokio::time::timeout(Duration::from_millis(sse_idle_timeout_ms), chunks.next())
                 .await
                 .map_err(|_| {
-                    format!("read SSE chunk idle timeout after {sse_idle_timeout_ms}ms")
+                    TransportError::Timeout(format!(
+                        "read SSE chunk idle timeout after {sse_idle_timeout_ms}ms"
+                    ))
                 })?;
         let Some(bytes) = next_chunk else {
             break;
@@ -210,9 +232,10 @@ async fn read_sse_chunks<B: AsRef<[u8]>>(
 async fn send_with_total_timeout(
     client: reqwest::Client,
     request: JsonHttpRequest,
-) -> Result<reqwest::Response, String> {
-    let method = reqwest::Method::from_bytes(request.method.as_bytes())
-        .map_err(|error| format!("invalid http method {}: {error}", request.method))?;
+) -> Result<reqwest::Response, TransportError> {
+    let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(|error| {
+        TransportError::Build(format!("invalid http method {}: {error}", request.method))
+    })?;
     let mut builder = client
         .request(method, request.url.as_str())
         .timeout(Duration::from_millis(request.timeout_ms.max(1)));
@@ -220,7 +243,7 @@ async fn send_with_total_timeout(
         builder = builder.header(name.as_str(), value.as_str());
     }
     builder
-        .body(request.body_json)
+        .body(bytes::Bytes::from_owner(request.body_json))
         .send()
         .await
         .map_err(|error| format_reqwest_error("http send failed", error))
@@ -229,32 +252,36 @@ async fn send_with_total_timeout(
 async fn send_sse_headers(
     client: reqwest::Client,
     request: JsonHttpRequest,
-) -> Result<reqwest::Response, String> {
-    let method = reqwest::Method::from_bytes(request.method.as_bytes())
-        .map_err(|error| format!("invalid http method {}: {error}", request.method))?;
+) -> Result<reqwest::Response, TransportError> {
+    let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(|error| {
+        TransportError::Build(format!("invalid http method {}: {error}", request.method))
+    })?;
     let mut builder = client.request(method, request.url.as_str());
     for (name, value) in &request.headers {
         builder = builder.header(name.as_str(), value.as_str());
     }
     tokio::time::timeout(
         Duration::from_millis(request.timeout_ms.max(1)),
-        builder.body(request.body_json).send(),
+        builder
+            .body(bytes::Bytes::from_owner(request.body_json))
+            .send(),
     )
     .await
     .map_err(|_| {
-        format!(
+        TransportError::Timeout(format!(
             "http send timed out while waiting for SSE headers after {}ms",
             request.timeout_ms.max(1)
-        )
+        ))
     })?
     .map_err(|error| format_reqwest_error("http send failed", error))
 }
 
-async fn response_to_json(response: reqwest::Response) -> Result<JsonHttpResponse, String> {
+async fn response_to_json(response: reqwest::Response) -> Result<JsonHttpResponse, TransportError> {
     let status_code = response.status().as_u16();
     let headers = response_headers(&response);
     let body_json = read_bounded_body(response, "http").await?;
     Ok(JsonHttpResponse {
+        timings: None,
         status_code,
         headers,
         body_json,
@@ -264,8 +291,10 @@ async fn response_to_json(response: reqwest::Response) -> Result<JsonHttpRespons
 async fn read_bounded_body(
     mut response: reqwest::Response,
     context: &str,
-) -> Result<String, String> {
-    let too_large = || format!("{context} body exceeds {MODEL_BODY_MAX_BYTES} bytes");
+) -> Result<String, TransportError> {
+    let too_large = || TransportError::ResponseTooLarge {
+        max_bytes: MODEL_BODY_MAX_BYTES,
+    };
     if response
         .content_length()
         .is_some_and(|length| length > MODEL_BODY_MAX_BYTES as u64)
@@ -313,7 +342,7 @@ impl SseDecoder {
         &mut self,
         bytes: &[u8],
         on_data: &mut (dyn FnMut(String) + Send),
-    ) -> Result<(), String> {
+    ) -> Result<(), TransportError> {
         // Drain incrementally: a large network chunk must not create an unbounded
         // pending buffer before the line limit is checked.
         for chunk in bytes.chunks(8192) {
@@ -321,18 +350,22 @@ impl SseDecoder {
             self.drain(false, on_data)?;
             let trailing_cr = usize::from(self.pending.last() == Some(&b'\r'));
             if self.pending.len() > SSE_LINE_MAX_BYTES + trailing_cr {
-                return Err(format!("SSE line exceeds {SSE_LINE_MAX_BYTES} bytes"));
+                return Err(TransportError::ResponseTooLarge {
+                    max_bytes: SSE_LINE_MAX_BYTES,
+                });
             }
         }
         Ok(())
     }
 
-    fn finish(&mut self, on_data: &mut (dyn FnMut(String) + Send)) -> Result<(), String> {
+    fn finish(&mut self, on_data: &mut (dyn FnMut(String) + Send)) -> Result<(), TransportError> {
         self.drain(true, on_data)?;
         if self.pending.is_empty() && !self.has_data {
             Ok(())
         } else {
-            Err("SSE stream ended with an incomplete event".to_string())
+            Err(TransportError::StreamInterrupted(
+                "SSE stream ended with an incomplete event".to_string(),
+            ))
         }
     }
 
@@ -340,7 +373,7 @@ impl SseDecoder {
         &mut self,
         end_of_stream: bool,
         on_data: &mut (dyn FnMut(String) + Send),
-    ) -> Result<(), String> {
+    ) -> Result<(), TransportError> {
         loop {
             let Some(index) = self
                 .pending
@@ -364,7 +397,9 @@ impl SseDecoder {
                     1
                 };
             if index > SSE_LINE_MAX_BYTES {
-                return Err(format!("SSE line exceeds {SSE_LINE_MAX_BYTES} bytes"));
+                return Err(TransportError::ResponseTooLarge {
+                    max_bytes: SSE_LINE_MAX_BYTES,
+                });
             }
             let line = self.pending[..index].to_vec();
             self.pending.drain(..index + delimiter_bytes);
@@ -377,15 +412,16 @@ impl SseDecoder {
         &mut self,
         line: &[u8],
         on_data: &mut (dyn FnMut(String) + Send),
-    ) -> Result<(), String> {
+    ) -> Result<(), TransportError> {
         let line = if !self.read_first_line {
             self.read_first_line = true;
             line.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(line)
         } else {
             line
         };
-        let line = std::str::from_utf8(line)
-            .map_err(|error| format!("SSE event contains invalid UTF-8: {error}"))?;
+        let line = std::str::from_utf8(line).map_err(|error| {
+            TransportError::InvalidResponse(format!("SSE event contains invalid UTF-8: {error}"))
+        })?;
         if line.is_empty() {
             if self.has_data {
                 let data = std::mem::take(&mut self.data);
@@ -405,7 +441,9 @@ impl SseDecoder {
             let value = value.strip_prefix(' ').unwrap_or(value);
             let separator = usize::from(self.has_data);
             if value.len() + separator > SSE_EVENT_MAX_BYTES - self.data.len() {
-                return Err(format!("SSE event exceeds {SSE_EVENT_MAX_BYTES} bytes"));
+                return Err(TransportError::ResponseTooLarge {
+                    max_bytes: SSE_EVENT_MAX_BYTES,
+                });
             }
             if self.has_data {
                 self.data.push('\n');
@@ -424,7 +462,7 @@ fn provider_waiting_chunk() -> String {
     .to_string()
 }
 
-fn format_reqwest_error(context: &str, error: reqwest::Error) -> String {
+fn format_reqwest_error(context: &str, error: reqwest::Error) -> TransportError {
     let mut message = format!("{context}: {error}");
     let mut source = std::error::Error::source(&error);
     while let Some(cause) = source {
@@ -432,7 +470,15 @@ fn format_reqwest_error(context: &str, error: reqwest::Error) -> String {
         message.push_str(&cause.to_string());
         source = cause.source();
     }
-    message
+    if error.is_timeout() {
+        TransportError::Timeout(message)
+    } else if error.is_builder() {
+        TransportError::Build(message)
+    } else if error.is_connect() {
+        TransportError::Connection(message)
+    } else {
+        TransportError::Network(message)
+    }
 }
 
 #[cfg(test)]
@@ -447,21 +493,11 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         for streaming in [false, true] {
-            for (header_name, provider, session, run) in [
-                (None, "opencode-go.default", "conversation-a", "run-1"),
-                (
-                    Some("User-Agent"),
-                    "opencode-go.default",
-                    "conversation-a",
-                    "run-2",
-                ),
-                (
-                    Some("uSeR-aGeNt"),
-                    "opencode-go.default",
-                    "conversation-b",
-                    "run-3",
-                ),
-                (None, "openai.default", "conversation-c", "run-4"),
+            for (header_name, provider, session) in [
+                (None, "opencode-go.default", "conversation-a"),
+                (Some("User-Agent"), "opencode-go.default", "conversation-a"),
+                (Some("uSeR-aGeNt"), "opencode-go.default", "conversation-b"),
+                (None, "openai.default", "conversation-c"),
             ] {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let address = listener.local_addr().unwrap();
@@ -504,7 +540,6 @@ mod tests {
                     body_json: "{}".into(),
                 };
                 let client = ReqwestJsonHttpTransport::for_session(
-                    run.into(),
                     session,
                     provider,
                     build_model_http_client,
@@ -554,101 +589,85 @@ mod tests {
         }
     }
 
-    #[test]
-    fn independently_created_model_transports_share_runtime_capacity() {
-        // This tests the actual process-global factory. Other parallel tests
-        // legitimately consume its capacity, so run the assertions in a fresh
-        // process instead of substituting a different admission domain.
-        let result = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "http_transport::tests::runtime_capacity_child",
-                "--ignored",
-                "--test-threads=1",
-                "--nocapture",
-            ])
-            .env("CENTAERIS_RUNTIME_CAPACITY_CHILD", "1")
-            .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "isolated capacity test failed: {} {}",
-            String::from_utf8_lossy(&result.stdout),
-            String::from_utf8_lossy(&result.stderr)
-        );
-        assert!(
-            String::from_utf8_lossy(&result.stdout).contains("RUNTIME_MODEL_CAPACITY_OK"),
-            "capacity child did not complete its assertions: {} {}",
-            String::from_utf8_lossy(&result.stdout),
-            String::from_utf8_lossy(&result.stderr)
-        );
-    }
-
     #[tokio::test]
-    #[ignore = "runs in the isolated process-global capacity child"]
-    async fn runtime_capacity_child() {
-        assert_eq!(
-            std::env::var("CENTAERIS_RUNTIME_CAPACITY_CHILD").unwrap(),
-            "1"
-        );
-        use futures::poll;
-        use std::sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        };
-        struct Pending(Arc<AtomicUsize>);
-        impl JsonHttpTransport for Pending {
-            fn execute_json<'a>(&'a self, _: &'a JsonHttpRequest) -> JsonHttpFuture<'a> {
-                Box::pin(async move {
-                    self.0.fetch_add(1, Ordering::SeqCst);
-                    std::future::pending().await
-                })
+    async fn independent_sessions_dispatch_eight_requests_before_any_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::sync::mpsc;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/model", listener.local_addr().unwrap());
+        let (arrived, mut requests) = mpsc::channel(8);
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let server_release = release.clone();
+        let server = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            for _ in 0..8 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let arrived = arrived.clone();
+                let release = server_release.clone();
+                connections.spawn(async move {
+                    let wait = release.notified();
+                    tokio::pin!(wait);
+                    wait.as_mut().enable();
+                    let mut wire = Vec::new();
+                    while !wire.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                        let mut chunk = [0; 1024];
+                        let n = socket.read(&mut chunk).await.unwrap();
+                        assert!(n > 0);
+                        wire.extend_from_slice(&chunk[..n]);
+                    }
+                    arrived.send(()).await.unwrap();
+                    wait.await;
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        )
+                        .await;
+                });
             }
+            while let Some(done) = connections.join_next().await {
+                done.unwrap();
+            }
+        });
+        let mut tasks = tokio::task::JoinSet::new();
+        for n in 0..8 {
+            let url = url.clone();
+            tasks.spawn(async move {
+                let transport = ReqwestJsonHttpTransport::for_session(
+                    &format!("session-{n}"),
+                    "custom.provider",
+                    || {
+                        reqwest::Client::builder()
+                            .no_proxy()
+                            .build()
+                            .map_err(|e| e.to_string())
+                    },
+                )
+                .unwrap();
+                let request = JsonHttpRequest {
+                    method: "POST".into(),
+                    url,
+                    headers: HashMap::new(),
+                    timeout_ms: 5000,
+                    sse_idle_timeout_ms: 5000,
+                    max_retries: 0,
+                    retry_backoff_ms: 0,
+                    body_json: "{}".into(),
+                };
+                transport.execute_json(&request).await
+            });
         }
-        let started = Arc::new(AtomicUsize::new(0));
-        let clients: Vec<_> = ["main-a", "child-a", "main-b", "compact", "model-test"]
-            .into_iter()
-            .map(|run| admit_runtime_transport(Pending(started.clone()), run.into()))
-            .collect();
-        let request = JsonHttpRequest {
-            method: "POST".into(),
-            url: "https://unused.invalid".into(),
-            headers: HashMap::new(),
-            timeout_ms: 1000,
-            sse_idle_timeout_ms: 1000,
-            max_retries: 0,
-            retry_backoff_ms: 0,
-            body_json: "{}".into(),
-        };
-        let mut attempts: Vec<_> = clients
-            .iter()
-            .map(|client| client.execute_json(&request))
-            .collect();
-        for attempt in &mut attempts {
-            assert!(poll!(attempt).is_pending());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for _ in 0..8 {
+                requests.recv().await.expect("request reached server");
+            }
+        })
+        .await
+        .expect("all eight requests must dispatch before a response releases anything");
+        release.notify_waiters();
+        while let Some(done) = tasks.join_next().await {
+            assert_eq!(done.unwrap().unwrap().status_code, 200);
         }
-        assert_eq!(started.load(Ordering::SeqCst), LOCAL_MODEL_IN_FLIGHT_LIMIT);
-        drop(attempts.remove(0));
-        assert!(poll!(attempts.last_mut().unwrap()).is_pending());
-        assert_eq!(
-            started.load(Ordering::SeqCst),
-            LOCAL_MODEL_IN_FLIGHT_LIMIT + 1
-        );
-        drop(attempts);
-        // No capacity lost after dropping both active and previously queued calls.
-        let mut again: Vec<_> = clients
-            .iter()
-            .take(LOCAL_MODEL_IN_FLIGHT_LIMIT)
-            .map(|client| client.execute_json(&request))
-            .collect();
-        for attempt in &mut again {
-            assert!(poll!(attempt).is_pending());
-        }
-        assert_eq!(
-            started.load(Ordering::SeqCst),
-            LOCAL_MODEL_IN_FLIGHT_LIMIT * 2 + 1
-        );
-        println!("RUNTIME_MODEL_CAPACITY_OK");
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -670,7 +689,10 @@ mod tests {
             .expect_err("closed local proxy must reject the connection");
         let message = format_reqwest_error("proxy request failed", error);
 
-        assert!(!message.contains("unsupported scheme socks5h"), "{message}");
+        assert!(
+            !message.to_string().contains("unsupported scheme socks5h"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -776,7 +798,10 @@ mod tests {
         .await
         .expect_err("an idle stream must time out");
         assert_eq!(started.elapsed(), Duration::from_millis(150));
-        assert_eq!(error, "read SSE chunk idle timeout after 150ms");
+        assert_eq!(
+            error,
+            TransportError::Timeout("read SSE chunk idle timeout after 150ms".into())
+        );
     }
 
     #[tokio::test]
@@ -817,7 +842,7 @@ mod tests {
             sse_idle_timeout_ms: 5000,
             max_retries: 0,
             retry_backoff_ms: 0,
-            body_json: "{}".to_string(),
+            body_json: "{}".into(),
         };
         let mut events = Vec::new();
 
@@ -840,9 +865,6 @@ mod tests {
         assert!(events.iter().any(|event| event.contains("finish_reason")));
     }
 }
-
-#[cfg(test)]
-mod admission_tests;
 
 #[cfg(test)]
 mod boundary_tests;

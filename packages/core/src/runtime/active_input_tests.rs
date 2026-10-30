@@ -34,6 +34,7 @@ impl ModelClient for CompactionInputModel {
                 "answer with the new input".into()
             };
             Ok(ModelClientResponse {
+                request_timings: None,
                 generate_result: GenerateResult {
                     content,
                     tool_calls: vec![],
@@ -449,6 +450,7 @@ impl ModelClient for ActiveInputModel {
                 );
             }
             Ok(ModelClientResponse {
+                request_timings: None,
                 generate_result: response,
                 provider_request_id: None,
                 provider_latency_ms: None,
@@ -785,6 +787,7 @@ impl ModelClient for IntakeModelClient {
                 }
             }
             Ok(ModelClientResponse {
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: "One answer for the accepted input batch.".into(),
                     tool_calls: vec![],

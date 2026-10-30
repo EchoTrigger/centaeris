@@ -178,6 +178,7 @@ mod tests {
                     .expect("record HTTP request")
                     .push(request.clone());
                 Ok(JsonHttpResponse {
+                    timings: None,
                     status_code: 200,
                     headers: HashMap::new(),
                     body_json:

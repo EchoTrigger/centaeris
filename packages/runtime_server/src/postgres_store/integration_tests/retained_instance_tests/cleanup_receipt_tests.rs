@@ -483,6 +483,110 @@ fn postgres_cleanup_receipt_replays_after_target_disappears_without_rewriting_fa
 
 #[test]
 #[ignore = "requires owned disposable PostgreSQL cleanup database"]
+fn postgres_cleanup_preservation_preflight_replays_removed_per_run_instance() {
+    use crate::postgres_store::cleanup_receipts::CleanupPhysicalResult;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let (_, store, mut db) = setup();
+    let mut r = run(&store, &mut db, "run-preservation-replay", 1);
+    r.grant.payload.execution_mode = "perRun".into();
+    r.grant = sign(r.grant.payload);
+    let physical = Arc::new(Mutex::new(Vec::new()));
+    let allocation = prepare(&store, &r, "preservation-replay-allocation", &physical).unwrap();
+    let container = "a".repeat(64);
+    db.execute(
+        "UPDATE runtime.resident_sandboxes SET container_id=$1",
+        &[&container],
+    )
+    .unwrap();
+    physical.lock().unwrap()[0].container_id = container;
+    let cleanup = terminal(&mut db, &mut r, false);
+    let request = CleanupAuthorityRequest {
+        cleanup: &cleanup,
+        signing_key: KEY,
+        lease: &r.fence,
+        host_id: "host",
+    };
+    let original = store
+        .with_cleanup_authority(
+            &request,
+            || Ok(physical.lock().unwrap().clone()),
+            |target, _| {
+                let CleanupTarget::Instance { allocation, .. } = target else {
+                    panic!("cleanup must remove the exact allocated instance");
+                };
+                physical.lock().unwrap().clear();
+                Ok(CleanupPhysicalResult::Removed {
+                    instance_id: allocation.instance_id.clone(),
+                    container_id: allocation.container_id.clone().unwrap(),
+                })
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        original.allocation,
+        CleanupAllocation::Instance {
+            instance_id: allocation.instance_id,
+        }
+    );
+    assert!(db
+        .query_one(
+            "SELECT physical_removed FROM runtime.agent_run_cleanup_receipts WHERE receipt_id=$1",
+            &[&original.receipt_id]
+        )
+        .unwrap()
+        .get::<_, bool>(0));
+
+    // HTTP preservation preflight precedes the ordinary cleanup replay.
+    store
+        .with_cleanup_target(
+            &request,
+            || Ok(vec![]),
+            |_, _| -> Result<(), String> {
+                panic!("a completed cleanup must not recapture the removed instance");
+            },
+        )
+        .expect("preservation preflight must reach receipt replay after physical removal");
+    let replay = store
+        .with_cleanup_authority(
+            &request,
+            || Err("physical inventory must not be needed for committed cleanup".into()),
+            |_, _| -> Result<(), String> {
+                panic!("a completed cleanup must not run physical cleanup again");
+            },
+        )
+        .unwrap();
+    assert_eq!(replay, original);
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    assert!(!db.query_one("SELECT controller_released FROM public.app_core_sessionenvironment WHERE id='environment'", &[]).unwrap().get::<_, bool>(0), "cleanup replay must leave controller release to its existing contract");
+
+    let mut stale = r.fence.clone();
+    stale.lease_owner = "stale-preservation-replay-owner".into();
+    assert!(
+        store
+            .with_cleanup_target(
+                &CleanupAuthorityRequest {
+                    lease: &stale,
+                    ..request
+                },
+                || -> Result<Vec<ObservedResidentSandbox>, String> {
+                    panic!("a stale lease must not observe physical inventory");
+                },
+                |_, _| -> Result<(), String> {
+                    panic!("a stale lease must not recapture the target");
+                },
+            )
+            .is_err(),
+        "receipt replay still requires the current cleanup lease"
+    );
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL cleanup database"]
 fn postgres_cleanup_receipt_rejects_historical_execution_unknown_inventory_and_unconfirmed_tasks() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_url, store, mut db) = setup();

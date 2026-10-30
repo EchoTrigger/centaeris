@@ -102,7 +102,7 @@ impl<T: JsonHttpTransport> OpenAiResponsesModelClient<T> {
             sse_idle_timeout_ms: DEFAULT_MODEL_SSE_IDLE_TIMEOUT_MS,
             max_retries: resolved.effective_max_retries,
             retry_backoff_ms: resolved.effective_retry_backoff_ms,
-            body_json,
+            body_json: body_json.into(),
         })
     }
 
@@ -158,6 +158,7 @@ impl<T: JsonHttpTransport> OpenAiResponsesModelClient<T> {
         let tool_calls = extract_openai_responses_tool_calls(parsed.output.as_deref())?;
         validate_provider_tool_call_arguments("openai-responses", &tool_calls)?;
         Ok(ModelClientResponse {
+            request_timings: None,
             generate_result: GenerateResult {
                 content: extract_openai_responses_text(
                     parsed.output_text.clone(),
@@ -199,10 +200,16 @@ impl<T: JsonHttpTransport> ModelClient for OpenAiResponsesModelClient<T> {
         request: &'a ModelClientRequest,
     ) -> ModelClientFuture<'a, ModelClientResponse> {
         Box::pin(async move {
-            let http_request = self.build_http_request(request, false)?;
-            execute_json_model_response_with_retries(&self.transport, &http_request, |response| {
-                self.parse_http_response(response)
-            })
+            let request_started = tokio::time::Instant::now();
+            let http_request = self
+                .build_http_request(request, false)
+                .map_err(|error| preparation_failure(error, request_started))?;
+            execute_json_model_response_with_retries(
+                &self.transport,
+                &http_request,
+                request_started,
+                |response| self.parse_http_response(response),
+            )
             .await
         })
     }
@@ -213,13 +220,19 @@ impl<T: JsonHttpTransport> ModelClient for OpenAiResponsesModelClient<T> {
         sink: &'a mut (dyn FnMut(ModelClientStreamEvent) + Send),
     ) -> ModelClientFuture<'a, ModelClientResponse> {
         Box::pin(async move {
-            let http_request = self.build_http_request(request, true)?;
+            let request_started = tokio::time::Instant::now();
+            let http_request = self
+                .build_http_request(request, true)
+                .map_err(|error| preparation_failure(error, request_started))?;
             let mut stream_state = OpenAiResponsesStreamState::default();
             let mut pending_completion_events = Vec::<ModelClientStreamEvent>::new();
             let mut attempt_has_visible_content = false;
             let mut emitted_reasoning = String::new();
-            let attempted =
-                execute_sse_with_retries(&self.transport, &http_request, &mut |event| {
+            let attempted = execute_sse_with_retries(
+                &self.transport,
+                &http_request,
+                request_started,
+                &mut |event| {
                     let chunk = match event {
                         SseAttemptEvent::Start { attempt } => {
                             stream_state = OpenAiResponsesStreamState::default();
@@ -323,20 +336,23 @@ impl<T: JsonHttpTransport> ModelClient for OpenAiResponsesModelClient<T> {
                         }
                     }
                     progress
-                })
-                .await
-                .map_err(map_attempted_transport_error)?;
+                },
+            )
+            .await
+            .map_err(map_attempted_transport_error)?;
             let response = attempted.response;
             if response.status_code >= 400 {
                 return Err(map_openai_responses_http_error(
                     response.status_code,
                     response.body_json.as_str(),
                 )
-                .with_provider_attempts(attempted.attempts));
+                .with_provider_attempts(attempted.attempts)
+                .with_request_timings(attempted.request_timings));
             }
             let parsed = stream_state.into_response();
             let mut parsed_response = self
                 .parse_http_response(JsonHttpResponse {
+                    timings: response.timings,
                     status_code: response.status_code,
                     headers: response.headers,
                     body_json: serde_json::to_string(&parsed).map_err(|err| {
@@ -347,8 +363,16 @@ impl<T: JsonHttpTransport> ModelClient for OpenAiResponsesModelClient<T> {
                         )
                     })?,
                 })
-                .map_err(|error| error.with_provider_attempts(attempted.attempts))?;
+                .map_err(|mut error| {
+                    let mut timings = attempted.request_timings.clone();
+                    timings.total_ms = request_started.elapsed().as_millis() as u64;
+                    error.request_timings = Some(Box::new(timings));
+                    error.with_provider_attempts(attempted.attempts)
+                })?;
             parsed_response.provider_attempts = attempted.attempts;
+            let mut timings = attempted.request_timings;
+            timings.total_ms = request_started.elapsed().as_millis() as u64;
+            parsed_response.request_timings = Some(timings);
             for event in pending_completion_events {
                 sink(event);
             }
@@ -1048,6 +1072,8 @@ fn reject_openai_responses_finish_reason(
 ) -> Result<(), ModelClientError> {
     match finish_reason {
         Some("max_output_tokens") => Err(ModelClientError {
+            request_timings: None,
+            retry_after: None,
             kind: ModelClientErrorKind::ProviderResponseInterrupted,
             message: "provider stopped generation at the output-token limit before producing a complete response".to_string(),
             retryable: false,
@@ -1056,6 +1082,8 @@ fn reject_openai_responses_finish_reason(
             truncated_tool_calls: Vec::new(),
         }),
         Some("incomplete") => Err(ModelClientError {
+            request_timings: None,
+            retry_after: None,
             kind: ModelClientErrorKind::ProviderResponseInterrupted,
             message: "openai-responses provider returned an incomplete response".to_string(),
             retryable: false,
@@ -1258,6 +1286,8 @@ pub(super) fn map_openai_responses_http_error(
     };
     let retryable = is_retryable_model_client_error_kind(kind);
     ModelClientError {
+        request_timings: None,
+        retry_after: None,
         kind,
         message,
         retryable,

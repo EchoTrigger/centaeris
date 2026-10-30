@@ -396,8 +396,10 @@ pub struct ModelClientRequest {
 
 #[derive(Debug, Clone)]
 pub struct ModelClientResponse {
+    pub request_timings: Option<super::ModelRequestTimings>,
     pub generate_result: GenerateResult,
     pub provider_request_id: Option<String>,
+    /// Provider-supplied latency, distinct from locally observed request timing.
     pub provider_latency_ms: Option<u64>,
     pub provider_attempts: u32,
 }
@@ -481,6 +483,8 @@ impl ModelClientErrorKind {
 
 #[derive(Debug, Clone)]
 pub struct ModelClientError {
+    pub request_timings: Option<Box<super::ModelRequestTimings>>,
+    pub retry_after: Option<super::RetryAfter>,
     pub kind: ModelClientErrorKind,
     pub message: String,
     pub retryable: bool,
@@ -496,9 +500,16 @@ impl ModelClientError {
             message: message.into(),
             retryable,
             provider_code: None,
+            retry_after: None,
+            request_timings: None,
             provider_attempts: 0,
             truncated_tool_calls: Vec::new(),
         }
+    }
+
+    pub fn with_request_timings(mut self, timings: super::ModelRequestTimings) -> Self {
+        self.request_timings = Some(Box::new(timings));
+        self
     }
 
     pub fn with_provider_attempts(mut self, provider_attempts: u32) -> Self {
@@ -522,25 +533,6 @@ pub(super) fn is_retryable_model_client_error_kind(kind: ModelClientErrorKind) -
             | ModelClientErrorKind::Network
             | ModelClientErrorKind::Provider
     )
-}
-
-pub(super) fn map_transport_model_client_error(message: String) -> ModelClientError {
-    let normalized = message.to_ascii_lowercase();
-    let kind = if normalized.contains("read http body failed")
-        || normalized.contains("error decoding response body")
-        || normalized.contains("response body")
-        || normalized.contains("stream ended before a terminal response event")
-    {
-        ModelClientErrorKind::ProviderResponseInterrupted
-    } else if normalized.contains("timeout")
-        || normalized.contains("timed out")
-        || normalized.contains("deadline has elapsed")
-    {
-        ModelClientErrorKind::Timeout
-    } else {
-        ModelClientErrorKind::Network
-    };
-    ModelClientError::new(kind, message, is_retryable_model_client_error_kind(kind))
 }
 
 pub type ModelClientFuture<'a, TValue> =

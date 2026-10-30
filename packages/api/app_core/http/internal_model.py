@@ -52,6 +52,8 @@ async def _model_stream_response(source):
             "reasonType": reason,
             "httpStatus": error.httpStatus if isinstance(error, ModelProviderError) else None,
         }
+        if isinstance(error, ModelProviderError) and error.retryAfter is not None:
+            failure["retryAfter"] = error.retryAfter
         if isinstance(error, ModelProviderError) and reason == "incomplete_output_token_limit":
             failure["truncatedToolCalls"] = error.truncatedToolCalls or []
         yield encode_model_stream_event("error", failure)
@@ -104,6 +106,8 @@ async def model_runs(request):
             "reasonType": safe_model_error_reason(error),
             "httpStatus": error.httpStatus if isinstance(error, ModelProviderError) else None,
         }
+        if isinstance(error, ModelProviderError) and error.retryAfter is not None:
+            failure["retryAfter"] = error.retryAfter
         if isinstance(error, ModelProviderError) and error.reasonType == "incomplete_output_token_limit":
             failure["truncatedToolCalls"] = error.truncatedToolCalls or []
         return JsonResponse(

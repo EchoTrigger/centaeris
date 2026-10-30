@@ -133,13 +133,14 @@ impl PostgresRuntimeStore {
         })
     }
     /// Capture an exact cleanup target without acknowledging cleanup or release.
-    /// All database pins and physical locks are released before returning the capture.
+    /// A verified completed receipt skips capture. All pins and physical locks
+    /// are released before returning the capture.
     pub(crate) fn with_cleanup_target<T: Send>(
         &self,
         request: &CleanupAuthorityRequest<'_>,
         inventory: impl crate::resident_capacity::ResidentInventorySource<Vec<ObservedResidentSandbox>>,
         capture: impl FnOnce(&CleanupTarget, &VerifiedOriginalGrant) -> Result<T, String> + Send,
-    ) -> Result<T, String> {
+    ) -> Result<Option<T>, String> {
         request.cleanup.clone().validate(request.signing_key)?;
         let authority = ControllerAuthorityRequest {
             environment_authorization: &request.cleanup.environment_authorization,
@@ -150,7 +151,13 @@ impl PostgresRuntimeStore {
         };
         self.with_client(|client| {
             let mut tx = client.transaction().map_err(|error| error.to_string())?;
-            verify_controller_authority(&mut tx, &authority)?;
+            let verified = verify_controller_authority(&mut tx, &authority)?;
+            if let Some(receipt) = load_receipt(&mut tx, &request.cleanup.agent_run_id)? {
+                validate_replay(&receipt, request, &verified)?;
+                require_physical_replay(&mut tx, request, &receipt)?;
+                tx.commit().map_err(|error| error.to_string())?;
+                return Ok(None);
+            }
             tx.commit().map_err(|error| error.to_string())?;
             let mut environment = super::residency::lock_environment(
                 client,
@@ -174,6 +181,12 @@ impl PostgresRuntimeStore {
                 .transaction()
                 .map_err(|error| error.to_string())?;
             let verified = verify_controller_authority(&mut tx, &authority)?;
+            if let Some(receipt) = load_receipt(&mut tx, &request.cleanup.agent_run_id)? {
+                validate_replay(&receipt, request, &verified)?;
+                require_physical_replay(&mut tx, request, &receipt)?;
+                tx.commit().map_err(|error| error.to_string())?;
+                return Ok(None);
+            }
             let target = resolve_target(
                 &mut tx,
                 request,
@@ -183,7 +196,7 @@ impl PostgresRuntimeStore {
             let captured = capture(&target, &verified)?;
             verify_controller_authority(&mut tx, &authority)?;
             tx.commit().map_err(|error| error.to_string())?;
-            Ok(captured)
+            Ok(Some(captured))
         })
     }
     pub(crate) fn with_cleanup_authority<P: Into<CleanupPhysicalResult>>(

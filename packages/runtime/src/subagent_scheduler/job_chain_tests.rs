@@ -301,7 +301,6 @@ async fn join_result(parent: &str, row: &RuntimeJobRecord) {
         config: model_config,
     };
     let transport = ReqwestJsonHttpTransport::for_session(
-        "parent-result-join".into(),
         parent,
         &config_store.config.provider_id,
         crate::http_transport::build_model_http_client,

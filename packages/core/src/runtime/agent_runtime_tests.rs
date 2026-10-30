@@ -1382,6 +1382,7 @@ impl ModelClient for SubagentReadModelClient {
         Box::pin(async move {
             let request_index = self.request_count.fetch_add(1, Ordering::SeqCst);
             Ok(ModelClientResponse {
+                request_timings: None,
                 generate_result: if request_index == 0 {
                     read_generate_result("call-subagent-read", "fixture.txt")
                 } else {
@@ -1433,6 +1434,7 @@ impl ModelClient for CompleteTurnTestModelClient {
                 }
             }
             Ok(ModelClientResponse {
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: if tool_calls.is_empty() {
                         "finished after failed tool".to_string()
@@ -1530,6 +1532,7 @@ impl ModelClient for RuntimeJobWaitModelClient {
                 Vec::new()
             };
             Ok(ModelClientResponse {
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: if tool_calls.is_empty() {
                         "finished from the durable background result".to_string()
@@ -1564,6 +1567,7 @@ impl AnswerNowBoundaryModelClient {
             Vec::new()
         };
         ModelClientResponse {
+            request_timings: None,
             generate_result: GenerateResult {
                 content: if tool_calls.is_empty() {
                     if request_index == 0 {
@@ -1693,6 +1697,7 @@ impl ModelClient for CompleteBatchModelClient {
                 Vec::new()
             };
             Ok(ModelClientResponse {
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: if tool_calls.is_empty() {
                         "verified all four tool results".to_string()
@@ -1727,6 +1732,7 @@ impl StreamExecutionBoundaryModelClient {
             Vec::new()
         };
         ModelClientResponse {
+            request_timings: None,
             generate_result: GenerateResult {
                 content: if tool_calls.is_empty() {
                     "finished after tool result".to_string()
@@ -1840,6 +1846,7 @@ impl NoToolSupplementBoundaryModelClient {
             );
         }
         ModelClientResponse {
+            request_timings: None,
             generate_result: GenerateResult {
                 content: if request_index == 0 {
                     "obsolete final".to_string()
@@ -2163,6 +2170,7 @@ impl ModelClient for UnboundedToolLoopModelClient {
                 vec![]
             };
             Ok(ModelClientResponse {
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: if tool_calls.is_empty() {
                         "natural final after long tool loop".to_string()
@@ -2270,6 +2278,8 @@ impl ModelClient for OutputLimitRecoveryModelClient {
         let emit_incomplete_tool_identity = self.emit_incomplete_tool_identity;
         Box::pin(async move {
             Err(ModelClientError {
+                request_timings: None,
+                retry_after: None,
                 kind: ModelClientErrorKind::ProviderResponseInterrupted,
                 message: "provider stopped generation at the output-token limit".to_string(),
                 retryable: false,
@@ -2311,6 +2321,7 @@ impl ModelClient for OutputLimitRecoveryModelClient {
             });
             return Box::pin(async {
                 Ok(ModelClientResponse {
+                    request_timings: None,
                     generate_result: GenerateResult {
                         content: "done".to_string(),
                         tool_calls: vec![],
@@ -2332,6 +2343,8 @@ impl ModelClient for OutputLimitRecoveryModelClient {
         });
         Box::pin(async move {
             Err(ModelClientError {
+                request_timings: None,
+                retry_after: None,
                 kind: ModelClientErrorKind::ProviderResponseInterrupted,
                 message: "provider stopped generation at the output-token limit".to_string(),
                 retryable: false,
@@ -3008,6 +3021,7 @@ impl ModelClient for PromptCompactionModelClient {
                 .push(request.clone());
             match &self.behavior {
                 PromptCompactionModelClientBehavior::ValidSummary => Ok(ModelClientResponse {
+                    request_timings: None,
                     generate_result: GenerateResult {
                         content: test_model_compaction_summary_from_prompt(
                             request.prepared_prompt.messages[0].content.as_str(),
@@ -3165,6 +3179,7 @@ impl ModelClient for OnlinePromptCompactionModelClient {
                     .contains("[model_compaction_prompt_v1]")
             {
                 return Ok(ModelClientResponse {
+                    request_timings: None,
                     generate_result: GenerateResult {
                         content: self.compaction_summary_content(
                             request.prepared_prompt.messages[0].content.as_str(),
@@ -3186,6 +3201,7 @@ impl ModelClient for OnlinePromptCompactionModelClient {
             }
 
             Ok(ModelClientResponse {
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: "main response after compaction".to_string(),
                     tool_calls: vec![],
@@ -8519,120 +8535,6 @@ async fn query_loop_external_cancel_stops_before_another_provider_request() {
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn query_loop_cancellation_removes_queued_model_attempt_before_provider_call() {
-    use crate::model::admission::{AdmittedJsonHttpTransport, ModelAdmission};
-    use crate::model::{JsonHttpFuture, JsonHttpRequest, JsonHttpTransport};
-    use futures::poll;
-    use std::num::NonZeroUsize;
-
-    struct PendingHttp(Arc<AtomicUsize>);
-    impl JsonHttpTransport for PendingHttp {
-        fn execute_json<'a>(&'a self, _: &'a JsonHttpRequest) -> JsonHttpFuture<'a> {
-            Box::pin(async move {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                std::future::pending().await
-            })
-        }
-    }
-    struct QueuedClient {
-        transport: AdmittedJsonHttpTransport<PendingHttp>,
-        request: JsonHttpRequest,
-        entered: Arc<AtomicBool>,
-    }
-    impl ModelClient for QueuedClient {
-        fn generate<'a>(
-            &'a self,
-            _: &'a ModelClientRequest,
-        ) -> ModelClientFuture<'a, ModelClientResponse> {
-            Box::pin(async move {
-                self.entered.store(true, Ordering::SeqCst);
-                let _ = self.transport.execute_json(&self.request).await;
-                Err(ModelClientError::new(
-                    ModelClientErrorKind::Network,
-                    "unexpected completion",
-                    false,
-                ))
-            })
-        }
-    }
-    let domain = ModelAdmission::new(NonZeroUsize::new(1).unwrap());
-    let calls = Arc::new(AtomicUsize::new(0));
-    let request = JsonHttpRequest {
-        method: "POST".into(),
-        url: "https://unused.invalid".into(),
-        headers: HashMap::new(),
-        timeout_ms: 1000,
-        sse_idle_timeout_ms: 1000,
-        max_retries: 0,
-        retry_backoff_ms: 0,
-        body_json: "{}".into(),
-    };
-    let blocker = AdmittedJsonHttpTransport::new(
-        PendingHttp(calls.clone()),
-        domain.clone(),
-        "other-run".into(),
-    );
-    let mut occupied = blocker.execute_json(&request);
-    assert!(poll!(&mut occupied).is_pending());
-    let entered = Arc::new(AtomicBool::new(false));
-    let client = QueuedClient {
-        transport: AdmittedJsonHttpTransport::new(
-            PendingHttp(calls.clone()),
-            domain.clone(),
-            "cancelled-run".into(),
-        ),
-        request: request.clone(),
-        entered: entered.clone(),
-    };
-    let engine =
-        AgentRuntime::new_for_test(AgentRuntimeTestStore::new(), AgentRuntimeConfig::default());
-    let config_store = StaticModelSessionConfigStore {
-        config: Some(ModelSessionConfig::default()),
-    };
-    let result = engine
-        .process_turn_loop_online_with_model_client_stream_cancellable_async(
-            AgentRunRequest {
-                session_id: "cancel-model-admission".into(),
-                initial_turn_id: "turn-admission".into(),
-                initial_input: AgentRunInitialInput::UserMessage("cancel while queued".into()),
-                agent_run_identity: None,
-                runtime_scope: PromptCompactionScopeV1::main(),
-                resume_from_turn_id: None,
-                auto_continue_after_resume_wait: None,
-            },
-            &client,
-            &config_store,
-            &mut |_| {},
-            &|| {
-                Ok(entered
-                    .load(Ordering::SeqCst)
-                    .then(|| "cancel while queued".into()))
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        result.stop,
-        AgentRunStop::Cancelled("cancel while queued".into())
-    );
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        1,
-        "cancelled queued request reached provider"
-    );
-    drop(occupied);
-    let next =
-        AdmittedJsonHttpTransport::new(PendingHttp(calls.clone()), domain, "next-run".into());
-    let mut admitted = next.execute_json(&request);
-    assert!(poll!(&mut admitted).is_pending());
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        2,
-        "cancelled waiter blocked successor"
-    );
-}
-
 #[tokio::test]
 async fn cancellation_drops_in_flight_provider_request_and_keeps_session_input() {
     let store = AgentRuntimeTestStore::new();
@@ -12128,6 +12030,7 @@ impl ModelClient for LiveReasoningModel {
                 text: "second attempt".to_string(),
             });
             Ok(ModelClientResponse {
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: "answer".to_string(),
                     tool_calls: vec![],
@@ -12280,6 +12183,7 @@ impl ModelClient for CountingToolLoopModelClient {
                 vec![]
             };
             Ok(ModelClientResponse {
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: if tool_calls.is_empty() {
                         "natural final after long tool loop".to_string()

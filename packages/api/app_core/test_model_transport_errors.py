@@ -16,6 +16,16 @@ from .model_adapter.common import ModelProviderError, provider_error
 
 
 class ModelTransportErrorTests(SimpleTestCase):
+    async def test_retry_after_reaches_runtime_without_private_provider_details(self):
+        async def rejected():
+            raise ModelProviderError("provider_rate_limited", 429, "5")
+            yield
+        frames = [json.loads(frame.decode().split("data: ", 1)[1])
+                  async for frame in _model_stream_response(rejected())]
+        self.assertEqual(frames, [{"schema": "api.model.stream.v1", "type": "error",
+                                  "reasonType": "provider_rate_limited", "httpStatus": 429,
+                                  "retryAfter": "5"}])
+
     def test_anthropic_sdk_timeout_and_connection_keep_transport_categories(self):
         request = httpx.Request("POST", "https://synthetic.invalid/messages")
         for error, reason in (

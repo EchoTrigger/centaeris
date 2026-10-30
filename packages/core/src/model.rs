@@ -32,7 +32,6 @@ pub struct GenerateResult {
     pub prompt_cache_miss_tokens: Option<i64>,
 }
 
-pub mod admission;
 pub mod prepared_prompt;
 pub mod prompt;
 mod protocol_adapters;
@@ -49,10 +48,13 @@ pub use protocol_adapters::{
 pub use provider_registry::*;
 pub use settings::*;
 pub use store::EmptyModelSessionConfigStore;
-pub use transport::{JsonHttpFuture, JsonHttpRequest, JsonHttpResponse, JsonHttpTransport};
+pub use transport::{
+    EncodedJsonBody, HttpAttemptTimings, HttpTimings, JsonHttpFuture, JsonHttpRequest,
+    JsonHttpResponse, JsonHttpTransport, ModelRequestTimings, RetryAfter, TransportError,
+};
 
-use provider_registry::{is_retryable_model_client_error_kind, map_transport_model_client_error};
+use provider_registry::is_retryable_model_client_error_kind;
 use transport::{
     execute_json_model_response_with_retries, execute_sse_with_retries,
-    map_attempted_transport_error, SseAttemptEvent, SseAttemptProgress,
+    map_attempted_transport_error, preparation_failure, SseAttemptEvent, SseAttemptProgress,
 };

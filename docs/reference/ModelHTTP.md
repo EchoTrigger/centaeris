@@ -25,8 +25,7 @@ runs before obtaining/building the shared Client; other providers do not gain
 that validation. Raw session header values are preserved. Explicit session or
 User-Agent request headers override defaults case-insensitively, and multiple
 explicit case variants are not collapsed. Sharing a connection pool does not
-share a transport's Retry-After cooldown: each transport keeps its own cooldown
-and the existing shared local request-capacity admission.
+impose a model concurrency cap or shared provider cooldown. Retry-After delays only the rejected request's configured retry.
 
 The current locked Local Runtime uses environment-derived proxies, including
 HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY and their lowercase variants; reqwest's
@@ -61,8 +60,8 @@ These are explicit local transport safety ceilings, not supplier quotas or
 measured hardware capacity. There was no pre-existing maximum model response
 contract to derive a precise value from. 16 MiB is a conservative envelope with
 substantial room for text and structured tool output; an endpoint needing larger
-individual responses requires a deliberate contract/budget update. Four active
-attempts can each retain bounded line/event/body buffers; these ceilings do not
+individual responses requires a deliberate contract/budget update. Concurrent
+attempts each retain bounded line/event/body buffers; these ceilings do not
 bound memory retained later by model protocol adapters or application consumers.
 
 Overflow fails the transport without delivering a partial event. A declared
@@ -99,3 +98,52 @@ Candidate source and documentation:
 - <https://docs.rs/tokio_sse_codec/0.0.2/tokio_sse_codec/>
 - <https://docs.rs/crate/tokio_sse_codec/0.0.2/source/src/field_decoder.rs>
 - <https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream>
+
+## Typed failures, shared request bodies and observations
+
+The local client uses no model SDK. Request text is encoded once into
+`EncodedJsonBody`; clones share its owned allocation, and reqwest receives a
+zero-copy Bytes owner. No process-wide model slots or fair-admission queue remain.
+
+`TransportError` distinguishes timeout, connection, network, request-build, invalid
+response, response-too-large and interrupted-stream failures. Build, invalid-response
+and size-limit failures do not consume repeated attempts. Existing provider business
+classification and the configured finite retry budget remain in the protocol adapters.
+
+`RetryAfter` captures seconds or an HTTP date as a monotonic deadline. Only the
+rejected request waits; unrelated calls proceed, and dropping the waiting future
+cancels it. This is not an account-wide rate-limit or quota implementation.
+
+Completed HTTP exchanges expose optional `HttpTimings`: response-header wait,
+first complete SSE event, response-body duration and one HTTP attempt's total time.
+First SSE event includes comments and is not semantic TTFT. Missing failed-exchange
+phase measurements are absent rather than recorded as zero.
+
+`ModelClientResponse.request_timings` and `ModelClientError.request_timings` carry
+`ModelRequestTimings` for the logical local-client invocation: preparation, actual
+retry waiting, total elapsed time, and every transport invocation, including failed
+ones. Each attempt records elapsed time, optional HTTP status, typed transport error
+and any available HTTP phase measurements. The total includes final protocol parsing;
+SSE parsing performed in the transport callback also lies inside attempt time, so
+these intervals must not be added together. The total ends after protocol parsing,
+before final completion callbacks; synchronous incremental callbacks remain included.
+PreparedPrompt assembly and work outside this invocation are excluded. No supplier
+dispatch count is inferred from it.
+
+`provider_latency_ms` remains reserved for a provider-supplied metric and is not
+populated with a local HTTP duration. Cancellation drops the client future; Core's
+existing cancellation facts remain authoritative. A cancelled future returns no
+completed response/timing summary, and no completed measurement is synthesized.
+These observations add no Session schema or product-visible messages.
+
+## Reproducible loopback probe
+
+Run `cargo run -p centaeris-runtime --example model_transport_probe -- <label>`
+for bounded synthetic measurements of the actual local transport. The probe uses
+127.0.0.1, a no-proxy client, keep-alive and complete request-body reads. It measures
+100 request clones at 1/4/8 MiB, sequential 2-byte/1/4/8-MiB HTTP exchanges, and eight
+simultaneous requests with an explicitly artificial 25-ms server service interval.
+HTTP scenarios take 30 samples and discard the first three; outputs are JSON lines.
+Use identical build profiles and an otherwise quiet host for comparisons. Any
+process memory measurement includes the probe's in-process mock server. This probe
+does not exercise model inference, Core commits, production proxies or runsc.

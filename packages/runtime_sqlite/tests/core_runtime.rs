@@ -66,6 +66,7 @@ impl ModelClient for FinalModelClient {
         Box::pin(async move {
             self.requests.fetch_add(1, Ordering::SeqCst);
             Ok(ModelClientResponse {
+                request_timings: None,
                 generate_result: GenerateResult {
                     content: "SQLite-backed runtime completed.".to_string(),
                     tool_calls: Vec::new(),

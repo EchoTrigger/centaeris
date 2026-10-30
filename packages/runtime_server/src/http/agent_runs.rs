@@ -315,6 +315,7 @@ fn teardown_owned_tasks(
             )
             .and_then(|prepared| {
                 prepared
+                    .flatten()
                     .map(|prepared| {
                         let api_url = env::var("API_INTERNAL_URL")
                             .map_err(|_| "API_INTERNAL_URL is required")?;

@@ -771,7 +771,6 @@ impl ElectronSubagentRunner {
             agent_run_identity: Some(agent_run_identity),
         };
         let transport = ReqwestJsonHttpTransport::for_session(
-            req.job.job_id.clone(),
             &binding.child_session_id,
             &config_store.config.provider_id,
             || self.event_writer.model_http_client(),

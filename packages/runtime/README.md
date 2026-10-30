@@ -7,7 +7,7 @@ and terminal management, and exposes the exact Local Runtime Host protocol
 
 Desktop and TUI are both thin hosts over this one Runtime process and one user
 data root (`~/.centaeris` by default); they do not implement a second Session
-or tool loop. Runtime owns `ExecutionHost` binding, model admission wiring,
+or tool loop. Runtime owns `ExecutionHost` binding, model HTTP wiring,
 Plugin/Skill/MCP/Hook activation freezing, local process and schedule
 lifecycle, the session catalog, and the Windows Local `ExecutionHost` (Git for
 Windows Bash) and native Linux/macOS execution paths.
