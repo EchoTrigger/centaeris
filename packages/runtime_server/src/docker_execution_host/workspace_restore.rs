@@ -23,9 +23,29 @@ pub(super) fn response_encoding(headers: &reqwest::header::HeaderMap) -> Result<
 }
 fn require_encoding(encoding: Option<&str>) -> Result<&str, String> {
     match encoding {
-        Some(value @ ("frameV1" | "tarZstdV1")) => Ok(value),
+        Some(value @ ("frameV1" | "tarZstdV1" | "fileManifestV1")) => Ok(value),
         _ => Err("workspace_restore_encoding_rejected".into()),
     }
+}
+
+pub(super) fn prepare_with_files(
+    source: &mut impl Read,
+    stored: &WorkspaceSnapshotDescriptor,
+    encoding: Option<&str>,
+    expanded_limit: u64,
+    observation: WorkspaceProtection,
+    access: Option<&workspace_files::FileAccess<'_>>,
+) -> Result<PreparedWorkspaceRestore, String> {
+    if require_encoding(encoding)? == workspace_files::ENCODING {
+        return workspace_files::restore_from_api(
+            source,
+            stored,
+            expanded_limit,
+            observation,
+            access.ok_or("workspace_restore_file_authority_missing")?,
+        );
+    }
+    prepare(source, stored, encoding, expanded_limit, observation)
 }
 
 /// Validate the complete stored object before decoding into a private helper
@@ -112,6 +132,7 @@ pub(super) fn prepare(
         stored_descriptor: stored.clone(),
         helper_frame: ImmutableWorkspaceSnapshot {
             file: frame,
+            file_source: None,
             descriptor,
             manifest,
             observation,
@@ -200,6 +221,7 @@ mod tests {
             Some("tarZstdV1"),
             frame_descriptor.expanded_size_bytes,
             WorkspaceProtection::new(),
+            None,
         )
         .expect("recovery preparation must not parse compressed archive bytes as a frame header");
         let mut bytes = Vec::new();

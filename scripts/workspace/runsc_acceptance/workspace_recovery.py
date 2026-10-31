@@ -152,7 +152,7 @@ def verify_run(driver, admitted, sample, binary):
 
 def _known_head(head):
     if (head.get('baselineKnown') is not True or type(head.get('generation')) is not int or head['generation'] < 1
-            or not head.get('storageKey') or head.get('snapshotEncoding') != 'frameV1'
+            or not head.get('storageKey') or head.get('snapshotEncoding') != 'fileManifestV1'
             or any(type(head.get(key)) is not int or head[key] < 1 for key in ('snapshotSizeBytes', 'expandedSizeBytes', 'fileCount'))
             or head.get('payloadSha256') != head.get('snapshotSha256')):
         raise RuntimeError('known durable nonempty verified Session head required')

@@ -67,14 +67,14 @@ class WorkspaceSnapshotDownloadEncodingTests(fixtures.ExecutionPublicationFixtur
     def test_session_archive_header_preserves_original_compressed_identity(self):
         self.download_head("tarZstdV1")
 
-    def test_execution_download_uses_immutable_frame_stage_contract(self):
+    def test_execution_download_uses_its_immutable_manifest_encoding(self):
         body,snapshot,_=self._checkpoint_download_body()
         response=self.client.post("/internal/agent-runs/execution-workspace/download",data=json.dumps(body),
             content_type="application/json",HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN,
             HTTP_X_WORKSPACE_SNAPSHOT_ENCODING="tarZstdV1")
         received=streaming_response_bytes(response)
         self.assertEqual(response.status_code,200,received)
-        self.assertEqual(response.get("X-Workspace-Snapshot-Encoding"),"frameV1")
+        self.assertEqual(response.get("X-Workspace-Snapshot-Encoding"),"fileManifestV1")
         self.assertEqual(response["Content-Length"],str(len(snapshot)))
         self.assertEqual(response["X-Content-Sha256"],"sha256:"+hashlib.sha256(snapshot).hexdigest())
         self.assertEqual(received,snapshot)

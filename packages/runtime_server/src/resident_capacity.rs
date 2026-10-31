@@ -104,7 +104,7 @@ pub(crate) fn declared_usage(resources: SandboxResources) -> ResidentResourceUsa
         memory_bytes: resources.memory_bytes,
         cpu_milli: u64::from(resources.cpu_milli),
         pids: u64::from(resources.pids_limit),
-        workspace_bytes: resources.data_tmpfs_bytes,
+        workspace_bytes: resources.workspace_bytes,
     }
 }
 

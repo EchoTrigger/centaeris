@@ -4,7 +4,7 @@ use crate::contract::AgentRunCleanup;
 use crate::postgres_store::execution_instances::RetainedInstanceAllocation;
 use centaeris_core::session::RuntimeJobLeaseFence;
 
-const PRESERVATION_SCHEMA: &str = "runtime.session_workspace.preserve.v1";
+const PRESERVATION_SCHEMA: &str = "runtime.session_workspace.preserve.v2";
 const PRESERVATION_RESULT_SCHEMA: &str = "runtime.session_workspace.preserve.result.v1";
 const PRESERVATION_RESPONSE_LIMIT: usize = 16 * 1024;
 const PRESERVATION_METADATA_LIMIT: usize = 64 * 1024;
@@ -133,7 +133,8 @@ fn upload_blocking(
     if api_token.is_empty() {
         return Err("stopped_preservation_api_unavailable".into());
     }
-    let descriptor = &artifact.descriptor;
+    workspace_files::prepare(artifact)?;
+    let descriptor = artifact.descriptor.clone();
     let candidate = SessionWorkspace {
         generation: cleanup
             .authorization
@@ -161,6 +162,7 @@ fn upload_blocking(
     let request = PreservationRequest {
         commit: SessionWorkspaceCommitRequest {
             schema: PRESERVATION_SCHEMA,
+            snapshot_encoding: workspace_files::encoding(descriptor.size_bytes),
             job_id: &lease.job_id,
             lease_owner: &lease.lease_owner,
             agent_run_id: &cleanup.agent_run_id,
@@ -180,6 +182,29 @@ fn upload_blocking(
         profile_digest: &allocation.profile_digest,
         baseline: &cleanup.authorization.session_workspace,
     };
+    let proof =
+        serde_json::to_value(&request).map_err(|_| "stopped_preservation_metadata_rejected")?;
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .map_err(|_| "stopped_preservation_api_unavailable")?;
+    let content_lease = SessionWorkspaceLease {
+        job_id: lease.job_id.clone(),
+        lease_owner: lease.lease_owner.clone(),
+    };
+    workspace_files::FileAccess::new(
+        &client,
+        api_url,
+        api_token,
+        &cleanup.agent_run_id,
+        &cleanup.authorization_digest,
+        &content_lease,
+        None,
+    )
+    .with_preservation(&proof)
+    .upload_missing(artifact)?;
     let metadata =
         serde_json::to_vec(&request).map_err(|_| "stopped_preservation_metadata_rejected")?;
     if metadata.len() > PRESERVATION_METADATA_LIMIT {
@@ -202,12 +227,6 @@ fn upload_blocking(
         prefix: Cursor::new(prefix),
         snapshot,
     };
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .build()
-        .map_err(|_| "stopped_preservation_api_unavailable")?;
     let observation = &artifact.observation;
     let response = observation
         .timed(ProtectionMetric::UploadElapsedMs, || {
@@ -363,7 +382,10 @@ mod tests {
         let mut frame = (bytes.len() as u32).to_be_bytes().to_vec();
         frame.extend_from_slice(&bytes);
         frame.extend_from_slice(payload);
-        capture_snapshot_artifact(&mut Cursor::new(frame.clone()), frame.len() as u64).unwrap()
+        let mut artifact =
+            capture_snapshot_artifact(&mut Cursor::new(frame.clone()), frame.len() as u64).unwrap();
+        workspace_files::prepare(&mut artifact).unwrap();
+        artifact
     }
     fn ack(cleanup: &AgentRunCleanup, artifact: &ImmutableWorkspaceSnapshot) -> serde_json::Value {
         serde_json::json!({"schema":"runtime.session_workspace.preserve.result.v1","disposition":"committed","preservationReceiptId":format!("sha256:{}","f".repeat(64)),"sessionWorkspace":{"generation":cleanup.authorization.session_workspace.generation+1,"snapshotSha256":artifact.descriptor.sha256,"snapshotSizeBytes":artifact.descriptor.size_bytes,"expandedSizeBytes":artifact.descriptor.expanded_size_bytes,"fileCount":artifact.descriptor.file_count}})
@@ -379,52 +401,71 @@ mod tests {
         let server = thread::spawn(move || {
             listener.set_nonblocking(true).unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
-            let mut socket = loop {
-                match listener.accept() {
-                    Ok((socket, _)) => break socket,
-                    Err(error)
-                        if error.kind() == std::io::ErrorKind::WouldBlock
-                            && Instant::now() < deadline =>
-                    {
-                        thread::sleep(Duration::from_millis(5))
+            loop {
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(5))
+                        }
+                        Err(error) => {
+                            panic!("preservation fixture did not receive request: {error}")
+                        }
                     }
-                    Err(error) => panic!("preservation fixture did not receive request: {error}"),
+                };
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    assert!(header.len() < 65536);
+                    let mut byte = [0];
+                    socket.read_exact(&mut byte).unwrap();
+                    header.push(byte[0]);
                 }
-            };
-            socket
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut header = Vec::new();
-            while !header.ends_with(b"\r\n\r\n") {
-                assert!(header.len() < 65536);
-                let mut byte = [0];
-                socket.read_exact(&mut byte).unwrap();
-                header.push(byte[0]);
+                let header = String::from_utf8(header).unwrap();
+                let length = header
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .map(|value| value.parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                assert!(length < 65536);
+                let mut body = vec![0; length];
+                socket.read_exact(&mut body).unwrap();
+                if header.starts_with("POST /internal/agent-runs/workspace-files/missing ") {
+                    let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(request["schema"], "runtime.workspace_files.missing.v1");
+                    assert_eq!(request["preservation"]["jobId"], request["jobId"]);
+                    assert_eq!(request["preservation"]["leaseOwner"], request["leaseOwner"]);
+                    assert_eq!(request["preservation"]["agentRunId"], request["agentRunId"]);
+                    assert_eq!(
+                        request["preservation"]["snapshotEncoding"],
+                        "fileManifestV1"
+                    );
+                    let reply =
+                        r#"{"schema":"runtime.workspace_files.missing.result.v1","missing":[]}"#;
+                    write!(socket, "HTTP/1.1 200 fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", reply.len(), reply).unwrap();
+                    continue;
+                }
+                let length = u32::from_be_bytes(body[..4].try_into().unwrap()) as usize;
+                let metadata = serde_json::from_slice(&body[4..4 + length]).unwrap();
+                let snapshot = body[4 + length..].to_vec();
+                if let Some((status, reply)) = reply {
+                    write!(socket,"HTTP/1.1 {status} fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",reply.len(),reply).unwrap();
+                }
+                return (header, metadata, snapshot);
             }
-            let header = String::from_utf8(header).unwrap();
-            let length = header
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length: ")
-                        .map(|value| value.parse::<usize>().unwrap())
-                })
-                .unwrap();
-            assert!(length < 65536);
-            let mut body = vec![0; length];
-            socket.read_exact(&mut body).unwrap();
-            let length = u32::from_be_bytes(body[..4].try_into().unwrap()) as usize;
-            let metadata = serde_json::from_slice(&body[4..4 + length]).unwrap();
-            let snapshot = body[4 + length..].to_vec();
-            if let Some((status, reply)) = reply {
-                write!(socket,"HTTP/1.1 {status} fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",reply.len(),reply).unwrap();
-            }
-            (header, metadata, snapshot)
         });
         (url, server)
     }
     #[test]
-    fn posts_exact_original_target_cleanup_authority_baseline_and_snapshot_frame() {
+    fn posts_exact_original_target_cleanup_authority_baseline_and_snapshot_manifest() {
         let (cleanup, lease, allocation) = fixture();
         let mut artifact = artifact(b"original\0\xff");
         let expected = ack(&cleanup, &artifact);
@@ -443,13 +484,13 @@ mod tests {
         assert!(header
             .to_ascii_lowercase()
             .contains("x-internal-token: synthetic-internal-token"));
-        let expected = serde_json::json!({"schema":"runtime.session_workspace.preserve.v1","jobId":lease.job_id,"leaseOwner":lease.lease_owner,"agentRunId":cleanup.agent_run_id,"authorizationDigest":cleanup.authorization_digest,"snapshotSha256":artifact.descriptor.sha256,"snapshotSizeBytes":artifact.descriptor.size_bytes,"expandedSizeBytes":artifact.descriptor.expanded_size_bytes,"fileCount":artifact.descriptor.file_count,"environmentAuthorization":cleanup.environment_authorization,"allocationExecutionId":allocation.allocation_execution_id,"instanceId":allocation.instance_id,"containerId":allocation.container_id,"profileDigest":allocation.profile_digest,"baseline":cleanup.authorization.session_workspace});
+        let expected = serde_json::json!({"schema":"runtime.session_workspace.preserve.v2","snapshotEncoding":"fileManifestV1","jobId":lease.job_id,"leaseOwner":lease.lease_owner,"agentRunId":cleanup.agent_run_id,"authorizationDigest":cleanup.authorization_digest,"snapshotSha256":artifact.descriptor.sha256,"snapshotSizeBytes":artifact.descriptor.size_bytes,"expandedSizeBytes":artifact.descriptor.expanded_size_bytes,"fileCount":artifact.descriptor.file_count,"environmentAuthorization":cleanup.environment_authorization,"allocationExecutionId":allocation.allocation_execution_id,"instanceId":allocation.instance_id,"containerId":allocation.container_id,"profileDigest":allocation.profile_digest,"baseline":cleanup.authorization.session_workspace});
         assert_eq!(metadata, expected);
         assert!(metadata.get("generation").is_none());
         assert_eq!(snapshot.len() as u64, artifact.descriptor.size_bytes);
         assert_eq!(
-            inspect_workspace_snapshot(&mut Cursor::new(snapshot)).unwrap(),
-            artifact.descriptor
+            serde_json::from_slice::<SandboxWorkspaceSnapshotManifest>(&snapshot).unwrap(),
+            artifact.manifest.clone().unwrap()
         );
         assert_eq!(
             proof.session_workspace.generation,
@@ -516,9 +557,12 @@ mod tests {
         assert_eq!(first_bytes, second_bytes);
         assert_eq!(artifact.descriptor, descriptor);
         artifact.file.rewind().unwrap();
+        let mut bytes = Vec::new();
+        artifact.file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes.len() as u64, descriptor.size_bytes);
         assert_eq!(
-            inspect_workspace_snapshot(&mut artifact.file).unwrap(),
-            descriptor
+            format!("sha256:{:x}", Sha256::digest(&bytes)),
+            descriptor.sha256
         );
     }
     #[test]

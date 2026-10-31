@@ -2,8 +2,49 @@
 import copy
 import hashlib
 import json
+from pathlib import PurePosixPath
+import re
+import unicodedata
 
 from django.db import migrations, models
+
+
+# Freeze this migration's released input contract independently of current validators.
+PROFILE_SCHEMA = 'runtime.environment_profile.v1'
+PROFILE_FIELDS = {'schema', 'imageDigest', 'workspaceRoot', 'user', 'network', 'resources'}
+RESOURCE_FIELDS = {'cpuMilli', 'memoryBytes', 'pidsLimit', 'dataTmpfsBytes', 'storageBytes'}
+
+
+def validate_historical_profile(value):
+    if not isinstance(value, dict) or set(value) != PROFILE_FIELDS or value['schema'] != PROFILE_SCHEMA:
+        raise ValueError('environment_profile_schema_invalid')
+    image = value['imageDigest']
+    if not isinstance(image, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', image):
+        raise ValueError('environment_profile_image_invalid')
+    root = value['workspaceRoot']
+    if (not isinstance(root, str) or not root.startswith('/') or root.startswith('//')
+            or len(root.encode('utf-8')) > 4096 or any(unicodedata.category(c) == 'Cc' for c in root)
+            or '\\' in root or unicodedata.normalize('NFC', root) != root
+            or '..' in root.split('/') or str(PurePosixPath(root)) != root
+            or root == '/run/centaeris' or root.startswith('/run/centaeris/')):
+        raise ValueError('environment_profile_workspace_root_invalid')
+    user = value['user']
+    if not isinstance(user, str) or not re.fullmatch(r'(0|[1-9][0-9]*):(0|[1-9][0-9]*)', user):
+        raise ValueError('environment_profile_user_invalid')
+    if any(int(part) >= 2**32 - 1 for part in user.split(':')):
+        raise ValueError('environment_profile_user_invalid')
+    if value['network'] not in ('publicInternet', 'disabled'):
+        raise ValueError('environment_profile_network_invalid')
+    resources = value['resources']
+    if not isinstance(resources, dict) or set(resources) != RESOURCE_FIELDS:
+        raise ValueError('environment profile resources fields mismatch')
+    for field, number in resources.items():
+        maximum = 2**32 - 1 if field in ('cpuMilli', 'pidsLimit') else 2**64 - 1
+        if type(number) is not int or number <= 0:
+            raise ValueError('environment profile resources must be positive integers')
+        if number > maximum:
+            raise ValueError(f'environment profile resources.{field} exceeds transport range')
+
 
 
 def remove_old_guards(apps, schema_editor):
@@ -26,7 +67,6 @@ def reconstruct_profiles(apps, schema_editor):
         original = environment.environment_profile
         # This known source schema contains all six authoritative configuration fields.
         # Ordinary historical grants do not record user/root/storage and cannot supply them.
-        from app_core.environment_profile import environment_profile_digest
         if (not isinstance(original, dict) or original.get('schema') != 'runtime.benchmark_execution_profile.v1'):
             raise RuntimeError('historical_environment_profile_unsupported')
         old_digest = 'sha256:' + hashlib.sha256(json.dumps(original, ensure_ascii=False,
@@ -36,7 +76,9 @@ def reconstruct_profiles(apps, schema_editor):
         current = copy.deepcopy(original)
         current['schema'] = 'runtime.environment_profile.v1'
         try:
-            digest = environment_profile_digest(current)
+            validate_historical_profile(current)
+            digest = 'sha256:' + hashlib.sha256(json.dumps(current, ensure_ascii=False,
+                sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         except (ValueError, TypeError, OverflowError):
             raise RuntimeError('historical_environment_profile_unsupported') from None
         environments.filter(pk=environment.pk).update(environment_profile=current,

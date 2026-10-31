@@ -18,13 +18,14 @@ from .environment_authorization import build_environment_authorization
 from .environment_lifecycle import _authority, _locked_binding
 from .models import AgentRun, AgentRunAuthorization, SessionWorkspacePreservation
 from .resource_commit import require_durable_commit
+from .workspace_file_objects import WorkspaceFileError
 from .runtime_contract import (
     agent_run_binding_matches, authorization_digest, require_opaque_ref, require_sha256,
     session_workspace_for_session, validate_session_workspace, verify_agent_run_authorization_signature,
 )
 
 
-SCHEMA = "runtime.session_workspace.preserve.v1"
+SCHEMA = "runtime.session_workspace.preserve.v2"
 RESULT_SCHEMA = "runtime.session_workspace.preserve.result.v1"
 TARGET_FIELDS = {"environmentAuthorization", "allocationExecutionId", "instanceId", "containerId",
                  "profileDigest", "baseline"}
@@ -97,7 +98,7 @@ def _receipt_identity(body, run, session, candidate, storage_key):
         "allocation_execution_id": body["allocationExecutionId"], "instance_id": body["instanceId"],
         "container_id": body["containerId"], "profile_digest": body["profileDigest"],
         "baseline": body["baseline"], "workspace": candidate, "storage_key": storage_key,
-        "snapshot_encoding": "frameV1"}
+        "snapshot_encoding": body["snapshotEncoding"]}
     receipt_id = "sha256:" + hashlib.sha256(json.dumps(identity, sort_keys=True,
         separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
     return receipt_id, identity
@@ -136,9 +137,9 @@ def preserve_session_workspace(request):
         with ExitStack() as uploads:
             with transaction.atomic():
                 run, session, baseline = _locked_preservation(body)
-                budget = run.authorization.payload["environmentProfile"]["resources"]["dataTmpfsBytes"]
+                budget = run.authorization.payload["environmentProfile"]["resources"]["workspaceBytes"]
                 if (body["snapshotSizeBytes"] > budget or body["expandedSizeBytes"] > budget
-                        or not internal._workspace_tmpfs_fits(run, body["expandedSizeBytes"])):
+                        or not internal._workspace_budget_fits(run, body["expandedSizeBytes"])):
                     raise internal.SessionWorkspaceError("session_workspace_preserve_invalid", 400)
                 candidate = {"generation": baseline["generation"] + 1,
                     **{name: body[name] for name in ("snapshotSha256", "snapshotSizeBytes", "expandedSizeBytes", "fileCount")}}
@@ -161,7 +162,7 @@ def preserve_session_workspace(request):
                 advance_session=True, lock_workspace=_locked_preservation, record_commit=record,
                 is_commit_replay=lambda run, session, candidate, key:
                     _is_preservation_replay(body, run, session, candidate, key))
-    except internal.SessionWorkspaceError as error:
+    except (internal.SessionWorkspaceError, WorkspaceFileError) as error:
         return JsonResponse({"error": error.code}, status=error.status)
     except DatabaseError as error:
         code = "environment_controller_busy" if getattr(error.__cause__, "sqlstate", None) == "55P03" else "session_workspace_preserve_unavailable"

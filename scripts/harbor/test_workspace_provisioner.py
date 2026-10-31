@@ -106,7 +106,7 @@ class HTTPProvisionerTests(unittest.TestCase):
         self.profile = {'schema': 'runtime.environment_profile.v1', 'imageDigest': 'sha256:' + 'a' * 64,
             'workspaceRoot': '/app', 'user': '0:0', 'network': 'disabled', 'resources': {
                 'cpuMilli': 1000, 'memoryBytes': 2147483648, 'pidsLimit': 256,
-                'dataTmpfsBytes': 1073741824, 'storageBytes': 10737418240}}
+                'workspaceBytes': 1073741824, 'storageBytes': 10737418240}}
         self.profile_digest = 'sha256:' + hashlib.sha256(json.dumps(self.profile, sort_keys=True,
             separators=(',', ':')).encode()).hexdigest()
         self.requests, self.request_bodies = [], []

@@ -12,7 +12,7 @@ PROFILE_SCHEMA = 'runtime.environment_profile.v1'
 BIND_SCHEMA = 'workspace.environment_profile.bind.v1'
 BOUND_SCHEMA = 'workspace.environment_profile.bound.v1'
 PROFILE_FIELDS = {'schema', 'imageDigest', 'workspaceRoot', 'user', 'network', 'resources'}
-RESOURCE_FIELDS = {'cpuMilli', 'memoryBytes', 'pidsLimit', 'dataTmpfsBytes', 'storageBytes'}
+RESOURCE_FIELDS = {'cpuMilli', 'memoryBytes', 'pidsLimit', 'workspaceBytes', 'storageBytes'}
 
 
 class EnvironmentProfileError(ValueError):
@@ -84,8 +84,8 @@ def freeze_run_environment_profile(agent_run, image_digest):
                 'user': '10001:10001', 'network': environment.network,
                 'resources': {'memoryBytes': settings.SANDBOX_MEMORY_BYTES,
                     'cpuMilli': settings.SANDBOX_CPU_MILLI, 'pidsLimit': settings.SANDBOX_PIDS_LIMIT,
-                    'dataTmpfsBytes': settings.SANDBOX_DATA_TMPFS_BYTES,
-                    'storageBytes': settings.SANDBOX_DATA_TMPFS_BYTES}}
+                    'workspaceBytes': settings.SANDBOX_WORKSPACE_BYTES,
+                    'storageBytes': settings.SANDBOX_WORKSPACE_BYTES}}
             environment.environment_profile_digest = environment_profile_digest(environment.environment_profile)
             environment.environment_profile_operation_id = f'first_run:{agent_run.pk}'
             environment.environment_profile_bound_at = timezone.now()

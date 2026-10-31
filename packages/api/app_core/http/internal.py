@@ -63,6 +63,7 @@ from app_core.session_event import (
 )
 from app_core.workspace_access import agent_run_membership_is_current
 from app_core import workspace_observations as protection_observations
+from app_core.workspace_file_objects import WorkspaceFileError
 
 from .json_body import decode_json_object
 from .security import internal_token_auth
@@ -76,9 +77,9 @@ AGENT_RUN_LIFECYCLE_DEAD_LETTER_REASON = "agent_run_lifecycle_dead_lettered"
 SESSION_WORKSPACE_RESOLVE_SCHEMA = "runtime.session_workspace.resolve.v1"
 SESSION_WORKSPACE_RESOLVED_SCHEMA = "runtime.session_workspace.resolved.v1"
 SESSION_WORKSPACE_DOWNLOAD_SCHEMA = "runtime.session_workspace.download.v1"
-SESSION_WORKSPACE_COMMIT_SCHEMA = "runtime.session_workspace.commit.v1"
+SESSION_WORKSPACE_COMMIT_SCHEMA = "runtime.session_workspace.commit.v2"
 SESSION_WORKSPACE_COMMIT_RESULT_SCHEMA = "runtime.session_workspace.commit.result.v1"
-EXECUTION_WORKSPACE_STAGE_SCHEMA = "runtime.execution_workspace.stage.v1"
+EXECUTION_WORKSPACE_STAGE_SCHEMA = "runtime.execution_workspace.stage.v2"
 EXECUTION_WORKSPACE_STAGE_RESULT_SCHEMA = "runtime.execution_workspace.stage.result.v1"
 EXECUTION_WORKSPACE_DOWNLOAD_SCHEMA = "runtime.execution_workspace.download.v1"
 SESSION_WORKSPACE_LEASE_FIELDS = {
@@ -89,6 +90,7 @@ SESSION_WORKSPACE_LEASE_FIELDS = {
     "authorizationDigest",
 }
 SESSION_WORKSPACE_COMMIT_FIELDS = SESSION_WORKSPACE_LEASE_FIELDS | {
+    "snapshotEncoding",
     "snapshotSha256",
     "snapshotSizeBytes",
     "expandedSizeBytes",
@@ -179,6 +181,11 @@ def _workspace_snapshot_upload_request(
     }
     try:
         validate_session_workspace(candidate)
+        expected_encoding = "fileManifestV1" if candidate["snapshotSizeBytes"] else "frameV1"
+        if body["snapshotEncoding"] != expected_encoding:
+            raise ValueError
+        if candidate["snapshotSizeBytes"] > MAX_SESSION_WORKSPACE_MANIFEST_BYTES:
+            raise ValueError
         if candidate["fileCount"] > MAX_SESSION_WORKSPACE_FILE_COUNT:
             raise ValueError
         if content_length != 4 + metadata_length + candidate["snapshotSizeBytes"]:
@@ -309,6 +316,7 @@ class _WorkspaceSnapshotUpload:
     validated: bool = False
     existing_verified: bool = False
     publication_id: str | None = None
+    manifest_files: list[dict] | None = None
 
 
 @contextmanager
@@ -349,6 +357,30 @@ def _store_workspace_snapshot(
     protection_observations.increment("apiWrittenBytes", 0)
     if not candidate["snapshotSizeBytes"]:
         _require_workspace_eof(request)
+        return
+    if body["snapshotEncoding"] == "fileManifestV1":
+        manifest_bytes = _read_workspace_bytes(request, candidate["snapshotSizeBytes"])
+        _require_workspace_eof(request)
+        if "sha256:" + hashlib.sha256(manifest_bytes).hexdigest() != candidate["snapshotSha256"]:
+            raise SessionWorkspaceError("session_workspace_snapshot_invalid", 400)
+        upload.manifest_files = _workspace_snapshot_manifest(manifest_bytes, candidate)
+        if default_storage.exists(storage_key):
+            _verify_owned_workspace_snapshot(body, candidate, storage_key, lock_workspace=lock_workspace)
+            upload.validated = upload.existing_verified = True
+            return
+        descriptor, upload.descriptor = upload.descriptor, -1
+        try:
+            with os.fdopen(descriptor, "wb") as temporary:
+                temporary.write(manifest_bytes)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+        except Exception:
+            protection_observations.unavailable("apiWrittenBytes")
+            protection_observations.unavailable("temporaryBytes")
+            raise
+        protection_observations.increment("apiWrittenBytes", len(manifest_bytes))
+        protection_observations.gauge("temporaryBytes", len(manifest_bytes))
+        upload.validated = True
         return
     reader = _WorkspaceSnapshotReader(request, candidate)
     if default_storage.exists(storage_key):
@@ -420,8 +452,17 @@ def _publish_workspace_snapshot(
                 replay = is_commit_replay(agent_run, session, candidate, storage_key)
             if advance_session and not replay:
                 _require_workspace_baseline(session, frozen)
+            if upload is not None and upload.manifest_files is not None:
+                from app_core.workspace_file_objects import require_manifest_files, register_snapshot_files
+                from app_core.models import WorkspaceSnapshotObject
+                files = require_manifest_files(session, agent_run, body, {"files": upload.manifest_files})
             if not _link_workspace_snapshot(storage_key, upload):
                 return None
+            if upload is not None and upload.manifest_files is not None:
+                snapshot_object = WorkspaceSnapshotObject.objects.get(storageKey=storage_key, session=session)
+                snapshot_object.snapshotEncoding = body["snapshotEncoding"]
+                snapshot_object.save(update_fields=["snapshotEncoding", "updatedAt"])
+                register_snapshot_files(snapshot_object, files)
             if upload is not None and upload.publication_id is not None:
                 from app_core.workspace_snapshot_publication import mark_published
                 mark_published(upload.publication_id, "committed" if advance_session else "staged")
@@ -433,7 +474,7 @@ def _publish_workspace_snapshot(
                 return "idempotent"
             session.workspaceGeneration = candidate["generation"]
             session.workspaceBaselineKnown = True
-            session.workspaceSnapshotEncoding = "frameV1"
+            session.workspaceSnapshotEncoding = body["snapshotEncoding"]
             session.workspaceStorageKey = storage_key
             session.workspaceSnapshotSha256 = candidate["snapshotSha256"]
             session.workspaceSnapshotSizeBytes = candidate["snapshotSizeBytes"]
@@ -697,7 +738,7 @@ def _workspace_advanced_by_agent_run(session: Session, frozen: dict, agent_run: 
     )
 
 
-def _workspace_tmpfs_fits(agent_run: AgentRun, expanded_size_bytes: int) -> bool:
+def _workspace_budget_fits(agent_run: AgentRun, expanded_size_bytes: int) -> bool:
     inputs_size_bytes = sum(
         item["sizeBytes"] for item in agent_run.authorization.payload["assetRefs"]
     )
@@ -705,7 +746,7 @@ def _workspace_tmpfs_fits(agent_run: AgentRun, expanded_size_bytes: int) -> bool
         expanded_size_bytes
         + inputs_size_bytes
         + SESSION_WORKSPACE_RESTORE_OVERHEAD_BYTES
-        <= agent_run.authorization.payload["environmentProfile"]["resources"]["dataTmpfsBytes"]
+        <= agent_run.authorization.payload["environmentProfile"]["resources"]["workspaceBytes"]
     )
 
 
@@ -728,7 +769,7 @@ def resolve_session_workspace(request):
                 _require_workspace_baseline(session, frozen)
                 disposition = "empty" if frozen["snapshotSizeBytes"] == 0 else "download"
                 resolved = frozen
-    except SessionWorkspaceError as error:
+    except (SessionWorkspaceError, WorkspaceFileError) as error:
         return JsonResponse({"error": error.code}, status=error.status)
     except Exception:
         logger.exception("Session workspace resolve failed")
@@ -770,7 +811,7 @@ async def download_session_workspace(request):
             content_length=frozen["snapshotSizeBytes"],
             authorized_open=authorized_open,
         )
-    except SessionWorkspaceError as error:
+    except (SessionWorkspaceError, WorkspaceFileError) as error:
         return JsonResponse({"error": error.code}, status=error.status)
     except Exception:
         logger.exception("Session workspace download preparation failed")
@@ -797,13 +838,13 @@ def _prepare_session_workspace_download(request, *, open_file=False):
             if frozen["snapshotSizeBytes"] == 0 or not session.workspaceStorageKey:
                 raise SessionWorkspaceError("session_workspace_snapshot_empty")
             encoding = session.workspaceSnapshotEncoding
-            if encoding not in {"frameV1", "tarZstdV1"}:
+            if encoding not in {"frameV1", "tarZstdV1", "fileManifestV1"}:
                 raise SessionWorkspaceError("session_workspace_encoding_invalid")
             if open_file:
                 handle = _open_workspace_snapshot_handle(session.workspaceStorageKey)
         transferred = True
         return frozen, handle if open_file else session.workspaceStorageKey, encoding
-    except SessionWorkspaceError as error:
+    except (SessionWorkspaceError, WorkspaceFileError) as error:
         if open_file:
             raise
         return JsonResponse({"error": error.code}, status=error.status)
@@ -833,11 +874,11 @@ def commit_session_workspace(request):
             with transaction.atomic():
                 agent_run, session, frozen = _locked_session_workspace_agent_run(body)
                 protection_observations.bind(sessionId=str(session.id), runId=str(agent_run.id), jobId=body["jobId"])
-                max_bytes = agent_run.authorization.payload["environmentProfile"]["resources"]["dataTmpfsBytes"]
+                max_bytes = agent_run.authorization.payload["environmentProfile"]["resources"]["workspaceBytes"]
                 if (
                     body["snapshotSizeBytes"] > max_bytes
                     or body["expandedSizeBytes"] > max_bytes
-                    or not _workspace_tmpfs_fits(agent_run, body["expandedSizeBytes"])
+                    or not _workspace_budget_fits(agent_run, body["expandedSizeBytes"])
                 ):
                     raise SessionWorkspaceError("session_workspace_commit_invalid", 400)
                 candidate = {
@@ -868,7 +909,7 @@ def commit_session_workspace(request):
             disposition = _publish_workspace_snapshot(
                 body, candidate, storage_key, upload, advance_session=True,
             )
-    except SessionWorkspaceError as error:
+    except (SessionWorkspaceError, WorkspaceFileError) as error:
         return JsonResponse({"error": error.code}, status=error.status)
     except Exception:
         logger.exception("Session workspace commit failed")
@@ -905,7 +946,7 @@ def stage_execution_workspace(request):
             with transaction.atomic():
                 agent_run, session, _frozen = _locked_session_workspace_agent_run(body)
                 protection_observations.bind(sessionId=str(session.id), runId=str(agent_run.id), jobId=body["jobId"])
-                if not _workspace_tmpfs_fits(agent_run, body["expandedSizeBytes"]):
+                if not _workspace_budget_fits(agent_run, body["expandedSizeBytes"]):
                     raise SessionWorkspaceError("execution_workspace_stage_invalid", 400)
                 storage_key = ""
                 if candidate["snapshotSizeBytes"]:
@@ -921,7 +962,7 @@ def stage_execution_workspace(request):
             _publish_workspace_snapshot(
                 body, candidate, storage_key, upload, advance_session=False,
             )
-    except SessionWorkspaceError as error:
+    except (SessionWorkspaceError, WorkspaceFileError) as error:
         return JsonResponse({"error": error.code}, status=error.status)
     except (TypeError, ValueError):
         return JsonResponse({"error": "execution_workspace_stage_invalid"}, status=400)
@@ -960,7 +1001,7 @@ async def download_execution_workspace(request):
             content_length=body["snapshotSizeBytes"],
             authorized_open=authorized_open,
         )
-    except SessionWorkspaceError as error:
+    except (SessionWorkspaceError, WorkspaceFileError) as error:
         return JsonResponse({"error": error.code}, status=error.status)
     except (TypeError, ValueError):
         return JsonResponse({"error": "execution_workspace_download_invalid"}, status=400)
@@ -969,8 +1010,7 @@ async def download_execution_workspace(request):
         return JsonResponse({"error": "execution_workspace_download_failed"}, status=500)
     if response.status_code == 200:
         response["X-Content-Sha256"] = body["snapshotSha256"]
-        # The immutable execution-workspace stage protocol accepts frameV1 only.
-        response["X-Workspace-Snapshot-Encoding"] = "frameV1"
+        response["X-Workspace-Snapshot-Encoding"] = body["snapshotEncoding"]
     return response
 
 
@@ -1029,11 +1069,18 @@ def _prepare_execution_workspace_download(request, *, open_file=False):
                 "checkpointId":body["checkpointId"],**snapshot}
             if selected not in roots["roots"]:
                 raise SessionWorkspaceError("execution_workspace_checkpoint_unreachable")
+            from app_core.models import WorkspaceSnapshotObject
+            encoding = WorkspaceSnapshotObject.objects.filter(session=session,
+                storageKey=snapshot["objectRef"], kind="snapshot", state="live").values_list(
+                    "snapshotEncoding", flat=True).first()
+            if encoding not in {"frameV1", "tarZstdV1", "fileManifestV1"}:
+                raise SessionWorkspaceError("execution_workspace_encoding_unavailable", 503)
+            body["snapshotEncoding"] = encoding
             if open_file:
                 handle = _open_workspace_snapshot_handle(body["objectRef"])
         transferred = True
         return (body, handle) if open_file else body
-    except SessionWorkspaceError as error:
+    except (SessionWorkspaceError, WorkspaceFileError) as error:
         if open_file:
             raise
         return JsonResponse({"error": error.code}, status=error.status)
@@ -1049,6 +1096,25 @@ def _prepare_execution_workspace_download(request, *, open_file=False):
     finally:
         if handle is not None and not transferred:
             handle.close()
+
+
+@_internal_post("/agent-runs/workspace-files/missing")
+def workspace_files_missing(request):
+    from .workspace_files import missing_files
+    return missing_files(request)
+
+
+@_internal_post("/agent-runs/workspace-files/upload")
+@protection_observations.observe_request("workspaceFileUpload")
+def workspace_files_upload(request):
+    from .workspace_files import upload_file
+    return upload_file(request)
+
+
+@_internal_post("/agent-runs/workspace-files/download")
+async def workspace_files_download(request):
+    from .workspace_files import download_file
+    return await download_file(request)
 
 
 @_internal_post("/artifacts/publish")

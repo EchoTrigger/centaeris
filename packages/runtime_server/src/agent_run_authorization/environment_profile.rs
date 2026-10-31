@@ -22,7 +22,7 @@ pub struct EnvironmentResources {
     pub cpu_milli: u32,
     pub memory_bytes: u64,
     pub pids_limit: u32,
-    pub data_tmpfs_bytes: u64,
+    pub workspace_bytes: u64,
     pub storage_bytes: u64,
 }
 
@@ -32,7 +32,7 @@ impl EnvironmentResources {
             cpu_milli: self.cpu_milli,
             memory_bytes: self.memory_bytes,
             pids_limit: self.pids_limit,
-            data_tmpfs_bytes: self.data_tmpfs_bytes,
+            workspace_bytes: self.workspace_bytes,
         }
     }
 }
@@ -75,7 +75,7 @@ impl EnvironmentProfile {
         if self.resources.cpu_milli == 0
             || self.resources.memory_bytes == 0
             || self.resources.pids_limit == 0
-            || self.resources.data_tmpfs_bytes == 0
+            || self.resources.workspace_bytes == 0
             || self.resources.storage_bytes == 0
         {
             return Err("environment_profile_resources_invalid".into());

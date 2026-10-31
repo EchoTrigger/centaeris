@@ -48,7 +48,7 @@ def _api_roots(session, manifest, key):
         if holding or receipt.agent_run_id in ids:
             roots.add(receipt.storage_key)
     roots.update(live_upload_keys(session))
-    if unregistered_key_has_live_owner(session, key):
+    if key is not None and unregistered_key_has_live_owner(session, key):
         roots.add(key)
     return roots
 
@@ -69,19 +69,68 @@ def _owner_retained(agent, owner, session):
             and owner.workspaceBaselineKnown)
 
 
+BATCH_SIZE = 32
+
+
+def _batch_roots(session, manifest, keys, cutoff):
+    from .workspace_file_objects import (
+        referenced_file_keys, live_reservation_keys, logical_file_keys, physical_file_keys,
+    )
+    roots = _api_roots(session, manifest, None)
+    # Grace-period manifests retain their content as well as their own bytes.
+    roots.update(_recent_registry_keys(session, cutoff))
+    roots.update(live_reservation_keys(session))
+    # A physical candidate pack has at most 32 logical members. Expand only this
+    # bounded batch before querying references from actual retained manifests.
+    logical_candidates = set(keys) | logical_file_keys(keys)
+    roots.update(referenced_file_keys(roots, logical_candidates))
+    # Only rooted logical members keep a pack. Live historical registration or
+    # an unrooted manifest edge alone does not make its content reachable.
+    roots.update(physical_file_keys(roots, candidate_keys=keys))
+    registered = set(WorkspaceSnapshotObject.objects.filter(session=session, storageKey__in=keys,
+        registered=True).values_list("storageKey", flat=True))
+    for key in set(keys) - registered:
+        if unregistered_key_has_live_owner(session, key):
+            roots.add(key)
+    return roots
+
+
+def _lock_owner(session, manifest):
+    agent = Agent.objects.select_for_update().get(pk=session.agent_id)
+    owner = Session.objects.select_for_update().get(pk=session.pk)
+    if not _owner_retained(agent, owner, session):
+        raise WorkspaceRootsUnavailable("workspace_snapshot_owner_changed")
+    require_current_roots(owner, manifest)
+    pin_job_ownership(owner)
+    return owner
+
+
+def _retire_file_reservations(session):
+    from .models import WorkspaceFileReservation
+    from .workspace_file_objects import live_reservation_keys
+    # Expired ownership is not durable history; current manifest references are.
+    live = live_reservation_keys(session)
+    WorkspaceFileReservation.objects.filter(file__object__session=session).exclude(
+        file__object__storageKey__in=live).delete()
+
+
 def collect_reachable_workspace_gc(root, cutoff, dry_run, report):
     from . import workspace_snapshot_gc as gc
     owners = Session.objects.filter(purgedAt__isnull=True).only(
         "id", "workspace_id", "agent_id", "workspaceBaselineKnown")
     for session in owners.order_by("id").iterator():
         prefix = gc._session_prefix(session)
-        if not dry_run and (WorkspaceSnapshotUpload.objects.filter(finalObject__session=session).exists()
-                or WorkspaceSnapshotObject.objects.filter(session=session,kind="temporary",state="collected").exists()):
+        from .models import WorkspaceFileReservation
+        needs_retirement = (WorkspaceSnapshotUpload.objects.filter(finalObject__session=session).exists()
+            or WorkspaceFileReservation.objects.filter(file__object__session=session).exists()
+            or WorkspaceSnapshotObject.objects.filter(session=session, kind="temporary", state="collected").exists())
+        if not dry_run and needs_retirement:
             with transaction.atomic():
                 Agent.objects.select_for_update().get(pk=session.agent_id)
-                owner=Session.objects.select_for_update().get(pk=session.pk)
+                owner = Session.objects.select_for_update().get(pk=session.pk)
                 pin_job_ownership(owner)
-                retire_upload_metadata(owner,cutoff)
+                retire_upload_metadata(owner, cutoff)
+                _retire_file_reservations(owner)
         keys = list(gc._snapshot_keys(root, prefix, session.pk, report))
         if not keys:
             continue
@@ -90,69 +139,70 @@ def collect_reachable_workspace_gc(root, cutoff, dry_run, report):
         if not session.workspaceBaselineKnown:
             report.blocked.append(prefix + ":baseline_unknown")
             continue
-        # Runtime I/O must never run under Agent/Session database locks.
         try:
             manifest = request_workspace_snapshot_roots(session)
         except Exception:
             report.blocked.append(prefix + ":roots_unavailable")
             continue
-        for key in keys:
+        for offset in range(0, len(keys), BATCH_SIZE):
+            batch = keys[offset:offset + BATCH_SIZE]
+            pending = []
             try:
                 with transaction.atomic():
-                    agent = Agent.objects.select_for_update().get(pk=session.agent_id)
-                    owner = Session.objects.select_for_update().get(pk=session.pk)
-                    if not _owner_retained(agent, owner, session):
-                        report.blocked.append(key)
-                        continue
-                    require_current_roots(owner, manifest)
-                    pin_job_ownership(owner)
-                    roots = _api_roots(owner, manifest, key)
-                    if key in roots:
-                        continue
-                    path = gc._checked_path(root, key, directory=False)
-                    if path.stat().st_mtime > cutoff.timestamp() or key in _recent_registry_keys(owner, cutoff):
-                        report.blocked.append(key)
-                        continue
-                    if dry_run:
-                        report.planned.append(key)
-                        continue
-                    object=collect_key(owner, key, kind="temporary" if gc._TEMPORARY_FILE.fullmatch(path.name) else "snapshot")
-                    token=object.publicationToken
-                # The incarnation fence commits before physical unlink. An I/O
-                # crash can leave bytes, but no older publisher may recreate a
-                # collected name after any successful or retried deletion.
-                claim = claim_storage_key(key, "workspaceSnapshot",publication_token=token)
-                if claim is None:
-                    report.blocked.append(key)
-                    continue
-                with transaction.atomic():
-                    agent = Agent.objects.select_for_update().get(pk=session.agent_id)
-                    owner = Session.objects.select_for_update().get(pk=session.pk)
-                    if not _owner_retained(agent, owner, session):
-                        report.blocked.append(key)
-                        continue
-                    require_current_roots(owner, manifest)
-                    pin_job_ownership(owner)
-                    if not require_collected_incarnation(owner,key,token):
-                        report.blocked.append(key)
-                        continue
-                    if key in _api_roots(owner, manifest, key):
-                        report.blocked.append(key)
-                        continue
-                    gc._checked_path(root, key, directory=False)
-                    result = clean_storage_key(key, "workspaceSnapshot",
-                        partial(gc._delete_observed_snapshot, session_id=str(owner.pk)), claim=claim,publication_token=token)
-                    if result.state == "cleaned":
-                        report.cleaned.append(key)
-                    elif result.state == "blocked":
+                    owner = _lock_owner(session, manifest)
+                    roots = _batch_roots(owner, manifest, batch, cutoff)
+                    for key in batch:
+                        if key in roots:
+                            continue
+                        try:
+                            path = gc._checked_path(root, key, directory=False)
+                            if path.stat().st_mtime > cutoff.timestamp():
+                                report.blocked.append(key)
+                                continue
+                        except FileNotFoundError:
+                            continue
+                        if dry_run:
+                            report.planned.append(key)
+                            continue
+                        obj = collect_key(owner, key, kind=gc._object_kind(path.name))
+                        pending.append((key, obj.publicationToken))
+                claimed = []
+                for key, token in pending:
+                    claim = claim_storage_key(key, "workspaceSnapshot", publication_token=token)
+                    if claim is None:
                         report.blocked.append(key)
                     else:
-                        report.failures.append(f"{key}: {result.failure}")
-            except FileNotFoundError:
-                continue
+                        claimed.append((key, token, claim))
+                if not claimed:
+                    continue
+                # Revalidate mutable roots once for this bounded deletion batch.
+                # Exact object incarnations remain individually fenced.
+                with transaction.atomic():
+                    owner = _lock_owner(session, manifest)
+                    roots = _batch_roots(owner, manifest, batch, cutoff)
+                    for key, token, claim in claimed:
+                        if (key in roots or not require_collected_incarnation(owner, key, token)):
+                            report.blocked.append(key)
+                            continue
+                        try:
+                            gc._checked_path(root, key, directory=False)
+                        except FileNotFoundError:
+                            continue
+                        result = clean_storage_key(key, "workspaceSnapshot",
+                            partial(gc._delete_observed_snapshot, session_id=str(owner.pk)),
+                            claim=claim, publication_token=token)
+                        if result.state == "cleaned":
+                            report.cleaned.append(key)
+                            from .models import WorkspaceSnapshotFileReference
+                            WorkspaceSnapshotFileReference.objects.filter(
+                                snapshot__storageKey=key, snapshot__state="collected").delete()
+                        elif result.state == "blocked":
+                            report.blocked.append(key)
+                        else:
+                            report.failures.append(f"{key}: {result.failure}")
             except WorkspaceRootsUnavailable:
                 report.blocked.append(prefix + ":roots_changed")
                 break
             except Exception as error:
-                report.failures.append(f"{key}: {error}")
+                report.failures.append(f"{prefix}: {error}")
     return report

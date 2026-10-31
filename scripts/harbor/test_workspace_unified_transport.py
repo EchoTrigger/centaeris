@@ -29,7 +29,7 @@ class UnifiedTransportTests(unittest.TestCase):
         self.profile = {'schema': 'runtime.environment_profile.v1', 'imageDigest': 'sha256:' + 'a' * 64,
             'workspaceRoot': '/app', 'user': '0:0', 'network': 'publicInternet', 'resources': {
                 'cpuMilli': 1000, 'memoryBytes': 2147483648, 'pidsLimit': 256,
-                'dataTmpfsBytes': 1073741824, 'storageBytes': 10737418240}}
+                'workspaceBytes': 1073741824, 'storageBytes': 10737418240}}
         self.requests, self.epoch = [], 0
         self.corrupt_digest = self.truncate = self.lose_start = self.invalid_result = False
         self.headers = []

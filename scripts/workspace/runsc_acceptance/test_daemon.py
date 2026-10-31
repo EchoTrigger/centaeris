@@ -1,6 +1,6 @@
 import hashlib,importlib.util,json,shlex,sys,tempfile,unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock,patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from runsc_acceptance import daemon
 class RawProbeTests(unittest.TestCase):
@@ -161,6 +161,36 @@ class StorageDriverTests(unittest.TestCase):
     with self.assertRaisesRegex(RuntimeError,'existing validation responsibility'):daemon.PrivateDocker(root,storage_driver='overlay2')
     self.assertTrue((root/name).is_symlink());self.assertFalse(outside.exists());popen.assert_not_called()
 
+
+
+class ImageTransferTests(unittest.TestCase):
+ def transfer(self,source,copied,output):
+  docker=daemon.PrivateDocker.__new__(daemon.PrivateDocker)
+  docker.argv=['docker','--host','unix:///var/tmp/centaeris-runsc-test/docker.sock']
+  docker.require_shared=Mock()
+  docker.run=Mock(return_value=json.dumps([copied]))
+  saved=Mock(returncode=0);saved.poll.return_value=0
+  loaded=Mock(returncode=0,stdout=output)
+  with patch.object(daemon,'command',return_value=json.dumps([source])),patch.object(daemon.subprocess,'Popen',return_value=saved) as save,patch.object(daemon.subprocess,'run',return_value=loaded):
+   result=docker.load_image('postgres:18-alpine@sha256:'+'a'*64)
+  self.assertEqual(save.call_args.args[0][-1],'postgres:18-alpine@sha256:'+'a'*64)
+  return result,docker
+ def test_import_inspects_actual_load_identity_across_image_stores_and_tags(self):
+  content={'Architecture':'amd64','Os':'linux','RootFS':{'Layers':['sha256:'+'b'*64]},'Config':{'Cmd':['postgres']}}
+  source=content|{'Id':'sha256:'+'a'*64}
+  for reference in ('sha256:'+'c'*64,'postgres:18-alpine'):
+   with self.subTest(reference=reference):
+    copied=content|{'Id':'sha256:'+'c'*64}
+    prefix='Loaded image ID: ' if reference.startswith('sha256:') else 'Loaded image: '
+    result,docker=self.transfer(source,copied,(prefix+reference+'\n').encode())
+    self.assertEqual(result,copied['Id'])
+    docker.run.assert_called_once_with('image','inspect',reference)
+    self.assertEqual(docker.require_shared.call_count,2)
+ def test_import_rejects_changed_content_despite_successful_load(self):
+  source={'Id':'sha256:'+'a'*64,'Architecture':'amd64','Os':'linux','RootFS':{'Layers':['old']},'Config':{}}
+  copied=source|{'Id':'sha256:'+'b'*64,'RootFS':{'Layers':['changed']}}
+  with self.assertRaisesRegex(RuntimeError,'imported image content differs'):
+   self.transfer(source,copied,('Loaded image ID: '+copied['Id']+'\n').encode())
 
 
 class WorkspaceBackingTests(unittest.TestCase):

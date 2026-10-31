@@ -16,6 +16,7 @@ from .models import Agent, Session, WorkspaceSnapshotObject, WorkspaceSnapshotUp
 from .runtime_schema_test_helpers import isolate_runtime_schema
 from . import test_workspace_snapshot_gc as fixtures
 from .workspace_snapshot_gc import collect_workspace_snapshot_gc
+from .test_execution_publication_fencing import prepare_workspace_files, post_workspace_snapshot
 
 
 class WorkspaceSnapshotReachabilityTests(TransactionTestCase):
@@ -70,10 +71,9 @@ class WorkspaceSnapshotReachabilityTests(TransactionTestCase):
             self.assertTrue(link(*args))
             raise RuntimeError("simulated transaction rollback after immutable link")
         with patch.object(internal,"_link_workspace_snapshot",abort_after_link):
-            response=self.client.post("/internal/agent-runs/session-workspace/commit",data=body,
-                content_type="application/octet-stream",HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
+            response=post_workspace_snapshot(self,body)
         self.assertEqual(response.status_code,500,response.content)
-        upload=WorkspaceSnapshotUpload.objects.get(agent_run=self.run)
+        upload=WorkspaceSnapshotUpload.objects.get(agent_run=self.run, finalObject__kind="snapshot")
         self.assertEqual(upload.state,"abandoned")
         final=upload.finalObject.storageKey
         self.assertTrue((self.root/final).exists())
@@ -91,10 +91,9 @@ class WorkspaceSnapshotReachabilityTests(TransactionTestCase):
         metadata.update(schema=internal.EXECUTION_WORKSPACE_STAGE_SCHEMA,checkpointId="checkpoint:pending-handoff")
         encoded=json.dumps(metadata,separators=(",", ":")).encode()
         body=len(encoded).to_bytes(4,"big")+encoded+snapshot
-        response=self.client.post("/internal/agent-runs/execution-workspace/stage",data=body,
-            content_type="application/octet-stream",HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
+        response=post_workspace_snapshot(self,body,"/internal/agent-runs/execution-workspace/stage")
         self.assertEqual(response.status_code,201,response.content)
-        upload=WorkspaceSnapshotUpload.objects.get(agent_run=self.run)
+        upload=WorkspaceSnapshotUpload.objects.get(agent_run=self.run, finalObject__kind="snapshot")
         self.assertEqual(upload.state,"staged")
         self.assertIsNotNone(upload.finishedAt)
         final=upload.finalObject.storageKey
@@ -205,28 +204,28 @@ class WorkspaceSnapshotReachabilityTests(TransactionTestCase):
         body,snapshot=ExecutionPublicationFixture._body(self)
         from .models import AgentRun
         AgentRun.objects.filter(pk=self.run.pk).update(status="running")
-        reader=internal._WorkspaceSnapshotReader.read
+        store=internal._store_workspace_snapshot
         observed=[]
-        def during_stream(source,size=-1):
-            chunk=reader(source,size)
-            if chunk and not observed:
-                upload=WorkspaceSnapshotUpload.objects.get(agent_run=self.run)
+        def during_stream(*args,**kwargs):
+            result=store(*args,**kwargs)
+            if not observed:
+                upload=WorkspaceSnapshotUpload.objects.get(agent_run=self.run, finalObject__kind="snapshot")
                 WorkspaceSnapshotObject.objects.update(createdAt=self.old,updatedAt=self.old)
                 WorkspaceSnapshotUpload.objects.update(createdAt=self.old,updatedAt=self.old)
                 os.utime(self.root/upload.temporaryObject.storageKey,(self.old.timestamp(),self.old.timestamp()))
                 observed.append(self.collect())
-            return chunk
-        with patch.object(internal._WorkspaceSnapshotReader,"read",during_stream):
-            response=self.client.post("/internal/agent-runs/session-workspace/commit",data=body,
-                content_type="application/octet-stream",HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
+            return result
+        with patch.object(internal,"_store_workspace_snapshot",during_stream):
+            response=post_workspace_snapshot(self,body)
         self.assertEqual(response.status_code,201,response.content)
         self.assertEqual(observed[0].cleaned,[])
         self.session.refresh_from_db()
         final=self.session.workspaceStorageKey
         # Remove the committed head reference to model a later authoritative empty head.
-        Session.objects.filter(pk=self.session.pk).update(workspaceStorageKey="",workspaceSnapshotSha256="",
+        Session.objects.filter(pk=self.session.pk).update(workspaceStorageKey="",workspaceSnapshotSha256="",workspaceSnapshotEncoding="frameV1",
             workspaceSnapshotSizeBytes=0,workspaceExpandedSizeBytes=0,workspaceFileCount=0)
         os.utime(self.root/final,(self.old.timestamp(),self.old.timestamp()))
+        WorkspaceSnapshotObject.objects.filter(storageKey=final).update(createdAt=self.old,updatedAt=self.old)
         WorkspaceSnapshotUpload.objects.update(updatedAt=self.old)
         self.assertEqual(self.collect().cleaned,[final])
 
@@ -251,14 +250,13 @@ class WorkspaceSnapshotReachabilityTests(TransactionTestCase):
                 [self.job_id,self.owner,f"{self.job_id}:{self.authorization.digest}",self.session.pk,f"record:agent_run:{self.run.pk}"])
         body,same=ExecutionPublicationFixture._body(self)
         self.assertEqual(same,snapshot)
-        response=self.client.post("/internal/agent-runs/session-workspace/commit",data=body,
-            content_type="application/octet-stream",HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
+        response=post_workspace_snapshot(self,body)
         self.assertEqual(response.status_code,201,response.content)
         object=WorkspaceSnapshotObject.objects.get(storageKey=old)
         self.assertNotEqual(object.publicationToken,old_token)
         self.assertEqual(StorageCleanupRetry.objects.get(storageKey=old).state,"pending")
         self.assertTrue((self.root/old).exists())
-        Session.objects.filter(pk=self.session.pk).update(workspaceGeneration=2,workspaceStorageKey="",workspaceSnapshotSha256="",
+        Session.objects.filter(pk=self.session.pk).update(workspaceGeneration=2,workspaceStorageKey="",workspaceSnapshotSha256="",workspaceSnapshotEncoding="frameV1",
             workspaceSnapshotSizeBytes=0,workspaceExpandedSizeBytes=0,workspaceFileCount=0)
         with connection.cursor() as cursor:
             cursor.execute("UPDATE runtime.runtime_jobs SET lease_expires_at_ms=0 WHERE job_id=%s",[self.job_id])
@@ -281,8 +279,7 @@ class WorkspaceSnapshotReachabilityTests(TransactionTestCase):
                 "(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint+60000,%s,%s,%s,'execute')",
                 [self.job_id,self.owner,f"{self.job_id}:{self.authorization.digest}",self.session.pk,f"record:agent_run:{self.run.pk}"])
         body,_=ExecutionPublicationFixture._body(self)
-        response=self.client.post("/internal/agent-runs/session-workspace/commit",data=body,
-            content_type="application/octet-stream",HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
+        response=post_workspace_snapshot(self,body)
         self.assertEqual(response.status_code,201,response.content)
         with connection.cursor() as cursor:
             cursor.execute("UPDATE runtime.runtime_jobs SET lease_expires_at_ms=0 WHERE job_id=%s",[self.job_id])

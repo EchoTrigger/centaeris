@@ -7,8 +7,8 @@
     "verifierError": "",
     "rationale": "The single current authorization shape has a stable canonical digest and HMAC.",
     "supportedSignerOutput": true,
-    "digest": "sha256:31a6abff1f44a1fa289bbda702f444e91e066bcda782b73118220bb9db7a3492",
-    "signature": "hmac-sha256:c018fa632708fad687e5b3a3e2179dabfb1517a9260e46e48cf8ec726a8732a3"
+    "digest": "sha256:ba479f0ff1b4400fde7a61979928632868523e81828a7d069f749e2dde69682c",
+    "signature": "hmac-sha256:4205ebc32932848a944fe5b8053596651caa48c586ef080dfecee9fde2523662"
   },
   {
     "id": "input_limit",
@@ -23,8 +23,8 @@
     "verifierError": "",
     "rationale": "The Core direct-input ceiling is inclusive and Python must accept that same endpoint.",
     "supportedSignerOutput": true,
-    "digest": "sha256:380320ef431e258289a55d9fb13322a3c6f7e448924627c600670ff448951605",
-    "signature": "hmac-sha256:fead11d5300607ffd7ed8bab8407385e55bfec78f6a1d2e0a14a1f05bbceb5ad"
+    "digest": "sha256:728a8468e2201bfa7d2145c5061c38cd0b40b15152c96a41f76023f876cc7c2e",
+    "signature": "hmac-sha256:dd35b348690b526fedbcbf2d5236ae8ef60d77b1890c795ca53384ccab9e87be"
   },
   {
     "id": "input_over_limit",
@@ -75,12 +75,12 @@
         ]
       },
       {
-        "path": "/environmentProfile/resources/dataTmpfsBytes",
+        "path": "/environmentProfile/resources/workspaceBytes",
         "value": 10
       },
       {
         "path": "/environmentProfileDigest",
-        "value": "sha256:72c697d7cf217e0d0c450eb2d4d2724caa8a9115659b3e8c104888d8ac9585cd"
+        "value": "sha256:5bcff609fe0dc0c1e4986ddab6234c4201e4f72ed2f3df9de056575ce08f306d"
       }
     ],
     "signerError": "",
@@ -88,8 +88,8 @@
     "verifierError": "",
     "rationale": "Two independently legal inputs may exactly consume half the configured tmpfs bytes.",
     "supportedSignerOutput": true,
-    "digest": "sha256:576036d9b2080cf132e9574cb00c0d5e67d38bc5598e804ae37effa0a96baf9e",
-    "signature": "hmac-sha256:a3ce80dc785e1b57cf51ee90cda7317f1a715b36a94b57d1b63f3822a698b2ba"
+    "digest": "sha256:9be57ecb01a326e7aa0c0671c8a700c9a75e0ef3f070ca5a53c898242d1985ae",
+    "signature": "hmac-sha256:de4d89e3f9b93790910fc759466d5c0e3b94e36dcfa50cb8e92fc7771e680695"
   },
   {
     "id": "aggregate_over_half",
@@ -126,17 +126,17 @@
         ]
       },
       {
-        "path": "/environmentProfile/resources/dataTmpfsBytes",
+        "path": "/environmentProfile/resources/workspaceBytes",
         "value": 9
       },
       {
         "path": "/environmentProfileDigest",
-        "value": "sha256:1b137d9caa596ff7b50f2fed7f6d684420f015f371eeb705f960f6a3cac9cd31"
+        "value": "sha256:2331dd73c81401b67491f61254ef066b89a6ce86cf73c5a06544a2e4999bef5a"
       }
     ],
-    "signerError": "half of dataTmpfsBytes",
+    "signerError": "half of workspaceBytes",
     "verifierStage": "validate",
-    "verifierError": "half of dataTmpfsBytes",
+    "verifierError": "half of workspaceBytes",
     "rationale": "The aggregate exceeds the integer half-tmpfs reservation by one byte, with each input independently legal.",
     "supportedSignerOutput": false
   },
@@ -264,7 +264,7 @@
       },
       {
         "path": "/environmentProfileDigest",
-        "value": "sha256:3fda5589319e4fe8729b514a94d2450bb384c0f4c307886b96ee96f235a290da"
+        "value": "sha256:2eb7d850c7df26f8bf19251057ca75c0e295ff8d052498db554990356605f213"
       }
     ],
     "signerError": "",
@@ -272,8 +272,8 @@
     "verifierError": "",
     "rationale": "The inclusive Rust resource integer maximum remains signable; no execution capacity guarantee is implied.",
     "supportedSignerOutput": true,
-    "digest": "sha256:1121dfeec55b88e1bcc20a16e3b7e67caa16d913be763e1bc4d06ec73093e574",
-    "signature": "hmac-sha256:b0a7f930953d9de2aec9650d762e1423fc0fadf3e7fa9510cd1d9e36ccd289fe"
+    "digest": "sha256:d41d87368f2f18f9fd86f2bd81479944b08ac5a712586bb6aaf144fd5c729483",
+    "signature": "hmac-sha256:5f486f094f82056351eeda115dff82a078a5694d2c53a3ee6a1599c59a11dd44"
   },
   {
     "id": "cpuMilli_overflow",
@@ -284,7 +284,7 @@
       },
       {
         "path": "/environmentProfileDigest",
-        "value": "sha256:883914f3b75aaca87596c29f6bee4e4822ef5c63b68ab2f64e59b7c8131c7fce"
+        "value": "sha256:465281a7fc71fa5db541d360c8d23b61df11171950cdf41e2d232f6d06edd2ab"
       }
     ],
     "signerError": "transport range",
@@ -302,7 +302,7 @@
       },
       {
         "path": "/environmentProfileDigest",
-        "value": "sha256:7ccfcf4f69ca27a2060a1f7fc66b4e1a9c067a8f15ef3d187e18b84595b96c4e"
+        "value": "sha256:0e9b0af0dfd87b9b0142272f99896bbcd10eba22a42e2d30a456b91101c4d914"
       }
     ],
     "signerError": "",
@@ -310,8 +310,8 @@
     "verifierError": "",
     "rationale": "The inclusive Rust resource integer maximum remains signable; no execution capacity guarantee is implied.",
     "supportedSignerOutput": true,
-    "digest": "sha256:a18870869c55193916e0f9c00d92ea79664e8191238ef3a4da3ff34ae4cbe146",
-    "signature": "hmac-sha256:b12a9bd3ea5e7cdcf8de45baa132a73b2538ca08c64d09dc2c47e9b2b79d9d1d"
+    "digest": "sha256:2503b1e02bc8ba2aac5646d59ec29a163873c12cd131d62910239ca6fc43f0ee",
+    "signature": "hmac-sha256:6f73aeb3f1e8724921da67dba777db590143656f0cd82a7d49a565b99caf1ecc"
   },
   {
     "id": "pidsLimit_overflow",
@@ -322,7 +322,7 @@
       },
       {
         "path": "/environmentProfileDigest",
-        "value": "sha256:ae5e16fa17b1a1093f6debcf10639557c57764c9b7d7a04f0d0d5c716b85816f"
+        "value": "sha256:e345da9bdbc972894c6248155476caf8ea91bc4742fd6ad594d2128c48f7f8cf"
       }
     ],
     "signerError": "transport range",
@@ -340,7 +340,7 @@
       },
       {
         "path": "/environmentProfileDigest",
-        "value": "sha256:156f2c8efb4b024f9034621fae32bf1393f5d8ed1ca53472a8ae4d9562eab63c"
+        "value": "sha256:d97cb7536d3d59c1e1ea182085dad85c598d5a337cab4b1217d09f63f22494b1"
       }
     ],
     "signerError": "",
@@ -348,19 +348,19 @@
     "verifierError": "",
     "rationale": "The inclusive Rust resource integer maximum remains signable; no execution capacity guarantee is implied.",
     "supportedSignerOutput": true,
-    "digest": "sha256:f439a0b67943e83b502b9a2102358236e821ae3e91b7934306a4c36d305803ac",
-    "signature": "hmac-sha256:80962ff65a3aabbb12c27716666ee3821efe3e32fc7ca197240344273af5a7d7"
+    "digest": "sha256:7d81fa567662969aadc20799b09930753aebf17a63b5ca90382472ca859a9715",
+    "signature": "hmac-sha256:9d6244bb0f4ecf762a04df20dad4cba06710a51e09c3f6684614bcf555d82a4c"
   },
   {
-    "id": "dataTmpfsBytes_max",
+    "id": "workspaceBytes_max",
     "changes": [
       {
-        "path": "/environmentProfile/resources/dataTmpfsBytes",
+        "path": "/environmentProfile/resources/workspaceBytes",
         "value": 18446744073709551615
       },
       {
         "path": "/environmentProfileDigest",
-        "value": "sha256:4233d1bba13edb55adbba4f7ca6bba66facbf47ae5c326e85fba1795633d5de1"
+        "value": "sha256:32468f82399878c2c74015b16ad82587b01e63f2d443c2db375682757e4f3424"
       }
     ],
     "signerError": "",
@@ -368,8 +368,8 @@
     "verifierError": "",
     "rationale": "The inclusive Rust resource integer maximum remains signable; no execution capacity guarantee is implied.",
     "supportedSignerOutput": true,
-    "digest": "sha256:fb253e6adbdea9247c404fe686dbbc586c80145d804292616b56a7616ff70fd3",
-    "signature": "hmac-sha256:9c7097d6bd7b60da5b04d33fa8665ed2079e82ff7029ef82a35998b30b6e19c6"
+    "digest": "sha256:c5cdadcd561d5b5ba9a9553394d06252f47c7f1ca85708d8e4a1520cd77048fe",
+    "signature": "hmac-sha256:2a9f6160b2ce24280b8f878a926cacf7e979d32f442e680e3a3307d01ae206d1"
   },
   {
     "id": "cpu_zero",
@@ -380,7 +380,7 @@
       },
       {
         "path": "/environmentProfileDigest",
-        "value": "sha256:558e351eabc7f0bc40afbc3052a63f4783bb0ce8f5ce7b3f4d645878d90bfd4d"
+        "value": "sha256:cb9b76b344a81e3faa10cc01abe1d71808b5bf12cbc996e5fe4ff785133b7fa9"
       }
     ],
     "signerError": "positive integers",
@@ -398,7 +398,7 @@
       },
       {
         "path": "/environmentProfileDigest",
-        "value": "sha256:6e8de458517da73fd718b2aa90bf7bc8df8b3ce5f5eebf5fae980e6fb28502d7"
+        "value": "sha256:14a8496aad0b78ced2bf558508298f81c350d2e9794daef0e62a0c61432f45e9"
       }
     ],
     "signerError": "positive integers",
@@ -416,7 +416,7 @@
       },
       {
         "path": "/environmentProfileDigest",
-        "value": "sha256:19a9f66e8df24a61ad52ec99591f4fcec5ab9191d7db77e36ee2e1c9c5ba57b7"
+        "value": "sha256:404e82febf784bc82b03646976cfbf1bea110e2baee382e9d4ff812b184d5066"
       }
     ],
     "signerError": "positive integers",
@@ -434,7 +434,7 @@
       },
       {
         "path": "/environmentProfileDigest",
-        "value": "sha256:4ef2518ecef263fadccf8a095e9a910a301327b61d446f4f9efba312bdd9ace1"
+        "value": "sha256:938a69ca7e3ffbc51ad7d6cc26cdeddd49163061ef70517f82bb4efe50c6d3a4"
       }
     ],
     "signerError": "positive integers",
@@ -466,7 +466,7 @@
       },
       {
         "path": "/environmentProfileDigest",
-        "value": "sha256:d7a34a360a00f1c56afa2ddada3bb361f307287759cc3eb186cefe1cb4faba83"
+        "value": "sha256:082295ba0f7cd256b86afeb4528d1e9ec3a35f2821b5840054c7752d30ec1911"
       }
     ],
     "signerError": "fields mismatch",
@@ -502,8 +502,8 @@
     "verifierError": "",
     "rationale": "The builder emits explicit null when no thinking override is selected.",
     "supportedSignerOutput": true,
-    "digest": "sha256:a4dd3cfed0768c2942a1a483c2567ecae6328994eff2b65961516051f49f69ae",
-    "signature": "hmac-sha256:92aa617203a5a85ab0c3f1c562d0ffe9b9feeb49426d83cb83c36ceba51541eb"
+    "digest": "sha256:226d52a240ff15f4c6777c34c5d317ab98bc1b0d1901822be531aa795250ff4c",
+    "signature": "hmac-sha256:dff98b9f711b228bbe33f4960321aca11ac30d46d05e0c941c1b5c0c0f2e8db0"
   },
   {
     "id": "thinking_arbitrary",
@@ -518,8 +518,8 @@
     "verifierError": "",
     "rationale": "Thinking mode is an open bounded string, not a hard-coded enumeration.",
     "supportedSignerOutput": true,
-    "digest": "sha256:20ce5396b3dc8592e8d26190cd8911dcfffc678e3266bf8a10dcd74eb24bcc78",
-    "signature": "hmac-sha256:d71965aaca97deb59f0393e87666b2b98deeb35c9064413898e078bbac4bda2e"
+    "digest": "sha256:b06f29b457a1132fd2cc378113302f17311a6bee383abc44a3575ff2482b0d5b",
+    "signature": "hmac-sha256:7c0640b3e5fb2e7f6b55d4e74e5bf6dacb9deb4dd1dadad6d560611881e7acbb"
   },
   {
     "id": "thinking_max",
@@ -534,8 +534,8 @@
     "verifierError": "",
     "rationale": "The common thinking-mode length ceiling includes 64 characters.",
     "supportedSignerOutput": true,
-    "digest": "sha256:2293b1670759e09371f7c6d57d0446aecbb94fe000e621d63c88a6f308fe95ef",
-    "signature": "hmac-sha256:870c10903617f105474d64a0cee7a8d85c8a423c446beb1969cd43470879ecef"
+    "digest": "sha256:6079717cce481922c3f520526d4f925bb5f635bc6e3ca492bc06c3566dc38c19",
+    "signature": "hmac-sha256:36fd01c537db585e07227668db70af563223392ec469994957f39d0593fbcdce"
   },
   {
     "id": "thinking_too_long",
@@ -592,8 +592,8 @@
     "verifierError": "",
     "rationale": "Accepted display-name Unicode and escaping must produce identical canonical bytes and HMACs.",
     "supportedSignerOutput": true,
-    "digest": "sha256:4544dda20f929db8691fd5892b491a47e8738adeb1c3f2803dc6766f84c84f38",
-    "signature": "hmac-sha256:07dba1422cbd49b9f441a92e2431e7eb3b6ebf415da1baf35a694d03364a03cd"
+    "digest": "sha256:9eeef962a2abff06999dc13c07ddc4ebd63caa6b51e6a37744791c78ea1f87f8",
+    "signature": "hmac-sha256:e27dbe430fa5add37967b195d89ae7e6ffe90a36291e676c241bac306586aec7"
   },
   {
     "id": "embedded_nul",
@@ -608,8 +608,8 @@
     "verifierError": "",
     "rationale": "Characterization of accepted opaque refs; not a safety-policy assertion.",
     "supportedSignerOutput": false,
-    "digest": "sha256:57e1328eb0d8b1a0e1da2a7d705105ad97383ebbead62c4b26c466fb80356abc",
-    "signature": "hmac-sha256:1bc2b7743f57a5ab9c0eb7e026d3a0283fbcbe4bdb61aa367f6a2c42ba50f37d"
+    "digest": "sha256:ea772189476242e500c652f5dbd4d3a352b19fe28c71881782238755f3002090",
+    "signature": "hmac-sha256:5f2fc254a7f57f608ad263b3931e7c687d94164c827355217a76c5583a982e7e"
   },
   {
     "id": "non_nfc",
@@ -644,8 +644,8 @@
     "verifierError": "",
     "rationale": "Generation zero with all snapshot metadata empty is the initial workspace shape.",
     "supportedSignerOutput": true,
-    "digest": "sha256:19a4cecca90a7f46b03a8099837c4d553df4d7e21c150b02d33a37dc70a9c8c2",
-    "signature": "hmac-sha256:fa9d9ccb0501f57470e9c131c39f30b5780fdc3d3e3794fae8e3b3bf94f22e46"
+    "digest": "sha256:44e1119c8bf931532b1a898d494eadcd0a2a2ead6a118c18cf3327b7a3255a97",
+    "signature": "hmac-sha256:70b524b745a0c93b09cb73cd0c169124f1ffe04d60be15ba18d3b27af33a0035"
   },
   {
     "id": "generation_zero_nonempty",
@@ -707,8 +707,8 @@
     "verifierError": "",
     "rationale": "A synthetic non-empty activation must agree with Core digest and nested resource semantics.",
     "supportedSignerOutput": true,
-    "digest": "sha256:5ecb57236db661f756f9e1d5e3f463872e7245cf2f8b98be614cbc9765ae14c3",
-    "signature": "hmac-sha256:e591de50e24d8e52e67e760d57a95b72e6a7e471270249245be34e5f9c38c361"
+    "digest": "sha256:8d809ab3957637a2026cc0677c0576512cd2ea00f5eabdfa529b3be23b639999",
+    "signature": "hmac-sha256:2e211e81c7943721dacc2c0b33aec5ccbe2dee6ca3275f7d35203a280581a674"
   },
   {
     "id": "activation_tamper",

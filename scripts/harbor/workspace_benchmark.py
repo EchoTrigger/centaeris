@@ -144,7 +144,7 @@ def task_profile(task, image):
     return {"schema": "runtime.environment_profile.v1", "imageDigest": image["imageDigest"],
         "workspaceRoot": image["workspaceRoot"], "user": user, "network": network, "resources": {
             "cpuMilli": resources.cpus * 1000, "memoryBytes": resources.memory_mb * 1024**2,
-            "storageBytes": resources.storage_mb * 1024**2, "pidsLimit": 4096, "dataTmpfsBytes": 64 * 1024**2}}
+            "storageBytes": resources.storage_mb * 1024**2, "pidsLimit": 4096, "workspaceBytes": 64 * 1024**2}}
 
 
 class _TrialProjection:

@@ -98,7 +98,7 @@ class AgentRunAuthorizationContractTests(SimpleTestCase):
     def test_profile_resources_enforce_transport_ranges(self):
         from .environment_profile import environment_profile_digest
         for field, maximum in (("cpuMilli", 2**32 - 1), ("pidsLimit", 2**32 - 1),
-                ("memoryBytes", 2**64 - 1), ("dataTmpfsBytes", 2**64 - 1), ("storageBytes", 2**64 - 1)):
+                ("memoryBytes", 2**64 - 1), ("workspaceBytes", 2**64 - 1), ("storageBytes", 2**64 - 1)):
             with self.subTest(field=field):
                 value = fixture()
                 value["environmentProfile"]["resources"][field] = maximum

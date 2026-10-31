@@ -16,7 +16,7 @@ def profile():
     return {"schema": "runtime.environment_profile.v1", "imageDigest": "sha256:" + "a" * 64,
         "workspaceRoot": "/workspace", "user": "10001:10001", "network": "disabled",
         "resources": {"cpuMilli": 2000, "memoryBytes": 2 * 1024**3, "pidsLimit": 512,
-            "dataTmpfsBytes": 4 * 1024**3, "storageBytes": 4 * 1024**3}}
+            "workspaceBytes": 4 * 1024**3, "storageBytes": 4 * 1024**3}}
 
 
 def payload():
@@ -30,6 +30,21 @@ def payload():
 
 
 class UnifiedEnvironmentAuthorizationTests(SimpleTestCase):
+    def test_workspace_budget_accepts_only_the_current_resource_name(self):
+        from .environment_profile import environment_profile_digest, validate_environment_profile
+        value = profile()
+        value["resources"]["storageBytes"] = value["resources"]["workspaceBytes"] * 2
+        validate_environment_profile(value)
+        self.assertTrue(environment_profile_digest(value).startswith("sha256:"))
+        legacy = copy.deepcopy(value)
+        legacy["resources"]["dataTmpfsBytes"] = legacy["resources"].pop("workspaceBytes")
+        with self.assertRaisesRegex(ValueError, "resources fields mismatch"):
+            validate_environment_profile(legacy)
+        both = copy.deepcopy(value)
+        both["resources"]["dataTmpfsBytes"] = both["resources"]["workspaceBytes"]
+        with self.assertRaisesRegex(ValueError, "resources fields mismatch"):
+            validate_environment_profile(both)
+
     def test_generic_profile_is_the_only_signed_execution_configuration(self):
         value = payload()
         signature = authorization_signature(value, "test-key")

@@ -67,7 +67,7 @@ fn capture_with(
         &mut archive,
         &profile.workspace_root,
         input_limit,
-        profile.resources.data_tmpfs_bytes,
+        profile.resources.workspace_bytes,
     )?;
     let after = io.observe(allocation, profile)?;
     validate_stopped_backing(&after, allocation, profile)?;
@@ -423,6 +423,7 @@ fn snapshot_from_tar(
         file: frame,
         descriptor,
         manifest,
+        file_source: None,
         observation: WorkspaceProtection::new(),
     })
 }
@@ -448,7 +449,7 @@ mod tests {
                 memory_bytes: 1024 * 1024 * 1024,
                 cpu_milli: 1000,
                 pids_limit: 128,
-                data_tmpfs_bytes: 1024 * 1024,
+                workspace_bytes: 1024 * 1024,
                 storage_bytes: 1024 * 1024 * 1024,
             },
         };

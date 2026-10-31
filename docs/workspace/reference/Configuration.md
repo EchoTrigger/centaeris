@@ -45,11 +45,12 @@ accepted work.
 ## Workspace Agents and independent Sessions
 
 Ordinary Agent configuration is shared within a Workspace. Owners and
-administrators publish its instructions, model, thinking mode, avatar and
-Plugin activation through the existing Agent settings. Members use the same
-published definition; each accepted Run freezes its selected version.
+administrators publish its instructions, default model and thinking mode, avatar
+and Plugin activation through the existing Agent settings. Members use the same
+published definition. Ordinary conversations can select a model and thinking mode
+for the next submitted Run; each accepted Run freezes its selected configuration.
 
-Migration 0035 adds the shared configuration and Workspace default binding.
+`0035_workspace_shared_agents` adds the shared configuration and Workspace default binding.
 For an existing Workspace, an administrator explicitly promotes the chosen
 existing Agent through its settings. Explicitly binding additional legacy
 personal identities uses the promotion API's `bindAgentIds` list. Migration and
@@ -63,8 +64,12 @@ use the Workspace default if the former Agent configuration is unavailable.
 Deleting the selected default restores the built-in appearance and instructions,
 retaining the selected default's model configuration. Session deletion and
 retention, rather than parent Agent deletion, govern file reclamation.
-Migration 0036 makes navigation changes wake the Workspace Session list across
-Agent identities; ship both migrations with the API.
+`0036_workspace_navigation_changes` wakes the Workspace Session list across Agent
+identities. `0037_merge_workspace_resources_and_agents` joins this released branch
+with `0036_workspace_file_objects` without renaming applied migrations. Both
+upgrade paths retain the original Agent, Session and accepted Run identities.
+The resource-contract migration still requires application writers and Workers
+to be stopped and environment responsibilities drained before upgrading.
 
 ## External OAuth sign-in
 
@@ -312,10 +317,20 @@ override; it does not change this 12-GiB deployment default.
 ### Sandbox execution profile
 
 `SANDBOX_MEMORY_BYTES`, `SANDBOX_CPU_MILLI`, `SANDBOX_PIDS_LIMIT`, and
-`SANDBOX_DATA_TMPFS_BYTES` define the authorized AgentRun profile.
+`SANDBOX_WORKSPACE_BYTES` define the authorized AgentRun profile.
+`workspaceBytes` is a workspace data budget for admission, inputs and expanded
+snapshots; it does not select a tmpfs or impose a live OverlayFS disk quota.
 The deployment example sets new environments to 4 GiB of memory and 2000 CPU
 milli (two cores). These are upper bounds. Existing signed environment profiles
 keep their original resource limits.
+
+Before upgrading the resource contract, stop application writes and drain Runs,
+cleanup Jobs, maintenance operations and resident instances using the existing
+lifecycle. Then stop workers and run the forward migration with
+`SANDBOX_WORKSPACE_BYTES` configured. Unresolved creation dispatches block the
+migration. It creates a new current Environment binding with `workspaceBytes`;
+old Environments, Run bindings, signed grants and committed workspace descriptors
+remain unchanged. Start the matching API/Runtime version together after migration.
 Compose and the material Worker default `OCI_RUNTIME` to `runsc`. Install and
 register gVisor on the Docker host before using that profile. Hosts without
 gVisor, including local Docker Desktop test environments, must explicitly set
