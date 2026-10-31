@@ -179,12 +179,19 @@ jobs:
       - run: python scripts/workspace/ci.py --stage PythonSupport
 
   workspace-api:
+    name: Hosted API tests · group ${{ matrix.group }}
     needs: scope
     if: ${{ needs.scope.outputs.workspacePython == 'true' }}
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2]
+        include:
+          - shard: 0
+            group: A
+          - shard: 1
+            group: B
+          - shard: 2
+            group: C
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     services:
