@@ -619,8 +619,10 @@ class AgentWorkTests(TransactionTestCase):
         self.assertEqual((self.run.authorization.digest, self.run.authorization.signature), source_proof)
         self.assertEqual((child.definition_version_id, child.modelConfig_id), (child_version.pk, self.model.pk))
 
-    def test_business_instance_source_is_rejected_before_runtime(self):
+    def test_business_definition_source_is_rejected_before_runtime(self):
+        from .testing import publish_agent_test_policy
         profile, schedule = self.dependencies()
+        publish_agent_test_policy(self.agent, model_config=self.model)
         Agent.objects.filter(pk=self.agent.pk).update(is_business_instance=True)
         response = self.post(self.request_fact())
         self.assertEqual(response.status_code, 403, response.content)

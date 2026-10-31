@@ -13,7 +13,7 @@ from .agent_messages import _digest, validate_message_args
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .app_delegations import session_authority_is_current
 from .assets import DeferredInputResolutionError
-from .business_agent_scope import run_session_ref_is_current
+from .business_agent_scope import branch_for_agent, run_session_ref_is_current
 from .deferred_input import DeferredInputBindingError, input_storage_batch
 from .execution_admission import queued_admission_error
 from .hosted_operations import accept_operation, replay_operation, serialize_operation
@@ -98,8 +98,9 @@ def _locked_source(event_id):
             or not AgentCoordinationSession.objects.filter(agent=agent, session_id=run.session_id).exists()
             or not session_authority_is_current(run.user_id, run.session_id, scope="messages:submit")):
         raise WorkMaterializationError(403, "agent_work_authority_rejected")
-    # Native shared configuration does not grant business or delegated authority.
-    if agent.is_business_instance or run.acting_app_id or run.app_delegation_id:
+    # Ordinary shared configuration extends the existing private native path.
+    if ((agent.is_business_instance and (agent.definition_id or run.definition_version_id))
+            or run.acting_app_id or run.app_delegation_id):
         raise WorkMaterializationError(403, "agent_work_source_not_supported")
     try:
         authorization = run.authorization
@@ -206,7 +207,8 @@ def materialize_work_request(event_id):
         child = AgentRun.objects.create(workspace_id=run.workspace_id, session=work, user=run.user,
             modelConfig=run.modelConfig, thinkingMode=run.thinkingMode, prompt=args["objective"],
             definition_version=version,
-            agent_instructions=version.instructions if version else work.agent.instructions)
+            agent_instructions=(version.instructions if version else
+                run.agent_instructions if branch_for_agent(run.session.agent_id) else work.agent.instructions))
         create_agent_run_authorization(child, message_asset_refs=refs, image_digest=profile["imageDigest"])
         operation = accept_operation(run.user, run.workspace, "submitMessage", key, digest, work, child)
         binding = AgentWorkSession.objects.create(**_binding(result, run, operation))

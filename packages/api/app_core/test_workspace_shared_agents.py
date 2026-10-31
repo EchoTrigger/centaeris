@@ -221,10 +221,10 @@ class WorkspaceSharedAgentTests(TransactionTestCase):
         for index, model in enumerate(unavailable):
             with self.subTest(model=model.displayName):
                 denied = self.submit(member, f"unavailable-{index}", modelConfigRef=model.pk)
-                self.assertEqual(denied.status_code, 409, denied.content)
-                self.assertEqual(denied.json()["error"], "agent_model_not_available")
+                self.assertEqual(denied.status_code, 400, denied.content)
+                self.assertEqual(denied.json()["error"], "model_not_found")
         denied = self.submit(member, "unsupported-effort", modelConfigRef=self.model.id, thinkingMode="medium")
-        self.assertEqual(denied.status_code, 409, denied.content)
+        self.assertEqual(denied.status_code, 400, denied.content)
         self.assertEqual(denied.json()["error"], "model_thinking_mode_unsupported")
         self.assertFalse(AgentRun.objects.exists())
 

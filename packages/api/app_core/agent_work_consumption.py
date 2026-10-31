@@ -14,7 +14,7 @@ from .agent_run_authorization_factory import create_agent_run_authorization
 from .agent_work_query import _signed_native_run
 from .agent_work_returns import _bound_work, _payload, WorkReturnError
 from .app_delegations import session_authority_is_current
-from .business_agent_scope import locked_agent_configuration
+from .business_agent_scope import agent_configuration, locked_agent_configuration
 from .execution_admission import queued_admission_error
 from .hosted_operations import accept_operation, replay_operation, serialize_operation
 from .models import AgentCoordinationSession, AgentInputQueue, AgentRun, AgentWorkConsumeAttempt, AgentWorkReturn, Session
@@ -71,7 +71,9 @@ def _locked_notice(notice_id):
                 or session.owner_id != source.user_id or session.workspace_id != source.workspace_id):
             raise WorkReturnError(403, "agent_work_consume_authority_rejected")
         # Native coordination binding.
-        if (agent.is_business_instance or source.acting_app_id or source.app_delegation_id
+        if ((agent.is_business_instance and
+                (agent.definition_id or source.definition_version_id or child.definition_version_id))
+                or source.acting_app_id or source.app_delegation_id
                 or child.acting_app_id or child.app_delegation_id
                 or not AgentCoordinationSession.objects.filter(agent=agent, session=session).exists()):
             raise WorkReturnError(403, "agent_work_consume_authority_rejected")
@@ -301,7 +303,8 @@ def consume_work_return(notice_id, operation_id):
             model, mode = _coordinator_model(agent, version)
             run = AgentRun.objects.create(workspace_id=source.workspace_id, user=source.user, session=session,
                 modelConfig=model, thinkingMode=mode, prompt=pending_users[0].body if pending_users else _initial_objective(session, source),
-                definition_version=version, agent_instructions=version.instructions if version else agent.instructions)
+                definition_version=version,
+                agent_instructions=version.instructions if version else agent_configuration(agent).instructions)
             create_agent_run_authorization(run, image_digest=profile["imageDigest"])
             if pending_users:
                 from .agent_input_delivery import _bind_pending

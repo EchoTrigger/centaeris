@@ -89,12 +89,13 @@ class AgentWorkValidationTests(TestCase):
         self.assertEqual(response.json()["agentRunId"], run.pk)
         self.assert_no_work(1, 2)
 
-    def test_business_instance_coordination_cannot_validate_or_register_native_work(self):
-        agent = Agent.objects.create(workspace=self.workspace, owner=self.user,
-            name="Business instance", is_business_instance=True)
+    def test_business_definition_coordination_cannot_validate_or_register_native_work(self):
+        from .testing import create_shared_agent
+        agent = create_shared_agent(workspace=self.workspace, owner=self.user,
+            name="Business definition instance", is_business_instance=True, model_config=self.model)
         session = Session.objects.create(workspace=self.workspace, owner=self.user, agent=agent)
         AgentCoordinationSession.objects.create(agent=agent, session=session)
-        run = self.new_run(session)
+        run = self.new_run(session, definition_version=agent.definition.published_version)
         self.assertNotIn("nativeCoordinationSessionId", fenced_start_fixture(run))
         self.assertEqual(self.validate(run, coordinationSessionId=session.pk).status_code, 403)
         self.assert_no_work(2, 2)

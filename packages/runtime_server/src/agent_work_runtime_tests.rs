@@ -592,7 +592,13 @@ fn django_production_registration_model_tools() {
             .iter()
             .map(|case| case.kind.as_str())
             .collect::<Vec<_>>(),
-        ["ordinary", "managed", "delegated", "native"]
+        [
+            "ordinary",
+            "shared_native",
+            "delegated",
+            "business_with_definition",
+            "native"
+        ]
     );
     for case in fixture.cases {
         let start = case
@@ -653,7 +659,7 @@ fn django_production_registration_model_tools() {
             .count();
         assert_eq!(
             dispatch_count,
-            usize::from(case.kind == "native"),
+            usize::from(matches!(case.kind.as_str(), "shared_native" | "native")),
             "{}: {:?}",
             case.kind,
             captured[0]
@@ -663,14 +669,14 @@ fn django_production_registration_model_tools() {
                 .iter()
                 .filter(|name| name.as_str() == "get_work_request")
                 .count(),
-            usize::from(case.kind == "native")
+            usize::from(matches!(case.kind.as_str(), "shared_native" | "native"))
         );
         assert_eq!(
             captured[0]
                 .iter()
                 .filter(|name| name.as_str() == "confirm_work_return")
                 .count(),
-            usize::from(case.kind == "native")
+            usize::from(matches!(case.kind.as_str(), "shared_native" | "native"))
         );
         assert!(
             captured[0].iter().any(|name| name == "read"),

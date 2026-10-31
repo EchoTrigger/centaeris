@@ -8,6 +8,7 @@ from django.db import close_old_connections, connection
 from django.test import Client, TransactionTestCase, override_settings
 from django.utils import timezone
 from . import models, test_agent_work_consumption, test_hosted_operations
+from .testing import publish_agent_test_policy
 
 
 @override_settings(EXECUTION_GLOBAL_QUEUE_LIMIT=1, EXECUTION_TENANT_QUEUE_LIMIT=4)
@@ -60,6 +61,7 @@ class ApiRunQueueCapacityTests(test_hosted_operations.OperationFixture, Transact
         other_workspace = models.Workspace.objects.create(name="Separate admission", createdBy=self.user)
         models.WorkspaceMembership.objects.create(workspace=other_workspace, user=self.user, role="owner")
         other_agent = models.Agent.objects.create(workspace=other_workspace, owner=self.user, name="Separate agent")
+        publish_agent_test_policy(other_agent, model_config=self.model)
         accepted = self.client.post(f"/api/workspaces/{other_workspace.pk}/sessions/new/messages",
             content_type="application/json", data=json.dumps({"operationId": "other-workspace",
                 "agentId": other_agent.pk, "text": "independent workspace slot", "modelConfigRef": self.model.pk}))
@@ -75,6 +77,7 @@ class ApiRunQueueCapacityTests(test_hosted_operations.OperationFixture, Transact
         other_workspace = models.Workspace.objects.create(name="Other Run queue", createdBy=self.user)
         models.WorkspaceMembership.objects.create(workspace=other_workspace, user=self.user, role="owner")
         other_agent = models.Agent.objects.create(workspace=other_workspace, owner=self.user, name="Other Run")
+        publish_agent_test_policy(other_agent, model_config=self.model)
         barrier = Barrier(2)
 
         def submit(target):

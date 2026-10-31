@@ -13,6 +13,7 @@ from .agent_input_delivery import dispatch_agent_inputs
 from .agent_inputs import accept_agent_input
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .assets import captured_input_fields
+from .testing import fenced_start_fixture
 
 
 class BusinessAgentExecutionTests(TransactionTestCase):
@@ -158,6 +159,7 @@ class BusinessAgentExecutionTests(TransactionTestCase):
             self.assertEqual(models.AgentWorkSession.objects.count(), before)
 
     def test_child_keeps_source_instruction_snapshot_and_is_the_only_admitted_work_reference(self):
+        self.assertEqual(fenced_start_fixture(self.run)["nativeCoordinationSessionId"], self.source.pk)
         self.dependencies()
         models.Agent.objects.filter(pk=self.root.pk).update(instructions="Later root policy.")
         models.Agent.objects.filter(pk=self.agent.pk).update(instructions="Mutable branch data must not be inherited.")
@@ -206,6 +208,7 @@ class BusinessAgentExecutionTests(TransactionTestCase):
         attempt = models.AgentWorkConsumeAttempt.objects.get()
         self.assertEqual((attempt.coordinator_run.modelConfig_id, attempt.coordinator_run.agent_instructions),
             (current.pk, "Current root instructions for return."))
+        self.assertEqual(fenced_start_fixture(attempt.coordinator_run)["nativeCoordinationSessionId"], self.source.pk)
 
     def test_owner_configuration_is_root_only_and_owner_list_hides_business_branches(self):
         self.assertEqual(self.client.patch(f"/api/agents/{self.agent.pk}",

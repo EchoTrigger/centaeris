@@ -44,7 +44,9 @@ class EnvironmentControllerRuntimeTests(LiveServerTestCase):
         session = Session.objects.create(workspace=self.workspace, owner=self.user,
             agent=self.agent, origin="automation")
         second = AgentRun.objects.create(workspace=self.workspace, session=session,
-            user=self.user, modelConfig=self.model, prompt="Independent session objective")
+            user=self.user, modelConfig=self.model, prompt="Independent session objective",
+            definition_version=self.agent.definition.published_version,
+            agent_instructions=self.agent.definition.published_version.instructions)
         create_agent_run_authorization(second, image_digest=self.run.authorization.payload["environmentProfile"]["imageDigest"])
         self.assertEqual(second.membership_ref, self.run.membership_ref)
         self.assertNotEqual(second.session_id, self.run.session_id)
