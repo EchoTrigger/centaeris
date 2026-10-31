@@ -2086,11 +2086,11 @@ fn execute_agent_run(
                 authorization_digest: &agent_run_start.authorization_digest,
                 lease: &recovery_workspace_lease,
                 checkpoint_id: &checkpoint.checkpoint_id,
-                data_tmpfs_bytes: agent_run_start
+                workspace_bytes: agent_run_start
                     .authorization
                     .environment_profile
                     .resources
-                    .data_tmpfs_bytes,
+                    .workspace_bytes,
                 input_upper_bound_bytes,
             },
             &checkpoint.workspace_snapshot,
@@ -3560,7 +3560,7 @@ fn execute_agent_run(
                                     .authorization
                                     .environment_profile
                                     .resources
-                                    .data_tmpfs_bytes,
+                                    .workspace_bytes,
                             ),
                     )
                     .unwrap_or(usize::MAX),

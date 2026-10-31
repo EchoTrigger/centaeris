@@ -129,7 +129,12 @@ class PrivateDocker:
             if saved.returncode or loaded.returncode:raise RuntimeError('owned cached image transfer failed')
         finally:
             if saved.poll() is None:saved.terminate();saved.wait(timeout=10)
-        copied=json.loads(self.run('image','inspect',image))[0]
+        references=[]
+        for line in loaded.stdout.decode().splitlines():
+            for prefix in ('Loaded image ID: ','Loaded image: '):
+                if line.startswith(prefix):references.append(line[len(prefix):])
+        if len(references)!=1:raise RuntimeError('single imported image identity required')
+        copied=json.loads(self.run('image','inspect',references[0]))[0]
         if any(source.get(k)!=copied.get(k) for k in ('Architecture','Os','RootFS','Config')):raise RuntimeError('imported image content differs')
         self.require_shared();return copied['Id']
     def capture_runtime_errors(self):

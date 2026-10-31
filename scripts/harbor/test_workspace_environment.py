@@ -141,7 +141,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.profile = {"schema": "runtime.environment_profile.v1", "imageDigest": "sha256:" + "a" * 64,
                         "workspaceRoot": "/app", "user": "0:0", "network": "publicInternet", "resources": {
                             "cpuMilli": 1000, "memoryBytes": 2 * 1024**3, "pidsLimit": 256,
-                            "dataTmpfsBytes": 1024**3, "storageBytes": 10 * 1024**3}}
+                            "workspaceBytes": 1024**3, "storageBytes": 10 * 1024**3}}
         self.client, self.allocation = PublicClient(), Allocation()
         self.provisioner = Provisioner(self.profile)
         self.arguments = dict(environment_dir=environment_dir, environment_name="task",

@@ -883,23 +883,72 @@ The receipt does not grant guest execution or provide an additional archive.
 Physical removal must independently revalidate current cleanup authority and
 the exact stopped target against the durable proof.
 
-Both ordinary commit and preservation accept the existing frame reader, so each
-new head records `frameV1` atomically, including a transition from an older
-`tarZstdV1` head to an explicitly empty workspace. Prior objects and signatures
-retain their original bytes and metadata.
+New nonempty Session commits, execution checkpoints and stopped-instance
+preservation publish `fileManifestV1`: canonical `workspace.snapshot.v1` manifest
+JSON whose file bodies are immutable, Session-scoped SHA-256 content objects.
+A snapshot stores the complete file listing; unchanged bodies are shared across
+snapshots, and removed paths are absent from the next manifest. Restoration
+requires one manifest and its content objects rather than a chain of deltas.
+Empty workspaces retain the explicit `frameV1` no-object representation.
 
-Successful workspace downloads return `X-Workspace-Snapshot-Encoding` with the
-exact value `frameV1` or `tarZstdV1`. Session downloads use the locked current
-head encoding and recheck it when opening storage; execution downloads use their
-immutable frame-stage contract. The response preserves stored bytes, SHA-256 and
-size. Runtime validates the encoding before preparing the helper frame stream.
+Small content objects may share a Session-scoped immutable physical pack. A pack
+contains 2–32 files of at most 16 KiB each and at most 512 KiB in total; a lone
+small file or a larger file remains a loose object. File identities in manifests
+stay the SHA256 of their individual bytes. The file index records its pack and
+byte offset, and the API exposes the same bounded file stream to Runtime. This
+reduces physical publication/fsync count without changing the public manifest,
+file hashes, file transport schemas, or helper frame protocol. A transport batch
+may contain multiple bounded physical packs; streaming transfer does not load
+the entire batch into memory.
+
+`snapshotSha256` and `snapshotSizeBytes` identify the exact stored manifest bytes;
+`expandedSizeBytes` sums file bodies across paths, including repeated content.
+The referenced unique-object bytes and PostgreSQL indexes are reported separately
+when measuring storage. `workspaceBytes` limits expanded workspace data plus the
+existing input and restore allowance, regardless of deduplication or compression.
+
+The helper continues to produce and consume framed snapshot streams. Runtime
+retains the validated capture source while uploading only missing file objects,
+then publishes the manifest under the existing Session generation CAS. Current
+Job/lease reservations protect both reused and new objects before publication.
+The publication transaction records indexed manifest-to-file references without
+reading or hashing those immutable file bodies again. The reservation does not
+grant execution authority; every upload/publication uses its existing authority
+boundary, including the distinct terminal-cleanup path.
+
+Successful downloads return `X-Workspace-Snapshot-Encoding` as `fileManifestV1`,
+`frameV1` or `tarZstdV1`. New manifest bytes retain their stored identity while
+Runtime reconstructs a separate private helper frame from authorized content.
+Existing complete framed or tar/zstd archives retain their original bytes,
+encoding, signatures and reader paths. Tar/zstd remains a complete archive codec;
+it is not the backing store for new file-level incremental snapshots.
+
+Reachability collection expands retained manifest roots through indexed file
+references and current canonical file reservations. It does not open manifests
+or read file bodies to compute reachability. Root/witness and ownership checks
+run once per bounded collection batch; exact publication incarnations remain
+individually fenced. A recent manifest also retains its referenced content for
+the grace period. Expired reservations and collected manifest edges are retired
+as scheduling metadata once their responsibility ends.
+
+For candidate packs, GC expands only their bounded member index, finds members
+referenced by the actual retained roots, and maps those members back to physical
+storage. Current lease reservations and grace-period logical registrations also
+protect their packs. A live logical file registry row or a historical snapshot
+edge does not independently root a pack. Any reachable member retains the whole
+pack; it is reclaimed only when no member remains reachable, through the same
+owner/witness and exact publication-token fences. The collector does not compact
+partly live packs or delete their virtual file names one by one. Measurements
+therefore count physical pack bytes, including any retained dead members, rather
+than treating logical deduplication alone as reclaimed disk space.
 
 `gc_deleted_resources` also collects local workspace bytes of Sessions with
 `status=deleted` and a non-null `purgedAt`. Both the purge time and the file mtime
 must precede its cutoff, which defaults to 30 days. It enumerates outside the
 transaction, then rechecks the locked owner before unlinking each exact key.
-Only canonical Session snapshot generations, checkpoint keys of AgentRuns owned
-by that Session, and this uploader's temporary-name format are eligible. It
+Only canonical Session snapshot generations, indexed loose file objects and
+file packs, checkpoint keys of AgentRuns owned by that Session, and this
+uploader's temporary-name format are eligible. It
 rejects symlinks/reparse points and reports unknown Run directories as blocked.
 Unrelated names and directory entries remain. Retained active Sessions and
 restorable trash use a separate reachability pass with the same cutoff grace.
@@ -969,7 +1018,7 @@ This follows the existing hosted result-snapshot model; it adds no Core port,
 event schema, object-store dependency, or binary transcript transport.
 
 Candidate retention and the pending publisher each use a byte budget of
-`min(memoryBytes, dataTmpfsBytes)` from the existing execution authorization.
+`min(memoryBytes, workspaceBytes)` from the existing execution authorization.
 Accounting includes retained identity/record metadata; these are operational
 archive bounds, not a limit on tool success or total Session history. One
 background writer drains each Execution's bounded queue. Each publication has a

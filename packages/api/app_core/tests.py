@@ -1285,10 +1285,12 @@ class ApiVerticalSliceTests(TransactionTestCase):
         manifest_bytes = json.dumps(
             manifest, ensure_ascii=False, separators=(",", ":")
         ).encode()
-        snapshot = len(manifest_bytes).to_bytes(4, "big") + manifest_bytes + content
+        snapshot = manifest_bytes
+        self._workspace_file_contents = {"sha256:" + hashlib.sha256(content).hexdigest(): content}
         metadata = lease_request(
-            "runtime.session_workspace.commit.v1", agent_run, authorization
+            "runtime.session_workspace.commit.v2", agent_run, authorization
         ) | {
+            "snapshotEncoding": "fileManifestV1",
             "snapshotSha256": f"sha256:{hashlib.sha256(snapshot).hexdigest()}",
             "snapshotSizeBytes": len(snapshot),
             "expandedSizeBytes": len(content),
@@ -1298,8 +1300,9 @@ class ApiVerticalSliceTests(TransactionTestCase):
         body = len(encoded).to_bytes(4, "big") + encoded + snapshot
         checkpoint_id = "checkpoint:workspace-api-test"
         staged_metadata = lease_request(
-            "runtime.execution_workspace.stage.v1", agent_run, authorization
+            "runtime.execution_workspace.stage.v2", agent_run, authorization
         ) | {
+            "snapshotEncoding": "fileManifestV1",
             "checkpointId": checkpoint_id,
             "snapshotSha256": metadata["snapshotSha256"],
             "snapshotSizeBytes": metadata["snapshotSizeBytes"],
@@ -1307,6 +1310,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             "fileCount": metadata["fileCount"],
         }
         staged_encoded = json.dumps(staged_metadata, separators=(",", ":")).encode()
+        from .test_execution_publication_fencing import prepare_workspace_files
+        prepare_workspace_files(self, body)
         staged = self.client.post(
             "/internal/agent-runs/execution-workspace/stage",
             data=len(staged_encoded).to_bytes(4, "big") + staged_encoded + snapshot,
@@ -3945,21 +3950,17 @@ class ApiVerticalSliceTests(TransactionTestCase):
             validate_agent_run_authorization_payload(authorization.payload)
 
     def test_agent_run_authorization_digest_is_stable(self):
-        payload = json.loads(
-            (Path(__file__).resolve().parents[3]
-             / "tests/workspace/fixtures/agent_run_authorization/v1/valid.json").read_text(encoding="utf-8")
-        )
+        fixtures = (Path(__file__).resolve().parents[3]
+                    / "tests/workspace/fixtures/agent_run_authorization/v1")
+        payload = json.loads((fixtures / "valid.json").read_text(encoding="utf-8"))
+        expected = json.loads((fixtures / "expected.json").read_text(encoding="utf-8"))
         digest = authorization_digest(payload)
-        self.assertEqual(
-            digest,
-            "sha256:31a6abff1f44a1fa289bbda702f444e91e066bcda782b73118220bb9db7a3492",
-        )
+        self.assertEqual(digest, expected["digest"])
         self.assertEqual(
             authorization_digest(dict(reversed(list(payload.items())))), digest
         )
         self.assertEqual(
-            authorization_signature(payload, "test-key"),
-            "hmac-sha256:c018fa632708fad687e5b3a3e2179dabfb1517a9260e46e48cf8ec726a8732a3",
+            authorization_signature(payload, "test-key"), expected["signature"]
         )
         unknownPayload = dict(payload, schema="banana")
         with self.assertRaisesRegex(ValueError, "agent_run_authorization_schema_mismatch"):

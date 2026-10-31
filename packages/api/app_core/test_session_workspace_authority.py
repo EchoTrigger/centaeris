@@ -66,10 +66,10 @@ class SessionWorkspaceAuthorityTests(OperationFixture, TestCase):
         run = AgentRun.objects.get(pk=response.json()["agentRunId"])
         owner = leased_lifecycle_job_fixture(self, run)
         Session.objects.filter(pk=run.session_id).update(workspaceBaselineKnown=False)
-        metadata = json.dumps({"schema": "runtime.session_workspace.commit.v1",
+        metadata = json.dumps({"schema": "runtime.session_workspace.commit.v2",
             "jobId": f"agent_run.lifecycle:{run.pk}", "leaseOwner": owner,
             "agentRunId": run.pk, "authorizationDigest": run.authorization.digest,
-            "snapshotSha256": "", "snapshotSizeBytes": 0, "expandedSizeBytes": 0, "fileCount": 0},
+            "snapshotEncoding": "frameV1", "snapshotSha256": "", "snapshotSizeBytes": 0, "expandedSizeBytes": 0, "fileCount": 0},
             separators=(",", ":")).encode()
         body = len(metadata).to_bytes(4, "big") + metadata
         for disposition in ("committed", "idempotent"):

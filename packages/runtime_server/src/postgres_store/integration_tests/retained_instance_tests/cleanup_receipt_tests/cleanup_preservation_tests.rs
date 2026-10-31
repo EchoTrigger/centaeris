@@ -395,3 +395,108 @@ fn postgres_recovery_cleanup_absence_requires_physical_removed_without_fabricati
     );
     assert!(db.query_opt("SELECT 1 FROM information_schema.columns WHERE table_name='app_core_session' AND column_name='workspaceBaselineKnown'",&[]).unwrap().is_none(),"absence cleanup must not fabricate snapshot state");
 }
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL cleanup database"]
+fn postgres_recovery_cleanup_binds_manifest_encoding_and_preserves_advanced_head_identity() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let (_, store, mut db) = setup();
+    let mut run = per_run(&store, &mut db, "manifest-preservation");
+    let physical = Arc::new(Mutex::new(vec![]));
+    let mut allocation = prepare(&store, &run, "manifest-allocation", &physical).unwrap();
+    canonical_container(&mut db, &physical, &mut allocation);
+    let cleanup = terminal(&mut db, &mut run, false);
+    let recovery = preservation_fixture(&mut db, &cleanup, &allocation);
+    let request = CleanupAuthorityRequest {
+        cleanup: &cleanup,
+        signing_key: KEY,
+        lease: &run.fence,
+        host_id: "host",
+    };
+    // Both old committed frames and new manifests reach the physical boundary
+    // under current authority, without rewriting their recorded identity.
+    for encoding in ["frameV1", "fileManifestV1"] {
+        db.execute(
+            "UPDATE public.app_core_sessionworkspacepreservation SET snapshot_encoding=$1",
+            &[&encoding],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE public.app_core_session SET \"workspaceSnapshotEncoding\"=$1",
+            &[&encoding],
+        )
+        .unwrap();
+        let called = AtomicBool::new(false);
+        let result = store.with_recovery_cleanup_authority(
+            &request,
+            || Ok(physical.lock().unwrap().clone()),
+            &recovery,
+            |_, _| -> Result<CleanupPhysicalResult, String> {
+                called.store(true, Ordering::SeqCst);
+                Err("physical callback intentionally not dispatched".into())
+            },
+        );
+        assert!(result.is_err());
+        assert!(
+            called.load(Ordering::SeqCst),
+            "valid receipt encoding {encoding}"
+        );
+        assert_responsibility(&mut db, &physical);
+    }
+    db.batch_execute("UPDATE public.app_core_session SET \"workspaceSnapshotEncoding\"='frameV1'")
+        .unwrap();
+    let called = AtomicBool::new(false);
+    assert!(store
+        .with_recovery_cleanup_authority(
+            &request,
+            || Ok(physical.lock().unwrap().clone()),
+            &recovery,
+            |_, _| -> Result<CleanupPhysicalResult, String> {
+                called.store(true, Ordering::SeqCst);
+                Err("encoding mismatch must not dispatch".into())
+            },
+        )
+        .is_err());
+    assert!(!called.load(Ordering::SeqCst));
+    assert_responsibility(&mut db, &physical);
+    let CleanupRecoveryEvidence::Preserved { workspace, .. } = &recovery.evidence else {
+        unreachable!()
+    };
+    let generation = workspace.generation + 1;
+    let hash = format!("sha256:{}", "d".repeat(64));
+    let key = format!(
+        "workspaces/ws_1/sessions/sess_1/snapshots/{generation}/{}.snapshot",
+        "d".repeat(64)
+    );
+    db.execute("UPDATE public.app_core_session SET \"workspaceGeneration\"=$1,\"workspaceSnapshotSha256\"=$2,\"workspaceStorageKey\"=$3,\"workspaceSnapshotEncoding\"='tarZstdV1'", &[&(generation as i64), &hash, &key]).unwrap();
+    let receipt = store
+        .with_recovery_cleanup_authority(
+            &request,
+            || Ok(physical.lock().unwrap().clone()),
+            &recovery,
+            |target, _| {
+                let CleanupTarget::Instance { allocation, .. } = target else {
+                    panic!("exact original target")
+                };
+                physical.lock().unwrap().clear();
+                Ok(CleanupPhysicalResult::Removed {
+                    instance_id: allocation.instance_id.clone(),
+                    container_id: allocation.container_id.clone().unwrap(),
+                })
+            },
+        )
+        .unwrap();
+    assert!(receipt.cleanup_complete);
+    let current = db.query_one("SELECT \"workspaceSnapshotSha256\",\"workspaceSnapshotEncoding\" FROM public.app_core_session", &[]).unwrap();
+    assert_eq!(current.get::<_, String>(0), hash);
+    assert_eq!(current.get::<_, String>(1), "tarZstdV1");
+    assert_eq!(
+        db.query_one(
+            "SELECT snapshot_encoding FROM public.app_core_sessionworkspacepreservation",
+            &[]
+        )
+        .unwrap()
+        .get::<_, String>(0),
+        "fileManifestV1"
+    );
+}

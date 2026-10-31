@@ -29,6 +29,8 @@ from . import workspace_observations as protection_observations
 _GENERATION = re.compile(r"[1-9][0-9]*\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _SNAPSHOT_FILE = re.compile(r"[0-9a-f]{64}\.snapshot\Z")
+_FILE_OBJECT = re.compile(r"[0-9a-f]{64}\.file\Z")
+_FILE_PACK = re.compile(r"[0-9a-f]{32}\.pack\Z")
 # tempfile.mkstemp currently uses eight lower-case alphanumeric/underscore
 # characters. Keep unrelated temporary names outside this collector's scope.
 _TEMPORARY_FILE = re.compile(r"\.centaeris-immutable-[a-z0-9_]{8}\.tmp\Z")
@@ -56,7 +58,7 @@ def collect_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcR
 
 
 def _collect_purged_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSnapshotGcReport:
-    """Collect the two precise key families owned by permanently deleted Sessions.
+    """Collect canonical workspace snapshot and file objects of permanently deleted Sessions.
 
     Both the Session or parent Agent tombstone and object modification time must
     precede cutoff. A parent purge also covers children left active or in trash
@@ -97,7 +99,7 @@ def _collect_purged_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSna
                             report.blocked.append(key)
                             continue
                         from .workspace_snapshot_publication import collect_key
-                        object=collect_key(owner, key, kind="temporary" if _TEMPORARY_FILE.fullmatch(path.name) else "snapshot")
+                        object=collect_key(owner, key, kind=_object_kind(path.name))
                         token=object.publicationToken
                     claim = claim_storage_key(key, "workspaceSnapshot",publication_token=token)
                     if claim is None:
@@ -272,6 +274,14 @@ def _children(root: Path, prefix: str, report: WorkspaceSnapshotGcReport) -> lis
         return []
 
 
+def _object_kind(name):
+    if _TEMPORARY_FILE.fullmatch(name):
+        return "temporary"
+    if _FILE_PACK.fullmatch(name):
+        return "filePack"
+    return "file" if _FILE_OBJECT.fullmatch(name) else "snapshot"
+
+
 def _directory_files(root: Path, prefix: str, report: WorkspaceSnapshotGcReport):
     for name in _children(root, prefix, report):
         if _SNAPSHOT_FILE.fullmatch(name) or _TEMPORARY_FILE.fullmatch(name):
@@ -279,6 +289,19 @@ def _directory_files(root: Path, prefix: str, report: WorkspaceSnapshotGcReport)
 
 
 def _snapshot_keys(root: Path, prefix: str, session_id: str, report: WorkspaceSnapshotGcReport):
+    files = f"{prefix}/files"
+    for shard in _children(root, files, report):
+        if len(shard) == 2 and all(char in "0123456789abcdef" for char in shard):
+            for name in _children(root, f"{files}/{shard}", report):
+                if ((_FILE_OBJECT.fullmatch(name) and name.startswith(shard))
+                        or _TEMPORARY_FILE.fullmatch(name)):
+                    yield f"{files}/{shard}/{name}"
+
+    packs = f"{prefix}/file-packs"
+    for name in _children(root, packs, report):
+        if _FILE_PACK.fullmatch(name) or _TEMPORARY_FILE.fullmatch(name):
+            yield f"{packs}/{name}"
+
     snapshots = f"{prefix}/snapshots"
     for generation in _children(root, snapshots, report):
         if _GENERATION.fullmatch(generation):

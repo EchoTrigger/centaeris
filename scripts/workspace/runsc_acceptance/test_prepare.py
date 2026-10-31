@@ -47,7 +47,7 @@ class PreparationTests(unittest.TestCase):
    with patch.object(sys,'argv',argv),patch.object(prepare,'verify_owner',return_value={'root':'/run/owned'}),patch.object(prepare.subprocess,'run',side_effect=self.outputs()),patch('builtins.print'):prepare.main()
    config=json.loads((root/'result/compose.json').read_text());manifest=json.loads((root/'result/manifest.json').read_text());env=dict(v.split('=',1) for v in (root/'result/synthetic.env').read_text().splitlines())
    for name in ('WORKER_SLOT_COUNT','EXECUTION_GLOBAL_LIMIT','RESIDENT_GLOBAL_COUNT','RESIDENT_TENANT_COUNT','RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS'):self.assertEqual(env[name],'4')
-   self.assertEqual(env['SANDBOX_MEMORY_BYTES'],str(4*1024**3));self.assertEqual(env['SANDBOX_CPU_MILLI'],'2000');self.assertEqual(env['SANDBOX_DATA_TMPFS_BYTES'],str(4*1024**3))
+   self.assertEqual(env['SANDBOX_MEMORY_BYTES'],str(4*1024**3));self.assertEqual(env['SANDBOX_CPU_MILLI'],'2000');self.assertEqual(env['SANDBOX_WORKSPACE_BYTES'],str(4*1024**3))
    self.assertEqual(env['WORKSPACE_PERF_OBSERVATIONS'],'1')
    self.assertEqual(env['RUNTIME_NATIVE_SHARED_ADMISSION'],'1');self.assertEqual(env['RESIDENT_TENANT_MEMORY_BYTES'],str(8*1024**3));self.assertEqual(env['RESIDENT_TENANT_WORKSPACE_BYTES'],str(32*1024**3))
    self.assertEqual(config['services']['model']['command'],['/app/.venv/bin/python','/harness/server.py'])

@@ -56,7 +56,7 @@ fn fixture() -> (RetainedInstanceAllocation, EnvironmentProfile) {
             memory_bytes: 1024 * 1024 * 1024,
             cpu_milli: 1000,
             pids_limit: 128,
-            data_tmpfs_bytes: 64 * 1024 * 1024,
+            workspace_bytes: 64 * 1024 * 1024,
             storage_bytes: 1024 * 1024 * 1024,
         },
     };

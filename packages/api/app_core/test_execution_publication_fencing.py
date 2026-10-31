@@ -28,6 +28,48 @@ from .models import Agent, AgentRun, ModelConfig, StorageCleanupRetry, Workspace
 from .testing import create_session
 
 
+
+def prepare_workspace_files(test, body):
+    """Drive the current file API before publishing this test's manifest."""
+    try:
+        length = int.from_bytes(body[:4], "big")
+        metadata = json.loads(body[4:4 + length])
+        snapshot = body[4 + length:]
+        if not snapshot:
+            return
+        manifest = json.loads(snapshot)
+        files = [{"sha256": file["sha256"], "sizeBytes": file["sizeBytes"]} for file in manifest["files"]]
+    except (ValueError, KeyError, TypeError):
+        return  # The snapshot endpoint must reject the malformed request itself.
+    identity = {key: metadata[key] for key in ("jobId", "leaseOwner", "agentRunId", "authorizationDigest")}
+    if metadata["schema"] == "runtime.session_workspace.preserve.v2":
+        identity["preservation"] = metadata
+    response = Client().post("/internal/agent-runs/workspace-files/missing",
+        data=json.dumps({"schema": "runtime.workspace_files.missing.v1", **identity, "files": files}),
+        content_type="application/json", HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
+    if response.status_code != 200:
+        return  # Retain the original endpoint's authority-rejection assertions.
+    contents = getattr(test, "_workspace_file_contents", {})
+    missing = response.json()["missing"]
+    if any(sha256 not in contents for sha256 in missing):
+        return
+    for offset in range(0, len(missing), 32):
+        batch = [contents[sha256] for sha256 in missing[offset:offset + 32]]
+        files = [{"sha256": "sha256:"+hashlib.sha256(content).hexdigest(), "sizeBytes": len(content)}
+                 for content in batch]
+        encoded = json.dumps({"schema": "runtime.workspace_files.upload.v1", **identity,
+            "files": files}, separators=(",", ":")).encode()
+        uploaded = Client().post("/internal/agent-runs/workspace-files/upload",
+            data=len(encoded).to_bytes(4, "big") + encoded + b"".join(batch),
+            content_type="application/octet-stream", HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
+        test.assertEqual(uploaded.status_code, 201, uploaded.content)
+
+
+def post_workspace_snapshot(test, body, endpoint="/internal/agent-runs/session-workspace/commit"):
+    prepare_workspace_files(test, body)
+    return Client().post(endpoint, data=body, content_type="application/octet-stream",
+                         HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN)
+
 class ExecutionPublicationFixture:
     def setUp(self):
         super().setUp()
@@ -91,9 +133,13 @@ class ExecutionPublicationFixture:
                        "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
                        "executable": False}],
         }, separators=(",", ":")).encode()
-        snapshot = len(manifest).to_bytes(4, "big") + manifest + content
+        snapshot = manifest
+        contents = getattr(self, "_workspace_file_contents", {})
+        contents["sha256:" + hashlib.sha256(content).hexdigest()] = content
+        self._workspace_file_contents = contents
         metadata = json.dumps({
-            "schema": "runtime.session_workspace.commit.v1",
+            "schema": "runtime.session_workspace.commit.v2",
+            "snapshotEncoding": "fileManifestV1",
             "jobId": self.job_id, "leaseOwner": owner or self.owner,
             "agentRunId": self.run.id, "authorizationDigest": self.authorization.digest,
             "snapshotSha256": "sha256:" + hashlib.sha256(snapshot).hexdigest(),
@@ -103,11 +149,7 @@ class ExecutionPublicationFixture:
         return len(metadata).to_bytes(4, "big") + metadata + snapshot, snapshot
 
     def _post(self, body):
-        return Client().post(
-            "/internal/agent-runs/session-workspace/commit", data=body,
-            content_type="application/octet-stream",
-            HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN,
-        )
+        return post_workspace_snapshot(self, body)
 
     def _assert_snapshot(self, expected):
         self.session.refresh_from_db()
@@ -238,7 +280,7 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
         if checkpoint:
             metadata_size = int.from_bytes(body[:4], "big")
             metadata = json.loads(body[4:4 + metadata_size])
-            metadata.update(schema="runtime.execution_workspace.stage.v1", checkpointId=checkpoint_id)
+            metadata.update(schema="runtime.execution_workspace.stage.v2", checkpointId=checkpoint_id)
             encoded = json.dumps(metadata, separators=(",", ":")).encode()
             body = len(encoded).to_bytes(4, "big") + encoded + snapshot
         retained_key = (
@@ -257,10 +299,8 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
 
         original_post = self._post
         if checkpoint:
-            self._post = lambda payload: Client().post(
-                "/internal/agent-runs/execution-workspace/stage", data=payload,
-                content_type="application/octet-stream", HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN,
-            )
+            self._post = lambda payload: post_workspace_snapshot(
+                self, payload, "/internal/agent-runs/execution-workspace/stage")
         try:
             stale = self._during_upload(purge_and_collect, body=body)
             self._assert_error(stale, "session_workspace_session_unavailable")
@@ -291,18 +331,14 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
         metadata_size = int.from_bytes(body[:4], "big")
         metadata = json.loads(body[4:4 + metadata_size])
         metadata.update(
-            schema="runtime.execution_workspace.stage.v1", checkpointId="checkpoint:purge-race",
+            schema="runtime.execution_workspace.stage.v2", checkpointId="checkpoint:purge-race",
         )
         encoded = json.dumps(metadata, separators=(",", ":")).encode()
         stage_body = len(encoded).to_bytes(4, "big") + encoded + body[4 + metadata_size:]
         original_post = self._post
 
         def post_stage(_body):
-            return Client().post(
-                "/internal/agent-runs/execution-workspace/stage", data=stage_body,
-                content_type="application/octet-stream",
-                HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN,
-            )
+            return post_workspace_snapshot(self, stage_body, "/internal/agent-runs/execution-workspace/stage")
 
         self._post = post_stage
         try:
@@ -331,24 +367,26 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
             metadata_size = int.from_bytes(body[:4], "big")
             metadata = json.loads(body[4:4 + metadata_size])
             metadata.update(
-                schema="runtime.execution_workspace.stage.v1",
+                schema="runtime.execution_workspace.stage.v2",
                 checkpointId="checkpoint:payload-purge-race",
             )
             encoded = json.dumps(metadata, separators=(",", ":")).encode()
             body = len(encoded).to_bytes(4, "big") + encoded + snapshot
 
         copying, release = Event(), Event()
-        real_read = internal._WorkspaceSnapshotReader.read
-        reads = 0
+        real_store = internal._store_workspace_snapshot
+        real_fsync = os.fsync
 
-        def paused_read(reader, size=-1):
-            nonlocal reads
-            reads += 1
-            if reads == 2:
-                copying.set()
-                if not release.wait(10):
-                    raise TimeoutError("In-flight snapshot upload was not released")
-            return real_read(reader, size)
+        def paused_store(*args, **kwargs):
+            writer = current_thread()
+            def after_write(fd):
+                real_fsync(fd)
+                if current_thread() is writer and not copying.is_set():
+                    copying.set()
+                    if not release.wait(10):
+                        raise TimeoutError("In-flight snapshot upload was not released")
+            with patch.object(internal.os, "fsync", after_write):
+                return real_store(*args, **kwargs)
 
         def upload():
             try:
@@ -356,14 +394,11 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
                     "/internal/agent-runs/execution-workspace/stage" if checkpoint
                     else "/internal/agent-runs/session-workspace/commit"
                 )
-                return Client().post(
-                    endpoint, data=body, content_type="application/octet-stream",
-                    HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN,
-                )
+                return post_workspace_snapshot(self, body, endpoint)
             finally:
                 connections.close_all()
 
-        with patch.object(internal._WorkspaceSnapshotReader, "read", paused_read):
+        with patch.object(internal, "_store_workspace_snapshot", paused_store):
             with ThreadPoolExecutor(max_workers=1) as executor:
                 pending = executor.submit(upload)
                 try:
@@ -397,6 +432,9 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
                                               for name in ("planned", "cleaned", "blocked", "failures")}
                         return report
 
+                    from .models import WorkspaceSnapshotObject
+                    file_keys = set(WorkspaceSnapshotObject.objects.filter(session=self.session, kind="file")
+                                    .values_list("storageKey", flat=True))
                     output = io.StringIO()
                     with patch.object(workspace_snapshot_gc, "delete_stored_object_for_gc",
                                       wraps=workspace_snapshot_gc.delete_stored_object_for_gc) as delete:
@@ -408,7 +446,10 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
                             self.assertFalse(recent_temporary, gc_state)
                             self.assertEqual(os.name, "nt", gc_state)
                             self.assertIn("Workspace snapshot GC failed", str(error), gc_state)
-                            self.assertEqual(delete.call_args_list, [((gc_state["key"],), {})], gc_state)
+                            self.assertEqual([call.args[0] for call in delete.call_args_list if call.args[0] == gc_state["key"]],
+                                             [gc_state["key"]], gc_state)
+                            self.assertTrue({call.args[0] for call in delete.call_args_list}.issubset(
+                                file_keys | {gc_state["key"]}), gc_state)
                             self.assertEqual(gc_state["report"]["blocked"], [], gc_state)
                             self.assertEqual(len(gc_state["report"]["failures"]), 1, gc_state)
                             self.assertTrue(gc_state["report"]["failures"][0].startswith(gc_state["key"] + ": "), gc_state)
@@ -417,13 +458,16 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
                             self.assertEqual(gc_state["report"]["failures"], [], gc_state)
                             if recent_temporary:
                                 self.assertEqual(gc_state["report"]["blocked"], [gc_state["key"]], gc_state)
-                                self.assertEqual(gc_state["report"]["cleaned"], [], gc_state)
-                                self.assertEqual(delete.call_count, 0, gc_state)
+                                self.assertNotIn(gc_state["key"], gc_state["report"]["cleaned"], gc_state)
+                                self.assertTrue(set(gc_state["report"]["cleaned"]).issubset(file_keys), gc_state)
+                                self.assertNotIn(gc_state["key"], [call.args[0] for call in delete.call_args_list], gc_state)
                                 self.assertTrue(temporaries[0].exists(), gc_state)
                             else:
                                 self.assertEqual(gc_state["report"]["blocked"], [], gc_state)
-                                self.assertEqual(gc_state["report"]["cleaned"], [gc_state["key"]], gc_state)
-                                self.assertEqual(delete.call_args_list, [((gc_state["key"],), {})], gc_state)
+                                self.assertIn(gc_state["key"], gc_state["report"]["cleaned"], gc_state)
+                                self.assertTrue(set(gc_state["report"]["cleaned"]).issubset(file_keys | {gc_state["key"]}), gc_state)
+                                self.assertEqual([call.args[0] for call in delete.call_args_list if call.args[0] == gc_state["key"]],
+                                                 [gc_state["key"]], gc_state)
                                 self.assertFalse(temporaries[0].exists(), gc_state)
                 finally:
                     release.set()
@@ -497,14 +541,10 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
         metadata_size = int.from_bytes(body[:4], "big")
         metadata = json.loads(body[4:4 + metadata_size])
         checkpoint_id = "checkpoint:download-purge-race"
-        metadata.update(schema="runtime.execution_workspace.stage.v1", checkpointId=checkpoint_id)
+        metadata.update(schema="runtime.execution_workspace.stage.v2", checkpointId=checkpoint_id)
         encoded = json.dumps(metadata, separators=(",", ":")).encode()
-        staged = Client().post(
-            "/internal/agent-runs/execution-workspace/stage",
-            data=len(encoded).to_bytes(4, "big") + encoded + snapshot,
-            content_type="application/octet-stream",
-            HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN,
-        )
+        staged = post_workspace_snapshot(self, len(encoded).to_bytes(4, "big") + encoded + snapshot,
+                                         "/internal/agent-runs/execution-workspace/stage")
         self.assertEqual(staged.status_code, 201, staged.content)
         stored_snapshot = {name: staged.json()[name] for name in (
             "objectRef", "snapshotSha256", "snapshotSizeBytes", "expandedSizeBytes", "fileCount",
@@ -723,30 +763,27 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
         self._competing_identical_upload(invalid_content=True)
 
     def _competing_identical_upload(self, *, invalid_content=False):
-        # Both requests have passed the absent-object check. The first request
-        # pauses after observing absence; the second publishes that same
-        # content-addressed key under a new lease. Stale cleanup must not delete
-        # the winner even though the stale request began while its lease held.
-        observed_absence, release = Event(), Event()
-        real_exists = default_storage.exists
+        # The first request owns private manifest staging while a replacement
+        # lease publishes the same immutable key. Neither stale publication nor
+        # stale validation failure may remove that winner.
+        staged, release = Event(), Event()
+        real_store = internal._store_workspace_snapshot
         caller = current_thread()
 
-        def paused_exists(*args, **kwargs):
-            exists = real_exists(*args, **kwargs)
-            if current_thread() is not caller and not observed_absence.is_set():
-                self.assertFalse(exists)
-                observed_absence.set()
+        def paused_store(*args, **kwargs):
+            if current_thread() is not caller and not staged.is_set():
+                staged.set()
                 if not release.wait(10):
                     raise TimeoutError("Competing snapshot upload was not released")
-            return exists
+            return real_store(*args, **kwargs)
 
         body, snapshot = self._body()
         competing_body = body[:-1] + b"X" if invalid_content else body
-        with patch.object(default_storage, "exists", paused_exists):
+        with patch.object(internal, "_store_workspace_snapshot", paused_store):
             with ThreadPoolExecutor(max_workers=1) as executor:
                 pending = executor.submit(self._thread_post, competing_body)
                 try:
-                    self.assertTrue(observed_absence.wait(5), "Upload did not check storage")
+                    self.assertTrue(staged.wait(5), "Upload did not reach private staging")
                     self._lease(self.owner, expired=True)
                     self._lease(self.replacement)
                     committed = self._post(self._body(owner=self.replacement)[0])
@@ -798,20 +835,20 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
 
     def test_interrupted_upload_cleans_partial_bytes_and_valid_retry_succeeds(self):
         body, snapshot = self._body(b"A" * (128 * 1024))
-        real_read = internal._WorkspaceSnapshotReader.read
+        real_read = internal._read_workspace_bytes
         chunks_read = 0
 
-        def interrupted_read(reader, size=-1):
+        def interrupted_read(request, size):
             nonlocal chunks_read
-            if chunks_read:
-                raise OSError("Simulated upload disconnect after one chunk")
-            chunk = real_read(reader, size)
-            self.assertTrue(chunk)
-            self.assertGreater(reader.remaining, 0)
-            chunks_read += 1
-            return chunk
+            if request.path == "/internal/agent-runs/session-workspace/commit" and size == len(snapshot):
+                chunk = request.read(max(1, size // 2))
+                self.assertTrue(chunk)
+                self.assertLess(len(chunk), size)
+                chunks_read += 1
+                raise OSError("Simulated manifest upload disconnect after one chunk")
+            return real_read(request, size)
 
-        with patch.object(internal._WorkspaceSnapshotReader, "read", interrupted_read):
+        with patch.object(internal, "_read_workspace_bytes", interrupted_read):
             with self.assertLogs(internal.logger, level="ERROR"):
                 failed = self._post(body)
         self.assertEqual(failed.status_code, 500, failed.content)
@@ -845,7 +882,7 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
         body, snapshot = self._body()
         metadata_size = int.from_bytes(body[:4], "big")
         metadata = json.loads(body[4:4 + metadata_size])
-        metadata.update(schema="runtime.execution_workspace.stage.v1", checkpointId="checkpoint:stage-test")
+        metadata.update(schema="runtime.execution_workspace.stage.v2", checkpointId="checkpoint:stage-test")
         encoded = json.dumps(metadata, separators=(",", ":")).encode()
         stage_body = len(encoded).to_bytes(4, "big") + encoded + snapshot
         expected_key = (
@@ -855,11 +892,7 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
             f"{hashlib.sha256(snapshot).hexdigest()}.snapshot"
         )
         for _ in range(2):
-            staged = self.client.post(
-                "/internal/agent-runs/execution-workspace/stage", data=stage_body,
-                content_type="application/octet-stream",
-                HTTP_X_INTERNAL_TOKEN=settings.INTERNAL_API_TOKEN,
-            )
+            staged = post_workspace_snapshot(self, stage_body, "/internal/agent-runs/execution-workspace/stage")
             self.assertEqual(staged.status_code, 201, staged.content)
             self.assertEqual(staged.json()["objectRef"], expected_key)
             with default_storage.open(expected_key, "rb") as stored:

@@ -42,7 +42,7 @@ pub(super) fn create_body_with_proxy_environment(
         "centaeris.environment_authorization_digest":expected.binding_digest,
         "centaeris.execution_id":expected.execution_id,
         "centaeris.environment_profile_digest":profile.digest()?,
-        "centaeris.data_budget":profile.resources.data_tmpfs_bytes.to_string(),
+        "centaeris.data_budget":profile.resources.workspace_bytes.to_string(),
     });
     labels[WORKSPACE_BACKING_LABEL] = serde_json::json!(WORKSPACE_BACKING_DOCKER_OVERLAYFS);
     if let centaeris_core::execution::EnvironmentTaskOwner::AgentRun { run_id } = &owner {
@@ -103,7 +103,7 @@ mod tests {
                 memory_bytes: 2 * 1024 * 1024 * 1024,
                 cpu_milli: 1000,
                 pids_limit: 512,
-                data_tmpfs_bytes: 64 * 1024 * 1024,
+                workspace_bytes: 64 * 1024 * 1024,
                 storage_bytes: 10 * 1024 * 1024 * 1024,
             },
         }

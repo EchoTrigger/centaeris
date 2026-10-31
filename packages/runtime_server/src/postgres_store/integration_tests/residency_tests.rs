@@ -523,7 +523,7 @@ fn sandbox_with_resources(
     profile.memory_bytes = usage.memory_bytes;
     profile.cpu_milli = usage.cpu_milli.try_into().unwrap();
     profile.pids_limit = usage.pids.try_into().unwrap();
-    profile.data_tmpfs_bytes = usage.workspace_bytes;
+    profile.workspace_bytes = usage.workspace_bytes;
     profile.storage_bytes = usage.workspace_bytes;
     original.environment_profile_digest = original.environment_profile.digest().unwrap();
     let digest = original.digest().unwrap();
@@ -966,7 +966,7 @@ fn postgres_declared_resident_budget_allows_progress_after_confirmed_release() {
         memory_bytes: configured("SANDBOX_MEMORY_BYTES"),
         cpu_milli: configured("SANDBOX_CPU_MILLI"),
         pids: configured("SANDBOX_PIDS_LIMIT"),
-        workspace_bytes: configured("SANDBOX_DATA_TMPFS_BYTES"),
+        workspace_bytes: configured("SANDBOX_WORKSPACE_BYTES"),
     };
     // Declared-accounting mode conservatively charges the profile. These
     // current defaults size this fixture; measured resource admission determines
@@ -1556,7 +1556,7 @@ fn postgres_resident_unavailable_or_corrupt_restore_source_preserves_old_executi
                 authorization_digest: &format!("sha256:{}", "a".repeat(64)),
                 lease: &lease,
                 checkpoint_id: "preflight-checkpoint",
-                data_tmpfs_bytes: 1024 * 1024 * 1024,
+                workspace_bytes: 1024 * 1024 * 1024,
                 input_upper_bound_bytes: 0,
             },
             &snapshot,

@@ -184,7 +184,7 @@ def main():
 
         "UPLOAD_TEMP_ROOT": "/var/lib/centaeris-upload-temp", "STORAGE_ROOT": "/var/lib/centaeris-storage", "PLUGIN_CATALOG_ROOT": "/opt/centaeris/plugins",
 
-        "SANDBOX_MEMORY_BYTES": "268435456", "SANDBOX_CPU_MILLI": "1000", "SANDBOX_PIDS_LIMIT": "128", "SANDBOX_DATA_TMPFS_BYTES": "67108864",
+        "SANDBOX_MEMORY_BYTES": "268435456", "SANDBOX_CPU_MILLI": "1000", "SANDBOX_PIDS_LIMIT": "128", "SANDBOX_WORKSPACE_BYTES": "67108864",
 
         "RUNTIME_URL": "http://runtime:9000", "RUNTIME_INTERNAL_URL": "http://runtime:9000", "API_INTERNAL_URL": "http://api:8000",
 

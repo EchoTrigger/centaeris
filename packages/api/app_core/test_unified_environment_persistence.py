@@ -44,7 +44,10 @@ class EnvironmentProfileReconstructionTests(TransactionTestCase):
     serialized_rollback = True
 
     def test_reconstructs_only_authoritative_profile_and_preserves_signed_history(self):
+        from importlib import import_module
+        from .migration_authorization_fixtures import historical_digest, historical_signature
         from .test_environment_network_migration import EnvironmentNetworkMigrationTests
+        historical_contract = import_module('app_core.migrations.0023_unified_environment_profile')
         helper = EnvironmentNetworkMigrationTests()
         old = [('app_core', '0022_environment_maintenance_authority')]
         current = [('app_core', '0023_unified_environment_profile')]
@@ -62,13 +65,16 @@ class EnvironmentProfileReconstructionTests(TransactionTestCase):
             environment = state.get_model('app_core', 'SessionEnvironment').objects.using(database.alias).get(pk=configured.pk)
             self.assertEqual(environment.historical_profile, {'profile': original_profile[0], 'profileDigest': original_profile[1]})
             self.assertEqual(environment.environment_profile, original_profile[0] | {'schema': 'runtime.environment_profile.v1'})
-            self.assertEqual(environment.environment_profile_digest, environment_profile_digest(environment.environment_profile))
+            historical_contract.validate_historical_profile(environment.environment_profile)
+            self.assertEqual(environment.environment_profile_digest, historical_digest(environment.environment_profile))
             self.assertNotEqual(environment.environment_profile_digest, original_profile[1])
             stored = state.get_model('app_core', 'AgentRunAuthorization').objects.using(database.alias).get(pk=grant.pk)
             self.assertEqual((stored.payload, stored.digest, stored.signature), original_grant)
-            for value in (stored.payload, historical_ordinary.payload):
+            for authorization in (stored, historical_ordinary):
+                self.assertEqual(authorization.digest, historical_digest(authorization.payload))
+                self.assertEqual(authorization.signature, historical_signature(authorization.payload, 'test-key'))
                 with self.assertRaises(ValueError):
-                    authorization_digest(value)
+                    authorization_digest(authorization.payload)
             unprofiled = state.get_model('app_core', 'SessionEnvironment').objects.using(database.alias).get(pk=empty.pk)
             self.assertIsNone(unprofiled.environment_profile)
             self.assertEqual(unprofiled.environment_profile_digest, '')

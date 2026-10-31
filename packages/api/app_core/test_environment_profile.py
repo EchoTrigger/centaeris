@@ -21,7 +21,7 @@ def profile():
             'imageDigest': 'sha256:' + 'b' * 64, 'workspaceRoot': '/app',
             'user': '0:0', 'network': 'publicInternet',
             'resources': {'cpuMilli': 1000, 'memoryBytes': 2 * 1024**3,
-                          'pidsLimit': 512, 'dataTmpfsBytes': 64 * 1024**2,
+                          'pidsLimit': 512, 'workspaceBytes': 64 * 1024**2,
                           'storageBytes': 10 * 1024**3}}
 
 

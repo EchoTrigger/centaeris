@@ -1352,7 +1352,7 @@ class Session(models.Model):
             ),
             models.CheckConstraint(
                 condition=(
-                    models.Q(workspaceSnapshotEncoding__in=["frameV1", "tarZstdV1"])
+                    models.Q(workspaceSnapshotEncoding__in=["frameV1", "tarZstdV1", "fileManifestV1"])
                     & (models.Q(workspaceSnapshotEncoding="frameV1")
                        | models.Q(workspaceSnapshotSizeBytes__gt=0))
                 ),
@@ -3082,6 +3082,7 @@ class WorkspaceSnapshotObject(models.Model):
     storageKey = models.CharField(max_length=1000, unique=True)
     session = models.ForeignKey(Session, on_delete=models.PROTECT, related_name="workspaceSnapshotObjects")
     kind = models.CharField(max_length=16)
+    snapshotEncoding = models.CharField(max_length=16, default="frameV1")
     state = models.CharField(max_length=16, default="live")
     publicationToken = models.CharField(max_length=32, default=new_workspace_publication_token)
     registered = models.BooleanField(default=False)
@@ -3091,7 +3092,7 @@ class WorkspaceSnapshotObject(models.Model):
 
     class Meta:
         constraints = [
-            models.CheckConstraint(condition=models.Q(kind__in=["snapshot", "temporary"]), name="workspace_object_kind"),
+            models.CheckConstraint(condition=models.Q(kind__in=["snapshot", "temporary", "file", "filePack"]), name="workspace_object_kind"),
             models.CheckConstraint(condition=(models.Q(state="live", collectedAt__isnull=True)
                 | models.Q(state="collected", collectedAt__isnull=False)), name="workspace_object_state"),
         ]
@@ -3117,6 +3118,50 @@ class WorkspaceSnapshotUpload(models.Model):
         constraints = [models.CheckConstraint(condition=models.Q(state__in=["streaming", "staged", "committed", "abandoned"]),
             name="workspace_upload_state")]
         indexes = [models.Index(fields=["jobId", "authorizationDigest"], name="workspace_upload_job")]
+
+
+class WorkspaceFilePack(models.Model):
+    """One immutable physical file containing bounded, verified content ranges."""
+    object = models.OneToOneField(WorkspaceSnapshotObject, primary_key=True,
+        on_delete=models.CASCADE, related_name="filePack")
+    sizeBytes = models.PositiveBigIntegerField()
+    verifiedPublicationToken = models.CharField(max_length=32, blank=True, default="")
+
+
+class WorkspaceFileObject(models.Model):
+    """Verified content bytes in a Session-owned publication incarnation."""
+    object = models.OneToOneField(WorkspaceSnapshotObject, primary_key=True,
+        on_delete=models.CASCADE, related_name="fileContent")
+    sha256 = models.CharField(max_length=71)
+    sizeBytes = models.PositiveBigIntegerField()
+    pack = models.ForeignKey(WorkspaceFilePack, null=True, blank=True,
+        on_delete=models.PROTECT, related_name="files")
+    packOffset = models.PositiveBigIntegerField(default=0)
+    verifiedPublicationToken = models.CharField(max_length=32, blank=True, default="")
+
+
+class WorkspaceFileReservation(models.Model):
+    """A current lifecycle lease protects content until snapshot publication."""
+    file = models.ForeignKey(WorkspaceFileObject, on_delete=models.CASCADE, related_name="reservations")
+    agent_run = models.ForeignKey(AgentRun, on_delete=models.PROTECT, related_name="workspaceFileReservations")
+    jobId = models.CharField(max_length=256)
+    leaseOwner = models.CharField(max_length=160)
+    authorizationDigest = models.CharField(max_length=71)
+    publicationToken = models.CharField(max_length=32)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["file", "jobId", "leaseOwner"],
+            name="workspace_file_reservation_identity")]
+        indexes = [models.Index(fields=["jobId", "authorizationDigest"], name="workspace_file_reservation_job")]
+
+
+class WorkspaceSnapshotFileReference(models.Model):
+    """Immutable manifest membership, indexed in both traversal directions."""
+    snapshot = models.ForeignKey(WorkspaceSnapshotObject, on_delete=models.CASCADE, related_name="fileReferences")
+    file = models.ForeignKey(WorkspaceFileObject, on_delete=models.PROTECT, related_name="snapshotReferences")
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["snapshot", "file"], name="workspace_snapshot_file_identity")]
 
 
 class StorageCleanupRetry(models.Model):

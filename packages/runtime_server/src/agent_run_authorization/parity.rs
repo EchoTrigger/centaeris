@@ -220,7 +220,7 @@ fn authentication_and_agent_run_binding_are_independent_checks() {
 
 #[test]
 fn resource_u64_overflow_is_rejected_on_the_wire() {
-    for field in ["memoryBytes", "dataTmpfsBytes"] {
+    for field in ["memoryBytes", "workspaceBytes"] {
         let mut value = serde_json::to_value(super::tests::authorization()).expect("fixture");
         // Preserve the out-of-range integer as JSON text, without a floating-point conversion.
         value["environmentProfile"]["resources"][field] =

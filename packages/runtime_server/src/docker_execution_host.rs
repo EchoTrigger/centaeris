@@ -11,6 +11,7 @@ mod snapshot_capture;
 mod stopped_preservation;
 pub(crate) mod stopped_recovery;
 mod stopped_workspace;
+mod workspace_files;
 mod workspace_restore;
 pub(crate) use maintenance::{
     maintenance_helper, maintenance_task, observe_environment, provision_environment,
@@ -105,9 +106,9 @@ const BASE_COMMAND_PATH: &str =
 const SESSION_WORKSPACE_RESOLVE_SCHEMA: &str = "runtime.session_workspace.resolve.v1";
 const SESSION_WORKSPACE_RESOLVED_SCHEMA: &str = "runtime.session_workspace.resolved.v1";
 const SESSION_WORKSPACE_DOWNLOAD_SCHEMA: &str = "runtime.session_workspace.download.v1";
-const SESSION_WORKSPACE_COMMIT_SCHEMA: &str = "runtime.session_workspace.commit.v1";
+const SESSION_WORKSPACE_COMMIT_SCHEMA: &str = "runtime.session_workspace.commit.v2";
 const SESSION_WORKSPACE_COMMIT_RESULT_SCHEMA: &str = "runtime.session_workspace.commit.result.v1";
-const EXECUTION_WORKSPACE_STAGE_SCHEMA: &str = "runtime.execution_workspace.stage.v1";
+const EXECUTION_WORKSPACE_STAGE_SCHEMA: &str = "runtime.execution_workspace.stage.v2";
 const EXECUTION_WORKSPACE_STAGE_RESULT_SCHEMA: &str = "runtime.execution_workspace.stage.result.v1";
 const EXECUTION_WORKSPACE_DOWNLOAD_SCHEMA: &str = "runtime.execution_workspace.download.v1";
 const SESSION_WORKSPACE_MANIFEST_LIMIT: usize = 1024 * 1024;
@@ -1236,14 +1237,16 @@ impl DockerExecutionHostRunner {
         let encoding = workspace_restore::response_encoding(response.headers())
             .map_err(SessionWorkspaceApiError::Rejected)?;
         let stored = WorkspaceSnapshotDescriptor::from(frozen);
+        let file_access = self.workspace_file_access(lease, None);
         let mut prepared = observation
             .download(&mut response, |source| {
-                workspace_restore::prepare(
+                workspace_restore::prepare_with_files(
                     source,
                     &stored,
                     Some(&encoding),
-                    self.resources.data_tmpfs_bytes,
+                    self.resources.workspace_bytes,
                     observation.clone(),
+                    Some(&file_access),
                 )
             })
             .map_err(SessionWorkspaceApiError::Rejected)?;
@@ -1263,7 +1266,7 @@ impl DockerExecutionHostRunner {
             return Ok(SessionWorkspaceCommitOutcome::Unchanged);
         }
         self.with_terminal_collection(|capture| {
-            let artifact = match self.capture_snapshot(
+            let mut artifact = match self.capture_snapshot(
                 capture,
                 &WorkspaceSnapshotDescriptor::from(frozen),
                 ProtectionTrigger::TerminalCommit,
@@ -1278,12 +1281,12 @@ impl DockerExecutionHostRunner {
                     return Ok(SessionWorkspaceCommitOutcome::Unchanged);
                 }
             };
-            let descriptor = &artifact.descriptor;
+            let descriptor = artifact.descriptor.clone();
             self.require_workspace_capacity(
                 descriptor.expanded_size_bytes,
                 input_upper_bound_bytes,
             )?;
-            if snapshot_matches_frozen_workspace(descriptor, frozen) {
+            if snapshot_matches_frozen_workspace(&descriptor, frozen) {
                 artifact
                     .observation
                     .count(ProtectionMetric::UploadAttempts, 0, true);
@@ -1292,6 +1295,8 @@ impl DockerExecutionHostRunner {
                     .count(ProtectionMetric::UploadedBytes, 0, true);
                 return Ok(SessionWorkspaceCommitOutcome::Unchanged);
             }
+            self.workspace_file_access(lease, None)
+                .upload_missing(&mut artifact)?;
             let candidate = SessionWorkspace {
                 generation: frozen
                     .generation
@@ -1305,6 +1310,7 @@ impl DockerExecutionHostRunner {
             candidate.validate()?;
             let metadata = SessionWorkspaceCommitRequest {
                 schema: SESSION_WORKSPACE_COMMIT_SCHEMA,
+                snapshot_encoding: workspace_files::encoding(descriptor.size_bytes),
                 job_id: lease.job_id.as_str(),
                 lease_owner: lease.lease_owner.as_str(),
                 agent_run_id: self.agent_run_id.as_str(),
@@ -1620,7 +1626,7 @@ impl DockerExecutionHostRunner {
         prepared: PreparedRecoveryWorkspace,
     ) -> Result<RecoveryWorkspaceSnapshotV1, String> {
         let PreparedRecoveryContent::Upload {
-            artifact,
+            mut artifact,
             lease,
             checkpoint_id,
         } = prepared.content
@@ -1630,6 +1636,8 @@ impl DockerExecutionHostRunner {
             };
             return Ok(snapshot);
         };
+        self.workspace_file_access(&lease, Some(&checkpoint_id))
+            .upload_missing(&mut artifact)?;
         let descriptor = &artifact.descriptor;
         let observation = artifact.observation.clone().with_context(
             ProtectionTrigger::RecoveryCheckpoint,
@@ -1640,6 +1648,7 @@ impl DockerExecutionHostRunner {
             crate::observations::timed("workspaceSnapshotUpload", || {
                 let metadata = ExecutionWorkspaceStageRequest {
                     schema: EXECUTION_WORKSPACE_STAGE_SCHEMA,
+                    snapshot_encoding: workspace_files::encoding(descriptor.size_bytes),
                     job_id: lease.job_id.as_str(),
                     lease_owner: lease.lease_owner.as_str(),
                     agent_run_id: self.agent_run_id.as_str(),
@@ -1796,12 +1805,14 @@ impl DockerExecutionHostRunner {
         );
         let encoding = workspace_restore::response_encoding(response.headers())
             .map_err(SessionWorkspaceApiError::Rejected)?;
+        let file_access = self.workspace_file_access(lease, Some(checkpoint_id));
         let mut artifact = prepare_recovery_restore_artifact(
             &mut response,
             snapshot,
             Some(&encoding),
-            self.resources.data_tmpfs_bytes,
+            self.resources.workspace_bytes,
             observation,
+            Some(&file_access),
         )?;
         self.restore_snapshot_artifact(&mut artifact, &capture)
             .map_err(SessionWorkspaceApiError::Rejected)
@@ -1830,6 +1841,22 @@ impl DockerExecutionHostRunner {
         }
     }
 
+    fn workspace_file_access<'a>(
+        &'a self,
+        lease: &'a SessionWorkspaceLease,
+        checkpoint_id: Option<&'a str>,
+    ) -> workspace_files::FileAccess<'a> {
+        workspace_files::FileAccess::new(
+            &self.api_client,
+            &self.api_url,
+            &self.api_token,
+            &self.agent_run_id,
+            &self.authorization_digest,
+            lease,
+            checkpoint_id,
+        )
+    }
+
     fn require_workspace_capacity(
         &self,
         expanded_size_bytes: u64,
@@ -1838,7 +1865,7 @@ impl DockerExecutionHostRunner {
         require_workspace_capacity_for_limit(
             expanded_size_bytes,
             input_upper_bound_bytes,
-            self.resources.data_tmpfs_bytes,
+            self.resources.workspace_bytes,
         )
     }
 
@@ -2374,7 +2401,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
                     usize::try_from(
                         self.resources
                             .memory_bytes
-                            .min(self.resources.data_tmpfs_bytes),
+                            .min(self.resources.workspace_bytes),
                     )
                     .unwrap_or(usize::MAX),
                 );
@@ -3242,6 +3269,7 @@ impl<'a> SessionWorkspaceLeaseRequest<'a> {
 #[serde(rename_all = "camelCase")]
 struct SessionWorkspaceCommitRequest<'a> {
     schema: &'a str,
+    snapshot_encoding: &'static str,
     job_id: &'a str,
     lease_owner: &'a str,
     agent_run_id: &'a str,
@@ -3256,6 +3284,7 @@ struct SessionWorkspaceCommitRequest<'a> {
 #[serde(rename_all = "camelCase")]
 struct ExecutionWorkspaceStageRequest<'a> {
     schema: &'a str,
+    snapshot_encoding: &'static str,
     job_id: &'a str,
     lease_owner: &'a str,
     agent_run_id: &'a str,
@@ -3315,6 +3344,7 @@ struct WorkspaceSnapshotDescriptor {
 
 struct ImmutableWorkspaceSnapshot {
     file: fs::File,
+    file_source: Option<Box<workspace_files::CapturedFiles>>,
     descriptor: WorkspaceSnapshotDescriptor,
     observation: WorkspaceProtection,
     manifest: Option<SandboxWorkspaceSnapshotManifest>,
@@ -3338,7 +3368,7 @@ pub(crate) struct RecoveryRestoreBinding<'a> {
     pub authorization_digest: &'a str,
     pub lease: &'a SessionWorkspaceLease,
     pub checkpoint_id: &'a str,
-    pub data_tmpfs_bytes: u64,
+    pub workspace_bytes: u64,
     pub input_upper_bound_bytes: u64,
 }
 
@@ -3392,7 +3422,7 @@ pub(crate) fn prepare_recovery_workspace_restore(
     require_workspace_capacity_for_limit(
         snapshot.expanded_size_bytes,
         binding.input_upper_bound_bytes,
-        binding.data_tmpfs_bytes,
+        binding.workspace_bytes,
     )
     .map_err(SessionWorkspaceApiError::Rejected)?;
     if snapshot.object_ref.is_none() {
@@ -3452,12 +3482,26 @@ pub(crate) fn prepare_recovery_workspace_restore(
     );
     let encoding = workspace_restore::response_encoding(response.headers())
         .map_err(SessionWorkspaceApiError::Rejected)?;
+    let file_access = workspace_files::FileAccess::new(
+        &client,
+        binding.api_url,
+        binding.api_token,
+        binding.agent_run_id,
+        binding.authorization_digest,
+        binding.lease,
+        if session_workspace.is_some() {
+            None
+        } else {
+            Some(binding.checkpoint_id)
+        },
+    );
     let artifact = prepare_recovery_restore_artifact(
         &mut response,
         snapshot,
         Some(&encoding),
-        binding.data_tmpfs_bytes,
+        binding.workspace_bytes,
         observation,
+        Some(&file_access),
     )?;
     Ok(PreparedRecoveryWorkspaceRestore {
         artifact: Some(artifact),
@@ -3471,16 +3515,18 @@ fn prepare_recovery_restore_artifact(
     encoding: Option<&str>,
     expanded_limit: u64,
     observation: WorkspaceProtection,
+    file_access: Option<&workspace_files::FileAccess<'_>>,
 ) -> Result<ImmutableWorkspaceSnapshot, SessionWorkspaceApiError> {
     let stored = WorkspaceSnapshotDescriptor::from(snapshot);
     let prepared = observation
         .download(source, |source| {
-            workspace_restore::prepare(
+            workspace_restore::prepare_with_files(
                 source,
                 &stored,
                 encoding,
                 expanded_limit,
                 observation.clone(),
+                file_access,
             )
         })
         .map_err(SessionWorkspaceApiError::Unavailable)?;
@@ -3501,7 +3547,7 @@ fn require_workspace_capacity_for_limit(
         .and_then(|value| value.checked_add(SESSION_WORKSPACE_RESTORE_OVERHEAD_BYTES))
         .is_none_or(|value| value > limit)
     {
-        return Err("session workspace exceeds sandbox dataTmpfsBytes".into());
+        return Err("session workspace exceeds sandbox workspaceBytes".into());
     }
     Ok(())
 }
@@ -3606,6 +3652,7 @@ fn capture_snapshot_artifact_observed(
         .map_err(|error| format!("rewind snapshot spool failed: {error}"))?;
     Ok(ImmutableWorkspaceSnapshot {
         file,
+        file_source: None,
         descriptor,
         observation,
         manifest,
@@ -4281,7 +4328,7 @@ mod tests {
             memory_bytes: setting("SANDBOX_MEMORY_BYTES"),
             cpu_milli: setting("SANDBOX_CPU_MILLI") as u32,
             pids_limit: setting("SANDBOX_PIDS_LIMIT") as u32,
-            data_tmpfs_bytes: setting("SANDBOX_DATA_TMPFS_BYTES"),
+            workspace_bytes: setting("SANDBOX_WORKSPACE_BYTES"),
         };
         let activation = centaeris_core::extension::build_plugin_activation_snapshot(&[]).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4485,7 +4532,7 @@ mod tests {
                 authorization_digest: &digest,
                 lease: &lease,
                 checkpoint_id: "centaeris-recovery-test-checkpoint",
-                data_tmpfs_bytes: resources.data_tmpfs_bytes,
+                workspace_bytes: resources.workspace_bytes,
                 input_upper_bound_bytes: 0,
             },
             &snapshot,
@@ -4663,7 +4710,7 @@ mod tests {
                 authorization_digest: &digest,
                 lease: &resumed_lease,
                 checkpoint_id: &persisted_checkpoint.checkpoint_id,
-                data_tmpfs_bytes: resources.data_tmpfs_bytes,
+                workspace_bytes: resources.workspace_bytes,
                 input_upper_bound_bytes: 0,
             },
             &persisted_checkpoint.workspace_snapshot,
@@ -5428,6 +5475,7 @@ mod tests {
                     "run-restored",
                     Some("job-restored"),
                 ),
+                None,
             )
         });
         let mut artifact = result.unwrap();
@@ -5447,7 +5495,8 @@ mod tests {
             &snapshot,
             Some("frameV1"),
             snapshot.expanded_size_bytes,
-            WorkspaceProtection::new()
+            WorkspaceProtection::new(),
+            None,
         )
         .is_err());
         let mut wrong_binding = snapshot.clone();
@@ -5457,7 +5506,8 @@ mod tests {
             &wrong_binding,
             Some("frameV1"),
             wrong_binding.expanded_size_bytes,
-            WorkspaceProtection::new()
+            WorkspaceProtection::new(),
+            None,
         )
         .is_err());
     }
@@ -6747,7 +6797,7 @@ mod tests {
                 memory_bytes: 1,
                 cpu_milli: 1,
                 pids_limit: 1,
-                data_tmpfs_bytes: 1,
+                workspace_bytes: 1,
             },
             plugin_volume_name: "centaeris-workspace-plugin-data".to_string(),
             plugin_mounts: vec![PluginMount {
@@ -6780,7 +6830,7 @@ mod tests {
                     cpu_milli: 1,
                     memory_bytes: 1,
                     pids_limit: 1,
-                    data_tmpfs_bytes: 1,
+                    workspace_bytes: 1,
                     storage_bytes: 1,
                 },
             }),

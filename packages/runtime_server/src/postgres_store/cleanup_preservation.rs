@@ -55,6 +55,14 @@ fn receipt_id_valid(id: &str) -> bool {
     })
 }
 
+fn supported_encoding(encoding: &str, workspace: &SessionWorkspace) -> bool {
+    match encoding {
+        "frameV1" => true,
+        "tarZstdV1" | "fileManifestV1" => workspace.snapshot_size_bytes != 0,
+        _ => false,
+    }
+}
+
 /// Called with today's verified cleanup authority and original resident pins.
 /// Creator lease/epoch remain immutable audit facts; they grant no current power.
 pub(super) fn verify_recovery(
@@ -105,6 +113,7 @@ pub(super) fn verify_recovery(
         .map_err(|_| "cleanup_preservation_receipt_rejected")?;
     let recorded: SessionWorkspace = serde_json::from_str(&row.get::<_, String>(11))
         .map_err(|_| "cleanup_preservation_receipt_rejected")?;
+    let receipt_encoding: String = row.get(12);
     if row.get::<_, String>(0) != cleanup.authorization.session_id
         || row.get::<_, String>(1) != cleanup.agent_run_id
         || Some(row.get::<_, String>(2).as_str()) != allocation.allocation_agent_run_id.as_deref()
@@ -117,7 +126,7 @@ pub(super) fn verify_recovery(
         || row.get::<_, String>(9) != allocation.profile_digest
         || baseline != cleanup.authorization.session_workspace
         || &recorded != workspace
-        || row.get::<_, String>(12) != "frameV1"
+        || !supported_encoding(&receipt_encoding, workspace)
         || row.get::<_, String>(13)
             != storage_key(
                 &cleanup.authorization.workspace_id,
@@ -148,10 +157,12 @@ pub(super) fn verify_recovery(
             .try_into()
             .map_err(|_| "cleanup_preservation_head_rejected")?,
     };
+    let head_encoding: String = row.get(6);
     if !row.get::<_, bool>(0)
         || head.generation < workspace.generation
-        || (head.generation == workspace.generation && &head != workspace)
-        || row.get::<_, String>(6) != "frameV1"
+        || (head.generation == workspace.generation
+            && (&head != workspace || head_encoding != receipt_encoding))
+        || !supported_encoding(&head_encoding, &head)
         || row.get::<_, String>(7)
             != storage_key(
                 &cleanup.authorization.workspace_id,

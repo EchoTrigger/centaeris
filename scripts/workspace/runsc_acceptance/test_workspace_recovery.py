@@ -53,7 +53,7 @@ class RecoveryCoordinatorTests(unittest.TestCase):
                 return {'baselineKnown': fail != 'unknownHead', 'generation': generation,
                         'storageKey': 'snapshot-' + str(generation), 'snapshotSha256': 'sha256:' + str(generation) * 64,
                         'snapshotSizeBytes': 100, 'expandedSizeBytes': 64, 'fileCount': 2,
-                        'snapshotEncoding': 'frameV1', 'payloadSha256': 'sha256:' + str(generation) * 64}
+                        'snapshotEncoding': 'fileManifestV1', 'payloadSha256': 'sha256:' + str(generation) * 64}
             def restart(self):
                 calls.append(('restart',))
                 return {'performed': True, 'beforeRuntimeStartedAt': 'before', 'afterRuntimeStartedAt': 'after'}
