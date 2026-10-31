@@ -3950,21 +3950,17 @@ class ApiVerticalSliceTests(TransactionTestCase):
             validate_agent_run_authorization_payload(authorization.payload)
 
     def test_agent_run_authorization_digest_is_stable(self):
-        payload = json.loads(
-            (Path(__file__).resolve().parents[3]
-             / "tests/workspace/fixtures/agent_run_authorization/v1/valid.json").read_text(encoding="utf-8")
-        )
+        fixtures = (Path(__file__).resolve().parents[3]
+                    / "tests/workspace/fixtures/agent_run_authorization/v1")
+        payload = json.loads((fixtures / "valid.json").read_text(encoding="utf-8"))
+        expected = json.loads((fixtures / "expected.json").read_text(encoding="utf-8"))
         digest = authorization_digest(payload)
-        self.assertEqual(
-            digest,
-            "sha256:31a6abff1f44a1fa289bbda702f444e91e066bcda782b73118220bb9db7a3492",
-        )
+        self.assertEqual(digest, expected["digest"])
         self.assertEqual(
             authorization_digest(dict(reversed(list(payload.items())))), digest
         )
         self.assertEqual(
-            authorization_signature(payload, "test-key"),
-            "hmac-sha256:c018fa632708fad687e5b3a3e2179dabfb1517a9260e46e48cf8ec726a8732a3",
+            authorization_signature(payload, "test-key"), expected["signature"]
         )
         unknownPayload = dict(payload, schema="banana")
         with self.assertRaisesRegex(ValueError, "agent_run_authorization_schema_mismatch"):

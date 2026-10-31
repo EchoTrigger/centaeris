@@ -391,9 +391,16 @@ class WorkspaceFileObjectTests(ExecutionPublicationFixture, TransactionTestCase)
         contents = [b"first", b"", b"last"]
         files = [descriptor(content) for content in contents]
         self.reserve(files)
-        with patch("app_core.workspace_file_objects.os.fsync", wraps=os.fsync) as sync:
+        import stat
+        synced_modes = []
+        real_fsync = os.fsync
+        def sync_descriptor(fd):
+            synced_modes.append(os.fstat(fd).st_mode)
+            return real_fsync(fd)
+        with patch("app_core.workspace_file_objects.os.fsync", side_effect=sync_descriptor):
             upload_files(io.BytesIO(b"".join(contents)), self.identity(), files, self.authorized)
-        self.assertEqual(sync.call_count, 1)
+        self.assertEqual(sum(stat.S_ISREG(mode) for mode in synced_modes), 1)
+        self.assertEqual(sum(stat.S_ISDIR(mode) for mode in synced_modes), 0 if os.name == "nt" else 1)
         pack = WorkspaceFilePack.objects.get()
         self.assertEqual(pack.sizeBytes, sum(map(len, contents)))
         self.assertEqual(len(list(self.storage_root.rglob("*.pack"))), 1)
