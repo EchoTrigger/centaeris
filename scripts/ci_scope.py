@@ -7,8 +7,8 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCTS = ("coreRust", "localNode", "workspaceRust", "workspacePython", "web", "docker")
-JOBS = {"coreRust": "core-rust", "localNode": "local-node", "workspaceRust": "workspace-rust",
-        "workspacePython": "workspace-python", "web": "web", "docker": "docker-fresh-start"}
+JOBS = {"coreRust": ("core-rust",), "localNode": ("local-node",), "workspaceRust": ("workspace-rust",),
+        "workspacePython": ("workspace-python", "workspace-api"), "web": ("web",), "docker": ("docker-fresh-start",)}
 
 
 def select_products(paths):
@@ -61,15 +61,16 @@ def aggregate_result(needs):
     if scope.get("result") != "success":
         return False
     outputs = scope.get("outputs", {})
-    for product, job in JOBS.items():
+    for product, jobs in JOBS.items():
         selected = outputs.get(product)
-        result = needs.get(job, {}).get("result")
-        if selected not in ("true", "false") or result is None:
-            return False
-        if selected == "true" and result != "success":
-            return False
-        if selected == "false" and result not in ("success", "skipped"):
-            return False
+        for job in jobs:
+            result = needs.get(job, {}).get("result")
+            if selected not in ("true", "false") or result is None:
+                return False
+            if selected == "true" and result != "success":
+                return False
+            if selected == "false" and result not in ("success", "skipped"):
+                return False
     return True
 
 

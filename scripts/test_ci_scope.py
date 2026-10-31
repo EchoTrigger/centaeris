@@ -60,16 +60,29 @@ class ScopeTests(unittest.TestCase):
                 self.assertEqual({key for key, value in selected.items() if value}, {"coreRust"})
                 needs = {"scope": {"result": "success", "outputs": {
                     key: str(value).lower() for key, value in selected.items()}}}
-                needs.update({job: {"result": "skipped"} for job in JOBS.values()})
+                needs.update({job: {"result": "skipped"} for jobs in JOBS.values() for job in jobs})
                 self.assertFalse(aggregate_result(needs))
                 needs["core-rust"]["result"] = "success"
                 self.assertTrue(aggregate_result(needs))
+
+    def test_python_support_and_api_matrix_are_both_required(self):
+        selected = select_products(["packages/api/app_core/models.py"])
+        needs = {"scope": {"result": "success", "outputs": {
+            key: str(value).lower() for key, value in selected.items()}}}
+        needs.update({job: {"result": "success" if selected[product] else "skipped"}
+                      for product, jobs in JOBS.items() for job in jobs})
+        self.assertTrue(aggregate_result(needs))
+        for job in JOBS["workspacePython"]:
+            for result in ("skipped", "failure", "cancelled"):
+                with self.subTest(job=job, result=result):
+                    self.assertFalse(aggregate_result({**needs, job: {"result": result}}))
+            self.assertFalse(aggregate_result({key: value for key, value in needs.items() if key != job}))
 
     def test_selected_skipped_failed_cancelled_and_missing_jobs_fail_the_aggregate(self):
         selected = dict.fromkeys(PRODUCTS, False)
         selected["web"] = True
         needs = {"scope": {"result": "success", "outputs": {key: str(value).lower() for key, value in selected.items()}}}
-        needs.update({job: {"result": "success" if selected[product] else "skipped"} for product, job in JOBS.items()})
+        needs.update({job: {"result": "success" if selected[product] else "skipped"} for product, jobs in JOBS.items() for job in jobs})
         self.assertTrue(aggregate_result(needs))
         for result in ("skipped", "failure", "cancelled"):
             altered = {**needs, "web": {"result": result}}

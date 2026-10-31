@@ -3,12 +3,50 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from python_test_gate import AuditedRunner
+from python_test_gate import AuditedRunner, shard_suite, test_ids
 
 
 class PythonGateTests(unittest.TestCase):
     def run_gate(self, suite):
         return AuditedRunner(stream=io.StringIO()).run(suite)
+
+    def test_shards_cover_every_case_once_and_keep_classes_together(self):
+        class First(unittest.TestCase):
+            def test_one(self): pass
+            def test_two(self): pass
+            def test_three(self): pass
+
+        class Second(unittest.TestCase):
+            def test_one(self): pass
+            def test_two(self): pass
+
+        class Third(unittest.TestCase):
+            def test_one(self): pass
+
+        class Fourth(unittest.TestCase):
+            def test_one(self): pass
+
+        suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(case)
+                                   for case in (First, Second, Third, Fourth))
+        expected = list(test_ids(suite))
+        parts = [list(test_ids(shard_suite(suite, index, 3))) for index in range(3)]
+        self.assertCountEqual([identity for part in parts for identity in part], expected)
+        for case in (First, Second, Third, Fourth):
+            identities = set(test_ids(unittest.defaultTestLoader.loadTestsFromTestCase(case)))
+            self.assertEqual(sum(identities.issubset(set(part)) for part in parts), 1)
+        for index, part in enumerate(parts):
+            self.assertEqual(part, [identity for identity in expected if identity in part])
+            self.assertEqual(list(test_ids(shard_suite(suite, index, 3))), part)
+        self.assertEqual(max(map(len, parts)) - min(map(len, parts)), 1)
+
+    def test_unsharded_execution_preserves_the_original_suite(self):
+        suite = unittest.TestSuite()
+        self.assertIs(shard_suite(suite, 0, 1), suite)
+
+    def test_invalid_shard_coordinates_fail(self):
+        for index, count in ((0, 0), (-1, 3), (3, 3)):
+            with self.subTest(index=index, count=count), self.assertRaises(ValueError):
+                shard_suite(unittest.TestSuite(), index, count)
 
     def test_empty_suite_fails(self):
         self.assertFalse(self.run_gate(unittest.TestSuite()).wasSuccessful())

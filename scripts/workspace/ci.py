@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -37,8 +38,10 @@ def run(label, args, capture=False):
     return result.stdout or ""
 
 
-def main(skip_frontend_tests=False, stage="All"):
-    if stage not in ("All", "Rust", "Python", "Web"):
+def main(skip_frontend_tests=False, stage="All", api_shard_index=0, api_shard_count=1):
+    if api_shard_count < 1 or not 0 <= api_shard_index < api_shard_count:
+        raise ValueError("invalid API test shard")
+    if stage not in ("All", "Rust", "Python", "PythonSupport", "Api", "Web"):
         raise ValueError(f"Unknown hosted gate stage: {stage}")
     py = sys.executable
     pnpm = "pnpm.cmd" if os.name == "nt" else "pnpm"
@@ -89,7 +92,15 @@ def main(skip_frontend_tests=False, stage="All"):
     rust_labels = {"Core source resolution", "Monorepo Core source", "Rust toolchain consistency",
                    "Transcript exporter cache isolation", "Transcript generated contract"}
     web_labels = {"Node install", "Shared frontend types", "Web production validation", "Web fixture toolchain", "Web fixture source", "Web unit tests", "Web component interactions"}
-    if stage == "Rust":
+    api_labels = {"Django fresh migration", "Django migration drift", "Full Django PostgreSQL suite"}
+    if stage == "Api":
+        gates = [gate for gate in gates if gate[0] in api_labels
+                 and (api_shard_index == 0 or gate[0] == "Full Django PostgreSQL suite")]
+        gates = [(label, [*args, "--shard-index", str(api_shard_index), "--shard-count", str(api_shard_count)])
+                 if label == "Full Django PostgreSQL suite" else (label, args) for label, args in gates]
+    elif stage == "PythonSupport":
+        gates = [gate for gate in gates if gate[0] not in rust_labels | web_labels | api_labels]
+    elif stage == "Rust":
         gates = [gate for gate in gates if gate[0] in rust_labels] + rust_gates
     elif stage == "Web":
         gates = [gate for gate in gates if gate[0] in web_labels]
@@ -98,7 +109,11 @@ def main(skip_frontend_tests=False, stage="All"):
     else:
         gates = gates[:5] + rust_gates + gates[5:]
     for label, args in gates:
-        run(label, args)
+        started = time.monotonic()
+        try:
+            run(label, args)
+        finally:
+            print(f"<== {label}: {time.monotonic() - started:.3f}s", flush=True)
     config = json.loads(run("Compose structure", ["docker", "compose", "--env-file", ".env.example", "config", "--format", "json"], capture=True))
     for name, consumer in (("document-processor", "material-worker"), ("workspace-general", "runtime")):
         if name not in config["services"] or config["services"][name].get("profiles") or not config["services"][consumer]["depends_on"].get(name):
@@ -108,6 +123,8 @@ def main(skip_frontend_tests=False, stage="All"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-frontend-tests", action="store_true")
-    parser.add_argument("--stage", choices=("All", "Rust", "Python", "Web"), default="All")
+    parser.add_argument("--stage", choices=("All", "Rust", "Python", "PythonSupport", "Api", "Web"), default="All")
+    parser.add_argument("--api-shard-index", type=int, default=0)
+    parser.add_argument("--api-shard-count", type=int, default=1)
     args = parser.parse_args()
-    main(args.skip_frontend_tests, args.stage)
+    main(args.skip_frontend_tests, args.stage, args.api_shard_index, args.api_shard_count)
