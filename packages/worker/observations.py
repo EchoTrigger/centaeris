@@ -1,4 +1,4 @@
-"""Opt-in timing facts. Never log request bodies, URLs, or exception messages."""
+"""Opt-in timing and always-on safe failure facts; no bodies, URLs or exception text."""
 from contextlib import contextmanager
 import json
 import os
@@ -13,6 +13,19 @@ _HTTP_ERROR_CODES = _REASONS | {
     "environment_host_busy", "execution_resident_capacity_wait",
     "retained_cleanup_unconfirmed", "retained_cleanup_unavailable",
     "agent_run_supplement_cleanup_failed", "terminal_subagent_cleanup_unavailable",
+    "environment_controller_owned", "environment_controller_busy",
+    "teardown_workspace_preservation_failed",
+}
+
+_DIAGNOSTIC_ROUTES = {
+    "/agent-runs/control", "/agent-runs/step", "/agent-runs/teardown",
+    "/internal/jobs/:id", "/internal/jobs/claim", "/internal/jobs/wait",
+    "/internal/jobs/start", "/internal/jobs/heartbeat", "/internal/jobs/yield",
+    "/internal/jobs/complete", "/internal/jobs/fail", "/internal/jobs/reconcile",
+    "/internal/jobs/control/claim", "/internal/jobs/control/start",
+    "/internal/agent-run-lifecycle/control", "/internal/agent-run-lifecycle/resolve",
+    "/internal/agent-run-lifecycle/transition", "/internal/agent-run-lifecycle/release",
+    "/internal/agent-run-lifecycle/reconcile", "/internal/agent-run-lifecycle/cleanup-reconcile",
 }
 
 
@@ -23,6 +36,26 @@ def _error_code(error):
         return code if isinstance(code, str) and code in _HTTP_ERROR_CODES else "other"
     reason = str(error)
     return reason if reason in _REASONS else "other"
+
+
+def diagnostic(event, error, *, job_id=None, control_stage=None, lane=None,
+               transition_reason=None, slot_index=None):
+    """Always record confirmed waits/failures using only bounded public categories."""
+    status = getattr(error, "http_status", None)
+    route = getattr(error, "route", None)
+    fact = {"schema": "workspace.worker.diagnostic.v1", "source": "worker", "event": event,
+            "atUnixMs": time.time_ns() // 1_000_000,
+            "errorType": type(error).__name__, "errorCode": _error_code(error),
+            "httpStatus": status if type(status) is int and 100 <= status <= 599 else None,
+            "route": route if isinstance(route, str) and route in _DIAGNOSTIC_ROUTES else None}
+    fields = {"jobId": job_id, "controlStage": control_stage, "lane": lane,
+              "transitionReason": transition_reason, "slotIndex": slot_index,
+              "causeType": getattr(error, "cause_type", None)}
+    fact.update({key: value for key, value in fields.items() if value is not None})
+    try:
+        print(json.dumps(fact, separators=(",", ":")), file=sys.stderr, flush=True)
+    except OSError:
+        pass  # Diagnostics cannot change the accepted Job handoff or failure.
 
 
 def emit(phase, started, **fields):

@@ -1,6 +1,8 @@
 """Unconfirmed terminal cleanup retains its canonical Job and retry budget."""
 from contextlib import contextmanager
 import unittest
+import io
+import json
 from unittest.mock import patch
 
 from test_worker import lifecycle_fixture
@@ -49,7 +51,15 @@ class CleanupResponsibilityTests(unittest.TestCase):
                 self.assertEqual(yielded.call_args.args[-1], "retained_cleanup_pending")
                 self.assertEqual(complete.call_count, 1 if stage == "complete" else 0)
 
-    def exercise(self, retry_count, mode, *, lose_lease=False, unknown_handoff=False):
+    def test_cleanup_wait_retains_bottom_http_classification(self):
+        error = worker.DependencyUnavailable("private teardown body", http_status=503)
+        error.http_error_code, error.route = "retained_cleanup_unconfirmed", "/agent-runs/teardown"
+        event = self.exercise(11, "retained", teardown_error=error)
+        self.assertEqual((event["errorType"], event["causeType"]), ("RetainedCleanupPending", "DependencyUnavailable"))
+        self.assertEqual((event["httpStatus"], event["errorCode"], event["route"]),
+            (503, "retained_cleanup_unconfirmed", "/agent-runs/teardown"))
+
+    def exercise(self, retry_count, mode, *, lose_lease=False, unknown_handoff=False, teardown_error=None):
         job, _ = lifecycle_fixture()
         job.update(retryCount=retry_count, maxRetries=10)
         terminal = test_retained_lifecycle.RetainedLifecycleTests().terminal()
@@ -75,14 +85,17 @@ class CleanupResponsibilityTests(unittest.TestCase):
         def teardown(*_args):
             nonlocal cleanup_attempted
             cleanup_attempted = True
-            raise OSError("lost teardown acknowledgement")
+            raise teardown_error or OSError("lost teardown acknowledgement")
 
+        output = io.StringIO()
         def handoff(*_args):
             healthy()
+            self.assertEqual(output.getvalue(), "")
             if unknown_handoff:
                 raise worker.YieldHandoffUnknown(OSError("lost yield acknowledgement"))
 
-        with patch.object(worker, "AGENT_RUN_EXECUTION_MODE", mode), \
+        with patch.object(worker.observations, "ENABLED", False), patch("sys.stderr", output), \
+                patch.object(worker, "AGENT_RUN_EXECUTION_MODE", mode), \
                 patch.object(worker, "start_job"), patch.object(worker, "lease_heartbeats", heartbeats), \
                 patch.object(worker, "resolve_agent_run_lifecycle", return_value=terminal), \
                 patch.object(worker, "runtime_teardown_request", side_effect=teardown), \
@@ -102,6 +115,15 @@ class CleanupResponsibilityTests(unittest.TestCase):
             yielded.assert_not_called()
         else:
             yielded.assert_called_once_with(job["jobId"], owner, 2000, "retained_cleanup_pending")
+        if lose_lease or unknown_handoff:
+            self.assertEqual(output.getvalue(), "")
+            return None
+        event = json.loads(output.getvalue())
+        self.assertEqual((event["event"], event["jobId"], event["lane"], event["transitionReason"]),
+            ("jobWaiting", job["jobId"], "execution", "retained_cleanup_pending"))
+        self.assertNotIn(owner, output.getvalue())
+        self.assertNotIn("private", output.getvalue())
+        return event
 
 
 if __name__ == "__main__":

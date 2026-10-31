@@ -244,7 +244,15 @@ A local concurrent model-request comparison rejected fixed mmap thresholds
 because they increased request latency. No periodic collection, heap trimming
 or automatic restart is added.
 
-API Docker logs rotate at 20 MiB per file, retaining five files per container.
+Worker wait and slot-failure diagnostics use `workspace.worker.diagnostic.v1`
+without enabling performance tracing. A confirmed Job yield records its Job ID,
+lane, control stage, transition reason, and safe HTTP error category/status/route.
+An unconfirmed yield does not produce a waiting record. Exception text,
+credentials and lease owners are excluded. Runtime classifies the exact
+`cleanup execution environment lost` failure as
+`cleanup_execution_environment_lost`.
+
+API and Worker Docker logs rotate at 20 MiB per file, retaining five files per container.
 Recreate the API container to apply allocator environment and logging changes;
 restarting an existing container does not apply new Compose configuration.
 

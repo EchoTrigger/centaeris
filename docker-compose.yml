@@ -189,6 +189,11 @@ services:
       dockerfile: packages/worker/Dockerfile
       labels: *release-image-labels
     command: ["python", "worker.py", "serve"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
     environment: &worker-environment
       RUNTIME_INTERNAL_URL: http://runtime:${RUNTIME_PORT}
       API_INTERNAL_URL: *api-internal-url

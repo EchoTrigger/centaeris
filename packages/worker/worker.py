@@ -155,7 +155,7 @@ def json_request(url, body, token_header, token, default_reason, timeout=10):
     with observations.measure("rpc", route=route):
         try:
             return _json_request(url, body, token_header, token, default_reason, timeout)
-        except DependencyUnavailable as error:
+        except RuntimeError as error:
             error.route = route
             raise
 
@@ -659,6 +659,8 @@ def execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
             raise
         require_healthy_lease()
         yield_job(job["jobId"], lease_owner, now_ms() + ENVIRONMENT_CONTROLLER_RECHECK_MS, reason)
+        observations.diagnostic("jobWaiting", error, job_id=job["jobId"],
+            control_stage=job.get("controlStage"), lane="execution", transition_reason=reason)
         return False
 
 
@@ -785,6 +787,12 @@ def resolve_agent_run_lifecycle(job, lease_owner, agent_run_id, digest):
 
 class RetainedCleanupPending(RuntimeError):
     """Cleanup is unconfirmed; retain the terminal and yield this Job's lease."""
+    def __init__(self, reason, cause=None):
+        super().__init__(reason)
+        self.cause_type = type(cause).__name__ if cause is not None else None
+        self.http_status = getattr(cause, "http_status", None)
+        self.http_error_code = getattr(cause, "http_error_code", None)
+        self.route = getattr(cause, "route", None)
 
 
 def finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, require_healthy_lease):
@@ -796,7 +804,7 @@ def finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, req
             raise
         # Never include untrusted response bodies or transport credentials.
         reason = str(error) if isinstance(error, RuntimeError) else "retained_cleanup_unavailable"
-        raise RetainedCleanupPending(reason) from error
+        raise RetainedCleanupPending(reason, error) from error
 
 
 def _finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, require_healthy_lease):
@@ -1426,11 +1434,7 @@ def _run_job_loop(slot_index, stopped):
             if not worked:
                 wait_for_jobs()
         except Exception as error:
-            print(
-                f"worker job slot failed: slot={slot_index}; error={type(error).__name__}",
-                file=sys.stderr,
-                flush=True,
-            )
+            observations.diagnostic("slotFailed", error, slot_index=slot_index, lane="execution")
             if (isinstance(error, DependencyUnavailable)
                     and type(getattr(error, "http_status", None)) is int
                     and error.http_status == 503
@@ -1493,6 +1497,8 @@ def execute_control_job(job):
                 healthy()
                 reason = environment_cleanup_wait_reason(error) or "control_retry_pending"
                 yield_job(job["jobId"], owner, now_ms() + ENVIRONMENT_CONTROLLER_RECHECK_MS, reason)
+                observations.diagnostic("jobWaiting", error, job_id=job["jobId"],
+                    control_stage=job["controlStage"], lane="control", transition_reason=reason)
     except YieldHandoffUnknown as error:
         print(f"worker handoff unconfirmed: jobId={job['jobId']}; transitionReason=job_yield_handoff_unknown; "
               f"errorType={error.error_type}; httpStatus={error.http_status}", flush=True)
