@@ -154,7 +154,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
   const [thinkingMode, setThinkingMode] = useState("");
   const [sessions, setSessions] = useState([]);
   const [projects, setProjects] = useState([]);
-  const [sessionId, setSessionId] = useState("");
+  const [sessionId, setSessionId] = useState(() => workspaceDraft || startFresh ? "" : requestedSessionId);
   const [presentationAttempt, setPresentationAttempt] = useState(0);
   const [runControlAttempt, setRunControlAttempt] = useState(0);
   const [contextVersion, setContextVersion] = useState(null);
@@ -441,7 +441,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
     clearRunControl();
     acceptedRouteSessionIdRef.current = "";
     setSessions([]);
-    setSessionId("");
+    setSessionId(workspaceDraft || startFresh ? "" : requestedSessionId);
     clearConversationProjection();
     setDraft("");
     setSending(false);
@@ -575,6 +575,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: presentationAttempt intentionally restarts the same subscription when Retry is chosen.
   useEffect(() => {
+    if (!workspaceDraft && !startFresh && requestedSessionId && sessionId !== requestedSessionId) return undefined;
     stopActiveStream();
     const abortController = new AbortController();
     streamAbortRef.current = abortController;

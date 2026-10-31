@@ -267,7 +267,7 @@ test("revoked navigation-only delivery cannot be restored by late bootstrap HTTP
   const request = env.request, bootstrap = deferred(), navigation = deferred();
   const original = await (await request("/api/sessions/session")).json();
   let waiting = false;
-  env.request = path => path.includes("/workspaces/") && path.includes("/sessions?")
+  env.request = path => path === "/api/workspaces/workspace/sessions"
     ? (waiting = true, bootstrap.promise) : request(path);
   env.stream = options => { env.streamOptions = options; return navigation.promise; };
   env.location.search = "?new=1"; await subject.settle();

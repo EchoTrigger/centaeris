@@ -50,6 +50,9 @@ vi.mock("../../src/chat/transcriptTransport", () => ({
 vi.mock("../../src/chat/workspacePresentationTransport", () => ({
   streamWorkspacePresentation: (options: Subscription) => {
     fixture.subscriptions.push(options);
+    if (options.sessionId === null && !fixture.agents.some(agent => agent.id === options.agentId)) {
+      return Promise.reject(Object.assign(new Error("presentation_scope_not_found"), { status: 404 }));
+    }
     options.onConnection("running");
     return new Promise<void>(resolve => options.signal.addEventListener("abort", () => resolve(), { once: true }));
   },
@@ -215,18 +218,22 @@ test("business Agent chat uses published model settings and leaves model selecti
 
 
 test("a deleted Agent Session remains discoverable, displays its original history and continues using the workspace default", async () => {
-  const user = userEvent.setup();
+  const user = userEvent.setup(), navigation = deferred<unknown>();
   fixture.agents = [{ definitionId: "default-definition", definitionVersionId: "default-version", id: "default-agent", workspaceId: "workspace", name: "Workspace default", status: "active", isBusinessRoot: false }];
   window.history.replaceState({}, "", "/w/workspace/sessions/session");
   const initial = fixture.request.getMockImplementation()!;
   fixture.request.mockImplementation((path, options) => path === "/api/agents/default-agent/model-settings"
     ? Promise.resolve({ schema: "agent.model_settings.v1", agentId: "default-agent", modelConfigRef: "model", thinkingMode: null, status: "configured" })
+    : path === "/api/workspaces/workspace/sessions" ? navigation.promise
     : path.endsWith("/messages") ? Promise.resolve(receiptFor(options)) : initial(path, options));
   await mountConversation(row, { ...page, sourceHighWater: "1", resumeCursors: [{ streamId: "workspace-transcript.v1", cursor: "1" }], blocks: [{
     blockId: "original-history", blockRevision: "1", orderKey: { sourceSequence: "1", ordinal: 0 },
     body: { kind: "userText", content: { inlineContent: "Original history before the Agent was deleted", sourceRef: null } },
   }] }, true);
   expect(screen.getByText("Original history before the Agent was deleted")).not.toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(fixture.subscriptions.every(item => item.sessionId === "session")).toBe(true);
+  await act(async () => { navigation.resolve({ sessions: [row] }); });
   const historyLink = screen.getByRole("link", { name: "Synthetic" });
   expect(historyLink.getAttribute("href")).toBe("/w/workspace/sessions/session");
   expect(fixture.subscriptions.findLast(item => item.sessionId === "session")?.agentId).toBe("agent");
@@ -292,6 +299,13 @@ test("sending immediately after opening a Session targets that Session while nav
     : path.endsWith("/messages") ? accepted.promise : initial(path, options));
   fixture.selectedSession = row;
   await user.click(oldSession);
+  await waitFor(() => expect(fixture.subscriptions.some(item => item.sessionId === "session" && !item.signal.aborted)).toBe(true));
+  const subscription = fixture.subscriptions.findLast(item => item.sessionId === "session" && !item.signal.aborted)!;
+  await act(async () => {
+    await subscription.controller.acceptWithBackpressure({ cursor: null, item: {
+      schema: "workspace.presentation.v1", workspaceId: "workspace", agentId: "agent", sessionId: "session", kind: "snapshot", page,
+    } });
+  });
   await user.type(screen.getByRole("textbox", { name: "appRoute.message" }), "Continue the Session I just opened");
   await user.click(screen.getByRole("button", { name: "appRoute.input" }));
   await waitFor(() => expect(callsFor("/messages")).toHaveLength(1));

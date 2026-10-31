@@ -82,10 +82,10 @@ test("a late startup HTTP list cannot replace a newer pushed navigation snapshot
 });
 
 
-test("pushed navigation opens the requested conversation while the startup HTTP list is still pending", async t => {
+test("the requested conversation opens directly while the startup HTTP list is still pending", async t => {
   let release;
   const f = await setup(t, false, () => new Promise(resolve => { release = resolve; }));
-  assert.equal(f.getOptions().sessionId, null);
+  assert.equal(f.getOptions().sessionId, "session");
   await f.send("navigation", {sessions: [row()]});
   assert.equal(f.getOptions().sessionId, "session");
   await f.send("snapshot", {page});
