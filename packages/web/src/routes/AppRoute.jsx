@@ -838,14 +838,14 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
     submissionOriginRef.current = requestToken;
     pendingBindingRef.current = { request: requestToken, sessionId: null, agentRunId: null };
     setSending(true);
-    const targetSessionId = sessionId || "new";
+    const targetSessionId = workspaceDraft || startFresh ? "new" : requestedSessionId || sessionId || "new";
     const attachmentRefs = [...pendingAttachmentIds].sort();
     const uploadFiles = pendingUploadFiles;
     setError("");
     if (targetSessionId === "new") composerStartRectRef.current = composerRef.current?.getBoundingClientRect() || null;
     const startedAtMs = Date.now();
     setWorkTime({ startedAtMs, sessionId: targetSessionId });
-    const pendingMessage = { text, startedAtMs, sessionId: sessionId || null, agentRunId: null };
+    const pendingMessage = { text, startedAtMs, sessionId: targetSessionId === "new" ? null : targetSessionId, agentRunId: null };
     setPendingUserMessage(pendingMessage);
     setDraft("");
     let accepted = false;

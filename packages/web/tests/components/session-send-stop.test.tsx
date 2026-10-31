@@ -111,7 +111,7 @@ async function mountConversation(initialSession: typeof row | null = null, snaps
 }
 
 beforeEach(() => {
-  sessionStorage.clear(); localStorage.clear(); fixture.activeRun = null; fixture.selectedSession = null;
+  sessionStorage.clear(); localStorage.clear(); fixture.activeRun = null; fixture.selectedSession = null; fixture.defaultAgentId = "default-agent";
   fixture.agents = [{ definitionId: null, definitionVersionId: null, id: "agent", workspaceId: "workspace", name: "Synthetic agent", status: "active", isBusinessRoot: false }];
   vi.stubGlobal("crypto", webcrypto);
   window.history.replaceState({}, "", "/w/workspace/agents/agent?sessionId=session");
@@ -277,4 +277,23 @@ test("a new ordinary shared Agent conversation submits the model and thinking mo
   expect(body.agentId).toBe("agent");
   expect(body.modelConfigRef).toBe("alternate");
   expect(body.thinkingMode).toBe("high");
+});
+
+test("sending immediately after opening a Session targets that Session while navigation data is pending", async () => {
+  vi.stubGlobal("matchMedia", () => ({ matches: true }));
+  const user = userEvent.setup(), navigation = deferred<unknown>(), accepted = deferred<unknown>();
+  fixture.defaultAgentId = "agent";
+  window.history.replaceState({}, "", "/w/workspace/app");
+  const initial = fixture.request.getMockImplementation()!;
+  render(<MemoryRouter initialEntries={["/w/workspace/app"]}><WorkspaceChatLayout /></MemoryRouter>);
+  await waitFor(() => expect(screen.getByRole("button", { name: "appRoute.aiModel" }).textContent).toContain("Synthetic model"));
+  const oldSession = await screen.findByRole("link", { name: "Synthetic" });
+  fixture.request.mockImplementation((path, options) => path === "/api/workspaces/workspace/sessions" ? navigation.promise
+    : path.endsWith("/messages") ? accepted.promise : initial(path, options));
+  fixture.selectedSession = row;
+  await user.click(oldSession);
+  await user.type(screen.getByRole("textbox", { name: "appRoute.message" }), "Continue the Session I just opened");
+  await user.click(screen.getByRole("button", { name: "appRoute.input" }));
+  await waitFor(() => expect(callsFor("/messages")).toHaveLength(1));
+  expect(callsFor("/messages")[0][0]).toBe("/api/workspaces/workspace/sessions/session/messages");
 });
