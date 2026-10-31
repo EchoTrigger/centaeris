@@ -87,7 +87,7 @@ def read_evidence(content: str, bound: BoundInput, representation, offset: int, 
     }
 
 
-def search_evidence(segment, bound: BoundInput, score: int, *, full_window=False) -> dict:
+def search_evidence(segment, bound: BoundInput, representation, score: int, *, full_window=False) -> dict:
     content = segment.boundedText if full_window else _bounded_utf8_prefix(segment.boundedText, MAX_SEARCH_SNIPPET_BYTES)
     locator = dict(segment.locator)
     locator["endByte"] = locator["startByte"] + len(content.encode("utf-8"))
@@ -102,7 +102,7 @@ def search_evidence(segment, bound: BoundInput, score: int, *, full_window=False
         "ownerSha256": bound.resolved["sha256"],
         "ownerGeneration": bound.input_identity["generation"],
         "representationId": segment.representation_id,
-        "specDigest": segment.representation.processingSpecification_id,
+        "specDigest": representation.processingSpecification_id,
         "locator": locator,
         "evidenceSha256": sha256_bytes(content.encode("utf-8")),
         "citationAllowed": bound.resolved["citationAllowed"],

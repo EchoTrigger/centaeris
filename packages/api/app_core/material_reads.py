@@ -74,12 +74,15 @@ def search_materials(access: MaterialAccess, input_bindings: list, *, query, ran
     representation_ids = [item.representation_id for item in inputs]
     candidates = list(
         KnowledgeSegment.objects.filter(representation_id__in=representation_ids)
-        .select_related("representation")
         .order_by("representation_id", "ordinal")[: MAX_SEARCH_CANDIDATES + 1]
     )
     if len(candidates) > MAX_SEARCH_CANDIDATES:
         raise KnowledgeError("knowledge_search_candidate_limit_exceeded")
     inputs_by_representation = {item.representation_id: item for item in inputs}
+    representations_by_id = {
+        item.representation_id: representation
+        for item, representation in zip(inputs, representations, strict=True)
+    }
     terms = list(dict.fromkeys(re.findall(r"\w+", query.casefold()))) or [query.casefold()]
     matches = []
     for segment in candidates:
@@ -96,7 +99,10 @@ def search_materials(access: MaterialAccess, input_bindings: list, *, query, ran
     else:
         matches.sort(key=lambda value: (-value[0], -value[1].timestamp(), value[2].segmentId))
     hits = [
-        material_evidence.search_evidence(segment, item, score, full_window=full_window)
+        material_evidence.search_evidence(
+            segment, item, representations_by_id[segment.representation_id], score,
+            full_window=full_window,
+        )
         for score, _updated, segment, item in matches[:limit]
     ]
     return {

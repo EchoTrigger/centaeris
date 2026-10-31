@@ -30,22 +30,33 @@ export function transcriptNormalContentReferences(blocks: readonly TranscriptBlo
 // residency: evicted history can still use the ordinary demand reader later.
 export function createPresentationContentStore() {
   const slots = new Map<string, Slot>();
+  const residents = new Map<string, Slot>();
   const listeners = new Set<() => void>();
   let bytes = 0;
+  let unfinished = 0;
   let version = 0;
   const notify = () => { version++; listeners.forEach(listener => listener()); };
   function reserve(references: readonly TranscriptContentRef[]) {
     for (const reference of references) {
       const id = key(reference);
-      if (!slots.has(id)) slots.set(id, { reference, offset: '0', bytes: 0, evicted: false, ranges: new Map(),
-        snapshot: { content: '', complete: BigInt(reference.byteLength) === 0n, limited: false } });
+      if (!slots.has(id)) {
+        const complete = BigInt(reference.byteLength) === 0n;
+        slots.set(id, { reference, offset: '0', bytes: 0, evicted: false, ranges: new Map(),
+          snapshot: { content: '', complete, limited: false } });
+        if (!complete) unfinished++;
+      }
     }
     // Metadata is bounded by the loaded transcript. Removing blocks retires its
     // slots through retain(); it does not keep an unbounded history of revisions.
   }
   function retain(references: readonly TranscriptContentRef[]) {
     const retained = new Set(references.map(key));
-    for (const [id, slot] of slots) if (!retained.has(id)) { bytes -= slot.bytes; slots.delete(id); }
+    for (const [id, slot] of slots) if (!retained.has(id)) {
+      bytes -= slot.bytes;
+      if (!slot.snapshot.complete) unfinished--;
+      residents.delete(id);
+      slots.delete(id);
+    }
   }
   function apply(raw: TranscriptContentRange, identity: { sessionId: string; projectionGeneration: string }, beforeNotify?: () => void) {
     const reference = { refId: raw.refId, revision: raw.revision, byteLength: raw.byteLength };
@@ -68,17 +79,21 @@ export function createPresentationContentStore() {
     if (start >= cap || end > cap) throw new Error('presentation content exceeds preview budget');
     const limited = BigInt(reference.byteLength) > BigInt(PRESENTATION_CONTENT_PREVIEW_BYTES) && end >= cap - 3n;
     const complete = !page.hasMore || limited;
+    if (!slot.snapshot.complete && complete) unfinished--;
     if (!slot.evicted) {
-      slot.bytes += new TextEncoder().encode(page.content).byteLength;
-      bytes += new TextEncoder().encode(page.content).byteLength;
+      // Validation already checked this exact UTF-8 byte length.
+      const pageBytes = Number(end - start);
+      slot.bytes += pageBytes;
+      bytes += pageBytes;
       slot.snapshot = { content: slot.snapshot.content + page.content, complete, limited };
+      residents.delete(id); residents.set(id, slot);
     } else slot.snapshot = { content: '', complete, limited };
     slot.ranges.set(page.startOffset, { end: page.endOffset, digest: rangeDigest(page.content) });
     slot.offset = page.endOffset;
-    slots.delete(id); slots.set(id, slot);
     while (bytes > PRESENTATION_CONTENT_CACHE_BYTES) {
-      const victim = [...slots.values()].find(candidate => candidate !== slot && candidate.bytes > 0);
-      if (!victim) break;
+      // The applied slot is last and cannot exceed the cache's preview cap.
+      const [victimId, victim] = residents.entries().next().value!;
+      residents.delete(victimId);
       bytes -= victim.bytes;
       victim.bytes = 0;
       victim.evicted = true;
@@ -87,8 +102,10 @@ export function createPresentationContentStore() {
     beforeNotify?.();
     notify();
   }
-  function ready() { return [...slots.values()].every(slot => slot.snapshot.complete); }
-  function reset(references: readonly TranscriptContentRef[] = []) { slots.clear(); bytes = 0; reserve(references); notify(); }
+  function ready() { return unfinished === 0; }
+  function reset(references: readonly TranscriptContentRef[] = []) {
+    slots.clear(); residents.clear(); bytes = 0; unfinished = 0; reserve(references); notify();
+  }
   function clear() { reset(); }
   return { reserve, retain, apply, ready, reset, clear,
     get: (reference: TranscriptContentRef): PresentationContentSnapshot | null => {

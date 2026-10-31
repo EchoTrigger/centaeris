@@ -364,3 +364,33 @@ queue-free service samples separately from user latency including congestion.
 Use matched source/configuration/workspace sizes for comparisons and adequate
 repetitions for p50/p95. The 500 ms value is an investigation target, not an
 unmeasured pass threshold.
+
+## Local processing comparisons
+
+These probes measure internal costs separately from the real-tool k6 gate:
+
+```sh
+cargo test -p centaeris-core --release --lib repeated_processing_timings -- --ignored --nocapture --test-threads=1
+node --expose-gc --experimental-strip-types perf/harness/presentation_content_store.mjs BASELINE_REVISION
+cargo test -p runtime_server --release --bin runtime_server resident_processing_timings -- --ignored --nocapture --test-threads=1
+```
+
+Use the same test-only Rust probes on both revisions. Core reports medians of
+five 100-call batches, including index creation and output destruction, excluding
+fixture construction and input clones. The Web probe alternates baseline and
+candidate stores with identical prebuilt inputs, including contract validation,
+and reports p50/p95. Its heap/RSS deltas are process snapshots, not peak or
+retained browser-memory measurements.
+
+The Runtime probe requires the existing gate-owned disposable PostgreSQL
+database variables and `pg_stat_statements` in that test server. It resets only
+that fixture's schemas and statistics; never point it at an application database.
+It reports 15 full reconciliation samples per inventory size and SQL execution
+counts across the gate, transaction, and wake path. Its separate usage samples
+include the database read. Keep connection topology and server configuration
+fixed; SQL executions are not identical to network round trips.
+
+These synthetic counts and timings do not establish a latency SLO or a physical
+concurrency result. Report the real-tool k6 results and original Run/Job cleanup
+evidence separately. Retain existing ordering, content equality, unknown-creation
+accounting, and maintenance locking behavior when changing lookup structures.

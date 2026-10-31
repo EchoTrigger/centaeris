@@ -124,11 +124,11 @@ class MaterialReadContractTests(SimpleTestCase):
             boundedText="😀" * 3_000,
             segmentId="segment_1",
             representation_id=self.bound.representation_id,
-            representation=SimpleNamespace(processingSpecification_id="sha256:" + "c" * 64),
             locator={"kind": "textSpan", "startByte": 10, "endByte": 12_010,
                      "startLine": 2, "endLine": 2, "pageStart": 2, "pageEnd": 2},
         )
-        result = material_evidence.search_evidence(segment, self.bound, 3)
+        representation = SimpleNamespace(processingSpecification_id="sha256:" + "c" * 64)
+        result = material_evidence.search_evidence(segment, self.bound, representation, 3)
         self.assertLessEqual(len(result["content"].encode()), material_contract.MAX_SEARCH_SNIPPET_BYTES)
         self.assertEqual(result["locator"]["endByte"], 10 + len(result["content"].encode()))
         self.assertEqual(result["evidenceSha256"], material_contract.sha256_bytes(result["content"].encode()))

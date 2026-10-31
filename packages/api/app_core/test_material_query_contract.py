@@ -4,10 +4,11 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 from . import material_access, material_reads
-from .material_contract import KnowledgeError
+from .material_contract import BoundInput, KnowledgeError, sha256_bytes
+from .models import DerivedRepresentation, KnowledgeSegment, ProcessingSpecification
 
 
 class MaterialQueryContractTests(SimpleTestCase):
@@ -28,12 +29,12 @@ class MaterialQueryContractTests(SimpleTestCase):
             "representations": patch.object(material_reads, "_representations", return_value=([object()], [])),
             "read": patch.object(material_reads, "_read_representation", return_value={"content": "evidence"}),
             "segments": patch.object(material_reads.KnowledgeSegment.objects, "filter"),
-            "hit": patch.object(material_reads.material_evidence, "search_evidence", side_effect=lambda segment, _item, score, full_window=False: {"segmentId": segment.segmentId, "score": score}),
+            "hit": patch.object(material_reads.material_evidence, "search_evidence", side_effect=lambda segment, _item, _representation, score, full_window=False: {"segmentId": segment.segmentId, "score": score}),
         }
         for name, patcher in patches.items():
             setattr(self, name, patcher.start())
             self.addCleanup(patcher.stop)
-        self.candidates = self.segments.return_value.select_related.return_value.order_by.return_value
+        self.candidates = self.segments.return_value.order_by.return_value
         self.candidates.__getitem__.return_value = []
 
     def read_request(self, **changes):
@@ -124,3 +125,78 @@ class MaterialQueryContractTests(SimpleTestCase):
         )
         self.assertNotIn("schema", direct)
         self.assertEqual(self.search_request(), {**direct})
+
+
+class MaterialSearchRepresentationTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.spec = ProcessingSpecification.objects.create(specDigest="sha256:" + "c" * 64, payload={})
+        cls.inputs = []
+        for index in range(4):
+            identity = {
+                "ownerKind": "sourceObject", "ownerId": f"source_{index}",
+                "generation": 1, "sha256": "sha256:" + "a" * 64,
+            }
+            representation = DerivedRepresentation.objects.create(
+                representationId=f"representation_{index}",
+                ownerKind=identity["ownerKind"], ownerId=identity["ownerId"],
+                ownerContentGeneration=identity["generation"], ownerSha256=identity["sha256"],
+                processingSpecification=cls.spec, pageCount=1,
+                canonicalTextKey=f"private/canonical_{index}", canonicalTextSizeBytes=20_000,
+                canonicalTextSha256="sha256:" + "b" * 64,
+                manifest={"pages": [{"text": "manifest text" * 200}]},
+            )
+            for ordinal, prefix in enumerate(("z", "a", "b")):
+                content = "policy\n" + "😀" * 3_000 if prefix != "b" else "unrelated"
+                KnowledgeSegment.objects.create(
+                    segmentId=f"{prefix}_doc_{index}", representation=representation,
+                    ordinal=ordinal, boundedText=content, textSha256=sha256_bytes(content.encode()),
+                    locator={"kind": "textSpan", "startByte": 10, "endByte": 10 + len(content.encode()),
+                             "startLine": 2, "endLine": 3, "pageStart": 1, "pageEnd": 1},
+                )
+            if index < 3:
+                cls.inputs.append(BoundInput(
+                    resolved={
+                        "inputRef": f"input_{index}", "displayName": f"document_{index}",
+                        "objectRef": identity["ownerId"], "ownerKind": identity["ownerKind"],
+                        "evidenceKind": "workspaceSource", "sha256": identity["sha256"],
+                        "citationAllowed": index != 1,
+                    },
+                    content_source=None,
+                    owner=SimpleNamespace(updatedAt=datetime(2026, 1, index + 1, tzinfo=UTC)),
+                    input_identity=identity, representation_id=representation.representationId,
+                ))
+
+    def search(self, **options):
+        access = material_access.MaterialAccess(object(), {}, self.spec.pk, "digest")
+        with patch.object(material_access, "bind_inputs", return_value=self.inputs):
+            return material_reads.search_materials(
+                access, [], query="policy", ranking=options.pop("ranking", "relevance"),
+                date_range=options.pop("date_range", None), limit=options.pop("limit", 20), **options,
+            )
+
+    def test_search_decodes_each_authorized_manifest_once_and_preserves_evidence(self):
+        manifest = DerivedRepresentation._meta.get_field("manifest")
+        with patch.object(manifest, "from_db_value", wraps=manifest.from_db_value) as decoded:
+            with self.assertNumQueries(2):
+                result = self.search(limit=4)
+        self.assertEqual(decoded.call_count, 3)
+        self.assertEqual([hit["segmentId"] for hit in result["hits"]], ["a_doc_2", "z_doc_2", "a_doc_1", "z_doc_1"])
+        hit = result["hits"][0]
+        self.assertEqual((hit["inputRef"], hit["ownerRef"], hit["representationId"], hit["specDigest"]),
+                         ("input_2", "source_2", "representation_2", self.spec.pk))
+        self.assertEqual(hit["score"], 3)
+        self.assertEqual(hit["evidenceSha256"], sha256_bytes(hit["content"].encode()))
+        self.assertEqual(hit["locator"]["endByte"], 10 + len(hit["content"].encode()))
+        self.assertTrue(hit["citationAllowed"])
+        self.assertFalse(result["hits"][2]["citationAllowed"])
+        self.assertLessEqual(len(hit["content"].encode()), 8 * 1024)
+
+    def test_recent_date_filter_and_full_window_keep_the_authorized_scope(self):
+        result = self.search(
+            ranking="recent", full_window=True,
+            date_range={"updatedFrom": "2026-01-02T00:00:00Z", "updatedTo": "2026-01-03T00:00:00Z"},
+        )
+        self.assertEqual([hit["segmentId"] for hit in result["hits"]], ["a_doc_2", "z_doc_2", "a_doc_1", "z_doc_1"])
+        self.assertEqual(result["hits"][0]["content"], "policy\n" + "😀" * 3_000)
+        self.assertEqual(result["hits"][0]["locator"]["endByte"], 10 + len(result["hits"][0]["content"].encode()))
