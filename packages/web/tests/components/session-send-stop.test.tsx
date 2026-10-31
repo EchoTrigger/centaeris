@@ -19,7 +19,7 @@ const fixture = vi.hoisted(() => ({
   navigate: vi.fn(),
   defaultAgentId: "default-agent", selectedSession: null as SessionSummary | null,
   user: { id: "user" }, workspace: { id: "workspace", name: "Synthetic workspace" },
-  agents: [{ definitionId: null as string | null, definitionVersionId: null as string | null, id: "agent", workspaceId: "workspace", name: "Synthetic agent", status: "active" }],
+  agents: [{ definitionId: null as string | null, definitionVersionId: null as string | null, id: "agent", workspaceId: "workspace", name: "Synthetic agent", status: "active", isBusinessRoot: false }],
   activeRun: null as { agentRunId: string; status: string; streamCursor: string } | null,
 }));
 
@@ -112,7 +112,7 @@ async function mountConversation(initialSession: typeof row | null = null, snaps
 
 beforeEach(() => {
   sessionStorage.clear(); localStorage.clear(); fixture.activeRun = null; fixture.selectedSession = null;
-  fixture.agents = [{ definitionId: null, definitionVersionId: null, id: "agent", workspaceId: "workspace", name: "Synthetic agent", status: "active" }];
+  fixture.agents = [{ definitionId: null, definitionVersionId: null, id: "agent", workspaceId: "workspace", name: "Synthetic agent", status: "active", isBusinessRoot: false }];
   vi.stubGlobal("crypto", webcrypto);
   window.history.replaceState({}, "", "/w/workspace/agents/agent?sessionId=session");
   fixture.request.mockImplementation(async path => {
@@ -189,10 +189,11 @@ test("a failed checkpoint without a Core message ends the pending submission whi
 });
 
 
-test("shared ordinary chat uses published model settings and leaves model selection to server acceptance", async () => {
+test("business Agent chat uses published model settings and leaves model selection to server acceptance", async () => {
   const user = userEvent.setup();
   fixture.agents[0].definitionId = "shared-definition";
   fixture.agents[0].definitionVersionId = "published-version";
+  fixture.agents[0].isBusinessRoot = true;
   const initial = fixture.request.getMockImplementation()!;
   fixture.request.mockImplementation((path, options) => path.endsWith("/model-settings")
     ? Promise.resolve({ schema: "agent.model_settings.v1", agentId: "agent", modelConfigRef: "model", thinkingMode: "high", status: "configured" })
@@ -215,7 +216,7 @@ test("shared ordinary chat uses published model settings and leaves model select
 
 test("a deleted Agent Session remains discoverable, displays its original history and continues using the workspace default", async () => {
   const user = userEvent.setup();
-  fixture.agents = [{ definitionId: "default-definition", definitionVersionId: "default-version", id: "default-agent", workspaceId: "workspace", name: "Workspace default", status: "active" }];
+  fixture.agents = [{ definitionId: "default-definition", definitionVersionId: "default-version", id: "default-agent", workspaceId: "workspace", name: "Workspace default", status: "active", isBusinessRoot: false }];
   window.history.replaceState({}, "", "/w/workspace/sessions/session");
   const initial = fixture.request.getMockImplementation()!;
   fixture.request.mockImplementation((path, options) => path === "/api/agents/default-agent/model-settings"
@@ -229,7 +230,7 @@ test("a deleted Agent Session remains discoverable, displays its original histor
   const historyLink = screen.getByRole("link", { name: "Synthetic" });
   expect(historyLink.getAttribute("href")).toBe("/w/workspace/sessions/session");
   expect(fixture.subscriptions.findLast(item => item.sessionId === "session")?.agentId).toBe("agent");
-  expect(fixture.request.mock.calls.some(([path]) => path === "/api/agents/default-agent/model-settings")).toBe(true);
+  expect(fixture.request.mock.calls.some(([path]) => path === "/api/agents/default-agent/model-settings")).toBe(false);
   await user.type(screen.getByRole("textbox", { name: "appRoute.message" }), "Continue this original Session");
   await user.click(screen.getByRole("button", { name: "appRoute.input" }));
   await waitFor(() => expect(callsFor("/messages")).toHaveLength(1));
@@ -237,8 +238,43 @@ test("a deleted Agent Session remains discoverable, displays its original histor
   const body = JSON.parse(String(options?.body));
   expect(path).toBe("/api/workspaces/workspace/sessions/session/messages");
   expect(body.agentId).toBe("agent");
-  expect(body.modelConfigRef).toBeUndefined();
+  expect(body.modelConfigRef).toBe("model");
   expect(body.thinkingMode).toBeUndefined();
   expect(row.agentId).toBe("agent");
   expect(screen.getByText("Original history before the Agent was deleted")).not.toBeNull();
+});
+
+test("a new ordinary shared Agent conversation submits the model and thinking mode chosen by its user", async () => {
+  vi.stubGlobal("matchMedia", () => ({ matches: true }));
+  const user = userEvent.setup();
+  fixture.agents[0].definitionId = "shared-definition";
+  fixture.agents[0].definitionVersionId = "published-version";
+  const initial = fixture.request.getMockImplementation()!;
+  fixture.request.mockImplementation((path, options) => path === "/api/models?workspaceId=workspace"
+    ? Promise.resolve({ models: [
+      { id: "model", providerId: "provider", modelName: "model", displayName: "Synthetic model", thinkingModes: [] },
+      { id: "alternate", providerId: "provider", modelName: "alternate", displayName: "Alternate model", thinkingModes: ["low", "high"] },
+    ] })
+    : path.endsWith("/model-settings") ? Promise.resolve({ schema: "agent.model_settings.v1", agentId: "agent", modelConfigRef: "model", thinkingMode: null, status: "configured" })
+    : path.endsWith("/messages") ? Promise.resolve(receiptFor(options)) : initial(path, options));
+  render(<MemoryRouter><AppPageContent agentId="agent" workspaceDraft={false} location={{ search: "?new=1", state: null }} modelsVersion={0} onSessionAccepted={() => {}} /></MemoryRouter>);
+  const modelPicker = screen.getByRole("button", { name: "appRoute.aiModel" });
+  await waitFor(() => expect(modelPicker.textContent).toContain("Synthetic model"));
+  expect((modelPicker as HTMLButtonElement).disabled).toBe(false);
+  await user.click(modelPicker);
+  await user.click(await screen.findByRole("menuitemradio", { name: "Alternate model" }));
+  expect(modelPicker.textContent).toContain("Alternate model");
+  const thinkingPicker = screen.getByRole("button", { name: "appRoute.reasoningEffort" });
+  expect((thinkingPicker as HTMLButtonElement).disabled).toBe(false);
+  await user.click(thinkingPicker);
+  await user.click(await screen.findByRole("menuitemradio", { name: "appRoute.high" }));
+  await user.type(screen.getByRole("textbox", { name: "appRoute.message" }), "Use my selected model");
+  await user.click(screen.getByRole("button", { name: "appRoute.input" }));
+  await waitFor(() => expect(callsFor("/messages")).toHaveLength(1));
+  const [path, options] = callsFor("/messages")[0];
+  const body = JSON.parse(String(options?.body));
+  expect(path).toBe("/api/workspaces/workspace/sessions/new/messages");
+  expect(body.agentId).toBe("agent");
+  expect(body.modelConfigRef).toBe("alternate");
+  expect(body.thinkingMode).toBe("high");
 });

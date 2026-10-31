@@ -118,7 +118,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
   const conversationAgentId = initialSession?.agentId || agentId;
   const activeAgent = agents.find((agent) => agent.id === conversationAgentId && agent.status === "active") || null;
   if (!activeAgent && !initialSession) throw new Error("agent_not_found");
-  const sharedConfiguration = !activeAgent || Boolean(activeAgent.definitionId);
+  const modelSelectionLocked = Boolean(activeAgent?.isBusinessRoot);
   const modelAgentId = activeAgent?.id || defaultAgentId;
   const modelSettingsClient = useMemo(() => modelAgentId ? createAgentModelSettingsClient(modelAgentId, apiJson) : null, [modelAgentId]);
   const workspaceBase = `/w/${encodeURIComponent(workspace.id)}`;
@@ -234,19 +234,19 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
     }));
   }, [models, t]);
   useEffect(() => {
-    if (!sharedConfiguration) setThinkingMode(readModelThinkingMode(user.id, workspace.id, currentModel));
-  }, [currentModel, user.id, workspace.id, sharedConfiguration]);
+    if (!modelSelectionLocked) setThinkingMode(readModelThinkingMode(user.id, workspace.id, currentModel));
+  }, [currentModel, user.id, workspace.id, modelSelectionLocked]);
   const selectThinkingMode = useCallback((mode) => {
-    if (sharedConfiguration || !currentModel) return;
+    if (modelSelectionLocked || !currentModel) return;
     writeModelThinkingMode(user.id, workspace.id, currentModel, mode);
     setThinkingMode(mode);
-  }, [currentModel, user.id, workspace.id, sharedConfiguration]);
+  }, [currentModel, user.id, workspace.id, modelSelectionLocked]);
   const selectModel = useCallback((id) => {
-    if (sharedConfiguration) return;
+    if (modelSelectionLocked) return;
     const selected = models.find((model) => model.id === id);
     if (selected) writePreferredModelIdentity(user.id, workspace.id, selected);
     setModelId(id);
-  }, [models, user.id, workspace.id, sharedConfiguration]);
+  }, [models, user.id, workspace.id, modelSelectionLocked]);
   const acceptedTarget = acceptedRunTarget && (!sessionId || acceptedRunTarget.sessionId === sessionId)
     ? acceptedRunTarget : null;
   const activeAgentRunId = acceptedTarget?.agentRunId || activeTranscriptRun?.agentRunId || "";
@@ -345,7 +345,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
     const previousModels = modelsRef.current;
     modelsRef.current = nextModels;
     setModels(nextModels);
-    if (sharedConfiguration) return;
+    if (modelSelectionLocked) return;
     setModelId((current) => {
       if (nextModels.some((model) => model.id === current)) return current;
       if (!current) {
@@ -359,7 +359,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
         model.providerId === previous?.providerId && model.modelName === previous?.modelName
       )?.id || "";
     });
-  }, [user.id, workspace.id, sharedConfiguration]);
+  }, [user.id, workspace.id, modelSelectionLocked]);
 
   const clearContextPanel = useCallback(() => {
     previewRequestIdRef.current += 1;
@@ -391,7 +391,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
       try {
         const [data, settings] = await Promise.all([
           apiResponse(`/api/models?workspaceId=${encodeURIComponent(workspace.id)}`, { signal: controller.signal }).then(response => response.json()),
-          sharedConfiguration && modelSettingsClient ? modelSettingsClient.load(controller.signal) : null,
+          modelSelectionLocked && modelSettingsClient ? modelSettingsClient.load(controller.signal) : null,
         ]);
         if (!controller.signal.aborted) {
           acceptModels(data.models);
@@ -403,7 +403,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
     }
     load();
     return () => controller.abort();
-  }, [modelsVersion, acceptModels, workspace.id, sharedConfiguration, modelSettingsClient, activeAgent?.definitionVersionId]);
+  }, [modelsVersion, acceptModels, workspace.id, modelSelectionLocked, modelSettingsClient, activeAgent?.definitionVersionId]);
 
   useEffect(() => {
     if (contextPanel.mode !== "filePreview" || !contextPanel.objectUrl) return undefined;
@@ -854,7 +854,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
           text,
           agentId: conversationAgentId,
           ...(targetSessionId === "new" && requestedProjectId ? { projectId: requestedProjectId } : {}),
-          ...(sharedConfiguration ? {} : { modelConfigRef: modelId, ...(thinkingMode ? { thinkingMode } : {}) }),
+          ...(modelSelectionLocked ? {} : { modelConfigRef: modelId, ...(thinkingMode ? { thinkingMode } : {}) }),
           ...(uploadFiles.length ? {} : { attachmentRefs }),
       }, uploadFiles, [], replaceUnconfirmedInput, hooks));
       accepted = true;
@@ -1388,7 +1388,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
             onUploadAttachment={uploadAttachment}
             sessionId={sessionId}
             contextRevision={contextVersion?.sessionId === sessionId ? contextVersion.revision : "0"}
-            modelSelectionDisabled={sharedConfiguration}
+            modelSelectionDisabled={modelSelectionLocked}
             currentModel={currentModel}
             thinkingMode={thinkingMode}
             onThinkingModeChange={selectThinkingMode}
