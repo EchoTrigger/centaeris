@@ -5,7 +5,7 @@ import json
 from django.conf import settings
 from django.db import transaction
 
-from .agent_definitions import available_agent_definitions
+from .agent_definitions import available_agent_definitions, uses_workspace_plugins
 from .app_delegations import DelegationRejected, require_run_delegation
 from .credentials import decrypt_credential_secret, validate_bearer_token
 from .models import AgentConnectorBinding, McpBearerCredential, McpCredentialAuditEvent
@@ -44,17 +44,18 @@ def _check_authorization(authorization):
                 "modelConfigRef": run.modelConfig_id}
     if authorization_digest(payload) != authorization.digest or any(payload[key] != value for key, value in bindings.items()):
         raise ConnectorRejected("mcp_connector_authorization_invalid")
-    if (run.status not in {"queued", "running"} or session.status != "active" or agent.status != "active"
+    if (run.status not in {"queued", "running"} or session.status != "active"
             or session.owner_id != run.user_id or agent.owner_id != run.user_id
             or session.workspace_id != run.workspace_id or agent.workspace_id != run.workspace_id):
         raise ConnectorRejected("mcp_connector_authorization_invalid")
-    if agent.definition_id is None:
-        if run.definition_version_id is not None:
+    if run.definition_version_id is None:
+        if agent.definition_id is not None:
             raise ConnectorRejected("mcp_connector_definition_invalid")
         return "private"
-    if (run.definition_version_id is None or run.definition_version.definition_id != agent.definition_id
+    if (run.definition_version.definition.workspace_id != run.workspace_id
             or run.agent_instructions != run.definition_version.instructions
-            or payload["pluginActivation"] != run.definition_version.plugin_activation):
+            or (not uses_workspace_plugins(agent, run.acting_app_id)
+                and payload["pluginActivation"] != run.definition_version.plugin_activation)):
         raise ConnectorRejected("mcp_connector_definition_invalid")
     return "managed"
 
@@ -72,7 +73,7 @@ def authorize_connector(authorization, body):
             require_run_delegation(run, lock=True)
         except DelegationRejected as error:
             raise ConnectorRejected(error.code, error.status) from error
-        definition_id = run.session.agent.definition_id
+        definition_id = run.definition_version.definition_id if run.definition_version_id else None
         if scope == "managed" and not available_agent_definitions(membership).filter(id=definition_id).exists():
             raise ConnectorRejected("agent_definition_not_available", 403)
         if not run.workspace.pluginEnablements.filter(pluginName=body["pluginName"]).exists():
@@ -89,19 +90,25 @@ def authorize_connector(authorization, body):
                 binding = AgentConnectorBinding.objects.select_for_update().filter(workspace_id=run.workspace_id,
                     definition_id=definition_id, plugin_name=body["pluginName"], server_id=body["serverId"]).first()
                 if binding is None:
-                    raise ConnectorRejected("mcp_connector_binding_missing")
-                from .models import AgentConnectorCredentialApproval
-                approval = AgentConnectorCredentialApproval.objects.select_for_update().get(pk=binding.approval_id)
-                if (approval.revoked_at is not None or approval.workspace_id != run.workspace_id
-                        or approval.definition_id != definition_id or approval.plugin_name != body["pluginName"]
-                        or approval.server_id != body["serverId"] or approval.resource_path != resource["resourcePath"]
-                        or approval.resource_digest != resource["resourceDigest"]):
-                    raise ConnectorRejected("mcp_connector_approval_invalid")
-                credential = McpBearerCredential.objects.select_for_update().get(pk=approval.credential_id)
-                if (credential.plugin_name != body["pluginName"] or (credential.workspace_id is not None and credential.credential_ref != resource["credentialRef"])
-                        or credential.workspace_id not in (None,run.workspace_id) or credential.version != approval.credential_version):
-                    raise ConnectorRejected("mcp_connector_approval_invalid")
-                identity.update(binding=binding.id, approval=approval.id)
+                    if uses_workspace_plugins(run.session.agent, run.acting_app_id):
+                        credential = McpBearerCredential.objects.select_for_update().filter(
+                            workspace_id=run.workspace_id, plugin_name=body["pluginName"],
+                            credential_ref=resource["credentialRef"]).first()
+                    if credential is None:
+                        raise ConnectorRejected("mcp_connector_binding_missing")
+                else:
+                    from .models import AgentConnectorCredentialApproval
+                    approval = AgentConnectorCredentialApproval.objects.select_for_update().get(pk=binding.approval_id)
+                    if (approval.revoked_at is not None or approval.workspace_id != run.workspace_id
+                            or approval.definition_id != definition_id or approval.plugin_name != body["pluginName"]
+                            or approval.server_id != body["serverId"] or approval.resource_path != resource["resourcePath"]
+                            or approval.resource_digest != resource["resourceDigest"]):
+                        raise ConnectorRejected("mcp_connector_approval_invalid")
+                    credential = McpBearerCredential.objects.select_for_update().get(pk=approval.credential_id)
+                    if (credential.plugin_name != body["pluginName"] or (credential.workspace_id is not None and credential.credential_ref != resource["credentialRef"])
+                            or credential.workspace_id not in (None,run.workspace_id) or credential.version != approval.credential_version):
+                        raise ConnectorRejected("mcp_connector_approval_invalid")
+                    identity.update(binding=binding.id, approval=approval.id)
             else:
                 from .workspace_resources import credential_for_workspace
                 try:

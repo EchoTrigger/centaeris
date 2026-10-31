@@ -8,6 +8,10 @@ class AgentModelSettingsError(ValueError):
     pass
 
 
+class SubmittedAgentModelError(AgentModelSettingsError):
+    """An ordinary Run explicitly selected an invalid catalog model or effort."""
+
+
 def selected_model(model_config_ref, thinking_mode, *, workspace_id=None):
     try:
         require_opaque_ref("modelConfigRef", model_config_ref)
@@ -32,16 +36,26 @@ def selected_model(model_config_ref, thinking_mode, *, workspace_id=None):
     return model, mode
 
 
-def configured_agent_model(agent):
+def configured_agent_model(agent, *, definition_version=None):
     """Call under the Agent admission lock, then snapshot on the new Run."""
+    business_instance = agent.is_business_instance or agent.business_branches.exists()
     try:
         agent = agent_configuration(agent)
     except BusinessAgentConfigurationUnavailable as error:
         raise AgentModelSettingsError(str(error)) from error
+    workspace_id = agent.workspace_id
+    if definition_version is not None:
+        agent = definition_version
+    elif agent.definition_id is not None:
+        agent = agent.definition.published_version
+        if agent is None:
+            raise AgentModelSettingsError("agent_definition_not_available")
+    elif not business_instance:
+        raise AgentModelSettingsError("agent_configuration_promotion_required")
     if agent.model_config_id is None:
         raise AgentModelSettingsError("agent_model_not_configured")
     mode = agent.thinking_mode or None
-    model, resolved = selected_model(agent.model_config_id, mode, workspace_id=agent.workspace_id)
+    model, resolved = selected_model(agent.model_config_id, mode, workspace_id=workspace_id)
     # A saved empty effort is a pinned value, not a request to resolve a changed
     # catalog default. ModelConfig revisions must not mutate their meaning.
     if resolved != agent.thinking_mode:
@@ -49,8 +63,28 @@ def configured_agent_model(agent):
     return model, agent.thinking_mode
 
 
+def submitted_agent_model(agent, model_config_ref, thinking_mode, *, definition_version=None):
+    """Ordinary Runs choose a catalog model; business Runs retain maintained policy."""
+    business_instance = agent.is_business_instance or agent.business_branches.exists()
+    if model_config_ref and not business_instance:
+        try:
+            return selected_model(model_config_ref, thinking_mode, workspace_id=agent.workspace_id)
+        except AgentModelSettingsError as error:
+            code = "model_not_found" if str(error) == "agent_model_not_available" else str(error)
+            raise SubmittedAgentModelError(code) from error
+    model, mode = configured_agent_model(agent, definition_version=definition_version)
+    if ((model_config_ref and model_config_ref != model.pk)
+            or (thinking_mode is not None and thinking_mode != mode)):
+        raise AgentModelSettingsError("agent_model_configuration_managed")
+    return model, mode
+
+
 def serialize_model_settings(agent):
     configuration = agent_configuration(agent)
+    if agent.definition_id is not None:
+        configuration = agent.definition.published_version
+        if configuration is None:
+            raise AgentModelSettingsError("agent_definition_not_available")
     status = "unconfigured"
     if configuration.model_config_id is not None:
         try:

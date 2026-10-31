@@ -1,6 +1,8 @@
 """Control processing must progress while all ordinary worker slots remain held."""
 from contextlib import contextmanager
 import threading
+import io
+import json
 import unittest
 from unittest.mock import patch
 from test_worker import lifecycle_fixture
@@ -85,6 +87,42 @@ class ControlLifecycleTests(unittest.TestCase):
                     self.assertEqual(paths[-1], "/internal/jobs/complete")
                 self.assertEqual(requests[-1][1]["jobId"], job["jobId"])
                 self.assertEqual(requests[-1][1]["leaseOwner"], job["leaseOwner"])
+
+    def test_control_wait_diagnostic_requires_confirmed_same_job_handoff(self):
+        for acknowledged in (True, False):
+            with self.subTest(acknowledged=acknowledged):
+                job, _ = lifecycle_fixture()
+                job.update(status="leased", leaseOwner="worker:private-lease", leasePurpose="control", controlStage="cleanup")
+                error = worker.DependencyUnavailable("private exception body", http_status=503)
+                error.http_error_code, error.route = "teardown_workspace_preservation_failed", "/agent-runs/teardown"
+                @contextmanager
+                def heartbeats(*_args):
+                    yield lambda: None
+                output = io.StringIO()
+                def handoff(job_id, owner, *_args):
+                    self.assertEqual((job_id, owner), (job["jobId"], job["leaseOwner"]))
+                    self.assertEqual(output.getvalue(), "")
+                    if not acknowledged:
+                        raise worker.YieldHandoffUnknown(error)
+                with patch.object(worker.observations, "ENABLED", False), patch("sys.stderr", output), \
+                        patch.object(worker, "runtime_request", return_value={"ok": True}), \
+                        patch.object(worker, "lease_heartbeats", heartbeats), \
+                        patch.object(worker, "_execute_control_job", side_effect=error), \
+                        patch.object(worker, "yield_job", side_effect=handoff) as yielded, \
+                        patch.object(worker, "fail_job") as failed:
+                    worker.execute_control_job(job)
+                yielded.assert_called_once()
+                failed.assert_not_called()
+                if acknowledged:
+                    event = json.loads(output.getvalue())
+                    self.assertEqual((event["event"], event["jobId"], event["controlStage"], event["lane"]),
+                        ("jobWaiting", job["jobId"], "cleanup", "control"))
+                    self.assertEqual(event["transitionReason"], "control_retry_pending")
+                    self.assertEqual((event["httpStatus"], event["errorCode"], event["route"]),
+                        (503, "teardown_workspace_preservation_failed", "/agent-runs/teardown"))
+                    self.assertNotIn("private", output.getvalue())
+                else:
+                    self.assertEqual(output.getvalue(), "")
 
     def test_queued_cancel_completes_while_eight_ordinary_slots_stay_held(self):
         job, _ = lifecycle_fixture()

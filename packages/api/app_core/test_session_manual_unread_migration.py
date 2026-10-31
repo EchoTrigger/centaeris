@@ -5,7 +5,7 @@ from django.test import TransactionTestCase
 from django.utils import timezone
 
 from .migration_testing import isolated_migration_database
-from .presentation_changes import agent_change_key, drain_pending_changes, read_presentation_versions, session_change_key
+from .presentation_changes import agent_change_key, drain_pending_changes, session_change_key
 from .session_attention import session_attention_snapshot
 
 
@@ -67,22 +67,31 @@ class SessionManualUnreadMigrationTests(TransactionTestCase):
                     cursor.execute('SELECT "isManuallyUnread" FROM app_core_session WHERE id=%s', [session.pk])
                     self.assertEqual(cursor.fetchone()[0], expected[session.pk][0])
             session_id = next(iter(expected))
+            # These migration stages use Agent navigation, before workspace navigation.
+            keys = {kind: agent_change_key(agent.pk, kind) for kind in ("navigation", "history", "work")}
+            keys.update({kind: session_change_key(session_id, kind) for kind in ("state", "context")})
+
+            def versions():
+                positions = dict(upgraded.get_model("app_core", "PresentationChange").objects.using(alias)
+                    .values_list("key", "revision"))
+                return {kind: positions.get(key, 0) for kind, key in keys.items()}
+
             drain_pending_changes(using=alias)
-            before = read_presentation_versions(workspace.pk, agent.pk, session_id, using=alias)
+            before = versions()
             current.filter(pk=session_id).update(isManuallyUnread=False)
             drain_pending_changes(using=alias)
-            after = read_presentation_versions(workspace.pk, agent.pk, session_id, using=alias)
+            after = versions()
             self.assertEqual({kind for kind in before if before[kind] != after[kind]}, {"navigation"})
             # Reversing this rename restores only the Session capture function,
             # not the superseded authority-producing apply function from 0028.
             MigrationExecutor(database).migrate(self.old)
             reverted = MigrationExecutor(database).loader.project_state(self.old).apps
-            before = read_presentation_versions(workspace.pk, agent.pk, session_id, using=alias)
+            before = versions()
             reverted.get_model("app_core", "Session").objects.using(alias).filter(pk=session_id).update(isUnread=True)
             pending = reverted.get_model("app_core", "PresentationChangeOutbox").objects.using(alias)
             self.assertEqual(set(pending.values_list("key", flat=True)), {agent_change_key(agent.pk, "navigation")})
             drain_pending_changes(using=alias)
-            after = read_presentation_versions(workspace.pk, agent.pk, session_id, using=alias)
+            after = versions()
             self.assertEqual({kind for kind in before if before[kind] != after[kind]}, {"navigation"})
             # A lifecycle change exercised the old apply function's authority
             # branch, so this proves reversal did not resurrect that broadcast.

@@ -237,7 +237,6 @@ def list_trash(request, workspace_id: str):
         Session.objects.filter(
             workspace_id=workspace_id,
             owner=request.user,
-            agent__status="active",
             **base,
         ),
         Source.objects.filter(

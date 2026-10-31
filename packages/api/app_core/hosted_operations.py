@@ -90,7 +90,7 @@ def replay_operation(user, workspace_id, command, operation_id, digest=None, *, 
         raise HostedOperationError(404, "operation_not_found")
     if app_delegation is not None:
         require_delegated_session(app_delegation, session.id, require_active=False)
-    if session.status != "active" or agent.status != "active":
+    if session.status != "active":
         raise HostedOperationError(410, "operation_resource_unavailable")
     if receipt.agentRunId is not None and not AgentRun.objects.filter(
         id=receipt.agentRunId, turn_id=receipt.turnId, session=session,

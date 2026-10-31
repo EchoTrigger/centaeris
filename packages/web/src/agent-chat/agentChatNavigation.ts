@@ -7,9 +7,8 @@ export function agentChatPath(workspaceId: string, agentId: string) {
   return `/w/${identity(workspaceId)}/agents/${identity(agentId)}`;
 }
 
-export function sessionChatPath(workspaceId: string, agentId: string, sessionId: string) {
-  identity(sessionId);
-  return `${agentChatPath(workspaceId, agentId)}?${new URLSearchParams({ sessionId })}`;
+export function sessionChatPath(workspaceId: string, sessionId: string) {
+  return `/w/${identity(workspaceId)}/sessions/${identity(sessionId)}`;
 }
 
 type SessionAgentIdentity = Readonly<{ id: string; workspaceId: string; status: string }>;

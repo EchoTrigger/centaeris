@@ -13,6 +13,7 @@ from .agent_input_delivery import dispatch_agent_inputs
 from .agent_inputs import accept_agent_input
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .assets import captured_input_fields
+from .testing import fenced_start_fixture
 
 
 class BusinessAgentExecutionTests(TransactionTestCase):
@@ -61,6 +62,38 @@ class BusinessAgentExecutionTests(TransactionTestCase):
     def validate_work(self, refs, **changes):
         from .test_agent_work_validation import AgentWorkValidationTests
         return AgentWorkValidationTests.validate(self, self.run, sessionRefs=refs, **changes)
+
+    def test_submitted_run_model_cannot_override_business_root_or_branch_policy(self):
+        from .agent_model_settings import AgentModelSettingsError, submitted_agent_model
+        other = models.ModelConfig.objects.create(displayName="Different available model")
+        for agent in (self.root, self.agent):
+            with self.subTest(agent=agent.pk):
+                with self.assertRaisesMessage(AgentModelSettingsError, "agent_model_configuration_managed"):
+                    submitted_agent_model(agent, other.pk, None)
+                selected, mode = submitted_agent_model(agent, self.model.pk, None)
+                self.assertEqual((selected.pk, mode), (self.model.pk, self.root.thinking_mode))
+
+    def test_workspace_admin_can_maintain_business_root_without_promoting_its_branch(self):
+        import json
+        membership = models.WorkspaceMembership.objects.get(workspace=self.workspace, user=self.user)
+        self.client.force_login(self.user)
+        url = f"/api/agents/{self.root.pk}/model-settings"
+        payload = {"schema": "agent.model_settings.update.v1", "modelConfigRef": self.model.pk, "thinkingMode": None}
+        membership.role = "member"
+        membership.save(update_fields=["role"])
+        response = self.client.patch(url, json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 403, response.content)
+        membership.role = "admin"
+        membership.save(update_fields=["role"])
+        response = self.client.patch(url, json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 200, response.content)
+        response = self.client.patch(f"/api/agents/{self.root.pk}", json.dumps({"instructions": "Maintained business policy"}), content_type="application/json")
+        self.assertEqual(response.status_code, 200, response.content)
+        self.root.refresh_from_db()
+        self.branch.agent.refresh_from_db()
+        self.assertIsNone(self.root.definition_id)
+        self.assertIsNone(self.branch.agent.definition_id)
+        self.assertEqual(self.root.instructions, "Maintained business policy")
 
     def test_branch_tools_reject_root_sibling_and_unbound_same_agent_sessions(self):
         sibling = self.new_branch("external-user-two")
@@ -126,6 +159,7 @@ class BusinessAgentExecutionTests(TransactionTestCase):
             self.assertEqual(models.AgentWorkSession.objects.count(), before)
 
     def test_child_keeps_source_instruction_snapshot_and_is_the_only_admitted_work_reference(self):
+        self.assertEqual(fenced_start_fixture(self.run)["nativeCoordinationSessionId"], self.source.pk)
         self.dependencies()
         models.Agent.objects.filter(pk=self.root.pk).update(instructions="Later root policy.")
         models.Agent.objects.filter(pk=self.agent.pk).update(instructions="Mutable branch data must not be inherited.")
@@ -174,6 +208,7 @@ class BusinessAgentExecutionTests(TransactionTestCase):
         attempt = models.AgentWorkConsumeAttempt.objects.get()
         self.assertEqual((attempt.coordinator_run.modelConfig_id, attempt.coordinator_run.agent_instructions),
             (current.pk, "Current root instructions for return."))
+        self.assertEqual(fenced_start_fixture(attempt.coordinator_run)["nativeCoordinationSessionId"], self.source.pk)
 
     def test_owner_configuration_is_root_only_and_owner_list_hides_business_branches(self):
         self.assertEqual(self.client.patch(f"/api/agents/{self.agent.pk}",

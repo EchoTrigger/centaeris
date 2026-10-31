@@ -201,7 +201,7 @@ class AgentWorkQueryTests(TransactionTestCase):
                 self.assertEqual(response.status_code, 409, response.content)
                 self.assertEqual(response.json()["error"], "agent_work_request_untrusted")
 
-    def test_ordinary_managed_and_delegated_callers_cannot_query_native_work(self):
+    def test_shared_coordination_can_query_while_ordinary_and_delegated_callers_are_rejected(self):
         from datetime import timedelta
         from .models import Agent, AgentDefinition, AgentDefinitionVersion, BusinessApplication, UserAppDelegation
         ordinary = Session.objects.create(workspace=self.workspace, owner=self.user, agent=self.agent)
@@ -229,5 +229,8 @@ class AgentWorkQueryTests(TransactionTestCase):
             run = AgentRun.objects.create(workspace=self.workspace, session=session, user=self.user,
                 modelConfig=self.model, definition_version=version, prompt="Managed query", status="running", **fields)
             create_agent_run_authorization(run, image_digest=test_agent_work.PROFILE["imageDigest"])
-            self.assertEqual(self.query(agentRunId=run.id, authorizationDigest=run.authorization.digest,
-                coordinationSessionId=session.id).status_code, 403)
+            response = self.query(agentRunId=run.id, authorizationDigest=run.authorization.digest,
+                coordinationSessionId=session.id, sourceAgentRunId=run.id)
+            self.assertEqual(response.status_code, 403 if fields else 200, response.content)
+            if not fields:
+                self.assertEqual(response.json()["status"], "notRecorded")

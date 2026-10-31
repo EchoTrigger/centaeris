@@ -7,6 +7,7 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.db import connection, transaction
 from django.db.models import Max, Q
 
+from .agent_definitions import AgentDefinitionUnavailable, published_version_for_agent
 from .agent_messages import _digest
 from .agent_model_settings import AgentModelSettingsError, configured_agent_model
 from .agent_run_authorization_factory import create_agent_run_authorization
@@ -70,7 +71,10 @@ def _locked_notice(notice_id):
                 or session.owner_id != source.user_id or session.workspace_id != source.workspace_id):
             raise WorkReturnError(403, "agent_work_consume_authority_rejected")
         # Native coordination binding.
-        if (agent.definition_id or source.definition_version_id or child.definition_version_id
+        if ((agent.is_business_instance and
+                (agent.definition_id or source.definition_version_id or child.definition_version_id))
+                or source.acting_app_id or source.app_delegation_id
+                or child.acting_app_id or child.app_delegation_id
                 or not AgentCoordinationSession.objects.filter(agent=agent, session=session).exists()):
             raise WorkReturnError(403, "agent_work_consume_authority_rejected")
         # Current source submit and child read access.
@@ -82,7 +86,7 @@ def _locked_notice(notice_id):
                 or notice.fact_kind != notice.payload["terminal"]["kind"]
                 or notice.fact_ref != notice.payload["terminal"]["factRef"]):
             raise WorkReturnError(403, "agent_work_consume_authority_rejected")
-        return notice, source, agent, session
+        return notice, source, agent, session, membership
     except WorkReturnError:
         raise
     except (ObjectDoesNotExist, ValueError, TypeError, KeyError, AttributeError) as error:
@@ -185,9 +189,9 @@ def _existing(notice, source, operation_id, digest):
     return None
 
 
-def _coordinator_model(agent):
+def _coordinator_model(agent, version):
     try:
-        return configured_agent_model(agent)
+        return configured_agent_model(agent, definition_version=version)
     except AgentModelSettingsError as error:
         code = "agent_model_not_configured" if str(error) == "agent_model_not_configured" else "agent_model_not_available"
         raise WorkReturnError(409, code) from error
@@ -247,7 +251,7 @@ def _initial_objective(session, source):
         notice__work__coordination_session=session).order_by("delivery_sequence")[:256]
     for waiting in pending:
         try:
-            _, original, _, _ = _locked_notice(waiting.notice_id)
+            _, original, _, _, _ = _locked_notice(waiting.notice_id)
             return original.prompt
         except WorkReturnError as error:
             if error.status != 403:
@@ -260,7 +264,7 @@ def consume_work_return(notice_id, operation_id):
         raise WorkReturnError(409, "agent_work_consume_requires_committed_notice")
     digest = _digest("workspace.agent_work.consume.v1", {"noticeId": notice_id}).removeprefix("sha256:")
     with transaction.atomic():
-        notice, source, agent, session = _locked_notice(notice_id)
+        notice, source, agent, session, membership = _locked_notice(notice_id)
         existing = _existing(notice, source, operation_id, digest)
         if isinstance(existing, dict):
             return existing, 200
@@ -275,7 +279,7 @@ def consume_work_return(notice_id, operation_id):
         native_input = request_host_event_input(session.id, candidate.id, notice.payload["source"], content)
     scheduled = None
     with transaction.atomic():
-        notice, source, agent, session = _locked_notice(notice_id)
+        notice, source, agent, session, membership = _locked_notice(notice_id)
         current = _existing(notice, source, operation_id, digest)
         if isinstance(current, dict):
             return current, 200
@@ -292,10 +296,15 @@ def consume_work_return(notice_id, operation_id):
             from .models import AgentInput
             pending_users = list(AgentInput.objects.filter(agent=agent, session=session,
                 membership_ref=source.membership_ref, delivery__isnull=True).order_by("sequence")[:256])
-            model, mode = _coordinator_model(agent)
+            try:
+                version = published_version_for_agent(agent, membership)
+            except AgentDefinitionUnavailable as error:
+                raise WorkReturnError(403, str(error)) from error
+            model, mode = _coordinator_model(agent, version)
             run = AgentRun.objects.create(workspace_id=source.workspace_id, user=source.user, session=session,
                 modelConfig=model, thinkingMode=mode, prompt=pending_users[0].body if pending_users else _initial_objective(session, source),
-                agent_instructions=agent_configuration(agent).instructions)
+                definition_version=version,
+                agent_instructions=version.instructions if version else agent_configuration(agent).instructions)
             create_agent_run_authorization(run, image_digest=profile["imageDigest"])
             if pending_users:
                 from .agent_input_delivery import _bind_pending
@@ -328,7 +337,7 @@ def consume_work_return(notice_id, operation_id):
                 if not _has_capacity(queue):
                     break
                 try:
-                    _, waiting_source, _, _ = _locked_notice(waiting.notice_id)
+                    _, waiting_source, _, _, _ = _locked_notice(waiting.notice_id)
                 except WorkReturnError as error:
                     if error.status != 403:
                         raise

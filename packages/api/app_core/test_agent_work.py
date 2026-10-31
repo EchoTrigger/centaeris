@@ -576,27 +576,57 @@ class AgentWorkTests(TransactionTestCase):
             self.assertFalse(HostedOperationReceipt.objects.exists())
             schedule.assert_not_called()
 
-    def test_available_managed_private_source_is_explicitly_unsupported(self):
-        from .models import AgentDefinition, AgentDefinitionVersion
-        profile, schedule = self.dependencies()
-        definition = AgentDefinition.objects.create(workspace=self.workspace, created_by=self.user,
-            name="Managed coordinator", availability_scope="workspace")
-        version = AgentDefinitionVersion.objects.create(definition=definition, version=1,
-            name=definition.name, published_by=self.user)
-        definition.published_version = version
-        definition.save(update_fields=["published_version"])
-        self.agent = Agent.objects.create(workspace=self.workspace, owner=self.user,
-            definition=definition, name=version.name)
+    def test_shared_native_work_freezes_source_child_and_coordinator_versions(self):
+        from . import test_agent_work_consumption as consumption, test_agent_work_returns as returns
+        from .models import AgentWorkConsumeAttempt
+        from .testing import create_shared_agent, publish_agent_test_policy
+
+        self.dependencies()
+        self.agent = create_shared_agent(workspace=self.workspace, owner=self.user,
+            name="Shared coordinator", model_config=self.model, instructions="Original shared instructions")
+        source_version = self.agent.definition.published_version
         self.source = Session.objects.create(workspace=self.workspace, owner=self.user, agent=self.agent, origin="automation")
         AgentCoordinationSession.objects.create(agent=self.agent, session=self.source)
         self.run = AgentRun.objects.create(workspace=self.workspace, session=self.source, user=self.user,
-            modelConfig=self.model, definition_version=version, agent_instructions=version.instructions,
-            prompt="Managed source", status="running")
+            modelConfig=self.model, definition_version=source_version, agent_instructions=source_version.instructions,
+            prompt="Shared source objective", status="running")
         create_agent_run_authorization(self.run, image_digest=PROFILE["imageDigest"])
+        source_proof = self.run.authorization.digest, self.run.authorization.signature
+        child_version = publish_agent_test_policy(self.agent, instructions="Current child instructions")
+        dispatched = self.post(self.request_fact())
+        self.assertEqual(dispatched.status_code, 201, dispatched.content)
+        child = AgentRun.objects.get(pk=dispatched.json()["operation"]["agentRunId"])
+        self.assertEqual((child.definition_version_id, child.agent_instructions),
+            (child_version.pk, child_version.instructions))
+        returns.AgentWorkReturnTests.terminal(self, child)
+        AgentRun.objects.filter(pk__in=[child.pk, self.run.pk]).update(status="completed")
+        returned = returns.AgentWorkReturnTests.publish(self, child.pk)
+        self.assertEqual(returned.status_code, 201, returned.content)
+        selected = ModelConfig.objects.create(displayName="Current coordinator model")
+        coordinator_version = publish_agent_test_policy(self.agent, model_config=selected,
+            instructions="Current coordinator instructions")
+        with consumption.AgentWorkConsumptionTests.runtime(self):
+            accepted = consumption.AgentWorkConsumptionTests.consume(self, returned.json()["notice"])
+        self.assertEqual(accepted.status_code, 201, accepted.content)
+        coordinator = AgentWorkConsumeAttempt.objects.get().coordinator_run
+        self.assertEqual((coordinator.definition_version_id, coordinator.agent_instructions, coordinator.modelConfig_id),
+            (coordinator_version.pk, coordinator_version.instructions, selected.pk))
+        self.run.refresh_from_db()
+        child.refresh_from_db()
+        self.run.authorization.refresh_from_db()
+        self.assertEqual((self.run.definition_version_id, self.run.agent_instructions),
+            (source_version.pk, source_version.instructions))
+        self.assertEqual((self.run.authorization.digest, self.run.authorization.signature), source_proof)
+        self.assertEqual((child.definition_version_id, child.modelConfig_id), (child_version.pk, self.model.pk))
+
+    def test_business_definition_source_is_rejected_before_runtime(self):
+        from .testing import publish_agent_test_policy
+        profile, schedule = self.dependencies()
+        publish_agent_test_policy(self.agent, model_config=self.model)
+        Agent.objects.filter(pk=self.agent.pk).update(is_business_instance=True)
         response = self.post(self.request_fact())
         self.assertEqual(response.status_code, 403, response.content)
         self.assertEqual(response.json()["error"], "agent_work_source_not_supported")
-        self.assertEqual(Session.objects.count(), 2)
         self.assertFalse(HostedOperationReceipt.objects.exists())
         profile.assert_not_called()
         schedule.assert_not_called()

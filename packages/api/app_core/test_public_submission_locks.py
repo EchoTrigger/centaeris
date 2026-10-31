@@ -11,7 +11,7 @@ from django.test import Client, TransactionTestCase
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .models import Agent, AgentCoordinationSession, AgentRun, HostedOperationReceipt, Session, Workspace, WorkspaceMembership
 from .test_hosted_operations import OperationFixture
-from .testing import create_session
+from .testing import create_session, create_shared_agent
 
 
 class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
@@ -85,7 +85,9 @@ class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
     def test_runtime_shared_authorization_allows_another_session_public_submission(self):
         original = create_session(workspace=self.workspace, owner=self.user, agent=self.agent)
         run = AgentRun.objects.create(workspace=self.workspace, user=self.user, session=original,
-            modelConfig=self.model, prompt='physical operation', status='running')
+            modelConfig=self.model, prompt='physical operation', status='running',
+            definition_version=self.agent.definition.published_version,
+            agent_instructions=self.agent.definition.published_version.instructions)
         create_agent_run_authorization(run, image_digest='sha256:' + 'a' * 64)
         target = create_session(workspace=self.workspace, owner=self.user, agent=self.agent)
         client = self.client_for_user()
@@ -107,7 +109,7 @@ class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
         self.assertEqual(self.schedule.call_count, 2)
 
     def test_same_operation_with_different_agent_payloads_has_one_receipt_and_exact_conflict(self):
-        other = Agent.objects.create(workspace=self.workspace, owner=self.user, name='Other target')
+        other = create_shared_agent(workspace=self.workspace, owner=self.user, name='Other target', model_config=self.model)
         first_client, second_client = self.client_for_user(), self.client_for_user()
         locked, release = Event(), Event()
         first_identity, second_identity = {'started': Event()}, {'started': Event()}
@@ -155,7 +157,7 @@ class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
 
     def test_waiting_for_one_session_does_not_hold_the_global_admission_lock(self):
         target = create_session(workspace=self.workspace, owner=self.user, agent=self.agent)
-        other = Agent.objects.create(workspace=self.workspace, owner=self.user, name='Independent agent')
+        other = create_shared_agent(workspace=self.workspace, owner=self.user, name='Independent agent', model_config=self.model)
         first_client, second_client = self.client_for_user(), self.client_for_user()
         identity = {'started': Event()}
         with ThreadPoolExecutor(max_workers=2) as pool:

@@ -29,6 +29,12 @@ release requirements call for them. Generic skill checklists do not expand the
 agreed scope. Sub-agents receive a bounded validation scope and report existing
 results for reuse instead of repeating each other's checks.
 
+The hosted Python CI runs the complete API suite and support checks sequentially
+in `workspace-python`. Each invocation owns its test database and temporary
+storage. Skipped tests and discovery/execution mismatches fail the gate. Fresh
+schema and migration drift checks run before the API suite; each gate reports
+its elapsed time.
+
 Frontend visual design uses manual appearance acceptance rather than TDD.
 Implement and iterate on layout, icons, spacing, color and typography directly.
 Focused behavioral tests still protect parsing, validation, requests, state

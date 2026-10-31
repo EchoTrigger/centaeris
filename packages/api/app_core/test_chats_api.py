@@ -212,9 +212,10 @@ class ChatApiTests(BusinessBranchFixture, TransactionTestCase):
         fact = models.AgentInput.objects.get(input_id="request-1")
         branch = models.BusinessAgentBranch.objects.get(agent=fact.agent)
         model = models.ModelConfig.objects.create(displayName="Platform default")
-        configured = self.send("patch", f"/api/agents/{branch.root_agent_id}/model-settings",
-            {"schema": "agent.model_settings.update.v1", "modelConfigRef": model.pk, "thinkingMode": None}, client=self.member_client)
+        configured = self.send("patch", self.base + f"/agent-definitions/{definition['id']}",
+            {"modelConfigRef": model.pk, "thinkingMode": None})
         self.assertEqual(configured.status_code, 200, configured.content)
+        self.publish(definition)
         with patch("app_core.runtime_client.request_execution_profile", return_value=PROFILE), \
              patch("app_core.runtime_client.schedule_agent_run_lifecycle", return_value="inserted"):
             run = dispatch_agent_inputs(branch.agent_id)

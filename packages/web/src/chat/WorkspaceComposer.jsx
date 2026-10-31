@@ -35,6 +35,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
   thinkingMode,
   onThinkingModeChange,
   modelGroups,
+  modelSelectionDisabled = false,
   modelId,
   onModelIdChange,
   cancellingAgentRunId,
@@ -92,10 +93,10 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
         <input ref={fileInputRef} className="srOnly" type="file" multiple aria-label={t("appRoute.selectOneOrMoreMaterials")} onChange={onUploadAttachment} />
         <div className="workspaceComposerControlGroup isRuntime">
           <span className="workspaceComposerControl" data-tooltip={thinkingMode ? t("appRoute.reasoningEffortValue", { value1: thinkingLabel }) : t("appRoute.reasoningEffort")}>
-            <ThinkingPicker model={currentModel} value={thinkingMode} onChange={onThinkingModeChange} disabled={!currentModel?.thinkingModes?.length || sending || hasActiveAgentRun} />
+            <ThinkingPicker model={currentModel} value={thinkingMode} onChange={onThinkingModeChange} disabled={modelSelectionDisabled || !currentModel?.thinkingModes?.length || sending || hasActiveAgentRun} />
           </span>
           <span className="workspaceComposerControl" data-tooltip={t("appRoute.aiModelValue", { value1: currentModel?.displayName || (modelGroups.length ? t("appRoute.selectAnOption") : t("appRoute.notConfigured")) })}>
-            <ModelPicker groups={modelGroups} model={currentModel} value={modelId} onChange={onModelIdChange} disabled={!modelGroups.length || sending} />
+            <ModelPicker groups={modelGroups} model={currentModel} value={modelId} onChange={onModelIdChange} disabled={modelSelectionDisabled || !modelGroups.length || sending} />
           </span>
           <span className="workspaceComposerControl" data-tooltip={hasActiveAgentRun ? t("appRoute.stop") : t("appRoute.input")}>
             {hasActiveAgentRun ? (

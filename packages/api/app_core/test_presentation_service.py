@@ -35,7 +35,12 @@ class PresentationApplicationTests(SimpleTestCase):
             self.assertEqual((await read())["type"], "lifespan.startup")
             order.append("mcp-startup")
             await send({"type": "lifespan.startup.complete"})
+            sample_task = owner.memory_observations._task
+            self.assertIsNotNone(sample_task)
+            self.assertFalse(sample_task.done())
             self.assertEqual((await read())["type"], "lifespan.shutdown")
+            self.assertTrue(sample_task.done())
+            self.assertIsNone(owner.memory_observations._task)
             order.append("mcp-shutdown")
             await send({"type": "lifespan.shutdown.complete"})
         with patch.object(module, "create_presentation_hub", return_value=hub), patch.object(module, "create_mcp_app", return_value=mcp):

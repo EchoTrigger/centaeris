@@ -34,10 +34,9 @@ def session_change_key(session_id, kind):
 
 
 def presentation_change_keys(workspace_id, agent_id, session_id=None):
-    # Agent and Session IDs are globally unique; workspace remains part of the
-    # caller's authorized binding rather than a broad content invalidation key.
-    _identity(workspace_id)
-    keys = {kind: agent_change_key(agent_id, kind) for kind in ("navigation", "history", "work")}
+    # Session navigation spans the workspace; history and work stay Agent-scoped.
+    keys = {"navigation": f"workspace:{_identity(workspace_id)}:navigation",
+            **{kind: agent_change_key(agent_id, kind) for kind in ("history", "work")}}
     if session_id is not None:
         keys.update({kind: session_change_key(session_id, kind) for kind in ("state", "context")})
     return keys

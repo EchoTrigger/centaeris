@@ -4,6 +4,7 @@ from django.conf import settings
 from ninja.utils import check_csrf
 from ninja.security import APIKeyHeader, HttpBearer, SessionAuth
 
+from app_core.api_memory import authenticate_request
 from app_core.app_delegations import DelegationRejected, authenticate_delegation, authorize_delegated_request
 from app_core.app_delegation_contract import SCOPES
 from app_core.business_agent_branches import bind_request_business_branch
@@ -46,6 +47,7 @@ class ProductSessionAuth(SessionAuth):
                     _ = request.body
                 if check_csrf(request) is not None:
                     raise PublicCsrfRejected("csrf_failed")
+            authenticate_request(request)
             return request.user
         raise PublicAuthenticationRequired("authentication_required")
 
@@ -77,7 +79,9 @@ class ProductUsageAuth(HttpBearer):
         parts = request.headers["Authorization"].split(" ")
         if len(parts) != 2 or parts[0].lower() != "bearer":
             raise DelegationRejected("delegation_invalid", 401)
-        return self.authenticate(request, parts[1])
+        user = self.authenticate(request, parts[1])
+        authenticate_request(request)
+        return user
 
     def authenticate(self, request, token):
         grant = authenticate_delegation(token, self.scope)
@@ -98,6 +102,7 @@ class InternalTokenAuth(APIKeyHeader):
 
     def authenticate(self, request, key):
         if isinstance(key, str) and secrets.compare_digest(key, settings.INTERNAL_API_TOKEN):
+            authenticate_request(request)
             return key
         raise InternalAuthenticationRequired("unauthorized")
 

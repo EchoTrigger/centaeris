@@ -978,7 +978,7 @@
   "agentChat.noActivity": "还没有活动。",
   "agentSettings.agents": "代理",
   "agentSettings.privateAgents": "你的私人 代理",
-  "agentSettings.selectAgent": "选择代理，编辑资料和模型。",
+  "agentSettings.selectAgent": "选择一个代理，查看其资料和模型。",
   "agentSettings.model": "新运行使用的模型",
   "agentSettings.configured": "已配置模型",
   "agentSettings.unconfigured": "请选择模型以配置此 代理。",
@@ -1169,5 +1169,11 @@
   "workspaceResources.loadFailed": "无法加载工作区。",
   "workspaceResources.models": "模型",
   "workspaceResources.plugins": "插件",
-  "workspaceResources.retry": "重试"
+  "workspaceResources.retry": "重试",
+  "agentSettings.workspaceAgents": "工作区代理",
+  "agentSettings.workspaceAgent": "工作区代理",
+  "agentSettings.viewAgent": "查看代理",
+  "agentSettings.viewSoulMd": "查看 SOUL.md",
+  "workspaceHomeRoute.noAgentsAreAvailableInThisWorkspaceYet": "当前工作区还没有可用的代理。",
+  "agentSettings.businessAgent": "业务代理"
 }

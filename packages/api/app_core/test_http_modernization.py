@@ -239,6 +239,7 @@ class NinjaContractTests(TestCase):
         schema = api.get_openapi_schema()
         raw_response_paths = {
             "/api/agents/{agent_id}/avatar",
+            "/api/agent-definitions/{definition_id}/avatar",
             "/api/sso/{provider_id}/callback",
             "/api/agents/{agent_id}/messages/{message_id}/files/{input_ref}/{action}",
             "/api/agents/{agent_id}/inputs/{input_id}/attachments/{input_ref}/{action}",

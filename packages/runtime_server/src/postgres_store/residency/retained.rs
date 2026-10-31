@@ -215,6 +215,7 @@ impl PostgresRuntimeStore {
                         global_used, tenant_used, host_used, requested: r.resources, limits,
                         host_available_bytes: sample.available_memory_bytes,
                         host_headroom_bytes: sample.memory_headroom_bytes,
+                        startup_memory_bytes: crate::shared_resident_admission::startup_memory_bytes()?,
                         unobserved_host_memory_bytes: pending_memory,
                     })?
                 } else {

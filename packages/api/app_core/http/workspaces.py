@@ -49,7 +49,8 @@ from app_core.plugin_catalog import (
     plugin_activation_for_workspace,
 )
 from app_core.agent_run_authorization_factory import create_agent_run_authorization
-from app_core.agent_definitions import AgentDefinitionUnavailable, published_version_for_agent
+from app_core.agent_definitions import AgentDefinitionUnavailable, published_version_for_agent, published_version_for_session
+from app_core.agent_model_settings import submitted_agent_model, AgentModelSettingsError, SubmittedAgentModelError
 from app_core.agent_run_stream import encode_stream_cursor
 from app_core.runtime_client import (
     TranscriptRuntimeError,
@@ -415,24 +416,24 @@ def list_session_projects(request, workspace_id: str):
     workspace = _workspace_for_user(request.user, workspace_id)
     if workspace is None:
         return Status(404, {"error": "workspace_not_found"})
-    if not valid_query_fields(request.GET, {"agentId"}, required={"agentId"}):
+    if not valid_query_fields(request.GET, {"agentId"}):
         return Status(400, {"error": "session_project_filter_invalid"})
-    agent_id = request.GET["agentId"]
+    agent_id = request.GET.get("agentId")
     try:
-        validate_agent_id(agent_id)
+        if agent_id is not None:
+            validate_agent_id(agent_id)
     except ValueError:
         return Status(400, {"error": "agent_id_invalid"})
-    if not Agent.objects.filter(
+    if agent_id is not None and not Agent.objects.filter(
         id=agent_id,
         workspace=workspace,
         owner=request.user,
-        status="active",
     ).exists():
         return Status(404, {"error": "agent_not_found"})
     projects = SessionProject.objects.filter(
         workspace=workspace,
         owner=request.user,
-        agent_id=agent_id,
+        **({"agent_id": agent_id} if agent_id is not None else {}),
     ).order_by("created_at", "id")
     return {"projects": [serialize_session_project(project) for project in projects]}
 
@@ -489,7 +490,6 @@ def prepare_workspace_session_list(request, workspace_id: str):
             id=agent_id,
             workspace=workspace,
             owner=request.user,
-            status="active",
         ).first()
         if agent is None:
             return Status(404, {"error": "agent_not_found"})
@@ -499,7 +499,6 @@ def prepare_workspace_session_list(request, workspace_id: str):
         workspace=workspace,
         owner=request.user,
         status="active",
-        agent__status="active",
         **({"agent_id": agent_id} if agent_id is not None else {}),
     )
     if grant is not None and grant.agent_id is not None:
@@ -722,8 +721,6 @@ def delete_session(request, session_id: str):
             return Status(404, {"error": "session_not_found"})
         if session.status == "deleted":
             return Status(410, {"error": "session_deleted"})
-        if agent.status == "deleted":
-            return Status(409, {"error": "agent_deleted"})
         active_agent_runs = list(
             session.agent_runs.select_for_update(of=("self",))
             .select_related("authorization", "modelConfig", "session")
@@ -776,8 +773,6 @@ def restore_session(request, session_id: str):
         agent, session = _locked_owned_session(request.user, session_id)
         if session is None:
             return Status(404, {"error": "session_not_found"})
-        if agent.status == "deleted":
-            return Status(409, {"error": "agent_deleted"})
         if session.status != "deleted":
             return Status(409, {"error": "session_not_deleted"})
         if not trash_is_restorable(session.deletedAt, session.purgedAt):
@@ -1172,7 +1167,6 @@ def _authorized_transcript_session(user, session_id: str) -> Session | None:
             id=session_id,
             owner=user,
             purgedAt__isnull=True,
-            agent__purgedAt__isnull=True,
         )
     except Session.DoesNotExist:
         return None
@@ -1274,23 +1268,6 @@ def create_session_message(
         return Status(400, {"error": str(error)})
     except HostedOperationError as error:
         return Status(error.status, {"error": error.code})
-    try:
-        model = models_for_workspace(workspace_id).get(
-            id=payload.model_config_ref,
-            enabled=True,
-            isCurrent=True,
-        )
-    except ModelConfig.DoesNotExist:
-        return Status(400, {"error": "model_not_found"})
-    thinking_mode = model.thinkingMode
-    if payload.thinking_mode is not None:
-        try:
-            validate_thinking_mode(payload.thinking_mode)
-        except ValueError:
-            return Status(400, {"error": "model_thinking_mode_unsupported"})
-        if payload.thinking_mode not in model.thinkingModes:
-            return Status(400, {"error": "model_thinking_mode_unsupported"})
-        thinking_mode = payload.thinking_mode
     if session_id != "new" and uploads:
         return Status(400, {"error": "message_upload_requires_new_session"})
     if session_id != "new" and payload.project_id is not None:
@@ -1326,12 +1303,13 @@ def create_session_message(
         ).first()
         if requested_session is None:
             return Status(404, {"error": "session_not_found"})
-        if requested_session.agent.status == "deleted":
-            return Status(410, {"error": "agent_deleted"})
     try:
-        published_version_for_agent(
-            requested_agent if session_id == "new" else requested_session.agent, membership,
-        )
+        if session_id == "new":
+            if requested_agent.definition_id is None:
+                return Status(409, {"error": "agent_configuration_promotion_required"})
+            published_version_for_agent(requested_agent, membership, acting_app_id=grant.app_id if grant else None)
+        else:
+            published_version_for_session(requested_session, membership, acting_app_id=grant.app_id if grant else None)
     except AgentDefinitionUnavailable as error:
         return Status(403, {"error": str(error)})
     try:
@@ -1428,8 +1406,6 @@ def create_session_message(
             else:
                 if session is None:
                     return Status(404, {"error": "session_not_found"})
-                if session.agent.status == "deleted":
-                    return Status(410, {"error": "agent_deleted"})
                 if payload.agent_id is not None and payload.agent_id != session.agent_id:
                     return Status(409, {"error": "session_agent_mismatch"})
                 if session.agent_runs.filter(status__in={"queued", "running"}).exists():
@@ -1442,7 +1418,14 @@ def create_session_message(
                 )
                 if linked_attachment_refs != set(attachment_refs):
                     return Status(403, {"error": "attachment_not_accessible"})
-            definition_version = published_version_for_agent(session.agent, membership)
+            definition_version = published_version_for_session(session, membership, acting_app_id=grant.app_id if grant else None)
+            try:
+                model, thinking_mode = submitted_agent_model(
+                    session.agent, payload.model_config_ref, payload.thinking_mode, definition_version=definition_version)
+            except SubmittedAgentModelError as error:
+                raise AgentSessionCreationError(400, str(error)) from error
+            except AgentModelSettingsError as error:
+                raise AgentSessionCreationError(409, str(error)) from error
             agent_run = AgentRun.objects.create(
                 workspace=workspace,
                 session=session,
@@ -1942,7 +1925,6 @@ def _session_for_update(user, session_id: str, *, lock: bool):
             id=session_id,
             owner=user,
             status="active",
-            agent__status="active",
         )
     except Session.DoesNotExist:
         return None

@@ -144,7 +144,7 @@ test("Agent shell reads workspace recent sessions using record identities, clear
   const subject = renderer(ShellPage, props, env);
   try {
     await subject.settle();
-    assert.deepEqual(calls, [["/api/workspaces/workspace/sessions?agentId=agent", "GET"], ["/api/workspaces/workspace/session-projects?agentId=agent", "GET"]]);
+    assert.deepEqual(calls, [["/api/workspaces/workspace/sessions", "GET"], ["/api/workspaces/workspace/session-projects", "GET"]]);
     assert.equal(component(subject.tree, "ShellSidebar").props.recentNavigation.sessions[0].agentId, "worker");
     denied = true; props.recentRevision = "next"; await subject.settle();
     assert.deepEqual(component(subject.tree, "ShellSidebar").props.recentNavigation.sessions, []);
@@ -230,7 +230,7 @@ test("the Session sidebar refreshes background work without changing the open dr
   globalThis.window = { addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {} };
   context.after(() => { globalThis.window = previousWindow; });
   const calls = []; let subscription;
-  let records = [{ ...session, agentId:"agent", hasActiveAgentRun: true }];
+  let records = [{ ...session, hasActiveAgentRun: true }];
   const env = environment({ presentation:options=>{subscription=options;return new Promise(resolve=>options.signal.addEventListener("abort",resolve,{once:true}));}, location: { search: "?new=1", state: null }, request: async path => {
     calls.push(path);
     const data = path === "/api/models?workspaceId=workspace" ? { models: [] } : path.includes("session-projects") ? { projects: [] } : { sessions: records };
@@ -241,14 +241,14 @@ test("the Session sidebar refreshes background work without changing the open dr
     await subject.settle();
     component(subject.tree, "WorkspaceComposer").props.onDraftChange("Keep this unsent draft");
     await subject.settle();
-    records = [{ ...session, agentId:"agent", title: "Completed background work", hasActiveAgentRun: false, isUnread: true, latestAttentionSequence:"1",attentionRevision:"1" }, { ...session, agentId:"agent", id: "new-work", title: "New background work" }];
+    records = [{ ...session, title: "Completed background work", hasActiveAgentRun: false, isUnread: true, latestAttentionSequence:"1",attentionRevision:"1" }, { ...session, agentId:"other", id: "new-work", title: "New background work" }];
     await subscription.controller.acceptWithBackpressure({cursor:null,item:{schema:"workspace.presentation.v1",kind:"navigation",workspaceId:"workspace",agentId:"agent",sessionId:null,snapshotId:"background",offset:0,hasMore:false,sessions:records}});
     await subject.settle();
     const sidebar = component(subject.tree, "ShellSidebar").props.sessionProps;
     assert.deepEqual(sidebar.sessions, records);
     assert.equal(sidebar.renderSessionRow(records[0]).props.running, false);
     assert.equal(component(subject.tree, "WorkspaceComposer").props.draft, "Keep this unsent draft");
-    assert.equal(calls.filter(path => path.includes("/sessions?")).length, 1, "background changes arrive on the display subscription");
+    assert.equal(calls.filter(path => path === "/api/workspaces/workspace/sessions").length, 1, "background changes arrive on the display subscription");
     assert.equal(calls.filter(path => path.includes("session-projects")).length, 1);
     assert.equal(calls.some(path => path.includes("/transcript")), false);
   } finally { subject.unmount(); }
@@ -297,7 +297,7 @@ test("bot sidebar exposes the same Session metadata controls and waits for delet
   const openMenu = async () => { button(row(), "appRoute.conversationActionsForValue").props.onClick(); await subject.settle(); };
   try {
     await subject.settle();
-    assert.equal(nodes(row(), node => node.props.to?.includes("?sessionId="))[0].props.to, "/w/workspace/agents/worker?sessionId=work");
+    assert.equal(nodes(row(), node => node.props.to === "/w/workspace/sessions/work").length, 1);
     for (const label of ["appRoute.running", "appRoute.pinned", "appRoute.unread"]) assert.ok(nodes(row(), node => node.props["aria-label"] === label).length);
     assert.equal(nodes(row(), node => node.props.children === "appRoute.auto").length, 0, "Agent work remains an ordinary Session without an automatic badge");
     await openMenu(); button(row(), "appRoute.markAsRead").props.onClick(); await subject.settle();
@@ -317,11 +317,11 @@ test("bot sidebar exposes the same Session metadata controls and waits for delet
   } finally { subject.unmount(); }
 });
 
-test("switching bot aborts a pending Session mutation and rejects its late metadata", async () => {
+test("switching bot preserves workspace Sessions, aborts pending mutation and rejects late metadata", async () => {
   const pending = deferred(); let signal;
   const env = environment({ request: async (path, options = {}) => {
     if (options.method === "PATCH") { signal = options.signal; return pending.promise; }
-    return path.includes("session-projects") ? { projects: [] } : { sessions: [{ ...session, title: path.includes("agentId=other") ? "Other bot work" : "First bot work" }] };
+    return path.includes("session-projects") ? { projects: [] } : { sessions: [session] };
   } });
   const props = { children: null, activeAgent: env.agents[0], showRecentSessions: true };
   const subject = renderer(ShellPage, props, env);
@@ -335,8 +335,9 @@ test("switching bot aborts a pending Session mutation and rejects its late metad
     button(row(), "appRoute.markAsUnread").props.onClick(); await subject.settle();
     props.activeAgent = { ...env.agents[0], id: "other" }; await subject.settle();
     assert.equal(signal.aborted, true);
+    assert.deepEqual(component(subject.tree, "ShellSidebar").props.sessionProps.sessions, [session]);
     pending.resolve({ session: { ...session, title: "Late first bot work", isUnread: true } }); await subject.settle();
-    assert.equal(component(subject.tree, "ShellSidebar").props.sessionProps.sessions[0].title, "Other bot work");
+    assert.deepEqual(component(subject.tree, "ShellSidebar").props.sessionProps.sessions, [session]);
     assert.equal(nodes(row(), node => node.props["aria-label"] === "appRoute.unread").length, 0);
   } finally { subject.unmount(); }
 });
@@ -353,7 +354,7 @@ test("background Session deletion completes against the current conversation sel
   } finally { subject.unmount(); }
 });
 
-test("pushed Agent navigation updates sessions without rereading the list or project catalog", async () => {
+test("pushed workspace navigation updates sessions without rereading the list or project catalog", async () => {
   const calls = [];
   const env = environment({ request: async path => { calls.push(path); return path.includes("session-projects") ? { projects: [] } : { sessions: [] }; } });
   const item = { id: "work", workspaceId: "workspace", agentId: "agent", projectId: null, title: "Initial",
@@ -362,7 +363,7 @@ test("pushed Agent navigation updates sessions without rereading the list or pro
   const subject = renderer(ShellPage, props, env);
   try {
     await subject.settle();
-    assert.deepEqual(calls, ["/api/workspaces/workspace/session-projects?agentId=agent"]);
+    assert.deepEqual(calls, ["/api/workspaces/workspace/session-projects"]);
     props.presentationNavigation = [item]; await subject.settle();
     const sidebar = nodes(subject.tree, node => node.type.name === "ShellSidebar")[0];
     assert.equal(sidebar.props.recentNavigation.sessions[0].title, "Initial");

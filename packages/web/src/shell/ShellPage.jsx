@@ -30,13 +30,12 @@ export function ShellPage({ children, initialTab = "home", activeAgent = null, m
     const controller = new AbortController();
     // This existing workspace projection excludes coordination Sessions. Keep
     // each record's owner identity; never substitute the selected Agent's id.
-    const query = new URLSearchParams({ agentId: selectedAgentId });
     void Promise.all([
-      pushedNavigation ? Promise.resolve({ sessions: [] }) : apiJson(`/api/workspaces/${encodeURIComponent(workspace.id)}/sessions?${query}`, { signal: controller.signal }),
-      apiJson(`/api/workspaces/${encodeURIComponent(workspace.id)}/session-projects?${query}`, { signal: controller.signal }),
+      pushedNavigation ? Promise.resolve({ sessions: [] }) : apiJson(`/api/workspaces/${encodeURIComponent(workspace.id)}/sessions`, { signal: controller.signal }),
+      apiJson(`/api/workspaces/${encodeURIComponent(workspace.id)}/session-projects`, { signal: controller.signal }),
     ]).then(([result, projectData]) => {
         if (controller.signal.aborted) return;
-        if (!Array.isArray(projectData.projects) || projectData.projects.some(row => !row || row.workspaceId !== workspace.id || row.agentId !== selectedAgentId || typeof row.id !== "string" || !row.id || typeof row.name !== "string" || !row.name) || !Array.isArray(result.sessions) || result.sessions.some(row => !row || row.workspaceId !== workspace.id || row.status !== "active"
+        if (!Array.isArray(projectData.projects) || projectData.projects.some(row => !row || row.workspaceId !== workspace.id || typeof row.id !== "string" || !row.id || typeof row.name !== "string" || !row.name) || !Array.isArray(result.sessions) || result.sessions.some(row => !row || row.workspaceId !== workspace.id || row.status !== "active"
           || typeof row.id !== "string" || !row.id.trim() || row.id.trim() !== row.id
           || typeof row.agentId !== "string" || !row.agentId.trim() || row.agentId.trim() !== row.agentId
           || typeof row.title !== "string" || !row.title.trim() || typeof row.updatedAt !== "string" || !Number.isFinite(Date.parse(row.updatedAt)))) throw new Error("session_navigation_response_invalid");
@@ -47,7 +46,7 @@ export function ShellPage({ children, initialTab = "home", activeAgent = null, m
       })
       .catch(() => { if (!controller.signal.aborted) setRecent({ scope, refreshKey, sessions: [], projects: [], loading: false, error: true }); });
     return () => controller.abort();
-  }, [showRecentSessions, workspace.id, selectedAgentId, scope, refreshKey, pushedNavigation]);
+  }, [showRecentSessions, workspace.id, scope, refreshKey, pushedNavigation]);
   useEffect(() => {
     if (!showRecentSessions || presentationNavigation === undefined || presentationNavigation === null) return;
     setRecent(previous => ({ scope, refreshKey,

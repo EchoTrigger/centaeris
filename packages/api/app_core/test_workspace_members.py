@@ -16,7 +16,7 @@ from app_core.models import (
     WorkspaceMembership,
 )
 from app_core.workspace_access import agent_run_membership_is_current
-from app_core.testing import create_session
+from app_core.testing import create_session, publish_agent_test_policy
 
 
 class WorkspaceMemberLifecycleTests(TestCase):
@@ -198,12 +198,17 @@ class WorkspaceMemberLifecycleTests(TestCase):
             workspace=self.workspace,
             owner=self.peer_admin,
         )
+        version = publish_agent_test_policy(session.agent, model_config=model)
+        self.workspace.default_agent_definition = session.agent.definition
+        self.workspace.save(update_fields=["default_agent_definition", "updatedAt"])
         agent_run = AgentRun.objects.create(
             workspace=self.workspace,
             session=session,
             user=self.peer_admin,
             modelConfig=model,
             prompt="before removal",
+            definition_version=version,
+            agent_instructions=version.instructions,
         )
         self.assertTrue(agent_run_membership_is_current(agent_run))
         pending, pending_token = self.issue_invitation(

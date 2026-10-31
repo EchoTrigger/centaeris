@@ -12,7 +12,7 @@ from django.test.utils import CaptureQueriesContext
 from django.db import connection
 
 from . import models, test_agent_inputs, test_agent_messages
-from .testing import fenced_start_fixture
+from .testing import fenced_start_fixture, publish_agent_test_policy
 from .test_agent_work import PROFILE
 
 
@@ -28,8 +28,7 @@ class AgentInputDeliveryTests(TransactionTestCase):
         self.session = self.bind()
         self.selected = models.ModelConfig.objects.create(displayName="Coordinator policy",
             thinkingMode="high", thinkingModes=["low", "high"])
-        self.agent.model_config, self.agent.thinking_mode = self.selected, "low"
-        self.agent.save(update_fields=["model_config", "thinking_mode"])
+        publish_agent_test_policy(self.agent, model_config=self.selected, thinking_mode="low")
 
     @contextmanager
     def runtime(self, *, profile=None, schedule=None):
@@ -84,8 +83,7 @@ class AgentInputDeliveryTests(TransactionTestCase):
         first = self.delivery("initial-one")
         run = first.queue.agent_run
         proof = deepcopy(run.authorization.payload), run.authorization.digest, run.authorization.signature
-        self.agent.model_config, self.agent.thinking_mode = None, ""
-        self.agent.save(update_fields=["model_config", "thinking_mode"])
+        publish_agent_test_policy(self.agent, model_config=None, thinking_mode="")
         with self.runtime(profile=AssertionError("busy admission has no profile RPC")):
             self.assertEqual(self.submit("active-two", "  later exact body  ").status_code, 201)
         second = self.delivery("active-two")
@@ -122,8 +120,7 @@ class AgentInputDeliveryTests(TransactionTestCase):
 
     def test_settings_are_rechecked_after_profile_rpc_before_committed_initial_admission(self):
         def changed_policy():
-            self.agent.thinking_mode = "high"
-            self.agent.save(update_fields=["thinking_mode"])
+            publish_agent_test_policy(self.agent, thinking_mode="high")
             return PROFILE
         with self.runtime(profile=changed_policy):
             self.submit("policy-race", "exact body")
@@ -257,7 +254,8 @@ class AgentInputDeliveryTests(TransactionTestCase):
             pass
         self.assertIsNone(self.read("initial-one"))
         foreign = models.AgentRun.objects.create(workspace=self.workspace, session=self.session,
-            user=self.user, modelConfig=self.selected, prompt="another execution", status="completed")
+            user=self.user, modelConfig=self.selected, prompt="another execution", status="completed",
+            definition_version=run.definition_version, agent_instructions=run.agent_instructions)
         self.uptake(foreign, ["initial-one"], request_id="foreign-request")
         self.assertIsNone(self.read("initial-one"))
 

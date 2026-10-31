@@ -7,6 +7,8 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
 
+from app_core.testing import create_shared_agent
+
 from app_core.models import (
     Agent,
     AgentRun,
@@ -18,15 +20,15 @@ from app_core.models import (
 )
 
 
-class PrivateAgentTests(TestCase):
+class AgentProfileAndPrivateHistoryTests(TestCase):
     def test_unavailable_sessions_do_not_require_runtime(self):
-        agent = Agent.objects.create(workspace=self.workspace, owner=self.member, name="Agent")
-        deleted = Session.objects.create(workspace=self.workspace, owner=self.member, agent=agent, status="deleted", deletedAt=timezone.now())
+        agent = create_shared_agent(workspace=self.workspace, owner=self.admin, name="Agent")
+        deleted = Session.objects.create(workspace=self.workspace, owner=self.admin, agent=agent, status="deleted", deletedAt=timezone.now())
         foreign_agent = Agent.objects.create(workspace=self.workspace, owner=self.owner, name="Other")
         foreign = Session.objects.create(workspace=self.workspace, owner=self.owner, agent=foreign_agent)
-        active = Session.objects.create(workspace=self.workspace, owner=self.member, agent=agent)
+        active = Session.objects.create(workspace=self.workspace, owner=self.admin, agent=agent)
         model = ModelConfig.objects.create(displayName="Test model")
-        self.client.force_login(self.member)
+        self.client.force_login(self.admin)
         with patch("app_core.http.workspaces.request_execution_profile", side_effect=RuntimeError("offline")) as profile:
             for session_id in (deleted.id, foreign.id, "session_missing"):
                 with self.subTest(session_id=session_id):
@@ -50,7 +52,7 @@ class PrivateAgentTests(TestCase):
     def setUp(self):
         User = get_user_model()
         self.owner = User.objects.create_user(username="owner@example.test")
-        self.member = User.objects.create_user(username="member@example.test")
+        self.admin = User.objects.create_user(username="admin@example.test")
         self.other = User.objects.create_user(username="other@example.test")
         self.workspace = Workspace.objects.create(name="Default", createdBy=self.owner)
         WorkspaceMembership.objects.create(
@@ -60,8 +62,8 @@ class PrivateAgentTests(TestCase):
         )
         WorkspaceMembership.objects.create(
             workspace=self.workspace,
-            user=self.member,
-            role="member",
+            user=self.admin,
+            role="admin",
         )
 
     def create_agent(
@@ -87,8 +89,8 @@ class PrivateAgentTests(TestCase):
             content_type="application/json",
         )
 
-    def test_agent_directory_is_private_even_from_workspace_owner(self):
-        created = self.create_agent(self.member)
+    def test_shared_directory_keeps_member_instances_private(self):
+        created = self.create_agent(self.admin)
         self.assertEqual(created.status_code, 201, created.content)
         agent = created.json()["agent"]
         self.assertEqual(agent["workspaceId"], self.workspace.id)
@@ -105,15 +107,14 @@ class PrivateAgentTests(TestCase):
             self.client.get(f"/api/agents/{agent['id']}").status_code,
             404,
         )
-        self.assertEqual(
-            self.client.get(f"/api/workspaces/{self.workspace.id}/agents").json(),
-            {"agents": []},
-        )
+        owner_instance = self.client.get(f"/api/workspaces/{self.workspace.id}/agents").json()["agents"][0]
+        self.assertEqual(owner_instance["definitionId"], agent["definitionId"])
+        self.assertNotEqual(owner_instance["id"], agent["id"])
 
     def test_agent_profile_is_canonical_and_strict(self):
         decomposed_name = unicodedata.normalize("NFD", "研究员")
         created = self.create_agent(
-            self.member,
+            self.admin,
             name=f"  {decomposed_name}  ",
             description="  可靠简介  ",
             instructions="  第一行\r\n\r\n第二行  ",
@@ -146,8 +147,8 @@ class PrivateAgentTests(TestCase):
             data=json.dumps({"description": "更新简介"}),
             content_type="application/json",
         )
-        self.assertEqual(unchanged.status_code, 409)
-        self.assertEqual(unchanged.json(), {"error": "agent_unchanged"})
+        self.assertEqual(unchanged.status_code, 200, unchanged.content)
+        self.assertEqual(unchanged.json()["agent"]["description"], "更新简介")
 
         invalid = self.client.post(
             f"/api/workspaces/{self.workspace.id}/agents",
@@ -181,7 +182,7 @@ class PrivateAgentTests(TestCase):
     def test_sessions_require_an_active_agent_owned_by_the_same_user(self):
         member_agent = Agent.objects.create(
             workspace=self.workspace,
-            owner=self.member,
+            owner=self.admin,
             name="Member Agent",
         )
         owner_agent = Agent.objects.create(
@@ -189,7 +190,7 @@ class PrivateAgentTests(TestCase):
             owner=self.owner,
             name="Owner Agent",
         )
-        self.client.force_login(self.member)
+        self.client.force_login(self.admin)
 
         created = self.client.post(
             f"/api/workspaces/{self.workspace.id}/sessions",
@@ -216,170 +217,69 @@ class PrivateAgentTests(TestCase):
         with self.assertRaisesRegex(ValueError, "ownership mismatch"):
             Session.objects.create(
                 workspace=self.workspace,
-                owner=self.member,
+                owner=self.admin,
                 agent=owner_agent,
             )
 
-    def test_agent_delete_tombstones_parent_and_preserves_sessions(self):
-        agent = Agent.objects.create(
-            workspace=self.workspace,
-            owner=self.member,
-            name="Disposable",
-        )
-        active_session = Session.objects.create(
-            workspace=self.workspace,
-            owner=self.member,
-            agent=agent,
-            title="Active child",
-            isPinned=True,
-        )
-        deleted_session = Session.objects.create(
-            workspace=self.workspace,
-            owner=self.member,
-            agent=agent,
-            title="Deleted child",
-            status="deleted",
-            deletedAt=timezone.now(),
-        )
-        model = ModelConfig.objects.create(displayName="Test model")
-        self.client.force_login(self.member)
-
-        self.assertEqual(
-            self.client.get(f"/api/agents/{agent.id}/trash/sessions").json(),
-            {"error": "agent_not_deleted"},
-        )
-        self.assertEqual(
-            self.client.patch(
-                f"/api/sessions/{deleted_session.id}",
-                data=json.dumps({"title": "must not change"}),
-                content_type="application/json",
-            ).status_code,
-            404,
-        )
-        self.assertEqual(
-            self.client.post(
-                f"/api/workspaces/{self.workspace.id}/sessions/{deleted_session.id}/messages",
-                data=json.dumps({"operationId": "test-operation-260", "text": "must not run", "modelConfigRef": model.id}),
-                content_type="application/json",
-            ).status_code,
-            404,
-        )
-        deleted = self.client.delete(f"/api/agents/{agent.id}")
-        self.assertEqual(deleted.status_code, 200, deleted.content)
+    def test_agent_retirement_preserves_independent_session_visibility_and_restore(self):
+        agent = Agent.objects.create(workspace=self.workspace, owner=self.admin, name="Disposable profile")
+        active = Session.objects.create(workspace=self.workspace, owner=self.admin, agent=agent, title="Retained history", isPinned=True)
+        deleted = Session.objects.create(workspace=self.workspace, owner=self.admin, agent=agent,
+            title="Own Session trash", status="deleted", deletedAt=timezone.now())
+        self.client.force_login(self.admin)
+        self.assertEqual(self.client.get(f"/api/agents/{agent.id}/trash/sessions").json(), {"error": "agent_not_deleted"})
+        self.assertEqual(self.client.patch(f"/api/sessions/{deleted.id}", json.dumps({"title": "Denied"}), content_type="application/json").status_code, 404)
+        response = self.client.delete(f"/api/agents/{agent.id}")
+        self.assertEqual(response.status_code, 200, response.content)
         agent.refresh_from_db()
         self.assertEqual(agent.status, "deleted")
         self.assertIsNotNone(agent.deletedAt)
-        self.assertEqual(
-            self.client.get(f"/api/workspaces/{self.workspace.id}/sessions").json(),
-            {"sessions": []},
-        )
-        self.assertEqual(
-            self.client.get(
-                f"/api/workspaces/{self.workspace.id}/trash",
-                {"kind": "session"},
-            ).json()["items"],
-            [],
-        )
-        self.assertEqual(
-            [
-                item["id"]
-                for item in self.client.get(
-                    f"/api/workspaces/{self.workspace.id}/trash",
-                    {"kind": "agent"},
-                ).json()["items"]
-            ],
-            [agent.id],
-        )
+        self.assertEqual([row["id"] for row in self.client.get(f"/api/workspaces/{self.workspace.id}/sessions").json()["sessions"]], [active.id])
+        self.assertEqual([row["id"] for row in self.client.get(f"/api/workspaces/{self.workspace.id}/trash", {"kind": "session"}).json()["items"]], [deleted.id])
         nested = self.client.get(f"/api/agents/{agent.id}/trash/sessions")
         self.assertEqual(nested.status_code, 200, nested.content)
-        self.assertEqual(
-            [(item["id"], item["status"]) for item in nested.json()["sessions"]],
-            [(active_session.id, "active"), (deleted_session.id, "deleted")],
-        )
-        self.assertIsNone(nested.json()["sessions"][0]["deletedAt"])
-        self.assertIsNotNone(nested.json()["sessions"][1]["deletedAt"])
-        self.assertEqual(
-            self.client.post(f"/api/sessions/{deleted_session.id}/restore").json(),
-            {"error": "agent_deleted"},
-        )
-        self.assertEqual(
-            self.client.get(f"/api/sessions/{active_session.id}").status_code,
-            200,
-        )
-        message = self.client.post(
-            f"/api/workspaces/{self.workspace.id}/sessions/{active_session.id}/messages",
-            data=json.dumps({"operationId": "test-operation-309", "text": "continue", "modelConfigRef": model.id}),
-            content_type="application/json",
-        )
-        self.assertEqual(message.status_code, 410)
-        self.assertEqual(message.json(), {"error": "agent_deleted"})
-        repeated = self.client.delete(f"/api/agents/{agent.id}")
-        self.assertEqual(repeated.status_code, 410)
-        self.assertEqual(repeated.json(), {"error": "agent_deleted"})
-
+        self.assertEqual({row["id"] for row in nested.json()["sessions"]}, {active.id, deleted.id})
+        self.assertEqual(self.client.get(f"/api/sessions/{active.id}").status_code, 200)
+        renamed = self.client.patch(f"/api/sessions/{active.id}", json.dumps({"title": "Own retained Session"}), content_type="application/json")
+        self.assertEqual(renamed.status_code, 200, renamed.content)
+        restored = self.client.post(f"/api/sessions/{deleted.id}/restore")
+        self.assertEqual(restored.status_code, 200, restored.content)
+        self.assertEqual(restored.json()["session"]["agentId"], agent.id)
+        agent.refresh_from_db()
+        self.assertEqual(agent.status, "deleted")
+        self.assertEqual(self.client.delete(f"/api/agents/{agent.id}").status_code, 410)
         restored_agent = self.client.post(f"/api/agents/{agent.id}/restore")
         self.assertEqual(restored_agent.status_code, 200, restored_agent.content)
         self.assertEqual(restored_agent.json()["agent"]["id"], agent.id)
-        self.assertIsNone(restored_agent.json()["agent"]["deletedAt"])
-        self.assertEqual(
-            [
-                item["id"]
-                for item in self.client.get(
-                    f"/api/workspaces/{self.workspace.id}/sessions"
-                ).json()["sessions"]
-            ],
-            [active_session.id],
-        )
-        self.assertEqual(
-            [
-                item["id"]
-                for item in self.client.get(
-                    f"/api/workspaces/{self.workspace.id}/trash",
-                    {"kind": "session"},
-                ).json()["items"]
-            ],
-            [deleted_session.id],
-        )
-        restored_session = self.client.post(
-            f"/api/sessions/{deleted_session.id}/restore"
-        )
-        self.assertEqual(restored_session.status_code, 200, restored_session.content)
-        self.assertEqual(restored_session.json()["session"]["id"], deleted_session.id)
-        self.assertIsNone(restored_session.json()["session"]["deletedAt"])
-        self.assertEqual(
-            self.client.post(f"/api/agents/{agent.id}/restore").json(),
-            {"error": "agent_not_deleted"},
-        )
-        self.assertEqual(
-            self.client.post(f"/api/sessions/{deleted_session.id}/restore").json(),
-            {"error": "session_not_deleted"},
-        )
+        self.assertEqual({row["id"] for row in self.client.get(f"/api/workspaces/{self.workspace.id}/sessions").json()["sessions"]}, {active.id, deleted.id})
+        self.assertEqual(self.client.post(f"/api/agents/{agent.id}/restore").json(), {"error": "agent_not_deleted"})
+        self.assertEqual(self.client.post(f"/api/sessions/{deleted.id}/restore").json(), {"error": "session_not_deleted"})
         self.assertEqual(SessionEvent.objects.count(), 0)
 
     def test_agent_trash_remains_private_from_workspace_admin_and_superuser(self):
         agent = Agent.objects.create(
             workspace=self.workspace,
-            owner=self.member,
+            owner=self.admin,
             name="Private trash",
         )
         Session.objects.create(
             workspace=self.workspace,
-            owner=self.member,
+            owner=self.admin,
             agent=agent,
         )
         active_agent = Agent.objects.create(
             workspace=self.workspace,
-            owner=self.member,
+            owner=self.admin,
             name="Active parent",
         )
         deleted_session = Session.objects.create(
             workspace=self.workspace,
-            owner=self.member,
+            owner=self.admin,
             agent=active_agent,
             status="deleted",
             deletedAt=timezone.now(),
         )
-        self.client.force_login(self.member)
+        self.client.force_login(self.admin)
         self.assertEqual(self.client.delete(f"/api/agents/{agent.id}").status_code, 200)
 
         for user in (self.owner, self.other):
@@ -425,18 +325,18 @@ class PrivateAgentTests(TestCase):
     def test_agent_and_session_trash_expire_after_thirty_days(self):
         agent = Agent.objects.create(
             workspace=self.workspace,
-            owner=self.member,
+            owner=self.admin,
             name="Expired Agent",
         )
         session = Session.objects.create(
             workspace=self.workspace,
-            owner=self.member,
+            owner=self.admin,
             agent=agent,
             title="Expired Session",
             status="deleted",
             deletedAt=timezone.now(),
         )
-        self.client.force_login(self.member)
+        self.client.force_login(self.admin)
         Session.objects.filter(id=session.id).update(
             deletedAt=timezone.now() - timedelta(days=31),
         )
@@ -473,12 +373,12 @@ class PrivateAgentTests(TestCase):
         self.assertIsNotNone(session.purgedAt)
 
     def test_agent_and_session_trash_use_fixed_cursor_pages(self):
-        self.client.force_login(self.member)
+        self.client.force_login(self.admin)
         deleted_at = timezone.now()
         deleted_agents = [
             Agent.objects.create(
                 workspace=self.workspace,
-                owner=self.member,
+                owner=self.admin,
                 name=f"Deleted {index}",
                 status="deleted",
                 deletedAt=deleted_at,
@@ -505,13 +405,13 @@ class PrivateAgentTests(TestCase):
 
         active_agent = Agent.objects.create(
             workspace=self.workspace,
-            owner=self.member,
+            owner=self.admin,
             name="Active parent",
         )
         deleted_sessions = [
             Session.objects.create(
                 workspace=self.workspace,
-                owner=self.member,
+                owner=self.admin,
                 agent=active_agent,
                 title=f"Deleted session {index}",
                 status="deleted",
@@ -538,7 +438,7 @@ class PrivateAgentTests(TestCase):
         nested_sessions = [
             Session.objects.create(
                 workspace=self.workspace,
-                owner=self.member,
+                owner=self.admin,
                 agent=deleted_agents[0],
                 title=f"Nested session {index}",
             )
@@ -574,17 +474,17 @@ class PrivateAgentTests(TestCase):
     def test_agent_and_session_restore_roll_back_on_database_failure(self):
         agent = Agent.objects.create(
             workspace=self.workspace,
-            owner=self.member,
+            owner=self.admin,
             name="Rollback",
         )
         session = Session.objects.create(
             workspace=self.workspace,
-            owner=self.member,
+            owner=self.admin,
             agent=agent,
             status="deleted",
             deletedAt=timezone.now(),
         )
-        self.client.force_login(self.member)
+        self.client.force_login(self.admin)
         original_session_save = Session.save
 
         def fail_session_restore(value, *args, **kwargs):
@@ -617,23 +517,23 @@ class PrivateAgentTests(TestCase):
     def test_agent_delete_rejects_an_active_child_run(self):
         agent = Agent.objects.create(
             workspace=self.workspace,
-            owner=self.member,
+            owner=self.admin,
             name="Running",
         )
         session = Session.objects.create(
             workspace=self.workspace,
-            owner=self.member,
+            owner=self.admin,
             agent=agent,
         )
         model = ModelConfig.objects.create(displayName="Test model")
         AgentRun.objects.create(
             workspace=self.workspace,
             session=session,
-            user=self.member,
+            user=self.admin,
             modelConfig=model,
             prompt="running",
         )
-        self.client.force_login(self.member)
+        self.client.force_login(self.admin)
 
         response = self.client.delete(f"/api/agents/{agent.id}")
 
@@ -645,23 +545,23 @@ class PrivateAgentTests(TestCase):
     def test_membership_removal_hides_but_does_not_delete_private_agent(self):
         agent = Agent.objects.create(
             workspace=self.workspace,
-            owner=self.member,
+            owner=self.admin,
             name="Persistent",
         )
         membership = WorkspaceMembership.objects.get(
             workspace=self.workspace,
-            user=self.member,
+            user=self.admin,
         )
         membership.delete()
-        self.client.force_login(self.member)
+        self.client.force_login(self.admin)
 
         self.assertEqual(self.client.get(f"/api/agents/{agent.id}").status_code, 404)
         self.assertTrue(Agent.objects.filter(id=agent.id, status="active").exists())
 
         rejoined = WorkspaceMembership.objects.create(
             workspace=self.workspace,
-            user=self.member,
-            role="member",
+            user=self.admin,
+            role="admin",
         )
         self.assertEqual(self.client.get(f"/api/agents/{agent.id}").status_code, 200)
         self.assertEqual(self.client.delete(f"/api/agents/{agent.id}").status_code, 200)
@@ -679,8 +579,8 @@ class PrivateAgentTests(TestCase):
 
         WorkspaceMembership.objects.create(
             workspace=self.workspace,
-            user=self.member,
-            role="member",
+            user=self.admin,
+            role="admin",
         )
         self.assertEqual(
             [

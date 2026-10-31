@@ -36,6 +36,41 @@ def create_session(*, workspace, owner, agent_id=None, agent=None, **fields):
         agent=agent,
         **fields,
     )
+
+def publish_agent_test_policy(agent, **fields):
+    """Explicitly publish the selected fixture policy without inferring defaults.
+
+    Storage-only Sessions remain personal. Admission fixtures opt into this helper
+    and supply their authoritative model; accepted historical Runs are untouched.
+    """
+    from .agent_definitions import publish_definition
+    from .models import AgentDefinition
+    if agent.definition_id is None:
+        definition = AgentDefinition.objects.create(workspace=agent.workspace, created_by=agent.owner,
+            name=agent.name, description=agent.description, instructions=agent.instructions,
+            avatar_kind=agent.avatar_kind, model_config=agent.model_config,
+            thinking_mode=agent.thinking_mode, availability_scope="workspace")
+        Agent.objects.filter(pk=agent.pk).update(definition=definition)
+        agent.definition = definition
+    else:
+        definition = agent.definition
+    for field, value in fields.items():
+        setattr(definition, field, value)
+    if fields:
+        definition.save(update_fields=[*fields, "updated_at"])
+    version = publish_definition(definition, agent.owner)
+    agent.definition = definition
+    return version
+
+
+def create_shared_agent(*, workspace, owner, model_config=None, thinking_mode="", **profile):
+    """Create a managed fixture with an explicit shared policy and member identity."""
+    agent = Agent.objects.create(workspace=workspace, owner=owner, model_config=model_config,
+        thinking_mode=thinking_mode, **profile)
+    publish_agent_test_policy(agent)
+    return agent
+
+
 def fenced_start_fixture(agent_run, *, execution_mode='perRun'):
     """Arrange persisted controller facts for serializer/input fixtures only.
 

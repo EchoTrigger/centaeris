@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { agentSettingsPath, canOpenPrivateAgentSettings, agentSettingsSelection } from "../../src/agent-chat/agentSettingsNavigation.ts";
+import { agentSettingsPath, canOpenAgentSettings, agentSettingsSelection } from "../../src/agent-chat/agentSettingsNavigation.ts";
 
-test("private Agent Settings is available to current members without administrator privilege", () => {
-  for (const role of ["owner", "admin", "member"]) assert.equal(canOpenPrivateAgentSettings({ id: "workspace", role }), true);
-  assert.equal(canOpenPrivateAgentSettings(null), false);
-  assert.equal(canOpenPrivateAgentSettings({ id: "workspace", role: "unknown" }), false);
+test("Agent Settings is available to current members without administrator privilege", () => {
+  for (const role of ["owner", "admin", "member"]) assert.equal(canOpenAgentSettings({ id: "workspace", role }), true);
+  assert.equal(canOpenAgentSettings(null), false);
+  assert.equal(canOpenAgentSettings({ id: "workspace", role: "unknown" }), false);
 });
 test("Agent selection is explicit; the settings list does not select a first or recent Agent", () => {
   assert.deepEqual(agentSettingsSelection("", ["agent", "other"]), { kind: "list" });

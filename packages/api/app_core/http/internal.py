@@ -669,8 +669,6 @@ def _locked_session_workspace_agent_run(body: dict) -> tuple[AgentRun, Session, 
         agent is None
         or agent.id != session.agent_id
         or agent.workspace_id != session.workspace_id
-        or agent.status != "active"
-        or agent.purgedAt is not None
         or agent_run.status not in {"queued", "running"}
         or session.status != "active"
         or session.purgedAt is not None

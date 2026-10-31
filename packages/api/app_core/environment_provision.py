@@ -48,7 +48,8 @@ def issue_provision_authorization(environment_id, body):
                 [environment.pk])
             if cursor.fetchone() is not None:
                 raise MaintenanceError('provision_allocation_exists')
-        if session.agent.definition_id:
+        from .agent_definitions import uses_workspace_plugins
+        if session.agent.definition_id and not uses_workspace_plugins(session.agent):
             from .agent_definitions import AgentDefinitionUnavailable, published_version_for_agent
             from .models import WorkspaceMembership
             membership = WorkspaceMembership.objects.filter(workspace=workspace, user_id=session.owner_id).first()

@@ -82,7 +82,7 @@ def expire_trash(cutoff, dry_run: bool) -> TrashExpirationReport:
     Session.objects.filter(id__in=session_ids, purgedAt__isnull=True).update(purgedAt=now)
     # Includes already-purged owners, so an interrupted GC pass is repairable.
     owners = Session.objects.filter(
-        models.Q(purgedAt__isnull=False) | models.Q(agent__purgedAt__isnull=False),
+        purgedAt__isnull=False,
         events__transcriptoutputcapture__purgedAt__isnull=True,
         events__transcriptoutputcapture__isnull=False,
     ).values_list("id", flat=True).distinct()

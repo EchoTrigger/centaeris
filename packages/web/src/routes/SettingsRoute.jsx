@@ -18,14 +18,14 @@ import WorkspaceMembersRoute from "./WorkspaceMembersRoute";
 import AppDelegations from "./AppDelegations";
 import AgentSettings from "./AgentSettings";
 import EnvironmentSettings from "./EnvironmentSettings";
-import { canOpenPrivateAgentSettings } from "../agent-chat/agentSettingsNavigation";
+import { canOpenAgentSettings } from "../agent-chat/agentSettingsNavigation";
 
 const ADMIN_ROLES = new Set(["owner", "admin"]);
 const SECTIONS = () => ({
   preferences: { label: t("settingsRoute.preferences"), title: t("settingsRoute.preferences"), icon: SlidersHorizontal, group: "", account: true },
   general: { label: t("pluginSettings.general"), title: t("pluginSettings.general"), icon: Settings2, group: "", account: true },
   applications: { label: t("appDelegations.title"), title: t("appDelegations.title"), icon: Boxes, group: "", account: true },
-  agents: { label: t("agentSettings.agents"), title: t("agentSettings.agents"), icon: Bot, group: t("settingsRoute.workspace"), privateAgents: true },
+  agents: { label: t("agentSettings.agents"), title: t("agentSettings.agents"), icon: Bot, group: t("settingsRoute.workspace"), agentSettings: true },
   members: { label: t("invitationActivationRoute.member"), title: t("settingsRoute.membersAndPermissions"), icon: Users, group: t("settingsRoute.workspace") },
   environment: { label: t("environmentSettings.title"), title: t("environmentSettings.title"), icon: Settings2, group: t("settingsRoute.workspace") },
   groups: { label: t("settingsRoute.groups"), title: t("settingsRoute.groups"), icon: UsersRound, group: t("settingsRoute.workspace"), hiddenInNav: true },
@@ -148,14 +148,14 @@ export default function SettingsPage() {
   const closeTo = safeReturnTo(chat?.returnTo, workspace) || safeReturnTo(location.state?.returnTo, workspace) || home;
   const canManageWorkspace = Boolean(workspace && ADMIN_ROLES.has(workspace.role));
   const canManageResources = Boolean(workspace && (canManageWorkspace || user?.isSuperuser));
-  const canManagePrivateAgents = Boolean(workspaceData && canOpenPrivateAgentSettings(workspace));
+  const canViewAgents = Boolean(workspaceData && canOpenAgentSettings(workspace));
   const [agentEditorOpen, setAgentEditorOpen] = useState(false);
   const visibleSections = Object.entries(SECTIONS()).filter(([, item]) => (
-    item.privateAgents ? canManagePrivateAgents : item.account || (item.superuser ? Boolean(user?.isSuperuser) : item.resourceManagement ? canManageResources : canManageWorkspace)
+    item.agentSettings ? canViewAgents : item.account || (item.superuser ? Boolean(user?.isSuperuser) : item.resourceManagement ? canManageResources : canManageWorkspace)
   ));
   const dialogRef = useModalDialog({ open: !agentEditorOpen, preserveOpener: section === "agents", onClose: () => navigate(closeTo) });
 
-  if (SECTIONS()[section]?.privateAgents ? !canManagePrivateAgents : !SECTIONS()[section]?.account && !SECTIONS()[section]?.superuser && !(SECTIONS()[section]?.resourceManagement ? canManageResources : canManageWorkspace)) return <Navigate replace to={home} state={{ workspaceNotice: t("settingsRoute.youDoNotHaveAccessToWorkspaceSettings") }} />;
+  if (SECTIONS()[section]?.agentSettings ? !canViewAgents : !SECTIONS()[section]?.account && !SECTIONS()[section]?.superuser && !(SECTIONS()[section]?.resourceManagement ? canManageResources : canManageWorkspace)) return <Navigate replace to={home} state={{ workspaceNotice: t("settingsRoute.youDoNotHaveAccessToWorkspaceSettings") }} />;
   if (!SECTIONS()[section] || (SECTIONS()[section].superuser && !user?.isSuperuser)) {
     return <Navigate replace to={isAccountRoute ? "/settings/preferences" : `${home.replace(/\/app$/, "")}/settings/general`} />;
   }

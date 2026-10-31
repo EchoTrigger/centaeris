@@ -25,6 +25,7 @@ class DefinitionFixture:
         self.admin_membership = WorkspaceMembership.objects.create(workspace=self.workspace, user=self.admin, role="owner")
         self.membership = WorkspaceMembership.objects.create(workspace=self.workspace, user=self.member)
         self.other_membership = WorkspaceMembership.objects.create(workspace=self.workspace, user=self.other)
+        self.definition_model = ModelConfig.objects.create(displayName="Shared policy model")
         self.base = f"/api/workspaces/{self.workspace.id}"
         self.client.force_login(self.admin)
 
@@ -35,6 +36,7 @@ class DefinitionFixture:
         response = self.send("post", self.base + "/agent-definitions", {
             "name": "Business assistant", "description": "Shared configuration",
             "instructions": "Use primary evidence.", "avatarKind": "centaeris",
+            "modelConfigRef": self.definition_model.id,
         })
         self.assertEqual(response.status_code, 201, response.content)
         return response.json()["definition"]
@@ -112,15 +114,15 @@ class AgentDefinitionTests(DefinitionFixture, TestCase):
         self.assertEqual(agent["definitionVersionId"], version["id"])
         for field, value in (("name", "Override"), ("instructions", "Override"), ("description", "Override"), ("avatarKind", "banana")):
             response = self.send("patch", f"/api/agents/{agent['id']}", {field: value})
-            self.assertEqual(response.status_code, 409, response.content)
-            self.assertEqual(response.json(), {"error": "agent_configuration_managed"})
+            self.assertEqual(response.status_code, 403, response.content)
+            self.assertEqual(response.json(), {"error": "agent_configuration_forbidden"})
         session = Session.objects.create(workspace=self.workspace, owner=self.member, agent_id=agent["id"])
         self.client.force_login(self.admin)
         self.assertEqual(self.client.get(f"/api/agents/{agent['id']}").status_code, 404)
         self.assertEqual(self.client.get(f"/api/sessions/{session.id}").status_code, 404)
-        self.assertEqual(self.client.get(self.base + "/agents").json(), {"agents": []})
+        self.assertEqual(self.client.get(self.base + "/agents").json()["agents"][0]["definitionId"], definition["id"])
         other = self.instance(definition)
-        self.assertEqual(other.status_code, 201, other.content)
+        self.assertEqual(other.status_code, 200, other.content)
         self.assertNotEqual(other.json()["agent"]["id"], agent["id"])
 
     def test_draft_changes_require_publication_and_old_versions_are_immutable(self):
@@ -204,7 +206,7 @@ class AgentDefinitionRunTests(DefinitionFixture, TransactionTestCase):
         self.definition, self.version = self.ready_definition()
         self.client.force_login(self.member)
         self.agent = self.instance(self.definition).json()["agent"]
-        self.model = ModelConfig.objects.create(displayName="Fixture")
+        self.model = self.definition_model
         for target, value in (("request_execution_profile", PROFILE), ("schedule_agent_run_lifecycle", "inserted")):
             patcher = patch("app_core.http.workspaces." + target, return_value=value)
             mock = patcher.start()
@@ -258,13 +260,15 @@ class AgentDefinitionRunTests(DefinitionFixture, TransactionTestCase):
         self.assertEqual(Session.objects.count(), 1)
         self.assertEqual(Agent.objects.get(id=self.agent["id"]).owner_id, self.member.id)
 
-    def test_managed_runs_do_not_inherit_workspace_external_plugins(self):
+    def test_ordinary_native_runs_inherit_enabled_workspace_external_plugins(self):
         from app_core.models import WorkspacePluginEnablement
         WorkspacePluginEnablement.objects.create(workspace=self.workspace, pluginName="banana")
-        first = self.submit("zero-extensions")
+        first = self.submit("workspace-extensions")
         self.assertEqual(first.status_code, 202, first.content)
         run = AgentRun.objects.get(id=first.json()["agentRunId"])
-        self.assertEqual(run.authorization.payload["pluginActivation"]["packages"], [])
+        from app_core.plugin_catalog import load_plugin_catalog
+        self.assertEqual(run.authorization.payload["pluginActivation"]["packages"],
+            [package for package in load_plugin_catalog()["packages"] if package["name"] == "banana"])
 
     def test_unavailable_definition_is_rejected_before_runtime_contact(self):
         self.client.force_login(self.admin)
@@ -373,7 +377,7 @@ class AgentDefinitionConcurrencyTests(DefinitionFixture, TransactionTestCase):
         self.client.force_login(self.admin)
         submitter = Client()
         submitter.force_login(self.member)
-        model = ModelConfig.objects.create(displayName="Fixture")
+        model = self.definition_model
         preflight_complete, changed = threading.Event(), threading.Event()
 
         def profile():
@@ -434,7 +438,7 @@ class AgentDefinitionConcurrencyTests(DefinitionFixture, TransactionTestCase):
         publisher, submitter = Client(), Client()
         publisher.force_login(self.admin)
         submitter.force_login(self.member)
-        model = ModelConfig.objects.create(displayName="Fixture")
+        model = self.definition_model
         preflight_complete = threading.Event()
         submission_locked, publication_waiting = threading.Event(), threading.Event()
 
@@ -521,7 +525,7 @@ class AgentDefinitionConcurrencyTests(DefinitionFixture, TransactionTestCase):
         publisher, submitter = Client(), Client()
         publisher.force_login(self.admin)
         submitter.force_login(self.member)
-        model = ModelConfig.objects.create(displayName="Fixture")
+        model = self.definition_model
         version_created = threading.Event()
         submission_waiting = threading.Event()
         original_create = AgentDefinitionVersion.objects.create
@@ -578,7 +582,7 @@ class AgentDefinitionConcurrencyTests(DefinitionFixture, TransactionTestCase):
         self.client.force_login(self.admin)
         submitter = Client()
         submitter.force_login(self.member)
-        model = ModelConfig.objects.create(displayName="Fixture")
+        model = self.definition_model
         preflight_complete, revoked = threading.Event(), threading.Event()
 
         def profile():

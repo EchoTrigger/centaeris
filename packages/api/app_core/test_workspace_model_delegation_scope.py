@@ -60,12 +60,13 @@ class WorkspaceModelDelegationScopeTests(AppDelegationFixture, TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(
             {item["id"] for item in response.json()["models"]},
-            {self.own_model.id, self.shared_model.id},
+            {self.own_model.id, self.shared_model.id, self.definition_model.id},
         )
 
     def test_no_query_preserves_the_existing_shared_only_catalog_contract(self):
         response = self.catalog()
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(
-            [item["id"] for item in response.json()["models"]], [self.shared_model.id]
+            {item["id"] for item in response.json()["models"]},
+            {self.shared_model.id, self.definition_model.id}
         )

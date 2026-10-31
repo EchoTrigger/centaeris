@@ -25,17 +25,17 @@ from .runtime_schema_test_helpers import remove_runtime_trigger_functions
 class AgentWorkRuntimeTests(LiveServerTestCase):
     serialized_rollback = True
 
-    def test_production_registration_exposes_dispatch_only_to_native_private_coordination(self):
+    def test_production_registration_exposes_dispatch_only_to_native_coordination(self):
         from .agent_messages import _digest
         user = get_user_model().objects.create_user(username="registration-owner")
         workspace = Workspace.objects.create(name="Registration", createdBy=user)
         membership = WorkspaceMembership.objects.create(workspace=workspace, user=user, role="owner")
         model = ModelConfig.objects.create(displayName="Registration model")
         cases = []
-        for kind in ("ordinary", "managed", "delegated", "native"):
+        for kind in ("ordinary", "shared_native", "delegated", "business_with_definition", "native"):
             definition = version = None
             fields = {}
-            if kind in {"managed", "delegated"}:
+            if kind in {"shared_native", "delegated", "business_with_definition"}:
                 definition = AgentDefinition.objects.create(workspace=workspace, created_by=user,
                     name=kind, availability_scope="workspace")
                 version = AgentDefinitionVersion.objects.create(definition=definition, version=1,
@@ -43,7 +43,8 @@ class AgentWorkRuntimeTests(LiveServerTestCase):
                 definition.published_version = version
                 definition.save(update_fields=["published_version"])
                 fields["definition_version"] = version
-            agent = Agent.objects.create(workspace=workspace, owner=user, name=kind, definition=definition)
+            agent = Agent.objects.create(workspace=workspace, owner=user, name=kind, definition=definition,
+                is_business_instance=kind == "business_with_definition")
             session = Session.objects.create(workspace=workspace, owner=user, agent=agent)
             if kind != "ordinary":
                 AgentCoordinationSession.objects.create(agent=agent, session=session)
@@ -76,11 +77,11 @@ class AgentWorkRuntimeTests(LiveServerTestCase):
         self.assertIn("production-registration-model-tools-ok", diagnostic)
         captured = [json.loads(line.removeprefix("registered model tools: "))
                     for line in diagnostic.splitlines() if line.startswith("registered model tools: ")]
-        self.assertEqual([case["kind"] for case in captured], ["ordinary", "managed", "delegated", "native"])
+        self.assertEqual([case["kind"] for case in captured], ["ordinary", "shared_native", "delegated", "business_with_definition", "native"])
         for case in captured:
-            self.assertEqual("dispatch_work" in case["tools"], case["kind"] == "native", case)
-            self.assertEqual("get_work_request" in case["tools"], case["kind"] == "native", case)
-            self.assertEqual("confirm_work_return" in case["tools"], case["kind"] == "native", case)
+            self.assertEqual("dispatch_work" in case["tools"], case["kind"] in {"shared_native", "native"}, case)
+            self.assertEqual("get_work_request" in case["tools"], case["kind"] in {"shared_native", "native"}, case)
+            self.assertEqual("confirm_work_return" in case["tools"], case["kind"] in {"shared_native", "native"}, case)
         self.assertFalse(AgentWorkSession.objects.exists())
         self.assertFalse(HostedOperationReceipt.objects.exists())
 

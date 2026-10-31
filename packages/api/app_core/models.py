@@ -300,6 +300,9 @@ class ResourceQuerySet(models.QuerySet):
 
 
 class Workspace(models.Model):
+    default_agent_definition = models.ForeignKey(
+        "AgentDefinition", on_delete=models.PROTECT, null=True, blank=True, related_name="default_for_workspaces",
+    )
     objects = ResourceQuerySet.as_manager()
     id = models.CharField(primary_key=True, max_length=64, default=new_workspace_id)
     name = models.CharField(max_length=160)
@@ -862,6 +865,10 @@ class AgentDefinition(models.Model):
     description = models.CharField(max_length=128, blank=True, default="")
     instructions = models.TextField(blank=True, default="")
     avatar_kind = models.CharField(max_length=16, default="centaeris")
+    avatar_image = models.BinaryField(null=True, blank=True, editable=False)
+    avatar_digest = models.CharField(max_length=64, blank=True, default="", editable=False)
+    model_config = models.ForeignKey(ModelConfig, on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    thinking_mode = models.CharField(max_length=64, blank=True, default="")
     plugin_names = models.JSONField(default=list)
     status = models.CharField(max_length=16, default="active")
     availability_scope = models.CharField(max_length=16, default="none")
@@ -893,6 +900,10 @@ class AgentDefinition(models.Model):
         if not self._state.adding:
             if type(self).objects.values_list("workspace_id", flat=True).get(pk=self.pk) != self.workspace_id:
                 raise ValueError("AgentDefinition workspace is immutable")
+        if self.model_config_id is None and self.thinking_mode:
+            raise ValueError("Unconfigured definition cannot carry thinking mode")
+        if self.thinking_mode:
+            validate_thinking_mode(self.thinking_mode)
         return super().save(*args, **kwargs)
 
 
@@ -920,6 +931,10 @@ class AgentDefinitionVersion(models.Model):
     description = models.CharField(max_length=128, blank=True, default="")
     instructions = models.TextField(blank=True, default="")
     avatar_kind = models.CharField(max_length=16, default="centaeris")
+    avatar_image = models.BinaryField(null=True, blank=True, editable=False)
+    avatar_digest = models.CharField(max_length=64, blank=True, default="", editable=False)
+    model_config = models.ForeignKey(ModelConfig, on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    thinking_mode = models.CharField(max_length=64, blank=True, default="")
     plugin_activation = models.JSONField(default=empty_plugin_activation)
     published_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
     published_at = models.DateTimeField(auto_now_add=True)
@@ -942,6 +957,10 @@ class AgentDefinitionVersion(models.Model):
         require_enum("AgentDefinitionVersion.avatar_kind", self.avatar_kind, {"centaeris", "banana"})
         if self.version <= 0:
             raise ValueError("AgentDefinitionVersion version must be positive")
+        if self.model_config_id is None and self.thinking_mode:
+            raise ValueError("Unconfigured definition cannot carry thinking mode")
+        if self.thinking_mode:
+            validate_thinking_mode(self.thinking_mode)
         return super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
@@ -1919,19 +1938,29 @@ class AgentRun(models.Model):
         if not self._state.adding:
             stored_snapshot = type(self).objects.values_list(
                 "acting_app_id", "app_delegation_id", "definition_version_id", "agent_instructions",
-                "session_id", "environment_id",
+                "session_id", "environment_id", "modelConfig_id", "thinkingMode",
             ).get(pk=self.pk)
             if stored_snapshot[:2] != (self.acting_app_id, self.app_delegation_id):
                 raise ValueError("AgentRun application origin is immutable")
         if self._state.adding:
             definition_id = self.session.agent.definition_id
             if self.definition_version_id:
-                if self.definition_version.definition_id != definition_id or self.agent_instructions != self.definition_version.instructions:
+                if self.definition_version.definition_id != definition_id:
+                    from .agent_definitions import published_version_for_session, AgentDefinitionUnavailable
+                    membership = WorkspaceMembership.objects.filter(workspace_id=self.workspace_id, user_id=self.user_id).select_related("workspace").first()
+                    try:
+                        expected = published_version_for_session(self.session, membership, acting_app_id=self.acting_app_id) if membership else None
+                    except AgentDefinitionUnavailable:
+                        expected = None
+                    if expected is None or expected.pk != self.definition_version_id:
+                        raise ValueError("AgentRun definition version binding mismatch")
+                if self.agent_instructions != self.definition_version.instructions:
                     raise ValueError("AgentRun definition version binding mismatch")
             elif definition_id:
                 raise ValueError("Managed AgentRun requires a published definition version")
         else:
-            if stored_snapshot[2:4] != (self.definition_version_id, self.agent_instructions):
+            if (stored_snapshot[2:4] != (self.definition_version_id, self.agent_instructions)
+                    or stored_snapshot[6:8] != (self.modelConfig_id, self.thinkingMode)):
                 raise ValueError("AgentRun configuration snapshot is immutable")
         if self.thinkingMode:
             validate_thinking_mode(self.thinkingMode)
@@ -1979,7 +2008,7 @@ class AgentRun(models.Model):
                     raise ValueError("agent_run_environment_binding_invalid")
                 self.environment = session.current_environment
                 return super().save(*args, **kwargs)
-        if stored_snapshot[4:] != (self.session_id, self.environment_id):
+        if stored_snapshot[4:6] != (self.session_id, self.environment_id):
             raise ValueError("agent_run_environment_binding_immutable")
         return super().save(*args, **kwargs)
 

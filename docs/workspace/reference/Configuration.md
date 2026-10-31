@@ -42,6 +42,44 @@ session-specific expiry and anonymous sessions remain finite. Browser sessions d
 not determine business application grant expiry or the lifetime of Agents and
 accepted work.
 
+## Workspace Agents and independent Sessions
+
+Ordinary Agent configuration is shared within a Workspace. Owners and
+administrators publish its instructions, default model and thinking mode, avatar
+and Plugin activation through the existing Agent settings. Members use the same
+published definition. Ordinary conversations can select a model and thinking mode
+for the next submitted Run; each accepted Run freezes its selected configuration.
+Ordinary native Runs inherit the Workspace enabled Plugin set directly, independently
+of the Agent definition Plugin selection. Their signed Run authorization freezes
+that set. Workspace-scoped MCP credentials resolve within the same Workspace;
+explicit approvals and application-delegated capability boundaries remain enforced.
+
+Shared configuration does not share user execution data. Coordination Sessions,
+child work, files and return receipts remain bound to the initiating user and
+Workspace. Native work dispatch and follow-up Runs freeze their published
+configuration without granting access to another member's Sessions or work.
+
+`0035_workspace_shared_agents` adds the shared configuration and Workspace default binding.
+For an existing Workspace, an administrator explicitly promotes the chosen
+existing Agent through its settings. Explicitly binding additional legacy
+personal identities uses the promotion API's `bindAgentIds` list. Migration and
+bootstrap do not guess which legacy
+configuration should become the default. A Workspace without a selected default
+requires an administrator to select it before ordinary execution.
+
+Sessions retain their own history and files when an Agent is deleted. Their
+historical Agent identity and old Run authorizations remain unchanged. New Runs
+use the Workspace default if the former Agent configuration is unavailable.
+Deleting the selected default restores the built-in appearance and instructions,
+retaining the selected default's model configuration. Session deletion and
+retention, rather than parent Agent deletion, govern file reclamation.
+`0036_workspace_navigation_changes` wakes the Workspace Session list across Agent
+identities. `0037_merge_workspace_resources_and_agents` joins this released branch
+with `0036_workspace_file_objects` without renaming applied migrations. Both
+upgrade paths retain the original Agent, Session and accepted Run identities.
+The resource-contract migration still requires application writers and Workers
+to be stopped and environment responsibilities drained before upgrading.
+
 ## External OAuth sign-in
 
 `SSO_PROVIDERS_JSON` is a server-side JSON array; `[]` disables external sign-in.
@@ -204,6 +242,34 @@ API's `agent_run_initial_queue` partial index. Schema numbers stay at v1; existi
 pre-release databases are not migrated or backfilled automatically. Isolated
 verification must initialize the current schema, not reuse an incompatible one.
 
+### API memory observations
+
+Each ASGI process emits an `api_memory_sample` every 30 seconds. It includes
+the deployment revision, RSS and peak RSS, cgroup memory, glibc allocated/free
+arena bytes, and HTTP/stream lifetime counters. Up to 16 active and 16 recently
+completed request identities are sampled, with authorized route and Run bindings.
+Request bodies, credentials and query strings are not recorded. Unsupported
+allocator or cgroup metrics are reported as unavailable rather than zero.
+
+Compose limits only the API's glibc arenas through `API_MALLOC_ARENA_MAX=8`.
+The mmap and trim thresholds retain glibc's adaptive behavior. This bounds arena
+proliferation; it does not guarantee return of all free heap pages to the host.
+A local concurrent model-request comparison rejected fixed mmap thresholds
+because they increased request latency. No periodic collection, heap trimming
+or automatic restart is added.
+
+Worker wait and slot-failure diagnostics use `workspace.worker.diagnostic.v1`
+without enabling performance tracing. A confirmed Job yield records its Job ID,
+lane, control stage, transition reason, and safe HTTP error category/status/route.
+An unconfirmed yield does not produce a waiting record. Exception text,
+credentials and lease owners are excluded. Runtime classifies the exact
+`cleanup execution environment lost` failure as
+`cleanup_execution_environment_lost`.
+
+API and Worker Docker logs rotate at 20 MiB per file, retaining five files per container.
+Recreate the API container to apply allocator environment and logging changes;
+restarting an existing container does not apply new Compose configuration.
+
 ## Execution and processing
 
 ### Resident sandbox capacity
@@ -224,6 +290,7 @@ yielding an execution lease does not free its resident sandbox capacity.
 | `RESIDENT_TENANT_CPU_MILLI` | 4000 | Workspace CPU ceiling (4 cores); shared admission checks each request |
 | `RESIDENT_TENANT_PIDS` | 2048 | Workspace process budget |
 | `RESIDENT_TENANT_WORKSPACE_BYTES` | 34359738368 | Workspace byte budget (32 GiB) |
+| `RESIDENT_STARTUP_MEMORY_BYTES` | 268435456 | Host memory allowance for a new preparation (256 MiB), capped by its cgroup ceiling |
 | `RESIDENT_HOST_MEMORY_HEADROOM_BYTES` | Greater of 20% of Docker host RAM or 512 MiB | Memory reserved for host services |
 | `RESIDENT_HOST_CPU_HEADROOM_MILLI` | 100 per Docker host CPU core | CPU reserved for host services |
 
@@ -231,7 +298,9 @@ These are Compose deployment defaults for the accepted eight-environment,
 12-GiB admission profile. Runtime also derives host capacity from Docker and
 retains host headroom; eight is a count ceiling, not guaranteed physical capacity.
 The shared policy charges fresh observed memory plus swap and PID usage for known
-residents. Pending or unknown creations keep their full declared charge; unknown
+residents. New preparations need host headroom plus `RESIDENT_STARTUP_MEMORY_BYTES`, not
+headroom plus the full cgroup ceiling. Aggregate global/Workspace declaration
+checks remain unchanged. Pending or unknown creations keep their full declared charge; unknown
 workspace usage keeps the declared workspace byte budget. CPU remains a
 per-environment ceiling and is not summed as a reservation. Headroom that leaves
 no capacity fails rather than allowing overbooking.

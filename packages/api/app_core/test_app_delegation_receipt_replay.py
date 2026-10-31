@@ -3,6 +3,7 @@ from unittest.mock import patch
 from django.test import TestCase
 
 from app_core.models import Agent, AgentRun, HostedOperationReceipt, ModelConfig, Session
+from app_core.testing import publish_agent_test_policy
 from app_core.test_agent_definitions import PROFILE
 from app_core.test_app_delegations import AppDelegationSessionFixture
 
@@ -50,18 +51,25 @@ class AppDelegationReceiptReplayTests(AppDelegationSessionFixture, TestCase):
         self.assertEqual(revoked.status_code, 403, revoked.content)
         self.assertEqual(revoked.json(), {"error": "delegation_not_available"})
 
-    def test_create_session_post_retry_after_agent_deletion_preserves_receipt_and_current_grant(self):
+    def test_create_session_post_retry_after_agent_retirement_preserves_session_and_rechecks_grant(self):
         path = self.base + "/sessions"
         payload = {"operationId": "deleted-agent-replay", "agentId": self.agent.id}
         accepted = self.api("post", path, payload)
         self.assertEqual(accepted.status_code, 201, accepted.content)
-        deleted = self.member_client.delete(f"/api/agents/{self.agent.id}")
+        deleted = self.send("patch", self.base + f"/agent-definitions/{self.definition['id']}",
+                            {"status": "disabled"})
         self.assertEqual(deleted.status_code, 200, deleted.content)
         browser = self.send("post", path, payload, client=self.member_client)
-        self.assert_deleted_operation(browser, self.api("post", path, payload))
+        app = self.api("post", path, payload)
+        self.assertEqual(browser.status_code, 201, browser.content)
+        self.assertEqual(app.status_code, 403, app.content)
+        self.assertEqual(app.json(), {"error": "delegation_not_available"})
+        self.assertEqual(browser.json(), accepted.json())
+        self.assertEqual(Session.objects.get(pk=accepted.json()["sessionId"]).status, "active")
+        self.assertEqual(self.member_client.get(f"/api/sessions/{accepted.json()['sessionId']}").status_code, 200)
         fresh = self.api("post", path, {**payload, "operationId": "fresh-deleted-agent"})
-        self.assertEqual(fresh.status_code, 404, fresh.content)
-        self.assertEqual(self.api("get", f"/api/agents/{self.agent.id}").status_code, 404)
+        self.assertEqual(fresh.status_code, 403, fresh.content)
+        self.assertEqual(fresh.json(), {"error": "delegation_not_available"})
         receipt = HostedOperationReceipt.objects.get(operationId=payload["operationId"])
         self.assertEqual((receipt.sessionId, receipt.acting_app_id, receipt.app_delegation_id),
                          (accepted.json()["sessionId"], self.application["id"], self.grant.id))
@@ -74,6 +82,7 @@ class AppDelegationReceiptReplayTests(AppDelegationSessionFixture, TestCase):
     def test_deleted_other_assistants_message_receipt_stays_inaccessible_on_both_urls(self):
         private = Agent.objects.create(workspace=self.workspace, owner=self.member, name="Private")
         session = Session.objects.create(workspace=self.workspace, owner=self.member, agent=private)
+        publish_agent_test_policy(private, model_config=self.definition_model)
         payload = {"operationId": "foreign-deleted-message", "text": "Fixture",
                    "modelConfigRef": ModelConfig.objects.create(displayName="Fixture").id}
         path = self.base + f"/sessions/{session.id}/messages"

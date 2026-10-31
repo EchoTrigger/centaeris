@@ -149,3 +149,47 @@ class WorkspaceResourceMigrationTests(TransactionTestCase):
                 with self.subTest(state=state), self.assertRaisesRegex(RuntimeError, "requires_drained_environment"):
                     MigrationExecutor(database).migrate(self.current)
                 self.assertEqual(manager("Session").get(pk=owner.pk).current_environment_id, environment.pk)
+
+    def test_both_released_branches_upgrade_without_replacing_shared_agents_or_history(self):
+        target = [("app_core", "0037_merge_workspace_resources_and_agents")]
+        branches = ("0036_workspace_navigation_changes", "0036_workspace_file_objects")
+        for branch in branches:
+            with self.subTest(branch=branch), isolated_migration_database(self.old) as database:
+                _, manager, owner, environment, run, grant = self.seed(database)
+                original_grant = manager("AgentRunAuthorization").values().get(pk=grant.pk)
+                original_run = manager("AgentRun").values().get(pk=run.pk)
+                MigrationExecutor(database).migrate([("app_core", branch)])
+                definition_id = None
+                if branch == "0036_workspace_navigation_changes":
+                    apps = MigrationExecutor(database).loader.project_state([("app_core", branch)]).apps
+                    definitions = apps.get_model("app_core", "AgentDefinition").objects.using(database.alias)
+                    definition = definitions.create(workspace_id=run.workspace_id, created_by_id=run.user_id,
+                        name="Published workspace Agent", instructions="Shared instructions", model_config_id=run.modelConfig_id)
+                    definition_id = definition.pk
+                    apps.get_model("app_core", "Workspace").objects.using(database.alias).filter(
+                        pk=run.workspace_id).update(default_agent_definition_id=definition_id)
+                    apps.get_model("app_core", "Agent").objects.using(database.alias).filter(
+                        pk=owner.agent_id).update(definition_id=definition_id)
+                    original_definition = definitions.values().get(pk=definition_id)
+                MigrationExecutor(database).migrate(target)
+                executor = MigrationExecutor(database)
+                self.assertEqual(executor.loader.detect_conflicts(), {})
+                apps = executor.loader.project_state(target).apps
+                sessions = apps.get_model("app_core", "Session").objects.using(database.alias)
+                upgraded = sessions.get(pk=owner.pk)
+                rebuilt = apps.get_model("app_core", "SessionEnvironment").objects.using(database.alias).get(
+                    pk=upgraded.current_environment_id)
+                self.assertNotEqual(rebuilt.pk, environment.pk)
+                self.assertIn("workspaceBytes", rebuilt.environment_profile["resources"])
+                self.assertNotIn("dataTmpfsBytes", rebuilt.environment_profile["resources"])
+                self.assertEqual(upgraded.workspaceGeneration, 4)
+                self.assertEqual(upgraded.workspaceStorageKey, "retained.snapshot")
+                self.assertEqual(upgraded.agent_id, owner.agent_id)
+                self.assertEqual(manager("AgentRunAuthorization").values().get(pk=grant.pk), original_grant)
+                self.assertEqual(manager("AgentRun").values().get(pk=run.pk), original_run)
+                if definition_id is not None:
+                    self.assertEqual(apps.get_model("app_core", "AgentDefinition").objects.using(database.alias).values().get(
+                        pk=definition_id), original_definition)
+                    self.assertEqual(apps.get_model("app_core", "Workspace").objects.using(database.alias).get(
+                        pk=run.workspace_id).default_agent_definition_id, definition_id)
+                self.assertIn("WorkspaceFileObject", [model.__name__ for model in apps.get_app_config("app_core").get_models()])

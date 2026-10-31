@@ -29,6 +29,9 @@ fn record(agent_run_id: &str, stage: &'static str, error: &str) -> serde_json::V
 }
 
 fn classify_error(error: &str) -> &str {
+    if error == "cleanup execution environment lost" {
+        return "cleanup_execution_environment_lost";
+    }
     [
         "execution activity changed during workspace snapshot collection",
         "snapshot manifest length is invalid",
@@ -68,6 +71,7 @@ pub(crate) fn cleanup_record(
         "execution_resident_capacity_wait" => "execution_resident_capacity_wait",
         "environment_host_busy" => "environment_host_busy",
         "cleanup_signing_key_unavailable" => "cleanup_signing_key_unavailable",
+        "cleanup execution environment lost" => "cleanup_execution_environment_lost",
         "cleanup_container_identity_missing" => "cleanup_container_identity_missing",
         "cleanup_physical_identity_rejected" => "cleanup_physical_identity_rejected",
         "cleanup_physical_absence_unconfirmed" => "cleanup_physical_absence_unconfirmed",
@@ -108,6 +112,7 @@ mod tests {
             "teardown_supplement_queue",
             "teardown_terminal_subagents",
             "teardown_host_context",
+            "teardown_workspace_preservation",
             "teardown_cleanup_authority",
         ] {
             for (error, reason) in [
@@ -116,6 +121,10 @@ mod tests {
                     "execution_resident_capacity_wait",
                 ),
                 ("environment_host_busy", "environment_host_busy"),
+                (
+                    "cleanup execution environment lost",
+                    "cleanup_execution_environment_lost",
+                ),
                 (
                     "cleanup_signing_key_unavailable",
                     "cleanup_signing_key_unavailable",
@@ -190,6 +199,26 @@ mod tests {
             record("agent_run_test", "core_turn", "SECRET_TOKEN")["reason"],
             "unclassified"
         );
+        for (error, reason) in [
+            (
+                "cleanup execution environment lost",
+                "cleanup_execution_environment_lost",
+            ),
+            (
+                "cleanup execution environment lost: PRIVATE_TOKEN /private/path",
+                "unclassified",
+            ),
+        ] {
+            let value = record("run", "teardown_workspace_preservation", error);
+            assert_eq!(value["reason"], reason);
+            assert_eq!(value["errorBytes"], error.len());
+            assert_eq!(
+                value["errorDigest"],
+                format!("sha256:{:x}", Sha256::digest(error.as_bytes()))
+            );
+            assert!(!value.to_string().contains("PRIVATE_TOKEN"));
+            assert!(!value.to_string().contains("/private/path"));
+        }
     }
 
     #[test]

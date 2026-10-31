@@ -14,8 +14,8 @@ export function HomePlane({ agent }) {
   const { t } = useTranslation();
   return (
     <div className="shHome" aria-label={t("homePlane.home")}>
-      <AgentMark className="shHomeAvatar" agent={agent} />
-      <h1>{agent.name}</h1>
+      <AgentMark className="shHomeAvatar" agent={agent || { avatarKind: "centaeris" }} />
+      <h1>{agent?.name || "Centaeris"}</h1>
     </div>
   );
 }

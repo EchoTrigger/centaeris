@@ -112,7 +112,7 @@ from .session_event import (
     project_committed_agent_run,
     rebuild_agent_run_citation_projection,
 )
-from .testing import create_session
+from .testing import create_session, publish_agent_test_policy
 from . import agent_run_stream
 
 
@@ -367,6 +367,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             displayName="Profile model",
             modelName="profile-model",
         )
+        publish_agent_test_policy(agent, model_config=model)
         self.client.force_login(user)
 
         with patch(
@@ -411,6 +412,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
             displayName="Fake Model",
             modelName="fake-model",
         )
+
+        publish_agent_test_policy(Agent.objects.get(id="centaeris"), model_config=model)
 
         loginResponse = self.client.post(
             "/api/login",
@@ -685,6 +688,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             owner=user,
             agent_id="centaeris",
         )
+        publish_agent_test_policy(session.agent, model_config=model)
         self.client.force_login(user)
 
         missing = self.client.post(
@@ -719,6 +723,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         session = create_session(workspace=workspace, owner=user)
         session.agent.instructions = "Keep the answer grounded."
         session.agent.save(update_fields=["instructions", "updatedAt"])
+        publish_agent_test_policy(session.agent, model_config=model)
         self.client.force_login(user)
 
         with patch(
@@ -1943,6 +1948,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             id="fake-model", displayName="Fake"
         )
         session = create_session(workspace=workspace, owner=user)
+        publish_agent_test_policy(session.agent, model_config=model)
         self.client.force_login(user)
         payload = {"text": "hello", "modelConfigRef": model.id}
 
@@ -2117,6 +2123,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             name="Centaeris",
         )
         model = ModelConfig.objects.create(id="project-model", displayName="Fake")
+        publish_agent_test_policy(Agent.objects.get(id="centaeris"), model_config=model)
         self.client.force_login(user)
 
         created = self.client.post(
@@ -2140,7 +2147,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             self.client.get(
                 f"/api/workspaces/{workspace.id}/session-projects"
             ).json(),
-            {"error": "session_project_filter_invalid"},
+            {"projects": [project]},
         )
 
         message = self.client.post(
@@ -4886,8 +4893,10 @@ class ModelAdminAcceptanceTests(TestCase):
         agent = Agent.objects.create(workspace=workspace, owner=self.admin, name="Agent")
         session = Session.objects.create(workspace=workspace, owner=self.admin, agent=agent)
         retiring = ModelConfig.objects.get(provider_id=provider_id, modelName="old", isCurrent=True)
+        policy_version = publish_agent_test_policy(agent, model_config=retiring)
         run = AgentRun.objects.create(workspace=workspace, session=session, user=self.admin,
-                                      modelConfig=retiring, prompt="Finish first")
+                                      modelConfig=retiring, prompt="Finish first",
+                                      definition_version=policy_version, agent_instructions=policy_version.instructions)
         create_agent_run_authorization(run)
         preview = self.client.get("/api/admin/model-catalog-reconciliation")
         self.assertEqual(preview.status_code, 200)
@@ -5051,6 +5060,7 @@ class ModelAdminAcceptanceTests(TestCase):
         workspace = Workspace.objects.create(name="Default", createdBy=self.admin)
         workspace.members.add(self.member)
         session = create_session(workspace=workspace, owner=self.member)
+        publish_agent_test_policy(session.agent, model_config=ModelConfig.objects.create(displayName="Available session model"))
         for modelRef in [modelId, "banana"]:
             rejected = self.client.post(
                 f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
@@ -7016,6 +7026,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
     def test_new_session_first_message_atomically_creates_uploaded_asset_and_run(
         self, schedule_agent_run_lifecycle
     ):
+        publish_agent_test_policy(self.session.agent, model_config=self.model)
         self.client.force_login(self.member)
 
         response = self.client.post(
@@ -7115,6 +7126,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         self.model.thinkingModes = ["low", "vendor-high"]
         self.model.thinkingMode = "vendor-high"
         self.model.save(update_fields=["thinkingModes", "thinkingMode"])
+        publish_agent_test_policy(self.session.agent, model_config=self.model, thinking_mode="vendor-high")
         self.client.force_login(self.member)
 
         rejected = self.client.post(
@@ -7152,6 +7164,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
     def test_new_session_first_message_rolls_back_upload_when_authorization_fails(self):
         from .assets import delete_stored_object_for_gc
 
+        publish_agent_test_policy(self.session.agent, model_config=self.model)
         self.client.force_login(self.member)
         before = {
             "sessions": Session.objects.count(),
@@ -7206,6 +7219,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         self.prepare_allowed_source_input(b"expected")
         with default_storage.open(self.allowedObject.storageKey, "wb") as output:
             output.write(b"tampered")
+        publish_agent_test_policy(self.session.agent, model_config=self.model)
         self.client.force_login(self.member)
 
         response = self.client.post(
@@ -7225,6 +7239,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         original = b"original"
         replacement = b"replacement"
         link = self.prepare_allowed_source_input(original)
+        publish_agent_test_policy(self.session.agent, model_config=self.model)
         self.client.force_login(self.member)
         response = self.client.post(
             f"/api/workspaces/{self.workspace.id}/sessions/{self.session.id}/messages",

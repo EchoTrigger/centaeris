@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -98,7 +99,11 @@ def main(skip_frontend_tests=False, stage="All"):
     else:
         gates = gates[:5] + rust_gates + gates[5:]
     for label, args in gates:
-        run(label, args)
+        started = time.monotonic()
+        try:
+            run(label, args)
+        finally:
+            print(f"<== {label}: {time.monotonic() - started:.3f}s", flush=True)
     config = json.loads(run("Compose structure", ["docker", "compose", "--env-file", ".env.example", "config", "--format", "json"], capture=True))
     for name, consumer in (("document-processor", "material-worker"), ("workspace-general", "runtime")):
         if name not in config["services"] or config["services"][name].get("profiles") or not config["services"][consumer]["depends_on"].get(name):

@@ -205,13 +205,11 @@ def session_authority_is_current(user_id, session_id, delegation_id=None, scope=
                                  business_branch_id=None):
     user = get_user_model().objects.filter(id=user_id, is_active=True).first()
     session = Session.objects.select_related("agent").filter(id=session_id, owner_id=user_id,
-        status="active", agent__owner_id=user_id, agent__status="active").first()
+        status="active", agent__owner_id=user_id).first()
     if user is None or session is None:
         return False
     membership = workspace_membership_for(user, session.workspace_id)
     if membership is None:
-        return False
-    if session.agent.definition_id and not available_agent_definitions(membership).filter(id=session.agent.definition_id).exists():
         return False
     if delegation_id is not None:
         try:

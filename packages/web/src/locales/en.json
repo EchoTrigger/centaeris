@@ -978,7 +978,7 @@
   "agentChat.noActivity": "No activity yet.",
   "agentSettings.agents": "Agents",
   "agentSettings.privateAgents": "Your private agents",
-  "agentSettings.selectAgent": "Select an Agent to edit its profile and model.",
+  "agentSettings.selectAgent": "Select an Agent to view its profile and model.",
   "agentSettings.model": "Model for new runs",
   "agentSettings.configured": "Model configured",
   "agentSettings.unconfigured": "Choose a model to configure this Agent.",
@@ -1169,5 +1169,11 @@
   "workspaceResources.loadFailed": "Unable to load workspaces.",
   "workspaceResources.models": "Models",
   "workspaceResources.plugins": "Plugins",
-  "workspaceResources.retry": "Retry"
+  "workspaceResources.retry": "Retry",
+  "agentSettings.workspaceAgents": "Workspace agents",
+  "agentSettings.workspaceAgent": "Workspace agent",
+  "agentSettings.viewAgent": "View agent",
+  "agentSettings.viewSoulMd": "View SOUL.md",
+  "workspaceHomeRoute.noAgentsAreAvailableInThisWorkspaceYet": "No agents are available in this workspace yet.",
+  "agentSettings.businessAgent": "Business agent"
 }

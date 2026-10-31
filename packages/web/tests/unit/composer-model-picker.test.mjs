@@ -84,3 +84,13 @@ test("a submission awaiting its Run identity still offers Stop", () => {
   assert.equal(stop.props["aria-busy"],true);
   stop.props.onClick();assert.equal(stops,1);
 });
+
+
+test("shared Agent conversation displays its published model and effort with both selectors read-only", () => {
+  const tree = subject({ modelSelectionDisabled: true });
+  assert.equal(control(tree, "model").props.disabled, true);
+  assert.equal(control(tree, "model").props.value, model.id);
+  assert.equal(control(tree, "thinking").props.disabled, true);
+  assert.equal(control(tree, "thinking").props.value, "high");
+  assert.equal(elements(tree, node => node.type === "textarea")[0].props.value, "Retained draft");
+});

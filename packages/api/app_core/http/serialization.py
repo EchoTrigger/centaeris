@@ -26,17 +26,20 @@ def serialize_agent(agent: Agent) -> dict:
     from app_core.business_agent_scope import agent_configuration
     configuration = agent_configuration(agent)
     version = agent.definition.published_version if agent.definition_id else None
+    avatar = version if version else configuration
     return {
         "id": agent.id,
         "workspaceId": agent.workspace_id,
         "definitionId": agent.definition_id,
         "definitionVersionId": version.id if version else None,
+        "isBusinessRoot": agent.business_branches.exists(),
+        "pluginNames": ([item["name"] for item in version.plugin_activation["packages"]] if version else []),
         "name": version.name if version else configuration.name,
         "description": version.description if version else configuration.description,
         "instructions": version.instructions if version else configuration.instructions,
         "avatarKind": version.avatar_kind if version else configuration.avatar_kind,
-        "avatarUrl": (f"/api/agents/{agent.id}/avatar?v={agent.avatar_digest}"
-            if agent.avatar_digest and not agent.definition_id and not agent.is_business_instance else None),
+        "avatarUrl": (f"/api/agents/{agent.id}/avatar?v={avatar.avatar_digest}"
+            if avatar.avatar_digest and not agent.is_business_instance else None),
         "status": agent.status,
         "deletedAt": agent.deletedAt.isoformat() if agent.deletedAt else None,
         "createdAt": agent.createdAt.isoformat(),
@@ -50,6 +53,8 @@ def serialize_agent_definition(definition) -> dict:
         "name": definition.name, "description": definition.description,
         "instructions": definition.instructions, "avatarKind": definition.avatar_kind,
         "pluginNames": definition.plugin_names,
+        "modelConfigRef": definition.model_config_id, "thinkingMode": definition.thinking_mode or None,
+        "avatarUrl": (f"/api/agent-definitions/{definition.id}/avatar?v={definition.avatar_digest}" if definition.avatar_digest else None),
         "status": definition.status, "availabilityScope": definition.availability_scope,
         "membershipIds": sorted(item.membership_id for item in definition.member_grants.all()),
         "publishedVersionId": definition.published_version_id,
@@ -63,6 +68,8 @@ def serialize_agent_definition_version(version) -> dict:
         "name": version.name, "description": version.description,
         "instructions": version.instructions, "avatarKind": version.avatar_kind,
         "pluginNames": [package["name"] for package in version.plugin_activation["packages"]],
+        "modelConfigRef": version.model_config_id, "thinkingMode": version.thinking_mode or None,
+        "avatarUrl": (f"/api/agent-definitions/{version.definition_id}/avatar?v={version.avatar_digest}" if version.avatar_digest else None),
         "publishedAt": version.published_at.isoformat(),
     }
 
