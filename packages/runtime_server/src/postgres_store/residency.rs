@@ -15,9 +15,9 @@ use crate::resident_capacity::{
 // Serialize inventory reconciliation and admission. Retained preparation releases
 // this gate after its durable reservation; maintenance keeps its existing scope.
 struct ResidentHostLock<'a>(&'a mut Client, String, Option<crate::observations::Span>);
-mod preparation_wait;
 #[cfg(test)]
 mod cost_tests;
+mod preparation_wait;
 
 impl Drop for ResidentHostLock<'_> {
     fn drop(&mut self) {
@@ -529,17 +529,15 @@ fn used_shared(
         let declared = usage(&row, 2)?;
         let on_host = row.get::<_, String>(0) == host_id;
         let confirmed = row.get::<_, String>(7) == "resident";
-        let observed = if on_host
-            && confirmed
-            && !pending.contains(row.get::<_, String>(8).as_str())
-        {
-            row.get::<_, Option<String>>(6)
-                .as_ref()
-                .and_then(|id| sample.measured_by_container.get(id))
-                .copied()
-        } else {
-            None
-        };
+        let observed =
+            if on_host && confirmed && !pending.contains(row.get::<_, String>(8).as_str()) {
+                row.get::<_, Option<String>>(6)
+                    .as_ref()
+                    .and_then(|id| sample.measured_by_container.get(id))
+                    .copied()
+            } else {
+                None
+            };
         let resources = crate::shared_resident_admission::charge(declared, observed)?;
         global = global.checked_add(resources)?;
         if on_host {
@@ -588,6 +586,29 @@ fn confirm_reserved_resident(
         .map_err(|error| format!("confirm resident reservation failed: {error}"))
 }
 
+struct ResidentDeclaration {
+    run_id: Option<String>,
+    workspace_id: String,
+    container_id: Option<String>,
+    resources: ResidentResourceUsage,
+    allocation_owner: centaeris_core::execution::EnvironmentTaskOwner,
+    confirmed: bool,
+}
+
+impl ResidentDeclaration {
+    fn from_row(row: &postgres::Row) -> Result<Self, String> {
+        Ok(Self {
+            run_id: row.get(0),
+            workspace_id: row.get(1),
+            container_id: row.get(2),
+            resources: usage(row, 3)?,
+            allocation_owner: serde_json::from_str(&row.get::<_, String>(7))
+                .map_err(|_| "allocation_owner_invalid")?,
+            confirmed: matches!(row.get::<_, String>(8).as_str(), "resident" | "releasing"),
+        })
+    }
+}
+
 fn reconcile(
     client: &mut Client,
     host_id: &str,
@@ -605,6 +626,50 @@ fn reconcile(
         .iter()
         .map(|pending| (pending.execution_id.as_str(), pending))
         .collect::<HashMap<_, _>>();
+    // Run declarations share the existing admission gate. Maintenance retains
+    // its locking read below, before reading the corresponding declaration.
+    let executions = inventory
+        .iter()
+        .filter(|sandbox| !preparing.contains_key(sandbox.execution_id.as_str()))
+        .filter(|sandbox| {
+            matches!(
+                sandbox.allocation_owner,
+                centaeris_core::execution::EnvironmentTaskOwner::AgentRun { .. }
+            )
+        })
+        .map(|sandbox| sandbox.execution_id.as_str())
+        .collect::<Vec<_>>();
+    let jobs = inventory
+        .iter()
+        .filter(|sandbox| !preparing.contains_key(sandbox.execution_id.as_str()))
+        .filter_map(|sandbox| match &sandbox.allocation_owner {
+            centaeris_core::execution::EnvironmentTaskOwner::AgentRun { run_id } => {
+                Some(agent_run_lifecycle_job_id(run_id))
+            }
+            _ => None,
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let tenants = if jobs.is_empty() {
+        HashMap::new()
+    } else {
+        tx.query(
+            "SELECT job_id,workspace_id FROM execution_job_tenants WHERE job_id=ANY($1)",
+            &[&jobs],
+        )
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+        .collect::<HashMap<_, _>>()
+    };
+    let mut declarations = if executions.is_empty() {
+        HashMap::new()
+    } else {
+        tx.query("SELECT agent_run_id,workspace_id,container_id,memory_bytes,cpu_milli,pids,workspace_bytes,allocation_owner_json,state,execution_id FROM resident_sandboxes WHERE host_id=$1 AND execution_id=ANY($2)", &[&host_id,&executions])
+            .map_err(|error| error.to_string())?
+            .iter()
+            .map(|row| Ok((row.get::<_, String>(9), ResidentDeclaration::from_row(row)?)))
+            .collect::<Result<HashMap<_, _>, String>>()?
+    };
     for sandbox in inventory {
         if let Some(preparing) = preparing.get(sandbox.execution_id.as_str()) {
             if preparing.allocation_owner != sandbox.allocation_owner
@@ -630,29 +695,29 @@ fn reconcile(
             centaeris_core::execution::EnvironmentTaskOwner::MaintenanceOperation { .. } => None,
         };
         let tenant = if let Some(run) = run_id {
-            tx.query_opt(
-                "SELECT workspace_id FROM execution_job_tenants WHERE job_id=$1",
-                &[&agent_run_lifecycle_job_id(run)?],
-            )
-            .map_err(|e| e.to_string())?
-            .ok_or("managed resident sandbox has unknown tenant; admission blocked")?
-            .get::<_, String>(0)
+            tenants
+                .get(&agent_run_lifecycle_job_id(run)?)
+                .ok_or("managed resident sandbox has unknown tenant; admission blocked")?
+                .clone()
         } else {
             tx.query_opt("SELECT s.workspace_id FROM runtime.execution_instances i JOIN runtime.resident_sandboxes s ON s.execution_id=i.execution_id WHERE i.execution_id=$1 AND i.agent_run_id IS NULL AND i.allocation_owner_json::jsonb=$2::text::jsonb AND i.allocation_execution_id=i.execution_id FOR SHARE OF i,s",&[&sandbox.execution_id,&serde_json::to_string(&sandbox.allocation_owner).map_err(|_|"allocation_owner_invalid")?]).map_err(|e|e.to_string())?.ok_or("managed maintenance sandbox has no durable reservation")?.get(0)
         };
-        let existing = tx.query_opt("SELECT agent_run_id,workspace_id,container_id,memory_bytes,cpu_milli,pids,workspace_bytes,allocation_owner_json,state FROM resident_sandboxes WHERE host_id=$1 AND execution_id=$2", &[&host_id, &sandbox.execution_id]).map_err(|error| error.to_string())?;
-        if let Some(row) = existing {
-            if row.get::<_, Option<String>>(0).as_deref() != run_id
-                || serde_json::from_str::<centaeris_core::execution::EnvironmentTaskOwner>(
-                    &row.get::<_, String>(7),
-                )
-                .map_err(|_| "allocation_owner_invalid")?
-                    != sandbox.allocation_owner
-                || row.get::<_, String>(1) != tenant
+        let existing = if run_id.is_some() {
+            declarations.remove(&sandbox.execution_id)
+        } else {
+            tx.query_opt("SELECT agent_run_id,workspace_id,container_id,memory_bytes,cpu_milli,pids,workspace_bytes,allocation_owner_json,state FROM resident_sandboxes WHERE host_id=$1 AND execution_id=$2", &[&host_id, &sandbox.execution_id])
+                .map_err(|error| error.to_string())?
+                .as_ref().map(ResidentDeclaration::from_row).transpose()?
+        };
+        let declaration = if let Some(mut row) = existing {
+            if row.run_id.as_deref() != run_id
+                || row.allocation_owner != sandbox.allocation_owner
+                || row.workspace_id != tenant
                 || row
-                    .get::<_, Option<String>>(2)
-                    .is_some_and(|id| id != sandbox.container_id)
-                || usage(&row, 3)? != sandbox.resources
+                    .container_id
+                    .as_ref()
+                    .is_some_and(|id| id != &sandbox.container_id)
+                || row.resources != sandbox.resources
             {
                 return Err(
                     "managed resident sandbox disagrees with reservation; admission blocked".into(),
@@ -661,8 +726,7 @@ fn reconcile(
             // A verified unchanged fact needs no write. In particular, ordinary
             // task/controller pins must not make another environment hold the
             // global preparation gate while refreshing an unused timestamp.
-            if row.get::<_, Option<String>>(2).as_deref() != Some(sandbox.container_id.as_str())
-                || !matches!(row.get::<_, String>(8).as_str(), "resident" | "releasing")
+            if row.container_id.as_deref() != Some(sandbox.container_id.as_str()) || !row.confirmed
             {
                 if confirm_reserved_resident(
                     &mut tx,
@@ -677,7 +741,10 @@ fn reconcile(
                         return Err("resident reservation changed during confirmation".into());
                     }
                 }
+                row.container_id = Some(sandbox.container_id.clone());
+                row.confirmed = true;
             }
+            row
         } else {
             insert(
                 &mut tx,
@@ -689,6 +756,17 @@ fn reconcile(
                 "resident",
                 sandbox.resources,
             )?;
+            ResidentDeclaration {
+                run_id: run_id.map(str::to_owned),
+                workspace_id: tenant,
+                container_id: Some(sandbox.container_id.clone()),
+                resources: sandbox.resources,
+                allocation_owner: sandbox.allocation_owner.clone(),
+                confirmed: true,
+            }
+        };
+        if run_id.is_some() {
+            declarations.insert(sandbox.execution_id.clone(), declaration);
         }
     }
     if newly_confirmed {
