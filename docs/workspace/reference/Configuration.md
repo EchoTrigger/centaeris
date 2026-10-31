@@ -49,6 +49,10 @@ administrators publish its instructions, default model and thinking mode, avatar
 and Plugin activation through the existing Agent settings. Members use the same
 published definition. Ordinary conversations can select a model and thinking mode
 for the next submitted Run; each accepted Run freezes its selected configuration.
+Ordinary native Runs inherit the Workspace enabled Plugin set directly, independently
+of the Agent definition Plugin selection. Their signed Run authorization freezes
+that set. Workspace-scoped MCP credentials resolve within the same Workspace;
+explicit approvals and application-delegated capability boundaries remain enforced.
 
 `0035_workspace_shared_agents` adds the shared configuration and Workspace default binding.
 For an existing Workspace, an administrator explicitly promotes the chosen

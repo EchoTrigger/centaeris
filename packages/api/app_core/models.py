@@ -1949,7 +1949,7 @@ class AgentRun(models.Model):
                     from .agent_definitions import published_version_for_session, AgentDefinitionUnavailable
                     membership = WorkspaceMembership.objects.filter(workspace_id=self.workspace_id, user_id=self.user_id).select_related("workspace").first()
                     try:
-                        expected = published_version_for_session(self.session, membership) if membership else None
+                        expected = published_version_for_session(self.session, membership, acting_app_id=self.acting_app_id) if membership else None
                     except AgentDefinitionUnavailable:
                         expected = None
                     if expected is None or expected.pk != self.definition_version_id:

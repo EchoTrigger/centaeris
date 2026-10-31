@@ -134,16 +134,16 @@ class AssistantConnectorTests(AssistantConnectorFixture, TestCase):
         WorkspaceMembership.objects.filter(workspace=self.workspace, user=self.member).delete()
         self.assertEqual(self.authorize(run).status_code, 403)
 
-    def test_selected_capability_excludes_another_workspace_enabled_plugin(self):
+    def test_native_shared_agent_inherits_all_workspace_enabled_plugins(self):
         WorkspacePluginEnablement.objects.create(workspace=self.workspace, pluginName="kiwi")
         self.selected_publication()
         run = self.submit_run()
-        self.assertEqual([package["name"] for package in run.authorization.payload["pluginActivation"]["packages"]], ["banana"])
+        self.assertEqual([package["name"] for package in run.authorization.payload["pluginActivation"]["packages"]], ["banana", "kiwi"])
         denied = self.authorize(run, pluginName="kiwi", serverId="public",
             resourceDigest=self.packages[1]["mcpServers"][0]["digest"])
-        self.assertEqual(denied.status_code, 409, denied.content)
+        self.assertEqual(denied.status_code, 200, denied.content)
 
-    def test_changed_package_requires_a_new_publication_before_accepting_new_runs(self):
+    def test_new_native_run_freezes_current_workspace_package_without_agent_republication(self):
         self.selected_publication()
         self.packages[0]["packageDigest"] = "sha256:" + "b" * 64
         self.write_catalog()
@@ -151,8 +151,9 @@ class AssistantConnectorTests(AssistantConnectorFixture, TestCase):
         agent = self.instance(self.definition).json()["agent"]
         response = self.send("post", self.base + "/sessions/new/messages", {
             "operationId": "changed-package", "agentId": agent["id"], "text": "fixture", "modelConfigRef": self.model.id})
-        self.assertEqual(response.status_code, 403, response.content)
-        self.assertFalse(AgentRun.objects.exists())
+        self.assertEqual(response.status_code, 202, response.content)
+        run = AgentRun.objects.get(pk=response.json()["agentRunId"])
+        self.assertEqual(run.authorization.payload["pluginActivation"]["packages"], self.packages[:1])
 
     def test_selection_is_workspace_enabled_strict_and_publication_frozen(self):
         for names in (["unknown"], ["kiwi"], ["banana", "banana"], ["Banana"]):
@@ -167,10 +168,10 @@ class AssistantConnectorTests(AssistantConnectorFixture, TestCase):
         self.client.force_login(self.admin)
         empty = self.publish(self.definition)
         run_two = self.submit_run(operation="empty-publication")
-        self.assertEqual(run_two.authorization.payload["pluginActivation"]["packages"], [])
+        self.assertEqual(run_two.authorization.payload["pluginActivation"]["packages"], self.packages[:1])
         self.assertEqual(run_two.definition_version_id, empty["id"])
 
-    def test_workspace_plugin_disable_blocks_publication_and_new_run(self):
+    def test_workspace_plugin_disable_removes_capability_from_next_native_run(self):
         self.selected_publication()
         self.enablement.delete()
         response = self.send("post", self.base + f"/agent-definitions/{self.definition['id']}/versions")
@@ -179,8 +180,9 @@ class AssistantConnectorTests(AssistantConnectorFixture, TestCase):
         agent = self.instance(self.definition).json()["agent"]
         response = self.send("post", self.base + "/sessions/new/messages", {
             "operationId": "disabled-plugin", "agentId": agent["id"], "text": "fixture", "modelConfigRef": self.model.id})
-        self.assertEqual(response.status_code, 403, response.content)
-        self.assertFalse(AgentRun.objects.exists())
+        self.assertEqual(response.status_code, 202, response.content)
+        run = AgentRun.objects.get(pk=response.json()["agentRunId"])
+        self.assertEqual(run.authorization.payload["pluginActivation"]["packages"], [])
 
     def test_managed_connector_has_no_global_fallback_without_binding(self):
         self.selected_publication()
@@ -388,3 +390,44 @@ class AssistantConnectorTests(AssistantConnectorFixture, TestCase):
         browser.force_login(self.custodian)
         self.assertEqual(self.approve(client=browser).status_code, 403)
         self.assertEqual(browser.delete(f"/api/admin/mcp-assistant-credential-approvals/{approved['id']}").status_code, 403)
+
+    def test_native_empty_agent_selection_uses_workspace_credential_and_rechecks_removal(self):
+        from app_core.models import (Agent, AgentCoordinationSession, BusinessAgentBranch,
+                                     BusinessApplication, Session, Workspace, WorkspaceMembership)
+        credential = McpBearerCredential.objects.create(workspace=self.workspace, plugin_name="banana",
+            credential_ref="business-token", display_name="Workspace account",
+            encrypted_secret=encrypt_credential_secret("synthetic-workspace-token"),
+            created_by=self.admin, updated_by=self.admin)
+        run = self.submit_run()
+        self.assertEqual(run.definition_version.plugin_activation["packages"], [])
+        self.assertEqual(run.authorization.payload["pluginActivation"]["packages"], self.packages[:1])
+        original = run.authorization.payload.copy()
+        resolved = self.authorize(run)
+        self.assertEqual(resolved.status_code, 200, resolved.content)
+        self.assertEqual(resolved.json()["token"], "synthetic-workspace-token")
+        root_agent = run.session.agent
+        version = root_agent.definition.published_version
+        business_agent = Agent.objects.create(workspace=self.workspace, owner=self.member,
+            definition=root_agent.definition, is_business_instance=True,
+            name=version.name, description=version.description, instructions=version.instructions,
+            avatar_kind=version.avatar_kind, model_config=root_agent.model_config,
+            thinking_mode=root_agent.thinking_mode)
+        business_session = Session.objects.create(workspace=self.workspace, owner=self.member,
+            agent=business_agent, origin="automation")
+        AgentCoordinationSession.objects.create(agent=business_agent, session=business_session)
+        application = BusinessApplication.objects.create(name="Fixture app", status="active", created_by=self.admin)
+        BusinessAgentBranch.objects.create(app=application, root_agent=run.session.agent,
+            business_user_id="fixture-business-user", agent=business_agent, session=business_session)
+        resolved_after_branch = self.authorize(run)
+        self.assertEqual(resolved_after_branch.status_code, 200, resolved_after_branch.content)
+        self.assertEqual(resolved_after_branch.json()["bindingDigest"], resolved.json()["bindingDigest"])
+        other = Workspace.objects.create(name="Other workspace", createdBy=self.admin)
+        McpBearerCredential.objects.filter(pk=credential.pk).update(workspace=other)
+        self.assertEqual(self.authorize(run).status_code, 409)
+        McpBearerCredential.objects.filter(pk=credential.pk).update(workspace=self.workspace)
+        self.enablement.delete()
+        self.assertEqual(self.authorize(run).status_code, 403)
+        self.assertEqual(run.authorization.payload, original)
+        WorkspacePluginEnablement.objects.create(workspace=self.workspace, pluginName="banana")
+        WorkspaceMembership.objects.filter(pk=self.membership.pk).delete()
+        self.assertEqual(self.authorize(run).status_code, 403)

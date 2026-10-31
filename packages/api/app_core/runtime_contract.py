@@ -8,6 +8,7 @@ from django.conf import settings
 from .agent_identity import validate_agent_id
 from .models import validate_thinking_mode
 from .plugin_catalog import plugin_activation_for_workspace, validate_plugin_activation
+from .agent_definitions import uses_workspace_plugins
 
 
 AGENT_RUN_AUTHORIZATION_SCHEMA = "workspace.agent_run_authorization.v1"
@@ -107,7 +108,8 @@ def build_agent_run_authorization_payload(
         "environmentProfileDigest": agent_run.environment.environment_profile_digest,
         "pluginActivation": (
             agent_run.definition_version.plugin_activation
-            if agent_run.definition_version_id else plugin_activation_for_workspace(agent_run.workspace)
+            if agent_run.definition_version_id and not uses_workspace_plugins(agent_run.session.agent, agent_run.acting_app_id)
+            else plugin_activation_for_workspace(agent_run.workspace)
         ),
     }
     validate_agent_run_authorization_payload(payload)

@@ -1307,9 +1307,9 @@ def create_session_message(
         if session_id == "new":
             if requested_agent.definition_id is None:
                 return Status(409, {"error": "agent_configuration_promotion_required"})
-            published_version_for_agent(requested_agent, membership)
+            published_version_for_agent(requested_agent, membership, acting_app_id=grant.app_id if grant else None)
         else:
-            published_version_for_session(requested_session, membership)
+            published_version_for_session(requested_session, membership, acting_app_id=grant.app_id if grant else None)
     except AgentDefinitionUnavailable as error:
         return Status(403, {"error": str(error)})
     try:
@@ -1418,7 +1418,7 @@ def create_session_message(
                 )
                 if linked_attachment_refs != set(attachment_refs):
                     return Status(403, {"error": "attachment_not_accessible"})
-            definition_version = published_version_for_session(session, membership)
+            definition_version = published_version_for_session(session, membership, acting_app_id=grant.app_id if grant else None)
             try:
                 model, thinking_mode = submitted_agent_model(
                     session.agent, payload.model_config_ref, payload.thinking_mode, definition_version=definition_version)

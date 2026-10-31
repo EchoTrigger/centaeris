@@ -97,7 +97,7 @@ class EnvironmentProvisionTests(TransactionTestCase):
         self.environment.refresh_from_db()
         self.assertTrue(self.environment.controller_released)
 
-    def test_definition_provision_uses_reviewed_published_activation_instead_of_workspace_defaults(self):
+    def test_native_shared_agent_provision_uses_workspace_activation(self):
         from .models import Agent, AgentDefinition, AgentDefinitionVersion, WorkspaceMembership
         user = self.session.owner
         WorkspaceMembership.objects.create(workspace=self.workspace, user=user, role='owner')
@@ -109,7 +109,8 @@ class EnvironmentProvisionTests(TransactionTestCase):
         definition.save(update_fields=['published_version'])
         Agent.objects.filter(pk=self.session.agent_id).update(definition=definition)
         with patch('app_core.environment_provision.plugin_activation_for_workspace',
-                side_effect=AssertionError('mutable workspace defaults used')):
+                return_value=version.plugin_activation) as activation:
             response = self.issue()
         self.assertEqual(response.status_code, 200, response.content)
+        activation.assert_called_once()
         self.assertEqual(response.json()['payload']['pluginActivation'], version.plugin_activation)
