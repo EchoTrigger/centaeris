@@ -1050,18 +1050,6 @@ impl ModelRequestStartedV1 {
                 {
                     return Err("model request system prompt observation mismatch".to_string())
                 }
-                ModelObservationV1::ContextMessage { message }
-                    if !request
-                        .prepared_prompt
-                        .messages
-                        .iter()
-                        .any(|candidate| candidate == message) =>
-                {
-                    return Err(format!(
-                        "model request context observation is absent from prepared prompt: {}",
-                        message.message_id
-                    ))
-                }
                 ModelObservationV1::InputImage { image }
                     if !request
                         .prepared_prompt
@@ -1263,12 +1251,15 @@ fn context_token_breakdown(
             })?;
         estimate_text_tokens(serialized.as_str())
     };
+    let tool_contracts = composition
+        .tool_contracts
+        .iter()
+        .map(|contract| (contract.name.as_str(), contract))
+        .collect::<HashMap<_, _>>();
     let mut weighted_tools = Vec::with_capacity(request.prepared_prompt.tool_definitions.len());
     for definition in &request.prepared_prompt.tool_definitions {
-        let contract = composition
-            .tool_contracts
-            .iter()
-            .find(|contract| contract.name == definition.name)
+        let contract = tool_contracts
+            .get(definition.name.as_str())
             .ok_or_else(|| {
                 format!(
                     "context breakdown tool contract missing: {}",
@@ -1722,6 +1713,10 @@ impl AgentRunResumeIntent {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "driver/request_tests.rs"]
+mod request_tests;
 
 #[cfg(test)]
 mod tests {
