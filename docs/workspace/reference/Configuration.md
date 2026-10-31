@@ -54,6 +54,11 @@ of the Agent definition Plugin selection. Their signed Run authorization freezes
 that set. Workspace-scoped MCP credentials resolve within the same Workspace;
 explicit approvals and application-delegated capability boundaries remain enforced.
 
+Shared configuration does not share user execution data. Coordination Sessions,
+child work, files and return receipts remain bound to the initiating user and
+Workspace. Native work dispatch and follow-up Runs freeze their published
+configuration without granting access to another member's Sessions or work.
+
 `0035_workspace_shared_agents` adds the shared configuration and Workspace default binding.
 For an existing Workspace, an administrator explicitly promotes the chosen
 existing Agent through its settings. Explicitly binding additional legacy

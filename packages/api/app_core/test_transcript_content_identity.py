@@ -220,7 +220,7 @@ class TranscriptContentIdentityTests(TestCase):
         self.assertFalse(capture.chunks.exists())
         self.assertEqual(self.client.get(self.url, query).status_code, 404)
 
-    def test_expired_agent_trash_purges_captures_but_dry_run_keeps_them(self):
+    def test_agent_purge_preserves_captures_until_session_trash_expires(self):
         from datetime import timedelta
         from django.utils import timezone
         from .deleted_resource_gc import expire_trash
@@ -230,6 +230,17 @@ class TranscriptContentIdentityTests(TestCase):
         agent.status = "deleted"
         agent.deletedAt = timezone.now() - timedelta(days=40)
         agent.save(update_fields=["status", "deletedAt"])
+        expire_trash(timezone.now() - timedelta(days=30), dry_run=True)
+        self.assertTrue(capture.chunks.exists())
+        expire_trash(timezone.now() - timedelta(days=30), dry_run=False)
+        capture.refresh_from_db()
+        self.assertIsNone(capture.purgedAt)
+        self.assertTrue(capture.chunks.exists())
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.status, "active")
+        self.session.status = "deleted"
+        self.session.deletedAt = timezone.now() - timedelta(days=40)
+        self.session.save(update_fields=["status", "deletedAt"])
         expire_trash(timezone.now() - timedelta(days=30), dry_run=True)
         self.assertTrue(capture.chunks.exists())
         expire_trash(timezone.now() - timedelta(days=30), dry_run=False)

@@ -14,7 +14,7 @@ from django.test import TransactionTestCase
 from . import test_agent_work_consumption as fixture
 from . import test_native_consumption_runtime as native
 from .models import AgentInput, AgentInputDelivery, AgentInputQueue, AgentRun, AgentWorkConsumeAttempt, ModelConfig
-from .testing import fenced_start_fixture
+from .testing import fenced_start_fixture, publish_agent_test_policy
 
 
 class ActiveWorkReturnIntakeTests(TransactionTestCase):
@@ -51,8 +51,7 @@ class ActiveWorkReturnIntakeTests(TransactionTestCase):
     def test_active_run_accepts_multiple_notices_without_changing_initial_or_authorization(self):
         notices = [self.notice(call, idle=False) for call in ("one", "two")]
         before = fenced_start_fixture(self.run)
-        self.agent.model_config = None
-        self.agent.save(update_fields=["model_config"])
+        publish_agent_test_policy(self.agent, model_config=None)
         with self.runtime() as (_, schedules):
             responses = [self.consume(notice, "consume-" + str(i)) for i, notice in enumerate(notices)]
         self.assertEqual([r.status_code for r in responses], [201, 201])
@@ -114,8 +113,7 @@ class ActiveWorkReturnIntakeTests(TransactionTestCase):
         attempts = list(self.attempts().order_by("delivery_sequence"))
         self.assertEqual([a.notice_id for a in attempts], [n["noticeId"] for n in notices])
         selected = ModelConfig.objects.create(displayName="Next idle policy", thinkingMode="low", thinkingModes=["low"])
-        self.agent.model_config, self.agent.thinking_mode = selected, "low"
-        self.agent.save(update_fields=["model_config", "thinking_mode"])
+        publish_agent_test_policy(self.agent, model_config=selected, thinking_mode="low")
         AgentRun.objects.filter(pk=self.run.pk).update(status="completed")
         with self.runtime() as (_, schedules):
             self.assertEqual(self.consume(notices[1], "batch-op-1").status_code, 200)

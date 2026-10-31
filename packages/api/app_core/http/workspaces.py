@@ -50,7 +50,7 @@ from app_core.plugin_catalog import (
 )
 from app_core.agent_run_authorization_factory import create_agent_run_authorization
 from app_core.agent_definitions import AgentDefinitionUnavailable, published_version_for_agent, published_version_for_session
-from app_core.agent_model_settings import submitted_agent_model, AgentModelSettingsError
+from app_core.agent_model_settings import submitted_agent_model, AgentModelSettingsError, SubmittedAgentModelError
 from app_core.agent_run_stream import encode_stream_cursor
 from app_core.runtime_client import (
     TranscriptRuntimeError,
@@ -1422,6 +1422,8 @@ def create_session_message(
             try:
                 model, thinking_mode = submitted_agent_model(
                     session.agent, payload.model_config_ref, payload.thinking_mode, definition_version=definition_version)
+            except SubmittedAgentModelError as error:
+                raise AgentSessionCreationError(400, str(error)) from error
             except AgentModelSettingsError as error:
                 raise AgentSessionCreationError(409, str(error)) from error
             agent_run = AgentRun.objects.create(

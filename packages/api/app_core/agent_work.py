@@ -1,4 +1,4 @@
-"""Materialize committed private dispatch requests into independent hosted admission."""
+"""Materialize committed native dispatch requests into independent hosted admission."""
 import hashlib
 import json
 import logging
@@ -8,11 +8,12 @@ from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import DatabaseError, connection, transaction
 
+from .agent_definitions import AgentDefinitionUnavailable, published_version_for_agent
 from .agent_messages import _digest, validate_message_args
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .app_delegations import session_authority_is_current
 from .assets import DeferredInputResolutionError
-from .business_agent_scope import branch_for_agent, run_session_ref_is_current
+from .business_agent_scope import run_session_ref_is_current
 from .deferred_input import DeferredInputBindingError, input_storage_batch
 from .execution_admission import queued_admission_error
 from .hosted_operations import accept_operation, replay_operation, serialize_operation
@@ -97,9 +98,8 @@ def _locked_source(event_id):
             or not AgentCoordinationSession.objects.filter(agent=agent, session_id=run.session_id).exists()
             or not session_authority_is_current(run.user_id, run.session_id, scope="messages:submit")):
         raise WorkMaterializationError(403, "agent_work_authority_rejected")
-    # This first consumer supports native private Agents only; no delegated
-    # execution or shared-definition permissions/credentials are inherited.
-    if agent.definition_id or run.acting_app_id or run.app_delegation_id:
+    # Native shared configuration does not grant business or delegated authority.
+    if agent.is_business_instance or run.acting_app_id or run.app_delegation_id:
         raise WorkMaterializationError(403, "agent_work_source_not_supported")
     try:
         authorization = run.authorization
@@ -123,7 +123,7 @@ def _locked_source(event_id):
     key = work_operation_id(run.id, result.payload["turnId"], result.payload["payload"]["callId"])
     digest = _digest("workspace.agent_work.request.v1",
         {**identity, "sourceEventId": result.eventId, "input": args}).removeprefix("sha256:")
-    return result, run, args, key, digest
+    return result, run, args, key, digest, membership
 
 
 def _binding(result, run, operation):
@@ -158,13 +158,13 @@ def materialize_work_request(event_id):
     if connection.in_atomic_block:
         raise WorkMaterializationError(409, "agent_work_requires_committed_source")
     with transaction.atomic():
-        result, run, args, key, digest = _locked_source(event_id)
+        result, run, args, key, digest, membership = _locked_source(event_id)
         replay = _replay(result, run, key, digest)
         if replay is not None:
             return replay, False
     profile = request_execution_profile()
     with transaction.atomic():
-        result, run, args, key, digest = _locked_source(event_id)
+        result, run, args, key, digest, membership = _locked_source(event_id)
         replay = _replay(result, run, key, digest)
         if replay is not None:
             return replay, False
@@ -188,6 +188,10 @@ def materialize_work_request(event_id):
         admission = queued_admission_error(run.workspace_id)
         if admission is not None:
             raise WorkMaterializationError(*admission)
+        try:
+            version = published_version_for_agent(run.session.agent, membership)
+        except AgentDefinitionUnavailable as error:
+            raise WorkMaterializationError(403, str(error)) from error
         work = Session.objects.create(workspace_id=run.workspace_id, owner=run.user, agent=run.session.agent,
                                       origin="automation", title=args["objective"][:80])
         refs = []
@@ -201,7 +205,8 @@ def materialize_work_request(event_id):
             refs.append(selected.id)
         child = AgentRun.objects.create(workspace_id=run.workspace_id, session=work, user=run.user,
             modelConfig=run.modelConfig, thinkingMode=run.thinkingMode, prompt=args["objective"],
-            agent_instructions=run.agent_instructions if branch_for_agent(run.session.agent_id) else work.agent.instructions)
+            definition_version=version,
+            agent_instructions=version.instructions if version else work.agent.instructions)
         create_agent_run_authorization(child, message_asset_refs=refs, image_digest=profile["imageDigest"])
         operation = accept_operation(run.user, run.workspace, "submitMessage", key, digest, work, child)
         binding = AgentWorkSession.objects.create(**_binding(result, run, operation))

@@ -260,13 +260,15 @@ class AgentDefinitionRunTests(DefinitionFixture, TransactionTestCase):
         self.assertEqual(Session.objects.count(), 1)
         self.assertEqual(Agent.objects.get(id=self.agent["id"]).owner_id, self.member.id)
 
-    def test_managed_runs_do_not_inherit_workspace_external_plugins(self):
+    def test_ordinary_native_runs_inherit_enabled_workspace_external_plugins(self):
         from app_core.models import WorkspacePluginEnablement
         WorkspacePluginEnablement.objects.create(workspace=self.workspace, pluginName="banana")
-        first = self.submit("zero-extensions")
+        first = self.submit("workspace-extensions")
         self.assertEqual(first.status_code, 202, first.content)
         run = AgentRun.objects.get(id=first.json()["agentRunId"])
-        self.assertEqual(run.authorization.payload["pluginActivation"]["packages"], [])
+        from app_core.plugin_catalog import load_plugin_catalog
+        self.assertEqual(run.authorization.payload["pluginActivation"]["packages"],
+            [package for package in load_plugin_catalog()["packages"] if package["name"] == "banana"])
 
     def test_unavailable_definition_is_rejected_before_runtime_contact(self):
         self.client.force_login(self.admin)

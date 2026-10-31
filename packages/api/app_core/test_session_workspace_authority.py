@@ -41,7 +41,9 @@ class SessionWorkspaceAuthorityTests(OperationFixture, TestCase):
         Session.objects.filter(pk=session.pk).update(workspaceBaselineKnown=False)
         session.refresh_from_db()
         run = AgentRun.objects.create(session=session, workspace=self.workspace, user=self.user,
-            modelConfig=self.model, prompt="continue original session")
+            modelConfig=self.model, prompt="continue original session",
+            definition_version=self.agent.definition.published_version,
+            agent_instructions=self.agent.definition.published_version.instructions)
         with self.assertRaisesMessage(ValueError, "session_workspace_baseline_unavailable"):
             create_agent_run_authorization(run, image_digest="sha256:" + "a" * 64)
         self.assertFalse(hasattr(run, "authorization"))

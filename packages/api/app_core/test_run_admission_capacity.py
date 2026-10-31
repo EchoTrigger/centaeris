@@ -126,7 +126,9 @@ class ApiWorkReturnQueueCapacityTests(TransactionTestCase):
         notice = self.notice()
         filler = models.AgentRun.objects.create(workspace=self.workspace, user=self.user,
             session=models.Session.objects.create(workspace=self.workspace, owner=self.user, agent=self.agent),
-            modelConfig=self.model, prompt="one existing resource obligation")
+            modelConfig=self.model, prompt="one existing resource obligation",
+            definition_version=self.agent.definition.published_version,
+            agent_instructions=self.agent.definition.published_version.instructions)
         before = models.AgentRun.objects.count()
         with override_settings(EXECUTION_GLOBAL_QUEUE_LIMIT=1, EXECUTION_TENANT_QUEUE_LIMIT=4), self.runtime() as (inputs, schedules):
             first = self.consume(notice)

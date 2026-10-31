@@ -24,16 +24,17 @@ class HttpQueryContractTests(TestCase):
                                 if field == "limit" and query.endswith("limit=") else {"error": error})
                     self.assertEqual(response.json(), expected)
 
-    def test_required_query_fields_keep_missing_duplicate_and_empty_distinct(self):
+    def test_workspace_project_agent_filter_is_optional_but_scalar_and_business_app_is_required(self):
         path = f"/api/workspaces/{self.workspace.id}/session-projects"
-        for query in ("", "unknown=1", f"agentId={self.agent.id}&agentId={self.agent.id}"):
+        for query in ("unknown=1", f"agentId={self.agent.id}&agentId={self.agent.id}", f"agentId={self.agent.id}&agentId="):
             response = self.client.get(f"{path}?{query}")
             self.assertEqual(response.status_code, 400)
             self.assertEqual(response.json(), {"error": "session_project_filter_invalid"})
         self.assertEqual(self.client.get(f"{path}?agentId=").json(), {"error": "agent_id_invalid"})
-        response = self.client.get(path, {"agentId": self.agent.id})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"projects": []})
+        for query in ({}, {"agentId": self.agent.id}):
+            response = self.client.get(path, query)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"projects": []})
         for suffix in ("", "/missing-branch/sessions"):
             path = f"/api/agents/{self.agent.id}/business-branches{suffix}"
             for query in ("", "limit=1", "appId=test&appId=test", "appId=test&unknown=1"):

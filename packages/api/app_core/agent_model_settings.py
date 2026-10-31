@@ -8,6 +8,10 @@ class AgentModelSettingsError(ValueError):
     pass
 
 
+class SubmittedAgentModelError(AgentModelSettingsError):
+    """An ordinary Run explicitly selected an invalid catalog model or effort."""
+
+
 def selected_model(model_config_ref, thinking_mode, *, workspace_id=None):
     try:
         require_opaque_ref("modelConfigRef", model_config_ref)
@@ -63,7 +67,11 @@ def submitted_agent_model(agent, model_config_ref, thinking_mode, *, definition_
     """Ordinary Runs choose a catalog model; business Runs retain maintained policy."""
     business_instance = agent.is_business_instance or agent.business_branches.exists()
     if model_config_ref and not business_instance:
-        return selected_model(model_config_ref, thinking_mode, workspace_id=agent.workspace_id)
+        try:
+            return selected_model(model_config_ref, thinking_mode, workspace_id=agent.workspace_id)
+        except AgentModelSettingsError as error:
+            code = "model_not_found" if str(error) == "agent_model_not_available" else str(error)
+            raise SubmittedAgentModelError(code) from error
     model, mode = configured_agent_model(agent, definition_version=definition_version)
     if ((model_config_ref and model_config_ref != model.pk)
             or (thinking_mode is not None and thinking_mode != mode)):

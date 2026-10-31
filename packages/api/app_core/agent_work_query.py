@@ -26,7 +26,7 @@ def _signed_native_run(run):
     _verify_authorization_digest_signature(digest, settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY,
                                            authorization.signature, schema=authorization.payload["schema"])
     if (digest != authorization.digest or not agent_run_binding_matches(authorization.payload, run)
-            or run.session.agent.definition_id or run.definition_version_id
+            or run.session.agent.is_business_instance
             or run.acting_app_id or run.app_delegation_id):
         raise WorkQueryError(403, "agent_work_authority_rejected")
     return digest

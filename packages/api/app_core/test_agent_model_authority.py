@@ -6,8 +6,8 @@ from unittest.mock import patch
 from django.test import TestCase, TransactionTestCase
 
 from . import test_agent_messages, test_agent_work_consumption
-from .models import Agent, AgentCoordinationSession, AgentRun, AgentRunAuthorization, HostedOperationReceipt, ModelConfig, Session, WorkspaceMembership
-from .testing import fenced_start_fixture
+from .models import AgentCoordinationSession, AgentRun, AgentRunAuthorization, HostedOperationReceipt, ModelConfig, Session, WorkspaceMembership
+from .testing import create_shared_agent, fenced_start_fixture, publish_agent_test_policy
 from .test_agent_work import PROFILE
 
 
@@ -30,8 +30,8 @@ class AgentCoordinatorModelAuthorityTests(TransactionTestCase):
         return ModelConfig.objects.create(displayName=name, thinkingMode="high", thinkingModes=["low", "high"])
 
     def configure(self, model, mode="low"):
-        self.agent.model_config, self.agent.thinking_mode = model, mode if model is not None else ""
-        self.agent.save(update_fields=["model_config", "thinking_mode"])
+        publish_agent_test_policy(self.agent, model_config=model,
+            thinking_mode=mode if model is not None else "")
 
     def test_new_coordinator_uses_agent_policy_and_preserves_independent_source_authorization(self):
         notice = self.notice()
@@ -182,8 +182,7 @@ class AgentCoordinationEntryTests(TestCase):
     def models(self):
         selected = ModelConfig.objects.create(displayName="Agent policy")
         other = ModelConfig.objects.create(displayName="Ordinary work choice")
-        self.agent.model_config = selected
-        self.agent.save(update_fields=["model_config"])
+        publish_agent_test_policy(self.agent, model_config=selected)
         return selected, other
 
     def post_message(self, session, model, operation="message-entry"):
@@ -197,7 +196,8 @@ class AgentCoordinationEntryTests(TestCase):
         for state in ("idle", "active"):
             if state == "active":
                 AgentRun.objects.create(workspace=self.workspace, user=self.user, session=session,
-                    modelConfig=selected, prompt="Existing coordinator", status="running")
+                    modelConfig=selected, prompt="Existing coordinator", status="running",
+                    definition_version=self.agent.definition.published_version)
             before = AgentRun.objects.count(), HostedOperationReceipt.objects.count()
             with patch("app_core.http.workspaces.request_execution_profile", side_effect=AssertionError("reject before RPC")):
                 for model in (selected, other):
@@ -208,7 +208,7 @@ class AgentCoordinationEntryTests(TestCase):
 
     def test_binding_created_during_profile_rpc_is_rechecked_before_run_or_receipt(self):
         selected, other = self.models()
-        agent = Agent.objects.create(workspace=self.workspace, owner=self.user, name="Race binding", model_config=selected)
+        agent = create_shared_agent(workspace=self.workspace, owner=self.user, name="Race binding", model_config=selected)
         session = Session.objects.create(workspace=self.workspace, owner=self.user, agent=agent)
         before = AgentRun.objects.count(), HostedOperationReceipt.objects.count()
         def bind_during_rpc():

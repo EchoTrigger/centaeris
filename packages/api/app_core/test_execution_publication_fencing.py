@@ -671,7 +671,14 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
             if response is not None:
                 response.close()
         if parent:
+            self.session.refresh_from_db()
+            self.assertEqual(self.session.status, "active")
+            self.assertTrue(default_storage.exists(key))
+            retained = self._thread_download(body, checkpoint=checkpoint)
+            self.assertEqual(retained.status_code, 200)
+            retained.close()
             AgentRun.objects.filter(id=self.run.id).update(status="completed")
+            self._purge_session()
         retry = StorageCleanupRetry.objects.filter(storageKey=key, state="failed").first()
         if retry is not None:
             self.assertIsNotNone(retry.nextCleanupAt)

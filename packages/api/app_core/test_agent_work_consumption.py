@@ -15,15 +15,14 @@ from django.test import Client, TransactionTestCase
 from . import test_agent_work as work_fixture
 from . import test_agent_work_returns as return_fixture
 from .models import AgentRun, AgentRunAuthorization, HostedOperationReceipt, WorkspaceMembership
-from .testing import fenced_start_fixture, leased_lifecycle_job_fixture
+from .testing import fenced_start_fixture, leased_lifecycle_job_fixture, publish_agent_test_policy
 
 
 class AgentWorkConsumptionTests(TransactionTestCase):
     serialized_rollback = True
     def setUp(self):
         work_fixture.AgentWorkTests.setUp(self)
-        self.agent.model_config, self.agent.thinking_mode = self.model, self.run.thinkingMode
-        self.agent.save(update_fields=["model_config", "thinking_mode"])
+        publish_agent_test_policy(self.agent, model_config=self.model, thinking_mode=self.run.thinkingMode)
     request_fact = work_fixture.AgentWorkTests.request_fact
     dependencies = work_fixture.AgentWorkTests.dependencies
     post = work_fixture.AgentWorkTests.post
@@ -100,7 +99,7 @@ class AgentWorkConsumptionTests(TransactionTestCase):
         notice = self.notice()
         baseline = self.counts()
         self.agent.instructions = "Keep the accepted objective."
-        self.agent.save(update_fields=["instructions"])
+        publish_agent_test_policy(self.agent, instructions=self.agent.instructions)
 
         def committed_before_schedule(body):
             attempt = self.attempts().select_related("coordinator_run", "operation").get()

@@ -142,7 +142,7 @@ def build_agent_run_start(agent_run, *, controller_authority, execution_mode="pe
     if AgentCoordinationSession.objects.filter(agent_id=agent_run.session.agent_id,
                                               session_id=agent_run.session_id).exists():
         start["coordinationSessionId"] = agent_run.session_id
-        if (not agent_run.session.agent.definition_id and not agent_run.definition_version_id
+        if (not agent_run.session.agent.is_business_instance
                 and not agent_run.acting_app_id and not agent_run.app_delegation_id):
             start["nativeCoordinationSessionId"] = agent_run.session_id
     queue = AgentInputQueue.objects.select_related("initial_host__notice__work", "initial_host__operation").filter(agent_run=agent_run).first()

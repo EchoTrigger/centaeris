@@ -33,7 +33,9 @@ class EnvironmentProfilePersistenceTests(OperationFixture, TestCase):
         session = Session.objects.get(pk=self.create().json()['sessionId'])
         for text in ('historical', 'candidate'):
             run = AgentRun.objects.create(session=session, workspace=self.workspace, user=self.user,
-                modelConfig=self.model, prompt=text, status='completed' if text == 'historical' else 'queued')
+                modelConfig=self.model, prompt=text, status='completed' if text == 'historical' else 'queued',
+                definition_version=self.agent.definition.published_version,
+                agent_instructions=self.agent.definition.published_version.instructions)
         with self.assertRaisesMessage(ValueError, 'environment_profile_history_unavailable'):
             create_agent_run_authorization(run, image_digest='sha256:' + 'a' * 64)
         session.current_environment.refresh_from_db()

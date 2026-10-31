@@ -60,7 +60,8 @@ class AuthorityAssertions:
                 if branch_id is not None:
                     options["HTTP_X_CENTAERIS_BUSINESS_BRANCH_ID"] = branch_id
                 response = (browser or Client()).get(path, query, **options)
-                self.assertEqual(response.status_code, expected_status,
+                status = expected_status[index] if isinstance(expected_status, tuple) else expected_status
+                self.assertEqual(response.status_code, status,
                     response.content if not response.streaming else "unexpected stream")
                 if response.streaming:
                     async_to_sync(response.aclose)()
@@ -76,7 +77,7 @@ class BrowserPresentationAuthorityTests(AuthorityAssertions, OperationFixture, T
         super().setUp()
         self.session = models.Session.objects.create(workspace=self.workspace, owner=self.user, agent=self.agent)
 
-    def test_private_agent_allows_navigation_and_selected_session_including_empty_navigation(self):
+    def test_private_agent_entry_allows_workspace_navigation_and_selected_session(self):
         self.assert_authority(self.loaders())
         self.assert_http(browser=self.client)
         empty = models.Agent.objects.create(workspace=self.workspace, owner=self.user, name="Empty")
@@ -84,21 +85,25 @@ class BrowserPresentationAuthorityTests(AuthorityAssertions, OperationFixture, T
         request.user = self.user
         loader = PresentationLoader(request, PresentationScope(self.workspace.pk, empty.pk))
         self.assertIs(async_to_sync(loader.authorized)(), True)
+        self.assertEqual({row["id"] for row in async_to_sync(loader.navigation)()}, {self.session.pk})
+        models.Session.objects.filter(pk=self.session.pk).update(status="deleted", deletedAt=timezone.now())
         self.assertEqual(async_to_sync(loader.navigation)(), [])
 
-    def test_current_user_workspace_agent_and_session_lifecycle_are_rechecked(self):
+    def test_current_user_workspace_and_session_lifecycle_are_rechecked_independently_of_agent(self):
         loaders = self.loaders()
         self.assert_authority(loaders)
         targets = [(get_user_model().objects.filter(pk=self.user.pk), {"is_active": False}, {"is_active": True}),
-            (models.Workspace.objects.filter(pk=self.workspace.pk), {"status": "deleted"}, {"status": "active"}),
-            (models.Agent.objects.filter(pk=self.agent.pk), {"status": "deleted", "deletedAt": timezone.now()},
-                {"status": "active", "deletedAt": None})]
+            (models.Workspace.objects.filter(pk=self.workspace.pk), {"status": "deleted"}, {"status": "active"})]
         for query, denied, restored in targets:
             with self.subTest(changes=denied):
                 query.update(**denied)
                 self.assert_authority(loaders, navigation=False, selected=False)
                 query.update(**restored)
                 self.assert_authority(loaders)
+        models.Agent.objects.filter(pk=self.agent.pk).update(status="deleted", deletedAt=timezone.now())
+        self.assert_authority(loaders, navigation=False, selected=True)
+        self.assert_http((404, 200), "presentation_scope_not_found", browser=self.client)
+        models.Agent.objects.filter(pk=self.agent.pk).update(status="active", deletedAt=None)
         models.Session.objects.filter(pk=self.session.pk).update(status="deleted", deletedAt=timezone.now())
         self.assert_authority(loaders, navigation=True, selected=False)
 
@@ -142,15 +147,15 @@ class DefinitionPresentationAuthorityTests(AuthorityAssertions, AppDelegationSes
                 ({"status": "disabled"}, {"status": "active"})]:
             models.AgentDefinition.objects.filter(pk=self.definition["id"]).update(**changes)
             self.assert_authority(delegated, navigation=False, selected=False)
-            self.assert_authority(browser, navigation=False, selected=False)
+            self.assert_authority(browser, navigation=False, selected=True)
             self.assert_http(403, "delegation_not_available", token=self.token)
-            self.assert_http(404, "presentation_scope_not_found", browser=self.member_client)
+            self.assert_http((404, 200), "presentation_scope_not_found", browser=self.member_client)
             models.AgentDefinition.objects.filter(pk=self.definition["id"]).update(**restored)
         self.assertEqual(self.availability(self.definition, "members", [self.membership.pk]).status_code, 200)
         self.assert_authority(delegated)
         models.AgentDefinitionMember.objects.filter(definition_id=self.definition["id"], membership=self.membership).delete()
         self.assert_authority(delegated, navigation=False, selected=False)
-        self.assert_authority(browser, navigation=False, selected=False)
+        self.assert_authority(browser, navigation=False, selected=True)
 
     def test_member_roles_remain_allowed_but_replacement_does_not_restore_a_grant(self):
         loaders = self.loaders()

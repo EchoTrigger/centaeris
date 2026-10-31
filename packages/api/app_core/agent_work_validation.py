@@ -1,4 +1,4 @@
-"""Validate one native private dispatch call without accepting hosted work."""
+"""Validate one native dispatch call without accepting hosted work."""
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
@@ -53,7 +53,7 @@ def validate_agent_work(body):
                 or not agent_run_binding_matches(authorization.payload, run)
                 or not agent_run_membership_is_current(run) or not run.user.is_active
                 or run.status not in {"queued", "running"}
-                or agent.definition_id or run.definition_version_id or run.acting_app_id or run.app_delegation_id
+                or agent.is_business_instance or run.acting_app_id or run.app_delegation_id
                 or agent.owner_id != run.user_id or agent.workspace_id != run.workspace_id
                 or run.session.owner_id != run.user_id or run.session.workspace_id != run.workspace_id
                 or body["coordinationSessionId"] != run.session_id

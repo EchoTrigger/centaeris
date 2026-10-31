@@ -33,7 +33,7 @@ from .models import (Agent, AgentCoordinationSession, AgentInputQueue, AgentRun,
                      AgentWorkReturn, AgentWorkSession, HostedOperationReceipt, ModelConfig,
                      Session, Workspace, WorkspaceMembership)
 from .runtime_client import schedule_agent_run_lifecycle
-from .testing import fenced_start_fixture
+from .testing import fenced_start_fixture, publish_agent_test_policy
 from .test_agent_work import PROFILE
 from . import test_agent_work_consumption as consume_fixture
 from .runtime_schema_test_helpers import isolate_runtime_schema
@@ -59,8 +59,7 @@ class NativeConsumptionProductionTests(LiveServerTestCase):
         self.child_objective = "Separate child objective; never replace the coordinator objective."
         self.run = AgentRun.objects.create(workspace=self.workspace, session=self.source,
             user=self.user, modelConfig=self.model, prompt=self.objective, agent_instructions=self.instructions)
-        self.agent.model_config, self.agent.thinking_mode = self.model, self.run.thinkingMode
-        self.agent.save(update_fields=["model_config", "thinking_mode"])
+        publish_agent_test_policy(self.agent, model_config=self.model, thinking_mode=self.run.thinkingMode)
         create_agent_run_authorization(self.run, image_digest=PROFILE["imageDigest"])
         AgentInputQueue.objects.create(agent_run=self.run, authorization_digest=self.run.authorization.digest)
         self.requests = []

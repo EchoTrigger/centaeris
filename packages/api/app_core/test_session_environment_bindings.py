@@ -139,7 +139,8 @@ class SessionEnvironmentPersistenceTests(OperationFixture, TestCase):
             session = Session.objects.create(workspace=self.workspace, owner=self.user, agent=self.agent, origin=origin)
             self.assertEqual(session.current_environment.session_id, session.pk)
             run = AgentRun.objects.create(workspace=self.workspace, user=self.user, session=session,
-                modelConfig=self.model, prompt="model seam")
+                modelConfig=self.model, prompt="model seam", definition_version=self.agent.definition.published_version,
+                agent_instructions=self.agent.definition.published_version.instructions)
             self.assertEqual(run.environment_id, session.current_environment_id)
             self.assertEqual(SessionEnvironment.objects.filter(session=session).count(), 1)
 
@@ -154,7 +155,9 @@ class SessionEnvironmentPersistenceTests(OperationFixture, TestCase):
                 environment=self.other.environment)])
         with self.assertRaisesRegex(ValueError, "environment_binding_invalid"):
             AgentRun.objects.create(workspace=self.workspace, user=self.user, session=self.run.session,
-                modelConfig=self.model, prompt="foreign", environment=self.other.environment)
+                modelConfig=self.model, prompt="foreign", environment=self.other.environment,
+                definition_version=self.agent.definition.published_version,
+                agent_instructions=self.agent.definition.published_version.instructions)
 
     def test_missing_binding_is_not_repaired_on_save_or_authorization(self):
         from .agent_run_authorization_factory import create_agent_run_authorization

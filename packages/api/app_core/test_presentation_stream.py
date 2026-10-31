@@ -600,7 +600,9 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         from .tests import append_started, append_session_records, session_record
         session = Session.objects.get(pk=self.session_id)
         run = AgentRun.objects.create(workspace=self.workspace, session=session, user=self.user,
-            modelConfig=self.model, prompt="Synthetic attention")
+            modelConfig=self.model, prompt="Synthetic attention",
+            definition_version=self.agent.definition.published_version,
+            agent_instructions=self.agent.definition.published_version.instructions)
         append_started(run)
         append_session_records(run, [session_record(run, 3, "agent_run_completed", {"doneReason": "finalized"})])
         request = RequestFactory().get("/")

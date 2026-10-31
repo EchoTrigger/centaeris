@@ -6,7 +6,6 @@ from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
 from .migration_testing import isolated_migration_database
-from .presentation_changes import read_presentation_versions
 
 
 @skipUnless(connection.vendor == "postgresql", "presentation triggers require PostgreSQL")
@@ -56,7 +55,9 @@ class PresentationAuthorityRemovalMigrationTests(TransactionTestCase):
                 self.assertEqual(list(manager(name).order_by("pk").values()), facts[name])
             self.assertEqual(list(manager("PresentationChange").order_by("key").values()), versions)
             self.assertEqual(list(manager("PresentationChangeOutbox").order_by("id").values()), pending)
-            self.assertEqual(read_presentation_versions(workspace.pk, agent.pk, session.pk, using=alias),
+            # This migration predates workspace navigation: read its historical keys.
+            positions = dict(manager("PresentationChange").values_list("key", "revision"))
+            self.assertEqual({kind: positions.get(key, 0) for kind, key in keys.items()},
                 {kind: index for index, kind in enumerate(keys, start=11)})
 
             # Auth-only writes produce no display work, while the same upgraded
