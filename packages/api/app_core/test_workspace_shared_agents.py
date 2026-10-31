@@ -150,34 +150,83 @@ class WorkspaceSharedAgentTests(TransactionTestCase):
         self.assertEqual(self.client.get(f"/api/agents/{member['id']}/model-settings").json()["modelConfigRef"], second.id)
         self.assertNotEqual(observed["definitionVersionId"], shared["definitionVersionId"])
 
-    def test_run_uses_authoritative_version_and_model_and_existing_run_remains_frozen(self):
+    def test_run_uses_selected_model_and_shared_version_and_existing_run_remains_frozen(self):
+        from copy import deepcopy
+        from django.conf import settings
+        from .runtime_contract import agent_run_binding_matches, verify_agent_run_authorization_signature
+
         shared = self.promote()
         member = self.member_instance()
-        first = self.submit(member, "first")
+        second = ModelConfig.objects.create(displayName="Second", thinkingMode="low", thinkingModes=["low", "high"])
+        first = self.submit(member, "first", modelConfigRef=second.id, thinkingMode="low")
         self.assertEqual(first.status_code, 202, first.content)
         run = AgentRun.objects.get(id=first.json()["agentRunId"])
-        self.assertEqual((run.definition_version_id, run.modelConfig_id, run.thinkingMode),
-            (shared["definitionVersionId"], self.model.id, "high"))
-        before = (run.authorization.payload, run.authorization.digest, run.authorization.signature)
-        second = ModelConfig.objects.create(displayName="Second", thinkingMode="low", thinkingModes=["low", "high"])
+        self.assertEqual((run.definition_version_id, run.modelConfig_id, run.thinkingMode, run.agent_instructions),
+            (shared["definitionVersionId"], second.id, "low", shared["instructions"]))
+        before = (deepcopy(run.authorization.payload), run.authorization.digest, run.authorization.signature)
+        self.assertEqual((before[0]["modelConfigRef"], before[0]["thinkingMode"]), (second.id, "low"))
+        self.assertTrue(agent_run_binding_matches(before[0], run))
+        verify_agent_run_authorization_signature(before[0], settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY, before[2])
+        AgentRun.objects.filter(pk=run.pk).update(status="completed")
         self.client.force_login(self.admin)
-        self.send("patch", f"/api/agents/{shared['id']}/model-settings", {
-            "schema": "agent.model_settings.update.v1", "modelConfigRef": second.id, "thinkingMode": "low"})
+        edited = self.send("patch", f"/api/agents/{shared['id']}", {"instructions": "Updated shared instructions"})
+        self.assertEqual(edited.status_code, 200, edited.content)
         self.client.force_login(self.member)
-        forged = self.submit(member, "forged", modelConfigRef=self.model.id, thinkingMode="high")
-        self.assertEqual(forged.status_code, 409, forged.content)
-        self.assertEqual(forged.json()["error"], "agent_model_configuration_managed")
-        accepted = self.submit(member, "second")
+        accepted = self.submit(member, "second", first.json()["sessionId"], modelConfigRef=self.model.id, thinkingMode="low")
         self.assertEqual(accepted.status_code, 202, accepted.content)
         latest = AgentRun.objects.get(id=accepted.json()["agentRunId"])
-        self.assertEqual((latest.modelConfig_id, latest.thinkingMode), (second.id, "low"))
+        self.assertEqual((latest.session_id, latest.modelConfig_id, latest.thinkingMode), (run.session_id, self.model.id, "low"))
+        self.assertEqual(latest.agent_instructions, "Updated shared instructions")
+        self.assertNotEqual(latest.definition_version_id, run.definition_version_id)
+        self.assertTrue(agent_run_binding_matches(latest.authorization.payload, latest))
+        self.client.force_login(self.admin)
+        owner = self.submit(shared, "owner-choice", modelConfigRef=second.id, thinkingMode="high")
+        self.assertEqual(owner.status_code, 202, owner.content)
+        owner_run = AgentRun.objects.get(id=owner.json()["agentRunId"])
+        self.assertNotEqual(owner_run.session_id, run.session_id)
+        self.assertEqual((owner_run.modelConfig_id, owner_run.thinkingMode), (second.id, "high"))
         run.refresh_from_db()
-        self.assertEqual((run.modelConfig_id, run.thinkingMode), (self.model.id, "high"))
+        self.assertEqual((run.modelConfig_id, run.thinkingMode), (second.id, "low"))
         self.assertEqual((run.authorization.payload, run.authorization.digest, run.authorization.signature), before)
         self.assertEqual(AgentDefinitionVersion.objects.get(id=run.definition_version_id).model_config_id, self.model.id)
-        run.modelConfig = second
+        self.assertTrue(agent_run_binding_matches(run.authorization.payload, run))
+        run.modelConfig = self.model
         with self.assertRaisesMessage(ValueError, "configuration snapshot is immutable"):
             run.save()
+
+    def test_selected_model_does_not_require_a_configured_shared_default(self):
+        shared = self.promote()
+        cleared = self.send("patch", f"/api/agents/{shared['id']}/model-settings", {
+            "schema": "agent.model_settings.update.v1", "modelConfigRef": None, "thinkingMode": None})
+        self.assertEqual(cleared.status_code, 200, cleared.content)
+        member = self.member_instance()
+        accepted = self.submit(member, "explicit-without-default", modelConfigRef=self.model.id, thinkingMode="low")
+        self.assertEqual(accepted.status_code, 202, accepted.content)
+        run = AgentRun.objects.get(pk=accepted.json()["agentRunId"])
+        self.assertEqual((run.modelConfig_id, run.thinkingMode), (self.model.id, "low"))
+        self.assertIsNone(run.definition_version.model_config_id)
+
+    def test_selected_model_rejects_unavailable_revisions_foreign_scope_and_unsupported_effort(self):
+        from .models import ModelProvider
+        self.promote()
+        member = self.member_instance()
+        other_workspace = Workspace.objects.create(name="Other model scope", createdBy=self.admin)
+        provider = ModelProvider.objects.create(workspace=other_workspace, displayName="Private provider",
+            api="openai-responses", apiBase="https://provider.example.test/v1")
+        unavailable = [
+            ModelConfig.objects.create(displayName="Disabled", enabled=False),
+            ModelConfig.objects.create(displayName="Superseded", isCurrent=False),
+            ModelConfig.objects.create(displayName="Foreign", provider=provider),
+        ]
+        for index, model in enumerate(unavailable):
+            with self.subTest(model=model.displayName):
+                denied = self.submit(member, f"unavailable-{index}", modelConfigRef=model.pk)
+                self.assertEqual(denied.status_code, 409, denied.content)
+                self.assertEqual(denied.json()["error"], "agent_model_not_available")
+        denied = self.submit(member, "unsupported-effort", modelConfigRef=self.model.id, thinkingMode="medium")
+        self.assertEqual(denied.status_code, 409, denied.content)
+        self.assertEqual(denied.json()["error"], "model_thinking_mode_unsupported")
+        self.assertFalse(AgentRun.objects.exists())
 
     def test_directory_exposes_same_shared_definition_with_distinct_member_identities(self):
         shared = self.promote()

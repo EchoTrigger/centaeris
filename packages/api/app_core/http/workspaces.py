@@ -50,7 +50,7 @@ from app_core.plugin_catalog import (
 )
 from app_core.agent_run_authorization_factory import create_agent_run_authorization
 from app_core.agent_definitions import AgentDefinitionUnavailable, published_version_for_agent, published_version_for_session
-from app_core.agent_model_settings import configured_agent_model, AgentModelSettingsError
+from app_core.agent_model_settings import submitted_agent_model, AgentModelSettingsError
 from app_core.agent_run_stream import encode_stream_cursor
 from app_core.runtime_client import (
     TranscriptRuntimeError,
@@ -1420,12 +1420,10 @@ def create_session_message(
                     return Status(403, {"error": "attachment_not_accessible"})
             definition_version = published_version_for_session(session, membership)
             try:
-                model, thinking_mode = configured_agent_model(session.agent, definition_version=definition_version)
+                model, thinking_mode = submitted_agent_model(
+                    session.agent, payload.model_config_ref, payload.thinking_mode, definition_version=definition_version)
             except AgentModelSettingsError as error:
                 raise AgentSessionCreationError(409, str(error)) from error
-            if ((payload.model_config_ref and payload.model_config_ref != model.pk)
-                    or (payload.thinking_mode is not None and payload.thinking_mode != thinking_mode)):
-                raise AgentSessionCreationError(409, "agent_model_configuration_managed")
             agent_run = AgentRun.objects.create(
                 workspace=workspace,
                 session=session,

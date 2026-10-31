@@ -59,6 +59,18 @@ def configured_agent_model(agent, *, definition_version=None):
     return model, agent.thinking_mode
 
 
+def submitted_agent_model(agent, model_config_ref, thinking_mode, *, definition_version=None):
+    """Ordinary Runs choose a catalog model; business Runs retain maintained policy."""
+    business_instance = agent.is_business_instance or agent.business_branches.exists()
+    if model_config_ref and not business_instance:
+        return selected_model(model_config_ref, thinking_mode, workspace_id=agent.workspace_id)
+    model, mode = configured_agent_model(agent, definition_version=definition_version)
+    if ((model_config_ref and model_config_ref != model.pk)
+            or (thinking_mode is not None and thinking_mode != mode)):
+        raise AgentModelSettingsError("agent_model_configuration_managed")
+    return model, mode
+
+
 def serialize_model_settings(agent):
     configuration = agent_configuration(agent)
     if agent.definition_id is not None:

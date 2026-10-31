@@ -62,6 +62,16 @@ class BusinessAgentExecutionTests(TransactionTestCase):
         from .test_agent_work_validation import AgentWorkValidationTests
         return AgentWorkValidationTests.validate(self, self.run, sessionRefs=refs, **changes)
 
+    def test_submitted_run_model_cannot_override_business_root_or_branch_policy(self):
+        from .agent_model_settings import AgentModelSettingsError, submitted_agent_model
+        other = models.ModelConfig.objects.create(displayName="Different available model")
+        for agent in (self.root, self.agent):
+            with self.subTest(agent=agent.pk):
+                with self.assertRaisesMessage(AgentModelSettingsError, "agent_model_configuration_managed"):
+                    submitted_agent_model(agent, other.pk, None)
+                selected, mode = submitted_agent_model(agent, self.model.pk, None)
+                self.assertEqual((selected.pk, mode), (self.model.pk, self.root.thinking_mode))
+
     def test_workspace_admin_can_maintain_business_root_without_promoting_its_branch(self):
         import json
         membership = models.WorkspaceMembership.objects.get(workspace=self.workspace, user=self.user)
