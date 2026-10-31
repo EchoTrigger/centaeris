@@ -2,6 +2,7 @@ use centaeris_core::execution::{admit_resident_resources, ResidentResourceUsage}
 use centaeris_core::session::reliability::agent_run_lifecycle_job_id;
 use centaeris_core::session::RuntimeJobLeaseFence;
 use postgres::{Client, GenericClient};
+use std::collections::{HashMap, HashSet};
 
 use super::PostgresRuntimeStore;
 mod retained;
@@ -15,6 +16,8 @@ use crate::resident_capacity::{
 // this gate after its durable reservation; maintenance keeps its existing scope.
 struct ResidentHostLock<'a>(&'a mut Client, String, Option<crate::observations::Span>);
 mod preparation_wait;
+#[cfg(test)]
+mod cost_tests;
 
 impl Drop for ResidentHostLock<'_> {
     fn drop(&mut self) {
@@ -517,15 +520,18 @@ fn used_shared(
     let mut tenant_used = ResidentResourceUsage::default();
     let mut host_used = ResidentResourceUsage::default();
     let mut unobserved_host_memory = 0u64;
+    let pending = snapshot
+        .pending_executions
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
     for row in rows {
         let declared = usage(&row, 2)?;
         let on_host = row.get::<_, String>(0) == host_id;
         let confirmed = row.get::<_, String>(7) == "resident";
         let observed = if on_host
             && confirmed
-            && !snapshot
-                .pending_executions
-                .contains(&row.get::<_, String>(8))
+            && !pending.contains(row.get::<_, String>(8).as_str())
         {
             row.get::<_, Option<String>>(6)
                 .as_ref()
@@ -594,12 +600,13 @@ fn reconcile(
     let mut tx = client.transaction().map_err(|error| error.to_string())?;
     super::resource_commit::require_durable_resource_commit(&mut tx)?;
     let mut newly_confirmed = false;
+    let preparing = snapshot
+        .preparing
+        .iter()
+        .map(|pending| (pending.execution_id.as_str(), pending))
+        .collect::<HashMap<_, _>>();
     for sandbox in inventory {
-        if let Some(preparing) = snapshot
-            .preparing
-            .iter()
-            .find(|pending| pending.execution_id == sandbox.execution_id)
-        {
+        if let Some(preparing) = preparing.get(sandbox.execution_id.as_str()) {
             if preparing.allocation_owner != sandbox.allocation_owner
                 || preparing.resources != sandbox.resources
                 || preparing
