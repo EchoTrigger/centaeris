@@ -242,6 +242,7 @@ export function createRouter() {
               id: "workspace",
               path: "w/:workspaceId",
               loader: workspaceLoader,
+              shouldRevalidate: ({ currentParams, nextParams, defaultShouldRevalidate }) => defaultShouldRevalidate || currentParams.sessionId !== nextParams.sessionId,
               Component: WorkspaceLayout,
               children: [
                 { index: true, loader: ({ params }) => redirect(`/w/${encodeURIComponent(params.workspaceId || "")}/app`) },
