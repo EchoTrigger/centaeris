@@ -1,7 +1,7 @@
 """Discover complete package suites; fail closed on empty, omitted or skipped tests."""
 
 import argparse
-from collections import Counter, defaultdict
+from collections import Counter
 import os
 from pathlib import Path
 import sys
@@ -10,37 +10,12 @@ import unittest
 import uuid
 
 
-def test_cases(suite):
+def test_ids(suite):
     for test in suite:
         if isinstance(test, unittest.TestSuite):
-            yield from test_cases(test)
+            yield from test_ids(test)
         else:
-            yield test
-
-
-def test_ids(suite):
-    return (test.id() for test in test_cases(suite))
-
-
-def shard_suite(suite, index, count):
-    """Balance complete test classes while preserving Django's execution order."""
-    if count < 1 or not 0 <= index < count:
-        raise ValueError("invalid test shard")
-    if count == 1:
-        return suite
-    cases = list(test_cases(suite))
-    classes = defaultdict(list)
-    for case in cases:
-        classes[type(case)].append(case)
-    assignments, sizes = {}, [0] * count
-    for case_type, members in sorted(classes.items(), key=lambda item: (
-            -len(item[1]), item[0].__module__, item[0].__qualname__)):
-        target = min(range(count), key=lambda position: (sizes[position], position))
-        assignments[case_type] = target
-        sizes[target] += len(members)
-    selected = unittest.TestSuite(case for case in cases if assignments[type(case)] == index)
-    print(f"API shard {index + 1}/{count}: selected={selected.countTestCases()}, discovered={len(cases)}", flush=True)
-    return selected
+            yield test.id()
 
 
 class AuditedResult(unittest.TextTestResult):
@@ -86,13 +61,7 @@ class AuditedRunner(unittest.TextTestRunner):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("package", choices=("api", "worker", "document_processor", "gate"))
-    parser.add_argument("--shard-index", type=int, default=0)
-    parser.add_argument("--shard-count", type=int, default=1)
     args = parser.parse_args()
-    if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
-        parser.error("shard index must be within the positive shard count")
-    if args.package != "api" and args.shard_count != 1:
-        parser.error("only the API suite supports sharding")
     root = Path(__file__).resolve().parents[2]
     directory = root / "packages" / args.package
     if args.package == "gate":
@@ -120,10 +89,6 @@ def main():
 
         class ApiRunner(DiscoverRunner):
             test_runner = AuditedRunner
-
-            def build_suite(self, *labels, **kwargs):
-                suite = super().build_suite(*labels, **kwargs)
-                return shard_suite(suite, args.shard_index, args.shard_count)
 
             def suite_result(self, suite, result, **kwargs):
                 return int(not result.wasSuccessful())

@@ -29,13 +29,11 @@ release requirements call for them. Generic skill checklists do not expand the
 agreed scope. Sub-agents receive a bounded validation scope and report existing
 results for reuse instead of repeating each other's checks.
 
-The hosted Python CI runs support and cross-language checks separately from three
-API test shards. Shards discover the complete API suite, assign whole test classes
-by case count, and preserve Django's execution order. Each job owns its database
-and temporary storage. All shards remain required; unsharded local execution
-continues to run the complete suite. Skipped tests and discovery/execution
-mismatches still fail the gate. Fresh-schema and migration-drift checks run once
-in the first API shard. Each support gate reports its elapsed time.
+The hosted Python CI runs the complete API suite and support checks sequentially
+in `workspace-python`. Each invocation owns its test database and temporary
+storage. Skipped tests and discovery/execution mismatches fail the gate. Fresh
+schema and migration drift checks run before the API suite; each gate reports
+its elapsed time.
 
 Frontend visual design uses manual appearance acceptance rather than TDD.
 Implement and iterate on layout, icons, spacing, color and typography directly.

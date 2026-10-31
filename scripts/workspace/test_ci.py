@@ -1,5 +1,4 @@
 import importlib.util
-from collections import Counter
 import json
 import os
 from pathlib import Path
@@ -15,28 +14,6 @@ spec.loader.exec_module(ci)
 
 
 class PortableCITests(unittest.TestCase):
-    def test_parallel_api_and_support_stages_preserve_the_complete_python_gate(self):
-        config = {"services": {"document-processor": {}, "workspace-general": {},
-            "runtime": {"depends_on": {"workspace-general": {"condition": "service_completed_successfully"}}},
-            "material-worker": {"depends_on": {"document-processor": {"condition": "service_completed_successfully"}}}}}
-        def commands(stage, index=0):
-            calls = []
-            with patch.object(ci, "run", side_effect=lambda label, args, **kw: calls.append(args) or json.dumps(config)):
-                ci.main(stage=stage, api_shard_index=index, api_shard_count=3 if stage == "Api" else 1)
-            return calls[:-1]  # Compose validation is shared by every standalone stage.
-        complete = commands("Python")
-        support = commands("PythonSupport")
-        first = commands("Api")
-        normalized = [command[:-4] if "--shard-index" in command else command for command in first]
-        self.assertEqual(Counter(map(tuple, complete)), Counter(map(tuple, support + normalized)))
-        for index in range(3):
-            api = commands("Api", index)
-            full = [command for command in api if "scripts/workspace/python_test_gate.py" in command]
-            self.assertEqual(len(full), 1)
-            self.assertEqual(full[0][-4:], ["--shard-index", str(index), "--shard-count", "3"])
-            self.assertEqual(len(api), 3 if index == 0 else 1)
-        self.assertFalse(any("api" == command[-1] and "scripts/workspace/python_test_gate.py" in command for command in support))
-
     def test_workspace_harbor_runs_with_pinned_dependency_early_in_python_stage(self):
         harbor = ["uv", "run", "--no-project", "--with", "harbor==0.21.0", "python", "-B",
                   "-m", "unittest", "discover", "-s", "scripts/harbor", "-p", "test_workspace*.py"]
