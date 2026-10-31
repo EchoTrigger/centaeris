@@ -51,21 +51,59 @@ class WorkspaceSharedAgentTests(TransactionTestCase):
             {"agentId": agent["id"], "operationId": operation, "text": "Synthetic request", **fields})
 
     def test_explicit_promotion_preserves_selected_instance_sessions_and_unselected_personal_config(self):
-        target = Agent.objects.create(workspace=self.workspace, owner=self.member, name="Old personal default", instructions="Different")
+        from copy import deepcopy
+        from django.conf import settings
+        from .agent_run_authorization_factory import create_agent_run_authorization
+        from .runtime_contract import agent_run_binding_matches, verify_agent_run_authorization_signature
+
+        old_model = ModelConfig.objects.create(displayName="Original member model", thinkingMode="low", thinkingModes=["low", "high"])
+        target = Agent.objects.create(workspace=self.workspace, owner=self.member, name="Old personal default",
+            instructions="Different", model_config=old_model, thinking_mode="low")
         session = Session.objects.create(workspace=self.workspace, owner=self.member, agent=target)
+        source_session = Session.objects.create(workspace=self.workspace, owner=self.admin, agent=self.legacy)
         untouched = Agent.objects.create(workspace=self.workspace, owner=self.admin, name="Unrelated")
+        old_runs = []
+        original = {}
+        for agent, owned_session in ((self.legacy, source_session), (target, session)):
+            run = AgentRun.objects.create(workspace=self.workspace,
+                session=owned_session, user=agent.owner, modelConfig=agent.model_config,
+                thinkingMode=agent.thinking_mode, agent_instructions=agent.instructions,
+                prompt="Accepted before explicit promotion", status="completed")
+            grant = create_agent_run_authorization(run, image_digest=PROFILE["imageDigest"])
+            self.assertIsNone(run.definition_version_id)
+            verify_agent_run_authorization_signature(grant.payload, settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY, grant.signature)
+            original[run.pk] = (run.definition_version_id, run.agent_instructions, run.modelConfig_id,
+                run.thinkingMode, deepcopy(grant.payload), grant.digest, grant.signature)
+            old_runs.append(run)
+
         shared = self.promote(bindAgentIds=[target.id])
         target.refresh_from_db()
         untouched.refresh_from_db()
         session.refresh_from_db()
+        source_session.refresh_from_db()
         self.assertEqual(target.definition_id, shared["definitionId"])
-        self.assertEqual(session.agent_id, target.id)
+        self.assertEqual((session.agent_id, source_session.agent_id), (target.id, self.legacy.id))
         self.assertEqual(target.instructions, "Different")
         self.assertIsNone(untouched.definition_id)
         member = self.member_instance()
         self.assertEqual(member["id"], target.id)
         self.assertEqual(member["instructions"], shared["instructions"])
         self.assertEqual(self.client.get(f"/api/agents/{target.id}/model-settings").json()["modelConfigRef"], self.model.id)
+
+        continued = self.submit(member, "after-explicit-promotion", session.id)
+        self.assertEqual(continued.status_code, 202, continued.content)
+        new_run = AgentRun.objects.get(pk=continued.json()["agentRunId"])
+        self.assertEqual((new_run.session_id, new_run.session.agent_id), (session.id, target.id))
+        self.assertEqual(new_run.definition_version_id, shared["definitionVersionId"])
+        self.assertEqual((new_run.agent_instructions, new_run.modelConfig_id, new_run.thinkingMode),
+            (shared["instructions"], self.model.id, "high"))
+        for run in old_runs:
+            run.refresh_from_db()
+            grant = run.authorization
+            self.assertEqual((run.definition_version_id, run.agent_instructions, run.modelConfig_id,
+                run.thinkingMode, grant.payload, grant.digest, grant.signature), original[run.pk])
+            self.assertTrue(agent_run_binding_matches(grant.payload, run))
+            verify_agent_run_authorization_signature(grant.payload, settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY, grant.signature)
 
     def test_legacy_configuration_requires_explicit_promotion(self):
         response = self.client.get(self.base + "/default-agent")
