@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import { useTranslation } from "../i18n";
 import { AnimatedDisclosure } from "./AnimatedDisclosure";
@@ -18,6 +18,10 @@ export function WorkProgress({ running, finalStarted, startedAtMs, completedAtMs
 }) {
   const { t } = useTranslation();
   const [now, setNow] = useState(Date.now);
+  const displayedElapsedRef = useRef(0);
+  const elapsedMs = Math.max(displayedElapsedRef.current, startedAtMs === undefined ? 0 : (completedAtMs ?? now) - startedAtMs);
+  // A terminal timestamp may arrive after a later second was already displayed.
+  useLayoutEffect(() => { displayedElapsedRef.current = elapsedMs; }, [elapsedMs]);
   const [disclosure, setDisclosure] = useState(() => initialDisclosure ?? initialWorkDisclosure(finalStarted));
   useLayoutEffect(() => { onDisclosureChange?.(disclosure); }, [disclosure, onDisclosureChange]);
   const nextDisclosure = observeFinalAnswer(disclosure, finalStarted);
@@ -28,7 +32,7 @@ export function WorkProgress({ running, finalStarted, startedAtMs, completedAtMs
     return () => clearInterval(interval);
   }, [running]);
   const elapsed = startedAtMs === undefined ? "" : formatWorkDuration(
-    (completedAtMs ?? now) - startedAtMs, t,
+    elapsedMs, t,
   );
   const label = [t(running ? "workProgress.working" : "workProgress.worked"), elapsed].filter(Boolean).join(" ");
   return <div className="workProgress">

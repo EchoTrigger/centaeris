@@ -3,6 +3,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { TranscriptBlockList } from "../../src/chat/TranscriptBlockList";
 import { createTranscriptViewStore } from "../../src/chat/transcriptViewStore";
+import { WorkProgress } from "../../src/chat/WorkProgress";
 
 vi.mock("../../src/i18n", () => {
   const t = (key: string, options?: { count?: number }) => options?.count === undefined ? key : `${key}:${options.count}`;
@@ -10,6 +11,21 @@ vi.mock("../../src/i18n", () => {
 });
 
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+test("delayed completion keeps the elapsed seconds already shown while history uses its recorded duration", async () => {
+  vi.useFakeTimers(); vi.setSystemTime(10000);
+  vi.stubGlobal("matchMedia", () => ({ matches: true }));
+  const { rerender, unmount } = render(<WorkProgress running finalStarted={false} startedAtMs={1000} />);
+  await act(async () => { vi.advanceTimersByTime(3000); });
+  expect(screen.getByText("workProgress.working workProgress.seconds:12")).toBeTruthy();
+  rerender(<WorkProgress running={false} finalStarted startedAtMs={1000} completedAtMs={11000} />);
+  expect(screen.getByRole("button", { name: "workProgress.worked workProgress.seconds:12" })).toBeTruthy();
+  await act(async () => { vi.advanceTimersByTime(5000); });
+  expect(screen.getByRole("button", { name: "workProgress.worked workProgress.seconds:12" })).toBeTruthy();
+  unmount();
+  render(<WorkProgress running={false} finalStarted startedAtMs={1000} completedAtMs={11000} />);
+  expect(screen.getByRole("button", { name: "workProgress.worked workProgress.seconds:10" })).toBeTruthy();
+});
 
 test.each(["failed", "cancelled", "completed"] as const)("%s submissions retain the original message and elapsed time without adding notices or actions", async (status) => {
   vi.useFakeTimers(); vi.setSystemTime(10000);
