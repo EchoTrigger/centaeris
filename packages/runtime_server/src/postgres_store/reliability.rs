@@ -315,68 +315,7 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
             let mut tx = client
                 .transaction()
                 .map_err(|error| format!("begin Postgres runtime job wake failed: {error}"))?;
-            let row = tx
-                .query_opt(
-                    "SELECT status,run_at_ms,session_id,lease_reclaim_not_before_ms FROM runtime_jobs WHERE job_id=$1 FOR UPDATE",
-                    &[&r.job_id],
-                )
-                .map_err(|error| format!("load Postgres runtime job for wake failed: {error}"))?
-                .ok_or_else(|| format!("wake runtime job not found: {}", r.job_id))?;
-            let status = row.get::<_, String>(0);
-            let run_at_ms = row.get::<_, i64>(1);
-            let session_id = row.get::<_, Option<String>>(2);
-            let reclaim_not_before_ms = row.get::<_, Option<i64>>(3);
-            let event_id = format!("runtime_job_wake:{}:{}", r.job_id, r.source_job_id);
-            let payload = serde_json::json!({
-                "schema": "runtime.job.wake.v1",
-                "jobId": r.job_id,
-                "sourceJobId": r.source_job_id,
-                "wokenAtMs": r.woken_at_ms,
-                "transitionReason": r.transition_reason,
-            })
-            .to_string();
-            let existing = tx
-                .query_opt(
-                    "SELECT payload_json FROM runtime_events WHERE event_id=$1",
-                    &[&event_id],
-                )
-                .map_err(|error| format!("load Postgres runtime job wake event failed: {error}"))?
-                .map(|row| row.get::<_, String>(0));
-            if existing.as_deref().is_some_and(|value| value != payload) {
-                return Err(format!(
-                    "wake runtime job idempotency conflict: {}",
-                    r.job_id
-                ));
-            }
-            if existing.is_none() {
-                tx.execute(
-                    "INSERT INTO runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) VALUES($1,$2,$3,'runtime_job_wake_requested',$4,'internal',$5)",
-                    &[&event_id, &session_id.unwrap_or_else(|| format!("runtime_job:{}", r.job_id)), &r.job_id, &r.woken_at_ms, &payload],
-                )
-                .map_err(|error| format!("append Postgres runtime job wake event failed: {error}"))?;
-            }
-            let disposition = match status.as_str() {
-                "queued" => {
-                    let wake_at_ms = r.woken_at_ms.max(reclaim_not_before_ms.unwrap_or(r.woken_at_ms));
-                    if run_at_ms > wake_at_ms {
-                        updated(
-                            tx.execute(
-                                "UPDATE runtime_jobs SET run_at_ms=$1,updated_at_ms=$3 WHERE job_id=$2 AND status='queued' AND run_at_ms>$1",
-                                &[&wake_at_ms, &r.job_id, &r.woken_at_ms],
-                            ),
-                            "wake Postgres runtime job",
-                        )?;
-                        WakeRuntimeJobDisposition::Woken
-                    } else {
-                        WakeRuntimeJobDisposition::AlreadyRunnable
-                    }
-                }
-                "leased" | "running" => WakeRuntimeJobDisposition::Active,
-                "succeeded" | "failed" | "dead_lettered" | "cancelled" => {
-                    WakeRuntimeJobDisposition::Terminal
-                }
-                other => return Err(format!("wake runtime job unsupported status: {other}")),
-            };
+            let disposition = wake_runtime_job_in_transaction(&mut tx, &r)?;
             tx.commit()
                 .map_err(|error| format!("commit Postgres runtime job wake failed: {error}"))?;
             Ok(disposition)
@@ -819,4 +758,76 @@ fn dl_status_from(v: &str) -> Result<DeadLetterStatus, String> {
         "dismissed" => Ok(DeadLetterStatus::Dismissed),
         _ => Err(format!("unknown dead letter status: {v}")),
     }
+}
+
+pub(super) fn wake_runtime_job_in_transaction<C: GenericClient>(
+    tx: &mut C,
+    r: &WakeRuntimeJobRequest,
+) -> Result<WakeRuntimeJobDisposition, String> {
+    let row = tx
+                .query_opt(
+                    "SELECT status,run_at_ms,session_id,lease_reclaim_not_before_ms FROM runtime_jobs WHERE job_id=$1 FOR UPDATE",
+                    &[&r.job_id],
+                )
+                .map_err(|error| format!("load Postgres runtime job for wake failed: {error}"))?
+                .ok_or_else(|| format!("wake runtime job not found: {}", r.job_id))?;
+    let status = row.get::<_, String>(0);
+    let run_at_ms = row.get::<_, i64>(1);
+    let session_id = row.get::<_, Option<String>>(2);
+    let reclaim_not_before_ms = row.get::<_, Option<i64>>(3);
+    let event_id = format!("runtime_job_wake:{}:{}", r.job_id, r.source_job_id);
+    let payload = serde_json::json!({
+        "schema": "runtime.job.wake.v1",
+        "jobId": r.job_id,
+        "sourceJobId": r.source_job_id,
+        "wokenAtMs": r.woken_at_ms,
+        "transitionReason": r.transition_reason,
+    })
+    .to_string();
+    let existing = tx
+        .query_opt(
+            "SELECT payload_json FROM runtime_events WHERE event_id=$1",
+            &[&event_id],
+        )
+        .map_err(|error| format!("load Postgres runtime job wake event failed: {error}"))?
+        .map(|row| row.get::<_, String>(0));
+    if existing.as_deref().is_some_and(|value| value != payload) {
+        return Err(format!(
+            "wake runtime job idempotency conflict: {}",
+            r.job_id
+        ));
+    }
+    if existing.is_none() {
+        tx.execute(
+                    "INSERT INTO runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) VALUES($1,$2,$3,'runtime_job_wake_requested',$4,'internal',$5)",
+                    &[&event_id, &session_id.unwrap_or_else(|| format!("runtime_job:{}", r.job_id)), &r.job_id, &r.woken_at_ms, &payload],
+                )
+                .map_err(|error| format!("append Postgres runtime job wake event failed: {error}"))?;
+    }
+    let disposition = match status.as_str() {
+        "queued" => {
+            let wake_at_ms = r
+                .woken_at_ms
+                .max(reclaim_not_before_ms.unwrap_or(r.woken_at_ms));
+            if run_at_ms > wake_at_ms {
+                updated(
+                            tx.execute(
+                                "UPDATE runtime_jobs SET run_at_ms=$1,updated_at_ms=$3 WHERE job_id=$2 AND status='queued' AND run_at_ms>$1",
+                                &[&wake_at_ms, &r.job_id, &r.woken_at_ms],
+                            ),
+                            "wake Postgres runtime job",
+                        )?;
+                WakeRuntimeJobDisposition::Woken
+            } else {
+                WakeRuntimeJobDisposition::AlreadyRunnable
+            }
+        }
+        "leased" | "running" => WakeRuntimeJobDisposition::Active,
+        "succeeded" | "failed" | "dead_lettered" | "cancelled" => {
+            WakeRuntimeJobDisposition::Terminal
+        }
+        other => return Err(format!("wake runtime job unsupported status: {other}")),
+    };
+
+    Ok(disposition)
 }

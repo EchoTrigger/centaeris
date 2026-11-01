@@ -94,6 +94,7 @@ pub(crate) mod lifecycle_control;
 pub(crate) mod maintenance;
 pub(crate) mod pre_admission_failure;
 pub(crate) mod provision;
+mod question;
 mod reliability;
 pub(crate) mod residency;
 mod resource_commit;

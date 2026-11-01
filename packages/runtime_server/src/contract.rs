@@ -294,6 +294,50 @@ impl AgentRunCancelRequest {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRunQuestionResponseRequest {
+    pub schema: String,
+    pub agent_run_control: AgentRunControl,
+    pub job_id: String,
+    pub continuation_id: String,
+    pub question_id: String,
+    pub operation_id: String,
+    pub action: String,
+    pub answer: Option<String>,
+}
+
+impl AgentRunQuestionResponseRequest {
+    pub fn response(&self) -> centaeris_core::runtime::question::QuestionResponse {
+        centaeris_core::runtime::question::QuestionResponse {
+            schema: centaeris_core::runtime::question::RESPONSE_SCHEMA.into(),
+            agent_run_id: self.agent_run_control.agent_run_id.clone(),
+            authorization_digest: self.agent_run_control.authorization_digest.clone(),
+            continuation_id: self.continuation_id.clone(),
+            question_id: self.question_id.clone(),
+            operation_id: self.operation_id.clone(),
+            action: self.action.clone(),
+            answer: self.answer.clone(),
+        }
+    }
+
+    pub fn validate(self, signing_key: &[u8]) -> Result<Self, String> {
+        if self.schema != "runtime.agent_run.question_response.v1" {
+            return Err("question_response_request_schema_mismatch".into());
+        }
+        self.agent_run_control.validate(signing_key)?;
+        if self.job_id
+            != centaeris_core::session::reliability::agent_run_lifecycle_job_id(
+                &self.agent_run_control.agent_run_id,
+            )?
+        {
+            return Err("question_response_job_id_mismatch".into());
+        }
+        self.response().validate()?;
+        Ok(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

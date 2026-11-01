@@ -1781,6 +1781,8 @@ fn terminalize_agent_run_failure(
 
 fn hosted_agent_runtime_config(start: &AgentRunStart) -> AgentRuntimeConfig {
     AgentRuntimeConfig {
+        question_input:
+            centaeris_core::runtime::question::QuestionInputCapability::PersistentResponses,
         tool_parallelism: centaeris_core::runtime::MAX_TOOL_PARALLELISM,
         agent_instructions: start.session_instructions.clone(),
         model_context_tokens: start.model_context_tokens,
@@ -3974,7 +3976,7 @@ fn execute_agent_run(
                 &terminal_lease_fence,
                 &mut *session_stream_guard(&session_stream)?,
             )?;
-            if response.stop == AgentRunStop::RuntimeJobWait {
+            {
                 let turn = response
                     .last_turn
                     .as_ref()

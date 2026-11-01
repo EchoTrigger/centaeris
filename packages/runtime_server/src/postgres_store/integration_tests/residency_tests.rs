@@ -561,7 +561,7 @@ fn sandbox_with_resources(
     .unwrap();
     db.execute("INSERT INTO public.app_core_workspacemembership VALUES($1,$2,'user_1','member') ON CONFLICT DO NOTHING", &[&member,&tenant]).unwrap();
     db.execute(
-        "INSERT INTO public.app_core_session VALUES($1,$2,'user_1','centaeris',$3,NULL)",
+        "INSERT INTO public.app_core_session(id,workspace_id,owner_id,current_environment_id,\"deletedAt\") VALUES($1,$2,'user_1',$3,NULL)",
         &[&fixture.original.session_id, &tenant, &environment],
     )
     .unwrap();

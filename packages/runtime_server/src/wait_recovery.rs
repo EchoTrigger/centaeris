@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const SCHEMA: &str = "workspace.runtime_job_wait_handoff.v1";
+const QUESTION_HANDOFF_SCHEMA: &str = "workspace.question_wait_handoff.v1";
 const PREFIX: &str = "waitcp:";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -160,7 +161,7 @@ fn digest(value: &impl Serialize) -> Result<String, String> {
 }
 
 impl WaitHandoff {
-    fn validate_replay<S: centaeris_core::session::reliability::RuntimeJobStorePort>(
+    pub(crate) fn validate_replay<S: centaeris_core::session::reliability::RuntimeJobStorePort>(
         &self,
         store: &S,
         wait: &CheckpointRecord,
@@ -179,7 +180,11 @@ impl WaitHandoff {
         wait: &CheckpointRecord,
     ) -> Result<String, String> {
         digest(&(
-            SCHEMA,
+            if wait.done_reason.as_deref() == Some("question") {
+                QUESTION_HANDOFF_SCHEMA
+            } else {
+                SCHEMA
+            },
             &payload.session_id,
             &payload.agent_run_id,
             &payload.execution_id,
@@ -194,7 +199,12 @@ impl WaitHandoff {
         snapshot: &SessionStateSnapshot,
     ) -> Result<Self, String> {
         Ok(Self {
-            schema: SCHEMA.into(),
+            schema: if wait.done_reason.as_deref() == Some("question") {
+                QUESTION_HANDOFF_SCHEMA
+            } else {
+                SCHEMA
+            }
+            .into(),
             handoff_key: Self::key(payload, &wait)?,
             source_session_sequence: payload
                 .session_sequence
@@ -248,24 +258,50 @@ impl WaitHandoff {
         payload: &RuntimeRecoveryCheckpointV1,
     ) -> Result<SessionStateSnapshot, String> {
         payload.validate()?;
-        let wait: RuntimeAwaitJobCheckpointV1 =
-            serde_json::from_str(&self.wait_checkpoint.payload_json).map_err(|e| e.to_string())?;
-        wait.validate()?;
+        let (schema, turn_id, run_id, digest, status) =
+            match self.wait_checkpoint.done_reason.as_deref() {
+                Some("runtime_job") => {
+                    let wait: RuntimeAwaitJobCheckpointV1 =
+                        serde_json::from_str(&self.wait_checkpoint.payload_json)
+                            .map_err(|e| e.to_string())?;
+                    wait.validate()?;
+                    (
+                        SCHEMA,
+                        wait.turn_id,
+                        wait.agent_run_id,
+                        wait.authorization_digest,
+                        "waiting",
+                    )
+                }
+                Some("question") => {
+                    let wait: centaeris_core::runtime::question::QuestionCheckpoint =
+                        serde_json::from_str(&self.wait_checkpoint.payload_json)
+                            .map_err(|e| e.to_string())?;
+                    wait.validate()?;
+                    (
+                        QUESTION_HANDOFF_SCHEMA,
+                        wait.turn_id,
+                        wait.agent_run_id,
+                        wait.authorization_digest,
+                        "paused_question",
+                    )
+                }
+                _ => return Err("unsupported wait handoff kind".into()),
+            };
         let snapshot: SessionStateSnapshot =
             serde_json::from_str(&self.snapshot_json).map_err(|e| e.to_string())?;
-        if self.schema != SCHEMA
+        if self.schema != schema
             || self.handoff_key != Self::key(payload, &self.wait_checkpoint)?
             || payload.checkpoint_id != self.checkpoint_id()?
             || self.source_session_sequence.checked_add(1) != Some(payload.session_sequence)
             || self.model_request_id != payload.model_request_id
             || snapshot.session_id != payload.session_id
             || self.wait_checkpoint.kind != CheckpointKindV1::Wait
-            || self.wait_checkpoint.status != "waiting"
-            || self.wait_checkpoint.done_reason.as_deref() != Some("runtime_job")
+            || self.wait_checkpoint.status != status
             || self.wait_checkpoint.session_id != payload.session_id
-            || self.wait_checkpoint.turn_id != wait.turn_id
-            || wait.agent_run_id != payload.agent_run_id
-            || wait.authorization_digest != payload.authorization_digest
+            || self.wait_checkpoint.turn_id != turn_id
+            || run_id != payload.agent_run_id
+            || digest != payload.authorization_digest
             || payload.workspace_generation.token().is_none()
         {
             return Err("wait recovery attachment binding mismatch".into());

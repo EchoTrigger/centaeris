@@ -37,7 +37,6 @@ use centaeris_runtime_sqlite::SqliteRuntimeStore;
 pub(super) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 mod checkpoint_requests;
-mod question_wait_notifications;
 mod cleanup_migration_tests;
 mod cleanup_recovery_tests;
 mod cold_append_fault_tests;
@@ -53,6 +52,8 @@ mod maintenance_authority_tests;
 mod maintenance_completion_schema_tests;
 mod owned_database;
 mod provision_authority_tests;
+mod question_response_tests;
+mod question_wait_notifications;
 mod residency_tests;
 mod resource_lifecycle_tests;
 pub(super) mod retained_instance_tests;

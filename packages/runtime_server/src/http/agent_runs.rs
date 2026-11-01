@@ -3,6 +3,46 @@ mod control;
 pub(crate) mod retained_cleanup;
 pub(super) use control::advance as advance_control;
 
+pub(super) fn question_response(
+    state: HttpServerState,
+    request: Request<Bytes>,
+) -> Result<Response<Body>, String> {
+    let request = match serde_json::from_slice::<crate::contract::AgentRunQuestionResponseRequest>(
+        request.body(),
+    )
+    .map_err(|error| error.to_string())
+    .and_then(|value| {
+        let key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
+            .map_err(|_| "AGENT_RUN_AUTHORIZATION_SIGNING_KEY is required".to_string())?;
+        value.validate(key.as_bytes())
+    }) {
+        Ok(value) => value,
+        Err(error) => return json_error_response(400, &error),
+    };
+    let response = request.response();
+    match state.job_store.respond_to_question(
+        &request.agent_run_control.authorization.session_id,
+        &request.job_id,
+        &response,
+        now_ms()?,
+    ) {
+        Ok(disposition) => Ok(http_response(
+            200,
+            "application/json",
+            serde_json::to_vec(&json!({
+                "schema":"runtime.agent_run.question_response.result.v1",
+                "agentRunId":response.agent_run_id,"continuationId":response.continuation_id,
+                "operationId":response.operation_id,"disposition":disposition,
+            }))
+            .map_err(|error| error.to_string())?,
+        )),
+        Err(error) => {
+            eprintln!("question response rejected: {error}");
+            json_error_response(409, "question_response_rejected")
+        }
+    }
+}
+
 pub(super) fn cleanup_receipt(
     state: HttpServerState,
     request: Request<Bytes>,

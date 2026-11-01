@@ -3,7 +3,7 @@ use centaeris_core::runtime::contracts::{
     RuntimeAgentRunIdentityV1, RuntimeAwaitJobCheckpointV1, RuntimeJobWaitV1,
 };
 
-fn install_presentation_spy(db: &mut Client) {
+pub(super) fn install_presentation_spy(db: &mut Client) {
     // This owned fixture records transactional calls; Django tests cover the real outbox/NOTIFY.
     db.batch_execute(
         "CREATE TABLE runtime.presentation_wait_calls(key text NOT NULL);

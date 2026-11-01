@@ -48,6 +48,10 @@ pub(super) fn router(state: HttpServerState) -> Router {
             on_blocking(MethodFilter::POST, agent_runs::cancel),
         )
         .route(
+            "/internal/agent-runs/question-response",
+            on_blocking(MethodFilter::POST, agent_runs::question_response),
+        )
+        .route(
             "/internal/agent-runs/supplement",
             on_blocking(MethodFilter::POST, agent_runs::supplement),
         )
