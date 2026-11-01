@@ -11,28 +11,21 @@ from unittest.mock import Mock,patch
 
 class SeedModeTests(unittest.TestCase):
  def execute(self,folder,mode,shared=True,recovery=False):
-  managers={name:Mock() for name in ('Agent','AgentDefinition','ModelConfig','ModelProvider','ProviderCredential','Workspace','WorkspaceMembership')}
+  managers={name:Mock() for name in ('ModelConfig','ModelProvider','ProviderCredential','Workspace','WorkspaceMembership')}
   for name,manager in managers.items():manager.create.return_value=types.SimpleNamespace(id='fixture-'+name)
-  managers['AgentDefinition'].create.return_value.name='Acceptance task runner'
   managers['Workspace'].exists.return_value=False
   models=types.SimpleNamespace(**{name:types.SimpleNamespace(objects=manager) for name,manager in managers.items()})
   user=types.SimpleNamespace(objects=Mock());user.objects.create_user.return_value=types.SimpleNamespace(id='fixture-user')
-  published=Mock()
   modules={'django.conf':types.SimpleNamespace(settings=types.SimpleNamespace(DATABASES={'default':{'NAME':'retained_acceptance'}},MEDIA_ROOT=folder)),
     'django.contrib.auth':types.SimpleNamespace(get_user_model=lambda:user),
     'django.db':types.SimpleNamespace(connection=object(),transaction=types.SimpleNamespace(atomic=contextlib.nullcontext)),
-    'app_core.credentials':types.SimpleNamespace(encrypt_credential_secret=lambda value:'encrypted-synthetic'), 'app_core.models':models,
-    'app_core.agent_definitions':types.SimpleNamespace(publish_definition=published)}
+    'app_core.credentials':types.SimpleNamespace(encrypt_credential_secret=lambda value:'encrypted-synthetic'), 'app_core.models':models}
   environment={'AGENT_RUN_EXECUTION_MODE':mode,'CENTAERIS_ACCEPTANCE_SHARED_WORKLOAD':'1' if shared else '0',
     'CENTAERIS_ACCEPTANCE_WORKSPACE_RECOVERY':'1' if recovery else '0'}
   with patch.dict(sys.modules,modules),patch.dict(os.environ,environment),patch('builtins.print') as printed:
    exec(compile(Path(__file__).with_name('seed.py').read_text(),'seed.py','exec'),{})
   value=json.loads((Path(folder)/'acceptance-seed.json').read_text())
   self.assertNotIn(value['password'],str(printed.call_args_list))
-  definition=managers['AgentDefinition'].create.return_value
-  published.assert_called_once_with(definition,user.objects.create_user.return_value)
-  self.assertIs(managers['Agent'].create.call_args.kwargs['definition'],definition)
-  self.assertIs(managers['AgentDefinition'].create.call_args.kwargs['model_config'],managers['ModelConfig'].create.return_value)
   self.model_name=managers['ModelConfig'].create.call_args.kwargs['modelName']
   return value
  def test_recovery_seed_selects_fixed_recovery_protocol_only_for_explicit_per_run_shared_fixture(self):

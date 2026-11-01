@@ -113,7 +113,7 @@ class RecoveryVerifierTests(unittest.TestCase):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as folder:
                 driver = types.SimpleNamespace(result=Path(folder), base='http://127.0.0.1:18083',
                     environment={'PATH': 'local', 'INTERNAL_API_TOKEN': 'must-not-cross', 'REAL_MODEL_SOCKET': '/private'},
-                    seed={'workspaceId': 'workspace-a', 'agentId': 'agent-a', 'modelConfigRef': 'model-a',
+                    seed={'workspaceId': 'workspace-a', 'modelConfigRef': 'model-a',
                           'email': 'synthetic@fixture.invalid', 'password': 'synthetic-private'})
                 value = {**record, 'artifact': dict(expected)}
                 if change == 'hash':value['artifact']['sha256'] = 'sha256:' + 'f' * 64

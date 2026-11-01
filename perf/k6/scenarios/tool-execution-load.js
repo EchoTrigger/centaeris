@@ -31,15 +31,15 @@ export const options = {
 
 export function setup() {
   const expectedArtifact = artifactExpectation();
-  const { workspaceId, agentId, modelId } = configuredTarget('tools');
+  const { workspaceId, modelId } = configuredTarget('tools');
   const { store, csrf } = login();
-  return { store, csrf, workspaceId, agentId, modelId, expectedArtifact };
+  return { store, csrf, workspaceId, modelId, expectedArtifact };
 }
 
 export function executeTools(data) {
   const started = Date.now();
   try {
-    const { sessionId, agentRunId } = startRun(data.store, data.csrf, data.workspaceId, data.agentId, data.modelId);
+    const { sessionId, agentRunId } = startRun(data.store, data.csrf, data.workspaceId, data.modelId);
     const result = waitForTerminal(data.store, data.csrf, sessionId, agentRunId, Number(__ENV.RUN_TIMEOUT || 120));
     runDuration.add(Date.now() - started);
     verifyToolRun(result, sessionId, agentRunId);

@@ -33,7 +33,7 @@ class SeedFixtureTests(unittest.TestCase):
             media=Path(directory)/'private-storage'
             settings=SimpleNamespace(DATABASES={'default':{'NAME':'retained_acceptance'}},
                                      MEDIA_ROOT=str(media))
-            names=('Agent','ModelConfig','ModelProvider','ProviderCredential','Workspace','WorkspaceMembership')
+            names=('ModelConfig','ModelProvider','ProviderCredential','Workspace','WorkspaceMembership')
             managers={name:InputManager(name) for name in (*names,'User')}
             models=ModuleType('app_core.models')
             for name in names:
@@ -61,9 +61,8 @@ class SeedFixtureTests(unittest.TestCase):
                 self.assertTrue(output.is_file(),'private seed must use configured MEDIA_ROOT')
                 original=output.read_bytes()
                 seed=json.loads(original)
-                self.assertTrue(set(seed)=={'email','password','workspaceId','agentId','modelConfigRef'})
+                self.assertTrue(set(seed)=={'email','password','workspaceId','modelConfigRef'})
                 self.assertEqual(seed['workspaceId'],managers['Workspace'].created[0].id)
-                self.assertEqual(seed['agentId'],managers['Agent'].created[0].id)
                 self.assertEqual(seed['modelConfigRef'],managers['ModelConfig'].created[0].id)
                 user=managers['User'].created[0]
                 self.assertTrue(seed['email']==user.email and seed['email'].endswith('@fixture.invalid'))

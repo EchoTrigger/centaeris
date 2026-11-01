@@ -61,7 +61,7 @@ class BenchmarkSeedTests(unittest.TestCase):
         identity_path.write_text(json.dumps(identity))
         media = root / 'private'
         settings = SimpleNamespace(DATABASES={'default': {'NAME': identity['databaseName'], 'USER': identity['databaseUser']}}, MEDIA_ROOT=str(media))
-        names = ('Agent','ModelConfig','ModelProvider','ProviderCredential','Workspace','WorkspaceMembership','Session','AgentRun','User')
+        names = ('ModelConfig','ModelProvider','ProviderCredential','Workspace','WorkspaceMembership','Session','AgentRun','User')
         managers = {name: Manager(name) for name in names}
         models = ModuleType('app_core.models')
         for name in names[:-1]:

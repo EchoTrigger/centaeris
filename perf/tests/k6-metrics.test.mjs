@@ -57,7 +57,7 @@ test('real K6 rejects actual Run admission errors without a scenario system tag'
   const subject = pathToFileURL(fileURLToPath(new URL('../k6/scenarios/run-arrival-load.js', import.meta.url))).href;
   fs.writeFileSync(script, `import { options as sourceOptions, admitRun } from ${JSON.stringify(subject)};
 export const options = { ...sourceOptions, scenarios: { runs: { executor: 'shared-iterations', vus: 1, iterations: 4, exec: 'fixtureRun' } } };
-export function fixtureRun() { admitRun({ store: {}, csrf: 'fixture', workspaceId: 'fixture', agentId: 'fixture', modelId: 'fixture' }); }
+export function fixtureRun() { admitRun({ store: {}, csrf: 'fixture', workspaceId: 'fixture', modelId: 'fixture' }); }
 `);
   const result = await new Promise((resolve, reject) => {
     const child = spawn(binary, ['run', '--summary-export', summary, script], {

@@ -33,12 +33,12 @@ export const options = {
 };
 
 export function setup() {
-  const { workspaceId, agentId, modelId } = configuredTarget('long');
+  const { workspaceId, modelId } = configuredTarget('long');
   const { store, csrf } = login();
   const runs = [];
   const count = Number(__ENV.MARATHON_RUNS || 4);
   for (let i = 0; i < count; i += 1) {
-    runs.push(startRun(store, csrf, workspaceId, agentId, modelId, `Marathon run ${i} for watchers.`));
+    runs.push(startRun(store, csrf, workspaceId, modelId, `Marathon run ${i} for watchers.`));
     console.log(`marathon run ${i + 1}/${count}: ${runs[i].agentRunId}`);
   }
   return { store, runs };

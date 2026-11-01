@@ -8,10 +8,39 @@
 | `storage-data` | Original files and API-owned stored objects |
 | `runtime-data` | Runtime-private durable state and generated runtime files |
 | `plugin-data` | Installed Plugin directories and catalog |
-| `agent-memory` | Agent memory files owned by the hosted memory boundary |
+| `agent-memory` | Memory files scoped to user and Workspace; the volume name is retained |
 
 Redis carries bounded transient browser and Runtime live state. Its loss can
 interrupt a live connection but must not erase durable history or jobs.
+
+## Session ownership migration
+
+`0038_session_ownership` removes Agent profiles, definitions, branches and their
+dedicated coordination Sessions. Ordinary Sessions, including former dispatched
+work Sessions, keep their identities, events, files, artifacts and project
+grouping. New Session instructions start empty; retired Agent instructions are
+not copied. Historical Run authorization payloads, digests and signatures remain
+unchanged. Old application grants are revoked, and application registration
+records remain. The retired Chat and Agent authorization entry points are not
+replaced by a public Session API in this upgrade.
+
+Stop old writers and settle accepted Runs, unreleased environment controllers,
+physical resident/retirement responsibilities and outstanding `agent_work.return`
+Jobs before applying the migration. Historical execution-instance rows alone do
+not block it. The migration rejects unsettled responsibilities and has no
+reverse data reconstruction.
+
+Coordination-owned stored objects transfer their exact storage keys to the
+existing cleanup retry ledger. The `gc_deleted_resources` command drains these
+entries with current-owner checks, preserving bytes still referenced by ordinary
+Sessions or personal library objects. The database migration performs no physical
+file deletion. Cross-Session references into retiring records require resolution
+before cutover rather than deletion of the surviving Session's data.
+
+Memory now shares one namespace per user and Workspace, across Sessions. Its
+existing Markdown protocol and `plastic-memories://self/` URI remain. The new
+`workspace_memory_scope_v2` namespace does not merge, copy or delete old
+Agent-scoped memory directories.
 
 ## Session output storage
 
@@ -72,9 +101,11 @@ old snapshot reader would reintroduce incorrect historical content; reverting
 code is not a content-recovery procedure. Full-output retention requires a
 separate immutable capture contract.
 
-## Persistent application authorization upgrade
+## Historical application authorization upgrade
 
 `0002_persistent_app_delegations` is a forward migration from `0001_initial`.
+The Agent-targeted entry points described in this historical upgrade are retired
+by `0038_session_ownership`; their grants are revoked rather than broadened.
 It retains existing users, applications, grant IDs, token digests, deadlines,
 revocations, memberships, Agent/Session identities and input facts. Existing
 grants receive credential version 1 and retain their definition target; existing
@@ -105,7 +136,7 @@ the migration commits. Back up first. The reverse migration refuses to drop the
 new table while browser credentials remain; any planned downgrade must revoke
 them explicitly rather than fabricate old deadlines or revive legacy copies.
 
-## Persistent business Agent branches
+## Historical business Agent branches
 
 `0004_business_agent_branches` creates empty branch identity storage and does not
 derive external users from existing Agents, Sessions or message text. New explicit
@@ -130,6 +161,10 @@ Sessions and file metadata, and include the existing memory and snapshot volumes
 Restoring only the branch map or issuing a new credential is not a history restore.
 An upgrade/restore check must return the same branch, Agent and Session for an
 existing application/root/business user identity.
+
+These branch identities and their coordination Sessions are retired by
+`0038_session_ownership`. The preceding restore requirement applies to the old
+schema, not to the current Session model.
 
 ## Trash and deletion
 

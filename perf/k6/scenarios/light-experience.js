@@ -144,7 +144,7 @@ export default function (data) {
   const contract = experienceTask(task, sampleId), started = Date.now();
   let admitted, stage = 'admission';
   try {
-    admitted = startRun(data.store, data.csrf, data.workspaceId, data.agentId, data.modelId, contract.prompt,
+    admitted = startRun(data.store, data.csrf, data.workspaceId, data.modelId, contract.prompt,
       { sessionId: sameSession === 'true' ? currentSession : 'new', operationId: sampleId, sampleId });
     currentSession = admitted.sessionId;
     const admissionMs = Date.now() - started; admission.add(admissionMs, { task });

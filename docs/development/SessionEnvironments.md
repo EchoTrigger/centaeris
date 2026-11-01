@@ -28,7 +28,7 @@ not part of this API.
 
 ## One current authorization contract
 
-`workspace.agent_run_authorization.v1` signs the Run, Session, complete
+`workspace.agent_run_authorization.v2` signs the Run, Session, complete
 environment profile and its digest. The independent
 `workspace.environment_authorization.v1` additionally binds the selected
 environment, original Run grant digest, lifetime policy and controller fence.

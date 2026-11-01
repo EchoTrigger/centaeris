@@ -13,7 +13,7 @@ class ExistingFixtureWorkloadTests(unittest.TestCase):
     def fixture(self, directory):
         samples=[{'sampleId':f'{i+1:032x}','operationId':f'{i+101:032x}','workUnits':2} for i in range(12)]
         return {'schema':'workspace.perf.fixture.v1','nativeManifest':str(Path(directory)/'native/fixture/manifest.json'),
-                'apiBase':'http://127.0.0.1:18083','workspaceId':'workspace-owned','agentId':'agent-owned',
+                'apiBase':'http://127.0.0.1:18083','workspaceId':'workspace-owned',
                 'modelRefs':{'tools':'model-owned'},'account':{'email':'synthetic@localhost.invalid','password':'not-for-output'},'samples':samples}
     def test_prepared_fixture_targets_and_secrets_are_passed_to_k6_only_through_environment(self):
         module=self.load()

@@ -166,8 +166,7 @@ def setup(stack, client):
         "contextTokens": 200000, "maxOutputTokens": 8192, "enabled": True}, expected=(200, 201))
     model_id = (model.get("model") or model)["id"]
     workspace_id = client.call("GET", "/api/workspaces")["workspaces"][0]["id"]
-    agent_id = client.call("GET", f"/api/workspaces/{workspace_id}/agents")["agents"][0]["id"]
-    return workspace_id, agent_id, model_id
+    return workspace_id, model_id
 
 
 def durable_runs(stack, accepted):
@@ -191,7 +190,7 @@ def run_workload(stack, output, seconds=60, interval=5, observers=3, stop=None):
     started = time.monotonic()
     try:
         client = Client(result["requests"])
-        workspace, agent, model = setup(stack, client)
+        workspace, model = setup(stack, client)
         began = time.monotonic()
         for arrival in range(math.ceil(seconds / interval)):
             remaining = began + arrival * interval - time.monotonic()
@@ -204,7 +203,7 @@ def run_workload(stack, output, seconds=60, interval=5, observers=3, stop=None):
                 continue
             operation_id = uuid.uuid4().hex
             accepted = client.call("POST", f"/api/workspaces/{workspace}/sessions/new/messages", {
-                "operationId": operation_id, "agentId": agent, "modelConfigRef": model,
+                "operationId": operation_id, "modelConfigRef": model,
                 "text": "Call your tool once, then finish the pool validation run.",
                 "attachmentRefs": []}, expected=(202,))
             entry = {"agentRunId": accepted["agentRunId"], "sessionId": accepted["sessionId"],

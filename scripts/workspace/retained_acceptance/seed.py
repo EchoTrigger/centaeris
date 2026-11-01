@@ -12,7 +12,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import connection, transaction
 from app_core.credentials import encrypt_credential_secret
-from app_core.models import (Agent, ModelConfig, ModelProvider, ProviderCredential,
+from app_core.models import (ModelConfig, ModelProvider, ProviderCredential,
                              Workspace, WorkspaceMembership)
 
 assert settings.DATABASES['default']['NAME'] == 'retained_acceptance'
@@ -33,13 +33,10 @@ with transaction.atomic():
         createdBy=user, updatedBy=user)
     model = ModelConfig.objects.create(provider=provider, displayName='Deterministic acceptance',
         modelName='retained-acceptance', contextTokens=131072, maxOutputTokens=4096)
-    agent = Agent.objects.create(workspace=workspace, owner=user, name='Acceptance task runner',
-        instructions='Follow the acceptance prompt and invoke only the requested tools.',
-        model_config=model)
 output.parent.mkdir(parents=True, exist_ok=True)
 fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(fd, 'w') as stream:
     json.dump({'email':email,'password':password,'workspaceId':workspace.id,
-               'agentId':agent.id,'modelConfigRef':model.id}, stream)
+               'modelConfigRef':model.id}, stream)
 print(json.dumps({'status':'synthetic-business-inputs-created','workspaceId':workspace.id,
-                  'agentId':agent.id,'modelConfigRef':model.id}))
+                  'modelConfigRef':model.id}))

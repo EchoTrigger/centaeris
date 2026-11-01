@@ -213,4 +213,3 @@ test("pushed workspace navigation updates sessions without rereading the list or
     assert.equal(calls.length, 1);
   } finally { subject.unmount(); }
 });
-

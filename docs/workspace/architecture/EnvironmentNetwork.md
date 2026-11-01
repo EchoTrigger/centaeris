@@ -12,7 +12,7 @@ grants retain their snapshot. A maintenance-authorized profile binding may set
 the same network field before that environment has been used. Once the complete
 profile is bound, PostgreSQL protects it against model, bulk and raw updates.
 
-The current `workspace.agent_run_authorization.v1` signs the network value inside
+The current `workspace.agent_run_authorization.v2` signs the network value inside
 `environmentProfile` and binds the complete `environmentProfileDigest`. Ordinary
 and Harbor execution use this same policy. Enabling the network does not alter
 the profile's user or the model tool's filesystem permissions.

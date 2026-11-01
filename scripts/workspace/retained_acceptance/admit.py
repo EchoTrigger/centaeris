@@ -37,7 +37,7 @@ def main():
         return
     csrf=request("/api/csrf")["csrfToken"]
     response=request(f"/api/workspaces/{seed['workspaceId']}/sessions/{args.session}/messages",{
-        "operationId":args.operation_id,"text":args.text,"agentId":seed["agentId"],
+        "operationId":args.operation_id,"text":args.text,
         "modelConfigRef":seed["modelConfigRef"],"attachmentRefs":[]})
     if response.get("status") != "accepted" or not response.get("agentRunId") or not response.get("sessionId"):
         raise RuntimeError("public admission did not return a valid accepted identity")

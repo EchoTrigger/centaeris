@@ -75,7 +75,7 @@ export default function (data) {
       workload.memoryMiB = sample.memoryMiB;
       workload.minimumHoldMs = sample.minimumHoldMs;
     }
-    admitted = startRun(data.store, data.csrf, data.workspaceId, data.agentId, data.modelId,
+    admitted = startRun(data.store, data.csrf, data.workspaceId, data.modelId,
       'PERF_FIXED_WORKLOAD ' + JSON.stringify(workload),
       { sessionId: currentSession, operationId: sample.operationId, sampleId: sample.sampleId });
     currentSession = admitted.sessionId;

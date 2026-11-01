@@ -11,11 +11,11 @@ function subject(environment = {}, change = () => {}) {
     Trend: Metric, Rate: Metric, Counter: Metric, console: { log(line) { records.push(JSON.parse(line.slice('PERF_EXPERIENCE '.length))); } },
     crypto: { randomBytes: () => new Uint8Array(16).fill(admissions.length + 1) },
     execution: { vu: { idInTest: 1, iterationInScenario: 0 } },
-    configuredTarget: profile => ({ workspaceId: 'workspace', agentId: 'agent', modelId: profile }),
+    configuredTarget: profile => ({ workspaceId: 'workspace', modelId: profile }),
     login: () => ({ store: {}, csrf: 'csrf' }),
     startRun(...args) { admissions.push(args); return { sessionId: 'owned-session', agentRunId: 'run-' + admissions.length }; },
     waitForTerminalObserved(store, csrf, sessionId, agentRunId) {
-      const args = admissions.at(-1), contract = context.experienceTask(environment.PERF_EXPERIENCE_TASK || 'text', args[6].operationId);
+      const args = admissions.at(-1), contract = context.experienceTask(environment.PERF_EXPERIENCE_TASK || 'text', args[5].operationId);
       const events = [];
       for (const [index, command] of contract.commands.entries()) {
         events.push({ type: 'tool_call', payload: { callId: 'call-' + index, toolName: 'bash', normalizedInput: { command: command.command } } });
@@ -75,8 +75,8 @@ test('three iterations reuse the admitted Session with distinct operations, whil
   for (const sameSession of ['true', 'false']) {
     const s = subject({ PERF_EXPERIENCE_ITERATIONS: '3', PERF_EXPERIENCE_SAME_SESSION: sameSession });
     const data = s.context.setup(); for (let index = 0; index < 3; index++) s.context.iteration(data);
-    assert.deepEqual(s.admissions.map(args => args[6].sessionId), sameSession === 'true' ? ['new', 'owned-session', 'owned-session'] : ['new', 'new', 'new']);
-    assert.equal(new Set(s.admissions.map(args => args[6].operationId)).size, 3);
+    assert.deepEqual(s.admissions.map(args => args[5].sessionId), sameSession === 'true' ? ['new', 'owned-session', 'owned-session'] : ['new', 'new', 'new']);
+    assert.equal(new Set(s.admissions.map(args => args[5].operationId)).size, 3);
   }
 });
 

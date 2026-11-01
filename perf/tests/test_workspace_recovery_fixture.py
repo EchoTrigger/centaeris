@@ -27,7 +27,7 @@ let source=fs.readFileSync(process.argv[1],'utf8').replace(/^import .*;\r?$/gm,'
 class Metric { add(){} }
 const context={__ENV:fixture===null?{}:{PERF_RUN_FIXTURE_PATH:'/owned/phase.json'},open:()=>{if(context.started)throw new Error('k6 only permits open during initialization');return JSON.stringify(fixture)},
 Trend:Metric,Rate:Metric,check:()=>true,console:{log:(v)=>calls.push(['log',v])},
-configuredTarget:()=>({workspaceId:'workspace',agentId:'agent',modelId:'model'}),login:()=>({store:{},csrf:'csrf'}),
+configuredTarget:()=>({workspaceId:'workspace',modelId:'model'}),login:()=>({store:{},csrf:'csrf'}),
 startRun:()=>{calls.push(['admit']);return {sessionId:'new-session',agentRunId:'new-run'}},
 artifactExpectation:()=>({filename:'default.bin',sizeBytes:1,sha256:'sha256:'+'a'.repeat(64)}),
 waitForTerminal:(store,csrf,s,r)=>{calls.push(['observe',s,r]);return {status:'completed',events:[]}},

@@ -44,7 +44,7 @@ def main():
         containers.discard(name)
         return result.stdout
 
-    def operation(path, action, scope="user-a-agent-a", error=None):
+    def operation(path, action, scope="user-a-workspace-a", error=None):
         result = json.loads(container([HELPER, "filesystem-once"], scope,
             json.dumps({"path": path, "operation": action})))
         if error:
@@ -55,7 +55,7 @@ def main():
         assert output["identity"] == {"key": path, "displayPath": path}, output
         return output
 
-    def read(path, scope="user-a-agent-a", error=None):
+    def read(path, scope="user-a-workspace-a", error=None):
         return operation(path, {"type": "readFile", "maxBytes": 65536}, scope, error)
 
     def write(path, text, previous=None):
@@ -67,7 +67,7 @@ def main():
         container(["python", "-c", "from pathlib import Path; import os; "
             "root=Path('/var/lib/centaeris/memory'); "
             "[( (root/s/'topics').mkdir(parents=True), os.chmod(root/s,0o700), os.chmod(root/s/'topics',0o700)) "
-            "for s in ['user-a-agent-a','user-a-agent-b','user-b-agent-a']]"])
+            "for s in ['user-a-workspace-a','user-a-workspace-b','user-b-workspace-a']]"])
         skill_path = "/opt/centaeris/system-skills/memory/SKILL.md"
         installed = read(skill_path)
         expected = (Path(__file__).resolve().parents[2] / "skills/system/memory/SKILL.md").read_bytes()
@@ -86,7 +86,7 @@ def main():
         restored = read(topic)
         assert bytes(restored["bytes"]).decode() == initial
         assert bytes(read(ROOT + "MEMORY.md")["bytes"]).decode() == index
-        for scope in ["user-a-agent-b", "user-b-agent-a"]:
+        for scope in ["user-a-workspace-b", "user-b-workspace-a"]:
             read(topic, scope, "not_found")
             read(ROOT + "MEMORY.md", scope, "not_found")
         write(topic, changed, restored["fileHash"])

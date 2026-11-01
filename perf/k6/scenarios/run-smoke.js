@@ -45,11 +45,11 @@ export default function () {
 
     const fixture = observationFixture();
     const expectedArtifact = fixture ? fixture.expectedArtifact : artifactExpectation();
-    const { workspaceId, agentId, modelId } = configuredTarget('short');
+    const { workspaceId, modelId } = configuredTarget('short');
     const { store, csrf } = login();
 
     const started = Date.now();
-    const { sessionId, agentRunId } = fixture || startRun(store, csrf, workspaceId, agentId, modelId);
+    const { sessionId, agentRunId } = fixture || startRun(store, csrf, workspaceId, modelId);
     const result = waitForTerminal(store, csrf, sessionId, agentRunId, 120);
     const milliseconds = Date.now() - started;
     runDuration.add(milliseconds);

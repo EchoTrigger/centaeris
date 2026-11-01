@@ -97,9 +97,8 @@ def main(output):
             "displayName": "Transcript capture validation", "contextTokens": 200000,
             "maxOutputTokens": 8192, "enabled": True}, expected=(200, 201))
         workspace = client.call("GET", "/api/workspaces")["workspaces"][0]["id"]
-        agent = client.call("GET", f"/api/workspaces/{workspace}/agents")["agents"][0]["id"]
         accepted = client.call("POST", f"/api/workspaces/{workspace}/sessions/new/messages", {
-            "operationId": uuid.uuid4().hex, "agentId": agent,
+            "operationId": uuid.uuid4().hex,
             "modelConfigRef": (model.get("model") or model)["id"],
             "text": "Validate fixed historical text after source replacement and deletion.",
             "attachmentRefs": []}, expected=(202,))

@@ -121,7 +121,7 @@ def verify_run(driver, admitted, sample, binary):
     environment = {key: value for key, value in driver.environment.items()
                    if key.upper() in {'PATH', 'HOME', 'TMP', 'TMPDIR', 'TEMP', 'SYSTEMROOT'}}
     environment.update(API_BASE=driver.base, PERF_WORKSPACE_ID=driver.seed['workspaceId'],
-                       PERF_AGENT_ID=driver.seed['agentId'], PERF_MODEL_REFS=json.dumps({'short': driver.seed['modelConfigRef']}),
+                       PERF_MODEL_REFS=json.dumps({'short': driver.seed['modelConfigRef']}),
                        PERF_ADMIN_EMAIL=driver.seed['email'], PERF_ADMIN_PASSWORD=driver.seed['password'],
                        PERF_RUN_FIXTURE_PATH=str(path), K6_NO_USAGE_REPORT='true')
     # Only the allowlisted success record becomes evidence; process diagnostics remain private.
