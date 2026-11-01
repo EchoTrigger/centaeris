@@ -51,7 +51,9 @@ test('live answer can occupy the persistent response area while reasoning keeps 
 });
 
 
-test('live text hands off once to referenced committed content even when its checkpoint is lost', async () => {
+for (const replacement of ['answer', 'tool-call commentary', 'batched tool-call commentaries']) test(`live text hands off once to ${replacement} even when its checkpoint is lost`, async () => {
+  const processSummary = replacement !== 'answer';
+  const multiple = replacement === 'batched tool-call commentaries';
   const store = createTranscriptViewStore();
   const identity = { workspaceId: 'workspace', sessionId: 'session' };
   const controller = new WorkspacePresentationController({ ...identity, store });
@@ -61,9 +63,10 @@ test('live text hands off once to referenced committed content even when its che
   await controller.acceptWithBackpressure({ cursor: null, item: { ...common, kind: 'snapshot', page } });
   await controller.acceptWithBackpressure({ cursor: null, item: { ...common, kind: 'live', agentRunId: 'run',
     live: { messageId: 'answer', turnId: 'turn', afterSequence: 0, revision: 1, text: 'abcdef', reasoning: null } } });
+  const blockId = processSummary ? 'notice:process-summary' : 'answer';
   function View() {
     const current = useSyncExternalStore(store.subscribeLive, store.getLiveSnapshot, store.getLiveSnapshot);
-    return <><TranscriptBlockRow store={store} blockId="answer" />{current ? <TranscriptLiveTail live={current} mode="text" /> : null}</>;
+    return <><TranscriptBlockRow store={store} blockId={blockId} /><TranscriptBlockRow store={store} blockId="notice:later-summary" />{current ? <TranscriptLiveTail live={current} mode="text" /> : null}</>;
   }
   render(<View />);
   const once = () => {
@@ -71,13 +74,18 @@ test('live text hands off once to referenced committed content even when its che
   };
   once();
   const reference = { refId: 'session-event:answer', revision: '1', byteLength: '6' };
-  const block = { blockId: 'answer', blockRevision: '1', orderKey: { sourceSequence: '1', ordinal: 0 },
-    body: { kind: 'assistantText', content: { inlineContent: null, sourceRef: reference }, status: 'completed' } };
+  const block = { blockId, blockRevision: '1', orderKey: { sourceSequence: '1', ordinal: 0 },
+    body: { kind: processSummary ? 'notice' : 'assistantText', ...(processSummary ? { noticeType: 'model_process_summary' } : {}),
+      content: { inlineContent: null, sourceRef: reference }, status: processSummary ? 'running' : 'completed' } };
+  const laterReference = { refId: 'session-event:later-summary', revision: '1', byteLength: '5' };
+  const later = { blockId: 'notice:later-summary', blockRevision: '1', orderKey: { sourceSequence: '2', ordinal: 0 },
+    body: { kind: 'notice', noticeType: 'model_process_summary', content: { inlineContent: null, sourceRef: laterReference }, status: 'running' } };
+  const water = multiple ? '2' : '1';
   await act(async () => controller.acceptWithBackpressure({ cursor: null, item: { ...common, kind: 'patches', page: {
     schema: 'transcript.patch.page.v1', sessionId: 'session', projectionVersion: 'transcript.projection.v1', projectionGeneration: 'generation',
-    throughSourceHighWater: '1', nextSourceHighWater: '1', hasMore: false, patches: [{ schema: 'transcript.patch.v1', sessionId: 'session',
-      projectionVersion: 'transcript.projection.v1', projectionGeneration: 'generation', sourceHighWater: '1', streamId: 'workspace-transcript.v1',
-      appliedCursor: '1', upserts: [block], removals: [] }],
+    throughSourceHighWater: water, nextSourceHighWater: water, hasMore: false, patches: [{ schema: 'transcript.patch.v1', sessionId: 'session',
+      projectionVersion: 'transcript.projection.v1', projectionGeneration: 'generation', sourceHighWater: water, streamId: 'workspace-transcript.v1',
+      appliedCursor: water, upserts: multiple ? [later, block] : [block], removals: [] }],
   } } }));
   once();
   const content = (startOffset: string, endOffset: string, text: string, hasMore: boolean) => ({ cursor: null, item: { ...common, kind: 'content' as const,
@@ -88,6 +96,16 @@ test('live text hands off once to referenced committed content even when its che
   await act(async () => controller.acceptWithBackpressure(content('3', '6', 'def', false)));
   once();
   expect(controller.lastCursor).toBeNull();
+  await act(async () => controller.acceptWithBackpressure({ cursor: null, item: { ...common, kind: 'live', agentRunId: 'run',
+    live: { messageId: 'answer', turnId: 'turn', afterSequence: 0, revision: 2, text: 'abcdef', reasoning: null } } }));
+  once();
+  if (multiple) await act(async () => controller.acceptWithBackpressure({ cursor: null, item: { ...common, kind: 'content', range: {
+    schema: 'transcript.content.range.v1', sessionId: 'session', projectionVersion: 'transcript.projection.v1', projectionGeneration: 'generation',
+    ...laterReference, startOffset: '0', endOffset: '5', content: 'later', hasMore: false,
+  } } }));
+  await act(async () => controller.acceptWithBackpressure({ cursor: null, item: { ...common, kind: 'live', agentRunId: 'run',
+    live: { messageId: 'next-answer', turnId: 'next-turn', afterSequence: Number(water), revision: 1, text: 'abcdef', reasoning: null } } }));
+  expect(screen.getAllByTestId('markdown-body').map(element => element.textContent)).toEqual(multiple ? ['abcdef', 'later', 'abcdef'] : ['abcdef', 'abcdef']);
 });
 
 

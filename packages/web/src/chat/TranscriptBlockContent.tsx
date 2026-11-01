@@ -112,7 +112,8 @@ function ReferencedContent({ store, reference, mode = "markdown", allowVisuals =
     return candidate?.refId === reference.refId && candidate.revision === reference.revision
       && candidate.byteLength === reference.byteLength;
   };
-  const coveredByLive = live !== null && ((Boolean(live.text) && sameReference(live.messageId))
+  const coveredByLive = live !== null && ((Boolean(live.text) && (sameReference(live.messageId)
+    || sameReference(store.getLiveTextReplacementBlockId() ?? "")))
     || (Boolean(live.reasoning?.text) && sameReference(live.reasoning?.blockId ?? "")));
   const evicted = store.isPresentationContentEvicted(reference);
   const streamedBody = useRef<HTMLDivElement>(null);

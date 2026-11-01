@@ -56,6 +56,7 @@ export function createTranscriptViewStore() {
     appliedSourceHighWater: "0",
   });
   let liveSnapshot: TranscriptLiveOverlay | null = null;
+  let liveTextReplacementBlockId: string | null = null;
   const listListeners = new Set<Listener>();
   const managedContentListeners = new Set<Listener>();
   const blockListeners = new Map<string, Set<Listener>>();
@@ -74,6 +75,8 @@ export function createTranscriptViewStore() {
   }
 
   function setLiveSnapshot(next: TranscriptLiveOverlay | null) {
+    if (next === null || next.messageId !== liveSnapshot?.messageId || next.turnId !== liveSnapshot?.turnId
+      || next.afterSourceHighWater !== liveSnapshot?.afterSourceHighWater) liveTextReplacementBlockId = null;
     if (canonical(liveSnapshot) === canonical(next)) return;
     liveSnapshot = next;
     liveListeners.forEach((listener) => listener());
@@ -285,6 +288,7 @@ export function createTranscriptViewStore() {
     const stagedRevisions = new Map<string, string>();
     const changed = new Set<string>();
     let nextLive = liveSnapshot;
+    let nextLiveTextReplacementBlockId = liveTextReplacementBlockId;
     let noticeAffected = false;
     const currentBlock = (blockId: string) => (
       stagedBlocks.has(blockId) ? stagedBlocks.get(blockId) : blocks.get(blockId)
@@ -318,6 +322,12 @@ export function createTranscriptViewStore() {
         stagedBlocks.set(item.blockId, clone(item));
         stagedRevisions.set(item.blockId, item.blockRevision);
         changed.add(item.blockId);
+        if (retainPendingLive && nextLive !== null && item.body.kind === "notice"
+          && item.body.noticeType === "model_process_summary"
+          && BigInt(item.orderKey.sourceSequence) > BigInt(nextLive.afterSourceHighWater)) {
+          const replacement = nextLiveTextReplacementBlockId === null ? null : currentBlock(nextLiveTextReplacementBlockId);
+          if (!replacement || compareBlocks(item, replacement) < 0) nextLiveTextReplacementBlockId = item.blockId;
+        }
         if (!retainPendingLive && nextLive !== null && (
           item.blockId === nextLive.messageId
           || item.blockId === nextLive.reasoning?.blockId
@@ -337,6 +347,7 @@ export function createTranscriptViewStore() {
         stagedBlocks.set(removal.blockId, null);
         stagedRevisions.set(removal.blockId, removal.blockRevision);
         if (previous !== undefined && previous !== null) changed.add(removal.blockId);
+        if (removal.blockId === nextLiveTextReplacementBlockId) nextLiveTextReplacementBlockId = null;
         if (nextLive !== null && (
           removal.blockId === nextLive.messageId || removal.blockId === nextLive.reasoning?.blockId
         )) nextLive = null;
@@ -408,6 +419,7 @@ export function createTranscriptViewStore() {
       appliedSourceHighWater: BigInt(page.nextSourceHighWater) > BigInt(listSnapshot.appliedSourceHighWater)
         ? page.nextSourceHighWater : listSnapshot.appliedSourceHighWater,
     });
+    liveTextReplacementBlockId = nextLiveTextReplacementBlockId;
     setLiveSnapshot(nextLive);
     if (retainPendingLive) settlePresentationLive();
     if (stagedBlocks.size > 0) notifyManagedContent();
@@ -439,7 +451,8 @@ export function createTranscriptViewStore() {
       if (!block) return false;
       return transcriptNormalContentReferences([block]).every(reference => presentationContent.isReady(reference));
     };
-    const text = available(liveSnapshot.messageId) ? "" : liveSnapshot.text;
+    const text = available(liveSnapshot.messageId)
+      || (liveTextReplacementBlockId !== null && available(liveTextReplacementBlockId)) ? "" : liveSnapshot.text;
     const reasoning = liveSnapshot.reasoning && available(liveSnapshot.reasoning.blockId) ? null : liveSnapshot.reasoning;
     if (text !== liveSnapshot.text || reasoning !== liveSnapshot.reasoning) {
       setLiveSnapshot(text || reasoning ? { ...liveSnapshot, text, reasoning } : null);
@@ -554,6 +567,7 @@ export function createTranscriptViewStore() {
     getListSnapshot: () => listSnapshot,
     getBlockSnapshot: (blockId: string) => blocks.get(blockId) || null,
     getLiveSnapshot: () => liveSnapshot,
+    getLiveTextReplacementBlockId: () => liveTextReplacementBlockId,
     subscribeList(listener: Listener) {
       listListeners.add(listener);
       return () => listListeners.delete(listener);
