@@ -125,7 +125,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   const spacerRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<ReturnType<typeof createMessageScroll> | null>(null);
   const lastSentRef = useRef<number | null>(null);
-  const submittedTurnKeysRef = useRef(new Map<string, string>());
+  const submittedTurnsRef = useRef(new Map<string, { key: string; startedAtMs: number }>());
   const pendingAnchorRef = useRef<{ userId: string | null } | null>(null);
   const userScrollInputRef = useRef(0);
   const observedScrollTopRef = useRef(0);
@@ -249,19 +249,21 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   const pendingRunKey = pendingUserMessage?.agentRunId && pendingUserMessage.sessionId
     ? `${pendingUserMessage.sessionId}:${pendingUserMessage.agentRunId}` : null;
 
-  // Keep the submitted row's React identity when its durable input arrives.
-  // Retain aliases only for loaded turns and the current submission.
+  // Admission changes the input's identity, not the work period that began on send.
+  // Retain its local clock only for loaded turns and the current submission.
   useLayoutEffect(() => {
-    if (pendingRunKey && pendingTurnKey) submittedTurnKeysRef.current.set(pendingRunKey, pendingTurnKey);
+    if (pendingRunKey && pendingTurnKey && pendingStartedAt !== undefined) {
+      submittedTurnsRef.current.set(pendingRunKey, { key: pendingTurnKey, startedAtMs: pendingStartedAt });
+    }
     const loaded = new Set(turns.flatMap((turn) => {
       const runId = turn.userBlockId && store.getBlockSnapshot(turn.userBlockId)?.presentation?.agentRunId;
       return runId ? [`${sessionId}:${runId}`] : [];
     }));
     if (pendingRunKey) loaded.add(pendingRunKey);
-    for (const key of submittedTurnKeysRef.current.keys()) {
-      if (!loaded.has(key)) submittedTurnKeysRef.current.delete(key);
+    for (const key of submittedTurnsRef.current.keys()) {
+      if (!loaded.has(key)) submittedTurnsRef.current.delete(key);
     }
-  }, [pendingRunKey, pendingTurnKey, sessionId, store, turns]);
+  }, [pendingRunKey, pendingTurnKey, pendingStartedAt, sessionId, store, turns]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: only identity changes reset scrolling; pending admission must preserve the anchor.
   useLayoutEffect(() => {
@@ -514,21 +516,23 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
             const isLast = index === renderedTurns.length - 1;
             const runId = turn.userBlockId && store.getBlockSnapshot(turn.userBlockId)?.presentation?.agentRunId;
             const runKey = runId ? `${sessionId}:${runId}` : null;
+            const submitted = runKey ? submittedTurnsRef.current.get(runKey) : undefined;
             const rowKey = isPending || (runKey && runKey === pendingRunKey)
-              ? pendingTurnKey : (runKey && submittedTurnKeysRef.current.get(runKey)) || `${sessionId}:${turn.id}`;
+              ? pendingTurnKey : submitted?.key || `${sessionId}:${turn.id}`;
             const turnLive = isLast && !isPending ? live : null;
             const time = workTimes.get(turnAnchors[index]);
-            const runEnded = typeof (time ? time.completedAtMs : isLast ? completedAtMs : undefined) === "number";
-            const hasWork = isPending || (isLast && running) || turnLive !== null || turn.processIds.length > 0
+            const turnCompletedAt = time?.completedAtMs ?? (isLast ? completedAtMs : undefined);
+            const runEnded = typeof turnCompletedAt === "number";
+            const hasWork = isPending || submitted !== undefined || (isLast && running) || turnLive !== null || turn.processIds.length > 0
               || turn.answerIds.length > 0 || time !== undefined;
             return <div className="workspaceTranscriptTurn" data-send-anchor={turn.userBlockId || isPending ? "" : undefined} key={rowKey}>
               {isPending ? <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id="pending:user">
                 <div className="workspaceUserMessage">{pendingUserMessage?.text}</div>
                 <div className="workspaceUserMessageMeta workspaceUserMessageMetaPlaceholder" aria-hidden="true" />
               </div> : turn.userBlockId ? <TranscriptBlockRow store={store} blockId={turn.userBlockId} /> : null}
-              {hasWork ? <WorkProgress key="work" running={Boolean(isPending ? !pendingTerminal : isLast && running)} finalStarted={turn.answerIds.length > 0}
+              {hasWork ? <WorkProgress key="work" running={Boolean(isPending ? !pendingTerminal : isLast && (running || (submitted && !runEnded)))} finalStarted={turn.answerIds.length > 0}
                 response={turnLive ? <TranscriptLiveTail live={turnLive} mode="text" /> : null}
-                startedAtMs={isPending ? pendingStartedAt : time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={isPending ? pendingUserMessage?.completedAtMs : time?.completedAtMs ?? (isLast ? completedAtMs : undefined)}>
+                startedAtMs={isPending || (runKey && runKey === pendingRunKey) ? pendingStartedAt : submitted?.startedAtMs ?? time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={isPending ? pendingUserMessage?.completedAtMs : turnCompletedAt}>
                 {groupTranscriptBlocks(store, turn.processIds).map((entry) => entry.kind === "tool"
                   ? <TranscriptToolGroupCard store={store} blockIds={entry.blockIds} toolOperations={toolOperations} citations={citations.citations} onShowCitation={onShowCitation} runEnded={runEnded} key={`tool:${entry.blockIds[0]}`} />
                   : <TranscriptBlockRow store={store} blockId={entry.blockId} key={entry.blockId} />)}
