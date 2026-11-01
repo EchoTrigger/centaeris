@@ -502,7 +502,7 @@ button.agent-operation-summary:focus-visible { outline: 2px solid var(--outline)
 .agent-tool-node-icon { width: 16px; height: 16px; flex: none; color: var(--process-text); }
 .agent-tool-node-action.is-inline-summary { display: block; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-tool-node-status { flex: none; color: var(--process-text); white-space: nowrap; }
-.agent-tool-node:is(.failed, .interrupted, .unconfirmed) .agent-tool-node-status { color: var(--error); }
+.agent-tool-node:is(.failed, .interrupted, .unconfirmed) .agent-tool-node-status { color: var(--process-text); }
 .agent-operation-chevron { width: 7px; height: 7px; flex: none; margin-left: 4px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); transition: transform 140ms ease; }
 .agent-operation-chevron.open { transform: rotate(225deg); }
 .agent-operation-body.agent-tool-node-body { min-width: 0; max-width: 100%; padding: 0 12px 10px; }
