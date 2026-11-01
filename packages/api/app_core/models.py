@@ -923,7 +923,6 @@ class Session(models.Model):
         Workspace, on_delete=models.PROTECT, related_name="sessions"
     )
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
-    instructions = models.TextField(blank=True, default="")
     project = models.ForeignKey(
         SessionProject,
         db_column="project_id",

@@ -204,7 +204,7 @@ class WorkspaceMemberLifecycleTests(TestCase):
             user=self.peer_admin,
             modelConfig=model,
             prompt="before removal",
-            agent_instructions=session.instructions,
+            agent_instructions="",
         )
         self.assertTrue(agent_run_membership_is_current(agent_run))
         pending, pending_token = self.issue_invitation(

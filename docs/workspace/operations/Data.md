@@ -18,8 +18,8 @@ interrupt a live connection but must not erase durable history or jobs.
 `0038_session_ownership` removes Agent profiles, definitions, branches and their
 dedicated coordination Sessions. Ordinary Sessions, including former dispatched
 work Sessions, keep their identities, events, files, artifacts and project
-grouping. New Session instructions start empty; retired Agent instructions are
-not copied. Historical Run authorization payloads, digests and signatures remain
+grouping. Retired Agent configuration is not copied. Historical Run authorization
+payloads, digests and signatures remain
 unchanged. Old application grants are revoked, and application registration
 records remain. The retired Chat and Agent authorization entry points are not
 replaced by a public Session API in this upgrade.
@@ -36,6 +36,10 @@ entries with current-owner checks, preserving bytes still referenced by ordinary
 Sessions or personal library objects. The database migration performs no physical
 file deletion. Cross-Session references into retiring records require resolution
 before cutover rather than deletion of the surviving Session's data.
+
+`0039_remove_session_instructions` removes the Session configuration field and
+its metadata API exposure. New Runs use an empty technical instruction snapshot;
+existing Run instruction snapshots remain unchanged.
 
 Memory now shares one namespace per user and Workspace, across Sessions. Its
 existing Markdown protocol and `plastic-memories://self/` URI remain. The new

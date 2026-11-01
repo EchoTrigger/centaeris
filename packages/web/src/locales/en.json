@@ -900,8 +900,5 @@
   "workspaceResources.loadFailed": "Unable to load workspaces.",
   "workspaceResources.models": "Models",
   "workspaceResources.plugins": "Plugins",
-  "workspaceResources.retry": "Retry",
-  "sessionInstructions.title": "Session instructions",
-  "sessionInstructions.hint": "These instructions apply to future runs in this session.",
-  "sessionInstructions.saveFailed": "Unable to save session instructions."
+  "workspaceResources.retry": "Retry"
 }

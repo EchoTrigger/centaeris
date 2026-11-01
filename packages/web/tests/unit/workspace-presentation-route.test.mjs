@@ -17,7 +17,7 @@ const loader = subjectLoader({ extraOverrides: [
   ["../shell/HomePlane", stub("export const HomePlane=()=>null; export const HomeQuickActions=()=>null;")],
 ] });
 const { AppPageContent } = await import(await loader(fileURLToPath(new URL("../../src/routes/AppRoute.jsx", import.meta.url))));
-const row = changes => ({id:"session",workspaceId:"workspace",instructions:"",projectId:null,currentEnvironmentId:null,executionMode:null,title:"Synthetic",origin:"user",status:"active",deletedAt:null,isPinned:false,isUnread:true,hasActiveAgentRun:false,updatedAt:"2026-10-23T00:00:00Z",latestAttentionSequence:"10",readThroughSequence:"0",attentionRevision:"1",isManuallyUnread:false,...changes});
+const row = changes => ({id:"session",workspaceId:"workspace",projectId:null,currentEnvironmentId:null,executionMode:null,title:"Synthetic",origin:"user",status:"active",deletedAt:null,isPinned:false,isUnread:true,hasActiveAgentRun:false,updatedAt:"2026-10-23T00:00:00Z",latestAttentionSequence:"10",readThroughSequence:"0",attentionRevision:"1",isManuallyUnread:false,...changes});
 const page = {schema:"transcript.page.v1",sessionId:"session",projectionVersion:"transcript.projection.v1",projectionGeneration:"generation",sourceHighWater:"10",blocks:[],olderCursor:null,hasOlder:false,resumeCursors:[{streamId:"workspace-transcript.v1",cursor:"10"}]};
 const tick = () => new Promise(resolve => setImmediate(resolve));
 async function setup(t, draft=false, navigationRead=null, controls={}) {

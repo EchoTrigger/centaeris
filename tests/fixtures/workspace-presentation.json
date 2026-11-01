@@ -31,8 +31,7 @@
           "readThroughSequence": "0",
           "attentionRevision": "0",
           "hasActiveAgentRun": false,
-          "updatedAt": "2026-10-23T00:00:00+00:00",
-          "instructions": ""
+          "updatedAt": "2026-10-23T00:00:00+00:00"
         }
       ]
     },
@@ -198,8 +197,7 @@
           "readThroughSequence": "0",
           "attentionRevision": "0",
           "hasActiveAgentRun": false,
-          "updatedAt": "2026-10-23T00:00:00+00:00",
-          "instructions": ""
+          "updatedAt": "2026-10-23T00:00:00+00:00"
         }
       ]
     },

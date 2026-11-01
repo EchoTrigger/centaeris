@@ -86,7 +86,7 @@ class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
         original = create_session(workspace=self.workspace, owner=self.user)
         run = AgentRun.objects.create(workspace=self.workspace, user=self.user, session=original,
             modelConfig=self.model, prompt='physical operation', status='running',
-            agent_instructions=original.instructions)
+            agent_instructions="")
         create_agent_run_authorization(run, image_digest='sha256:' + 'a' * 64)
         target = create_session(workspace=self.workspace, owner=self.user)
         client = self.client_for_user()

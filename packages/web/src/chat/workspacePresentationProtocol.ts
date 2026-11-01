@@ -29,7 +29,7 @@ const FIELDS: Record<PresentationFrame['kind'], readonly string[]> = {
   navigation: ['snapshotId', 'offset', 'hasMore', 'sessions'], snapshot: ['page'], patches: ['page'], content: ['range'],
   live: ['agentRunId', 'live'], operation: ['detail'], checkpoint: ['projectionGeneration', 'sourceHighWater', 'agentRun'], reset: ['reason'],
 };
-const SESSION_FIELDS = ['id', 'workspaceId', 'instructions', 'projectId', 'currentEnvironmentId', 'executionMode', 'title', 'origin', 'status', 'deletedAt', 'isPinned', 'isUnread', 'hasActiveAgentRun', 'updatedAt', 'latestAttentionSequence', 'readThroughSequence', 'attentionRevision', 'isManuallyUnread'];
+const SESSION_FIELDS = ['id', 'workspaceId', 'projectId', 'currentEnvironmentId', 'executionMode', 'title', 'origin', 'status', 'deletedAt', 'isPinned', 'isUnread', 'hasActiveAgentRun', 'updatedAt', 'latestAttentionSequence', 'readThroughSequence', 'attentionRevision', 'isManuallyUnread'];
 const DECIMAL = /^(0|[1-9][0-9]*)$/;
 export const PRESENTATION_MAX_FRAME_BYTES = 4 * 1024 * 1024;
 export function isPresentationWater(value: unknown): value is string {
@@ -52,7 +52,7 @@ export function validatePresentationFrame(value: unknown, identity: Presentation
       const ids = new Set<string>();
       for (const row of value.sessions) {
         if (!isRecord(row) || !hasExactFields(row, SESSION_FIELDS) || typeof row.id !== 'string' || !row.id
-          || row.workspaceId !== identity.workspaceId || typeof row.instructions !== 'string'
+          || row.workspaceId !== identity.workspaceId
           || typeof row.isPinned !== 'boolean'
           || typeof row.hasActiveAgentRun !== 'boolean' || typeof row.title !== 'string' || ids.has(row.id)) invalid('invalid presentation navigation');
         try { validateSessionAttention(row); } catch { invalid("invalid presentation navigation attention"); }

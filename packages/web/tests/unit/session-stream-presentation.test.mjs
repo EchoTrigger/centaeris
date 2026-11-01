@@ -35,7 +35,7 @@ async function setup(context, tailPage = page("Retained authoritative answer"), 
   globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {} };
   context.after(() => { globalThis.window = oldWindow; globalThis.document = oldDocument; });
   const attempt = deferred();
-  const session = { id: "session", workspaceId: "workspace", instructions: "", projectId: null, title: "Synthetic Session", origin: "user", status: "active", deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: true, updatedAt: "2026-10-05T00:00:00Z",  currentEnvironmentId: null, executionMode: "perRun", latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", isManuallyUnread: false };
+  const session = { id: "session", workspaceId: "workspace", projectId: null, title: "Synthetic Session", origin: "user", status: "active", deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: true, updatedAt: "2026-10-05T00:00:00Z",  currentEnvironmentId: null, executionMode: "perRun", latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", isManuallyUnread: false };
   const env = environment({ location: { search: "?sessionId=session", state: null },
     request: async path => ({ json: async () => path === "/api/models?workspaceId=workspace" ? { models: idle ? [{ id: "model", providerId: "provider", modelName: "synthetic", displayName: "Synthetic", thinkingModes: [] }] : [] }
       : path.includes("session-projects") ? { projects: [] }

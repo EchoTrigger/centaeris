@@ -67,7 +67,7 @@ vi.mock("../../src/shell/HomePlane", () => ({ HomePlane: () => null, HomeQuickAc
 vi.mock("../../src/components/WorkspaceContextPanel", () => ({ WorkspaceContextPanel: () => null }));
 vi.mock("../../src/components/DocumentPreview", () => ({ DocumentPreview: () => null }));
 
-const row = { id: "session", workspaceId: "workspace", instructions: "", projectId: null, currentEnvironmentId: null,
+const row = { id: "session", workspaceId: "workspace", projectId: null, currentEnvironmentId: null,
   executionMode: null, title: "Synthetic", origin: "user",  status: "active", deletedAt: null,
   isPinned: false, isUnread: false, hasActiveAgentRun: false, updatedAt: "2026-10-23T00:00:00Z",
   latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", isManuallyUnread: false };

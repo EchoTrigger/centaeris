@@ -23,6 +23,6 @@ class WorkspaceSessionListQueryTests(SessionRecordFixture, TransactionTestCase):
             many = self.listing()
         self.assertEqual(many.status_code, 200, many.content)
         self.assertEqual(len(many.json()["sessions"]), 14)
-        self.assertTrue(all(row["instructions"] == "" for row in many.json()["sessions"]))
+        self.assertTrue(all("instructions" not in row for row in many.json()["sessions"]))
         self.assertEqual(len(many_queries), len(first_queries),
             f"queries grew from {len(first_queries)} to {len(many_queries)} for ordinary sessions")

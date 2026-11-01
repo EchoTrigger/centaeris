@@ -20,7 +20,7 @@ class SessionOwnershipTests(TestCase):
         WorkspaceMembership.objects.create(workspace=self.workspace, user=self.user, role="owner")
         self.client.force_login(self.user)
 
-    def test_creation_projects_and_instructions_have_only_session_ownership(self):
+    def test_creation_projects_and_metadata_have_only_session_ownership(self):
         project = self.client.post(f"/api/workspaces/{self.workspace.pk}/session-projects",
             json.dumps({"name":"Project"}), content_type="application/json")
         self.assertEqual(project.status_code, 201, project.content)
@@ -30,8 +30,10 @@ class SessionOwnershipTests(TestCase):
         self.assertEqual(created.status_code, 201, created.content)
         sid = created.json()["sessionId"]
         result = self.client.patch(f"/api/sessions/{sid}", json.dumps({"instructions":"Use this Session's instructions."}), content_type="application/json")
+        self.assertEqual(result.status_code, 400, result.content)
+        result = self.client.patch(f"/api/sessions/{sid}", json.dumps({"title":"Updated Session"}), content_type="application/json")
         self.assertEqual(result.status_code, 200, result.content)
-        self.assertEqual(result.json()["session"]["instructions"], "Use this Session's instructions.")
+        self.assertNotIn("instructions", result.json()["session"])
         self.assertNotIn("agentId", result.json()["session"])
         self.assertEqual(Session.objects.get(pk=sid).project_id, project_id)
         self.assertEqual(self.client.get(f"/api/workspaces/{self.workspace.pk}/sessions?agentId=old").status_code, 400)
@@ -101,7 +103,7 @@ class SessionOwnershipTests(TestCase):
 
 class SessionOwnershipMigrationTests(TransactionTestCase):
     migrate_from = ("app_core", "0037_merge_workspace_resources_and_agents")
-    migrate_to = ("app_core", "0038_session_ownership")
+    migrate_to = ("app_core", "0039_remove_session_instructions")
 
     def _restore_current_test_schema(self):
         if self._schema_is_current or connection.vendor != "postgresql":
@@ -159,7 +161,7 @@ class SessionOwnershipMigrationTests(TransactionTestCase):
                 environment_profile_operation_id="historical-bound-profile", environment_profile_bound_at=timezone.now())
         model = get("ModelConfig").objects.create()
         run = get("AgentRun").objects.create(workspace=workspace, session=ordinary, environment=env,
-            user_id=user.pk, modelConfig=model, membership_ref=member.pk, prompt="history", status="completed")
+            user_id=user.pk, modelConfig=model, membership_ref=member.pk, prompt="history", status="completed", agent_instructions="Historical Run snapshot")
         payload = {"schema":"workspace.agent_run_authorization.v1", "agentId":agent.pk, "opaque":"historical"}
         get("AgentRunAuthorization").objects.create(agent_run=run, payload=payload, digest="original-digest", signature="original-signature")
         get("SessionEvent").objects.create(eventId="history-event", workspace=workspace, session=ordinary,
@@ -185,12 +187,17 @@ class SessionOwnershipMigrationTests(TransactionTestCase):
                 migration.retire_agent_data(old, editor)
         get("AgentRun").objects.filter(pk=run.pk).update(status="completed")
         executor = MigrationExecutor(connection)
+        executor.migrate([("app_core", "0038_session_ownership")])
+        intermediate = executor.loader.project_state([("app_core", "0038_session_ownership")]).apps
+        intermediate.get_model("app_core", "Session").objects.filter(pk=ordinary.pk).update(instructions="Unrequested Session configuration")
+        executor = MigrationExecutor(connection)
         executor.migrate([self.migrate_to])
         self._schema_is_current = True
         current = executor.loader.project_state([self.migrate_to]).apps
         self.assertFalse(current.get_model("app_core", "Session").objects.filter(pk=coordinator.pk).exists())
+        current.get_model("app_core", "Session").objects.filter(pk=ordinary.pk).update(title="After configuration removal")
         session = current.get_model("app_core", "Session").objects.get(pk=ordinary.pk)
-        self.assertEqual(session.instructions, "")
+        self.assertEqual(current.get_model("app_core", "AgentRun").objects.get(pk=run.pk).agent_instructions, "Historical Run snapshot")
         grant = current.get_model("app_core", "AgentRunAuthorization").objects.get(agent_run_id=run.pk)
         self.assertEqual((grant.payload, grant.digest, grant.signature), (payload, "original-digest", "original-signature"))
         self.assertTrue(current.get_model("app_core", "SessionEvent").objects.filter(pk="history-event").exists())

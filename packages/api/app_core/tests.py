@@ -616,8 +616,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
         workspace.members.add(user)
         model = ModelConfig.objects.create(id="schedule-gap-model", displayName="Fake")
         session = create_session(workspace=workspace, owner=user)
-        session.instructions = "Keep the answer grounded."
-        session.save(update_fields=["instructions", "updatedAt"])
         self.client.force_login(user)
 
         with patch(
@@ -633,7 +631,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(response.status_code, 202)
         agent_run = AgentRun.objects.get(session=session)
         self.assertEqual(agent_run.prompt, "hello")
-        self.assertEqual(agent_run.agent_instructions, "Keep the answer grounded.")
+        self.assertEqual(agent_run.agent_instructions, "")
         self.assertEqual(agent_run.transitionReason, "agent_run_lifecycle_schedule_pending")
         self.assertTrue(AgentRunAuthorization.objects.filter(agent_run=agent_run).exists())
         self.assertFalse(SessionEvent.objects.filter(agent_run=agent_run).exists())
@@ -2103,7 +2101,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
             {
                 "id": pinned.id,
                 "workspaceId": workspace.id,
-                "instructions": "",
                 "projectId": None,
                 "currentEnvironmentId": pinned.current_environment_id,
                 "executionMode": "perRun",
@@ -4775,7 +4772,7 @@ class ModelAdminAcceptanceTests(TestCase):
         retiring = ModelConfig.objects.get(provider_id=provider_id, modelName="old", isCurrent=True)
         run = AgentRun.objects.create(workspace=workspace, session=session, user=self.admin,
                                       modelConfig=retiring, prompt="Finish first",
-                                      agent_instructions=session.instructions)
+                                      agent_instructions="")
         create_agent_run_authorization(run)
         preview = self.client.get("/api/admin/model-catalog-reconciliation")
         self.assertEqual(preview.status_code, 200)

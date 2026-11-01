@@ -22,7 +22,7 @@ const appLoader = subjectLoader({ extraOverrides: [
 ] });
 const { AppPageContent } = await import(await appLoader(url("../../src/routes/AppRoute.jsx")));
 const { useSessionNavigationActions } = await import(await subjectLoader()(url("../../src/shell/useSessionNavigationActions.js")));
-const session = { currentEnvironmentId:null, executionMode:null, deletedAt:null,  isUnread:false, isManuallyUnread:false, latestAttentionSequence:"0", readThroughSequence:"0", attentionRevision:"0", id: "work", workspaceId: "workspace", instructions: "", title: "Synthetic work", status: "active", origin: "user", isPinned: false, projectId: null, hasActiveAgentRun: false, updatedAt: "2026-10-01T00:00:00Z" };
+const session = { currentEnvironmentId:null, executionMode:null, deletedAt:null,  isUnread:false, isManuallyUnread:false, latestAttentionSequence:"0", readThroughSequence:"0", attentionRevision:"0", id: "work", workspaceId: "workspace", title: "Synthetic work", status: "active", origin: "user", isPinned: false, projectId: null, hasActiveAgentRun: false, updatedAt: "2026-10-01T00:00:00Z" };
 const component = (tree, name) => nodes(tree, node => node.type.name === name)[0];
 
 test("ordinary Session preview starts at navigation width and preserves intentional resizing and draft", async context => {
@@ -198,7 +198,7 @@ test("background Session deletion completes against the current conversation sel
 test("pushed workspace navigation updates sessions without rereading the list or project catalog", async () => {
   const calls = [];
   const env = environment({ request: async path => { calls.push(path); return path.includes("session-projects") ? { projects: [] } : { sessions: [] }; } });
-  const item = { id: "work", workspaceId: "workspace", instructions: "", projectId: null, title: "Initial",
+  const item = { id: "work", workspaceId: "workspace", projectId: null, title: "Initial",
     status: "active", updatedAt: "2026-10-05T00:00:00Z", hasActiveAgentRun: false };
   const props = { children: null, showRecentSessions: true, presentationNavigation: null };
   const subject = renderer(ShellPage, props, env);

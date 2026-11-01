@@ -376,7 +376,6 @@ class InitialInputOriginResponse(StrictSchema):
 class SessionResponse(StrictSchema):
     id: str
     workspace_id: str
-    instructions: str
     project_id: str | None
     current_environment_id: str
     execution_mode: Literal["perRun"]

@@ -41,7 +41,6 @@ import {
 } from "../preferences";
 import { HomePlane, HomeQuickActions } from "../shell/HomePlane";
 import { ShellSidebar } from "../shell/ShellSidebar";
-import { SessionInstructions } from "../shell/SessionInstructions";
 import { sessionChatPath, groupSessionNavigation, sortSessionNavigation as sortSessions } from "../shell/sessionNavigation.mjs";
 import { SessionNavigationRow } from "../shell/SessionNavigationRow";
 import { useSessionNavigationActions } from "../shell/useSessionNavigationActions";
@@ -1293,7 +1292,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
           >
             <PanelLeft aria-hidden="true" />
           </button> : null}
-          {activeSession ? <><span>{activeSession.title}</span><SessionInstructions key={activeSession.id} session={activeSession} onSaved={updated => setSessions(items => upsertBy(items, "id", updated))} /></> : null}
+          {isSidebarOpen && activeSession ? <nav className="workspaceConversationBreadcrumb" aria-label={t("appRoute.currentConversation")}><span>{activeSession.title}</span></nav> : null}
         </div>
         {streamIssue?.sessionId === sessionId && !streamIssue.reconnecting ? <button
           className="workspacePanelToggle"

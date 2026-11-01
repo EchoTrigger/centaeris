@@ -277,7 +277,7 @@ test('comment heartbeats keep a silent model connected without inventing task pr
 });
 
 
-const navigationRow = id => ({ id, workspaceId: 'workspace', instructions: '', projectId: null, currentEnvironmentId: null,
+const navigationRow = id => ({ id, workspaceId: 'workspace', projectId: null, currentEnvironmentId: null,
   executionMode: 'local', title: id, origin: 'user',  status: 'active', deletedAt: null,
   isPinned: false, isUnread: false, hasActiveAgentRun: false, updatedAt: '2026-10-23T10:00:00Z',
   latestAttentionSequence: '0', readThroughSequence: '0', attentionRevision: '0', isManuallyUnread: false });

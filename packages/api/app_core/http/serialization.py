@@ -38,7 +38,6 @@ def serialize_session(session: Session, has_active_agent_run: bool | None = None
     return {
         "id": session.id,
         "workspaceId": session.workspace_id,
-        "instructions": session.instructions,
         "projectId": session.project_id,
         "currentEnvironmentId": session.current_environment_id,
         "executionMode": "perRun",

@@ -1190,10 +1190,3 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .workspaceComposerPickerTrigger { border:0; background:transparent; font:inherit; }
 .workspaceComposerPickerTrigger:disabled { cursor:default; opacity:.55; }
 .workspaceComposerPickerPanel button[data-highlighted] { background:var(--surface-variant); outline:0; }
-
-.sessionInstructions { position: relative; font-size: 13px; }
-.sessionInstructions summary { cursor: pointer; }
-.sessionInstructions form { position: absolute; z-index: 4; top: 100%; left: 0; display: grid; gap: 10px; width: min(420px, calc(100vw - 36px)); padding: 16px; border: 1px solid var(--outline-variant); border-radius: 10px; background: var(--surface-color); box-shadow: 0 14px 36px rgba(31, 35, 40, .18); }
-.sessionInstructions label { display: grid; gap: 6px; }
-.sessionInstructions textarea { min-height: 180px; resize: vertical; }
-.sessionInstructions small { color: var(--muted); }

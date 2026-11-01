@@ -27,7 +27,7 @@ function fixture(context, request) {
   const data=new Map(); globalThis.sessionStorage={getItem:k=>data.get(k)??null,setItem:(k,v)=>data.set(k,v),removeItem:k=>data.delete(k)};
   const calls=[];
   globalThis.document={hidden:false,addEventListener(){},removeEventListener(){}};
-  const session={id:"work",workspaceId:"workspace",instructions:"",projectId:null,currentEnvironmentId:null,executionMode:"perRun",title:"work",origin:"user",status:"active",deletedAt:null,isPinned:false,isUnread:false,hasActiveAgentRun:false,updatedAt:"2026-10-23T00:00:00Z",latestAttentionSequence:"0",readThroughSequence:"0",attentionRevision:"0",isManuallyUnread:false};
+  const session={id:"work",workspaceId:"workspace",projectId:null,currentEnvironmentId:null,executionMode:"perRun",title:"work",origin:"user",status:"active",deletedAt:null,isPinned:false,isUnread:false,hasActiveAgentRun:false,updatedAt:"2026-10-23T00:00:00Z",latestAttentionSequence:"0",readThroughSequence:"0",attentionRevision:"0",isManuallyUnread:false};
   globalThis.window={location:{pathname:"/w/workspace/app"},addEventListener(){},removeEventListener(){}};
   const env=environment({tail:async()=>({schema:"transcript.page.v1",sessionId:"work",projectionVersion:"transcript.projection.v1",projectionGeneration:"generation",sourceHighWater:"1",blocks:[],olderCursor:null,hasOlder:false,resumeCursors:[{streamId:"workspace-transcript.v1",cursor:"1"}]}),request:async(path,options)=>{
     calls.push([path,options]); let value;

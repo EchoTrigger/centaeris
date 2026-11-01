@@ -48,23 +48,17 @@ Sessions are not entry points for ordinary Session work.
 | List the user's active Sessions | `GET /api/workspaces/{workspaceId}/sessions` | No query fields |
 | Create an empty Session | `POST /api/workspaces/{workspaceId}/sessions` | `operationId`, optional `projectId` |
 | Read a Session | `GET /api/sessions/{sessionId}` | No Agent selector |
-| Update Session metadata | `PATCH /api/sessions/{sessionId}` | One or more of `instructions`, `title`, `isPinned`, `isUnread` |
+| Update Session metadata | `PATCH /api/sessions/{sessionId}` | One or more of `title`, `isPinned`, `isUnread` |
 | Create a Session project | `POST /api/workspaces/{workspaceId}/session-projects` | `name` |
 | Submit a message | `POST /api/workspaces/{workspaceId}/sessions/{sessionId}/messages` | `operationId`, `modelConfigRef`; optional `text`, `thinkingMode`, `attachmentRefs`, `projectId`, `tailAction` |
 
-Session responses contain `instructions` as a string, defaulting to empty.
-They retain the existing Workspace, project, environment, title, origin, status,
+Session responses retain the existing Workspace, project, environment, title, origin, status,
 pin, attention, active-Run and update metadata, without `agentId` or
 `initialInputOrigin`. Projects contain `id`, `workspaceId`, `name` and
 `createdAt`, without an Agent binding. Neither creation nor message input
 accepts `agentId`.
 
 Session metadata PATCH rejects an empty body, null values and unknown fields.
-Setting `instructions` to `""` clears it. A new AgentRun captures the Session's
-current instructions in its retained Run snapshot; later edits affect later
-Runs and do not rewrite accepted execution. The browser exposes this field on
-an existing Session. A fresh Session starts with empty instructions and does not
-inherit retired Agent configuration.
 
 Message submission requires an explicit `modelConfigRef` from the models
 available to that Workspace. The referenced model must be enabled and current.

@@ -213,7 +213,6 @@ class SessionReadRequest(StrictSchema):
 
 
 class SessionMetadataRequest(StrictSchema):
-    instructions: str | None = None
     title: str | None = None
     is_pinned: bool | None = Field(default=None)
     is_unread: bool | None = Field(default=None)
@@ -584,11 +583,6 @@ def update_session_metadata(
         if session is None:
             return Status(404, {"error": "session_not_found"})
         update_fields = []
-        if "instructions" in fields:
-            if payload.instructions is None:
-                return Status(400, {"error": "session_instructions_invalid"})
-            session.instructions = payload.instructions
-            update_fields.append("instructions")
         if "title" in fields:
             title = payload.title.strip()
             if not title or len(title) > 200:
@@ -1285,7 +1279,7 @@ def create_session_message(
                 modelConfig=model,
                 thinkingMode=thinking_mode,
                 prompt=prompt,
-                agent_instructions=session.instructions,
+                agent_instructions="",
                 tailPolicy=("rewriteLastUser" if payload.tail_action else "append"),
                 rewriteTargetMessageId=(payload.tail_action.target_message_id if payload.tail_action else ""),
                 rewriteExpectedTailMessageId=(payload.tail_action.expected_tail_message_id if payload.tail_action else ""),

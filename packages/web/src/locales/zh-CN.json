@@ -900,8 +900,5 @@
   "workspaceResources.loadFailed": "无法加载工作区。",
   "workspaceResources.models": "模型",
   "workspaceResources.plugins": "插件",
-  "workspaceResources.retry": "重试",
-  "sessionInstructions.title": "会话指令",
-  "sessionInstructions.hint": "这些指令适用于本会话后续运行。",
-  "sessionInstructions.saveFailed": "无法保存会话指令。"
+  "workspaceResources.retry": "重试"
 }

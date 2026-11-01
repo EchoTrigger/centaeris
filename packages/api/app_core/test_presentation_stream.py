@@ -603,7 +603,7 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         session = Session.objects.get(pk=self.session_id)
         run = AgentRun.objects.create(workspace=self.workspace, session=session, user=self.user,
             modelConfig=self.model, prompt="Synthetic attention",
-            agent_instructions=session.instructions)
+            agent_instructions="")
         append_started(run)
         append_session_records(run, [session_record(run, 3, "agent_run_completed", {"doneReason": "finalized"})])
         request = RequestFactory().get("/")

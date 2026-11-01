@@ -67,11 +67,7 @@ conversation. Workspace layout owns the browser title and favicon: the title
 uses the Workspace name and the icon remains the platform mark across Session
 and settings navigation.
 
-A Session has independent `instructions`, initially empty. Its owner can edit
-that field through the existing Session metadata endpoint. New AgentRuns
-snapshot the current Session instructions; changing the Session does not
-rewrite an accepted Run's snapshot. Instructions are not inherited from retired
-Agent profiles. Each message submission explicitly selects a currently available
+Each message submission explicitly selects a currently available
 Workspace model through `modelConfigRef` and an optional `thinkingMode`.
 The browser can retain the user's model preference, but does not choose the
 first catalog entry as a default.

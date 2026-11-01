@@ -23,7 +23,7 @@ export type AuthenticatedUser = {
 };
 
 export type AuthLoaderData = { user: AuthenticatedUser };
-export type SessionSummary = { id: string; workspaceId: string; instructions: string; status: string; title: string };
+export type SessionSummary = { id: string; workspaceId: string; status: string; title: string };
 export type WorkspaceLoaderData = {
   workspace: WorkspaceSummary;
   workspaces: WorkspaceSummary[];

@@ -25,10 +25,10 @@ class EnvironmentRuntimeFixture:
         self.workspace = Workspace.objects.create(name="Environment runtime", createdBy=self.user)
         WorkspaceMembership.objects.create(workspace=self.workspace, user=self.user, role="owner")
         self.model = ModelConfig.objects.create(displayName="Environment runtime model")
-        self.source = Session.objects.create(workspace=self.workspace, owner=self.user, instructions="Finish the requested objective.")
+        self.source = Session.objects.create(workspace=self.workspace, owner=self.user)
         self.run = AgentRun.objects.create(workspace=self.workspace, session=self.source,
             user=self.user, modelConfig=self.model, prompt="Complete the environment lifecycle objective.",
-            agent_instructions=self.source.instructions)
+            agent_instructions="Finish the requested objective.")
         create_agent_run_authorization(self.run, image_digest="sha256:" + "a" * 64)
         self.requests, self.runtime_lines = [], []
         self.runtime_markers = queue.Queue()
