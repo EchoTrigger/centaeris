@@ -352,3 +352,18 @@ test("dispatch hooks expose the exact operation before its single POST", async (
   });
   assert.deepEqual(order, ["identity", "dispatch", "post"]);
 });
+
+
+test("a lost question response recovers its original Run receipt without another answer POST", async () => {
+  const calls = []; let id;
+  const operation = new OperationClient({ ...scope, command: "respondQuestion" }, { storage: storage(), request: async (path, options) => {
+    calls.push(options?.method || "GET");
+    if (options) { id = JSON.parse(options.body).operationId; throw new TypeError("response lost"); }
+    assert.equal(path, `/api/workspaces/workspace/operations/respondQuestion/${id}`);
+    return { ...accepted(id), command: "respondQuestion" };
+  } });
+  assert.deepEqual(await operation.submit("/responses", { continuationId: "continuation", action: "answer", answer: "1. Summary" }), { ...accepted(id), command: "respondQuestion" });
+  assert.deepEqual(calls, ["POST", "GET"]);
+  operation.complete(id);
+  assert.equal(operation.pending(), null);
+});

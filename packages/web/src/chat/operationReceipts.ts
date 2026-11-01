@@ -2,7 +2,7 @@ import { ApiError, apiJson } from "../api.ts";
 import type { ActiveTranscriptAgentRun, createWorkspaceTranscriptTransport } from "./transcriptTransport.ts";
 import type { TranscriptViewStore } from "./transcriptViewStore.ts";
 
-type Command = "createSession" | "submitMessage";
+type Command = "createSession" | "submitMessage" | "respondQuestion";
 type Scope = { userId: string; workspaceId: string; command: Command };
 export type OperationReceipt = { operationId: string; command: Command; status: "accepted"; sessionId: string; agentRunId: string | null; turnId: string | null };
 type Receipt = OperationReceipt;

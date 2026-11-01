@@ -3,6 +3,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { TranscriptBlockList } from "../../src/chat/TranscriptBlockList";
 import { createTranscriptViewStore } from "../../src/chat/transcriptViewStore";
+import { TranscriptActivity } from "../../src/chat/TranscriptActivity";
 import { WorkProgress } from "../../src/chat/WorkProgress";
 
 vi.mock("../../src/i18n", () => {
@@ -12,21 +13,27 @@ vi.mock("../../src/i18n", () => {
 
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
-test("Thinking, Working and Waiting for input share one uninterrupted work clock", async () => {
+test("activity moves below output while its work clock remains uninterrupted", async () => {
   vi.useFakeTimers(); vi.setSystemTime(10000);
   const props = { running: true, finalStarted: false, startedAtMs: 1000 };
-  const { container, rerender } = render(<WorkProgress {...props} activity="thinking" />);
-  expect(container.textContent).toBe("workProgress.thinking workProgress.seconds:9");
+  function View({ activity, running = true }: { activity: "thinking" | "working" | "waitingInput"; running?: boolean }) {
+    return <><WorkProgress {...props} running={running} completedAtMs={running ? undefined : 14000} /><p>Latest output</p>{running ? <TranscriptActivity activity={activity} /> : null}</>;
+  }
+  const { container, rerender } = render(<View activity="thinking" />);
+  expect(screen.getByRole("status").textContent).toBe("transcriptActivity.thinking");
+  expect(screen.getByText("workProgress.working workProgress.seconds:9")).toBeTruthy();
   await act(async () => { vi.advanceTimersByTime(2000); });
-  rerender(<WorkProgress {...props} activity="working" />);
-  expect(container.textContent).toBe("workProgress.working workProgress.seconds:11");
+  rerender(<View activity="working" />);
+  expect(screen.getByText("workProgress.working workProgress.seconds:11")).toBeTruthy();
+  expect(screen.getByRole("status").textContent).toBe("transcriptActivity.working");
   await act(async () => { vi.advanceTimersByTime(2000); });
-  rerender(<WorkProgress {...props} activity="waitingInput" />);
-  expect(container.textContent).toBe("workProgress.waitingInput workProgress.seconds:13");
-  rerender(<WorkProgress {...props} activity="thinking" />);
-  expect(container.textContent).toBe("workProgress.thinking workProgress.seconds:13");
-  rerender(<WorkProgress {...props} activity="waitingInput" running={false} completedAtMs={14000} />);
-  expect(container.textContent).toBe("workProgress.worked workProgress.seconds:13");
+  rerender(<View activity="waitingInput" />);
+  expect(screen.getByText("workProgress.working workProgress.seconds:13")).toBeTruthy();
+  expect(screen.getByRole("status").textContent).toBe("transcriptActivity.waitingInput");
+  expect(container.lastElementChild).toBe(screen.getByRole("status"));
+  rerender(<View activity="thinking" running={false} />);
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(screen.getByText("workProgress.worked workProgress.seconds:13")).toBeTruthy();
 });
 
 test("delayed completion keeps the elapsed seconds already shown while history uses its recorded duration", async () => {

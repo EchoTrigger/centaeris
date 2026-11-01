@@ -483,3 +483,29 @@ test('disposed or superseded presentation subscriptions cannot apply activity', 
     assert.equal(controller.lastCursor, null);
   }
 });
+
+
+test('pending questions restore and clear from authoritative delivery without advancing a cursor', async () => {
+  const received = [];
+  const { controller } = fixture({ onQuestion: frame => received.push(frame) });
+  const question = { questionId: 'question', continuationId: 'continuation', turnId: 'turn', question: 'Choose a delivery format', options: ['Summary', 'Task list'] };
+  const frame = entry('question', { agentRunId: 'run', sourceHighWater: '17', question });
+  await controller.acceptWithBackpressure(readPresentationSseBlock(wire([frame]), identity));
+  assert.deepEqual(received.at(-1), frame.item);
+  await controller.acceptWithBackpressure(entry('question', { agentRunId: 'run', sourceHighWater: '18', question: null }));
+  assert.equal(received.at(-1).question, null);
+  assert.equal(controller.lastCursor, null);
+  const invalid = [
+    { question: { ...question, unexpected: true } }, { question: { ...question, continuationId: '' } },
+    { question: { ...question, question: '' } }, { question: { ...question, options: [1] } },
+    { question: { ...question, options: [''] } }, { sourceHighWater: '01' }, { sessionId: 'other' }, { agentRunId: '' },
+  ].map(changes => entry('question', { ...frame.item, ...changes }));
+  invalid.push({ ...frame, cursor: 'must-not-ack' });
+  for (const value of invalid) {
+    assert.throws(() => readPresentationSseBlock(wire([value]), identity));
+    await assert.rejects(controller.acceptWithBackpressure(value));
+  }
+  controller.dispose();
+  await controller.acceptWithBackpressure(frame);
+  assert.equal(received.length, 2);
+});

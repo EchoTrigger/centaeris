@@ -14,6 +14,7 @@ import {
 } from "react";
 import { useTranscriptTurnMetadata } from "./useTranscriptTurnMetadata";
 import { WorkProgress } from "./WorkProgress";
+import { TranscriptActivity } from "./TranscriptActivity";
 import { groupTranscriptTurns, hasCommittedPendingMessage, shouldLoadEarlier, shouldReleaseLoadedHistory, type PendingTranscriptMessage } from "./transcriptTurns";
 import { ChevronDown } from "lucide-react";
 import { useTranslation } from "../i18n";
@@ -534,7 +535,6 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
                 <div className="workspaceUserMessageMeta workspaceUserMessageMetaPlaceholder" aria-hidden="true" />
               </div> : turn.userBlockId ? <TranscriptBlockRow store={store} blockId={turn.userBlockId} /> : null}
               {hasWork ? <WorkProgress key="work" running={Boolean(isPending ? !pendingTerminal : isLast && (running || (submitted && !runEnded)))} finalStarted={turn.answerIds.length > 0}
-                activity={isLast ? activity : undefined}
                 response={turnLive ? <TranscriptLiveTail live={turnLive} mode="text" /> : null}
                 startedAtMs={isPending || (runKey && runKey === pendingRunKey) ? pendingStartedAt : submitted?.startedAtMs ?? time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={isPending ? pendingUserMessage?.completedAtMs : turnCompletedAt}>
                 {groupTranscriptBlocks(store, turn.processIds).map((entry) => entry.kind === "tool"
@@ -549,6 +549,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
                   <a href={artifact.downloadUrl} onClick={onShowArtifact ? (event) => { event.preventDefault(); onShowArtifact(artifact); } : undefined}>{artifact.filename}</a>
                 </span>)}
               </div> : null}
+              {isLast && (isPending ? !pendingTerminal : running) ? <TranscriptActivity activity={activity} /> : null}
             </div>;
           })}
         </div>

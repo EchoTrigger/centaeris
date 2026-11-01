@@ -910,5 +910,19 @@
   "workspaceResources.loadFailed": "Unable to load workspaces.",
   "workspaceResources.models": "Models",
   "workspaceResources.plugins": "Plugins",
-  "workspaceResources.retry": "Retry"
+  "workspaceResources.retry": "Retry",
+  "transcriptActivity.thinking": "Thinking...",
+  "transcriptActivity.working": "Working...",
+  "transcriptActivity.waitingInput": "Waiting for input...",
+  "sessionQuestion.label": "Question",
+  "sessionQuestion.collapse": "Collapse question, keep waiting",
+  "sessionQuestion.pending": "A question is waiting for your answer",
+  "sessionQuestion.expand": "Expand question",
+  "sessionQuestion.choose": "Choose an answer",
+  "sessionQuestion.answer": "Write your answer",
+  "sessionQuestion.placeholder": "Or write your own reply",
+  "sessionQuestion.skip": "Skip",
+  "sessionQuestion.send": "Send",
+  "sessionQuestion.sending": "Sending...",
+  "sessionQuestion.failed": "Unable to send your answer. Try again."
 }

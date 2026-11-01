@@ -910,5 +910,19 @@
   "workspaceResources.loadFailed": "无法加载工作区。",
   "workspaceResources.models": "模型",
   "workspaceResources.plugins": "插件",
-  "workspaceResources.retry": "重试"
+  "workspaceResources.retry": "重试",
+  "transcriptActivity.thinking": "思考中...",
+  "transcriptActivity.working": "工作中...",
+  "transcriptActivity.waitingInput": "等待输入...",
+  "sessionQuestion.label": "问题",
+  "sessionQuestion.collapse": "收起问题，保留等待状态",
+  "sessionQuestion.pending": "有一个问题等待回答",
+  "sessionQuestion.expand": "展开问题",
+  "sessionQuestion.choose": "选择回答",
+  "sessionQuestion.answer": "自行撰写回答",
+  "sessionQuestion.placeholder": "或自行撰写回复",
+  "sessionQuestion.skip": "跳过",
+  "sessionQuestion.send": "发送",
+  "sessionQuestion.sending": "发送中...",
+  "sessionQuestion.failed": "回答发送失败，请重试。"
 }

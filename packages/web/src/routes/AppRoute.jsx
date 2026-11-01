@@ -24,6 +24,7 @@ import {
   transcriptContentRangeCacheBytes,
 } from "../chat/transcriptContentRanges";
 import { WorkspaceComposer } from "../chat/WorkspaceComposer";
+import { SessionQuestionCard } from "../chat/SessionQuestionCard";
 import { SubmissionControl } from "../chat/submissionControl";
 import {
   attachmentCanPreview,
@@ -89,6 +90,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
   const { user } = useRouteLoaderData("authenticated");
   const { workspace } = useRouteLoaderData("workspace");
   const operations = useMemo(() => new OperationClient({ userId: user.id, workspaceId: workspace.id, command: "submitMessage" }), [user.id, workspace.id]);
+  const questionOperations = useMemo(() => new OperationClient({ userId: user.id, workspaceId: workspace.id, command: "respondQuestion" }), [user.id, workspace.id]);
   const cancelSubmission = useCallback(async (target) => {
     const response = await apiResponse(`/api/sessions/${encodeURIComponent(target.sessionId)}/agent-runs/${encodeURIComponent(target.agentRunId)}/cancel`, { method: "POST" });
     return response.json();
@@ -164,6 +166,8 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
   useEffect(() => { pendingUserMessageRef.current = pendingUserMessage; }, [pendingUserMessage]);
   const [workTime, setWorkTime] = useState(null);
   const [workActivity, setWorkActivity] = useState(null);
+  const [pendingQuestion, setPendingQuestion] = useState(null);
+  const answeredQuestionIdsRef = useRef(new Set());
   const enterStartsNewLine = useEnterStartsNewLine(user.id);
   const [error, setError] = useState("");
   const [streamIssue, setStreamIssue] = useState(null);
@@ -358,6 +362,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     clearTranscriptContentRangeCache();
     updateActiveTranscriptRun(null);
     setWorkActivity(null);
+    setPendingQuestion(null);
     olderHistoryRequestRef.current?.controller.abort();
     olderHistoryRequestRef.current = null;
     setAssets([]);
@@ -629,7 +634,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
           setAcceptedRunTarget(null);
         }
         updateActiveTranscriptRun(active ? run : null);
-        if (!active) setWorkActivity(null);
+        if (!active) { setWorkActivity(null); setPendingQuestion(null); }
         if (active && run.startedAt) setWorkTime(value => ({ ...value, sessionId: selectedSessionId, startedAtMs: Date.parse(run.startedAt), completedAtMs: null }));
         if (!active && run?.completedAt) setWorkTime(value => ({ ...value, sessionId: selectedSessionId, completedAtMs: Date.parse(run.completedAt) }));
       },
@@ -637,6 +642,12 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
         if (!isCurrent() || selectedSessionId === null || currentRunIdentityRef.current !== activity.agentRunId
           || terminalRunIdsRef.current.has(activity.agentRunId)) return;
         setWorkActivity({ sessionId: selectedSessionId, agentRunId: activity.agentRunId, activity: activity.activity });
+      },
+      onQuestion: frame => {
+        if (!isCurrent() || selectedSessionId === null || currentRunIdentityRef.current !== frame.agentRunId
+          || terminalRunIdsRef.current.has(frame.agentRunId)) return;
+        if (frame.question && answeredQuestionIdsRef.current.has(frame.question.continuationId)) return;
+        setPendingQuestion(frame.question ? { ...frame.question, sessionId: selectedSessionId, agentRunId: frame.agentRunId } : null);
       },
       onApplied: checkpoint => {
         if (!isCurrent()) return;
@@ -1267,6 +1278,22 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     return <SessionNavigationRow key={session.id} workspaceId={workspace.id} session={session} actions={sessionActions} active={session.id === sessionId} running={session.id === sessionId ? hasActiveAgentRun : session.hasActiveAgentRun} onSelect={selectSession} {...options} />;
   }
 
+  async function answerQuestion(question, answer) {
+    const scope = requestScopeRef.current;
+    const isCurrent = () => scope.active && requestScopeRef.current === scope
+      && activeSessionIdRef.current === question.sessionId && currentRunIdentityRef.current === question.agentRunId
+      && !terminalRunIdsRef.current.has(question.agentRunId);
+    const receipt = await questionOperations.submit(
+      `/api/sessions/${encodeURIComponent(question.sessionId)}/agent-runs/${encodeURIComponent(question.agentRunId)}/questions/${encodeURIComponent(question.questionId)}/responses`,
+      { continuationId: question.continuationId, ...answer }, [], [], false, { shouldDispatch: isCurrent },
+    );
+    if (receipt.sessionId !== question.sessionId || receipt.agentRunId !== question.agentRunId) throw new Error("question_response_binding_invalid");
+    questionOperations.complete(receipt.operationId);
+    answeredQuestionIdsRef.current.add(question.continuationId);
+    if (!isCurrent()) return;
+    setPendingQuestion(value => value?.continuationId === question.continuationId ? null : value);
+  }
+
   return (
     <main
       className={`workspaceWorkbench ${isSidebarOpen ? "withSidebar" : "withoutSidebar"} ${contextPanelClass}`}
@@ -1341,6 +1368,11 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
             completedAtMs={workTime?.sessionId === sessionId ? workTime.completedAtMs : undefined}
           />
 
+          <div className="workspaceComposerDock">
+          {pendingQuestion?.sessionId === sessionId && pendingQuestion.agentRunId === activeAgentRunId ? <SessionQuestionCard
+            key={pendingQuestion.continuationId}
+            question={pendingQuestion} onAnswer={answer => answerQuestion(pendingQuestion, answer)}
+          /> : null}
           <WorkspaceComposer
             formRef={composerRef}
             fileInputRef={fileInputRef}
@@ -1374,6 +1406,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
             cancellingAgentRunId={cancellingAgentRunId}
             onCancelActiveAgentRun={cancelActiveAgentRun}
           />
+          </div>
           {isHome ? <HomeQuickActions onQuickAction={handleQuickAction} /> : null}
         </div>
       </section>

@@ -1204,3 +1204,43 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .workspaceComposerPickerTrigger { border:0; background:transparent; font:inherit; }
 .workspaceComposerPickerTrigger:disabled { cursor:default; opacity:.55; }
 .workspaceComposerPickerPanel button[data-highlighted] { background:var(--surface-variant); outline:0; }
+
+/* Pending questions stay directly above the ordinary composer. */
+.workspaceComposerDock { min-width: 0; }
+.workspaceConversationPlane.isEmpty .workspaceComposerDock { grid-row: 2; }
+.sessionQuestion, .sessionQuestionCollapsed { box-sizing: border-box; width: min(820px, calc(100% - 32px)); margin: 0 auto 10px; border: 1px solid var(--outline-variant); border-radius: 22px; background: var(--surface-color); color: var(--on-surface); }
+.sessionQuestion { padding: 17px 14px 13px; max-height: min(480px, 55vh); overflow: auto; }
+.sessionQuestionTop, .sessionQuestionTop > span, .sessionQuestionCollapsed, .sessionQuestionCollapsed > span { display: flex; align-items: center; gap: 8px; }
+.sessionQuestionTop { justify-content: space-between; margin: 0 3px 10px; color: var(--process-text); font-size: 13px; }
+.sessionQuestion svg, .sessionQuestionCollapsed svg { width: 17px; height: 17px; flex: none; }
+.sessionQuestionClose { display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: inherit; padding: 4px; cursor: pointer; }
+.sessionQuestionClose:hover { background: var(--surface-hover); }
+.sessionQuestionHeading { margin: 0 7px 14px; font-size: 15px; font-weight: 500; line-height: 1.7; }
+.sessionQuestionOptions { display: grid; gap: 4px; }
+.sessionQuestionOption { display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 10px; border: 1px solid transparent; border-radius: 13px; background: transparent; color: inherit; text-align: left; font: inherit; font-size: 14px; cursor: pointer; }
+.sessionQuestionOption:hover, .sessionQuestionOption[aria-pressed="true"] { background: var(--surface-hover); }
+.sessionQuestionOption[aria-pressed="true"] { border-color: var(--outline-variant); }
+.sessionQuestionNumber { display: grid; place-items: center; flex: none; width: 25px; height: 25px; border: 1px solid var(--outline-variant); border-radius: 6px; background: var(--surface-hover); color: var(--process-text); font-size: 12px; }
+.sessionQuestionOptionCopy { flex: 1; }
+.sessionQuestionOption > svg { opacity: 0; }
+.sessionQuestionOption[aria-pressed="true"] > svg { opacity: 1; }
+.sessionQuestionFooter { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 9px; margin: 16px 7px 0; }
+.sessionQuestionFree { display: flex; align-items: flex-start; gap: 9px; flex: 1 1 170px; min-width: 0; padding: 5px 0; }
+.sessionQuestionFree > svg { margin-top: 4px; color: var(--process-text); }
+.sessionQuestionFree textarea { width: 100%; min-height: 30px; max-height: 120px; resize: vertical; border: 0; background: transparent; color: inherit; padding: 2px 0; font: inherit; font-size: 14px; }
+.sessionQuestionFree textarea::placeholder { color: var(--process-text); }
+.sessionQuestionActions { display: flex; gap: 8px; }
+.sessionQuestionActions button { border: 1px solid var(--outline-variant); border-radius: 18px; padding: 6px 12px; background: transparent; color: inherit; white-space: nowrap; font: inherit; font-size: 13px; cursor: pointer; }
+.sessionQuestionActions .sessionQuestionSend { background: var(--on-surface); color: var(--surface-color); border-color: var(--on-surface); }
+.sessionQuestion button:disabled { cursor: default; opacity: .5; }
+.sessionQuestion button:focus-visible, .sessionQuestion textarea:focus-visible, .sessionQuestionCollapsed button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+.sessionQuestionError { margin: 8px 7px 0; color: var(--error); font-size: 13px; }
+.sessionQuestionCollapsed { justify-content: space-between; padding: 10px 14px; border-radius: 14px; font-size: 13px; }
+.sessionQuestionCollapsed button { border: 0; background: transparent; color: inherit; text-decoration: underline; padding: 3px 0; cursor: pointer; font: inherit; }
+.workspaceTranscriptActivity { display: flex; align-items: center; gap: 8px; margin-top: 14px; color: var(--process-text); font-size: var(--font-size-process); }
+.workspaceTranscriptActivity svg { width: 15px; height: 15px; flex: none; }
+.workspaceTranscriptActivityLoader { animation: transcriptActivitySpin 1s linear infinite; }
+@keyframes transcriptActivitySpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .workspaceTranscriptActivityLoader { animation: none; } }
+@media (max-width: 640px) { .sessionQuestion, .sessionQuestionCollapsed { width: calc(100% - 18px); } .sessionQuestion { padding: 14px 9px 11px; } .sessionQuestionActions { margin-left: auto; } .sessionQuestionFree textarea { font-size: 16px; } }
+@media (pointer: coarse) { .sessionQuestion button { min-height: 44px; } }

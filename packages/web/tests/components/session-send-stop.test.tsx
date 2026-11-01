@@ -278,3 +278,60 @@ test("sending immediately after opening a Session targets that Session while nav
   await waitFor(() => expect(callsFor("/messages")).toHaveLength(1));
   expect(callsFor("/messages")[0][0]).toBe("/api/workspaces/workspace/sessions/session/messages");
 });
+
+
+test("restored questions from a later turn accept the original Run receipt and never leak across Session selection", async () => {
+  const user = userEvent.setup();
+  const originalRequest = fixture.request.getMockImplementation()!;
+  fixture.request.mockImplementation(async (path, options) => {
+    if (path.endsWith('/questions/question/responses')) return {
+      operationId: JSON.parse(String(options?.body)).operationId, command: 'respondQuestion', status: 'accepted',
+      sessionId: 'session', agentRunId: 'original-run', turnId: 'original-turn',
+    };
+    if (path === '/api/sessions/other') return { session: { ...row, id: 'other', title: 'Other Session' } };
+    return originalRequest(path, options);
+  });
+  fixture.activeRun = { agentRunId: 'original-run', status: 'running', streamCursor: '0' };
+  const props = { workspaceDraft: false, location: { search: '?sessionId=session', state: null }, modelsVersion: 0, onSessionAccepted: () => {} };
+  const mount = () => render(<MemoryRouter><AppPageContent {...props} initialSession={row} /></MemoryRouter>);
+  let view = mount();
+  const restore = async () => {
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'appRoute.stop' })).not.toBeNull());
+    const subscription = fixture.subscriptions.findLast(item => item.sessionId === 'session' && !item.signal.aborted)!;
+    await act(async () => {
+      await subscription.controller.acceptWithBackpressure({ cursor: null, item: { schema: 'workspace.presentation.v1', workspaceId: 'workspace', sessionId: 'session', kind: 'snapshot', page } });
+      await subscription.controller.acceptWithBackpressure({ cursor: null, item: { schema: 'workspace.presentation.v1', workspaceId: 'workspace', sessionId: 'session', kind: 'checkpoint',
+        projectionGeneration: 'generation', sourceHighWater: '0', agentRun: { agentRunId: 'original-run', status: 'running', startedAt: null, completedAt: null } } });
+      await subscription.controller.acceptWithBackpressure({ cursor: null, item: { schema: 'workspace.presentation.v1', workspaceId: 'workspace', sessionId: 'session', kind: 'question',
+        agentRunId: 'original-run', sourceHighWater: '0', question: { questionId: 'question', continuationId: 'continuation', turnId: 'later-question-turn', question: 'Choose delivery', options: ['Summary'] } } });
+    });
+    expect(screen.getByRole('region', { name: 'Choose delivery' })).toBeTruthy();
+    return subscription;
+  };
+  const oldSubscription = await restore();
+  view.unmount();
+  view = mount();
+  const currentSubscription = await restore();
+  await user.click(screen.getByRole('button', { name: /1 Summary/ }));
+  await user.click(screen.getByRole('button', { name: 'sessionQuestion.send' }));
+  await waitFor(() => expect(screen.queryByRole('region', { name: 'Choose delivery' })).toBeNull());
+  const responses = callsFor('/responses');
+  expect(responses).toHaveLength(1);
+  expect(responses[0][0]).toBe('/api/sessions/session/agent-runs/original-run/questions/question/responses');
+  expect(JSON.parse(String(responses[0][1]?.body))).toMatchObject({ continuationId: 'continuation', action: 'answer', answer: '1. Summary' });
+  expect(callsFor('/messages')).toHaveLength(0);
+  await act(async () => currentSubscription.controller.acceptWithBackpressure({ cursor: null, item: {
+    schema: 'workspace.presentation.v1', workspaceId: 'workspace', sessionId: 'session', kind: 'question', agentRunId: 'original-run', sourceHighWater: '0',
+    question: { questionId: 'question', continuationId: 'next-continuation', turnId: 'next-question-turn', question: 'Choose next step', options: ['Check documents', 'Finish'] },
+  } }));
+  expect(screen.getByRole('region', { name: 'Choose next step' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'sessionQuestion.send' })).toHaveProperty('disabled', true);
+  fixture.activeRun = null;
+  view.rerender(<MemoryRouter><AppPageContent {...props} initialSession={{ ...row, id: 'other', title: 'Other Session' }} location={{ search: '?sessionId=other', state: null }} /></MemoryRouter>);
+  await act(async () => oldSubscription.controller.acceptWithBackpressure({ cursor: null, item: {
+    schema: 'workspace.presentation.v1', workspaceId: 'workspace', sessionId: 'session', kind: 'question', agentRunId: 'original-run', sourceHighWater: '0',
+    question: { questionId: 'old-question', continuationId: 'continuation', turnId: 'original-turn', question: 'Stale question', options: [] },
+  } }));
+  expect(screen.queryByText('Stale question')).toBeNull();
+  expect(screen.queryByText('Choose delivery')).toBeNull();
+});

@@ -13,9 +13,12 @@ type Common = PresentationIdentity & Readonly<{ schema: 'workspace.presentation.
 export type PresentationViewRevision = Common & Readonly<{ kind: 'viewRevision'; contextRevision: string; historyRevision: string; workRevision: string }>;
 export type PresentationCheckpoint = Common & Readonly<{ kind: 'checkpoint'; projectionGeneration: string | null; sourceHighWater: string; agentRun: PresentationAgentRun | null }>;
 export type PresentationActivity = Common & Readonly<{ kind: 'activity'; agentRunId: string; sourceHighWater: string; activity: 'thinking' | 'working' | 'waitingInput' }>;
+export type PendingSessionQuestion = Readonly<{ questionId: string; continuationId: string; turnId: string; question: string; options: readonly string[] }>;
+export type PresentationQuestion = Common & Readonly<{ kind: 'question'; agentRunId: string; sourceHighWater: string; question: PendingSessionQuestion | null }>;
 export type PresentationFrame =
   | PresentationViewRevision
   | PresentationActivity
+  | PresentationQuestion
   | (Common & Readonly<{ kind: 'navigation'; snapshotId: string; offset: number; hasMore: boolean; sessions: readonly PresentationSession[] }>)
   | (Common & Readonly<{ kind: 'snapshot'; page: TranscriptPage }>)
   | (Common & Readonly<{ kind: 'patches'; page: TranscriptPatchPage }>)
@@ -29,6 +32,7 @@ const COMMON = ['schema', 'kind', 'workspaceId', 'sessionId'];
 const FIELDS: Record<PresentationFrame['kind'], readonly string[]> = {
   viewRevision: ['contextRevision', 'historyRevision', 'workRevision'],
   activity: ['agentRunId', 'sourceHighWater', 'activity'],
+  question: ['agentRunId', 'sourceHighWater', 'question'],
   navigation: ['snapshotId', 'offset', 'hasMore', 'sessions'], snapshot: ['page'], patches: ['page'], content: ['range'],
   live: ['agentRunId', 'live'], operation: ['detail'], checkpoint: ['projectionGeneration', 'sourceHighWater', 'agentRun'], reset: ['reason'],
 };
@@ -46,6 +50,14 @@ export function validatePresentationFrame(value: unknown, identity: Presentation
     || !Object.hasOwn(FIELDS, value.kind) || !hasExactFields(value, [...COMMON, ...FIELDS[value.kind as PresentationFrame['kind']]])
     || value.workspaceId !== identity.workspaceId || value.sessionId !== identity.sessionId) invalid();
   switch (value.kind) {
+    case 'question': {
+      if (typeof value.agentRunId !== 'string' || !value.agentRunId || !isPresentationWater(value.sourceHighWater)) invalid('invalid presentation question');
+      const question = value.question;
+      if (question !== null && (!isRecord(question) || !hasExactFields(question, ['questionId', 'continuationId', 'turnId', 'question', 'options'])
+        || ![question.questionId, question.continuationId, question.turnId, question.question].every(item => typeof item === 'string' && item.length > 0)
+        || !Array.isArray(question.options) || !question.options.every(item => typeof item === 'string' && item.length > 0))) invalid('invalid presentation question');
+      break;
+    }
     case 'activity':
       if (typeof value.agentRunId !== 'string' || !value.agentRunId || !isPresentationWater(value.sourceHighWater)
         || typeof value.activity !== 'string' || !['thinking', 'working', 'waitingInput'].includes(value.activity)) invalid('invalid presentation activity');
