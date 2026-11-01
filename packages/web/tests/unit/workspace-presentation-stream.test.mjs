@@ -434,3 +434,52 @@ test('workspace navigation retains distinct Sessions without weakening workspace
   assert.throws(() => readPresentationSseBlock(wire([entry('navigation', { snapshotId: 'foreign', offset: 0, hasMore: false,
     sessions: [{ ...navigationRow('foreign-history'), workspaceId: 'foreign' }] })]), identity));
 });
+
+
+test('activity frames deliver bound status without advancing applied water or checkpoint cursor', async () => {
+  const activities = [];
+  const { store, controller } = fixture({ onActivity: activity => activities.push(activity) });
+  await controller.acceptWithBackpressure(entry('checkpoint', checkpoint(), 'applied:0'));
+  for (const activity of ['thinking', 'working', 'waitingInput']) {
+    const frame = entry('activity', { agentRunId: 'run', sourceHighWater: '17', activity });
+    await controller.acceptWithBackpressure(readPresentationSseBlock(wire([frame]), identity));
+    assert.deepEqual(activities.at(-1), frame.item);
+    assert.equal(controller.lastCursor, 'applied:0');
+    assert.equal(store.getListSnapshot().appliedSourceHighWater, '0');
+  }
+  assert.equal(activities.length, 3);
+});
+
+test('activity rejects invalid phases, fields, water, run and scope bindings and any cursor', async () => {
+  const valid = { agentRunId: 'run', sourceHighWater: '17', activity: 'working' };
+  const activities = [];
+  const { controller } = fixture({ onActivity: activity => activities.push(activity) });
+  const invalid = [
+    { activity: 'executing' }, { activity: ['working'] }, { unexpected: true },
+    { sourceHighWater: 17 }, { sourceHighWater: '01' }, { sourceHighWater: '-1' },
+    { sourceHighWater: '18446744073709551616' }, { agentRunId: '' },
+    { sessionId: 'other' }, { workspaceId: 'other' },
+  ].map(changes => entry('activity', { ...valid, ...changes }));
+  const missing = entry('activity', valid);
+  delete missing.item.activity;
+  invalid.push(missing, entry('activity', valid, 'must-not-ack'));
+  for (const frame of invalid) {
+    assert.throws(() => readPresentationSseBlock(wire([frame]), identity));
+    await assert.rejects(controller.acceptWithBackpressure(frame));
+  }
+  assert.deepEqual(activities, []);
+  assert.equal(controller.lastCursor, null);
+});
+
+test('disposed or superseded presentation subscriptions cannot apply activity', async () => {
+  for (const stop of ['dispose', 'scope']) {
+    let current = true;
+    const activities = [];
+    const { controller } = fixture({ isCurrent: () => current, onActivity: activity => activities.push(activity) });
+    if (stop === 'dispose') controller.dispose();
+    else current = false;
+    await controller.acceptWithBackpressure(entry('activity', { agentRunId: 'run', sourceHighWater: '17', activity: 'thinking' }));
+    assert.deepEqual(activities, []);
+    assert.equal(controller.lastCursor, null);
+  }
+});

@@ -101,6 +101,29 @@ test("normal submission receipt states never add a status banner or recovery but
   }
 });
 
+test("current Run activity restores independently of transcript water and clears at terminal", async context => {
+  const { env, send, list, preserved, subject } = await setup(context);
+  const activity = value => ({ agentRunId: "run", sourceHighWater: "99", activity: value });
+  await send("activity", activity("waitingInput"));
+  assert.equal(list().props.activity, "waitingInput", "a fresh connection can restore an already waiting Run");
+  preserved();
+  for (const value of ["thinking", "working", "waitingInput"]) {
+    await send("activity", activity(value));
+    assert.equal(list().props.activity, value);
+    assert.equal(list().props.store.getListSnapshot().appliedSourceHighWater, "99");
+    preserved();
+  }
+  await send("activity", { ...activity("thinking"), agentRunId: "another-run" });
+  assert.equal(list().props.activity, "waitingInput", "another Run cannot replace the current activity");
+  env.streamOptions.onConnection("reconnecting"); await subject.settle();
+  assert.equal(list().props.activity, "waitingInput");
+  await send("checkpoint", { projectionGeneration: "generation", sourceHighWater: "99",
+    agentRun: { agentRunId: "run", status: "completed", startedAt: null, completedAt: "2026-11-01T00:00:01Z" } });
+  assert.equal(list().props.activity, undefined);
+  await send("activity", activity("thinking"));
+  assert.equal(list().props.activity, undefined, "late activity cannot revive a completed Run");
+});
+
 test("transient Session reconnects preserve content and draft without a visible status banner", async context => {
   const { subject, env, preserved } = await setup(context);
   for (const connection of ["reconnecting", "running", "reconnecting"]) {

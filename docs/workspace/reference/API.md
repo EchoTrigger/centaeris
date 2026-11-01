@@ -82,6 +82,18 @@ records. Unknown selectors, including `agentId`, fail validation. Browser title
 and favicon belong to the Workspace layout, using its name and the platform mark
 through Session and settings navigation.
 
+An active Run also emits an `activity` frame with exactly `schema:
+"workspace.presentation.v1"`, `kind: "activity"`, `workspaceId`, `sessionId`,
+`agentRunId`, `sourceHighWater`, and `activity`. The activity is `thinking` for
+the current model phase, `working` for tools and other execution, or
+`waitingInput` for a currently registered Core question wait bound to that Run
+and its authorization. It follows the authority checkpoint from the same database
+snapshot and carries no event cursor. Reconnecting restores the current value;
+consuming the wait clears `waitingInput`, including when the transcript water is
+unchanged. A terminal checkpoint clears active activity. Only applied checkpoints
+acknowledge transcript delivery. These display states add no question or answer
+submission interface.
+
 ## Hosted command acceptance
 
 `POST /api/workspaces/{workspaceId}/sessions` (`createSession`) and

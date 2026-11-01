@@ -12,8 +12,10 @@ export type PresentationOperation = Readonly<{
 type Common = PresentationIdentity & Readonly<{ schema: 'workspace.presentation.v1' }>;
 export type PresentationViewRevision = Common & Readonly<{ kind: 'viewRevision'; contextRevision: string; historyRevision: string; workRevision: string }>;
 export type PresentationCheckpoint = Common & Readonly<{ kind: 'checkpoint'; projectionGeneration: string | null; sourceHighWater: string; agentRun: PresentationAgentRun | null }>;
+export type PresentationActivity = Common & Readonly<{ kind: 'activity'; agentRunId: string; sourceHighWater: string; activity: 'thinking' | 'working' | 'waitingInput' }>;
 export type PresentationFrame =
   | PresentationViewRevision
+  | PresentationActivity
   | (Common & Readonly<{ kind: 'navigation'; snapshotId: string; offset: number; hasMore: boolean; sessions: readonly PresentationSession[] }>)
   | (Common & Readonly<{ kind: 'snapshot'; page: TranscriptPage }>)
   | (Common & Readonly<{ kind: 'patches'; page: TranscriptPatchPage }>)
@@ -26,6 +28,7 @@ export type PresentationEntry = Readonly<{ cursor: string | null; item: Presenta
 const COMMON = ['schema', 'kind', 'workspaceId', 'sessionId'];
 const FIELDS: Record<PresentationFrame['kind'], readonly string[]> = {
   viewRevision: ['contextRevision', 'historyRevision', 'workRevision'],
+  activity: ['agentRunId', 'sourceHighWater', 'activity'],
   navigation: ['snapshotId', 'offset', 'hasMore', 'sessions'], snapshot: ['page'], patches: ['page'], content: ['range'],
   live: ['agentRunId', 'live'], operation: ['detail'], checkpoint: ['projectionGeneration', 'sourceHighWater', 'agentRun'], reset: ['reason'],
 };
@@ -43,6 +46,10 @@ export function validatePresentationFrame(value: unknown, identity: Presentation
     || !Object.hasOwn(FIELDS, value.kind) || !hasExactFields(value, [...COMMON, ...FIELDS[value.kind as PresentationFrame['kind']]])
     || value.workspaceId !== identity.workspaceId || value.sessionId !== identity.sessionId) invalid();
   switch (value.kind) {
+    case 'activity':
+      if (typeof value.agentRunId !== 'string' || !value.agentRunId || !isPresentationWater(value.sourceHighWater)
+        || typeof value.activity !== 'string' || !['thinking', 'working', 'waitingInput'].includes(value.activity)) invalid('invalid presentation activity');
+      break;
     case 'viewRevision':
       if (![value.contextRevision, value.historyRevision, value.workRevision].every(isPresentationWater)) invalid('invalid presentation view revision');
       break;

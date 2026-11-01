@@ -151,6 +151,7 @@ async def _produce(scope, loader, cursor, read_timeout):
         reset_reason = "cursorInvalid"
     navigation = None
     last_state = None
+    last_activity = None
     last_live = object()
     last_versions = None
     last_view_revision = None
@@ -215,11 +216,19 @@ async def _produce(scope, loader, cursor, read_timeout):
             if not _water(target):
                 raise RuntimeError("presentation_authority_water_invalid")
             changed = state != last_state or needs_snapshot
+            activity = state["activity"]
+            if activity not in {None, "thinking", "working", "waitingInput"}:
+                raise RuntimeError("presentation_activity_invalid")
+            activity_identity = None if activity is None else (state["agentRun"]["agentRunId"], target, activity)
+            activity_changed = activity_identity is not None and activity_identity != last_activity
+            last_activity = activity_identity
             if changed:
                 # This authority observation is useful even if the Runtime read
                 # then fails. It has no id and cannot acknowledge missing text.
                 yield _encode(scope, "checkpoint", projectionGeneration=generation,
                               sourceHighWater=target, agentRun=state["agentRun"])
+                if activity_changed:
+                    yield _encode(scope, "activity", agentRunId=activity_identity[0], sourceHighWater=target, activity=activity)
                 if int(water) > int(target):
                     reset_reason, needs_snapshot = "cursorInvalid", True
                 if not needs_snapshot:

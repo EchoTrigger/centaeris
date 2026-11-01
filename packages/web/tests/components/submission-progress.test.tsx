@@ -12,6 +12,23 @@ vi.mock("../../src/i18n", () => {
 
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
+test("Thinking, Working and Waiting for input share one uninterrupted work clock", async () => {
+  vi.useFakeTimers(); vi.setSystemTime(10000);
+  const props = { running: true, finalStarted: false, startedAtMs: 1000 };
+  const { container, rerender } = render(<WorkProgress {...props} activity="thinking" />);
+  expect(container.textContent).toBe("workProgress.thinking workProgress.seconds:9");
+  await act(async () => { vi.advanceTimersByTime(2000); });
+  rerender(<WorkProgress {...props} activity="working" />);
+  expect(container.textContent).toBe("workProgress.working workProgress.seconds:11");
+  await act(async () => { vi.advanceTimersByTime(2000); });
+  rerender(<WorkProgress {...props} activity="waitingInput" />);
+  expect(container.textContent).toBe("workProgress.waitingInput workProgress.seconds:13");
+  rerender(<WorkProgress {...props} activity="thinking" />);
+  expect(container.textContent).toBe("workProgress.thinking workProgress.seconds:13");
+  rerender(<WorkProgress {...props} activity="waitingInput" running={false} completedAtMs={14000} />);
+  expect(container.textContent).toBe("workProgress.worked workProgress.seconds:13");
+});
+
 test("delayed completion keeps the elapsed seconds already shown while history uses its recorded duration", async () => {
   vi.useFakeTimers(); vi.setSystemTime(10000);
   vi.stubGlobal("matchMedia", () => ({ matches: true }));

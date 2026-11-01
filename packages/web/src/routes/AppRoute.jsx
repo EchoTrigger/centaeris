@@ -163,6 +163,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
   const pendingUserMessageRef = useRef(null);
   useEffect(() => { pendingUserMessageRef.current = pendingUserMessage; }, [pendingUserMessage]);
   const [workTime, setWorkTime] = useState(null);
+  const [workActivity, setWorkActivity] = useState(null);
   const enterStartsNewLine = useEnterStartsNewLine(user.id);
   const [error, setError] = useState("");
   const [streamIssue, setStreamIssue] = useState(null);
@@ -356,6 +357,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     toolOperations.clear();
     clearTranscriptContentRangeCache();
     updateActiveTranscriptRun(null);
+    setWorkActivity(null);
     olderHistoryRequestRef.current?.controller.abort();
     olderHistoryRequestRef.current = null;
     setAssets([]);
@@ -627,8 +629,14 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
           setAcceptedRunTarget(null);
         }
         updateActiveTranscriptRun(active ? run : null);
+        if (!active) setWorkActivity(null);
         if (active && run.startedAt) setWorkTime(value => ({ ...value, sessionId: selectedSessionId, startedAtMs: Date.parse(run.startedAt), completedAtMs: null }));
         if (!active && run?.completedAt) setWorkTime(value => ({ ...value, sessionId: selectedSessionId, completedAtMs: Date.parse(run.completedAt) }));
+      },
+      onActivity: activity => {
+        if (!isCurrent() || selectedSessionId === null || currentRunIdentityRef.current !== activity.agentRunId
+          || terminalRunIdsRef.current.has(activity.agentRunId)) return;
+        setWorkActivity({ sessionId: selectedSessionId, agentRunId: activity.agentRunId, activity: activity.activity });
       },
       onApplied: checkpoint => {
         if (!isCurrent()) return;
@@ -1328,6 +1336,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
             historyMemoryPressure={transcriptManagedBytes >= TRANSCRIPT_MEMORY_WARNING_BYTES}
             onReleaseLoadedHistory={releaseLoadedTranscriptHistory}
             running={hasActiveAgentRun || (sending && !["failed", "cancelled", "completed"].includes(pendingUserMessage?.status))}
+            activity={workActivity?.sessionId === sessionId && workActivity.agentRunId === activeAgentRunId ? workActivity.activity : undefined}
             startedAtMs={workTime?.sessionId === sessionId ? workTime.startedAtMs : undefined}
             completedAtMs={workTime?.sessionId === sessionId ? workTime.completedAtMs : undefined}
           />

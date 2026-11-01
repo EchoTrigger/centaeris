@@ -1,3 +1,4 @@
+use centaeris_core::runtime::contracts::{CheckpointKindV1, CheckpointRecord};
 use centaeris_core::session::reliability::{
     CreateDeadLetterDisposition, CreateDeadLetterResult, RuntimeJobFailureDisposition,
     ScheduleRuntimeJobDisposition, ScheduleRuntimeJobResult, RUNTIME_JOB_TERMINAL_EVENT,
@@ -23,7 +24,7 @@ impl RuntimeStoreTransactionPort for PostgresRuntimeStore {
             let mut tx = client
                 .transaction()
                 .map_err(|error| format!("begin Postgres save_wait_checkpoint failed: {error}"))?;
-            match load_checkpoint(
+            let inserted = match load_checkpoint(
                 &mut tx,
                 req.checkpoint.session_id.as_str(),
                 req.checkpoint.turn_id.as_str(),
@@ -31,10 +32,16 @@ impl RuntimeStoreTransactionPort for PostgresRuntimeStore {
                 Some(existing) if existing != req.checkpoint => {
                     return Err("save_wait_checkpoint idempotency conflict".to_string())
                 }
-                Some(_) => {}
-                None => save_checkpoint(&mut tx, &req.checkpoint)?,
-            }
+                Some(_) => false,
+                None => {
+                    save_checkpoint(&mut tx, &req.checkpoint)?;
+                    true
+                }
+            };
             append_runtime_event_idempotent(&mut tx, &req.event)?;
+            if inserted {
+                notify_question_wait_change(&mut tx, &req.checkpoint)?;
+            }
             tx.commit()
                 .map_err(|error| format!("commit Postgres save_wait_checkpoint failed: {error}"))
         })
@@ -80,6 +87,7 @@ impl RuntimeStoreTransactionPort for PostgresRuntimeStore {
             if deleted != 1 {
                 return Err("consume_wait_checkpoint delete mismatch".to_string());
             }
+            notify_question_wait_change(&mut tx, &req.checkpoint)?;
             tx.commit()
                 .map_err(|error| format!("commit Postgres consume_wait_checkpoint failed: {error}"))
         })
@@ -200,4 +208,20 @@ impl RuntimeStoreTransactionPort for PostgresRuntimeStore {
             })
         })
     }
+}
+
+fn notify_question_wait_change(
+    tx: &mut postgres::Transaction<'_>,
+    checkpoint: &CheckpointRecord,
+) -> Result<(), String> {
+    if checkpoint.kind == CheckpointKindV1::Wait
+        && checkpoint.done_reason.as_deref() == Some("question")
+    {
+        let key = format!("session:{}:state", checkpoint.session_id);
+        tx.query_one("SELECT public.workspace_presentation_bump_v1($1)", &[&key])
+            .map_err(|error| {
+                format!("notify Postgres question wait presentation failed: {error}")
+            })?;
+    }
+    Ok(())
 }

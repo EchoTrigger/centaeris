@@ -1,6 +1,8 @@
 import { validateTranscriptPatchPage, type TranscriptPage } from './transcriptContract.ts';
 import type { TranscriptViewStore } from './transcriptViewStore.ts';
-import { validatePresentationFrame, PresentationProtocolError, type PresentationIdentity, type PresentationEntry, type PresentationCheckpoint, type PresentationSession, type PresentationOperation, type PresentationViewRevision } from './workspacePresentationProtocol.ts';
+import { validatePresentationFrame, PresentationProtocolError, type PresentationIdentity, type PresentationEntry, type PresentationCheckpoint, type PresentationSession, type PresentationOperation, type PresentationViewRevision, type PresentationActivity } from './workspacePresentationProtocol.ts';
+
+export type { PresentationActivity } from './workspacePresentationProtocol.ts';
 
 type Options = PresentationIdentity & Readonly<{
   store: TranscriptViewStore;
@@ -11,6 +13,7 @@ type Options = PresentationIdentity & Readonly<{
   onSnapshot?(page: TranscriptPage, epoch: number): void;
   onNavigation?(sessions: readonly PresentationSession[]): void;
   onOperation?(detail: PresentationOperation): void;
+  onActivity?(activity: PresentationActivity): void;
   onCheckpoint?(checkpoint: PresentationCheckpoint): void;
   onApplied?(checkpoint: PresentationCheckpoint): void;
   onReset?(reason: 'cursorInvalid' | 'projectionInvalidated'): void;
@@ -77,6 +80,7 @@ export class WorkspacePresentationController {
           break;
         }
         case 'operation': this.options.onOperation?.(item.detail); break;
+        case 'activity': this.options.onActivity?.(item); break;
         case 'reset': this.lastCursor = null; this.options.onReset?.(item.reason); break;
         case 'snapshot': {
           const epoch = await this.store.withPresentationSnapshot(item.page, () => this.options.applySnapshot

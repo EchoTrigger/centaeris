@@ -4,11 +4,13 @@ import { useTranslation } from "../i18n";
 import { AnimatedDisclosure } from "./AnimatedDisclosure";
 import { initialWorkDisclosure, observeFinalAnswer, toggleWorkDisclosure, preserveWorkDisclosure, type WorkDisclosure } from "./workDisclosure";
 import { formatWorkDuration } from "./workDuration";
+import type { PresentationActivity } from "./workspacePresentationProtocol";
 
-export function WorkProgress({ running, finalStarted, startedAtMs, completedAtMs, children, response, responseIsProcess = false, initialDisclosure, onDisclosureChange }: {
+export function WorkProgress({ running, activity, finalStarted, startedAtMs, completedAtMs, children, response, responseIsProcess = false, initialDisclosure, onDisclosureChange }: {
   initialDisclosure?: WorkDisclosure;
   onDisclosureChange?(value: WorkDisclosure): void;
   running: boolean;
+  activity?: PresentationActivity["activity"];
   finalStarted: boolean;
   startedAtMs?: number;
   completedAtMs?: number;
@@ -34,7 +36,9 @@ export function WorkProgress({ running, finalStarted, startedAtMs, completedAtMs
   const elapsed = startedAtMs === undefined ? "" : formatWorkDuration(
     elapsedMs, t,
   );
-  const label = [t(running ? "workProgress.working" : "workProgress.worked"), elapsed].filter(Boolean).join(" ");
+  const statusKey = !running ? "workProgress.worked" : activity === "thinking" ? "workProgress.thinking"
+    : activity === "waitingInput" ? "workProgress.waitingInput" : "workProgress.working";
+  const label = [t(statusKey), elapsed].filter(Boolean).join(" ");
   return <div className="workProgress">
     {disclosure.finalSeen ? <button className="workProgressSummary workProgressHeader" type="button" aria-label={label}
       aria-expanded={disclosure.expanded}

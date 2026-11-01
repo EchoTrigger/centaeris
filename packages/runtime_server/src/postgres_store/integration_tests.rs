@@ -37,6 +37,7 @@ use centaeris_runtime_sqlite::SqliteRuntimeStore;
 pub(super) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 mod checkpoint_requests;
+mod question_wait_notifications;
 mod cleanup_migration_tests;
 mod cleanup_recovery_tests;
 mod cold_append_fault_tests;
@@ -2559,55 +2560,6 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
             .expect("load snapshot")
             .as_deref(),
         Some("{\"snapshot\":true}")
-    );
-    let wait_checkpoint = CheckpointRecord {
-        checkpoint_id: "checkpoint:wait-pg".to_string(),
-        kind: centaeris_core::runtime::contracts::CheckpointKindV1::Wait,
-        session_id: "session_pg".to_string(),
-        turn_id: "turn_wait_pg".to_string(),
-        status: "waiting".to_string(),
-        done_reason: Some("question".to_string()),
-        updated_at_ms: 5,
-        payload_json: "{\"schema\":\"runtime.await_question.v1\"}".to_string(),
-    };
-    store
-        .save_wait_checkpoint(SaveWaitCheckpointRequest {
-            checkpoint: wait_checkpoint.clone(),
-            event: RuntimeEvent {
-                event_id: "runtime_wait_pg_waiting".to_string(),
-                session_id: "session_pg".to_string(),
-                task_id: Some("turn_wait_pg".to_string()),
-                event_type: "runtime_wait_changed.v1".to_string(),
-                at_ms: 5,
-                visibility: EventVisibility::Internal,
-                payload_json: "{\"status\":\"waiting\"}".to_string(),
-            },
-        })
-        .expect("atomic wait transition");
-    store
-        .consume_wait_checkpoint(ConsumeWaitCheckpointRequest {
-            checkpoint: wait_checkpoint,
-            events: vec![RuntimeEvent {
-                event_id: "runtime_wait_pg_resumed".to_string(),
-                session_id: "session_pg".to_string(),
-                task_id: Some("turn_wait_pg".to_string()),
-                event_type: "runtime_wait_changed.v1".to_string(),
-                at_ms: 6,
-                visibility: EventVisibility::Internal,
-                payload_json: "{\"status\":\"resumed\"}".to_string(),
-            }],
-        })
-        .expect("atomic wait consumption");
-    assert!(store
-        .load_checkpoint_by_turn("session_pg", "turn_wait_pg")
-        .expect("wait checkpoint removed")
-        .is_none());
-    assert_eq!(
-        store
-            .list_events("session_pg", 10, 0)
-            .expect("runtime events")
-            .len(),
-        2
     );
     store
         .schedule_runtime_job(ScheduleRuntimeJobRequest {

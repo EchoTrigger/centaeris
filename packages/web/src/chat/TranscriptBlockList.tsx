@@ -20,6 +20,7 @@ import { useTranslation } from "../i18n";
 import { TranscriptBlockRow, TranscriptLiveTail, TranscriptToolGroupCard } from "./TranscriptBlockContent";
 import type { TranscriptToolOperationRegistry } from "./transcriptToolOperations";
 import type { TranscriptViewStore } from "./transcriptViewStore";
+import type { PresentationActivity } from "./workspacePresentationProtocol";
 
 
 type Props = Readonly<{
@@ -37,6 +38,7 @@ type Props = Readonly<{
   onShowCitation?(citation: CitationSummary, origin: { elementId: string }): void;
   onShowArtifact?(artifact: import("./useTranscriptTurnMetadata").PublishedArtifact): void;
   running?: boolean;
+  activity?: PresentationActivity["activity"];
   startedAtMs?: number;
   completedAtMs?: number;
 }>;
@@ -110,6 +112,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   onShowArtifact,
   onShowCitation,
   running = false,
+  activity,
   startedAtMs,
   completedAtMs,
 }: Props) {
@@ -531,6 +534,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
                 <div className="workspaceUserMessageMeta workspaceUserMessageMetaPlaceholder" aria-hidden="true" />
               </div> : turn.userBlockId ? <TranscriptBlockRow store={store} blockId={turn.userBlockId} /> : null}
               {hasWork ? <WorkProgress key="work" running={Boolean(isPending ? !pendingTerminal : isLast && (running || (submitted && !runEnded)))} finalStarted={turn.answerIds.length > 0}
+                activity={isLast ? activity : undefined}
                 response={turnLive ? <TranscriptLiveTail live={turnLive} mode="text" /> : null}
                 startedAtMs={isPending || (runKey && runKey === pendingRunKey) ? pendingStartedAt : submitted?.startedAtMs ?? time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={isPending ? pendingUserMessage?.completedAtMs : turnCompletedAt}>
                 {groupTranscriptBlocks(store, turn.processIds).map((entry) => entry.kind === "tool"
