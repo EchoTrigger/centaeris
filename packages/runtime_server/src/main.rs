@@ -1961,25 +1961,31 @@ fn execute_agent_run(
     let cancellation_probe_cache = Arc::new(Mutex::new(None));
     let cached_cancellation_probe = cancellation_probe_cache.clone();
     let cancellation_probe: Arc<ExecutionCancellationProbe> = Arc::new(move || {
-        cached_execution_control_reason(&cached_cancellation_probe, || {
-            let now =
-                now_ms().map_err(|error| format!("run_execution_control_probe_failed:{error}"))?;
-            let state = cancellation_job_store
-                .agent_run_execution_control_state(
-                    cancellation_agent_run_id.as_str(),
-                    cancellation_lifecycle_job_id.as_str(),
-                    cancellation_lifecycle_lease_owner.as_str(),
-                    now,
-                )
-                .map_err(|error| format!("run_execution_control_probe_failed:{error}"))?;
-            Ok(if state.cancellation_requested {
-                Some("agent_run_cancel_requested".to_string())
-            } else if !state.lifecycle_lease_current {
-                Some("agent_run_lifecycle_lease_lost".to_string())
-            } else {
-                None
-            })
-        })
+        observations::execution_boundary(
+            "executionControlCheck",
+            &cancellation_agent_run_id,
+            || {
+                cached_execution_control_reason(&cached_cancellation_probe, || {
+                    let now = now_ms()
+                        .map_err(|error| format!("run_execution_control_probe_failed:{error}"))?;
+                    let state = cancellation_job_store
+                        .agent_run_execution_control_state(
+                            cancellation_agent_run_id.as_str(),
+                            cancellation_lifecycle_job_id.as_str(),
+                            cancellation_lifecycle_lease_owner.as_str(),
+                            now,
+                        )
+                        .map_err(|error| format!("run_execution_control_probe_failed:{error}"))?;
+                    Ok(if state.cancellation_requested {
+                        Some("agent_run_cancel_requested".to_string())
+                    } else if !state.lifecycle_lease_current {
+                        Some("agent_run_lifecycle_lease_lost".to_string())
+                    } else {
+                        None
+                    })
+                })
+            },
+        )
     });
     match cancellation_probe.as_ref()()?.as_deref() {
         Some("agent_run_cancel_requested") => {
@@ -3139,14 +3145,25 @@ fn execute_agent_run(
             ToolSafePoint::ModelRequestStarted(_) => "model_request_safe_point",
             ToolSafePoint::DurableToolCall { .. } => "tool_call_safe_point",
             ToolSafePoint::DurableReceipt { .. } => "tool_receipt_safe_point",
+            ToolSafePoint::CompletedTurn(_) => "completed_turn_safe_point",
             _ => "other_safe_point",
         };
         let result = failure_diagnostics::observe(&agent_run_start.agent_run_id, stage, || {
-            let mut pending_recovery_upload = pending_recovery_upload
-                .lock()
-                .map_err(|_| "pending recovery upload lock poisoned")?;
+            let mut pending_recovery_upload = observations::execution_boundary(
+                "recoveryUploadLock",
+                &agent_run_start.agent_run_id,
+                || {
+                    pending_recovery_upload
+                        .lock()
+                        .map_err(|_| "pending recovery upload lock poisoned")
+                },
+            )?;
             if !safe_point_live_degraded.load(Ordering::Relaxed) {
-                match flush_live_stream(&safe_point_stream) {
+                match observations::execution_boundary(
+                    "safePointLiveFlush",
+                    &agent_run_start.agent_run_id,
+                    || flush_live_stream(&safe_point_stream),
+                ) {
                     Ok(()) => {}
                     Err(error) => latch_live_error(&safe_point_live_degraded, error),
                 }
@@ -3163,10 +3180,16 @@ fn execute_agent_run(
                 _ => None,
             };
             let now = now_ms()?;
-            let mut committed_sequence = safe_point_sequence
-                .lock()
-                .map_err(|_| "session record sequence lock poisoned".to_string())?
-                .clone();
+            let mut committed_sequence = observations::execution_boundary(
+                "safePointSequenceRead",
+                &agent_run_start.agent_run_id,
+                || {
+                    safe_point_sequence
+                        .lock()
+                        .map(|sequence| sequence.clone())
+                        .map_err(|_| "session record sequence lock poisoned".to_string())
+                },
+            )?;
             let wait_for_upload = matches!(
                 &safe_point,
                 ToolSafePoint::DurableToolCall { .. }
@@ -3175,9 +3198,15 @@ fn execute_agent_run(
             );
             let completed_upload = if wait_for_upload {
                 observations::timed("recoveryUploadFence", || {
-                    Ok(pending_recovery_upload
-                        .as_mut()
-                        .and_then(|pending| pending.upload.take(true)))
+                    observations::execution_boundary(
+                        "recoveryUploadFence",
+                        &agent_run_start.agent_run_id,
+                        || {
+                            Ok(pending_recovery_upload
+                                .as_mut()
+                                .and_then(|pending| pending.upload.take(true)))
+                        },
+                    )
                 })?
             } else {
                 pending_recovery_upload
@@ -3345,11 +3374,17 @@ fn execute_agent_run(
                                 &current_generation,
                             ));
                     let workspace_snapshot = if should_collect {
-                        let Some(prepared) = docker_execution.prepare_recovery_workspace(
-                            &workspace_lease,
-                            checkpoint_id.as_str(),
-                            &recovery_workspace_snapshot,
-                            workspace_input_upper_bound_bytes,
+                        let Some(prepared) = observations::execution_boundary(
+                            "recoveryWorkspacePrepare",
+                            &agent_run_start.agent_run_id,
+                            || {
+                                docker_execution.prepare_recovery_workspace(
+                                    &workspace_lease,
+                                    checkpoint_id.as_str(),
+                                    &recovery_workspace_snapshot,
+                                    workspace_input_upper_bound_bytes,
+                                )
+                            },
                         )?
                         else {
                             // Commit the real model request, but neither publish an unstable
@@ -3518,31 +3553,54 @@ fn execute_agent_run(
                     .map(|reason| Err(format!("fatal_execution_outcome:{reason}")))
                     .unwrap_or(Ok(()));
             }
-            let receipt = commit_agent_tool_records(
-                &session_log,
-                &agent_run_start,
-                &events,
-                recovery_checkpoint
-                    .as_ref()
-                    .map(|(checkpoint, _, _)| checkpoint),
-                &terminal_lease_fence,
-                work_trigger.as_ref(),
+            let receipt = observations::execution_boundary(
+                "safePointRecordCommit",
+                &agent_run_start.agent_run_id,
+                || {
+                    commit_agent_tool_records(
+                        &session_log,
+                        &agent_run_start,
+                        &events,
+                        recovery_checkpoint
+                            .as_ref()
+                            .map(|(checkpoint, _, _)| checkpoint),
+                        &terminal_lease_fence,
+                        work_trigger.as_ref(),
+                    )
+                },
             )?;
             if let Some((call_id, Some(tool_ok))) = &observed_call {
                 run_timings.tool_committed(call_id, *tool_ok);
             }
-            accept_session_commit(
-                &mut committed_sequence,
-                &mut *session_stream_guard(&safe_point_stream)?,
-                &receipt,
+            observations::execution_boundary(
+                "safePointLivePublish",
+                &agent_run_start.agent_run_id,
+                || {
+                    accept_session_commit(
+                        &mut committed_sequence,
+                        &mut *session_stream_guard(&safe_point_stream)?,
+                        &receipt,
+                    )
+                },
             )?;
-            *safe_point_sequence
-                .lock()
-                .map_err(|_| "session record sequence lock poisoned".to_string())? =
-                committed_sequence;
+            observations::execution_boundary(
+                "safePointSequenceWrite",
+                &agent_run_start.agent_run_id,
+                || {
+                    *safe_point_sequence
+                        .lock()
+                        .map_err(|_| "session record sequence lock poisoned".to_string())? =
+                        committed_sequence;
+                    Ok::<_, String>(())
+                },
+            )?;
             // Capture publication is downstream of the durable Core event and
             // must never change its successful tool outcome or trigger replay.
-            if let Ok(mut capture) = docker_execution.transcript_capture.lock() {
+            if let Ok(mut capture) = observations::execution_boundary(
+                "transcriptCaptureLock",
+                &agent_run_start.agent_run_id,
+                || docker_execution.transcript_capture.lock(),
+            ) {
                 transcript_capture::publish_committed(
                     job_store.as_ref().clone(),
                     docker_execution.execution_id().to_string(),

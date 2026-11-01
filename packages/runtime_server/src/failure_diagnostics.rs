@@ -98,7 +98,8 @@ pub(crate) fn observe<T>(
     stage: &'static str,
     operation: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    operation().inspect_err(|error| report(agent_run_id, stage, error))
+    crate::observations::execution_boundary(stage, agent_run_id, operation)
+        .inspect_err(|error| report(agent_run_id, stage, error))
 }
 
 #[cfg(test)]
