@@ -10,7 +10,7 @@ from django.db.models import Max, Q
 from django.utils import timezone
 from ninja import Router, Status
 from ninja.responses import codes_4xx
-from pydantic import Field, ValidationError, field_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from app_core.assets import captured_input_fields
 from app_core.app_delegations import require_delegated_session, require_request_delegation
@@ -52,6 +52,7 @@ from app_core.runtime_client import (
     TranscriptRuntimeError,
     request_agent_run_cancellation,
     request_agent_run_supplement,
+    request_agent_run_question_response,
     request_workspace_skill_catalog,
     request_workspace_skill_detail,
     request_workspace_hook_catalog,
@@ -210,6 +211,24 @@ class SessionReadRequest(StrictSchema):
         if int(value) > MAX_SEQUENCE:
             raise ValueError("session_read_sequence_invalid")
         return value
+
+
+class QuestionResponseRequest(StrictSchema):
+    operation_id: str = Field(pattern=OPERATION_ID_PATTERN, min_length=1, max_length=128)
+    continuation_id: str = Field(min_length=1, max_length=256)
+    action: Literal["answer", "skip"]
+    answer: str | None = Field(default=None, max_length=65536)
+
+    @model_validator(mode="after")
+    def validate_response(self):
+        if not self.continuation_id.strip():
+            raise ValueError("question_continuation_required")
+        if self.action == "answer":
+            if self.answer is None or not self.answer.strip() or len(self.answer.encode()) > 65536:
+                raise ValueError("question_answer_required")
+        elif "answer" in self.model_fields_set:
+            raise ValueError("question_skip_has_no_answer")
+        return self
 
 
 class SessionMetadataRequest(StrictSchema):
@@ -512,7 +531,7 @@ def create_workspace_session(request, workspace_id: str, payload: SessionCreateR
     response={200: HostedOperationResponse} | COMMON_ERROR_RESPONSES,
 )
 def get_hosted_operation(request, response: HttpResponse, workspace_id: str,
-                         command: Literal["createSession", "submitMessage"],
+                         command: Literal["createSession", "submitMessage", "respondQuestion"],
                          operation_id: str):
     response["Cache-Control"] = "no-store"
     if request.GET or re.fullmatch(OPERATION_ID_PATTERN, operation_id) is None:
@@ -1377,6 +1396,53 @@ def _parse_session_message_request(request):
             else "request_invalid"
         )
         return None, uploads, code
+
+
+@router.post(
+    "/sessions/{session_id}/agent-runs/{agent_run_id}/questions/{question_id}/responses",
+    auth=usage_auth("messages:submit"),
+    response={202: HostedOperationResponse} | COMMON_ERROR_RESPONSES,
+)
+def respond_question(request, session_id: str, agent_run_id: str, question_id: str, payload: QuestionResponseRequest):
+    session = Session.objects.filter(id=session_id, owner=request.user, status="active").first()
+    if session is None:
+        return Status(404, {"error": "session_not_found"})
+    digest = request_digest(payload, target={"sessionId": session_id, "agentRunId": agent_run_id, "questionId": question_id})
+    try:
+        with transaction.atomic():
+            membership = shared_submission_membership_for(request.user, session.workspace_id)
+            if membership is None:
+                return Status(404, {"error": "session_not_found"})
+            grant = require_request_delegation(request, "messages:submit", workspace_id=session.workspace_id,
+                session_id=session_id, lock=True)
+            lock_operation_identity(request.user, session.workspace_id, "respondQuestion", payload.operation_id)
+            receipt = replay_operation(request.user, session.workspace_id, "respondQuestion", payload.operation_id,
+                digest, app_delegation=grant)
+            if receipt is not None:
+                return Status(202, serialize_operation(receipt))
+            session = Session.objects.select_for_update().filter(id=session_id, owner=request.user, status="active").first()
+            if session is None:
+                return Status(404, {"error": "session_not_found"})
+            run = AgentRun.objects.select_related("authorization", "modelConfig", "session").filter(
+                id=agent_run_id, session=session, workspace_id=session.workspace_id, user=request.user).first()
+            if run is None or not agent_run_membership_is_current(run):
+                return Status(404, {"error": "agent_run_not_found"})
+            # Runtime atomically binds and records the response before waking the
+            # original lifecycle Job. Its receipt also recovers an uncertain HTTP
+            # result after the checkpoint has already been consumed.
+            request_agent_run_question_response(run, operation_id=payload.operation_id,
+                continuation_id=payload.continuation_id, question_id=question_id,
+                action=payload.action, answer=payload.answer)
+            receipt = accept_operation(request.user, membership.workspace, "respondQuestion", payload.operation_id,
+                digest, session, run, app_delegation=grant)
+        return Status(202, serialize_operation(receipt))
+    except HostedOperationError as error:
+        return Status(error.status, {"error": error.code})
+    except ValueError as error:
+        return Status(409, {"error": str(error)})
+    except RuntimeError:
+        logger.exception("Question response admission failed", extra={"agentRunId": agent_run_id})
+        return Status(503, {"error": "agent_run_question_response_unavailable"})
 
 
 @router.post(

@@ -1455,7 +1455,7 @@ class HostedOperationReceipt(models.Model):
             models.CheckConstraint(
                 condition=(
                     models.Q(command="createSession", agentRunId__isnull=True, turnId__isnull=True)
-                    | models.Q(command__in=["submitMessage", "consumeWorkReturn"], agentRunId__isnull=False, turnId__isnull=False)
+                    | models.Q(command__in=["submitMessage", "consumeWorkReturn", "respondQuestion"], agentRunId__isnull=False, turnId__isnull=False)
                     | models.Q(command="consumeWorkReturn", agentRunId__isnull=True, turnId__isnull=True)
                 ),
                 name="hosted_operation_result_valid",

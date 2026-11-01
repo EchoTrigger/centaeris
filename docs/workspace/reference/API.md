@@ -92,7 +92,37 @@ snapshot and carries no event cursor. Reconnecting restores the current value;
 consuming the wait clears `waitingInput`, including when the transcript water is
 unchanged. A terminal checkpoint clears active activity. Only applied checkpoints
 acknowledge transcript delivery. These display states add no question or answer
-submission interface.
+submission by themselves.
+
+When Core pauses for `request_user_input`, the same feed sends `kind: "question"`
+with `workspaceId`, `sessionId`, `agentRunId`, `sourceHighWater`, and `question`.
+The question is either null, clearing the pending card, or exactly
+`{questionId, continuationId, turnId, question, options}`. `question` is the prompt
+string and `options` is a string array. This frame follows the same-snapshot
+authority checkpoint and activity, has no cursor, and restores the current
+pending question after refresh. Runtime tool-call data and authorization digests
+are not exposed. Accepting a response or consuming the current wait sends null; a terminal checkpoint
+also clears the card.
+
+`POST /api/sessions/{sessionId}/agent-runs/{agentRunId}/questions/{questionId}/responses`
+accepts exactly `operationId`, `continuationId`, `action: "answer" | "skip"`, and
+an optional `answer`. Answer actions require a nonempty answer string, which may
+combine selected option numbers and free text. Skip actions omit `answer`.
+HTTP 202 uses the ordinary hosted operation receipt with command
+`respondQuestion`, preserving the original Run and its initial turn identity.
+The response is accepted durably before waking that Run's original lifecycle Job.
+Its receipt clears the question card and changes activity to `working`, including
+after refresh while Core has not yet consumed the wait. Retry uncertain requests
+with the same operation ID, or look up
+`GET /api/workspaces/{workspaceId}/operations/respondQuestion/{operationId}`.
+Reusing an identity with different content or question binding returns 409.
+Current Session ownership, Workspace membership and original Run authorization
+still apply to requests and receipt recovery.
+
+Migration `0040_question_responses` enables the receipt command and rejects any
+remaining `runtime.await_question.v1` wait. Those old records have no authoritative
+question body to copy; they must be resolved or reconstructed from authoritative
+records before upgrading. New pending records use `runtime.await_question.v2`.
 
 ## Hosted command acceptance
 

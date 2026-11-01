@@ -152,6 +152,7 @@ async def _produce(scope, loader, cursor, read_timeout):
     navigation = None
     last_state = None
     last_activity = None
+    last_question = object()
     last_live = object()
     last_versions = None
     last_view_revision = None
@@ -222,6 +223,10 @@ async def _produce(scope, loader, cursor, read_timeout):
             activity_identity = None if activity is None else (state["agentRun"]["agentRunId"], target, activity)
             activity_changed = activity_identity is not None and activity_identity != last_activity
             last_activity = activity_identity
+            question = state["question"]
+            question_identity = None if state["agentRun"] is None else (state["agentRun"]["agentRunId"], question)
+            question_changed = question_identity != last_question
+            last_question = question_identity
             if changed:
                 # This authority observation is useful even if the Runtime read
                 # then fails. It has no id and cannot acknowledge missing text.
@@ -229,6 +234,8 @@ async def _produce(scope, loader, cursor, read_timeout):
                               sourceHighWater=target, agentRun=state["agentRun"])
                 if activity_changed:
                     yield _encode(scope, "activity", agentRunId=activity_identity[0], sourceHighWater=target, activity=activity)
+                if question_changed and question_identity is not None and state["agentRun"]["status"] in {"queued", "running"}:
+                    yield _encode(scope, "question", agentRunId=question_identity[0], sourceHighWater=target, question=question)
                 if int(water) > int(target):
                     reset_reason, needs_snapshot = "cursorInvalid", True
                 if not needs_snapshot:

@@ -16,10 +16,22 @@ def data(frame):
     return json.loads(next(line[6:] for line in frame.splitlines() if line.startswith("data: ")))
 
 
+def create_question_authority_tables():
+    from django.db import connection
+    with connection.cursor() as cursor:
+        cursor.execute("CREATE SCHEMA IF NOT EXISTS runtime")
+        cursor.execute("CREATE TABLE IF NOT EXISTS runtime.checkpoints("
+            "checkpoint_id text PRIMARY KEY,kind text NOT NULL,session_id text NOT NULL,"
+            "turn_id text NOT NULL,status text NOT NULL,done_reason text,updated_at_ms bigint NOT NULL,payload_json text NOT NULL)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS runtime.runtime_events("
+            "event_id text PRIMARY KEY,session_id text NOT NULL,task_id text,event_type text NOT NULL,"
+            "at_ms bigint NOT NULL,visibility text NOT NULL,payload_json text NOT NULL)")
+
+
 class PresentationStreamTests(SimpleTestCase):
     def setUp(self):
         self.scope = PresentationScope("workspace", "session")
-        self.state = {"sourceHighWater": "2", "activity": None, "agentRun": {
+        self.state = {"sourceHighWater": "2", "activity": None, "question": None, "agentRun": {
             "agentRunId": "run", "status": "completed", "startedAt": None, "completedAt": None,
         }}
         self.page = {"schema": "transcript.page.v1", "sessionId": "session",
@@ -122,6 +134,38 @@ class PresentationStreamTests(SimpleTestCase):
             changed.set()
             terminal = await self.until(source, lambda item, _frame: item["kind"] == "checkpoint" and item["agentRun"]["status"] == "completed")
             self.assertFalse(any(data(frame)["kind"] == "activity" for frame in terminal))
+        finally:
+            await source.aclose()
+
+    async def test_question_is_restored_and_cleared_at_unchanged_water_after_its_authority(self):
+        self.loader.state.side_effect = lambda: json.loads(json.dumps(self.state))
+        versions = self.loader.revisions.return_value
+        self.loader.revisions.side_effect = lambda: dict(versions)
+        changed = asyncio.Event()
+        async def wait(_previous):
+            await changed.wait()
+            changed.clear()
+        self.loader.wait_for_change.side_effect = wait
+        self.state["agentRun"]["status"] = "running"
+        self.state["activity"] = "waitingInput"
+        question = {"questionId": "question", "continuationId": "continuation", "turnId": "later-turn",
+            "question": "Which branch?", "options": ["Release", "Main"]}
+        self.state["question"] = question
+        source = stream_presentation(self.scope, self.loader)
+        try:
+            frames = await self.until(source, lambda item, frame: item["kind"] == "checkpoint" and frame.startswith("id:"))
+            items = [data(frame) for frame in frames]
+            self.assertEqual([item["kind"] for item in items[:4]], ["navigation", "checkpoint", "activity", "question"])
+            self.assertEqual(items[3], {"schema": "workspace.presentation.v1", **self.scope.wire(),
+                "kind": "question", "agentRunId": "run", "sourceHighWater": "2", "question": question})
+            self.assertFalse(frames[3].startswith("id:"))
+            self.state["question"] = None
+            self.state["activity"] = "working"
+            versions["state"] += 1
+            changed.set()
+            update = await self.until(source, lambda item, _frame: item["kind"] == "question")
+            self.assertIsNone(data(update[-1])["question"])
+            self.assertEqual(data(update[-1])["sourceHighWater"], "2")
         finally:
             await source.aclose()
 
@@ -744,15 +788,11 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         run = AgentRun.objects.select_related("authorization").get(pk=accepted["agentRunId"])
         run.status = "running"
         run.save(update_fields=["status"])
-        with connection.cursor() as cursor:
-            cursor.execute("CREATE SCHEMA IF NOT EXISTS runtime")
-            cursor.execute("CREATE TABLE IF NOT EXISTS runtime.checkpoints("
-                "checkpoint_id text PRIMARY KEY,kind text NOT NULL,session_id text NOT NULL,"
-                "turn_id text NOT NULL,status text NOT NULL,done_reason text,updated_at_ms bigint NOT NULL,"
-                "payload_json text NOT NULL)")
+        create_question_authority_tables()
         def clean():
             with connection.cursor() as cursor:
                 cursor.execute("DELETE FROM runtime.checkpoints WHERE session_id=%s", [self.session_id])
+                cursor.execute("DELETE FROM runtime.runtime_events WHERE session_id=%s", [self.session_id])
         self.addCleanup(clean)
         request = RequestFactory().get("/")
         request.user = self.user
@@ -773,7 +813,7 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         self.activity_event(run, 3, "provider_usage")
         self.assertEqual(async_to_sync(loader.state)()["activity"], "thinking")
         self.activity_event(run, 4, "tool_call")
-        self.assertEqual(presentation_activity(run, 3), "thinking")
+        self.assertEqual(presentation_activity(run, 3, question=None, response_accepted=False), "thinking")
         self.assertEqual(async_to_sync(loader.state)()["activity"], "working")
         self.activity_event(run, 5, "tool_result")
         self.assertEqual(async_to_sync(loader.state)()["activity"], "working")
@@ -784,9 +824,11 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         from django.db import connection
         run, loader = self.activity_fixture()
         self.activity_event(run, 1, "model_request_started")
-        payload = {"schema": "runtime.await_question.v1", "continuationId": "continuation",
+        payload = {"schema": "runtime.await_question.v2", "continuationId": "continuation",
             "agentRunId": run.pk, "authorizationDigest": run.authorization.digest,
-            "turnId": "later-turn", "questionId": "question"}
+            "turnId": "later-turn", "questionId": "question",
+            "question": {"question": "Which branch?", "options": ["Release", "Main"]},
+            "toolCall": {"id": "question", "name": "request_user_input", "argsJson": '{"question":"Which branch?","options":["Release","Main"]}'}}
         def store(**changes):
             row_session = changes.pop("row_session", self.session_id)
             row_turn = changes.pop("row_turn", "later-turn")
@@ -803,18 +845,47 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         store()
         state = async_to_sync(loader.state)()
         self.assertEqual((state["sourceHighWater"], state["activity"]), ("1", "waitingInput"))
+        self.assertEqual(state["question"], {"questionId": "question", "continuationId": "continuation", "turnId": "later-turn",
+            "question": "Which branch?", "options": ["Release", "Main"]})
         self.assertEqual(async_to_sync(loader.state)()["activity"], "waitingInput")
+        response = {"schema": "runtime.question.response.v1", "agentRunId": run.pk,
+            "authorizationDigest": run.authorization.digest, "continuationId": "continuation", "questionId": "question",
+            "operationId": "answer-operation", "action": "answer", "answer": "1"}
+        def accept_response(**changes):
+            row_session = changes.pop("row_session", self.session_id)
+            row_turn = changes.pop("row_turn", "later-turn")
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM runtime.runtime_events WHERE event_id='runtime_question_response:continuation'")
+                cursor.execute("INSERT INTO runtime.runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) "
+                    "VALUES('runtime_question_response:continuation',%s,%s,'runtime.question.response.v1',2,'internal',%s)",
+                    [row_session, row_turn, json.dumps({**response, **changes})])
+        for changes in ({"agentRunId": "another-run"}, {"row_session": "another-session"},
+                {"authorizationDigest": "sha256:" + "0" * 64}, {"continuationId": "another-continuation"},
+                {"questionId": "another-question"}, {"row_turn": "another-turn"}):
+            accept_response(**changes)
+            self.assertEqual(async_to_sync(loader.state)()["activity"], "waitingInput")
+        accept_response()
+        accepted = async_to_sync(loader.state)()
+        self.assertEqual((accepted["sourceHighWater"], accepted["activity"], accepted["question"]), ("1", "working", None))
+        # A second reader/refresh sees the receipt before Core has consumed the
+        # still-registered checkpoint; no in-memory answered set is needed.
+        self.assertEqual(async_to_sync(loader.state)()["activity"], "working")
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM runtime.checkpoints WHERE checkpoint_id='activity-wait'")
+            self.assertEqual(cursor.fetchone()[0], 1)
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM runtime.checkpoints WHERE checkpoint_id='activity-wait'")
         self.assertEqual(async_to_sync(loader.state)()["activity"], "thinking")
+        self.assertIsNone(async_to_sync(loader.state)()["question"])
 
     def test_terminal_activity_overrides_still_registered_wait_and_queued_needs_no_runtime_table(self):
         from django.db import connection
         from .models import AgentRun
         run, loader = self.activity_fixture()
-        payload = {"schema": "runtime.await_question.v1", "continuationId": "continuation",
+        payload = {"schema": "runtime.await_question.v2", "continuationId": "continuation",
             "agentRunId": run.pk, "authorizationDigest": run.authorization.digest,
-            "turnId": "later-turn", "questionId": "question"}
+            "turnId": "later-turn", "questionId": "question", "question": {"question": "Continue?", "options": ["Yes", "No"]},
+            "toolCall": {"id": "question", "name": "request_user_input", "argsJson": '{"question":"Continue?","options":["Yes","No"]}'}}
         with connection.cursor() as cursor:
             cursor.execute("INSERT INTO runtime.checkpoints(checkpoint_id,kind,session_id,turn_id,status,done_reason,updated_at_ms,payload_json) "
                 "VALUES('terminal-activity-wait','wait',%s,'later-turn','paused_question','question',1,%s)",
@@ -828,7 +899,7 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         from .presentation_activity import presentation_activity
         run.status = "queued"
         with patch("app_core.presentation_activity.connection.cursor") as cursor:
-            self.assertEqual(presentation_activity(run, 0), "working")
+            self.assertEqual(presentation_activity(run, 0, question=None, response_accepted=False), "working")
             run.status = "completed"
-            self.assertIsNone(presentation_activity(run, 0))
+            self.assertIsNone(presentation_activity(run, 0, question=None, response_accepted=False))
             cursor.assert_not_called()

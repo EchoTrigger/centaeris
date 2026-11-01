@@ -21,9 +21,11 @@ class HostedOperationError(Exception):
         self.code = code
 
 
-def request_digest(payload, *, session_id=None, uploads=()):
+def request_digest(payload, *, session_id=None, uploads=(), target=None):
     """Hash normalized caller input, never a model default or allocated resource ID."""
     value = payload.model_dump(by_alias=True, exclude={"operation_id"})
+    if target is not None:
+        value["target"] = target
     if session_id is not None:
         value["sessionId"] = session_id
         value["text"] = value["text"].strip()

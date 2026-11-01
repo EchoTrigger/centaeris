@@ -46,6 +46,15 @@ existing Markdown protocol and `plastic-memories://self/` URI remain. The new
 `workspace_memory_scope_v2` namespace does not merge, copy or delete old
 Agent-scoped memory directories.
 
+## Question response migration
+
+`0040_question_responses` adds question-response command receipts. It refuses
+unresolved `runtime.await_question.v1` waits because those records contain no
+question text or choices. The migration preserves their data and requires
+authoritative resolution before upgrading; it does not invent question content.
+New question waits retain the original Run identity, question, provider call,
+accepted response and completed closure needed to resume after a restart.
+
 ## Session output storage
 
 The hosted `SessionEvent.payload` JSONB column is a query index, not a reason to

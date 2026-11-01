@@ -345,6 +345,38 @@ def request_agent_run_supplement(agent_run, supplement_id: str, message: str) ->
     return result
 
 
+def request_agent_run_question_response(agent_run, *, operation_id, continuation_id, question_id, action, answer):
+    body = {"schema": "runtime.agent_run.question_response.v1",
+        "agentRunControl": build_agent_run_control(agent_run),
+        "jobId": agent_run_lifecycle_job_id(agent_run.id),
+        "operationId": operation_id, "continuationId": continuation_id,
+        "questionId": question_id, "action": action}
+    if action == "answer":
+        body["answer"] = answer
+    try:
+        result = request_json("/internal/agent-runs/question-response", body,
+            timeout=settings.RUNTIME_CONTROL_TIMEOUT_SECONDS)
+    except urllib.error.HTTPError as error:
+        try:
+            payload = json.loads(error.read())
+        except json.JSONDecodeError:
+            payload = None
+        finally:
+            error.close()
+        if error.code == 409 and isinstance(payload, dict) and set(payload) == {"error"} and isinstance(payload["error"], str):
+            raise ValueError(payload["error"]) from error
+        raise RuntimeError("agent_run_question_response_unavailable") from error
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise RuntimeError("agent_run_question_response_unavailable") from error
+    if (not isinstance(result, dict)
+            or set(result) != {"schema", "agentRunId", "continuationId", "operationId", "disposition"}
+            or result["schema"] != "runtime.agent_run.question_response.result.v1"
+            or result["agentRunId"] != agent_run.id or result["continuationId"] != continuation_id
+            or result["operationId"] != operation_id or result["disposition"] not in {"accepted", "existing"}):
+        raise RuntimeError("agent_run_question_response_invalid")
+    return result
+
+
 def request_workspace_skill_catalog(plugin_activation: dict) -> dict:
     return _request_workspace_projection(
         "/skills/catalog",

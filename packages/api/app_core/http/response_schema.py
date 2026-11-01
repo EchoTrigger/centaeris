@@ -796,7 +796,7 @@ class TranscriptCitationsResponse(StrictSchema):
 
 class HostedOperationResponse(StrictSchema):
     operation_id: str
-    command: Literal["createSession", "submitMessage"]
+    command: Literal["createSession", "submitMessage", "respondQuestion"]
     status: Literal["accepted"]
     session_id: str
     agent_run_id: str | None
