@@ -6,24 +6,24 @@ const harness = new URL("./componentHarness.mjs", import.meta.url).href;
 const stub = code => `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
 const loader = subjectLoader({ extraOverrides: [
   ["../api.ts", stub(`import {context} from ${JSON.stringify(harness)}; export {ApiError} from ${JSON.stringify(harness)}; export const apiJson=(...args)=>context.request(...args); export const apiResponse=(...args)=>context.request(...args);`)],
-  ["react-router", stub(`export {matchPath} from ${JSON.stringify(import.meta.resolve("react-router"))}; import {context} from ${JSON.stringify(harness)}; export const Link=()=>null; export const useRouteLoaderData=id=>id==='authenticated'?{user:context.user}:{workspace:context.workspace,agents:context.agents}; export const useNavigate=()=>context.navigate;`)],
+  ["react-router", stub(`export {matchPath} from ${JSON.stringify(import.meta.resolve("react-router"))}; import {context} from ${JSON.stringify(harness)}; export const Link=()=>null; export const useRouteLoaderData=id=>id==='authenticated'?{user:context.user}:{workspace:context.workspace}; export const useNavigate=()=>context.navigate;`)],
   ["../i18n", stub("export const t=key=>key; export const i18n={language:'en'}; export const useTranslation=()=>({t});")],
   ["react", stub(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useLayoutEffect} from ${JSON.stringify(harness)}; export const useEffectEvent=callback=>callback; export const useSyncExternalStore=(_subscribe,snapshot)=>snapshot();`)],
   ["../preferences", stub("export const useEnterStartsNewLine=()=>false; export const readModelThinkingMode=()=>''; export const readPreferredModelIdentity=()=>''; export const writeModelThinkingMode=()=>{}; export const writePreferredModelIdentity=()=>{};")],
   ["../chat/transcriptTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const createWorkspaceTranscriptTransport=()=>({loadTail:async()=>context.tail,loadPatches:async()=>{},loadActiveAgentRun:async(...args)=>context.activeRun?context.activeRun(...args):({agentRun:null})});`)],
   ["../chat/workspaceWebTransport", stub("export const streamWorkspaceAgentRun=async()=>{};")],
   ["../chat/workspacePresentationTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const streamWorkspacePresentation=options=>context.presentation(options);`)],
-  ...["../components/WorkspaceContextPanel", "../components/DocumentPreview", "../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../agent-chat/SessionAgentBreadcrumb", "../shell/ShellSidebar"].map(s => [s, stub(`export const ${s.split("/").at(-1)}=()=>null;`)]),
+  ...["../components/WorkspaceContextPanel", "../components/DocumentPreview", "../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../shell/ShellSidebar"].map(s => [s, stub(`export const ${s.split("/").at(-1)}=()=>null;`)]),
   ["../shell/HomePlane", stub("export const HomePlane=()=>null; export const HomeQuickActions=()=>null;")],
 ] });
 const { AppPageContent } = await import(await loader(fileURLToPath(new URL("../../src/routes/AppRoute.jsx", import.meta.url))));
-const row = changes => ({id:"session",workspaceId:"workspace",agentId:"agent",projectId:null,currentEnvironmentId:null,executionMode:null,title:"Synthetic",origin:"user",initialInputOrigin:null,status:"active",deletedAt:null,isPinned:false,isUnread:true,hasActiveAgentRun:false,updatedAt:"2026-10-23T00:00:00Z",latestAttentionSequence:"10",readThroughSequence:"0",attentionRevision:"1",isManuallyUnread:false,...changes});
+const row = changes => ({id:"session",workspaceId:"workspace",instructions:"",projectId:null,currentEnvironmentId:null,executionMode:null,title:"Synthetic",origin:"user",status:"active",deletedAt:null,isPinned:false,isUnread:true,hasActiveAgentRun:false,updatedAt:"2026-10-23T00:00:00Z",latestAttentionSequence:"10",readThroughSequence:"0",attentionRevision:"1",isManuallyUnread:false,...changes});
 const page = {schema:"transcript.page.v1",sessionId:"session",projectionVersion:"transcript.projection.v1",projectionGeneration:"generation",sourceHighWater:"10",blocks:[],olderCursor:null,hasOlder:false,resumeCursors:[{streamId:"workspace-transcript.v1",cursor:"10"}]};
 const tick = () => new Promise(resolve => setImmediate(resolve));
 async function setup(t, draft=false, navigationRead=null, controls={}) {
   const previousWindow=globalThis.window,previousDocument=globalThis.document,previousStorage=globalThis.sessionStorage;
   const stored=new Map();globalThis.sessionStorage={getItem:key=>stored.get(key)??null,setItem:(key,value)=>stored.set(key,value),removeItem:key=>stored.delete(key)};
-  globalThis.window={location:{pathname:"/w/workspace/agents/agent"},requestAnimationFrame(){},addEventListener(){},removeEventListener(){}};
+  globalThis.window={location:{pathname:draft?"/w/workspace/app":"/w/workspace/sessions/session"},requestAnimationFrame(){},addEventListener(){},removeEventListener(){}};
   globalThis.document={hidden:false,addEventListener(){},removeEventListener(){}};
   t.after(()=>{globalThis.window=previousWindow;globalThis.document=previousDocument;globalThis.sessionStorage=previousStorage;});
   const calls=[]; let options; let serverRun=null;
@@ -44,11 +44,12 @@ async function setup(t, draft=false, navigationRead=null, controls={}) {
     value.onConnection("running");
     return new Promise(resolve=>value.signal.addEventListener("abort",resolve,{once:true}));
   }});
-  const props={agentId:"agent",workspaceDraft:draft,location:{search:draft?"?new=1":"?sessionId=session",state:null},modelsVersion:0,onSessionAccepted:path=>controls.accepted?.(path)};
+  const props={workspaceDraft:draft,location:{search:draft?"?new=1":"?sessionId=session",state:null},modelsVersion:0,onSessionAccepted:path=>controls.accepted?.(path)};
   const subject=renderer(AppPageContent,props,env);
   t.after(()=>subject.unmount());
   await subject.settle();
-  const send=async(kind,body,cursor=null)=>{if(kind==="checkpoint") serverRun=body.agentRun && ["queued","running"].includes(body.agentRun.status) ? {...body.agentRun,streamCursor:cursor || "current"} : null;assert.ok(options,"the display subscription is active");await options.controller.acceptWithBackpressure({cursor,item:{schema:"workspace.presentation.v1",workspaceId:"workspace",agentId:"agent",sessionId:options.sessionId,kind,...(kind==="navigation"?{snapshotId:"navigation",offset:0,hasMore:false,...body}:body)}});await tick();await subject.settle();};
+  if ((controls.models ?? ["model"]).length) { nodes(subject.tree,n=>n.type.name==="WorkspaceComposer")[0].props.onModelIdChange("model"); await subject.settle(); }
+  const send=async(kind,body,cursor=null)=>{if(kind==="checkpoint") serverRun=body.agentRun && ["queued","running"].includes(body.agentRun.status) ? {...body.agentRun,streamCursor:cursor || "current"} : null;assert.ok(options,"the display subscription is active");await options.controller.acceptWithBackpressure({cursor,item:{schema:"workspace.presentation.v1",workspaceId:"workspace",sessionId:options.sessionId,kind,...(kind==="navigation"?{snapshotId:"navigation",offset:0,hasMore:false,...body}:body)}});await tick();await subject.settle();};
   return {subject,calls,send,props,getOptions:()=>options,rows:()=>nodes(subject.tree,n=>n.type.name==="SessionNavigationRow")};
 }
 

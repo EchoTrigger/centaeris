@@ -18,7 +18,6 @@ import { groupTranscriptTurns, hasCommittedPendingMessage, shouldLoadEarlier, sh
 import { ChevronDown } from "lucide-react";
 import { useTranslation } from "../i18n";
 import { TranscriptBlockRow, TranscriptLiveTail, TranscriptToolGroupCard } from "./TranscriptBlockContent";
-import type { TranscriptInitialInputOrigin } from "./TranscriptBlockContent";
 import type { TranscriptToolOperationRegistry } from "./transcriptToolOperations";
 import type { TranscriptViewStore } from "./transcriptViewStore";
 
@@ -35,7 +34,6 @@ type Props = Readonly<{
   historyMemoryPressure?: boolean;
   onReleaseLoadedHistory?(): void;
   onReadingLatestChange?(sessionId: string | null, readingLatest: boolean): void;
-  initialInputOrigin?: TranscriptInitialInputOrigin | null;
   onShowCitation?(citation: CitationSummary, origin: { elementId: string }): void;
   onShowArtifact?(artifact: import("./useTranscriptTurnMetadata").PublishedArtifact): void;
   running?: boolean;
@@ -109,7 +107,6 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   historyMemoryPressure = false,
   onReleaseLoadedHistory,
   onReadingLatestChange,
-  initialInputOrigin,
   onShowArtifact,
   onShowCitation,
   running = false,
@@ -528,7 +525,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
               {isPending ? <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id="pending:user">
                 <div className="workspaceUserMessage">{pendingUserMessage?.text}</div>
                 <div className="workspaceUserMessageMeta workspaceUserMessageMetaPlaceholder" aria-hidden="true" />
-              </div> : turn.userBlockId ? <TranscriptBlockRow store={store} blockId={turn.userBlockId} initialInputOrigin={initialInputOrigin} /> : null}
+              </div> : turn.userBlockId ? <TranscriptBlockRow store={store} blockId={turn.userBlockId} /> : null}
               {hasWork ? <WorkProgress key="work" running={Boolean(isPending ? !pendingTerminal : isLast && running)} finalStarted={turn.answerIds.length > 0}
                 response={turnLive ? <TranscriptLiveTail live={turnLive} mode="text" /> : null}
                 startedAtMs={isPending ? pendingStartedAt : time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={isPending ? pendingUserMessage?.completedAtMs : time?.completedAtMs ?? (isLast ? completedAtMs : undefined)}>

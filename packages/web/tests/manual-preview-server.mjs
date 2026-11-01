@@ -1,10 +1,5 @@
 import http from "node:http";
 
-const agents = [
-  { id: "centaeris", workspaceId: "ws_1", name: "Centaeris", description: "私人 Agent", instructions: "保持判断清晰，先核验事实，再回答。", avatarKind: "centaeris", status: "active", deletedAt: null, createdAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:00:00Z" },
-  { id: "research", workspaceId: "ws_1", name: "研究助手", description: "梳理资料与形成结论", instructions: "优先检索一手资料，区分事实、推断与未知。", avatarKind: "centaeris", status: "active", deletedAt: null, createdAt: "2026-08-02T00:00:00Z", updatedAt: "2026-08-02T00:00:00Z" },
-  { id: "writer", workspaceId: "ws_1", name: "写作伙伴", description: "起草、改写与校对", instructions: "保留作者语气，先处理结构，再润色句子。", avatarKind: "centaeris", status: "active", deletedAt: null, createdAt: "2026-08-03T00:00:00Z", updatedAt: "2026-08-03T00:00:00Z" },
-];
 const plugins = [
   { name: "banana", displayName: "Banana Extension", shortDescription: "Synthetic extension fixture.", capabilities: ["Synthetic capability"], version: "1.0.0", packageDigest: `sha256:${"a".repeat(64)}`, enabled: true, skills: [{ path: "skills/banana/SKILL.md", digest: `sha256:${"b".repeat(64)}` }], cli: [{ path: "bin/banana", digest: `sha256:${"c".repeat(64)}` }], mcpServers: [{ id: "banana-source", transport: { type: "streamableHttp", endpoint: "https://banana.invalid/mcp" }, auth: { type: "bearer", credentialRef: "banana-token", credentialConfigured: true }, tools: [] }], hooks: [] },
   { name: "data-workspace", displayName: "Data Workspace", shortDescription: "Query structured data from the workspace.", capabilities: ["SQL", "Data analysis"], version: "1.0.0", packageDigest: `sha256:${"f".repeat(64)}`, enabled: false, skills: [], cli: [], mcpServers: [{ id: "data-query", transport: { type: "stdio" }, auth: { type: "none", credentialConfigured: false }, tools: [] }], hooks: [] },
@@ -12,7 +7,7 @@ const plugins = [
 const skills = [
   { skillId: "plugin-banana-0:banana", name: "banana", description: "合成扩展说明", enabled: true, allowImplicitInvocation: true, allowedTools: ["read", "bash"] },
 ];
-let preview = { role: "owner", agentSet: "multi" };
+let preview = { role: "owner" };
 const notes = new Map([["note_1", {
   id: "note_1",
   displayName: "个人笔记",
@@ -51,18 +46,17 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "OPTIONS") return response.writeHead(204).end();
   if (url.pathname === "/__preview") {
     const role = url.searchParams.get("role");
-    const agentSet = url.searchParams.get("agents");
     if (role && !["owner", "member"].includes(role)) return json(response, 400, { error: "banana_role" });
-    if (agentSet && !["empty", "single", "multi"].includes(agentSet)) return json(response, 400, { error: "banana_agents" });
-    preview = { role: role || preview.role, agentSet: agentSet || preview.agentSet };
+    preview = { role: role || preview.role };
     return json(response, 200, preview);
   }
   if (url.pathname === "/api/csrf") return json(response, 200, { csrfToken: "preview-csrf" });
   if (url.pathname === "/api/me") return json(response, 200, { user: { id: "user_1", email: preview.role === "owner" ? "owner@example.com" : "member@example.com", isStaff: false, isSuperuser: false } });
   if (url.pathname === "/api/workspaces") return json(response, 200, { workspaces: [{ id: "ws_1", name: "Default", status: "active", role: preview.role }] });
-  if (url.pathname === "/api/workspaces/ws_1/agents") {
-    const count = preview.agentSet === "empty" ? 0 : preview.agentSet === "single" ? 1 : agents.length;
-    return json(response, 200, { agents: agents.slice(0, count) });
+  if (url.pathname === "/api/workspaces/ws_1/presentation/events") {
+    response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store" });
+    response.write(`data: ${JSON.stringify({schema:"workspace.presentation.v1", kind:"navigation", workspaceId:"ws_1", sessionId:null, snapshotId:"preview", offset:0, hasMore:false, sessions:[]})}\n\n`);
+    return;
   }
   if (url.pathname === "/api/models") return json(response, 200, { models: [{ id: "model_1", displayName: "Preview Model", providerId: "preview", providerDisplayName: "预览", modelName: "preview-model" }] });
   if (url.pathname === "/api/workspaces/ws_1/session-projects") return json(response, 200, { projects: [] });

@@ -19,5 +19,5 @@ export function useWorkspaceDocumentIdentity(workspace: Readonly<{ id: string; n
         if (type === null) icon.removeAttribute("type"); else icon.setAttribute("type", type);
       }
     };
-  }, [workspace.id, workspace.name]);
+  }, [workspace.name]);
 }

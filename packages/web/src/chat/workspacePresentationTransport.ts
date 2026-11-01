@@ -113,15 +113,15 @@ function exhausted(cause?: unknown) {
   return new Error('presentation stream repeatedly ended or failed; automatic reconnect budget exhausted', { cause });
 }
 
-export async function streamWorkspacePresentation({ workspaceId, agentId, sessionId, controller, signal, onConnection,
+export async function streamWorkspacePresentation({ workspaceId, sessionId, controller, signal, onConnection,
   request = apiResponse, wait = abortableDelay, headersTimeoutMs = 15_000, silenceTimeoutMs = 30_000, retryLimit = 5,
   subscribeWake = browserWake, now = Date.now, random = Math.random, isOnline = browserOnline }: Options) {
   if (![headersTimeoutMs, silenceTimeoutMs].every(value => Number.isFinite(value) && value > 0)) throw new Error('presentation deadlines must be positive');
   if (!Number.isSafeInteger(retryLimit) || retryLimit < 0) throw new Error('presentation retry limit must be a nonnegative integer');
-  const identity = { workspaceId, agentId, sessionId };
-  const query = new URLSearchParams({ agentId });
+  const identity = { workspaceId, sessionId };
+  const query = new URLSearchParams();
   if (sessionId !== null) query.set('sessionId', sessionId);
-  const path = `/api/workspaces/${encodeURIComponent(workspaceId)}/presentation/events?${query}`;
+  const path = `/api/workspaces/${encodeURIComponent(workspaceId)}/presentation/events${query.size ? `?${query}` : ""}`;
   let failures = 0, lastActivity = 0, attempted = false;
   let retryStarts: number[] = [];
   let activeAttempt: AbortController | null = null;

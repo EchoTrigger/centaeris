@@ -49,7 +49,7 @@ function fixture(options: { hasOlder?: boolean; onLoadOlderHistory?: () => Promi
       blockId: "answer", blockRevision: "1", orderKey: { sourceSequence: "18", ordinal: 0 },
       body: { kind: "assistantText", content: { inlineContent: "Completed answer", sourceRef: null }, status: "completed" },
     }] });
-  let session: SessionAttention = { id: "session", workspaceId: "workspace", agentId: "agent", isUnread: false,
+  let session: SessionAttention = { id: "session", workspaceId: "workspace",  isUnread: false,
     isManuallyUnread: false, latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0" };
   let readingLatest = false;
   let visible = true;

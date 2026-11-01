@@ -18,8 +18,6 @@ import { TranscriptToolOperationRegistry } from "../chat/transcriptToolOperation
 import { createWorkspaceTranscriptTransport } from "../chat/transcriptTransport";
 import { WorkspacePresentationController } from "../chat/workspacePresentationController";
 import { TranscriptBlockList } from "../chat/TranscriptBlockList";
-import { createAgentModelSettingsClient } from "../agent-chat/agentModelSettings";
-import { parseSessionInputOrigin } from "../agent-chat/agentWorkSessions";
 import {
   clearTranscriptContentRangeCache,
   subscribeTranscriptContentRangeCache,
@@ -42,10 +40,9 @@ import {
   writePreferredModelIdentity,
 } from "../preferences";
 import { HomePlane, HomeQuickActions } from "../shell/HomePlane";
-import { sessionChatPath } from "../agent-chat/agentChatNavigation";
-import { SessionAgentBreadcrumb } from "../agent-chat/SessionAgentBreadcrumb";
 import { ShellSidebar } from "../shell/ShellSidebar";
-import { groupSessionNavigation, sortSessionNavigation as sortSessions } from "../shell/sessionNavigation.mjs";
+import { SessionInstructions } from "../shell/SessionInstructions";
+import { sessionChatPath, groupSessionNavigation, sortSessionNavigation as sortSessions } from "../shell/sessionNavigation.mjs";
 import { SessionNavigationRow } from "../shell/SessionNavigationRow";
 import { useSessionNavigationActions } from "../shell/useSessionNavigationActions";
 import { SessionReadController, mergeSessionAttention, mergeSessionNavigation } from "../shell/sessionReadState";
@@ -88,10 +85,10 @@ function ConnectedWorkspaceContextPanel({ panel, browserWidthPx, onBrowserWidthC
   );
 }
 
-export function AppPageContent({ agentId, initialSession = null, workspaceDraft, location, modelsVersion, onSessionAccepted }) {
+export function AppPageContent({ initialSession = null, workspaceDraft, location, modelsVersion, onSessionAccepted }) {
   const { t } = useTranslation();
   const { user } = useRouteLoaderData("authenticated");
-  const { workspace, agents, defaultAgentId } = useRouteLoaderData("workspace");
+  const { workspace } = useRouteLoaderData("workspace");
   const operations = useMemo(() => new OperationClient({ userId: user.id, workspaceId: workspace.id, command: "submitMessage" }), [user.id, workspace.id]);
   const cancelSubmission = useCallback(async (target) => {
     const response = await apiResponse(`/api/sessions/${encodeURIComponent(target.sessionId)}/agent-runs/${encodeURIComponent(target.agentRunId)}/cancel`, { method: "POST" });
@@ -114,14 +111,8 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
   const requestedProjectId = searchParams.get("projectId") || "";
   const requestedPrompt = searchParams.get("prompt") || "";
   const startFresh = searchParams.get("new") === "1";
-  const conversationAgentId = initialSession?.agentId || agentId;
-  const activeAgent = agents.find((agent) => agent.id === conversationAgentId && agent.status === "active") || null;
-  if (!activeAgent && !initialSession) throw new Error("agent_not_found");
-  const modelSelectionLocked = Boolean(activeAgent?.isBusinessRoot);
-  const modelAgentId = activeAgent?.id || defaultAgentId;
-  const modelSettingsClient = useMemo(() => modelAgentId ? createAgentModelSettingsClient(modelAgentId, apiJson) : null, [modelAgentId]);
   const workspaceBase = `/w/${encodeURIComponent(workspace.id)}`;
-  const requestScopeKey = JSON.stringify([workspace.id, conversationAgentId, workspaceDraft, requestedSessionId, startFresh, requestedProjectId]);
+  const requestScopeKey = JSON.stringify([workspace.id, workspaceDraft, requestedSessionId, startFresh, requestedProjectId]);
   const requestScopeRef = useRef({ key: requestScopeKey, active: true });
   if (requestScopeRef.current.key !== requestScopeKey) requestScopeRef.current = { key: requestScopeKey, active: true };
   const navigationSnapshotRef = useRef({ scope: requestScopeKey, sessions: null });
@@ -162,10 +153,9 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
   const [pageVisible, setPageVisible] = useState(() => typeof document === "undefined" || !document.hidden);
   const enteredReadRef = useRef({ sessionId: "", handled: false });
   if (enteredReadRef.current.sessionId !== sessionId) enteredReadRef.current = { sessionId, handled: false };
-  const presentationScopeKey = JSON.stringify([workspace.id, conversationAgentId, sessionId]);
+  const presentationScopeKey = JSON.stringify([workspace.id, sessionId]);
   const presentationScopeRef = useRef(presentationScopeKey);
   presentationScopeRef.current = presentationScopeKey;
-  const [initialInputOrigin, setInitialInputOrigin] = useState(null);
   const [assets, setAssets] = useState([]);
   const [pendingAttachmentIds, setPendingAttachmentIds] = useState([]);
   const [pendingUploadFiles, setPendingUploadFiles] = useState([]);
@@ -180,7 +170,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
   const [sending, setSending] = useState(false);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [attachmentPreview, setAttachmentPreview] = useState(null);
-  const sessionActions = useSessionNavigationActions({ scopeKey: JSON.stringify([workspace.id, conversationAgentId]), sessions, onChangeSessions: setSessions, onError: setError, onDeleted: onSessionDeleted });
+  const sessionActions = useSessionNavigationActions({ scopeKey: JSON.stringify([workspace.id]), sessions, onChangeSessions: setSessions, onError: setError, onDeleted: onSessionDeleted });
   const { deletingSessionId, deleteConfirmationSessionId, setDeleteConfirmationSessionId, setEditingSessionId, setOpenSessionMenuId, markSessionRead, deleteSession } = sessionActions;
   const [loadingHistory, setLoadingHistory] = useState(!workspaceDraft);
   const [loadingOlderHistory, setLoadingOlderHistory] = useState(false);
@@ -233,19 +223,18 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
     }));
   }, [models, t]);
   useEffect(() => {
-    if (!modelSelectionLocked) setThinkingMode(readModelThinkingMode(user.id, workspace.id, currentModel));
-  }, [currentModel, user.id, workspace.id, modelSelectionLocked]);
+    setThinkingMode(readModelThinkingMode(user.id, workspace.id, currentModel));
+  }, [currentModel, user.id, workspace.id]);
   const selectThinkingMode = useCallback((mode) => {
-    if (modelSelectionLocked || !currentModel) return;
+    if (!currentModel) return;
     writeModelThinkingMode(user.id, workspace.id, currentModel, mode);
     setThinkingMode(mode);
-  }, [currentModel, user.id, workspace.id, modelSelectionLocked]);
+  }, [currentModel, user.id, workspace.id]);
   const selectModel = useCallback((id) => {
-    if (modelSelectionLocked) return;
     const selected = models.find((model) => model.id === id);
     if (selected) writePreferredModelIdentity(user.id, workspace.id, selected);
     setModelId(id);
-  }, [models, user.id, workspace.id, modelSelectionLocked]);
+  }, [models, user.id, workspace.id]);
   const acceptedTarget = acceptedRunTarget && (!sessionId || acceptedRunTarget.sessionId === sessionId)
     ? acceptedRunTarget : null;
   const activeAgentRunId = acceptedTarget?.agentRunId || activeTranscriptRun?.agentRunId || "";
@@ -344,28 +333,26 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
     const previousModels = modelsRef.current;
     modelsRef.current = nextModels;
     setModels(nextModels);
-    if (modelSelectionLocked) return;
     setModelId((current) => {
       if (nextModels.some((model) => model.id === current)) return current;
       if (!current) {
         if (previousModels.length) return "";
         const preferred = readPreferredModelIdentity(user.id, workspace.id);
         return nextModels.find((model) => JSON.stringify([model.providerId, model.modelName]) === preferred)?.id
-          || nextModels[0]?.id || "";
+          || "";
       }
       const previous = previousModels.find((model) => model.id === current);
       return nextModels.find((model) =>
         model.providerId === previous?.providerId && model.modelName === previous?.modelName
       )?.id || "";
     });
-  }, [user.id, workspace.id, modelSelectionLocked]);
+  }, [user.id, workspace.id]);
 
   const clearContextPanel = useCallback(() => {
     previewRequestIdRef.current += 1;
     setContextPanel(CLOSED_CONTEXT_PANEL);
   }, []);
   const clearConversationProjection = useCallback(() => {
-    setInitialInputOrigin(null);
     transcriptStore.clear();
     toolOperations.clear();
     clearTranscriptContentRangeCache();
@@ -388,13 +375,9 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
     const controller = new AbortController();
     async function load() {
       try {
-        const [data, settings] = await Promise.all([
-          apiResponse(`/api/models?workspaceId=${encodeURIComponent(workspace.id)}`, { signal: controller.signal }).then(response => response.json()),
-          modelSelectionLocked && modelSettingsClient ? modelSettingsClient.load(controller.signal) : null,
-        ]);
+        const data = await apiResponse(`/api/models?workspaceId=${encodeURIComponent(workspace.id)}`, { signal: controller.signal }).then(response => response.json());
         if (!controller.signal.aborted) {
           acceptModels(data.models);
-          if (settings) { setModelId(settings.status === "configured" ? settings.modelConfigRef : ""); setThinkingMode(settings.thinkingMode || ""); }
         }
       } catch {
         if (!controller.signal.aborted) reportLoadError("appRoute.unableToRefreshModelsPleaseTryAgain");
@@ -402,7 +385,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
     }
     load();
     return () => controller.abort();
-  }, [modelsVersion, acceptModels, workspace.id, modelSelectionLocked, modelSettingsClient, activeAgent?.definitionVersionId]);
+  }, [modelsVersion, acceptModels, workspace.id]);
 
   useEffect(() => {
     if (contextPanel.mode !== "filePreview" || !contextPanel.objectUrl) return undefined;
@@ -433,7 +416,6 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
       return undefined;
     }
     let active = true;
-    setInitialInputOrigin(null);
     setError("");
     const navigationScopeKey = requestScopeKey;
     setLoadingHistory(!workspaceDraft);
@@ -497,7 +479,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
       const attention = Object.fromEntries(["latestAttentionSequence", "readThroughSequence", "attentionRevision", "isManuallyUnread", "isUnread"].map(key => [key, record[key]]));
       return mergeSessionAttention(item, { ...item, ...attention });
     })),
-  }), [user.id, workspace.id, conversationAgentId]);
+  }), [user.id, workspace.id]);
   useEffect(() => () => readController.dispose(), [readController]);
   useEffect(() => {
     if (typeof document === "undefined") return undefined;
@@ -595,13 +577,13 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
         apiResponse(`/api/sessions/${encodeURIComponent(selectedSessionId)}`, { signal: abortController.signal }).then(response => response.json()),
       ]).then(([assetData, sessionData]) => {
         if (!isCurrent()) return;
-        const origin = parseSessionInputOrigin(sessionData, workspace.id, conversationAgentId, selectedSessionId);
-        setInitialInputOrigin({ scope: requestScopeRef.current.key, sessionId: selectedSessionId, value: origin });
+        if (sessionData.session?.id !== selectedSessionId || sessionData.session.workspaceId !== workspace.id) throw new Error("session_response_invalid");
+        setSessions(items => sortSessions(upsertBy(items, "id", sessionData.session)));
         setAssets(assetData.assets);
       }).catch(errorValue => { if (isCurrent() && errorValue?.name !== "AbortError") showStreamError(errorValue); });
     }
     const controller = new WorkspacePresentationController({
-      workspaceId: workspace.id, agentId: conversationAgentId, sessionId: selectedSessionId,
+      workspaceId: workspace.id, sessionId: selectedSessionId,
       store: transcriptStore, signal: abortController.signal, isCurrent,
       applySnapshot: (page, signal) => restorePresentationSnapshot(page, signal, isCurrent),
       onSnapshot: () => {
@@ -658,7 +640,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
     });
     chatControllerRef.current = controller;
     void streamWorkspacePresentation({
-      workspaceId: workspace.id, agentId: conversationAgentId, sessionId: selectedSessionId,
+      workspaceId: workspace.id, sessionId: selectedSessionId,
       controller, signal: abortController.signal,
       onConnection: connection => {
         if (isCurrent()) setStreamIssue(connection === "reconnecting"
@@ -666,7 +648,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
       },
     }).catch(errorValue => { if (isCurrent()) handlePresentationFailure(errorValue, selectedSessionId); });
     return () => { active = false; abortController.abort(); controller.dispose(); };
-  }, [presentationScopeKey, presentationAttempt, sessionId, workspace.id, conversationAgentId, operations, transcriptStore, toolOperations, clearConversationProjection, stopActiveStream, updateActiveTranscriptRun, restorePresentationSnapshot, handlePresentationFailure, showStreamError, recordRunTerminal, workspaceDraft, startFresh, requestedSessionId]);
+  }, [presentationScopeKey, presentationAttempt, sessionId, workspace.id, operations, transcriptStore, toolOperations, clearConversationProjection, stopActiveStream, updateActiveTranscriptRun, restorePresentationSnapshot, handlePresentationFailure, showStreamError, recordRunTerminal, workspaceDraft, startFresh, requestedSessionId]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: Route ownership, Retry, and conflicting Run metadata each require a fresh authoritative read.
   useEffect(() => {
@@ -709,11 +691,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
     setEditingSessionId("");
     setOpenSessionMenuId("");
     clearContextPanel();
-    const newSessionSearch = new URLSearchParams({ new: "1" });
-    if (projectId) newSessionSearch.set("projectId", projectId);
-    navigate(workspaceDraft || !activeAgent
-      ? `/w/${encodeURIComponent(workspace.id)}/app${projectId ? `?${new URLSearchParams({ projectId })}` : ""}`
-      : `/w/${encodeURIComponent(workspace.id)}/agents/${encodeURIComponent(conversationAgentId)}?${newSessionSearch}`, { state: { sidebarTab } });
+    navigate(`${workspaceBase}/app${projectId ? `?${new URLSearchParams({ projectId })}` : ""}`, { state: { sidebarTab } });
   }
 
   function selectSession() {
@@ -725,16 +703,14 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
   }
 
   async function createProject(name) {
-    const projectAgentId = activeAgent?.id || defaultAgentId;
     const response = await apiResponse(`/api/workspaces/${workspace.id}/session-projects`, {
       method: "POST",
-      body: JSON.stringify({ agentId: projectAgentId, name }),
+      body: JSON.stringify({ name }),
     });
     const data = await response.json();
     if (
       !data?.project
       || data.project.workspaceId !== workspace.id
-      || data.project.agentId !== projectAgentId
     ) throw new Error("session_project_response_invalid");
     setProjects((items) => [...items, data.project]);
     return data.project;
@@ -779,10 +755,8 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
     let ownedSubmission = null;
     const isCurrentRequest = () => {
       const pathname = window.location.pathname;
-      const currentAgentId = matchPath(`${workspaceBase}/agents/:agentId`, pathname)?.params.agentId;
       const currentSessionId = matchPath(`${workspaceBase}/sessions/:sessionId`, pathname)?.params.sessionId;
       const locationOwnsRequest = pathname === `${workspaceBase}/app`
-        || currentAgentId === conversationAgentId
         || currentSessionId === requestedSessionId
         || pathname.startsWith(`${workspaceBase}/settings/`);
       return locationOwnsRequest && requestScope.active && requestScopeRef.current === requestScope
@@ -852,9 +826,8 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
     try {
       const messageData = await submissionControl.submit(hooks => operations.submit(`/api/workspaces/${workspace.id}/sessions/${targetSessionId}/messages`, {
           text,
-          agentId: conversationAgentId,
           ...(targetSessionId === "new" && requestedProjectId ? { projectId: requestedProjectId } : {}),
-          ...(modelSelectionLocked ? {} : { modelConfigRef: modelId, ...(thinkingMode ? { thinkingMode } : {}) }),
+          modelConfigRef: modelId, ...(thinkingMode ? { thinkingMode } : {}),
           ...(uploadFiles.length ? {} : { attachmentRefs }),
       }, uploadFiles, [], replaceUnconfirmedInput, hooks));
       accepted = true;
@@ -871,7 +844,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
       if (!isCurrentRequest()) return;
       if (
         acceptedSession?.id !== messageData.sessionId
-        || acceptedSession.agentId !== conversationAgentId
+        || acceptedSession.workspaceId !== workspace.id
         || (targetSessionId === "new" && (acceptedSession.projectId || "") !== requestedProjectId)
       ) {
         throw new Error("AgentRun acceptance identity is invalid");
@@ -971,8 +944,8 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
         }
         const { session } = await (await apiResponse(`/api/sessions/${encodeURIComponent(accepted.sessionId)}`)).json();
         if (!isCurrent()) return;
-        if (session?.id !== accepted.sessionId || typeof session.agentId !== "string" || !session.agentId) throw new Error("session_response_invalid");
-        if (session.id === activeSessionIdRef.current && session.agentId === conversationAgentId) {
+        if (session?.id !== accepted.sessionId || session.workspaceId !== workspace.id) throw new Error("session_response_invalid");
+        if (session.id === activeSessionIdRef.current) {
           operations.complete(accepted.operationId);
           setError(preserveChangedDraft ? t("operations.inputUnconfirmed") : "");
           setPresentationAttempt(value => value + 1);
@@ -1295,13 +1268,10 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
       <div className="workspaceSidebarSlot">
         {isSidebarOpen ? <ShellSidebar
           workspace={workspace}
-          agents={agents}
-          activeAgent={activeAgent}
           onStartNewChat={startNewChat}
           onCollapse={() => setIsSidebarOpen(false)}
           initialTab={location.state?.sidebarTab || (workspaceDraft ? "home" : "chat")}
           sessionProps={{
-            agentId: conversationAgentId,
             sessions,
             projects,
             groupedSessions,
@@ -1323,7 +1293,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
           >
             <PanelLeft aria-hidden="true" />
           </button> : null}
-          {isSidebarOpen && activeSession ? <SessionAgentBreadcrumb workspaceId={workspace.id} agent={activeAgent} session={activeSession} sessionId={sessionId} label={t("appRoute.currentConversation")} /> : null}
+          {activeSession ? <><span>{activeSession.title}</span><SessionInstructions key={activeSession.id} session={activeSession} onSaved={updated => setSessions(items => upsertBy(items, "id", updated))} /></> : null}
         </div>
         {streamIssue?.sessionId === sessionId && !streamIssue.reconnecting ? <button
           className="workspacePanelToggle"
@@ -1349,11 +1319,10 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
           onReadingLatestChange={(targetSessionId, following) => { if (targetSessionId === activeSessionIdRef.current) setReadingLatest(following); }}
             toolOperations={toolOperations}
             sessionId={sessionId || null}
-            initialInputOrigin={initialInputOrigin?.scope === requestScopeKey && initialInputOrigin.sessionId === sessionId ? initialInputOrigin.value : null}
             loadingHistory={loadingHistory}
             loadingOlderHistory={loadingOlderHistory}
             onLoadOlderHistory={loadOlderHistory}
-            emptyState={isHome ? <HomePlane agent={activeAgent} /> : null}
+            emptyState={isHome ? <HomePlane workspace={workspace} /> : null}
             onShowCitation={showCitation}
             onShowArtifact={(artifact) => showArtifact(artifact, "conversation")}
             pendingUserMessage={visiblePendingMessage}
@@ -1377,7 +1346,7 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
             draft={draft}
             onDraftChange={setDraft}
             enterStartsNewLine={enterStartsNewLine}
-            activeAgentName={activeAgent?.name || "Centaeris"}
+            workspaceName={workspace.name}
             workspaceAvailable={Boolean(workspace)}
             sending={sending}
             loadingHistory={loadingHistory}
@@ -1387,7 +1356,6 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
             onUploadAttachment={uploadAttachment}
             sessionId={sessionId}
             contextRevision={contextVersion?.sessionId === sessionId ? contextVersion.revision : "0"}
-            modelSelectionDisabled={modelSelectionLocked}
             currentModel={currentModel}
             thinkingMode={thinkingMode}
             onThinkingModeChange={selectThinkingMode}

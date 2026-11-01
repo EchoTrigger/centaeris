@@ -5,7 +5,7 @@ import { OperationClient } from "../../src/chat/operationReceipts.ts";
 import { SubmissionControl } from "../../src/chat/submissionControl.ts";
 
 const scope = { userId: "user", workspaceId: "workspace", command: "submitMessage" as const };
-const input = { text: "synthetic private message", modelConfigRef: "model", agentId: "agent" };
+const input = { text: "synthetic private message", modelConfigRef: "model", };
 const target = { sessionId: "session", agentRunId: "run" };
 const accepted = operationId => ({ operationId, command: "submitMessage", status: "accepted", ...target, turnId: "turn" });
 const requested = { agentRunId: "run", status: "running", disposition: "requested" };
@@ -72,7 +72,7 @@ test("unknown acceptance retains the stop across reload, never replays POST, and
   assert.equal(calls.filter(([, method]) => method === "POST").length, 1);
   assert.equal(reloaded.operations.pending()!.operationId, operationId);
   const metadata = [...store.data.entries()].find(([key]) => key.startsWith("centaeris.submissionControl.v1:"))![1];
-  assert.doesNotMatch(metadata, /synthetic private message|modelConfigRef|agentId/);
+  assert.doesNotMatch(metadata, /synthetic private message|modelConfigRef/);
 });
 
 test("persisted stop metadata is strictly versioned and transport failure remains unknown", async () => {

@@ -6,14 +6,14 @@ import { button, deferred, environment, nodes, renderer, subjectLoader } from ".
 const harness = new URL("./componentHarness.mjs", import.meta.url).href;
 const stub = code => `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
 const loader = subjectLoader({ extraOverrides: [
-  ["react-router", stub(`export {matchPath} from ${JSON.stringify(import.meta.resolve("react-router"))}; import {context} from ${JSON.stringify(harness)}; export const Link=()=>null; export const useRouteLoaderData=id=>id==='authenticated'?{user:context.user}:{workspace:context.workspace,agents:context.agents}; export const useNavigate=()=>context.navigate;`)],
+  ["react-router", stub(`export {matchPath} from ${JSON.stringify(import.meta.resolve("react-router"))}; import {context} from ${JSON.stringify(harness)}; export const Link=()=>null; export const useRouteLoaderData=id=>id==='authenticated'?{user:context.user}:{workspace:context.workspace}; export const useNavigate=()=>context.navigate;`)],
   ["../i18n", stub("export const t=key=>key; export const i18n={language:'en'}; export const useTranslation=()=>({t});")],
   ["react", stub(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect} from ${JSON.stringify(harness)}; import {useEffect} from ${JSON.stringify(harness)}; export const useLayoutEffect=useEffect; export const useEffectEvent=callback=>callback; export const useSyncExternalStore=(_subscribe,getSnapshot)=>getSnapshot();`)],
   ["../chat/operationReceipts", stub(`import {context} from ${JSON.stringify(harness)}; export class OperationClient {pending(){return context.pendingOperation ?? null;} submit(...args){return context.submit(...args);} complete(){}} export const acceptedConversationReviewLink=()=>null; export const consumeReviewedOperation=()=>{}; export {loadAcceptedConversation} from ${JSON.stringify(new URL("../../src/chat/operationReceipts.ts", import.meta.url).href)};`)],
   ["../preferences", stub("export const useEnterStartsNewLine=()=>false; export const readModelThinkingMode=()=>''; export const readPreferredModelIdentity=()=>''; export const writeModelThinkingMode=()=>{}; export const writePreferredModelIdentity=()=>{};")],
   ["../chat/transcriptTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const createWorkspaceTranscriptTransport=()=>context.transport;`)],
   ["../chat/workspacePresentationTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const streamWorkspacePresentation=options=>context.stream(options);`)],
-  ...["../components/WorkspaceContextPanel", "../components/DocumentPreview", "../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../agent-chat/SessionAgentBreadcrumb", "../shell/ShellSidebar"].map(specifier => [specifier, stub(`export const ${specifier.split("/").at(-1)}=()=>null;`)]),
+  ...["../components/WorkspaceContextPanel", "../components/DocumentPreview", "../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../shell/ShellSidebar"].map(specifier => [specifier, stub(`export const ${specifier.split("/").at(-1)}=()=>null;`)]),
   ["../shell/HomePlane", stub("export const HomePlane=()=>null; export const HomeQuickActions=()=>null;")],
 ] });
 const { AppPageContent } = await import(await loader(fileURLToPath(new URL("../../src/routes/AppRoute.jsx", import.meta.url))));
@@ -31,11 +31,11 @@ async function setup(context, tailPage = page("Retained authoritative answer"), 
   globalThis.sessionStorage = { getItem:key=>stored.get(key)??null, setItem:(key,value)=>stored.set(key,value), removeItem:key=>stored.delete(key) };
   context.after(() => { globalThis.sessionStorage = oldStorage; });
   const oldWindow = globalThis.window, oldDocument = globalThis.document;
-  globalThis.window = { addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {}, location: { pathname: "/w/workspace/agents/agent" } };
+  globalThis.window = { addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {}, location: { pathname: "/w/workspace/sessions/session" } };
   globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {} };
   context.after(() => { globalThis.window = oldWindow; globalThis.document = oldDocument; });
   const attempt = deferred();
-  const session = { id: "session", workspaceId: "workspace", agentId: "agent", projectId: null, title: "Synthetic Session", origin: "user", status: "active", deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: true, updatedAt: "2026-10-05T00:00:00Z", initialInputOrigin: null, currentEnvironmentId: null, executionMode: "perRun", latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", isManuallyUnread: false };
+  const session = { id: "session", workspaceId: "workspace", instructions: "", projectId: null, title: "Synthetic Session", origin: "user", status: "active", deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: true, updatedAt: "2026-10-05T00:00:00Z",  currentEnvironmentId: null, executionMode: "perRun", latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", isManuallyUnread: false };
   const env = environment({ location: { search: "?sessionId=session", state: null },
     request: async path => ({ json: async () => path === "/api/models?workspaceId=workspace" ? { models: idle ? [{ id: "model", providerId: "provider", modelName: "synthetic", displayName: "Synthetic", thinkingModes: [] }] : [] }
       : path.includes("session-projects") ? { projects: [] }
@@ -44,11 +44,11 @@ async function setup(context, tailPage = page("Retained authoritative answer"), 
     transport: { loadActiveAgentRun: async () => ({agentRun: idle ? null : {agentRunId:"run",status:"running",streamCursor:"cursor:0"}}), loadOlder: async () => { throw new Error("unexpected older history request"); } },
     stream: options => { env.streamOptions = options; const pending = env.nextAttempt ?? attempt; env.nextAttempt = null; return pending.promise; },
   });
-  const subject = renderer(AppPageContent, { agentId: "agent", workspaceDraft: false, location: env.location, modelsVersion: 0 }, env);
+  const subject = renderer(AppPageContent, {  workspaceDraft: false, location: env.location, modelsVersion: 0 }, env);
   await subject.settle();
   assert.ok(env.streamOptions, `the selected Session started its stream; ${JSON.stringify(nodes(subject.tree, node => node.props.className === 'errorBanner').map(node => node.props.children))}`);
   const frame = (kind, body, cursor = null) => ({ cursor, item: {
-    schema: "workspace.presentation.v1", workspaceId: "workspace", agentId: "agent", sessionId: "session", kind, ...body,
+    schema: "workspace.presentation.v1", workspaceId: "workspace",  sessionId: "session", kind, ...body,
   } });
   const send = async (kind, body, cursor = null) => {
     await env.streamOptions.controller.acceptWithBackpressure(frame(kind, body, cursor));
@@ -60,6 +60,7 @@ async function setup(context, tailPage = page("Retained authoritative answer"), 
   const list = () => component(subject.tree, "TranscriptBlockList");
   const composer = () => component(subject.tree, "WorkspaceComposer");
   const store = list().props.store;
+  if (idle) { composer().props.onModelIdChange("model"); await subject.settle(); }
   composer().props.onDraftChange("Unsent draft"); await subject.settle();
   const preserved = () => {
     assert.equal(store.getBlockSnapshot("answer").body.content.inlineContent, "Retained authoritative answer");
@@ -241,7 +242,7 @@ for (const unavailable of ["snapshot", "checkpoint"]) test(`failed ${unavailable
 
 
 test("revoked selected delivery cannot be restored by late Session metadata", async context => {
-  const { subject, env, attempt, list, store } = await setup(context);
+  const { subject, env, attempt, store } = await setup(context);
   attempt.reject(new TypeError("synthetic connection loss")); await subject.settle();
   const metadata = deferred(), retry = deferred();
   const request = env.request;
@@ -254,12 +255,10 @@ test("revoked selected delivery cannot be restored by late Session metadata", as
   assert.equal(waiting, true);
   retry.reject(Object.assign(new Error("synthetic authority revoked"), { status: 403 })); await subject.settle();
   assert.equal(store.getListSnapshot().blockIds.length, 0);
-  const lateOrigin = { messageId: "late-private-input", agentId: "agent", agentName: "Private sender" };
-  metadata.resolve({ json: async () => ({ session: { ...original.session, initialInputOrigin: lateOrigin } }) });
+  metadata.resolve({ json: async () => ({ session: { ...original.session, title: "Late private Session" } }) });
   await subject.settle();
-  assert.deepEqual({ origin: list().props.initialInputOrigin,
-    sessions: component(subject.tree, "ShellSidebar").props.sessionProps.sessions.map(row => row.id) },
-  { origin: null, sessions: [] }, "a rejected authority retires both pending metadata and cached navigation");
+  assert.deepEqual({ sessions: component(subject.tree, "ShellSidebar").props.sessionProps.sessions.map(row => row.id) },
+  { sessions: [] }, "a rejected authority retires both pending metadata and cached navigation");
 });
 
 test("revoked navigation-only delivery cannot be restored by late bootstrap HTTP", async context => {
@@ -273,7 +272,7 @@ test("revoked navigation-only delivery cannot be restored by late bootstrap HTTP
   env.location.search = "?new=1"; await subject.settle();
   assert.equal(waiting, true); assert.equal(env.streamOptions.sessionId, null);
   await env.streamOptions.controller.acceptWithBackpressure({ cursor: null, item: {
-    schema: "workspace.presentation.v1", workspaceId: "workspace", agentId: "agent", sessionId: null,
+    schema: "workspace.presentation.v1", workspaceId: "workspace",  sessionId: null,
     kind: "navigation", snapshotId: "before-revocation", offset: 0, hasMore: false, sessions: [original.session],
   } });
   await subject.settle();

@@ -24,8 +24,6 @@ import {
 } from "lucide-react";
 import { apiJson, apiResponse, clearCsrfToken } from "../api";
 import { useModalDialog } from "../components/useModalDialog";
-import { AgentMark } from "./AgentMark";
-import { agentChatPath } from "../agent-chat/agentChatNavigation";
 import { SearchOverlay } from "./SearchOverlay";
 import { TrashPopover } from "./TrashPopover";
 
@@ -193,34 +191,19 @@ function HomeTab({ base, notes, notesError, onCreateNote, onOpenCreate, trashOpe
   );
 }
 
-function ConversationTab({ agents, activeAgent, base, workspaceId, sessionProps, recentNavigation, onStartNewChat, sidebarTab = "chat" }) {
+function ConversationTab({ base, sessionProps, recentNavigation, onStartNewChat, sidebarTab = "chat" }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const location = useLocation();
-  const query = new URLSearchParams(location.search);
   const startNewChat = (projectId = "") => {
     if (onStartNewChat) onStartNewChat(projectId, sidebarTab);
     else {
       const query = new URLSearchParams({ new: "1" });
       if (projectId) query.set("projectId", projectId);
-      navigate(activeAgent ? `${base}/agents/${encodeURIComponent(activeAgent.id)}?${query}` : `${base}/app`, { state: { sidebarTab } });
+      navigate(`${base}/app?${query}`, { state: { sidebarTab } });
     }
   };
   return (
     <div className="shScroll">
-      <section className="shSection">
-        <header className="shSectionHeader">
-          <span>{t("agentRunRow.agent")}</span>
-        </header>
-        <div className="shAgentStrip">
-          {agents.map((agent) => {
-            const target = agentChatPath(workspaceId, agent.id);
-            const selected = location.pathname === target && !query.has("sessionId") && !query.has("new");
-            return <Link className={`shRow ${selected ? "isActive" : ""}`} aria-current={selected ? "page" : undefined} to={target} state={{ sidebarTab }} key={agent.id}><AgentMark className="shAgentGlyph" agent={agent} /><span>{agent.name}</span></Link>;
-          })}
-        </div>
-      </section>
-
       {sessionProps ? <>
         <section className="shSection shCollapsibleSection shSessionSection">
           <details className="shDisclosure" open>
@@ -265,7 +248,7 @@ function ConversationTab({ agents, activeAgent, base, workspaceId, sessionProps,
   );
 }
 
-export function ShellSidebar({ workspace, agents, activeAgent, sessionProps, recentNavigation, onStartNewChat, onCollapse, initialTab = "home" }) {
+export function ShellSidebar({ workspace, sessionProps, recentNavigation, onStartNewChat, onCollapse, initialTab = "home" }) {
   const { t } = useTranslation();
   const [tab, setTab] = useState(initialTab);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -325,13 +308,11 @@ export function ShellSidebar({ workspace, agents, activeAgent, sessionProps, rec
     setTrashOpen(false);
     setTab("chat");
     if (sessionProps) return;
-    if (activeAgent) navigate(`${base}/agents/${encodeURIComponent(activeAgent.id)}`);
-    else if (agents.length === 1) navigate(`${base}/agents/${encodeURIComponent(agents[0].id)}`);
-    else navigate(`${base}/app`);
+    navigate(`${base}/app`);
   }
 
   const defaultNewChat = () => {
-    navigate(activeAgent ? `${base}/agents/${encodeURIComponent(activeAgent.id)}?new=1` : `${base}/app`, { state: { sidebarTab: tab } });
+    navigate(`${base}/app`, { state: { sidebarTab: tab } });
   };
 
   function createNote(template) {
@@ -376,9 +357,9 @@ export function ShellSidebar({ workspace, agents, activeAgent, sessionProps, rec
         </button>
       </div>
 
-      {tab === "home" ? <HomeTab base={base} notes={privateNotes} notesError={privateNotesError} onCreateNote={() => { setTrashOpen(false); createNote({ name: "Untitled", markdown: "" }); }} onOpenCreate={() => { setTrashOpen(false); setPrivateCreateOpen(true); }} trashOpen={trashOpen} onToggleTrash={() => { setTrashOpen((value) => !value); }} trashTriggerRef={trashTriggerRef} /> : <ConversationTab agents={agents} activeAgent={activeAgent} base={base} workspaceId={workspace.id} sessionProps={sessionProps ? { ...sessionProps, onOpenProjectCreate: () => setProjectCreateOpen(true) } : null} recentNavigation={recentNavigation} onStartNewChat={onStartNewChat} sidebarTab={tab} />}
+      {tab === "home" ? <HomeTab base={base} notes={privateNotes} notesError={privateNotesError} onCreateNote={() => { setTrashOpen(false); createNote({ name: "Untitled", markdown: "" }); }} onOpenCreate={() => { setTrashOpen(false); setPrivateCreateOpen(true); }} trashOpen={trashOpen} onToggleTrash={() => { setTrashOpen((value) => !value); }} trashTriggerRef={trashTriggerRef} /> : <ConversationTab base={base} sessionProps={sessionProps ? { ...sessionProps, onOpenProjectCreate: () => setProjectCreateOpen(true) } : null} recentNavigation={recentNavigation} onStartNewChat={onStartNewChat} sidebarTab={tab} />}
 
-      {searchOpen ? <SearchOverlay sessions={sessionProps?.sessions || []} workspace={workspace} agents={agents} agentId={sessionProps?.agentId || activeAgent?.id || ""} onClose={() => setSearchOpen(false)} /> : null}
+      {searchOpen ? <SearchOverlay sessions={sessionProps?.sessions || []} workspace={workspace} onClose={() => setSearchOpen(false)} /> : null}
       {privateCreateOpen ? <PrivateCreateDialog onClose={() => setPrivateCreateOpen(false)} onCreateNote={createNote} onUpload={openUpload} /> : null}
       {projectCreateOpen ? <ProjectCreateDialog onClose={() => setProjectCreateOpen(false)} onCreate={sessionProps.onCreateProject} /> : null}
       <TrashPopover open={trashOpen} workspace={workspace} anchorRef={trashTriggerRef} onClose={() => setTrashOpen(false)} />

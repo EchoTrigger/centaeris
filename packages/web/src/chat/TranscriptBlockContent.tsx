@@ -428,16 +428,12 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
   );
 }
 
-export type TranscriptInitialInputOrigin = Readonly<{ messageId: string; agentId: string; agentName: string }>;
-
 export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   store,
   blockId,
-  initialInputOrigin,
 }: Readonly<{
   store: TranscriptViewStore;
   blockId: string;
-  initialInputOrigin?: TranscriptInitialInputOrigin | null;
 }>) {
   const { t } = useTranslation();
   const block = useTranscriptBlock(store, blockId);
@@ -463,7 +459,6 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   if (kind === "userText") {
     return (
       <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id={block.blockId}>
-        {initialInputOrigin?.messageId === block.blockId ? <span className="workspaceUserMessageOrigin">{t("transcript.sendByAgent", { agentName: initialInputOrigin.agentName })}</span> : null}
         <div className="workspaceUserMessage">
           {text ?? (reference ? <ReferencedContent store={store} reference={reference} mode="plain" /> : null)}
         </div>

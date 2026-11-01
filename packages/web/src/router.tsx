@@ -23,29 +23,10 @@ export type AuthenticatedUser = {
 };
 
 export type AuthLoaderData = { user: AuthenticatedUser };
-export type AgentSummary = {
-  id: string;
-  workspaceId: string;
-  definitionId: string | null;
-  definitionVersionId: string | null;
-  pluginNames: string[];
-  isBusinessRoot: boolean;
-  name: string;
-  description: string;
-  instructions: string;
-  avatarKind: "centaeris" | "banana";
-  avatarUrl: string | null;
-  status: "active" | "deleted";
-  deletedAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
-export type SessionSummary = { id: string; workspaceId: string; agentId: string; status: string; title: string };
+export type SessionSummary = { id: string; workspaceId: string; instructions: string; status: string; title: string };
 export type WorkspaceLoaderData = {
   workspace: WorkspaceSummary;
   workspaces: WorkspaceSummary[];
-  agents: AgentSummary[];
-  defaultAgentId: string | null;
   selectedSession: SessionSummary | null;
 };
 export type AccountSettingsLoaderData = {
@@ -190,28 +171,16 @@ async function workspaceLoader({ params, request }: { params: { workspaceId?: st
   const workspace = workspaces.find((item) => item.id === workspaceId);
   if (!workspace) throw redirect("/workspaces");
   try {
-    let defaultAgentId: string | null = null;
-    try {
-      const result = await apiJson<{ agent: AgentSummary }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/default-agent`, { signal: request.signal });
-      defaultAgentId = result.agent.id;
-    } catch (error) {
-      if (!(error instanceof ApiError && error.status === 409 && error.message === "agent_configuration_promotion_required")) throw error;
-    }
-    const agentResult = await apiJson<{ agents: AgentSummary[] }>(
-      `/api/workspaces/${encodeURIComponent(workspaceId)}/agents`,
-      { signal: request.signal },
-    );
-    if (!Array.isArray(agentResult.agents)) throw new Error("agent_directory_invalid");
     const url = new URL(request.url);
     const base = `/w/${encodeURIComponent(workspaceId)}`;
-    const sessionId = url.pathname.startsWith(`${base}/sessions/`) ? params.sessionId : url.pathname.startsWith(`${base}/agents/`) ? url.searchParams.get("sessionId") : null;
+    const sessionId = url.pathname.startsWith(`${base}/sessions/`) ? params.sessionId : null;
     let selectedSession: SessionSummary | null = null;
     if (sessionId) {
       const result = await apiJson<{ session: SessionSummary }>(`/api/sessions/${encodeURIComponent(sessionId)}`, { signal: request.signal });
       if (result.session.id !== sessionId || result.session.workspaceId !== workspaceId || result.session.status !== "active") throw new Error("session_identity_invalid");
       selectedSession = result.session;
     }
-    return { workspace, workspaces, agents: agentResult.agents, defaultAgentId, selectedSession };
+    return { workspace, workspaces, selectedSession };
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) throw redirect("/workspaces");
     throw error;
@@ -239,7 +208,7 @@ export function createRouter() {
               Component: WorkspaceEntry,
             },
             { path: "workspaces", loader: workspacesLoader, Component: WorkspaceEntry },
-            ...["general", "preferences", "security", "applications", "platform-models", "global-plugins", "workspace-resources"].map((section) => ({ path: `settings/${section}`, loader: accountSettingsLoader, Component: SettingsRoute })),
+            ...["general", "preferences", "security", "platform-models", "global-plugins", "workspace-resources"].map((section) => ({ path: `settings/${section}`, loader: accountSettingsLoader, Component: SettingsRoute })),
             {
               id: "workspace",
               path: "w/:workspaceId",
@@ -252,9 +221,8 @@ export function createRouter() {
                   Component: WorkspaceHomeRoute,
                   children: [
                     { path: "app", element: <></> },
-                    { path: "agents/:agentId", element: <></> },
                     { path: "sessions/:sessionId", element: <></> },
-                    ...["preferences", "security", "applications", "general", "members", "groups", "plugins", "models", "platform-models", "global-plugins", "workspace-resources", "agents", "environment"].map((section) => ({ path: `settings/${section}`, Component: SettingsRoute })),
+                    ...["preferences", "security", "general", "members", "groups", "plugins", "models", "platform-models", "global-plugins", "workspace-resources", "environment"].map((section) => ({ path: `settings/${section}`, Component: SettingsRoute })),
                   ],
                 },
                 { path: "trash/sessions/:sessionId", Component: TrashSessionRoute },

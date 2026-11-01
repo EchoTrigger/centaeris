@@ -1,7 +1,6 @@
 export type SessionAttention = Readonly<{
   id: string;
   workspaceId: string;
-  agentId: string;
   isUnread: boolean;
   isManuallyUnread: boolean;
   latestAttentionSequence: string;
@@ -23,7 +22,7 @@ export function sessionAttentionSequence(value: unknown): bigint {
 export function validateSessionAttention(value: unknown): asserts value is SessionAttention {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("session attention identity invalid");
   const record = value as Record<string, unknown>;
-  if (![record.id, record.workspaceId, record.agentId].every(identity => typeof identity === "string" && identity.length > 0 && identity.trim() === identity)
+  if (![record.id, record.workspaceId].every(identity => typeof identity === "string" && identity.length > 0 && identity.trim() === identity)
     || typeof record.isManuallyUnread !== "boolean" || typeof record.isUnread !== "boolean") {
     throw new Error("session attention identity invalid");
   }

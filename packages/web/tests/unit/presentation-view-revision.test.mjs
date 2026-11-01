@@ -3,7 +3,7 @@ import test from 'node:test';
 import { WorkspacePresentationController } from '../../src/chat/workspacePresentationController.ts';
 import { validatePresentationFrame } from '../../src/chat/workspacePresentationProtocol.ts';
 import { createTranscriptViewStore } from '../../src/chat/transcriptViewStore.ts';
-const identity = {workspaceId:'workspace',agentId:'agent',sessionId:null};
+const identity = {workspaceId:'workspace',sessionId:null};
 const frame = (contextRevision='0',historyRevision='1',workRevision='2') => ({schema:'workspace.presentation.v1',kind:'viewRevision',...identity,contextRevision,historyRevision,workRevision});
 test('view revisions publish through the same scoped presentation controller and coalesce replays', async()=>{
   const received=[];

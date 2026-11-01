@@ -31,9 +31,9 @@ export class WorkspacePresentationController {
   private applying = false;
   private viewRevision: PresentationViewRevision | null = null;
   constructor(options: Options) {
-    if (!options.workspaceId || !options.agentId) throw new Error('presentation identity is required');
+    if (!options.workspaceId) throw new Error('presentation identity is required');
     this.options = options;
-    this.identity = { workspaceId: options.workspaceId, agentId: options.agentId, sessionId: options.sessionId };
+    this.identity = { workspaceId: options.workspaceId, sessionId: options.sessionId };
     this.store = options.store;
     this.signal = options.signal ?? new AbortController().signal;
     this.viewEpoch = options.store.getListSnapshot().viewEpoch;

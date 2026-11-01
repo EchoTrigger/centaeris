@@ -196,13 +196,6 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .libraryCatalogEmpty > svg { width: 24px; height: 24px; }
 .libraryCatalogEmpty strong { color: var(--text); font-size: 14px; font-weight: 550; }
 .libraryCatalogNoMatch { grid-column: 1 / -1; width: 100%; color: var(--muted); padding: 38px 0; text-align: center; }
-.libraryAgentStrip { display: flex; gap: 18px; overflow-x: auto; padding: 8px 2px 24px; }
-.libraryAgentCard { display: grid; width: 112px; flex: none; justify-items: center; gap: 6px; border-radius: 8px; color: var(--text); padding: 8px 5px; text-align: center; text-decoration: none; }
-.libraryAgentCard:hover { background: var(--surface-container); }
-.libraryAgentCard > .shAgentMark, .libraryAgentCard.isAdd > span { width: 74px; height: 74px; border-radius: 16px !important; }
-.libraryAgentCard.isAdd > span { display: grid; place-items: center; border: 1px dashed var(--border-strong); background: transparent; color: var(--muted); font-size: 24px; }
-.libraryAgentCard strong { max-width: 100%; overflow: hidden; font-size: 13px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
-.libraryAgentCard small { max-width: 100%; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .librarySkillTable { min-width: 0; border-top: 1px solid var(--border); }
 .librarySkillRow { display: grid; min-height: 48px; grid-template-columns: minmax(180px, 1.15fr) minmax(220px, 1.7fr) minmax(110px, .75fr) 86px; align-items: center; gap: 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; }
 .librarySkillRow { width: 100%; border-top: 0; border-right: 0; border-left: 0; background: transparent; padding: 0; font-family: inherit; text-align: left; }
@@ -1197,3 +1190,10 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .workspaceComposerPickerTrigger { border:0; background:transparent; font:inherit; }
 .workspaceComposerPickerTrigger:disabled { cursor:default; opacity:.55; }
 .workspaceComposerPickerPanel button[data-highlighted] { background:var(--surface-variant); outline:0; }
+
+.sessionInstructions { position: relative; font-size: 13px; }
+.sessionInstructions summary { cursor: pointer; }
+.sessionInstructions form { position: absolute; z-index: 4; top: 100%; left: 0; display: grid; gap: 10px; width: min(420px, calc(100vw - 36px)); padding: 16px; border: 1px solid var(--outline-variant); border-radius: 10px; background: var(--surface-color); box-shadow: 0 14px 36px rgba(31, 35, 40, .18); }
+.sessionInstructions label { display: grid; gap: 6px; }
+.sessionInstructions textarea { min-height: 180px; resize: vertical; }
+.sessionInstructions small { color: var(--muted); }

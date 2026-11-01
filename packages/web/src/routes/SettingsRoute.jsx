@@ -1,7 +1,7 @@
 import { t } from "../i18n";
 import { useTranslation } from "../i18n";
 import { useState } from "react";
-import { Bot, Boxes, Cpu, Plug, Settings2, ShieldCheck, SlidersHorizontal, Users, UsersRound, X } from "lucide-react";
+import { Boxes, Cpu, Plug, Settings2, ShieldCheck, SlidersHorizontal, Users, UsersRound, X } from "lucide-react";
 import { Link, Navigate, useLoaderData, useLocation, useNavigate, useOutletContext, useRouteLoaderData } from "react-router";
 import { ApiError, apiJson, jsonOptions } from "../api";
 import { useModalDialog } from "../components/useModalDialog";
@@ -15,17 +15,12 @@ import OperatorWorkspaceResources from "./OperatorWorkspaceResources";
 import PluginSettings from "./PluginSettings";
 import WorkspaceGroupsRoute from "./WorkspaceGroupsRoute";
 import WorkspaceMembersRoute from "./WorkspaceMembersRoute";
-import AppDelegations from "./AppDelegations";
-import AgentSettings from "./AgentSettings";
 import EnvironmentSettings from "./EnvironmentSettings";
-import { canOpenAgentSettings } from "../agent-chat/agentSettingsNavigation";
 
 const ADMIN_ROLES = new Set(["owner", "admin"]);
 const SECTIONS = () => ({
   preferences: { label: t("settingsRoute.preferences"), title: t("settingsRoute.preferences"), icon: SlidersHorizontal, group: "", account: true },
   general: { label: t("pluginSettings.general"), title: t("pluginSettings.general"), icon: Settings2, group: "", account: true },
-  applications: { label: t("appDelegations.title"), title: t("appDelegations.title"), icon: Boxes, group: "", account: true },
-  agents: { label: t("agentSettings.agents"), title: t("agentSettings.agents"), icon: Bot, group: t("settingsRoute.workspace"), agentSettings: true },
   members: { label: t("invitationActivationRoute.member"), title: t("settingsRoute.membersAndPermissions"), icon: Users, group: t("settingsRoute.workspace") },
   environment: { label: t("environmentSettings.title"), title: t("environmentSettings.title"), icon: Settings2, group: t("settingsRoute.workspace") },
   groups: { label: t("settingsRoute.groups"), title: t("settingsRoute.groups"), icon: UsersRound, group: t("settingsRoute.workspace"), hiddenInNav: true },
@@ -148,14 +143,12 @@ export default function SettingsPage() {
   const closeTo = safeReturnTo(chat?.returnTo, workspace) || safeReturnTo(location.state?.returnTo, workspace) || home;
   const canManageWorkspace = Boolean(workspace && ADMIN_ROLES.has(workspace.role));
   const canManageResources = Boolean(workspace && (canManageWorkspace || user?.isSuperuser));
-  const canViewAgents = Boolean(workspaceData && canOpenAgentSettings(workspace));
-  const [agentEditorOpen, setAgentEditorOpen] = useState(false);
   const visibleSections = Object.entries(SECTIONS()).filter(([, item]) => (
-    item.agentSettings ? canViewAgents : item.account || (item.superuser ? Boolean(user?.isSuperuser) : item.resourceManagement ? canManageResources : canManageWorkspace)
+    item.account || (item.superuser ? Boolean(user?.isSuperuser) : item.resourceManagement ? canManageResources : canManageWorkspace)
   ));
-  const dialogRef = useModalDialog({ open: !agentEditorOpen, preserveOpener: section === "agents", onClose: () => navigate(closeTo) });
+  const dialogRef = useModalDialog({ onClose: () => navigate(closeTo) });
 
-  if (SECTIONS()[section]?.agentSettings ? !canViewAgents : !SECTIONS()[section]?.account && !SECTIONS()[section]?.superuser && !(SECTIONS()[section]?.resourceManagement ? canManageResources : canManageWorkspace)) return <Navigate replace to={home} state={{ workspaceNotice: t("settingsRoute.youDoNotHaveAccessToWorkspaceSettings") }} />;
+  if (!SECTIONS()[section]?.account && !SECTIONS()[section]?.superuser && !(SECTIONS()[section]?.resourceManagement ? canManageResources : canManageWorkspace)) return <Navigate replace to={home} state={{ workspaceNotice: t("settingsRoute.youDoNotHaveAccessToWorkspaceSettings") }} />;
   if (!SECTIONS()[section] || (SECTIONS()[section].superuser && !user?.isSuperuser)) {
     return <Navigate replace to={isAccountRoute ? "/settings/preferences" : `${home.replace(/\/app$/, "")}/settings/general`} />;
   }
@@ -163,8 +156,6 @@ export default function SettingsPage() {
   const body = section === "preferences" ? <Preferences userId={user.id} />
     : section === "security" ? <AccountSecurity />
     : section === "workspace-resources" ? <OperatorWorkspaceResources isSuperuser={Boolean(user?.isSuperuser)} />
-    : section === "applications" ? <AppDelegations isSuperuser={Boolean(user?.isSuperuser)} />
-    : section === "agents" ? <AgentSettings key={`${workspace.id}:${location.search}`} onEditorOpenChange={setAgentEditorOpen} />
     : section === "members" ? <WorkspaceMembersRoute embedded />
     : section === "environment" ? <EnvironmentSettings key={workspace.id} workspace={workspace} />
       : section === "groups" ? <WorkspaceGroupsRoute embedded />
@@ -178,8 +169,8 @@ export default function SettingsPage() {
     <div>{body}</div>
   </div> : body;
   return (
-    <main className="settingsModalPage" onMouseDown={() => { if (!agentEditorOpen) navigate(closeTo); }}>
-      <section className={`settingsDialog workspaceSettingsDialog${section === "agents" ? " isAgentSettings" : section === "applications" ? " isApplicationSettings" : ""}`} ref={dialogRef} role="dialog" aria-modal="true" aria-label={SECTIONS()[section].title} tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
+    <main className="settingsModalPage" onMouseDown={() => navigate(closeTo)}>
+      <section className={`settingsDialog workspaceSettingsDialog`} ref={dialogRef} role="dialog" aria-modal="true" aria-label={SECTIONS()[section].title} tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
         <button className="quietCloseButton workspaceSettingsClose" type="button" onClick={() => navigate(closeTo)} aria-label={t("workspaceContextPanel.close")}><X aria-hidden="true" /></button>
         <aside className="workspaceSettingsNav">
           {["", t("settingsRoute.workspace"), t("invitationActivationRoute.administrator")].map((group) => {

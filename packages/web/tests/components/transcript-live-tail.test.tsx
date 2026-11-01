@@ -53,7 +53,7 @@ test('live answer can occupy the persistent response area while reasoning keeps 
 
 test('live text hands off once to referenced committed content even when its checkpoint is lost', async () => {
   const store = createTranscriptViewStore();
-  const identity = { workspaceId: 'workspace', agentId: 'agent', sessionId: 'session' };
+  const identity = { workspaceId: 'workspace', sessionId: 'session' };
   const controller = new WorkspacePresentationController({ ...identity, store });
   const common = { schema: 'workspace.presentation.v1', ...identity } as const;
   const page = { schema: 'transcript.page.v1', sessionId: 'session', projectionVersion: 'transcript.projection.v1', projectionGeneration: 'generation',

@@ -3,14 +3,14 @@ import { useTranslation } from "../i18n";
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router";
-import { Bot, FileText, MessageSquare, Search } from "lucide-react";
-import { sessionChatPath } from "../agent-chat/agentChatNavigation";
+import { FileText, MessageSquare, Search } from "lucide-react";
+import { sessionChatPath } from "./sessionNavigation.mjs";
 import { apiJson } from "../api";
 import { useModalDialog } from "../components/useModalDialog";
 
-const KIND_LABEL = () => ({ note: t("libraryRoute.note"), file: t("libraryRoute.materials"), session: t("searchOverlay.conversations"), agent: t("agentRunRow.agent") });
+const KIND_LABEL = () => ({ note: t("libraryRoute.note"), file: t("libraryRoute.materials"), session: t("searchOverlay.conversations") });
 
-export function SearchOverlay({ sessions, workspace, agents, agentId, onClose }) {
+export function SearchOverlay({ sessions, workspace, onClose }) {
   const { t } = useTranslation();
   const [query, setQuery] = useState("");
   const [library, setLibrary] = useState([]);
@@ -58,17 +58,10 @@ export function SearchOverlay({ sessions, workspace, agents, agentId, onClose })
         results: loadedSessions
           .filter((session) => matches(session.title || ""))
           .slice(0, 12)
-          .map((session) => ({ key: `session:${session.id}`, id: session.id, kind: "session", title: session.title || t("searchOverlay.untitledConversation"), detail: t("agentRunRow.agentSessions"), href: sessionChatPath(workspace.id, session.id) })),
-      },
-      {
-        label: t("agentRunRow.agent"),
-        icon: Bot,
-        results: agents
-          .filter((agent) => matches(`${agent.name} ${agent.description}`))
-          .map((agent) => ({ key: `agent:${agent.id}`, id: agent.id, kind: "agent", title: agent.name, detail: agent.description, href: `/w/${encodeURIComponent(workspace.id)}/agents/${encodeURIComponent(agent.id)}` })),
+          .map((session) => ({ key: `session:${session.id}`, id: session.id, kind: "session", title: session.title || t("searchOverlay.untitledConversation"), detail: t("searchOverlay.conversations"), href: sessionChatPath(workspace.id, session.id) })),
       },
     ];
-  }, [agents, library, loadedSessions, query, workspace.id, t]);
+  }, [library, loadedSessions, query, workspace.id, t]);
   const results = groups.flatMap((group) => group.results.map((result) => ({ ...result, icon: group.icon })));
   const selected = results[Math.min(selectedIndex, Math.max(0, results.length - 1))];
 
@@ -114,7 +107,7 @@ export function SearchOverlay({ sessions, workspace, agents, agentId, onClose })
           <Search aria-hidden="true" />
           <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("searchOverlay.searchWorkspace")} aria-label={t("searchOverlay.searchConversationsAndNotes")} />
         </div>
-        <div className="shSearchFilters"><span>{t("searchOverlay.searchesTitlesAndLoadedDescriptionsOnly")}</span><span>{t("searchOverlay.conversationsNotesAgents")}</span></div>
+        <div className="shSearchFilters"><span>{t("searchOverlay.searchesTitlesAndLoadedDescriptionsOnly")}</span><span>{t("searchOverlay.searchConversationsAndNotes")}</span></div>
         <div className="shSearchBody">
           <div className="shSearchResults" role="listbox" aria-label={t("searchOverlay.searchResults")}>
             {groups.map(({ label, icon: Icon, results: groupResults }) => groupResults.length ? (

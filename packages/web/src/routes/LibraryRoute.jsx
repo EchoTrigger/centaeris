@@ -4,7 +4,7 @@ import { useTranslation } from "../i18n";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useRouteLoaderData, useSearchParams } from "react-router";
 import {
-  Bot, BookOpen, ChevronDown, ChevronRight, Download, FileText, Folder, FolderInput,
+  BookOpen, ChevronDown, ChevronRight, Download, FileText, Folder, FolderInput,
   Image as ImageIcon, Layers, LoaderCircle, MessageSquarePlus, Minus,
   Search, Trash2, Upload, X,
 } from "lucide-react";
@@ -12,7 +12,6 @@ import { ApiError, apiJson as api, apiUrl, jsonOptions } from "../api";
 import { OperationClient } from "../chat/operationReceipts";
 import { MarkdownContent } from "../chat/MarkdownContent";
 import { useModalDialog } from "../components/useModalDialog";
-import { AgentMark } from "../shell/AgentMark";
 import { ShellPage } from "../shell/ShellPage";
 import { MAX_UPLOAD_BATCH_FILES } from "../upload";
 
@@ -44,11 +43,10 @@ function statusLabel(item) {
   throw new Error(`unsupported library status: ${item.status}`);
 }
 
-const LIBRARY_VIEWS = new Set(["materials", "knowledge", "agents", "skills"]);
+const LIBRARY_VIEWS = new Set(["materials", "knowledge", "skills"]);
 const LIBRARY_TABS = () => ([
   ["materials", t("libraryRoute.materials"), Folder],
   ["knowledge", t("libraryRoute.knowledgeBases"), BookOpen],
-  ["agents", t("agentRunRow.agent"), Bot],
   ["skills", "Skills", Layers],
 ]);
 
@@ -61,7 +59,7 @@ function SkillMarkdown({ content }) {
 function LibraryPageContent() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { workspace, agents } = useRouteLoaderData("workspace");
+  const { workspace } = useRouteLoaderData("workspace");
   const { user } = useRouteLoaderData("authenticated");
   const operations = useMemo(() => new OperationClient({ userId: user.id, workspaceId: workspace.id, command: "createSession" }), [user.id, workspace.id]);
   const operationScopeRef = useRef({ operations, active: true });
@@ -379,7 +377,7 @@ function LibraryPageContent() {
     }
   }
 
-  async function createChat(agentId) {
+  async function createChat() {
     setDialog("");
     if (!selectedItems.length || selectedItems.some(isFolder) || !workspace || working) return;
     setWorking(true);
@@ -390,7 +388,7 @@ function LibraryPageContent() {
     try {
       let accepted;
       try {
-        accepted = await operations.submit(`/api/workspaces/${workspace.id}/sessions`, { agentId }, [], selectedItems.map((item) => item.id).sort());
+        accepted = await operations.submit(`/api/workspaces/${workspace.id}/sessions`, {}, [], selectedItems.map((item) => item.id).sort());
       } catch (requestError) {
         targetUnavailable = requestError instanceof ApiError
           && requestError.status === 410
@@ -417,13 +415,13 @@ function LibraryPageContent() {
     if (pending?.operationId !== accepted.operationId) throw new Error("operation_identity_changed");
     const { session } = await api(`/api/sessions/${encodeURIComponent(accepted.sessionId)}`);
     if (!isCurrent()) return;
-    if (session?.id !== accepted.sessionId || typeof session.agentId !== "string") throw new Error("session_response_invalid");
+    if (session?.id !== accepted.sessionId || session.workspaceId !== workspace.id) throw new Error("session_response_invalid");
     if (linkAssets) await Promise.all(pending.assetIds.map((assetId) => api(`/api/sessions/${accepted.sessionId}/assets`, jsonOptions("POST", {
       assetKind: "userLibraryObject", assetId,
     }))));
     if (!isCurrent()) return;
     operations.complete(accepted.operationId);
-    navigate(`${base}/agents/${encodeURIComponent(session.agentId)}?sessionId=${encodeURIComponent(session.id)}`);
+    navigate(`${base}/sessions/${encodeURIComponent(session.id)}`);
   }
 
   async function openPendingChat(linkAssets = true) {
@@ -452,9 +450,7 @@ function LibraryPageContent() {
   }
 
   function startChat() {
-    if (agents.length === 1) void createChat(agents[0].id);
-    else if (agents.length > 1) setDialog("agent");
-    else navigate(`${base}/app`);
+    void createChat();
   }
 
   const visibleObjects = useMemo(() => {
@@ -466,7 +462,6 @@ function LibraryPageContent() {
     });
   }, [filter, objects, query]);
   const normalizedCatalogQuery = query.trim().toLocaleLowerCase();
-  const visibleAgents = agents.filter((agent) => !normalizedCatalogQuery || `${agent.name} ${agent.description}`.toLocaleLowerCase().includes(normalizedCatalogQuery));
   const visibleSkills = (skills || []).filter((skill) => !normalizedCatalogQuery || `${skill.name} ${skill.description}`.toLocaleLowerCase().includes(normalizedCatalogQuery));
   const visibleObjectIds = visibleObjects.map((item) => item.id);
   const allVisibleSelected = visibleObjectIds.length > 0 && visibleObjectIds.every((itemId) => selectedIds.includes(itemId));
@@ -556,12 +551,7 @@ function LibraryPageContent() {
               })}
             </div>
           </> : libraryView === "knowledge" ? <div className="libraryCatalogEmpty"><BookOpen aria-hidden="true" /><strong>{t("libraryRoute.noKnowledgeBasesYet")}</strong><span>{t("libraryRoute.connectedSourcesWillAppearHere")}</span></div>
-            : libraryView === "agents" ? <div className="libraryAgentStrip" aria-label={t("agentRunRow.agent")}>
-              {visibleAgents.map((agent) => <Link className="libraryAgentCard" to={`${base}/agents/${encodeURIComponent(agent.id)}`} key={agent.id}><AgentMark agent={agent} /><strong>{agent.name}</strong><small>{agent.description || t("libraryRoute.privateAgents")}</small></Link>)}
-              <Link className="libraryAgentCard isAdd" to={`${base}/settings/agents?new=1`}><span aria-hidden="true">＋</span><strong>{t("libraryRoute.newAgent")}</strong></Link>
-              {!visibleAgents.length && normalizedCatalogQuery ? <p className="libraryCatalogNoMatch">{t("libraryRoute.noMatchingAgents")}</p> : null}
-            </div>
-              : <>
+            : <>
                   {(["owner", "admin"].includes(workspace.role) || user.isSuperuser) ? <Link to={`${base}/settings/plugins`}>{t("workspaceResources.manageSkills")}</Link> : null}
                   {catalogError ? <div className="errorBanner libraryError" role="alert">{catalogError}</div> : null}
                   {skills === null && !catalogError ? <div className="libraryCatalogEmpty" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.loadingSkills")}</div> : null}
@@ -623,7 +613,6 @@ function LibraryPageContent() {
           </>}
           {dialog === "folder" && <><h2 id="library-dialog-title">{t("libraryRoute.newFolder")}</h2><input autoFocus value={dialogTitle} onChange={(event) => setDialogTitle(event.target.value)} placeholder={t("libraryRoute.folderName")} /><div className="libraryDialogActions"><button type="button" onClick={() => setDialog("")}>{t("agentRunRow.cancel")}</button><button className="primary" type="button" disabled={working || !dialogTitle.trim()} onClick={createFolder}>{t("libraryRoute.create")}</button></div></>}
           {dialog === "move" && <><header className="libraryMoveHeader"><h2 id="library-dialog-title">{t("libraryRoute.moveTo")}</h2><button type="button" onClick={() => setDialog("")} aria-label={t("libraryRoute.closeMoveDialog")}><X aria-hidden="true" /></button></header><button className="libraryMoveRoot" type="button" onClick={() => loadMoveDirectory("")}>{t("workspaceContextPanel.library")}</button>{error && <div className="errorBanner" role="alert">{error}</div>}<div className="libraryMoveObjects">{moveLoading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.loadingFolders")}</div> : moveObjects.map((item) => { const ItemIcon = isFolder(item) ? Folder : isImage(item) ? ImageIcon : FileText; const disabled = !isFolder(item) || selectedIds.includes(item.id); return isFolder(item) ? <button className="libraryMoveObject folder" type="button" key={item.id} disabled={disabled} onClick={() => loadMoveDirectory(item.id)}><ItemIcon aria-hidden="true" /><span>{item.displayName}</span></button> : <div className="libraryMoveObject file" key={item.id}><ItemIcon aria-hidden="true" /><span>{item.displayName}</span></div>; })}</div><footer className="libraryMoveActions">{creatingMoveFolder ? <form className="libraryMoveCreate" onSubmit={(event) => { event.preventDefault(); createMoveFolder(); }}><input autoFocus value={moveFolderName} onChange={(event) => setMoveFolderName(event.target.value)} placeholder={t("libraryRoute.newFolderName")} /><button className="primary" type="submit" disabled={working || !moveFolderName.trim()}>{t("libraryRoute.create")}</button></form> : <button type="button" disabled={working} onClick={() => { setError(""); setCreatingMoveFolder(true); }}>{t("libraryRoute.newFolder")}</button>}<span /><button type="button" onClick={() => setDialog("")}>{t("agentRunRow.cancel")}</button><button className="primary" type="button" disabled={working || moveLoading} onClick={moveSelected}>{t("libraryRoute.moveHere")}</button></footer></>}
-          {dialog === "agent" && <><h2 id="library-dialog-title">{t("libraryRoute.selectAgent")}</h2><div className="libraryAgentChoices">{agents.map((agent) => <button type="button" key={agent.id} onClick={() => void createChat(agent.id)}>{agent.name}</button>)}</div><div className="libraryDialogActions"><button type="button" onClick={() => setDialog("")}>{t("agentRunRow.cancel")}</button></div></>}
         </section>
       </div>}
     </ShellPage>

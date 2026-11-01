@@ -32,14 +32,14 @@ test('evicted historical content waits until it becomes visible before demand re
 
 for (const deferredReturn of [false, true]) test(`async snapshot publication owns pushed references before React can start an HTTP reader (${deferredReturn ? 'deferred return' : 'immediate async return'})`, async () => {
   const store = createTranscriptViewStore();
-  const common = { schema: 'workspace.presentation.v1', workspaceId: 'workspace', agentId: 'agent', sessionId: 'session' } as const;
+  const common = { schema: 'workspace.presentation.v1', workspaceId: 'workspace', sessionId: 'session' } as const;
   const reference = { refId: 'session-event:answer', revision: '1', byteLength: '6' };
   const page = { schema: 'transcript.page.v1', sessionId: 'session', projectionVersion: 'transcript.projection.v1', projectionGeneration: 'generation', sourceHighWater: '1',
     olderCursor: null, hasOlder: false, resumeCursors: [{ streamId: 'workspace-transcript.v1', cursor: '1' }],
     blocks: [{ blockId: 'answer', blockRevision: '1', orderKey: { sourceSequence: '1', ordinal: 0 }, body: { kind: 'assistantText',
       content: { inlineContent: null, sourceRef: reference }, status: 'completed' } }],
   } as const;
-  const controller = new WorkspacePresentationController({ workspaceId: 'workspace', agentId: 'agent', sessionId: 'session', store,
+  const controller = new WorkspacePresentationController({ workspaceId: 'workspace', sessionId: 'session', store,
     applySnapshot: async fresh => {
       const epoch = store.openTail(fresh);
       if (deferredReturn) await new Promise(resolve => setTimeout(resolve, 0));

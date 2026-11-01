@@ -1,7 +1,7 @@
 import { Link } from "react-router";
 import { Ellipsis, LoaderCircle, Mail, MailOpen, MessageSquare, Pencil, Pin, PinOff, Trash2 } from "lucide-react";
 import { useTranslation } from "../i18n";
-import { sessionChatPath } from "../agent-chat/agentChatNavigation";
+import { sessionChatPath } from "./sessionNavigation.mjs";
 
 export function SessionNavigationRow({ workspaceId, session, actions, active = false, running = session.hasActiveAgentRun, icon = false, nested = false, onSelect }) {
   const { t } = useTranslation();
