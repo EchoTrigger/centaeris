@@ -42,7 +42,6 @@ import {
   writePreferredModelIdentity,
 } from "../preferences";
 import { HomePlane, HomeQuickActions } from "../shell/HomePlane";
-import { AgentDocumentIdentity } from "../shell/useAgentDocumentIdentity";
 import { sessionChatPath } from "../agent-chat/agentChatNavigation";
 import { SessionAgentBreadcrumb } from "../agent-chat/SessionAgentBreadcrumb";
 import { ShellSidebar } from "../shell/ShellSidebar";
@@ -1293,7 +1292,6 @@ export function AppPageContent({ agentId, initialSession = null, workspaceDraft,
       className={`workspaceWorkbench ${isSidebarOpen ? "withSidebar" : "withoutSidebar"} ${contextPanelClass}`}
       style={{ "--browser-panel-width": `${browserPanelWidthPx}px` }}
     >
-      <AgentDocumentIdentity agent={activeAgent} />
       <div className="workspaceSidebarSlot">
         {isSidebarOpen ? <ShellSidebar
           workspace={workspace}

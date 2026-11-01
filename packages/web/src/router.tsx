@@ -1,3 +1,4 @@
+import { useWorkspaceDocumentIdentity } from "./shell/useWorkspaceDocumentIdentity";
 
 import { useTranslation } from "./i18n";
 import { useEffect, useState } from "react";
@@ -90,6 +91,7 @@ function WorkspaceLayout() {
   useTranslation();
   const { user } = useRouteLoaderData("authenticated") as AuthLoaderData;
   const { workspace } = useLoaderData() as WorkspaceLoaderData;
+  useWorkspaceDocumentIdentity(workspace);
 
   useEffect(() => {
     try {

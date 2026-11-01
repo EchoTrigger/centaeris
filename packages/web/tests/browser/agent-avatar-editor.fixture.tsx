@@ -4,7 +4,7 @@ import { apiJson, configureApi, jsonOptions } from "../../src/api";
 import { i18n } from "../../src/i18n";
 import { AgentEditorModal } from "../../src/shell/AgentEditorModal";
 import { AgentMark } from "../../src/shell/AgentMark";
-import { AgentDocumentIdentity } from "../../src/shell/useAgentDocumentIdentity";
+import { useWorkspaceDocumentIdentity } from "../../src/shell/useWorkspaceDocumentIdentity";
 import "../../src/globals.css";
 
 configureApi({ apiBaseUrl: location.origin });
@@ -30,6 +30,7 @@ window.fetch = async (input, init) => {
   throw new Error(`Unexpected avatar editor fixture request: ${method} ${path}`);
 };
 function Fixture() {
+  useWorkspaceDocumentIdentity({ id: "workspace", name: "Avatar workspace" });
   const [agent, setAgent] = useState(stored);
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -42,7 +43,7 @@ function Fixture() {
     } catch { setError("Synthetic profile save failed"); }
     finally { setBusy(false); }
   }
-  return <><AgentDocumentIdentity agent={agent} /><main>
+  return <><main>
     <header data-saved-agent><AgentMark className="shWorkspaceAgentMark" agent={agent} /><h1>{agent.name}</h1></header>
     <button type="button" onClick={() => setEditing(true)}>Edit profile</button>
   </main>{editing ? <AgentEditorModal agent={agent} heading="Edit Agent" submitLabel="Save profile" onSave={save} onClose={() => setEditing(false)} busy={busy} error={error} /> : null}</>;

@@ -68,7 +68,6 @@ vi.mock("../../src/chat/TranscriptBlockList", () => ({
 }));
 vi.mock("../../src/shell/ShellSidebar", () => ({ ShellSidebar: ({ sessionProps }: { sessionProps: { sessions: { id: string }[]; renderSessionRow: (session: { id: string }) => React.ReactNode } }) => <nav aria-label="Session navigation">{sessionProps.sessions.map(sessionProps.renderSessionRow)}</nav> }));
 vi.mock("../../src/shell/HomePlane", () => ({ HomePlane: () => null, HomeQuickActions: () => null }));
-vi.mock("../../src/shell/useAgentDocumentIdentity", () => ({ AgentDocumentIdentity: () => null }));
 vi.mock("../../src/agent-chat/SessionAgentBreadcrumb", () => ({ SessionAgentBreadcrumb: () => null }));
 vi.mock("../../src/components/WorkspaceContextPanel", () => ({ WorkspaceContextPanel: () => null }));
 vi.mock("../../src/components/DocumentPreview", () => ({ DocumentPreview: () => null }));

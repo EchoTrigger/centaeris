@@ -376,7 +376,7 @@ for (const view of [
   { name: "workspace welcome", workspaceDraft: true, search: "" },
   { name: "new Agent conversation", workspaceDraft: false, search: "?new=1" },
   { name: "existing Agent Session", workspaceDraft: false, search: "?sessionId=work" },
-]) test(`${view.name} presents its actual Agent identity without selecting the first directory entry`, context => {
+]) test(`${view.name} presents its actual Agent in the conversation without selecting the first directory entry`, context => {
   const previousWindow = globalThis.window; const previousStorage = globalThis.sessionStorage;
   globalThis.window = { innerWidth: 1280, addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {} };
   globalThis.sessionStorage = { getItem: () => null };
@@ -385,6 +385,6 @@ for (const view of [
   const subject = renderer(AppPageContent, { agentId: selected.id, workspaceDraft: view.workspaceDraft, location: { search: view.search, state: null }, modelsVersion: 0 }, env);
   try {
     subject.render();
-    assert.equal(component(subject.tree, "AgentDocumentIdentity")?.props.agent, selected, "the rendered page hands its actual Agent to the browser identity component");
+    assert.equal(component(subject.tree, "ShellSidebar")?.props.activeAgent, selected, "conversation navigation retains the selected Agent within the Workspace");
   } finally { subject.unmount(); }
 });

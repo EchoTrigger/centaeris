@@ -9,7 +9,7 @@ import { runBrowser, waitFor } from "./browserHarness.mjs";
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==", "base64");
 
-test("avatar file selection previews locally and saves atomically with name, persisted mark and browser tab", async () => {
+test("avatar file selection previews locally and saves atomically with name and persisted mark while retaining the Workspace tab", async () => {
   const server = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), server: { host: "127.0.0.1", port: 0, strictPort: false },
     optimizeDeps: { entries: ["tests/browser/agent-avatar-editor.html"] },
     plugins: [{ name: "saved-avatar-image", configureServer(vite) {
@@ -52,11 +52,11 @@ test("avatar file selection previews locally and saves atomically with name, per
         await send("DOM.setFileInputFiles", { nodeId, files: [image] }); await frame();
         await waitFor(() => evaluate("document.querySelector('[role=dialog] .shAgentHeroMark img')?.getAttribute('src')?.startsWith('data:image/png;base64,')"), "local avatar preview");
       };
-      await waitFor(() => evaluate("document.title==='Private Agent'"), "initial saved identity");
+      await waitFor(() => evaluate("document.title==='Avatar workspace'"), "initial saved identity");
       await click("Edit profile"); await chooseFile();
       await waitFor(() => evaluate("document.querySelector('[role=dialog] .shAgentHeroMark img')?.complete"), "transparent preview decoded");
       await assertThemeTransparency("[role=dialog] .shAgentHeroMark img");
-      assert.equal(await evaluate("document.title"), "Private Agent", "unsaved image/name drafts do not change the saved tab identity");
+      assert.equal(await evaluate("document.title"), "Avatar workspace", "unsaved image/name drafts retain the Workspace tab identity");
       const name = await evaluate("(() => { const input=document.querySelector('input[name=agentName]'); input.focus(); input.select(); return true; })()");
       assert.equal(name, true); await send("Input.insertText", { text: "Uploaded portrait Agent" }); await frame();
       assert.deepEqual(await writes(), [], "preview and name changes do not issue a write before Save");
@@ -65,7 +65,7 @@ test("avatar file selection previews locally and saves atomically with name, per
         await writeFile(join(process.env.CENTAERIS_TEST_SCREENSHOT_DIR, "agent-avatar-editor-preview.png"), Buffer.from(screenshot.data, "base64"));
       }
       await click("Save profile");
-      await waitFor(() => evaluate("!document.querySelector('[role=dialog]') && document.title==='Uploaded portrait Agent' && document.querySelector('link[rel=icon]')?.getAttribute('href')?.endsWith('?v=saved')"), "saved profile and favicon");
+      await waitFor(() => evaluate("!document.querySelector('[role=dialog]') && document.querySelector('[data-saved-agent] h1')?.textContent==='Uploaded portrait Agent' && document.title==='Avatar workspace' && document.querySelector('link[rel=icon]')?.getAttribute('href')==='/centaeris-mark.png'"), "saved profile with Workspace tab identity");
       const saved = await writes(); assert.equal(saved.length, 1); assert.equal(saved[0].path, "/api/agents/fixture-agent");
       assert.deepEqual(saved[0].body, { name: "Uploaded portrait Agent", description: "Synthetic avatar editor", instructions: "Keep the existing instructions.", avatarKind: "centaeris", avatarDataBase64: png.toString("base64") });
       assert.equal(await evaluate("document.querySelector('[data-saved-agent] img').getAttribute('src').endsWith('?v=saved')"), true);
