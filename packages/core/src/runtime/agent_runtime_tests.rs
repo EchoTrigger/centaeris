@@ -43,6 +43,8 @@ mod host_event_tests;
 mod prompt_compaction_attempt_tests;
 mod prompt_compaction_live_chain_tests;
 mod prompt_compaction_recovery_tests;
+#[path = "agent_runtime_tests/question_tests.rs"]
+mod question_tests;
 mod recovery_tool_origin_tests;
 mod wait_recovery_tests;
 
@@ -9618,31 +9620,33 @@ async fn agent_run_cancellation_abandons_runtime_job_waiter_before_terminal_comm
 #[tokio::test]
 async fn query_loop_answer_now_closes_question_wait_before_toolless_convergence() {
     let store = AgentRuntimeTestStore::new();
-    let engine = AgentRuntime::new_for_test(store.clone(), AgentRuntimeConfig::default());
+    let engine = AgentRuntime::new_for_test(
+        store.clone(),
+        AgentRuntimeConfig {
+            question_input: question::QuestionInputCapability::PersistentResponses,
+            ..AgentRuntimeConfig::default()
+        },
+    );
     let agent_run_identity = RuntimeAgentRunIdentityV1 {
         agent_run_id: "agent-run-answer-now-question".to_string(),
         execution_id: "execution-answer-now-question".to_string(),
         authorization_digest: format!("sha256:{}", "a".repeat(64)),
     };
     let wait_turn_id = "turn-answer-now-question";
-    let waiting = crate::runtime::contracts::RuntimeAwaitQuestionCheckpointV1::new(
-        &agent_run_identity,
-        wait_turn_id,
-        "question-1",
-    )
-    .expect("question wait");
-    store
-        .save_checkpoint(CheckpointRecord {
-            checkpoint_id: "checkpoint:answer-now-question".to_string(),
-            kind: crate::runtime::contracts::CheckpointKindV1::Wait,
-            session_id: "chat-answer-now-question".to_string(),
-            turn_id: wait_turn_id.to_string(),
-            status: "paused_question".to_string(),
-            done_reason: Some("question".to_string()),
-            updated_at_ms: now_ms(),
-            payload_json: serde_json::to_string(&waiting).expect("serialize question checkpoint"),
-        })
-        .expect("persist question checkpoint");
+    engine
+        .process_turn_with_stream_sink_async(
+            ProcessTurnRequest {
+                session_id: "chat-answer-now-question".into(),
+                turn_id: wait_turn_id.into(),
+                input: TurnInput::UserMessage("Ask me a question".into()),
+                agent_run_identity: Some(agent_run_identity.clone()),
+                generate_result: question_tests::question_generate_result(),
+                agent_run_resource_usage: AgentRunResourceUsageV1::default(),
+            },
+            None,
+        )
+        .await
+        .expect("model question wait");
     engine
         .persist_answer_now_requested(
             "chat-answer-now-question",

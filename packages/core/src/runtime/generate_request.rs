@@ -175,12 +175,24 @@ impl<
         &self,
         session: &SessionStateSnapshot,
     ) -> Result<(Vec<ModelToolDefinition>, String), String> {
-        tool_projection::build_generate_tool_projection(
+        let (mut definitions, guidance) = tool_projection::build_generate_tool_projection(
             session,
             self.tools_port.dynamic_tool_registry(),
             self.config.allowed_tools.as_deref(),
             self.tools_port.execution_host_kind(),
-        )
+        )?;
+        if self.config.question_input == question::QuestionInputCapability::PersistentResponses
+            && self.config.allowed_tools.is_none()
+        {
+            if definitions
+                .iter()
+                .any(|tool| tool.name == question::TOOL_NAME)
+            {
+                return Err("reserved_user_input_tool_collision".into());
+            }
+            definitions.push(question::tool_definition());
+        }
+        Ok((definitions, guidance))
     }
 
     #[cfg(test)]

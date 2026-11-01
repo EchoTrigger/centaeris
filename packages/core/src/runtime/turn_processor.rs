@@ -161,13 +161,14 @@ impl<
         } else {
             None
         };
-        if matches!(routed.continuation, QueryContinuation::ExecuteTools)
-            && ensure_model_assistant_semantics_message(
-                &self.message_handler,
-                &mut session,
-                &effective_generate_result,
-            )?
-        {
+        if matches!(
+            routed.continuation,
+            QueryContinuation::ExecuteTools | QueryContinuation::AwaitQuestion
+        ) && ensure_model_assistant_semantics_message(
+            &self.message_handler,
+            &mut session,
+            &effective_generate_result,
+        )? {
             self.session_manager.save_session(&session)?;
         }
         if matches!(routed.continuation, QueryContinuation::AwaitQuestion) {
@@ -213,11 +214,6 @@ impl<
         match routed.continuation {
             QueryContinuation::AwaitQuestion => {
                 let question_message = "Waiting for user input.";
-                self.message_handler.push_assistant_message(
-                    &mut session,
-                    question_message,
-                    JsonMap::new(),
-                );
                 runtime_events.push(build_runtime_event_status_event(
                     req.session_id.as_str(),
                     req.turn_id.as_str(),
@@ -232,9 +228,14 @@ impl<
                     req.session_id.as_str(),
                     req.turn_id.as_str(),
                     req.turn_id.as_str(),
-                    json!({
-                        "message": question_message,
-                    }),
+                    serde_json::from_str(
+                        routed
+                            .state
+                            .pending_question_json
+                            .as_deref()
+                            .ok_or("question_payload_required")?,
+                    )
+                    .map_err(|error| format!("invalid question payload: {error}"))?,
                 ));
             }
             QueryContinuation::ExecuteTools => {

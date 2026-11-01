@@ -1952,6 +1952,10 @@ impl<
                     call.name
                 ));
             }
+            if call.name == question::TOOL_NAME {
+                question::question_from_result(generate_result)?;
+                continue;
+            }
             if self.tools_port.tool_turn_behavior(call.name.as_str())?
                 == ToolTurnBehavior::CompleteTurnOnSuccess
             {
@@ -1999,12 +2003,7 @@ impl<
         tool_name: &str,
     ) -> Result<bool, String> {
         let canonical = canonicalize_tool_name(tool_name).unwrap_or(tool_name);
-        let (definitions, _) = build_generate_tool_projection(
-            session,
-            self.tools_port.dynamic_tool_registry(),
-            self.config.allowed_tools.as_deref(),
-            self.tools_port.execution_host_kind(),
-        )?;
+        let (definitions, _) = self.build_generate_tool_projection(session)?;
         Ok(definitions
             .iter()
             .any(|definition| definition.name == canonical))
