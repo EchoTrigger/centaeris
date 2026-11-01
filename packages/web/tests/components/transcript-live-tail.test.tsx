@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import { useSyncExternalStore } from 'react';
@@ -131,4 +131,37 @@ test('only explicitly truncated tool detail gains an authorized complete-downloa
   vi.mocked(registry.getSnapshot).mockReturnValue({ version: 2, records: new Map([['call', { ...record, previewTruncated: false }]]) });
   view.rerender(<TranscriptToolGroupCard store={store} blockIds={['tool']} toolOperations={registry} />);
   expect(screen.queryByRole('link', { name: 'libraryObjectRoute.downloadFile' })).toBeNull();
+});
+
+
+test('each tool opens directly to its command and output while failures stay visible', async () => {
+  const user = userEvent.setup();
+  const store = createTranscriptViewStore();
+  store.openTail({ schema: 'transcript.page.v1', sessionId: 'session', projectionVersion: 'transcript.projection.v1', projectionGeneration: 'generation',
+    sourceHighWater: '2', olderCursor: null, hasOlder: false, resumeCursors: [{ streamId: 'workspace-transcript.v1', cursor: '2' }],
+    blocks: ['first', 'second'].map((id, index) => ({ blockId: id, blockRevision: '1', orderKey: { sourceSequence: String(index + 1), ordinal: 0 }, body: {
+      kind: 'tool', callId: id, toolName: 'bash', status: index ? 'failed' : 'completed', summary: id, summaryRef: null, outputRef: null,
+    } })),
+  });
+  const registry = new TranscriptToolOperationRegistry();
+  const records = ['first', 'second'].map((id, index) => [id, { callId: id, call: { toolName: 'bash', normalizedInput: { command: `echo ${id}` } },
+    result: null, status: index ? 'failed' as const : 'completed' as const,
+    operations: [{ callId: id, toolName: 'bash', kind: 'command', outputPreview: `${id} output`, ...(index ? { error: 'Permission denied' } : {}) }],
+  }] as const);
+  vi.spyOn(registry, 'getSnapshot').mockReturnValue({ version: 1, records: new Map(records) });
+  render(<TranscriptToolGroupCard store={store} blockIds={['first', 'second']} toolOperations={registry} />);
+  expect(screen.getAllByRole('button')).toHaveLength(2);
+  expect(screen.getByText('transcriptTool.status.failed')).toBeTruthy();
+  expect(screen.queryByText('first output')).toBeNull();
+  await user.click(screen.getByRole('button', { name: /echo first/ }));
+  expect(within(screen.getByRole('region', { name: 'transcriptTool.command' })).getByText('$ echo first')).toBeTruthy();
+  expect(within(screen.getByRole('region', { name: 'transcriptTool.output' })).getByText('first output')).toBeTruthy();
+  expect(screen.queryByText('second output')).toBeNull();
+  await user.click(screen.getByRole('button', { name: /echo second/ }));
+  expect(screen.getByText('first output')).toBeTruthy();
+  expect(screen.getByText('second output')).toBeTruthy();
+  expect(screen.getByRole('alert').textContent).toBe('Permission denied');
+  await user.click(screen.getByRole('button', { name: /echo first/ }));
+  expect(screen.queryByText('first output')).toBeNull();
+  expect(screen.getByText('second output')).toBeTruthy();
 });
