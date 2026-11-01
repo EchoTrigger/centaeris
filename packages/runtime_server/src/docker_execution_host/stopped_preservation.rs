@@ -302,7 +302,7 @@ mod tests {
     ) {
         let authorization: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
             serde_json::from_str(include_str!(
-                "../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+                "../../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
             ))
             .unwrap();
         let lease = RuntimeJobLeaseFence {

@@ -713,7 +713,7 @@ fn postgres_control_cancellation_completes_without_taking_foreign_environment() 
     );
     assert_eq!(invoke("/internal/jobs/control/start",serde_json::json!({"schema":"runtime.job.control.start.v1","jobId":target.fence.job_id,"leaseOwner":owner,"atMs":now})).0,200);
     let control = serde_json::json!({"agentRunId":target.original.agent_run_id,"authorizationDigest":grant_digest,"authorizationSignature":target.original.signature(fixture::KEY).unwrap(),"authorization":target.original});
-    let execute_start = serde_json::json!({"schema":"workspace.agent_run.start.v1","agentRunId":target.original.agent_run_id,"turnId":"turn-control-probe","prompt":"probe","initialInput":{"type":"userMessage"},"agentInstructions":"","modelContextTokens":131072,"modelMaxOutputTokens":4096,"authorizationDigest":grant_digest,"authorizationSignature":target.original.signature(fixture::KEY).unwrap(),"authorization":target.original,"environmentAuthorization":target.grant,"tailAction":{"type":"append"}});
+    let execute_start = serde_json::json!({"schema":"workspace.agent_run.start.v1","agentRunId":target.original.agent_run_id,"turnId":"turn-control-probe","prompt":"probe","initialInput":{"type":"userMessage"},"sessionInstructions":"","modelContextTokens":131072,"modelMaxOutputTokens":4096,"authorizationDigest":grant_digest,"authorizationSignature":target.original.signature(fixture::KEY).unwrap(),"authorization":target.original,"environmentAuthorization":target.grant,"tailAction":{"type":"append"}});
     let (status, rejected) = invoke(
         "/agent-runs/step",
         serde_json::json!({"schema":"runtime.agent_run.step.v1","jobId":target.fence.job_id,"leaseOwner":owner,"agentRunStart":execute_start}),

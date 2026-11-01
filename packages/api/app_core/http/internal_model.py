@@ -26,7 +26,6 @@ from app_core.runtime_contract import (
     validate_agent_run_authorization_payload,
 )
 from app_core.workspace_access import agent_run_membership_is_current
-from app_core.agent_message_prompt import conversation_provider_prompt
 
 from .security import internal_token_auth
 from .stream_response import OwnedAsyncStreamingHttpResponse
@@ -242,9 +241,4 @@ def _validate_model_run(body):
         validate_prepared_prompt(authorization.agent_run.modelConfig, body)
     except ModelProviderError as error:
         return JsonResponse({"error": error.reasonType}, status=400)
-    # This parsed envelope is provider-local. Derive its System channel without
-    # altering Core's messages, tools, authorization or any persisted Agent fact.
-    body["preparedPrompt"] = conversation_provider_prompt(
-        authorization.agent_run, prepared_prompt,
-    )
     return authorization.payload["modelConfigRef"]

@@ -5,7 +5,7 @@ from django.test import TransactionTestCase
 from django.utils import timezone
 
 from .migration_testing import isolated_migration_database
-from .presentation_changes import agent_change_key, drain_pending_changes, session_change_key
+from .presentation_changes import drain_pending_changes, session_change_key
 from .session_attention import session_attention_snapshot
 
 
@@ -68,7 +68,7 @@ class SessionManualUnreadMigrationTests(TransactionTestCase):
                     self.assertEqual(cursor.fetchone()[0], expected[session.pk][0])
             session_id = next(iter(expected))
             # These migration stages use Agent navigation, before workspace navigation.
-            keys = {kind: agent_change_key(agent.pk, kind) for kind in ("navigation", "history", "work")}
+            keys = {kind: f"agent:{agent.pk}:{kind}" for kind in ("navigation", "history", "work")}
             keys.update({kind: session_change_key(session_id, kind) for kind in ("state", "context")})
 
             def versions():
@@ -89,7 +89,7 @@ class SessionManualUnreadMigrationTests(TransactionTestCase):
             before = versions()
             reverted.get_model("app_core", "Session").objects.using(alias).filter(pk=session_id).update(isUnread=True)
             pending = reverted.get_model("app_core", "PresentationChangeOutbox").objects.using(alias)
-            self.assertEqual(set(pending.values_list("key", flat=True)), {agent_change_key(agent.pk, "navigation")})
+            self.assertEqual(set(pending.values_list("key", flat=True)), {f"agent:{agent.pk}:navigation"})
             drain_pending_changes(using=alias)
             after = versions()
             self.assertEqual({kind for kind in before if before[kind] != after[kind]}, {"navigation"})
@@ -99,7 +99,7 @@ class SessionManualUnreadMigrationTests(TransactionTestCase):
             for status, deleted_at in [("deleted", timezone.now()), ("active", None)]:
                 sessions.filter(pk=session_id).update(status=status, deletedAt=deleted_at)
                 self.assertEqual(set(pending.values_list("key", flat=True)), {
-                    agent_change_key(agent.pk, kind) for kind in ("navigation", "history", "work")
+                    f"agent:{agent.pk}:{kind}" for kind in ("navigation", "history", "work")
                 } | {session_change_key(session_id, "state")})
                 drain_pending_changes(using=alias)
             MigrationExecutor(database).migrate(self.current)

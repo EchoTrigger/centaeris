@@ -6,7 +6,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
 
-from .models import Agent, Session, Source, UserLibraryObject, Workspace, WorkspaceMembership
+from .models import Session, Source, UserLibraryObject, Workspace, WorkspaceMembership
 
 
 class TrashOrderingTests(TestCase):
@@ -15,21 +15,18 @@ class TrashOrderingTests(TestCase):
         cls.user = get_user_model().objects.create_user(username="trash-order")
         cls.workspace = Workspace.objects.create(name="Trash order", createdBy=cls.user)
         WorkspaceMembership.objects.create(workspace=cls.workspace, user=cls.user, role="owner")
-        parent = Agent.objects.create(workspace=cls.workspace, owner=cls.user, name="Active parent")
         instant = timezone.now() - timedelta(minutes=1)
         cls.expected = []
         # Identical timestamps force ID comparisons at multiple page boundaries.
         identities = [(f"{letter}{number:03}", instant) for letter in "aA_0-Zz" for number in range(17)]
         # Deliberately oppose lexical order: time must remain the primary key.
         identities += [("zz-newest", instant + timedelta(seconds=1)), ("00-oldest", instant - timedelta(seconds=1))]
-        for kind in ("agent", "library", "session", "source"):
+        for kind in ("library", "session", "source"):
             for suffix, deleted_at in identities:
                 identity = f"{kind}_{suffix}"
                 base = {"id": identity, "status": "deleted", "deletedAt": deleted_at}
-                if kind == "agent":
-                    Agent.objects.create(**base, workspace=cls.workspace, owner=cls.user, name=identity)
-                elif kind == "session":
-                    Session.objects.create(**base, workspace=cls.workspace, owner=cls.user, agent=parent)
+                if kind == "session":
+                    Session.objects.create(**base, workspace=cls.workspace, owner=cls.user)
                 elif kind == "source":
                     Source.objects.create(**base, workspace=cls.workspace, createdBy=cls.user,
                                           name=identity, sourceType="uploadedFile", deletedFromStatus="ready")
@@ -66,7 +63,7 @@ class TrashOrderingTests(TestCase):
         self.assertEqual(len(set(collected)), len(expected))
 
     def test_each_kind_has_exact_pages_and_no_missing_or_repeated_ids(self):
-        for kind in ("agent", "library", "session", "source"):
+        for kind in ("library", "session", "source"):
             with self.subTest(kind=kind):
                 self.assert_pages(kind)
 

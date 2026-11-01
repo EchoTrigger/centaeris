@@ -367,7 +367,7 @@ mod frame_tests {
     use hosted_execution::protocol::FileSystemFrameMetadata;
     fn frame(content: Vec<u8>) -> Vec<u8> {
         let mut auth:MaintenanceAuthorization=serde_json::from_str(include_str!("../../../../tests/workspace/fixtures/environment_maintenance_authorization/v1/valid.json")).unwrap();
-        let profile:crate::agent_run_authorization::EnvironmentProfile=serde_json::from_value(serde_json::from_str::<serde_json::Value>(include_str!("../../../../tests/workspace/fixtures/environment_provision_authorization/v1/valid.json")).unwrap()["payload"]["environmentProfile"].clone()).unwrap();
+        let profile:crate::agent_run_authorization::EnvironmentProfile=serde_json::from_value(serde_json::from_str::<serde_json::Value>(include_str!("../../../../tests/workspace/fixtures/environment_provision_authorization/v2/valid.json")).unwrap()["payload"]["environmentProfile"].clone()).unwrap();
         let (metadata, raw) = FileSystemFrameMetadata::from_request(
             centaeris_core::execution::ExecutionFileSystemRequest {
                 operation_id: None,

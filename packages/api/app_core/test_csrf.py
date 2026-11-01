@@ -7,7 +7,6 @@ from django.utils import timezone
 
 from app_core.assets import tombstone_stored_object
 from app_core.models import (
-    Agent,
     Session,
     Source,
     SourceGrant,
@@ -153,79 +152,18 @@ class CsrfTests(TestCase):
         self.assertEqual(added.status_code, 403)
         self.assertFalse(group.members.exists())
 
-    def test_agent_mutations_reject_missing_token(self):
+
+    def test_session_restore_and_purge_reject_missing_token(self):
         workspace = Workspace.objects.create(name="Default", createdBy=self.user)
-        WorkspaceMembership.objects.create(
-            workspace=workspace,
-            user=self.user,
-            role="owner",
-        )
-        agent = Agent.objects.create(
-            workspace=workspace,
-            owner=self.user,
-            name="Private",
-        )
+        WorkspaceMembership.objects.create(workspace=workspace, user=self.user, role="owner")
+        session = Session.objects.create(workspace=workspace, owner=self.user,
+            status="deleted", deletedAt=timezone.now())
         self.client.force_login(self.user)
-
-        created = self.client.post(
-            f"/api/workspaces/{workspace.id}/agents",
-            data='{"name":"Denied"}',
-            content_type="application/json",
-        )
-        updated = self.client.patch(
-            f"/api/agents/{agent.id}",
-            data='{"name":"Denied"}',
-            content_type="application/json",
-        )
-        deleted = self.client.delete(f"/api/agents/{agent.id}")
-
-        self.assertEqual(created.status_code, 403)
-        self.assertEqual(updated.status_code, 403)
-        self.assertEqual(deleted.status_code, 403)
-        agent.refresh_from_db()
-        self.assertEqual(agent.name, "Private")
-        self.assertEqual(agent.status, "active")
-
-    def test_agent_and_session_restore_reject_missing_token(self):
-        workspace = Workspace.objects.create(name="Default", createdBy=self.user)
-        WorkspaceMembership.objects.create(
-            workspace=workspace,
-            user=self.user,
-            role="owner",
-        )
-        agent = Agent.objects.create(
-            workspace=workspace,
-            owner=self.user,
-            name="Trash",
-        )
-        session = Session.objects.create(
-            workspace=workspace,
-            owner=self.user,
-            agent=agent,
-        )
-        deleted_at = timezone.now()
-        Agent.objects.filter(id=agent.id).update(
-            status="deleted",
-            deletedAt=deleted_at,
-        )
-        Session.objects.filter(id=session.id).update(
-            status="deleted",
-            deletedAt=deleted_at,
-        )
-        self.client.force_login(self.user)
-
-        agent_restore = self.client.post(f"/api/agents/{agent.id}/restore")
-        session_restore = self.client.post(f"/api/sessions/{session.id}/restore")
-        agent_permanent = self.client.delete(f"/api/agents/{agent.id}/trash")
-        session_permanent = self.client.delete(f"/api/sessions/{session.id}/trash")
-
-        self.assertEqual(agent_restore.status_code, 403)
-        self.assertEqual(session_restore.status_code, 403)
-        self.assertEqual(agent_permanent.status_code, 403)
-        self.assertEqual(session_permanent.status_code, 403)
-        agent.refresh_from_db()
+        restored = self.client.post(f"/api/sessions/{session.pk}/restore")
+        purged = self.client.delete(f"/api/sessions/{session.pk}/trash")
+        self.assertEqual(restored.status_code, 403)
+        self.assertEqual(purged.status_code, 403)
         session.refresh_from_db()
-        self.assertEqual(agent.status, "deleted")
         self.assertEqual(session.status, "deleted")
 
     def test_library_restore_rejects_missing_token(self):

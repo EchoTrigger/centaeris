@@ -12,7 +12,7 @@ from django.db import connection, transaction
 from django.test import SimpleTestCase, TransactionTestCase
 
 from .http import internal
-from .models import Agent, Session, WorkspaceFilePack, WorkspaceFileObject, WorkspaceSnapshotObject
+from .models import Session, WorkspaceFilePack, WorkspaceFileObject, WorkspaceSnapshotObject
 from .test_execution_publication_fencing import ExecutionPublicationFixture
 from .testing import create_session
 from .workspace_file_objects import (WorkspaceFileError, file_key, live_reservation_keys, open_file,
@@ -108,7 +108,6 @@ class WorkspaceFileObjectTests(ExecutionPublicationFixture, TransactionTestCase)
 
     def collect(self, key):
         with transaction.atomic():
-            Agent.objects.select_for_update().get(pk=self.session.agent_id)
             session = Session.objects.select_for_update().get(pk=self.session.pk)
             return collect_key(session, key, kind="file")
 
@@ -440,7 +439,6 @@ class WorkspaceFileObjectTests(ExecutionPublicationFixture, TransactionTestCase)
         upload_files(io.BytesIO(b"".join(contents)), self.identity(), files, self.authorized)
         old_pack = WorkspaceFilePack.objects.select_related("object").get()
         with transaction.atomic():
-            Agent.objects.select_for_update().get(pk=self.session.agent_id)
             session = Session.objects.select_for_update().get(pk=self.session.pk)
             collect_key(session, old_pack.object.storageKey, kind="filePack")
         (self.storage_root / old_pack.object.storageKey).unlink()

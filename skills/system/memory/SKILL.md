@@ -1,12 +1,14 @@
 ---
 name: memory
-description: Use when durable private context about this user and Agent may help, or when asked to remember, update, correct, or forget it.
+description: Use when durable private context about this user and Workspace may help, or when asked to remember, update, correct, or forget it.
 allowed-tools: [read, edit, write]
 ---
 
 # Memory
 
-Use Agent Memory only when it is relevant to the current task. Do not read it routinely.
+Memory is private to the current user and Workspace and is shared across that user's Sessions in this Workspace.
+
+Use Workspace Memory only when it is relevant to the current task. Do not read it routinely.
 
 ## Read
 

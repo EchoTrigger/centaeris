@@ -7,7 +7,6 @@ from ninja.security import APIKeyHeader, HttpBearer, SessionAuth
 from app_core.api_memory import authenticate_request
 from app_core.app_delegations import DelegationRejected, authenticate_delegation, authorize_delegated_request
 from app_core.app_delegation_contract import SCOPES
-from app_core.business_agent_branches import bind_request_business_branch
 
 
 class PublicAuthenticationRequired(RuntimeError):
@@ -85,7 +84,6 @@ class ProductUsageAuth(HttpBearer):
 
     def authenticate(self, request, token):
         grant = authenticate_delegation(token, self.scope)
-        bind_request_business_branch(request, grant)
         authorize_delegated_request(request, grant)
         request.user = grant.user
         request.app_delegation = grant

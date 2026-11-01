@@ -10,7 +10,6 @@ from django.db import IntegrityError, transaction
 from django.test import TestCase
 
 from app_core.models import (
-    Agent,
     AgentRun,
     ModelConfig,
     Session,
@@ -57,25 +56,8 @@ class BootstrapSuperadminTests(TestCase):
         workspaceGroup = WorkspaceGroup.objects.get(workspace=workspace, name="全体成员")
         self.assertEqual(workspaceGroup.kind, "all_members")
         self.assertFalse(workspaceGroup.members.exists())
-        agent = Agent.objects.get(workspace=workspace, owner=user)
-        self.assertEqual(agent.name, "Centaeris")
-        self.assertEqual(agent.description, "默认 Agent")
-        self.assertEqual(agent.status, "active")
+        self.assertFalse(Session.objects.filter(workspace=workspace, owner=user).exists())
 
-    def test_existing_personal_agent_requires_explicit_shared_promotion(self):
-        user = get_user_model().objects.create_superuser(username=self.email, email=self.email, password=self.password)
-        workspace = Workspace.objects.create(name="Default", createdBy=user)
-        WorkspaceMembership.objects.create(workspace=workspace, user=user, role="owner")
-        agent = Agent.objects.create(workspace=workspace, owner=user, name="Maintained personal")
-        self.bootstrap()
-        self.client.force_login(user)
-        response = self.client.get(f"/api/workspaces/{workspace.pk}/default-agent")
-        self.assertEqual(response.status_code, 409, response.content)
-        self.assertEqual(response.json()["error"], "agent_configuration_promotion_required")
-        agent.refresh_from_db()
-        workspace.refresh_from_db()
-        self.assertIsNone(agent.definition_id)
-        self.assertIsNone(workspace.default_agent_definition_id)
 
     def test_existing_superadmin_is_not_mutated(self):
         self.bootstrap()
@@ -94,7 +76,7 @@ class BootstrapSuperadminTests(TestCase):
         self.assertEqual(
             Workspace.objects.filter(createdBy=user, name="Default").count(), 1
         )
-        self.assertEqual(Agent.objects.filter(workspace=workspace, owner=user).count(), 1)
+        self.assertFalse(Session.objects.filter(workspace=workspace, owner=user).exists())
         self.assertEqual(
             WorkspaceGroup.objects.filter(
                 workspace__createdBy=user,

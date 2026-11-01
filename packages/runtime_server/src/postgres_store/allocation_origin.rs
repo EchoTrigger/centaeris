@@ -10,7 +10,6 @@ pub(crate) struct AllocationOrigin {
     pub workspace_id: String,
     pub session_id: String,
     pub user_id: String,
-    pub agent_id: String,
     pub environment_profile: EnvironmentProfile,
     pub plugin_activation: PluginActivationSnapshotV1,
 }
@@ -28,7 +27,6 @@ impl From<WorkspaceAgentRunAuthorization> for AllocationOrigin {
             workspace_id: a.workspace_id,
             session_id: a.session_id,
             user_id: a.user_id,
-            agent_id: a.agent_id,
             environment_profile: a.environment_profile,
             plugin_activation: a.plugin_activation,
         }
@@ -96,7 +94,6 @@ pub(super) fn load(
                 workspace_id: b.workspace_id.clone(),
                 session_id: b.session_id.clone(),
                 user_id: b.user_id.clone(),
-                agent_id: b.agent_id.clone(),
                 environment_profile: b.environment_profile.clone(),
                 plugin_activation: b.plugin_activation.clone(),
             }

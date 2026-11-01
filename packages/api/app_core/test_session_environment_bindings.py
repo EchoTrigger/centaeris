@@ -5,7 +5,6 @@ from django.test.utils import CaptureQueriesContext
 from unittest.mock import PropertyMock, patch
 
 from .models import AgentRun, Session, SessionEnvironment, WorkspaceMembership
-from .test_business_agent_branches import BusinessBranchFixture
 from .test_execution_publication_fencing import ExecutionPublicationFixture
 from .test_hosted_operations import OperationFixture
 
@@ -136,17 +135,17 @@ class SessionEnvironmentPersistenceTests(OperationFixture, TestCase):
 
     def test_model_creation_seam_binds_ordinary_automation_and_direct_runs(self):
         for origin in ("user", "automation"):
-            session = Session.objects.create(workspace=self.workspace, owner=self.user, agent=self.agent, origin=origin)
+            session = Session.objects.create(workspace=self.workspace, owner=self.user, origin=origin)
             self.assertEqual(session.current_environment.session_id, session.pk)
             run = AgentRun.objects.create(workspace=self.workspace, user=self.user, session=session,
-                modelConfig=self.model, prompt="model seam", definition_version=self.agent.definition.published_version,
-                agent_instructions=self.agent.definition.published_version.instructions)
+                modelConfig=self.model, prompt="model seam",
+                agent_instructions="Session instructions")
             self.assertEqual(run.environment_id, session.current_environment_id)
             self.assertEqual(SessionEnvironment.objects.filter(session=session).count(), 1)
 
     def test_bulk_creation_cannot_skip_or_select_a_foreign_binding(self):
         with self.assertRaises(IntegrityError), transaction.atomic():
-            Session.objects.bulk_create([Session(workspace=self.workspace, owner=self.user, agent=self.agent)])
+            Session.objects.bulk_create([Session(workspace=self.workspace, owner=self.user)])
             with connection.cursor() as cursor:
                 cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
         with self.assertRaises(IntegrityError), transaction.atomic():
@@ -156,8 +155,7 @@ class SessionEnvironmentPersistenceTests(OperationFixture, TestCase):
         with self.assertRaisesRegex(ValueError, "environment_binding_invalid"):
             AgentRun.objects.create(workspace=self.workspace, user=self.user, session=self.run.session,
                 modelConfig=self.model, prompt="foreign", environment=self.other.environment,
-                definition_version=self.agent.definition.published_version,
-                agent_instructions=self.agent.definition.published_version.instructions)
+                agent_instructions="Session instructions")
 
     def test_missing_binding_is_not_repaired_on_save_or_authorization(self):
         from .agent_run_authorization_factory import create_agent_run_authorization
@@ -171,7 +169,7 @@ class SessionEnvironmentPersistenceTests(OperationFixture, TestCase):
         self.assertEqual(self.run.environment_id, original)
 
     def test_failed_initial_environment_rolls_back_and_the_same_instance_can_retry(self):
-        session = Session(workspace=self.workspace, owner=self.user, agent=self.agent)
+        session = Session(workspace=self.workspace, owner=self.user)
         session_id = session.pk
         before = SessionEnvironment.objects.count()
         with patch.object(SessionEnvironment, "save", side_effect=RuntimeError("synthetic environment failure")):
@@ -259,20 +257,6 @@ class SessionEnvironmentPersistenceTests(OperationFixture, TestCase):
         self.assertEqual(self.run.status, "completed")
 
 
-class SessionEnvironmentDelegationTests(BusinessBranchFixture, TestCase):
-    def test_delegation_cannot_read_sibling_environment_or_continue_after_revoke(self):
-        first, second = self.resolve("first").json(), self.resolve("second").json()
-        session = Session.objects.get(pk=first["sessionId"])
-        run = AgentRun.objects.create(workspace=self.workspace, user=self.member, session=session,
-            modelConfig=self.root.model_config, prompt="read binding")
-        url = f"/api/sessions/{session.pk}/agent-runs/{run.pk}/environment"
-        response = self.api("get", url, branch=first["branchId"])
-        self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(response.json()["environmentId"], session.current_environment_id)
-        self.assertEqual(response["Cache-Control"], "no-store")
-        self.assertEqual(self.api("get", url, branch=second["branchId"]).status_code, 404)
-        self.membership.delete()
-        self.assertEqual(self.api("get", url, branch=first["branchId"]).status_code, 403)
 
 
 class SessionEnvironmentWorkspaceTests(ExecutionPublicationFixture, TransactionTestCase):

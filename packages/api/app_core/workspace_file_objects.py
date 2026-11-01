@@ -1,6 +1,6 @@
 """Session-scoped immutable file content and indexed manifest membership.
 
-Callers own authorization and Agent->Session locking. Only upload_file crosses
+Callers own authorization and Session ownership locking. Only upload_file crosses
 that boundary itself, invoking the supplied authority callback before accepting
 bytes and again before publishing the verified private file.
 """
@@ -18,7 +18,7 @@ from django.db.models import F, Q, Case, When, Value
 from django.utils import timezone
 
 from .assets import _sync_directory
-from .models import (Agent, Session, WorkspaceFilePack, WorkspaceFileObject, WorkspaceFileReservation, WorkspaceSnapshotFileReference,
+from .models import (Session, WorkspaceFilePack, WorkspaceFileObject, WorkspaceFileReservation, WorkspaceSnapshotFileReference,
                      WorkspaceSnapshotObject, WorkspaceSnapshotUpload, StorageCleanupRetry)
 from .resource_commit import require_durable_commit
 from .runtime_contract import require_sha256
@@ -194,7 +194,6 @@ def _finish_file_uploads(entries, owner):
     uploads = [entry["upload"] for entry in entries if entry.get("upload") is not None]
     if uploads:
         with transaction.atomic():
-            Agent.objects.select_for_update().get(pk=owner.agent_id)
             Session.objects.select_for_update().get(pk=owner.pk)
             now = timezone.now()
             WorkspaceSnapshotUpload.objects.filter(pk__in=[upload.pk for upload in uploads]).update(

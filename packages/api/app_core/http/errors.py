@@ -1,6 +1,5 @@
 import logging
 from app_core.app_delegations import DelegationRejected
-from app_core.business_agent_scope import BusinessAgentConfigurationUnavailable
 
 from ninja.errors import HttpError, ValidationError
 
@@ -105,9 +104,6 @@ def _mapped_error_code(request, *, malformed_json: bool) -> str:
 
 
 def install_error_handlers(api) -> None:
-    @api.exception_handler(BusinessAgentConfigurationUnavailable)
-    def business_agent_configuration_unavailable(request, error):
-        return api.create_response(request, {"error": str(error)}, status=409)
 
     @api.exception_handler(DelegationRejected)
     def delegation_rejected(request, error):

@@ -21,7 +21,7 @@ fn sign(payload: ProvisionBinding) -> ProvisionAuthorization {
 fn setup() -> (String, PostgresRuntimeStore, Client, ProvisionAuthorization) {
     let (url, store, mut db) = retained_instance_tests::setup();
     let vector: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../tests/workspace/fixtures/environment_provision_authorization/v1/valid.json"
+        "../../../../../tests/workspace/fixtures/environment_provision_authorization/v2/valid.json"
     ))
     .unwrap();
     let mut payload: ProvisionBinding = serde_json::from_value(vector["payload"].clone()).unwrap();

@@ -648,7 +648,6 @@ fn resolve_target(
     let origin_authorization = super::allocation_origin::load(db, &allocation, r.signing_key)?;
     if origin_authorization.workspace_id != r.cleanup.authorization.workspace_id
         || origin_authorization.session_id != b.session_id
-        || origin_authorization.agent_id != r.cleanup.authorization.agent_id
         || origin_authorization.user_id != r.cleanup.authorization.user_id
         || crate::resident_capacity::declared_usage(
             origin_authorization

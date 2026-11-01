@@ -15,7 +15,6 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from .models import AgentRun, Session, SessionAssetLink, SessionEvent, WorkspaceMembership
-from . import test_agent_messages
 from .test_hosted_operations import OperationFixture
 from .testing import leased_lifecycle_job_fixture
 from .workspace_snapshot_gc import collect_workspace_snapshot_gc
@@ -35,9 +34,14 @@ class SessionWorkspaceRetentionTests(OperationFixture, TestCase):
         self.assertEqual(first.status_code, 202, first.content)
         run = AgentRun.objects.get(pk=first.json()["agentRunId"])
         original_grant = deepcopy((run.authorization.payload, run.authorization.digest, run.authorization.signature))
-        test_agent_messages.AgentMessageTests.commit(self, run, "user_message", {
+        SessionEvent.objects.create(workspace=run.workspace, session=run.session, agent_run=run,
+            eventId="original-history", sequence=1, agent_run_sequence=1,
+            projects_to_agent_run_stream=True, createdAtMs=1,
+            payload={"schemaVersion":"session.event.v1", "eventVersion":1, "type":"user_message",
+                "eventId":"original-history", "sessionId":run.session_id, "agentRunId":run.pk,
+                "turnId":run.turn_id,"createdAtMs":1,"sequence":1,"payload":{
             "messageId": "original-message", "text": "original history", "attachments": [],
-        })
+        }})
         lease_owner = leased_lifecycle_job_fixture(self, run)
         content = b"authoritative committed workspace"
         manifest = json.dumps({"schema": "workspace.snapshot.v1", "files": [{

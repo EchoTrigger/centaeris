@@ -78,12 +78,12 @@ pub(crate) fn verify_controller_authority(
     {
         return Err("retained membership rejected".into());
     }
-    let session=tx.query_opt("SELECT workspace_id,owner_id::text,agent_id,current_environment_id,\"deletedAt\" IS NULL FROM public.app_core_session WHERE id=$1 FOR SHARE", &[&b.session_id]).map_err(|e|e.to_string())?.ok_or("retained Session missing")?;
+    let session=tx.query_opt("SELECT workspace_id,owner_id::text,current_environment_id,\"deletedAt\" IS NULL FROM public.app_core_session WHERE id=$1 FOR SHARE", &[&b.session_id]).map_err(|e|e.to_string())?.ok_or("retained Session missing")?;
     if session.get::<_, String>(0) != tenant
         || session.get::<_, String>(1) != user
         || (r.purpose == ControllerPurpose::Execute
-            && (session.get::<_, Option<String>>(3).as_deref() != Some(&b.environment_id)
-                || !session.get::<_, bool>(4)))
+            && (session.get::<_, Option<String>>(2).as_deref() != Some(&b.environment_id)
+                || !session.get::<_, bool>(3)))
     {
         return Err("retained Session rejected".into());
     }
@@ -150,7 +150,6 @@ pub(crate) fn verify_controller_authority(
         .verify(&original, &digest, r.signing_key)?;
     if original.workspace_id != tenant
         || original.user_id != user
-        || original.agent_id != session.get::<_, String>(2)
         || original.model_config_ref != run.get::<_, String>(6)
         || original.thinking_mode != run.get::<_, Option<String>>(7).filter(|s| !s.is_empty())
     {

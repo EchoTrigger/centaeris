@@ -6,8 +6,8 @@ use centaeris_core::execution::{
 };
 use centaeris_core::extension::{validate_plugin_activation_snapshot, PluginActivationSnapshotV1};
 
-const SCHEMA: &str = "workspace.environment_provision_authorization.v1";
-const DOMAIN: &[u8] = b"workspace:environment-provision-authorization:v1\0";
+const SCHEMA: &str = "workspace.environment_provision_authorization.v2";
+const DOMAIN: &[u8] = b"workspace:environment-provision-authorization:v2\0";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -21,7 +21,6 @@ pub(crate) struct ProvisionBinding {
     pub environment_profile: EnvironmentProfile,
     pub environment_profile_digest: String,
     pub user_id: String,
-    pub agent_id: String,
     pub plugin_activation: PluginActivationSnapshotV1,
     pub controller_owner: EnvironmentTaskOwner,
     pub controller_epoch: i64,
@@ -34,11 +33,11 @@ pub(crate) struct ProvisionBinding {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ProvisionRequest {
+    pub workspace_id: String,
     pub kind: String,
     pub environment_profile: EnvironmentProfile,
     pub environment_profile_digest: String,
     pub user_id: String,
-    pub agent_id: String,
     pub plugin_activation: PluginActivationSnapshotV1,
 }
 
@@ -56,7 +55,7 @@ impl ProvisionBinding {
             environment_profile: self.environment_profile.clone(),
             environment_profile_digest: self.environment_profile_digest.clone(),
             user_id: self.user_id.clone(),
-            agent_id: self.agent_id.clone(),
+            workspace_id: self.workspace_id.clone(),
             plugin_activation: self.plugin_activation.clone(),
         }
     }
@@ -79,7 +78,6 @@ impl ProvisionBinding {
             &self.environment_id,
             &self.operation_id,
             &self.user_id,
-            &self.agent_id,
         ] {
             if id.is_empty()
                 || id.len() > 160
@@ -195,7 +193,7 @@ mod tests {
         request: ProvisionRequest,
     }
     fn vector() -> Vector {
-        serde_json::from_str(include_str!("../../../../tests/workspace/fixtures/environment_provision_authorization/v1/valid.json")).unwrap()
+        serde_json::from_str(include_str!("../../../../tests/workspace/fixtures/environment_provision_authorization/v2/valid.json")).unwrap()
     }
     #[test]
     fn python_provision_signature_binds_the_independent_owner_and_exact_request() {
@@ -223,7 +221,7 @@ mod tests {
             payload: v.payload,
             signature: v.signature,
         };
-        auth.payload.agent_id = "other-agent".into();
+        auth.payload.workspace_id = "other-workspace".into();
         auth.payload.request_digest = format!(
             "sha256:{:x}",
             Sha256::digest(

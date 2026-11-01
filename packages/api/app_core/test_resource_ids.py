@@ -6,11 +6,9 @@ from django.db import IntegrityError, transaction
 from django.test import TestCase
 
 from .models import (
-    Agent,
     Session,
     Workspace,
     WorkspaceMembership,
-    new_agent_id,
     new_session_id,
     new_turn_id,
     new_workspace_id,
@@ -22,23 +20,21 @@ class ResourceIdTests(TestCase):
     def setUpTestData(cls):
         cls.owner = get_user_model().objects.create_user(username="id-owner")
         cls.workspace = Workspace.objects.create(name="Original", createdBy=cls.owner)
-        cls.agent = Agent.objects.create(workspace=cls.workspace, owner=cls.owner, name="Original")
-        cls.session = Session.objects.create(workspace=cls.workspace, owner=cls.owner, agent=cls.agent)
+        cls.session = Session.objects.create(workspace=cls.workspace, owner=cls.owner)
 
     def resources(self):
         return (
             (Workspace, self.workspace, {"name": "New", "createdBy": self.owner}),
-            (Agent, self.agent, {"workspace": self.workspace, "owner": self.owner, "name": "New"}),
-            (Session, self.session, {"workspace": self.workspace, "owner": self.owner, "agent": self.agent}),
+            (Session, self.session, {"workspace": self.workspace, "owner": self.owner}),
         )
 
     def test_generators_encode_twelve_random_bytes_without_truncation(self):
         suffix = "AbCdEf0123-_xyZ9"
         with patch("secrets.token_bytes", return_value=base64.urlsafe_b64decode(suffix)) as random_bytes:
-            for generator, prefix in ((new_workspace_id, "ws"), (new_agent_id, "agent"), (new_session_id, "session")):
+            for generator, prefix in ((new_workspace_id, "ws"), (new_session_id, "session")):
                 with self.subTest(prefix=prefix):
                     self.assertEqual(generator(), f"{prefix}_{suffix}")
-            self.assertEqual(random_bytes.call_count, 3)
+            self.assertEqual(random_bytes.call_count, 2)
             self.assertTrue(all(call.args == (12,) for call in random_bytes.call_args_list))
         self.assertRegex(new_turn_id(), r"^turn_[0-9a-f]{32}$")
 
@@ -81,20 +77,12 @@ class ResourceIdTests(TestCase):
     def test_short_ids_round_trip_through_owned_api_and_do_not_grant_access(self):
         with patch("app_core.models.secrets.token_urlsafe", return_value="AbCdEf0123-_xyZ9"):
             workspace = Workspace.objects.create(name="Short IDs", createdBy=self.owner)
-            agent = Agent.objects.create(workspace=workspace, owner=self.owner, name="Short IDs")
-            session = Session.objects.create(workspace=workspace, owner=self.owner, agent=agent)
+            session = Session.objects.create(workspace=workspace, owner=self.owner)
         WorkspaceMembership.objects.create(workspace=workspace, user=self.owner, role="owner")
         self.client.force_login(self.owner)
-        response = self.client.get(f"/api/workspaces/{workspace.pk}/agents")
+        response = self.client.get(f"/api/sessions/{session.pk}")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["agents"][0]["id"], agent.pk)
-        for path, envelope, resource in (
-            (f"/api/agents/{agent.pk}", "agent", agent),
-            (f"/api/sessions/{session.pk}", "session", session),
-        ):
-            response = self.client.get(path)
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()[envelope]["id"], resource.pk)
+        self.assertEqual(response.json()["session"]["id"], session.pk)
         self.assertEqual(
             self.client.get(
                 f"/api/sessions/{session.pk}/transcript/active-agent-run",
@@ -108,7 +96,6 @@ class ResourceIdTests(TestCase):
         WorkspaceMembership.objects.create(workspace=workspace, user=other, role="member")
         self.client.force_login(other)
         for path in (
-            f"/api/agents/{agent.pk}",
             f"/api/sessions/{session.pk}",
             f"/api/sessions/{session.pk}/transcript/active-agent-run?sourceHighWater=0",
         ):

@@ -9,7 +9,6 @@ Input resolution retains current permission, signature and source identity check
 from dataclasses import dataclass
 
 from .assets import DeferredInputResolutionError
-from .agent_input_attachments import delivered_attachments
 from .deferred_input import DeferredInputBindingError, input_storage_batch
 from .material_contract import BoundInput, KnowledgeError
 from .material_identity import processing_spec_digest, representation_id
@@ -56,10 +55,6 @@ def authorize_material_access(context: MaterialAccessContext) -> MaterialAccess:
 
 def declared_inputs_for_run(agent_run):
     declared = {item["inputRef"]: item for item in agent_run.authorization.payload["assetRefs"]}
-    for capture in delivered_attachments(agent_run):
-        if capture["inputRef"] in declared and declared[capture["inputRef"]] != capture:
-            raise KnowledgeError("knowledge_input_binding_invalid")
-        declared[capture["inputRef"]] = capture
     return declared
 
 

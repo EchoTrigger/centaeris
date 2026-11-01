@@ -376,13 +376,12 @@ class InitialInputOriginResponse(StrictSchema):
 class SessionResponse(StrictSchema):
     id: str
     workspace_id: str
-    agent_id: str
+    instructions: str
     project_id: str | None
     current_environment_id: str
     execution_mode: Literal["perRun"]
     title: str
     origin: str
-    initial_input_origin: InitialInputOriginResponse | None
     status: Literal["active", "deleted"]
     deleted_at: str | None
     is_pinned: bool
@@ -422,7 +421,6 @@ class AgentWorkSessionsResponse(StrictSchema):
 class SessionProjectResponse(StrictSchema):
     id: str
     workspace_id: str
-    agent_id: str
     name: str
     created_at: str
 
@@ -530,7 +528,7 @@ class TrashActorResponse(StrictSchema):
 
 
 class TrashLocationResponse(StrictSchema):
-    kind: Literal["workspace", "agent", "libraryRoot", "libraryFolder"]
+    kind: Literal["workspace", "libraryRoot", "libraryFolder"]
     id: str | None
     label: str
     scope: Literal["workspace", "privateLibrary"]
@@ -538,7 +536,7 @@ class TrashLocationResponse(StrictSchema):
 
 class TrashItemResponse(StrictSchema):
     id: str
-    kind: Literal["agent", "session", "source", "library"]
+    kind: Literal["session", "source", "library"]
     title: str
     deleted_at: str
     expires_at: str

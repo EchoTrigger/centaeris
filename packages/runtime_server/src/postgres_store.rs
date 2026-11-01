@@ -99,7 +99,6 @@ pub(crate) mod residency;
 mod resource_commit;
 pub(crate) mod runsc_rotation;
 mod runtime;
-pub(crate) use runtime::validate_hosted_native_input;
 mod schema;
 mod transactions;
 mod transcript;

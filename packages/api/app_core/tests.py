@@ -55,7 +55,6 @@ from .model_adapter.openai_responses import (
     stream_open_ai_responses,
 )
 from .models import (
-    Agent,
     Artifact,
     ArtifactPublication,
     Session,
@@ -112,7 +111,7 @@ from .session_event import (
     project_committed_agent_run,
     rebuild_agent_run_citation_projection,
 )
-from .testing import create_session, publish_agent_test_policy
+from .testing import create_session
 from . import agent_run_stream
 
 
@@ -358,16 +357,10 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
         workspace = Workspace.objects.create(name="Profile unavailable", createdBy=user)
         workspace.members.add(user)
-        agent = Agent.objects.create(
-            workspace=workspace,
-            owner=user,
-            name="Centaeris",
-        )
         model = ModelConfig.objects.create(
             displayName="Profile model",
             modelName="profile-model",
         )
-        publish_agent_test_policy(agent, model_config=model)
         self.client.force_login(user)
 
         with patch(
@@ -380,7 +373,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
                     {
                         "operationId": "test-operation-338",
                         "text": "hello",
-                        "agentId": agent.id,
                         "modelConfigRef": model.id,
                     }
                 ),
@@ -402,18 +394,11 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
         workspace = Workspace.objects.create(name="默认工作区", createdBy=user)
         workspace.members.add(user)
-        Agent.objects.create(
-            id="centaeris",
-            workspace=workspace,
-            owner=user,
-            name="Centaeris",
-        )
         model = ModelConfig.objects.create(
             displayName="Fake Model",
             modelName="fake-model",
         )
 
-        publish_agent_test_policy(Agent.objects.get(id="centaeris"), model_config=model)
 
         loginResponse = self.client.post(
             "/api/login",
@@ -444,7 +429,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
                 data=json.dumps({
                     "operationId": "test-operation-400",
                     "text": "帮我看牙科 SOP",
-                    "agentId": "centaeris",
                     "modelConfigRef": model.id,
                 }),
                 content_type="application/json",
@@ -625,95 +609,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertNotIn("contentDigest", stream)
         self.assertIn('"type":"assistant_message"', stream)
 
-    def test_sessions_are_bound_to_an_immutable_agent_identity(self):
-        user = User.objects.create_user(
-            username="agent-sessions@example.com", password="password"
-        )
-        workspace = Workspace.objects.create(name="Agent sessions", createdBy=user)
-        workspace.members.add(user)
-        self.client.force_login(user)
-
-        first = create_session(
-            workspace=workspace,
-            owner=user,
-            agent_id="centaeris",
-        )
-        second = create_session(
-            workspace=workspace,
-            owner=user,
-            agent_id="research-agent",
-        )
-
-        response = self.client.get(
-            f"/api/workspaces/{workspace.id}/sessions?agentId=centaeris"
-        )
-        self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(
-            [(item["id"], item["agentId"]) for item in response.json()["sessions"]],
-            [(first.id, "centaeris")],
-        )
-        response = self.client.get(
-            f"/api/workspaces/{workspace.id}/sessions?agentId=research-agent"
-        )
-        self.assertEqual(
-            [(item["id"], item["agentId"]) for item in response.json()["sessions"]],
-            [(second.id, "research-agent")],
-        )
-
-        first.agent_id = "research-agent"
-        with self.assertRaisesRegex(ValueError, "agent_id is immutable"):
-            first.save()
-
-        create_session(
-            workspace=workspace,
-            owner=user,
-            agent_id="猫" * 64,
-        )
-        with self.assertRaisesRegex(ValueError, "agent_id_invalid"):
-            create_session(
-                workspace=workspace,
-                owner=user,
-                agent_id="猫" * 65,
-            )
-
-    def test_session_message_requires_or_matches_agent_identity(self):
-        user = User.objects.create_user(
-            username="agent-message@example.com", password="password"
-        )
-        workspace = Workspace.objects.create(name="Agent message", createdBy=user)
-        workspace.members.add(user)
-        model = ModelConfig.objects.create(id="agent-message-model", displayName="Fake")
-        session = create_session(
-            workspace=workspace,
-            owner=user,
-            agent_id="centaeris",
-        )
-        publish_agent_test_policy(session.agent, model_config=model)
-        self.client.force_login(user)
-
-        missing = self.client.post(
-            f"/api/workspaces/{workspace.id}/sessions/new/messages",
-            data=json.dumps({"operationId": "test-operation-650", "text": "hello", "modelConfigRef": model.id}),
-            content_type="application/json",
-        )
-        self.assertEqual(missing.status_code, 400, missing.content)
-        self.assertEqual(missing.json(), {"error": "agent_id_required"})
-
-        mismatch = self.client.post(
-            f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
-            data=json.dumps(
-                {
-                    "operationId": "test-operation-658",
-                    "text": "hello",
-                    "agentId": "research-agent",
-                    "modelConfigRef": model.id,
-                }
-            ),
-            content_type="application/json",
-        )
-        self.assertEqual(mismatch.status_code, 409, mismatch.content)
-        self.assertEqual(mismatch.json(), {"error": "session_agent_mismatch"})
-        self.assertFalse(session.agent_runs.exists())
 
     def test_agent_run_lifecycle_scheduling_gap_keeps_agent_run_input_without_forging_session_event(self):
         user = User.objects.create_user(username="schedule-gap@example.com", password="password")
@@ -721,9 +616,8 @@ class ApiVerticalSliceTests(TransactionTestCase):
         workspace.members.add(user)
         model = ModelConfig.objects.create(id="schedule-gap-model", displayName="Fake")
         session = create_session(workspace=workspace, owner=user)
-        session.agent.instructions = "Keep the answer grounded."
-        session.agent.save(update_fields=["instructions", "updatedAt"])
-        publish_agent_test_policy(session.agent, model_config=model)
+        session.instructions = "Keep the answer grounded."
+        session.save(update_fields=["instructions", "updatedAt"])
         self.client.force_login(user)
 
         with patch(
@@ -1948,7 +1842,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
             id="fake-model", displayName="Fake"
         )
         session = create_session(workspace=workspace, owner=user)
-        publish_agent_test_policy(session.agent, model_config=model)
         self.client.force_login(user)
         payload = {"text": "hello", "modelConfigRef": model.id}
 
@@ -2116,30 +2009,21 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
         workspace = Workspace.objects.create(name="默认工作区", createdBy=user)
         workspace.members.add(user)
-        Agent.objects.create(
-            id="centaeris",
-            workspace=workspace,
-            owner=user,
-            name="Centaeris",
-        )
         model = ModelConfig.objects.create(id="project-model", displayName="Fake")
-        publish_agent_test_policy(Agent.objects.get(id="centaeris"), model_config=model)
         self.client.force_login(user)
 
         created = self.client.post(
             f"/api/workspaces/{workspace.id}/session-projects",
-            data=json.dumps({"agentId": "centaeris", "name": "  Lumi  "}),
+            data=json.dumps({"name": "  Lumi  "}),
             content_type="application/json",
         )
 
         self.assertEqual(created.status_code, 201, created.content)
         project = created.json()["project"]
         self.assertEqual(project["name"], "Lumi")
-        self.assertEqual(project["agentId"], "centaeris")
         self.assertEqual(
             self.client.get(
                 f"/api/workspaces/{workspace.id}/session-projects",
-                {"agentId": "centaeris"},
             ).json()["projects"],
             [project],
         )
@@ -2156,7 +2040,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
                 {
                     "operationId": "test-operation-2061",
                     "text": "project child",
-                    "agentId": "centaeris",
                     "projectId": project["id"],
                     "modelConfigRef": model.id,
                 }
@@ -2173,7 +2056,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
 
         rejected = self.client.post(
             f"/api/workspaces/{workspace.id}/sessions",
-            data=json.dumps({"operationId": "test-operation-2082", "agentId": "centaeris", "projectId": "banana"}),
+            data=json.dumps({"operationId": "test-operation-2082", "projectId": "banana"}),
             content_type="application/json",
         )
         self.assertEqual(rejected.status_code, 404)
@@ -2220,13 +2103,12 @@ class ApiVerticalSliceTests(TransactionTestCase):
             {
                 "id": pinned.id,
                 "workspaceId": workspace.id,
-                "agentId": "centaeris",
+                "instructions": "",
                 "projectId": None,
                 "currentEnvironmentId": pinned.current_environment_id,
                 "executionMode": "perRun",
                 "title": "Renamed",
                 "origin": "user",
-                "initialInputOrigin": None,
                 "status": "active",
                 "deletedAt": None,
                 "isPinned": True,
@@ -2945,7 +2827,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         agentRunStart = fenced_start_fixture(agent_run)
         self.assertEqual(agentRunStart["schema"], "workspace.agent_run.start.v1")
         self.assertEqual(agentRunStart["initialInput"], {"type": "userMessage"})
-        self.assertEqual(agentRunStart["agentInstructions"], "Prefer primary sources.")
+        self.assertEqual(agentRunStart["sessionInstructions"], "Prefer primary sources.")
         self.assertEqual(agentRunStart["authorization"], authorization.payload)
         self.assertEqual(agentRunStart["authorizationDigest"], authorization.digest)
         self.assertEqual(agentRunStart["modelContextTokens"], model.contextTokens)
@@ -3911,7 +3793,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
         session = create_session(
             workspace=workspace,
             owner=user,
-            agent_id="banana-agent",
         )
         advancedRun = AgentRun.objects.create(
             workspace=workspace,
@@ -3937,7 +3818,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             prompt="hello",
         )
         authorization = create_agent_run_authorization(agent_run)
-        self.assertEqual(authorization.payload["agentId"], "banana-agent")
+        self.assertEqual(authorization.payload["sessionId"], session.id)
         self.assertEqual(
             authorization.payload["sessionWorkspace"],
             {
@@ -3958,7 +3839,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
 
     def test_agent_run_authorization_digest_is_stable(self):
         fixtures = (Path(__file__).resolve().parents[3]
-                    / "tests/workspace/fixtures/agent_run_authorization/v1")
+                    / "tests/workspace/fixtures/agent_run_authorization/v2")
         payload = json.loads((fixtures / "valid.json").read_text(encoding="utf-8"))
         expected = json.loads((fixtures / "expected.json").read_text(encoding="utf-8"))
         digest = authorization_digest(payload)
@@ -4890,13 +4771,11 @@ class ModelAdminAcceptanceTests(TestCase):
         provider["models"] = [definition("keep", 128000), definition("new", 64000)]
         workspace = Workspace.objects.create(name="Reconciliation", createdBy=self.admin)
         workspace.members.add(self.admin)
-        agent = Agent.objects.create(workspace=workspace, owner=self.admin, name="Agent")
-        session = Session.objects.create(workspace=workspace, owner=self.admin, agent=agent)
+        session = create_session(workspace=workspace, owner=self.admin)
         retiring = ModelConfig.objects.get(provider_id=provider_id, modelName="old", isCurrent=True)
-        policy_version = publish_agent_test_policy(agent, model_config=retiring)
         run = AgentRun.objects.create(workspace=workspace, session=session, user=self.admin,
                                       modelConfig=retiring, prompt="Finish first",
-                                      definition_version=policy_version, agent_instructions=policy_version.instructions)
+                                      agent_instructions=session.instructions)
         create_agent_run_authorization(run)
         preview = self.client.get("/api/admin/model-catalog-reconciliation")
         self.assertEqual(preview.status_code, 200)
@@ -4950,7 +4829,7 @@ class ModelAdminAcceptanceTests(TestCase):
         with patch("app_core.http.workspaces.schedule_agent_run_lifecycle"):
             continued = self.client.post(
                 f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
-                data=json.dumps({"operationId": "test-operation-5027", "text": "Continue with the updated model", "agentId": agent.id,
+                data=json.dumps({"operationId": "test-operation-5027", "text": "Continue with the updated model",
                                  "modelConfigRef": revised.id}),
                 content_type="application/json",
             )
@@ -5060,7 +4939,6 @@ class ModelAdminAcceptanceTests(TestCase):
         workspace = Workspace.objects.create(name="Default", createdBy=self.admin)
         workspace.members.add(self.member)
         session = create_session(workspace=workspace, owner=self.member)
-        publish_agent_test_policy(session.agent, model_config=ModelConfig.objects.create(displayName="Available session model"))
         for modelRef in [modelId, "banana"]:
             rejected = self.client.post(
                 f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
@@ -7026,7 +6904,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
     def test_new_session_first_message_atomically_creates_uploaded_asset_and_run(
         self, schedule_agent_run_lifecycle
     ):
-        publish_agent_test_policy(self.session.agent, model_config=self.model)
         self.client.force_login(self.member)
 
         response = self.client.post(
@@ -7034,7 +6911,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
             data={
                 "operationId": "test-operation-7102",
                 "text": "read the attached PDF",
-                "agentId": "centaeris",
                 "modelConfigRef": self.model.id,
                 "files": SimpleUploadedFile(
                     "policy.pdf",
@@ -7108,7 +6984,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
                 {
                     "operationId": "test-operation-7174",
                     "text": "must not create a session",
-                    "agentId": "centaeris",
                     "modelConfigRef": self.model.id,
                     "attachmentRefs": ["banana"],
                 }
@@ -7126,7 +7001,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         self.model.thinkingModes = ["low", "vendor-high"]
         self.model.thinkingMode = "vendor-high"
         self.model.save(update_fields=["thinkingModes", "thinkingMode"])
-        publish_agent_test_policy(self.session.agent, model_config=self.model, thinking_mode="vendor-high")
         self.client.force_login(self.member)
 
         rejected = self.client.post(
@@ -7134,7 +7008,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
             data=json.dumps({
                 "operationId": "test-operation-7199",
                 "text": "reject unknown effort",
-                "agentId": "centaeris",
                 "modelConfigRef": self.model.id,
                 "thinkingMode": "banana",
             }),
@@ -7148,7 +7021,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
             data=json.dumps({
                 "operationId": "test-operation-7212",
                 "text": "use selected effort",
-                "agentId": "centaeris",
                 "modelConfigRef": self.model.id,
                 "thinkingMode": "low",
             }),
@@ -7164,7 +7036,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
     def test_new_session_first_message_rolls_back_upload_when_authorization_fails(self):
         from .assets import delete_stored_object_for_gc
 
-        publish_agent_test_policy(self.session.agent, model_config=self.model)
         self.client.force_login(self.member)
         before = {
             "sessions": Session.objects.count(),
@@ -7190,7 +7061,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
                 data={
                     "operationId": "test-operation-7252",
                     "text": "must roll back",
-                    "agentId": "centaeris",
                     "modelConfigRef": self.model.id,
                     "files": SimpleUploadedFile(
                         "rollback.pdf",
@@ -7219,7 +7089,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         self.prepare_allowed_source_input(b"expected")
         with default_storage.open(self.allowedObject.storageKey, "wb") as output:
             output.write(b"tampered")
-        publish_agent_test_policy(self.session.agent, model_config=self.model)
         self.client.force_login(self.member)
 
         response = self.client.post(
@@ -7239,7 +7108,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         original = b"original"
         replacement = b"replacement"
         link = self.prepare_allowed_source_input(original)
-        publish_agent_test_policy(self.session.agent, model_config=self.model)
         self.client.force_login(self.member)
         response = self.client.post(
             f"/api/workspaces/{self.workspace.id}/sessions/{self.session.id}/messages",
@@ -7725,14 +7593,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
 
     def test_deleted_resource_gc_expires_all_trash_domains_after_thirty_days(self):
         deleted_at = timezone.now() - timedelta(days=31)
-        agent = Agent.objects.create(
-            workspace=self.workspace,
-            owner=self.member,
-            name="Expired Agent",
-        )
-        agent.status = "deleted"
-        agent.deletedAt = deleted_at
-        agent.save(update_fields=["status", "deletedAt", "updatedAt"])
         self.session.status = "deleted"
         self.session.deletedAt = deleted_at
         self.session.save(update_fields=["status", "deletedAt", "updatedAt"])
@@ -7757,17 +7617,15 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         output = io.StringIO()
         call_command("gc_deleted_resources", stdout=output)
 
-        agent.refresh_from_db()
         self.session.refresh_from_db()
         self.source.refresh_from_db()
         library.refresh_from_db()
         self.allowedObject.refresh_from_db()
-        self.assertIsNotNone(agent.purgedAt)
         self.assertIsNotNone(self.session.purgedAt)
         self.assertIsNotNone(self.source.purgedAt)
         self.assertIsNotNone(library.purgedAt)
         self.assertEqual(self.allowedObject.status, "deleted")
-        self.assertIn("Expired 1 agents, 1 sessions, 1 sources, 1 library objects", output.getvalue())
+        self.assertIn("Expired 1 sessions, 1 sources, 1 library objects", output.getvalue())
 
     def test_deleted_resource_gc_records_failure_and_retries_original_storage(self):
         storageKey, sizeBytes, sha256 = self.store_bytes("gc/retry.txt", b"retry")

@@ -13,7 +13,7 @@ from ninja.responses import codes_4xx
 from pydantic import Field, ValidationError, field_validator
 
 from app_core.assets import captured_input_fields
-from app_core.app_delegations import require_delegated_agent, require_delegated_session, require_request_delegation
+from app_core.app_delegations import require_delegated_session, require_request_delegation
 from app_core.execution_admission import queued_admission_error
 from app_core.hosted_operations import (
     OPERATION_ID_PATTERN,
@@ -24,10 +24,7 @@ from app_core.hosted_operations import (
     request_digest,
     serialize_operation,
 )
-from app_core.agent_identity import validate_agent_id
 from app_core.models import (
-    Agent,
-    AgentCoordinationSession,
     Artifact,
     Session,
     SessionProject,
@@ -49,8 +46,7 @@ from app_core.plugin_catalog import (
     plugin_activation_for_workspace,
 )
 from app_core.agent_run_authorization_factory import create_agent_run_authorization
-from app_core.agent_definitions import AgentDefinitionUnavailable, published_version_for_agent, published_version_for_session
-from app_core.agent_model_settings import submitted_agent_model, AgentModelSettingsError, SubmittedAgentModelError
+from app_core.session_model_settings import selected_session_model, SessionModelSettingsError
 from app_core.agent_run_stream import encode_stream_cursor
 from app_core.runtime_client import (
     TranscriptRuntimeError,
@@ -151,38 +147,20 @@ class RewriteLastUserTailRequest(StrictSchema):
 class SessionMessageRequest(StrictSchema):
     operation_id: str = Field(pattern=OPERATION_ID_PATTERN)
     text: str = ""
-    agent_id: str | None = Field(default=None)
     project_id: str | None = Field(default=None)
-    model_config_ref: str = Field(default='')
+    model_config_ref: str = Field(min_length=1)
     thinking_mode: str | None = Field(default=None)
     attachment_refs: list[str] = Field(default_factory=list)
     tail_action: RewriteLastUserTailRequest | None = Field(default=None)
 
-    @field_validator("agent_id")
-    @classmethod
-    def validate_agent_identity(cls, value: str | None) -> str | None:
-        return None if value is None else validate_agent_id(value)
-
 
 class SessionCreateRequest(StrictSchema):
     operation_id: str = Field(pattern=OPERATION_ID_PATTERN)
-    agent_id: str
     project_id: str | None = Field(default=None)
-
-    @field_validator("agent_id")
-    @classmethod
-    def validate_agent_identity(cls, value: str) -> str:
-        return validate_agent_id(value)
 
 
 class SessionProjectCreateRequest(StrictSchema):
-    agent_id: str
     name: str
-
-    @field_validator("agent_id")
-    @classmethod
-    def validate_agent_identity(cls, value: str) -> str:
-        return validate_agent_id(value)
 
     @field_validator("name")
     @classmethod
@@ -235,6 +213,7 @@ class SessionReadRequest(StrictSchema):
 
 
 class SessionMetadataRequest(StrictSchema):
+    instructions: str | None = None
     title: str | None = None
     is_pinned: bool | None = Field(default=None)
     is_unread: bool | None = Field(default=None)
@@ -416,24 +395,11 @@ def list_session_projects(request, workspace_id: str):
     workspace = _workspace_for_user(request.user, workspace_id)
     if workspace is None:
         return Status(404, {"error": "workspace_not_found"})
-    if not valid_query_fields(request.GET, {"agentId"}):
-        return Status(400, {"error": "session_project_filter_invalid"})
-    agent_id = request.GET.get("agentId")
-    try:
-        if agent_id is not None:
-            validate_agent_id(agent_id)
-    except ValueError:
-        return Status(400, {"error": "agent_id_invalid"})
-    if agent_id is not None and not Agent.objects.filter(
-        id=agent_id,
-        workspace=workspace,
-        owner=request.user,
-    ).exists():
-        return Status(404, {"error": "agent_not_found"})
+    if request.GET:
+        return Status(400, {"error": "session_project_filter_unsupported"})
     projects = SessionProject.objects.filter(
         workspace=workspace,
         owner=request.user,
-        **({"agent_id": agent_id} if agent_id is not None else {}),
     ).order_by("created_at", "id")
     return {"projects": [serialize_session_project(project) for project in projects]}
 
@@ -454,19 +420,9 @@ def create_session_project(
         if membership is None:
             return Status(404, {"error": "workspace_not_found"})
         workspace = membership.workspace
-        agent = Agent.objects.select_for_update().filter(
-            id=payload.agent_id,
-            workspace=workspace,
-            owner=request.user,
-        ).first()
-        if agent is None:
-            return Status(404, {"error": "agent_not_found"})
-        if agent.status == "deleted":
-            return Status(410, {"error": "agent_deleted"})
         project = SessionProject.objects.create(
             workspace=workspace,
             owner=request.user,
-            agent=agent,
             name=payload.name,
         )
     return Status(201, {"project": serialize_session_project(project)})
@@ -477,40 +433,10 @@ def prepare_workspace_session_list(request, workspace_id: str):
     workspace = _workspace_for_user(request.user, workspace_id)
     if workspace is None:
         return Status(404, {"error": "workspace_not_found"})
-    if not valid_query_fields(request.GET, {"agentId"}):
+    if request.GET:
         return Status(400, {"error": "session_filter_unsupported"})
-    grant = require_request_delegation(request, "sessions:read", workspace_id=workspace_id)
-    agent_id = request.GET.get("agentId")
-    if agent_id is not None:
-        try:
-            validate_agent_id(agent_id)
-        except ValueError:
-            return Status(400, {"error": "agent_id_invalid"})
-        agent = Agent.objects.filter(
-            id=agent_id,
-            workspace=workspace,
-            owner=request.user,
-        ).first()
-        if agent is None:
-            return Status(404, {"error": "agent_not_found"})
-        if grant is not None:
-            require_delegated_agent(grant, agent_id)
-    sessions_query = Session.objects.filter(
-        workspace=workspace,
-        owner=request.user,
-        status="active",
-        **({"agent_id": agent_id} if agent_id is not None else {}),
-    )
-    if grant is not None and grant.agent_id is not None:
-        branch = request.business_branch
-        sessions_query = sessions_query.filter(agent_id=branch.agent_id).filter(
-            Q(pk=branch.session_id) | Q(work_binding__coordination_session_id=branch.session_id)
-        )
-    else:
-        sessions_query = sessions_query.filter(coordination_binding__isnull=True)
-        if grant is not None:
-            sessions_query = sessions_query.filter(agent__definition_id=grant.definition_id)
-    return sessions_query
+    require_request_delegation(request, "sessions:read", workspace_id=workspace_id)
+    return Session.objects.filter(workspace=workspace, owner=request.user, status="active")
 
 
 @router.get(
@@ -522,7 +448,7 @@ def list_workspace_sessions(request, workspace_id: str):
     sessions_query = prepare_workspace_session_list(request, workspace_id)
     if isinstance(sessions_query, Status):
         return sessions_query
-    sessions = list(sessions_query.select_related("work_binding__operation").order_by("-isPinned", "-updatedAt"))
+    sessions = list(sessions_query.order_by("-isPinned", "-updatedAt"))
     from app_core.session_attention import refresh_session_attention_many
     refresh_session_attention_many(sessions)
     running_session_ids = set(
@@ -553,7 +479,7 @@ def create_workspace_session(request, workspace_id: str, payload: SessionCreateR
             return Status(404, {"error": "workspace_not_found"})
         workspace = membership.workspace
         grant = require_request_delegation(request, "sessions:create", workspace_id=workspace_id,
-                                            agent_id=payload.agent_id, lock=True, require_active=False)
+                                            lock=True, require_active=False)
         digest = request_digest(payload)
         try:
             receipt = replay_operation(request.user, workspace_id, "createSession", payload.operation_id, digest,
@@ -562,31 +488,18 @@ def create_workspace_session(request, workspace_id: str, payload: SessionCreateR
             return Status(error.status, {"error": error.code})
         if receipt is not None:
             return Status(201, serialize_operation(receipt))
-        if grant is not None:
-            require_delegated_agent(grant, payload.agent_id)
-        agent = Agent.objects.select_for_update().filter(
-            id=payload.agent_id,
-            workspace=workspace,
-            owner=request.user,
-        ).first()
-        if agent is None:
-            return Status(404, {"error": "agent_not_found"})
-        if agent.status == "deleted":
-            return Status(410, {"error": "agent_deleted"})
         project = None
         if payload.project_id is not None:
             project = SessionProject.objects.filter(
                 id=payload.project_id,
                 workspace=workspace,
                 owner=request.user,
-                agent=agent,
             ).first()
             if project is None:
                 return Status(404, {"error": "session_project_not_found"})
         session = Session.objects.create(
             workspace=workspace,
             owner=request.user,
-            agent=agent,
             project=project,
         )
         receipt = accept_operation(request.user, workspace, "createSession", payload.operation_id, digest, session,
@@ -671,6 +584,11 @@ def update_session_metadata(
         if session is None:
             return Status(404, {"error": "session_not_found"})
         update_fields = []
+        if "instructions" in fields:
+            if payload.instructions is None:
+                return Status(400, {"error": "session_instructions_invalid"})
+            session.instructions = payload.instructions
+            update_fields.append("instructions")
         if "title" in fields:
             title = payload.title.strip()
             if not title or len(title) > 200:
@@ -1124,8 +1042,6 @@ def session_transcript_active_agent_run(request, session_id: str):
     )
 
 
-
-
 @router.get(
     "/sessions/{session_id}/context-usage",
     auth=usage_auth("sessions:read"),
@@ -1198,15 +1114,6 @@ def _canonical_waterline(value: str) -> bool:
     )
 
 
-def _is_coordination_message_target(user, workspace_id, session_id):
-    return session_id != "new" and AgentCoordinationSession.objects.filter(
-        session_id=session_id, session__owner=user, session__workspace_id=workspace_id,
-        session__status="active", agent__owner=user, agent__status="active",
-    ).exists()
-
-
-
-
 @router.post(
     "/workspaces/{workspace_id}/sessions/{session_id}/messages",
     auth=usage_auth("messages:submit"),
@@ -1246,22 +1153,15 @@ def create_session_message(
             if membership is None:
                 return Status(404, {"error": "session_not_found"})
             grant = require_request_delegation(request, "messages:submit", workspace_id=workspace_id,
-                agent_id=payload.agent_id, session_id=session_id,
+                session_id=session_id,
                 additional_scopes=(["sessions:create"] if session_id == "new" else [])
                     + (["attachments:write"] if uploads else []), lock=True, require_active=False)
-            # Coordination Sessions use the one Agent input/admission chain.
-            # The Workspace SHARE pin excludes coordination writers using UPDATE;
-            # reject before spending a generic operation identity.
-            if _is_coordination_message_target(request.user, workspace_id, session_id):
-                return Status(409, {"error": "coordination_session_requires_agent_input"})
             lock_operation_identity(request.user, workspace_id, "submitMessage", payload.operation_id)
             receipt = replay_operation(request.user, workspace_id, "submitMessage", payload.operation_id, digest,
                                        app_delegation=grant)
             if receipt is not None:
                 return Status(202, serialize_operation(receipt))
             if grant is not None:
-                if payload.agent_id is not None:
-                    require_delegated_agent(grant, payload.agent_id)
                 if session_id != "new":
                     require_delegated_session(grant, session_id)
     except ValueError as error:
@@ -1276,42 +1176,17 @@ def create_session_message(
         return Status(403, {"error": "attachment_not_accessible"})
     if session_id == "new" and payload.tail_action is not None:
         return Status(400, {"error": "rewrite_requires_existing_session"})
-    if session_id == "new" and payload.agent_id is None:
-        return Status(400, {"error": "agent_id_required"})
     if session_id == "new":
-        requested_agent = Agent.objects.filter(
-            id=payload.agent_id,
-            workspace=workspace,
-            owner=request.user,
-        ).first()
-        if requested_agent is None:
-            return Status(404, {"error": "agent_not_found"})
-        if requested_agent.status == "deleted":
-            return Status(410, {"error": "agent_deleted"})
         if payload.project_id is not None and not SessionProject.objects.filter(
-            id=payload.project_id,
-            workspace=workspace,
-            owner=request.user,
-            agent=requested_agent,
+            id=payload.project_id, workspace=workspace, owner=request.user,
         ).exists():
             return Status(404, {"error": "session_project_not_found"})
-    else:
-        # Reject inaccessible sessions before contacting Runtime; the transaction
-        # below still revalidates the session under a row lock before any write.
-        requested_session = Session.objects.select_related("agent").filter(
-            id=session_id, workspace=workspace, owner=request.user, status="active"
-        ).first()
-        if requested_session is None:
-            return Status(404, {"error": "session_not_found"})
+    elif not Session.objects.filter(id=session_id, workspace=workspace, owner=request.user, status="active").exists():
+        return Status(404, {"error": "session_not_found"})
     try:
-        if session_id == "new":
-            if requested_agent.definition_id is None:
-                return Status(409, {"error": "agent_configuration_promotion_required"})
-            published_version_for_agent(requested_agent, membership, acting_app_id=grant.app_id if grant else None)
-        else:
-            published_version_for_session(requested_session, membership, acting_app_id=grant.app_id if grant else None)
-    except AgentDefinitionUnavailable as error:
-        return Status(403, {"error": str(error)})
+        selected_session_model(workspace.id, payload.model_config_ref, payload.thinking_mode)
+    except SessionModelSettingsError as error:
+        return Status(400, {"error": str(error)})
     try:
         execution_profile = request_execution_profile()
     except RuntimeError:
@@ -1330,34 +1205,21 @@ def create_session_message(
                 raise AgentSessionCreationError(404, "session_not_found")
             workspace = membership.workspace
             grant = require_request_delegation(request, "messages:submit", workspace_id=workspace_id,
-                agent_id=payload.agent_id, session_id=session_id,
+                session_id=session_id,
                 additional_scopes=(["sessions:create"] if session_id == "new" else [])
                     + (["attachments:write"] if uploads else []), lock=True, require_active=False)
-            # A binding may have appeared while the Runtime profile RPC ran.
-            # Revalidate under the same authorization pin before any Run/receipt.
-            if _is_coordination_message_target(request.user, workspace_id, session_id):
-                raise AgentSessionCreationError(409, "coordination_session_requires_agent_input")
             lock_operation_identity(request.user, workspace_id, "submitMessage", payload.operation_id)
             receipt = replay_operation(request.user, workspace_id, "submitMessage", payload.operation_id, digest,
                                        app_delegation=grant)
             if receipt is not None:
                 raise AcceptedOperationReplay(receipt)
             if grant is not None:
-                if payload.agent_id is not None:
-                    require_delegated_agent(grant, payload.agent_id)
                 if session_id != "new":
                     require_delegated_session(grant, session_id)
-            # Take business locks in Agent -> Session order before the short
-            # global queue decision. Waiting for physical Session work must not
-            # retain the global admission lock and exclude unrelated Agents.
-            target_agent_id = payload.agent_id if session_id == "new" else requested_session.agent_id
-            agent = Agent.objects.select_for_update().filter(
-                id=target_agent_id, workspace=workspace, owner=request.user,
-            ).first()
             session = None
-            if session_id != "new" and agent is not None:
-                session = Session.objects.select_for_update(of=("self",)).select_related("agent").filter(
-                    id=session_id, workspace=workspace, owner=request.user, status="active", agent_id=agent.pk,
+            if session_id != "new":
+                session = Session.objects.select_for_update(of=("self",)).filter(
+                    id=session_id, workspace=workspace, owner=request.user, status="active",
                 ).first()
             # Retain the previous quota-error precedence over the business
             # existence/status checks below; no resource has been created yet.
@@ -1365,17 +1227,12 @@ def create_session_message(
             if admission_error is not None:
                 raise AgentSessionCreationError(*admission_error)
             if session_id == "new":
-                if agent is None:
-                    raise AgentSessionCreationError(404, "agent_not_found")
-                if agent.status == "deleted":
-                    raise AgentSessionCreationError(410, "agent_deleted")
                 project = None
                 if payload.project_id is not None:
                     project = SessionProject.objects.filter(
                         id=payload.project_id,
                         workspace=workspace,
                         owner=request.user,
-                        agent=agent,
                     ).first()
                     if project is None:
                         raise AgentSessionCreationError(
@@ -1384,7 +1241,6 @@ def create_session_message(
                 session = Session.objects.create(
                     workspace=workspace,
                     owner=request.user,
-                    agent=agent,
                     project=project,
                 )
                 library_objects = _create_uploaded_library_objects(request.user, stored)
@@ -1406,8 +1262,6 @@ def create_session_message(
             else:
                 if session is None:
                     return Status(404, {"error": "session_not_found"})
-                if payload.agent_id is not None and payload.agent_id != session.agent_id:
-                    return Status(409, {"error": "session_agent_mismatch"})
                 if session.agent_runs.filter(status__in={"queued", "running"}).exists():
                     return Status(409, {"error": "session_has_active_agent_run"})
                 linked_attachment_refs = set(
@@ -1418,14 +1272,10 @@ def create_session_message(
                 )
                 if linked_attachment_refs != set(attachment_refs):
                     return Status(403, {"error": "attachment_not_accessible"})
-            definition_version = published_version_for_session(session, membership, acting_app_id=grant.app_id if grant else None)
             try:
-                model, thinking_mode = submitted_agent_model(
-                    session.agent, payload.model_config_ref, payload.thinking_mode, definition_version=definition_version)
-            except SubmittedAgentModelError as error:
+                model, thinking_mode = selected_session_model(workspace.id, payload.model_config_ref, payload.thinking_mode)
+            except SessionModelSettingsError as error:
                 raise AgentSessionCreationError(400, str(error)) from error
-            except AgentModelSettingsError as error:
-                raise AgentSessionCreationError(409, str(error)) from error
             agent_run = AgentRun.objects.create(
                 workspace=workspace,
                 session=session,
@@ -1435,8 +1285,7 @@ def create_session_message(
                 modelConfig=model,
                 thinkingMode=thinking_mode,
                 prompt=prompt,
-                agent_instructions=(definition_version.instructions if definition_version else session.agent.instructions),
-                definition_version=definition_version,
+                agent_instructions=session.instructions,
                 tailPolicy=("rewriteLastUser" if payload.tail_action else "append"),
                 rewriteTargetMessageId=(payload.tail_action.target_message_id if payload.tail_action else ""),
                 rewriteExpectedTailMessageId=(payload.tail_action.expected_tail_message_id if payload.tail_action else ""),
@@ -1455,9 +1304,6 @@ def create_session_message(
     except AcceptedOperationReplay as replay:
         _delete_stored_upload_batch(stored)
         return Status(202, serialize_operation(replay.receipt))
-    except AgentDefinitionUnavailable as database_error:
-        _delete_stored_upload_batch(stored)
-        return Status(403, {"error": str(database_error)})
     except (AgentSessionCreationError, HostedOperationError) as database_error:
         try:
             _delete_stored_upload_batch(stored)
@@ -1501,19 +1347,18 @@ def _parse_session_message_request(request):
         try:
             uploads = _require_uploads(
                 request,
-                {"operationId", "text", "modelConfigRef", "agentId", "projectId", "thinkingMode"},
+                {"operationId", "text", "modelConfigRef", "projectId", "thinkingMode"},
             )
         except ValueError as error:
             return None, uploads, str(error)
         if (
-            not {"operationId", "text", "modelConfigRef", "agentId"}.issubset(request.POST)
+            not {"operationId", "text", "modelConfigRef"}.issubset(request.POST)
             or not set(request.POST).issubset(
-                {"operationId", "text", "modelConfigRef", "agentId", "projectId", "thinkingMode"}
+                {"operationId", "text", "modelConfigRef", "projectId", "thinkingMode"}
             )
             or len(request.POST.getlist("operationId")) != 1
             or len(request.POST.getlist("text")) != 1
             or len(request.POST.getlist("modelConfigRef")) != 1
-            or len(request.POST.getlist("agentId")) != 1
             or len(request.POST.getlist("projectId")) > 1
             or len(request.POST.getlist("thinkingMode")) > 1
         ):
@@ -1522,7 +1367,6 @@ def _parse_session_message_request(request):
             "operationId": request.POST["operationId"],
             "text": request.POST["text"],
             "modelConfigRef": request.POST["modelConfigRef"],
-            "agentId": request.POST["agentId"],
         }
         if "thinkingMode" in request.POST:
             value["thinkingMode"] = request.POST["thinkingMode"]
@@ -1921,7 +1765,7 @@ def _session_for_update(user, session_id: str, *, lock: bool):
     if lock:
         query = query.select_for_update()
     try:
-        session = query.select_related("workspace", "agent").get(
+        session = query.select_related("workspace").get(
             id=session_id,
             owner=user,
             status="active",
@@ -1932,26 +1776,8 @@ def _session_for_update(user, session_id: str, *, lock: bool):
 
 
 def _locked_owned_session(user, session_id: str):
-    scope = Session.objects.filter(id=session_id, owner=user).values_list(
-        "workspace_id",
-        "agent_id",
-    ).first()
-    if scope is None:
+    workspace_id = Session.objects.filter(id=session_id, owner=user).values_list("workspace_id", flat=True).first()
+    if workspace_id is None or locked_workspace_membership_for(user, workspace_id) is None:
         return None, None
-    workspace_id, agent_id = scope
-    if locked_workspace_membership_for(user, workspace_id) is None:
-        return None, None
-    agent = Agent.objects.select_for_update().filter(
-        id=agent_id,
-        workspace_id=workspace_id,
-        owner=user,
-    ).first()
-    if agent is None:
-        return None, None
-    session = Session.objects.select_for_update().filter(
-        id=session_id,
-        workspace_id=workspace_id,
-        owner=user,
-        agent_id=agent_id,
-    ).first()
-    return agent, session
+    session = Session.objects.select_for_update().filter(id=session_id, workspace_id=workspace_id, owner=user).first()
+    return None, session

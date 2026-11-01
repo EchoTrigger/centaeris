@@ -1,72 +1,39 @@
-"""The model catalog binds explicit workspace queries to real delegation scope."""
-
+"""Model catalog selection is scoped by current Workspace membership."""
+from django.contrib.auth import get_user_model
 from django.test import Client, TestCase
+from .models import ModelConfig, ModelProvider, Workspace, WorkspaceMembership
 
-from app_core.models import ModelConfig, ModelProvider, Workspace, WorkspaceMembership
-from app_core.test_app_delegations import AppDelegationFixture
-
-
-class WorkspaceModelDelegationScopeTests(AppDelegationFixture, TestCase):
+class WorkspaceModelCatalogScopeTests(TestCase):
     def setUp(self):
-        super().setUp()
-        self.foreign = Workspace.objects.create(
-            name="Another member workspace", createdBy=self.member
-        )
-        WorkspaceMembership.objects.create(
-            workspace=self.foreign, user=self.member, role="owner"
-        )
-        own_provider = ModelProvider.objects.create(
-            workspace=self.workspace,
-            displayName="Own",
-            api="openai-completions",
-            apiBase="https://example.invalid/v1",
-        )
-        foreign_provider = ModelProvider.objects.create(
-            workspace=self.foreign,
-            displayName="Foreign",
-            api="openai-completions",
-            apiBase="https://example.invalid/v1",
-        )
-        self.own_model = ModelConfig.objects.create(
-            provider=own_provider, modelName="own-model"
-        )
-        self.foreign_model = ModelConfig.objects.create(
-            provider=foreign_provider, modelName="foreign-model"
-        )
+        self.user = get_user_model().objects.create_user(username="catalog-owner")
+        self.workspace = Workspace.objects.create(name="Own", createdBy=self.user)
+        WorkspaceMembership.objects.create(workspace=self.workspace, user=self.user, role="owner")
+        self.foreign = Workspace.objects.create(name="Foreign", createdBy=self.user)
+        self.own_model = self.model(self.workspace, "Own")
+        self.foreign_model = self.model(self.foreign, "Foreign")
         self.shared_model = ModelConfig.objects.create(displayName="Shared fixture")
-        _definition, _app, issued = self.delegation()
-        self.token = issued.json()["accessToken"]
-        self.bearer = Client()
+        self.client.force_login(self.user)
 
-    def catalog(self, query=""):
-        return self.bearer.get(
-            "/api/models" + query, HTTP_AUTHORIZATION="Bearer " + self.token
-        )
+    def model(self, workspace, name):
+        provider = ModelProvider.objects.create(workspace=workspace, displayName=name,
+            api="openai-completions", apiBase="https://example.invalid/v1")
+        return ModelConfig.objects.create(provider=provider, modelName=name.lower())
 
-    def test_foreign_query_is_denied_even_when_the_delegating_user_is_an_owner_there(
-        self,
-    ):
-        browser = self.member_client.get(f"/api/models?workspaceId={self.foreign.id}")
-        self.assertEqual(browser.status_code, 200, browser.content)
-        self.assertIn(
-            self.foreign_model.id, [item["id"] for item in browser.json()["models"]]
-        )
-        denied = self.catalog(f"?workspaceId={self.foreign.id}")
-        self.assertIn(denied.status_code, (401, 403, 404), denied.content)
-        self.assertNotIn(self.foreign_model.id.encode(), denied.content)
-
-    def test_exact_delegated_workspace_query_returns_only_own_and_shared_models(self):
-        response = self.catalog(f"?workspaceId={self.workspace.id}")
+    def test_foreign_workspace_requires_current_membership(self):
+        path = f"/api/models?workspaceId={self.foreign.pk}"
+        denied = self.client.get(path)
+        self.assertEqual(denied.status_code, 404, denied.content)
+        WorkspaceMembership.objects.create(workspace=self.foreign, user=self.user, role="member")
+        response = self.client.get(path)
         self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(
-            {item["id"] for item in response.json()["models"]},
-            {self.own_model.id, self.shared_model.id, self.definition_model.id},
-        )
+        self.assertEqual({item["id"] for item in response.json()["models"]}, {self.foreign_model.pk, self.shared_model.pk})
 
-    def test_no_query_preserves_the_existing_shared_only_catalog_contract(self):
-        response = self.catalog()
+    def test_workspace_catalog_contains_only_local_and_shared_models(self):
+        response = self.client.get(f"/api/models?workspaceId={self.workspace.pk}")
         self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(
-            {item["id"] for item in response.json()["models"]},
-            {self.shared_model.id, self.definition_model.id}
-        )
+        self.assertEqual({item["id"] for item in response.json()["models"]}, {self.own_model.pk, self.shared_model.pk})
+
+    def test_no_query_returns_only_shared_models(self):
+        response = self.client.get("/api/models")
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual({item["id"] for item in response.json()["models"]}, {self.shared_model.pk})

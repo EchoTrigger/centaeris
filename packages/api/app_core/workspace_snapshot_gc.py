@@ -1,6 +1,6 @@
 """Reclaim unreachable Session bytes and permanently purged-owner payloads.
 
-The upload and download paths take the same Agent and Session locks while creating a local
+The upload and download paths take the same Session owner locks while creating a local
 temporary file, publishing its immutable name, or opening an authorized reader.
 Snapshot payload copying stays outside those transactions. Permanent deletion
 therefore prevents new names from appearing after a GC pass has enumerated them;
@@ -21,7 +21,7 @@ from django.db import transaction
 from django.db.models import Q
 
 from .assets import delete_stored_object_for_gc
-from .models import Agent, AgentRun, Session
+from .models import AgentRun, Session
 from .storage_gc_retry import claim_storage_key, clean_storage_key
 from . import workspace_observations as protection_observations
 
@@ -71,7 +71,7 @@ def _collect_purged_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSna
         return report
     sessions = Session.objects.filter(
         status="deleted", purgedAt__lte=cutoff,
-    ).only("id", "workspace_id", "agent_id")
+    ).only("id", "workspace_id")
     for session in sessions.order_by("id").iterator():
         try:
             prefix = _session_prefix(session)
@@ -91,9 +91,8 @@ def _collect_purged_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSna
                     # A parent's purge cannot reclaim a child that is still
                     # running. Do not spend attempts on this legitimate wait.
                     with transaction.atomic():
-                        agent = Agent.objects.select_for_update().get(pk=session.agent_id)
                         owner = Session.objects.select_for_update().get(pk=session.id)
-                        if not _owner_reclaimable(agent, owner, session, cutoff):
+                        if not _owner_reclaimable(owner, session, cutoff):
                             report.blocked.append(key)
                             continue
                         from .workspace_snapshot_publication import collect_key
@@ -106,13 +105,10 @@ def _collect_purged_workspace_snapshot_gc(cutoff, dry_run: bool) -> WorkspaceSna
                 # Match public deletion and snapshot I/O: parent before child.
                 # Do not enumerate or copy payloads while holding these locks.
                 with transaction.atomic():
-                    agent = Agent.objects.select_for_update().only(
-                        "status", "purgedAt", "workspace_id",
-                    ).get(pk=session.agent_id)
                     owner = Session.objects.select_for_update().only(
-                        "status", "purgedAt", "workspace_id", "agent_id",
+                        "status", "purgedAt", "workspace_id",
                     ).get(pk=session.id)
-                    if not _owner_reclaimable(agent, owner, session, cutoff):
+                    if not _owner_reclaimable(owner, session, cutoff):
                         report.blocked.append(key)
                         continue
                     try:
@@ -184,12 +180,10 @@ def _delete_observed_snapshot(key, *, session_id):
                         protection_observations.increment("gcReclaimedBytes", reclaimed)
 
 
-def _owner_reclaimable(agent, owner, session, cutoff):
+def _owner_reclaimable(owner, session, cutoff):
     session_purged = owner.status == "deleted" and owner.purgedAt is not None and owner.purgedAt <= cutoff
     return (
         owner.workspace_id == session.workspace_id
-        and owner.agent_id == agent.id
-        and agent.workspace_id == owner.workspace_id
         and session_purged
     )
 

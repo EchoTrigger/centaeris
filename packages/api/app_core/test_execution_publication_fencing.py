@@ -24,7 +24,7 @@ from django.utils import timezone
 
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .http import internal, workspaces
-from .models import Agent, AgentRun, ModelConfig, StorageCleanupRetry, Workspace
+from .models import AgentRun, ModelConfig, StorageCleanupRetry, Workspace
 from .testing import create_session
 
 
@@ -81,6 +81,7 @@ class ExecutionPublicationFixture:
         workspace = Workspace.objects.create(name="Publication fencing", createdBy=user)
         workspace.members.add(user)
         model = ModelConfig.objects.create(id="publication-model", displayName="Publication")
+        self.user, self.workspace, self.model = user, workspace, model
         self.session = create_session(workspace=workspace, owner=user)
         self.run = AgentRun.objects.create(
             workspace=workspace, session=self.session, user=user,
@@ -262,61 +263,9 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
             status="deleted", deletedAt=now, purgedAt=now,
         )
 
-    def _purge_agent(self):
-        now = timezone.now()
-        Agent.objects.filter(id=self.session.agent_id).update(
-            status="deleted", deletedAt=now, purgedAt=now,
-        )
 
-    def test_parent_purge_during_snapshot_upload_preserves_session_publication(self):
-        self._parent_purge_during_upload(checkpoint=False)
 
-    def test_parent_purge_during_checkpoint_upload_preserves_session_publication(self):
-        self._parent_purge_during_upload(checkpoint=True)
 
-    def _parent_purge_during_upload(self, *, checkpoint):
-        body, snapshot = self._body()
-        checkpoint_id = "checkpoint:parent-purge"
-        if checkpoint:
-            metadata_size = int.from_bytes(body[:4], "big")
-            metadata = json.loads(body[4:4 + metadata_size])
-            metadata.update(schema="runtime.execution_workspace.stage.v2", checkpointId=checkpoint_id)
-            encoded = json.dumps(metadata, separators=(",", ":")).encode()
-            body = len(encoded).to_bytes(4, "big") + encoded + snapshot
-        retained_key = (
-            f"workspaces/{self.run.workspace_id}/sessions/{self.session.id}/snapshots/2/"
-            f"{hashlib.sha256(b'previous snapshot').hexdigest()}.snapshot"
-        )
-        default_storage.save(retained_key, ContentFile(b"previous snapshot"))
-        reports = []
-
-        def purge_and_collect():
-            self._purge_agent()
-            output = io.StringIO()
-            call_command("gc_deleted_resources", older_than_seconds=0, stdout=output)
-            self.assertTrue(default_storage.exists(retained_key))
-            reports.append(output.getvalue())
-
-        original_post = self._post
-        if checkpoint:
-            self._post = lambda payload: post_workspace_snapshot(
-                self, payload, "/internal/agent-runs/execution-workspace/stage")
-        try:
-            committed = self._during_upload(purge_and_collect, body=body)
-            self.assertEqual(committed.status_code, 201, committed.content)
-            replay = self._post(body)
-            self.assertEqual(replay.status_code, 201 if checkpoint else 200, replay.content)
-        finally:
-            self._post = original_post
-        self.session.refresh_from_db()
-        self.assertEqual(self.session.status, "active")
-        self.assertIsNone(self.session.purgedAt)
-        self.assertEqual(self.session.workspaceGeneration, 0 if checkpoint else 1)
-        self.assertTrue(any(path.read_bytes() == snapshot for path in self.storage_root.rglob("*.snapshot")))
-        self._assert_no_upload_temporaries()
-        AgentRun.objects.filter(id=self.run.id).update(status="completed")
-        call_command("gc_deleted_resources", older_than_seconds=0, stdout=io.StringIO())
-        self.assertTrue(any(path.read_bytes() == snapshot for path in self.storage_root.rglob("*.snapshot")))
 
     def test_purged_session_during_upload_cannot_create_final_snapshot(self):
         stale = self._during_upload(self._purge_session)
@@ -612,15 +561,9 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
         body, snapshot, key = self._checkpoint_download_body()
         self._download_open_purge_race(body, snapshot, key, checkpoint=True)
 
-    def test_snapshot_download_opens_before_parent_purge_can_finish(self):
-        body, snapshot = self._download_body()
-        self._download_open_purge_race(body, snapshot, self.session.workspaceStorageKey, parent=True)
 
-    def test_checkpoint_download_opens_before_parent_purge_can_finish(self):
-        body, snapshot, key = self._checkpoint_download_body()
-        self._download_open_purge_race(body, snapshot, key, checkpoint=True, parent=True)
 
-    def _download_open_purge_race(self, body, snapshot, key, *, checkpoint=False, parent=False):
+    def _download_open_purge_race(self, body, snapshot, key, *, checkpoint=False):
         opening, release, purging = Event(), Event(), Event()
         real_open = default_storage.open
         response = None
@@ -635,7 +578,7 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
         def purge():
             try:
                 purging.set()
-                self._purge_agent() if parent else self._purge_session()
+                self._purge_session()
             finally:
                 connections.close_all()
 
@@ -670,15 +613,6 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
         finally:
             if response is not None:
                 response.close()
-        if parent:
-            self.session.refresh_from_db()
-            self.assertEqual(self.session.status, "active")
-            self.assertTrue(default_storage.exists(key))
-            retained = self._thread_download(body, checkpoint=checkpoint)
-            self.assertEqual(retained.status_code, 200)
-            retained.close()
-            AgentRun.objects.filter(id=self.run.id).update(status="completed")
-            self._purge_session()
         retry = StorageCleanupRetry.objects.filter(storageKey=key, state="failed").first()
         if retry is not None:
             self.assertIsNotNone(retry.nextCleanupAt)

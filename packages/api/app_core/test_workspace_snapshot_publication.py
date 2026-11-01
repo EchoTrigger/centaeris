@@ -7,7 +7,7 @@ from django.test import TransactionTestCase
 from django.utils import timezone
 
 from .http import internal
-from .models import Agent, Session, StorageCleanupRetry, WorkspaceSnapshotObject, WorkspaceSnapshotUpload
+from .models import Session, StorageCleanupRetry, WorkspaceSnapshotObject, WorkspaceSnapshotUpload
 from .test_execution_publication_fencing import ExecutionPublicationFixture
 from .storage_gc_retry import claim_storage_key,clean_storage_key
 
@@ -21,7 +21,6 @@ class WorkspaceSnapshotPublicationTests(ExecutionPublicationFixture, Transaction
 
     def tombstone(self, key):
         with transaction.atomic():
-            Agent.objects.select_for_update().get(pk=self.session.agent_id)
             Session.objects.select_for_update().get(pk=self.session.pk)
             object, _ = WorkspaceSnapshotObject.objects.get_or_create(
                 keyDigest=hashlib.sha256(key.encode()).hexdigest(),

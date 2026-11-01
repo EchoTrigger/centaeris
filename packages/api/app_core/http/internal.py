@@ -30,7 +30,7 @@ from app_core.deferred_input import (
     resolved_input_storage,
     input_storage_batch,
 )
-from app_core.models import Agent, Session, AgentRun
+from app_core.models import Session, AgentRun
 from app_core.material_contract import KnowledgeError
 from app_core.runtime_contract import (
     agent_run_binding_matches,
@@ -623,12 +623,7 @@ def _locked_session_workspace_agent_run(body: dict) -> tuple[AgentRun, Session, 
         job = cursor.fetchone()
     if job is None:
         raise SessionWorkspaceError("session_workspace_lease_lost")
-    # Public deletion and GC lock Agent before Session. A parent purge leaves
-    # child state unchanged, so lock and recheck both owners before snapshot I/O.
-    # Then retain the existing Run/lease order and recheck the lease after waiting.
-    agent_id = Session.objects.filter(id=job[0]).values_list("agent_id", flat=True).first()
-    agent = Agent.objects.select_for_update().filter(id=agent_id).first()
-    session = Session.objects.select_for_update().filter(id=job[0]).first()
+    session = Session.objects.select_for_update().filter(pk=job[0]).first()
     try:
         agent_run = (
             AgentRun.objects.select_for_update(of=("self",))
@@ -666,10 +661,7 @@ def _locked_session_workspace_agent_run(body: dict) -> tuple[AgentRun, Session, 
     except (AttributeError, ValueError):
         raise SessionWorkspaceError("session_workspace_authorization_invalid") from None
     if (
-        agent is None
-        or agent.id != session.agent_id
-        or agent.workspace_id != session.workspace_id
-        or agent_run.status not in {"queued", "running"}
+        agent_run.status not in {"queued", "running"}
         or session.status != "active"
         or session.purgedAt is not None
     ):
@@ -1378,269 +1370,30 @@ def validate_projected_inputs(request):
     )
 
 
-@_internal_post("/agent-work/returns/materialize")
-def materialize_agent_work_return(request):
-    from app_core.agent_work_returns import materialize_work_return, WorkReturnError
-    try:
-        body = decode_json_object(request)
-        if set(body) != {"schema", "workAgentRunId"} or body["schema"] != "workspace.agent_work.return_materialize.v1":
-            raise ValueError
-        require_opaque_ref("workAgentRunId", body["workAgentRunId"])
-        disposition, notice = materialize_work_return(body["workAgentRunId"])
-        return JsonResponse({"schema": "workspace.agent_work.return_materialized.v1",
-            "disposition": disposition, "notice": notice},
-            status=201 if disposition == "delivered" else 202 if disposition == "pending" else 200)
-    except WorkReturnError as error:
-        return JsonResponse({"error": error.code}, status=error.status)
-    except (ValueError, TypeError):
-        return JsonResponse({"error": "agent_work_return_invalid"}, status=400)
-    except RuntimeError:
-        return JsonResponse({"error": "agent_work_return_dependency_unavailable"}, status=503)
 
 
-@_internal_post("/agent-work/returns/query")
-def query_agent_work_return(request):
-    from app_core.agent_work_returns import query_work_return, WorkReturnError
-    try:
-        body = decode_json_object(request)
-        fields = {"schema", "agentRunId", "authorizationDigest", "coordinationSessionId", "toolCallId", "noticeId"}
-        if set(body) != fields or body["schema"] != "workspace.agent_work.return_query.v1":
-            raise ValueError
-        require_sha256("authorizationDigest", body["authorizationDigest"])
-        for name in fields - {"schema", "authorizationDigest"}:
-            require_opaque_ref(name, body[name])
-        return JsonResponse(query_work_return(body))
-    except WorkReturnError as error:
-        return JsonResponse({"error": error.code}, status=error.status)
-    except (ValueError, TypeError):
-        return JsonResponse({"error": "agent_work_return_invalid"}, status=400)
 
 
-@_internal_post("/agent-work/returns/consume")
-def consume_agent_work_return(request):
-    from django.db import IntegrityError
-    from app_core.agent_work_consumption import consume_work_return
-    from app_core.agent_work_returns import WorkReturnError
-    from app_core.hosted_operations import HostedOperationError, OPERATION_ID_PATTERN
-    import re
-    try:
-        body = decode_json_object(request)
-        if set(body) != {"schema", "noticeId", "operationId"} or body["schema"] != "workspace.agent_work.consume.v1":
-            raise ValueError
-        require_opaque_ref("noticeId", body["noticeId"])
-        if not isinstance(body["operationId"], str) or re.fullmatch(OPERATION_ID_PATTERN, body["operationId"]) is None:
-            raise ValueError
-        response, status = consume_work_return(body["noticeId"], body["operationId"])
-        return JsonResponse(response, status=status)
-    except (WorkReturnError, HostedOperationError) as error:
-        return JsonResponse({"error": error.code}, status=error.status)
-    except (ValueError, TypeError, KeyError):
-        return JsonResponse({"error": "agent_work_consume_invalid"}, status=400)
-    except IntegrityError:
-        return JsonResponse({"error": "agent_work_consume_conflict"}, status=409)
-    except RuntimeError:
-        return JsonResponse({"error": "agent_work_consume_dependency_unavailable"}, status=503)
 
 
-@_internal_post("/agent-work/returns/consume/discover")
-def discover_agent_work_consumption(request):
-    from app_core.agent_work_consumption import discover_pending_work_returns
-    try:
-        body = decode_json_object(request)
-        if set(body) != {"schema", "limit", "after", "through"} or body["schema"] != "workspace.agent_work.consume_discover.v1":
-            raise ValueError
-        limit = body["limit"]
-        if type(limit) is not int or not 1 <= limit <= AGENT_RUN_LIFECYCLE_RECONCILE_LIMIT:
-            raise ValueError
-        for name in ("after", "through"):
-            if body[name] is not None:
-                require_opaque_ref(name, body[name])
-                if len(body[name]) > 96:
-                    raise ValueError
-        if body["after"] is not None and (body["through"] is None or body["after"] > body["through"]):
-            raise ValueError
-        return JsonResponse(discover_pending_work_returns(body["after"], body["through"], limit))
-    except (ValueError, TypeError):
-        return JsonResponse({"error": "agent_work_consume_discover_invalid"}, status=400)
 
 
-@_internal_post("/agent-work/returns/schedule")
-def schedule_agent_work_return(request):
-    from app_core.agent_work_return_jobs import schedule_work_return_job
-    from app_core.agent_work_returns import WorkReturnError
-    try:
-        body = decode_json_object(request)
-        if set(body) != {"schema", "workAgentRunId"} or body["schema"] != "workspace.agent_work.return_schedule.v1":
-            raise ValueError
-        require_opaque_ref("workAgentRunId", body["workAgentRunId"])
-        disposition = schedule_work_return_job(AgentRun.objects.get(pk=body["workAgentRunId"]))
-        return JsonResponse({"schema": "workspace.agent_work.return_scheduled.v1", "disposition": disposition})
-    except WorkReturnError as error:
-        return JsonResponse({"error": error.code}, status=error.status)
-    except AgentRun.DoesNotExist:
-        return JsonResponse({"error": "agent_work_return_source_not_found"}, status=404)
-    except (ValueError, TypeError):
-        return JsonResponse({"error": "agent_work_return_schedule_invalid"}, status=400)
-    except RuntimeError:
-        return JsonResponse({"error": "agent_work_return_schedule_unavailable"}, status=503)
 
 
-@_internal_post("/agent-work/returns/audit/claim")
-def claim_agent_work_return_audit(request):
-    from app_core.agent_work_return_jobs import claim_work_return_audit
-    try:
-        body = decode_json_object(request)
-        if (set(body) != {"schema", "limit"} or body["schema"] != "workspace.agent_work.return_audit.claim.v1"
-                or type(body["limit"]) is not int or not 1 <= body["limit"] <= 100):
-            raise ValueError
-        return JsonResponse(claim_work_return_audit(body["limit"]))
-    except (ValueError, TypeError):
-        return JsonResponse({"error": "agent_work_return_audit_invalid"}, status=400)
 
 
-@_internal_post("/agent-work/returns/audit/finish")
-def finish_agent_work_return_audit(request):
-    from app_core.agent_work_return_jobs import finish_work_return_audit
-    from app_core.agent_work_returns import WorkReturnError
-    try:
-        body = decode_json_object(request)
-        if (set(body) != {"schema", "leaseOwner", "after", "complete"}
-                or body["schema"] != "workspace.agent_work.return_audit.finish.v1"
-                or type(body["complete"]) is not bool):
-            raise ValueError
-        require_opaque_ref("leaseOwner", body["leaseOwner"])
-        if body["after"] is not None:
-            require_opaque_ref("after", body["after"])
-        finish_work_return_audit(body["leaseOwner"], body["after"], body["complete"])
-        return JsonResponse({"schema": "workspace.agent_work.return_audit.finished.v1", "disposition": "recorded"})
-    except WorkReturnError as error:
-        return JsonResponse({"error": error.code}, status=error.status)
-    except (ValueError, TypeError):
-        return JsonResponse({"error": "agent_work_return_audit_invalid"}, status=400)
 
 
-@_internal_post("/agent-work/returns/query")
-def query_agent_work_return(request):
-    from app_core.agent_work_returns import query_work_return, WorkReturnError
-    try:
-        body = decode_json_object(request)
-        fields = {"schema", "agentRunId", "authorizationDigest", "coordinationSessionId", "toolCallId", "noticeId"}
-        if set(body) != fields or body["schema"] != "workspace.agent_work.return_query.v1":
-            raise ValueError
-        require_sha256("authorizationDigest", body["authorizationDigest"])
-        for name in fields - {"schema", "authorizationDigest"}:
-            require_opaque_ref(name, body[name])
-        return JsonResponse(query_work_return(body))
-    except WorkReturnError as error:
-        return JsonResponse({"error": error.code}, status=error.status)
-    except (ValueError, TypeError):
-        return JsonResponse({"error": "agent_work_return_invalid"}, status=400)
 
 
-@_internal_post("/agent-work/returns/consume")
-def consume_agent_work_return(request):
-    from django.db import IntegrityError
-    from app_core.agent_work_consumption import consume_work_return
-    from app_core.agent_work_returns import WorkReturnError
-    from app_core.hosted_operations import HostedOperationError, OPERATION_ID_PATTERN
-    import re
-    try:
-        body = decode_json_object(request)
-        if set(body) != {"schema", "noticeId", "operationId"} or body["schema"] != "workspace.agent_work.consume.v1":
-            raise ValueError
-        require_opaque_ref("noticeId", body["noticeId"])
-        if not isinstance(body["operationId"], str) or re.fullmatch(OPERATION_ID_PATTERN, body["operationId"]) is None:
-            raise ValueError
-        response, status = consume_work_return(body["noticeId"], body["operationId"])
-        return JsonResponse(response, status=status)
-    except (WorkReturnError, HostedOperationError) as error:
-        return JsonResponse({"error": error.code}, status=error.status)
-    except (ValueError, TypeError, KeyError):
-        return JsonResponse({"error": "agent_work_consume_invalid"}, status=400)
-    except IntegrityError:
-        return JsonResponse({"error": "agent_work_consume_conflict"}, status=409)
-    except RuntimeError:
-        return JsonResponse({"error": "agent_work_consume_dependency_unavailable"}, status=503)
 
 
-@_internal_post("/agent-work/returns/consume/discover")
-def discover_agent_work_consumption(request):
-    from app_core.agent_work_consumption import discover_pending_work_returns
-    try:
-        body = decode_json_object(request)
-        if set(body) != {"schema", "limit", "after", "through"} or body["schema"] != "workspace.agent_work.consume_discover.v1":
-            raise ValueError
-        limit = body["limit"]
-        if type(limit) is not int or not 1 <= limit <= AGENT_RUN_LIFECYCLE_RECONCILE_LIMIT:
-            raise ValueError
-        for name in ("after", "through"):
-            if body[name] is not None:
-                require_opaque_ref(name, body[name])
-                if len(body[name]) > 96:
-                    raise ValueError
-        if body["after"] is not None and (body["through"] is None or body["after"] > body["through"]):
-            raise ValueError
-        return JsonResponse(discover_pending_work_returns(body["after"], body["through"], limit))
-    except (ValueError, TypeError):
-        return JsonResponse({"error": "agent_work_consume_discover_invalid"}, status=400)
 
 
-@_internal_post("/agent-work/returns/discover")
-def discover_agent_work_returns(request):
-    from app_core.agent_work_returns import discover_work_returns
-    try:
-        body = decode_json_object(request)
-        if set(body) != {"schema", "limit", "after", "through"} or body["schema"] != "workspace.agent_work.returns.discover.v1":
-            raise ValueError
-        limit = body["limit"]
-        if type(limit) is not int or not 1 <= limit <= AGENT_RUN_LIFECYCLE_RECONCILE_LIMIT:
-            raise ValueError
-        for name in ("after", "through"):
-            if body[name] is not None:
-                require_opaque_ref(name, body[name])
-                if len(body[name]) > 64:
-                    raise ValueError
-        if body["after"] is not None and (body["through"] is None or body["after"] > body["through"]):
-            raise ValueError
-        return JsonResponse(discover_work_returns(body["after"], body["through"], limit))
-    except (ValueError, TypeError):
-        return JsonResponse({"error": "agent_work_return_invalid"}, status=400)
 
 
-@_internal_post("/agent-work/discover")
-def discover_agent_work(request):
-    from app_core.agent_work_recovery import discover_work_requests, scan_cursor
-    try:
-        body = decode_json_object(request)
-        if set(body) != {"schema", "limit", "after", "through"} or body["schema"] != "workspace.agent_work.discover.v1":
-            raise ValueError
-        limit = body["limit"]
-        if type(limit) is not int or not 1 <= limit <= AGENT_RUN_LIFECYCLE_RECONCILE_LIMIT:
-            raise ValueError
-        after, through = scan_cursor(body["after"]), scan_cursor(body["through"])
-        if after is not None and (through is None or after > through):
-            raise ValueError
-        return JsonResponse(discover_work_requests(after, through, limit))
-    except (ValueError, TypeError):
-        return JsonResponse({"error":"agent_work_discover_invalid"}, status=400)
 
 
-@_internal_post("/agent-work/materialize")
-def materialize_agent_work(request):
-    from app_core.agent_work import materialize_work_request, WorkMaterializationError
-    from app_core.hosted_operations import HostedOperationError
-
-    try:
-        body = decode_json_object(request)
-        if set(body) != {"schema", "sourceEventId"} or body["schema"] != "workspace.agent_work.materialize.v1":
-            raise ValueError("agent_work_materialize_invalid")
-        require_opaque_ref("sourceEventId", body["sourceEventId"])
-        response, created = materialize_work_request(body["sourceEventId"])
-        return JsonResponse(response, status=201 if created else 200)
-    except (WorkMaterializationError, HostedOperationError) as error:
-        return JsonResponse({"error": error.code}, status=error.status)
-    except ValueError:
-        return JsonResponse({"error": "agent_work_materialize_invalid"}, status=400)
 
 
 @_internal_post("/agent-run-lifecycle/control")
@@ -1846,7 +1599,6 @@ def reconcile_agent_run_lifecycle(request):
     scheduled = 0
     terminalized = 0
     pending = 0
-    input_handoff_agents = set()
     active_agent_runs, active_next = _lifecycle_scan_page(
         AgentRun.objects.filter(status__in={"queued", "running"})
         .select_related("authorization", "modelConfig", "session", "environment"),
@@ -1875,13 +1627,11 @@ def reconcile_agent_run_lifecycle(request):
                     projected.transitionReason = "runtime_session_terminal_committed"
                     projected.save(update_fields=["transitionReason", "updatedAt"])
                     terminalized += 1
-                    input_handoff_agents.add(projected.session.agent_id)
                 continue
             job = get_runtime_job(agent_run_lifecycle_job_id(agent_run.id))
             if job is not None and job.get("status") in {"failed", "dead_lettered"}:
                 _fail_agent_run_lifecycle(agent_run.id)
                 terminalized += 1
-                input_handoff_agents.add(agent_run.session.agent_id)
                 continue
             if job is not None and job.get("status") == "succeeded":
                 projected = project_committed_agent_run(agent_run)
@@ -1890,7 +1640,6 @@ def reconcile_agent_run_lifecycle(request):
                         "agent_run_lifecycle_completed_without_session_terminal"
                     )
                 terminalized += 1
-                input_handoff_agents.add(projected.session.agent_id)
                 continue
             schedule_agent_run_lifecycle(agent_run)
             if agent_run.status == "queued":
@@ -1910,11 +1659,6 @@ def reconcile_agent_run_lifecycle(request):
                 id=agent_run.id, status__in={"queued", "running"}
             ).exclude(transitionReason="execution_queue_expired").update(
                 transitionReason="agent_run_lifecycle_reconcile_pending")
-    from app_core.agent_input_delivery import try_dispatch_agent_inputs
-    from app_core.models import AgentInput
-    for agent_id in sorted(input_handoff_agents):
-        if AgentInput.objects.filter(agent_id=agent_id, delivery__isnull=True).exists():
-            try_dispatch_agent_inputs(agent_id)
     return JsonResponse(
         {"scheduled": scheduled, "terminalized": terminalized, "pending": pending,
          "activeNext": active_next, "deadLetterNext": dead_letter_next}
@@ -2058,12 +1802,4 @@ def transition_agent_run(request):
         return JsonResponse({"error": "agent_run_not_found"}, status=404)
     except (ValueError, TypeError) as error:
         return JsonResponse({"error": str(error)}, status=400)
-    if agent_run.status in {"completed", "failed", "cancelled"}:
-        # The terminal is already durable. Delivery failure must not undo it or
-        # block lifecycle teardown; the independent ledger pass repairs this gap.
-        try:
-            from app_core.agent_work_return_jobs import schedule_work_return_job
-            schedule_work_return_job(agent_run)
-        except Exception as error:
-            logger.warning("Work return delivery remains pending: %s", type(error).__name__)
     return JsonResponse({"agentRunId": agent_run.id, "state": agent_run.status})

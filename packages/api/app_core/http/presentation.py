@@ -12,11 +12,9 @@ from django.db.models import QuerySet
 from django.http import JsonResponse, QueryDict
 from ninja import Router
 
-from app_core.agent_identity import validate_agent_id
-from app_core.agent_definitions import available_agent_definitions
 from app_core.agent_run_stream import _load_live_text_state_async, _capture_signal_tail, _redis_stream_client, agent_run_signal_key
 from app_core.app_delegations import session_authority_is_current
-from app_core.models import Agent, AgentRun, Session, SessionEvent
+from app_core.models import AgentRun, Session, SessionEvent
 from app_core.operation_presentation import operation_records, operation_detail
 from app_core.presentation_stream import PresentationScope, PROJECTION_VERSION, stream_presentation
 from app_core.presentation_service import create_presentation_hub
@@ -50,8 +48,6 @@ class PresentationLoader:
         # Preserve the existing list authorization and delegated branch boundary.
         self.request = copy.copy(request)
         self.request.GET = QueryDict(mutable=True)
-        if getattr(request, "app_delegation", None) is not None:
-            self.request.GET["agentId"] = scope.agent_id
         self.scope = scope
         self.user_id = request.user.id
         delegation = getattr(request, "app_delegation", None)
@@ -66,8 +62,7 @@ class PresentationLoader:
     def authorized(self):
         with _database_deadline():
             if self.scope.session_id is not None:
-                if not Session.objects.filter(id=self.scope.session_id, workspace_id=self.scope.workspace_id,
-                                               agent_id=self.scope.agent_id).exists():
+                if not Session.objects.filter(id=self.scope.session_id, workspace_id=self.scope.workspace_id).exists():
                     return False
                 # The established helper already checks active user, owner,
                 # Agent, membership, definition visibility and delegation.
@@ -80,14 +75,6 @@ class PresentationLoader:
             membership = workspace_membership_for(user, self.scope.workspace_id)
             if membership is None:
                 return False
-            agent = Agent.objects.filter(id=self.scope.agent_id, workspace_id=self.scope.workspace_id,
-                                         owner_id=self.user_id, status="active").first()
-            if agent is None:
-                return False
-            if agent.definition_id and not available_agent_definitions(membership).filter(id=agent.definition_id).exists():
-                return False
-            # Recheck the exact list scope, including credential rotation and
-            # delegated branch restrictions, without materializing its rows.
             scoped = prepare_workspace_session_list(self.request, self.scope.workspace_id)
             return isinstance(scoped, QuerySet)
 
@@ -168,17 +155,12 @@ class PresentationLoader:
         "content": {"text/event-stream": {"schema": {"type": "string"}}},
     }}})
 async def presentation_events(request, workspace_id: str):
-    if not valid_query_fields(request.GET, {"agentId", "sessionId"}, required={"agentId"}):
+    if not valid_query_fields(request.GET, {"sessionId"}):
         return JsonResponse({"error": "presentation_query_invalid"}, status=400)
-    agent_id = request.GET["agentId"]
-    try:
-        validate_agent_id(agent_id)
-    except ValueError:
-        return JsonResponse({"error": "agent_id_invalid"}, status=400)
     session_id = request.GET.get("sessionId")
     if session_id is not None and (not session_id or len(session_id) > 64):
         return JsonResponse({"error": "presentation_query_invalid"}, status=400)
-    scope = PresentationScope(workspace_id, agent_id, session_id)
+    scope = PresentationScope(workspace_id, session_id)
     loader = PresentationLoader(request, scope)
     try:
         permitted = await asyncio.wait_for(loader.authorized(), READ_TIMEOUT_SECONDS)
@@ -213,7 +195,7 @@ def _operation_download(request, session_id, event_id):
         session = Session.objects.filter(id=session_id, owner_id=request.user.id, status="active").first()
         if session is None:
             return None
-        scope = PresentationScope(session.workspace_id, session.agent_id, session.id)
+        scope = PresentationScope(session.workspace_id, session.id)
         loader = PresentationLoader(request, scope)
         # Use the synchronous authorization implementation on this ORM thread,
         # retaining the existing delegated-session and membership checks.

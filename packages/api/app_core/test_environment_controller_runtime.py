@@ -8,20 +8,13 @@ from django.test import LiveServerTestCase, override_settings
 
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .models import AgentRun, Session
-from .model_adapter.common import fake_tool_call, zero_usage
+from .model_adapter.common import zero_usage
 from .runtime_client import schedule_agent_run_lifecycle
-from . import test_native_consumption_production as native_fixture
+from .test_environment_runtime_fixture import EnvironmentRuntimeFixture
 
 
-class EnvironmentControllerRuntimeTests(LiveServerTestCase):
+class EnvironmentControllerRuntimeTests(EnvironmentRuntimeFixture, LiveServerTestCase):
     serialized_rollback = True
-    setUp = native_fixture.NativeConsumptionProductionTests.setUp
-    start_runtime = native_fixture.NativeConsumptionProductionTests.start_runtime
-    stop_runtime = native_fixture.NativeConsumptionProductionTests.stop_runtime
-    runtime_command = native_fixture.NativeConsumptionProductionTests.runtime_command
-    load_worker = native_fixture.NativeConsumptionProductionTests.load_worker
-    claim_due_job = native_fixture.NativeConsumptionProductionTests.claim_due_job
-    assert_lifecycle_cleanup = native_fixture.NativeConsumptionProductionTests.assert_lifecycle_cleanup
 
     def resolve(self, run, owner):
         return self.client.post("/internal/agent-run-lifecycle/resolve",
@@ -42,11 +35,10 @@ class EnvironmentControllerRuntimeTests(LiveServerTestCase):
         runtime_url = self.start_runtime()
         worker = self.load_worker(runtime_url)
         session = Session.objects.create(workspace=self.workspace, owner=self.user,
-            agent=self.agent, origin="automation")
+            origin="automation")
         second = AgentRun.objects.create(workspace=self.workspace, session=session,
             user=self.user, modelConfig=self.model, prompt="Independent session objective",
-            definition_version=self.agent.definition.published_version,
-            agent_instructions=self.agent.definition.published_version.instructions)
+            agent_instructions="Session instructions")
         create_agent_run_authorization(second, image_digest=self.run.authorization.payload["environmentProfile"]["imageDigest"])
         self.assertEqual(second.membership_ref, self.run.membership_ref)
         self.assertNotEqual(second.session_id, self.run.session_id)
@@ -57,7 +49,7 @@ class EnvironmentControllerRuntimeTests(LiveServerTestCase):
             self.assertEqual(first.status_code, 200, first.content)
             pin = self.runtime_command("physical-pin:" + json.dumps({
                 "agentRunStart": first.json()["agentRunStart"], "leaseOwner": first_job["leaseOwner"]}),
-                "native-consume-production-physical-pinned:")
+                "environment-runtime-physical-pinned:")
             try:
                 self.assertEqual(pin["agentRunId"], self.run.pk)
                 # Independent writers prove these are actual Runtime transaction pins.
@@ -100,7 +92,7 @@ class EnvironmentControllerRuntimeTests(LiveServerTestCase):
                 self.assertIsNone(self.runtime_process.poll())
             finally:
                 released = self.runtime_command("release-physical-pin",
-                    "native-consume-production-physical-released:")
+                    "environment-runtime-physical-released:")
                 self.assertTrue(released["released"])
             # The same public request remains idempotent after the real pin releases.
             self.assertEqual(self.resolve(second, second_job["leaseOwner"]).json(), admitted.json())
@@ -150,10 +142,6 @@ class EnvironmentControllerRuntimeTests(LiveServerTestCase):
             claimed = self.claim_due_job(worker, job_id, "agent_run.lifecycle", "worker:busy-recovered")
             def response(_model, request):
                 self.requests.append(request)
-                if len(self.requests) == 1:
-                    return fake_tool_call("busy-recovered-reply", "send_message", {
-                        "body": "Completed after authority contention cleared.",
-                        "session_refs": [], "file_refs": []})
                 return {"text": "Completed after authority contention cleared.",
                     "toolCalls": [], "usage": zero_usage()}
             with patch("app_core.model_adapter.fake_model_response", side_effect=response):

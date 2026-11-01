@@ -219,11 +219,15 @@ struct MemoryMount {
     scope_key: String,
 }
 
-fn memory_mount(user_id: &str, agent_id: &str, volume_name: String) -> Result<MemoryMount, String> {
-    if user_id.trim().is_empty() || agent_id.trim().is_empty() {
+fn memory_mount(
+    user_id: &str,
+    workspace_id: &str,
+    volume_name: String,
+) -> Result<MemoryMount, String> {
+    if user_id.trim().is_empty() || workspace_id.trim().is_empty() {
         return Err("Agent Memory binding is invalid".to_string());
     }
-    let identity = serde_json::to_vec(&("agent_memory_scope_v1", user_id, agent_id))
+    let identity = serde_json::to_vec(&("workspace_memory_scope_v2", user_id, workspace_id))
         .map_err(|error| format!("encode Agent Memory scope failed: {error}"))?;
     Ok(MemoryMount {
         volume_name,
@@ -389,7 +393,6 @@ pub struct DockerExecutionHostRequest<'a> {
     pub agent_run_id: String,
     pub execution_id: String,
     pub user_id: String,
-    pub agent_id: String,
     pub authorization_digest: String,
     pub environment_authorization: crate::environment_authorization::EnvironmentAuthorization,
     pub image_digest: String,
@@ -490,17 +493,21 @@ impl DockerExecutionHostRunner {
         {
             return Err("benchmark network differs from signed authorization".into());
         }
+
         #[cfg(test)]
-        if crate::native_consumption_tests::owns_identity(&request.user_id, &request.agent_id) {
+        if crate::environment_runtime_tests::owns_identity(&request.user_id, &request.workspace_id)
+        {
             assert!(
                 !request.has_execution_fact,
                 "fresh execution required by native fixture"
             );
             validate_plugin_activation_snapshot(request.plugin_activation)?;
             assert!(request.plugin_activation.packages.is_empty());
-            let allocation =
-                crate::native_consumption_tests::prepare_owned_allocation(&request, before_create)?;
-            crate::native_consumption_tests::register_owned_run(&request.agent_run_id);
+            let allocation = crate::environment_runtime_tests::prepare_owned_allocation(
+                &request,
+                before_create,
+            )?;
+            crate::environment_runtime_tests::register_owned_run(&request.agent_run_id);
             let mut runner = tests::test_docker_execution_host_runner();
             runner.container_name = format!("native-consume-test:{}", request.execution_id);
             runner.agent_run_id = request.agent_run_id;
@@ -542,7 +549,6 @@ impl DockerExecutionHostRunner {
             agent_run_id,
             execution_id,
             user_id,
-            agent_id,
             authorization_digest,
             environment_authorization,
             image_digest,
@@ -580,7 +586,7 @@ impl DockerExecutionHostRunner {
         let plugin_mounts = plugin_mounts(plugin_activation)?;
         let memory_mount = memory_mount(
             user_id.as_str(),
-            agent_id.as_str(),
+            workspace_id.as_str(),
             docker_volume_name_from_environment(AGENT_MEMORY_VOLUME_NAME_ENV)?,
         )?;
         prepare_memory_scope(&memory_mount)?;
@@ -938,7 +944,7 @@ impl DockerExecutionHostRunner {
         fence: &centaeris_core::session::RuntimeJobLeaseFence,
     ) -> Result<(), String> {
         #[cfg(test)]
-        if crate::native_consumption_tests::owns_run(agent_run_id) {
+        if crate::environment_runtime_tests::owns_run(agent_run_id) {
             return Ok(());
         }
         crate::observations::timed("sandboxTeardown", || {
@@ -4053,7 +4059,7 @@ mod tests {
         let mut runner = retained_test_runner();
         let original: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
             serde_json::from_str(include_str!(
-                "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+                "../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
             ))
             .unwrap();
         runner.environment_profile = Some(original.environment_profile.clone());
@@ -4137,7 +4143,7 @@ mod tests {
         let mut runner = test_docker_execution_host_runner();
         let mut profile: EnvironmentProfile = serde_json::from_value(
             serde_json::from_str::<serde_json::Value>(include_str!(
-                "../../../tests/workspace/fixtures/agent_run_authorization/v1/custom.json"
+                "../../../tests/workspace/fixtures/agent_run_authorization/v2/custom.json"
             ))
             .unwrap()["environmentProfile"]
                 .clone(),
@@ -4349,7 +4355,6 @@ mod tests {
                         agent_run_id: run.into(),
                         execution_id: execution.into(),
                         user_id: "centaeris-recovery-test-user".into(),
-                        agent_id: "centaeris-recovery-test-agent".into(),
                         authorization_digest: digest.clone(),
                         environment_authorization:
                             crate::environment_authorization::EnvironmentAuthorization {
@@ -6039,7 +6044,8 @@ mod tests {
         );
         assert_ne!(
             mount,
-            memory_mount("user_1", "agent-banana", volume_name.clone()).expect("other Agent mount")
+            memory_mount("user_1", "workspace-banana", volume_name.clone())
+                .expect("other Workspace mount")
         );
         assert_ne!(
             mount,
@@ -6206,7 +6212,7 @@ mod tests {
         let mut runner = retained_test_runner();
         let original: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
             serde_json::from_str(include_str!(
-                "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+                "../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
             ))
             .unwrap();
         runner.resources = original.environment_profile.resources.sandbox_resources();
@@ -6263,7 +6269,7 @@ mod tests {
         let mut runner = retained_test_runner();
         let original: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
             serde_json::from_str(include_str!(
-                "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+                "../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
             ))
             .unwrap();
         runner.resources = original.environment_profile.resources.sandbox_resources();

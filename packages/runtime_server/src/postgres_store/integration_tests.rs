@@ -2988,7 +2988,7 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
     let session_id = "session_fenced_terminal";
     let mut authorization: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
         serde_json::from_str(include_str!(
-            "../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+            "../../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
         ))
         .unwrap();
     authorization.agent_run_id = agent_run_id.into();
@@ -3000,7 +3000,7 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
         turn_id: "turn_pg_fenced_terminal".into(),
         prompt: "fence terminal".into(),
         initial_input: crate::contract::AgentRunStartInitialInput::UserMessage {},
-        agent_instructions: "Read committed work history.".into(),
+        session_instructions: "Read committed work history.".into(),
         model_context_tokens: 200_000,
         model_max_output_tokens: 32_768,
         authorization_digest: authorization.digest().unwrap(),
@@ -3014,8 +3014,6 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             ),
         authorization,
         tail_action: crate::contract::AgentRunTailAction::Append,
-        coordination_session_id: None,
-        native_coordination_session_id: None,
     };
     let mut lifecycle_job = job(
         "agent_run.lifecycle:agent_run_fenced_terminal",
@@ -4668,9 +4666,9 @@ fn postgres_transcript_old_block_encoding_generation_is_invalidated_and_reinitia
 
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
-fn postgres_fenced_rewrite_tombstones_completed_dispatch_request() {
+fn postgres_fenced_rewrite_tombstones_completed_tool_request() {
     use centaeris_core::session::{rewrite_last_user_tail_tombstone, RewriteLastUserTailRequest};
-    use centaeris_core::tool::{DynamicToolContract, DynamicToolRegistry};
+    use centaeris_core::tool::DynamicToolRegistry;
 
     let _guard = TEST_LOCK.lock().unwrap();
     let url = test_url();
@@ -4697,13 +4695,10 @@ fn postgres_fenced_rewrite_tombstones_completed_dispatch_request() {
         "Dispatch work".into(),
     );
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let contract: DynamicToolContract = serde_json::from_str(include_str!(
-        "../../../api/app_core/contracts/dispatch_work.json"
-    ))
-    .unwrap();
+    let contract = crate::workspace_tools::workspace_tool_contracts().remove(0);
     let registry = DynamicToolRegistry::from_contracts(vec![contract]).unwrap();
     let digest = registry
-        .find_contract("dispatch_work")
+        .find_contract("publish_artifact")
         .unwrap()
         .contract_digest()
         .unwrap();
@@ -4736,7 +4731,7 @@ fn postgres_fenced_rewrite_tombstones_completed_dispatch_request() {
             3,
             SessionRecordType::ToolCall,
             serde_json::json!({
-            "callId":"dispatch-one","toolName":"dispatch_work","providerId":"workspace.agent_work",
+            "callId":"dispatch-one","toolName":"publish_artifact","providerId":"centaeris.artifact",
             "toolContractDigest":digest,"displayTarget":"Private Agent work",
             "normalizedInput":{"objective":"Complete objective","session_refs":[],"file_refs":[]}}),
         ),
@@ -4744,7 +4739,7 @@ fn postgres_fenced_rewrite_tombstones_completed_dispatch_request() {
             4,
             SessionRecordType::ToolResult,
             serde_json::json!({
-            "callId":"dispatch-one","toolName":"dispatch_work","resultState":"successWithOutput",
+            "callId":"dispatch-one","toolName":"publish_artifact","resultState":"successWithOutput",
             "modelContent":"Request accepted for Session commit","fullOutputPath":null,"outputStartByte":null,
             "outputByteLength":35,"outputComplete":true,"summary":"Request recorded",
             "operations":[],"modelInputImages":[],"latencyMs":0}),

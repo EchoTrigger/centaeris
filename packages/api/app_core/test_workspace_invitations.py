@@ -8,7 +8,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from app_core.models import (
-    Agent,
+    Session,
     Source,
     SourceGrant,
     Workspace,
@@ -211,8 +211,6 @@ class WorkspaceInvitationTests(TestCase):
             first_membership.id,
         )
         self.assertEqual(first_membership.invited_by, self.owner)
-        first_agent = Agent.objects.get(workspace=self.workspace, owner=account)
-        self.assertEqual(first_agent.name, "Centaeris")
         visible_sources = self.client.get(
             f"/api/workspaces/{self.workspace.id}/sources"
         )
@@ -241,14 +239,7 @@ class WorkspaceInvitationTests(TestCase):
         self.assertEqual(rejoined.status_code, 200, rejoined.content)
         self.assertNotEqual(rejoined.json()["membershipId"], first_membership_id)
         self.assertEqual(rejoined.json()["role"], "admin")
-        self.assertEqual(
-            list(
-                Agent.objects.filter(workspace=self.workspace, owner=account).values_list(
-                    "id", flat=True
-                )
-            ),
-            [first_agent.id],
-        )
+        self.assertFalse(Session.objects.filter(workspace=self.workspace, owner=account).exists())
         self.assertEqual(
             self.client.get(
                 f"/api/workspaces/{self.workspace.id}/sources"
@@ -279,14 +270,7 @@ class WorkspaceInvitationTests(TestCase):
             user=account,
         )
         self.assertEqual(membership.id, accepted.json()["membershipId"])
-        self.assertTrue(
-            Agent.objects.filter(
-                workspace=self.workspace,
-                owner=account,
-                name="Centaeris",
-                status="active",
-            ).exists()
-        )
+        self.assertFalse(Session.objects.filter(workspace=self.workspace, owner=account).exists())
         self.assertEqual(self.client.get("/api/me").status_code, 200)
 
     def test_new_account_password_uses_django_policy_before_acceptance(self):

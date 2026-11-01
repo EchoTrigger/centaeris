@@ -9,8 +9,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
-pub const AGENT_RUN_AUTHORIZATION_SCHEMA: &str = "workspace.agent_run_authorization.v1";
-const AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN: &str = "workspace:agent-run-authorization:v1\0";
+pub const AGENT_RUN_AUTHORIZATION_SCHEMA: &str = "workspace.agent_run_authorization.v2";
+const AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN: &str = "workspace:agent-run-authorization:v2\0";
 const MAX_DECLARED_INPUTS: usize = 64;
 
 mod environment_profile;
@@ -39,7 +39,6 @@ pub struct WorkspaceAgentRunAuthorization {
     pub organization_id: String,
     pub workspace_id: String,
     pub user_id: String,
-    pub agent_id: String,
     pub session_id: String,
     pub agent_run_id: String,
     pub session_workspace: SessionWorkspace,
@@ -82,7 +81,6 @@ impl WorkspaceAgentRunAuthorization {
             ("organizationId", self.organization_id.as_str()),
             ("workspaceId", self.workspace_id.as_str()),
             ("userId", self.user_id.as_str()),
-            ("agentId", self.agent_id.as_str()),
             ("sessionId", self.session_id.as_str()),
             ("agentRunId", self.agent_run_id.as_str()),
             ("modelConfigRef", self.model_config_ref.as_str()),
@@ -90,7 +88,6 @@ impl WorkspaceAgentRunAuthorization {
         ] {
             require_opaque_ref(name, value)?;
         }
-        validate_agent_id(self.agent_id.as_str())?;
         if let Some(thinking_mode) = &self.thinking_mode {
             require_non_empty("thinkingMode", thinking_mode)?;
             if thinking_mode.chars().count() > 64 || thinking_mode.chars().any(char::is_control) {
@@ -312,13 +309,6 @@ fn require_opaque_ref(name: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_agent_id(value: &str) -> Result<(), String> {
-    if value.chars().count() > 64 || value.chars().any(char::is_control) {
-        return Err("agentId is invalid".to_string());
-    }
-    Ok(())
-}
-
 fn require_non_empty(name: &str, value: &str) -> Result<(), String> {
     if value.trim().is_empty() || value.trim() != value {
         return Err(format!("{name} is required without outer whitespace"));
@@ -373,7 +363,7 @@ mod tests {
 
     pub(super) fn authorization() -> WorkspaceAgentRunAuthorization {
         serde_json::from_str(include_str!(
-            "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+            "../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
         ))
         .expect("shared authorization fixture")
     }
@@ -384,7 +374,7 @@ mod tests {
         authorization.validate().expect("authorization");
         let digest = authorization.digest().expect("digest");
         let expected: Value = serde_json::from_str(include_str!(
-            "../../../tests/workspace/fixtures/agent_run_authorization/v1/expected.json"
+            "../../../tests/workspace/fixtures/agent_run_authorization/v2/expected.json"
         ))
         .unwrap();
         assert_eq!(digest, expected["digest"]);
@@ -394,6 +384,16 @@ mod tests {
         authorization
             .verify_signature(b"test-key", signature.as_str())
             .expect("verify");
+    }
+
+    #[test]
+    fn authorization_rejects_retired_agent_grants() {
+        let mut old = authorization();
+        old.schema = "workspace.agent_run_authorization.v1".into();
+        assert!(old.validate().is_err());
+        let mut wire = serde_json::to_value(authorization()).unwrap();
+        wire["agentId"] = "retired-agent".into();
+        assert!(serde_json::from_value::<WorkspaceAgentRunAuthorization>(wire).is_err());
     }
 
     #[test]

@@ -1,12 +1,5 @@
-#[cfg(test)]
-use centaeris_core::session::restore_runtime_snapshot_from_session_records;
 mod agent_inputs;
-#[cfg(test)]
-mod agent_inputs_tests;
-mod agent_messages;
 mod agent_run_authorization;
-mod agent_work;
-mod agent_work_trigger;
 mod api_model_client;
 mod artifact_publication;
 mod contract;
@@ -15,6 +8,8 @@ mod docker_engine;
 mod docker_execution_host;
 mod docker_storage;
 mod environment_authorization;
+#[cfg(test)]
+mod environment_runtime_tests;
 mod environment_stdio;
 mod environment_supervisor;
 mod execution_capacity;
@@ -27,11 +22,7 @@ mod host_retirement;
 mod http;
 mod job_protocol;
 mod lifecycle_hooks;
-#[cfg(test)]
-mod lifecycle_test_fixture;
 mod mcp;
-#[cfg(test)]
-mod native_consumption_tests;
 mod observations;
 mod platform_materials;
 mod postgres_store;
@@ -133,8 +124,8 @@ use centaeris_core::tool::layer::{ToolExecutionResult, ToolLayer};
 use centaeris_core::tool::{DynamicToolRegistry, ToolErrorInfo, ToolFailureKind};
 use centaeris_model_catalog::model_catalog;
 use contract::{
-    AgentRunCancelRequest, AgentRunStart, AgentRunStartInitialInput, AgentRunStepRequest,
-    AgentRunSupplementRequest, AgentRunTailAction, HostEventInputRequest,
+    AgentRunCancelRequest, AgentRunStart, AgentRunStepRequest, AgentRunSupplementRequest,
+    AgentRunTailAction, HostEventInputRequest,
 };
 use deferred_input_resolver::{ApiDeferredInputResolver, ApiModelInputImageResolver};
 use docker_execution_host::{
@@ -1788,58 +1779,10 @@ fn terminalize_agent_run_failure(
     })
 }
 
-fn workspace_agent_tool_contracts(
-    agent_run_start: &AgentRunStart,
-) -> Vec<centaeris_core::tool::DynamicToolContract> {
-    let mut contracts = workspace_tool_contracts();
-    if agent_run_start.coordination_session_id.is_some() {
-        contracts.push(agent_messages::message_tool_contract());
-    }
-    if agent_run_start.native_coordination_session_id.is_some() {
-        contracts.push(agent_work::work_tool_contract());
-        contracts.push(agent_work::work_query_tool_contract());
-        contracts.push(agent_work::work_confirmation_tool_contract());
-    }
-    contracts
-}
-
-fn register_workspace_agent_tool_providers(
-    tool_layer: &mut ToolLayer,
-    agent_run_start: &AgentRunStart,
-    api_url: &str,
-    token: &str,
-) -> Result<(), String> {
-    if agent_run_start.coordination_session_id.is_some() {
-        tool_layer.register_dynamic_tool_provider(Arc::new(
-            agent_messages::WorkspaceAgentMessageProvider::new(
-                api_url.to_owned(),
-                token.to_owned(),
-                &agent_run_start.authorization,
-                agent_run_start.authorization_digest.clone(),
-            )?,
-        ))?;
-    }
-    if agent_run_start.native_coordination_session_id.is_some() {
-        tool_layer.register_dynamic_tool_provider(Arc::new(
-            agent_work::WorkspaceAgentWorkProvider::new(
-                api_url.to_owned(),
-                token.to_owned(),
-                &agent_run_start.authorization,
-                agent_run_start.authorization_digest.clone(),
-            )?,
-        ))?;
-    }
-    Ok(())
-}
-
 fn hosted_agent_runtime_config(start: &AgentRunStart) -> AgentRuntimeConfig {
     AgentRuntimeConfig {
         tool_parallelism: centaeris_core::runtime::MAX_TOOL_PARALLELISM,
-        required_completion_tool: start
-            .coordination_session_id
-            .is_some()
-            .then(|| "send_message".to_string()),
-        agent_instructions: start.agent_instructions.clone(),
+        agent_instructions: start.session_instructions.clone(),
         model_context_tokens: start.model_context_tokens,
         model_max_output_tokens: start.model_max_output_tokens,
         ..AgentRuntimeConfig::default()
@@ -2272,7 +2215,6 @@ fn execute_agent_run(
                     agent_run_id: agent_run_start.agent_run_id.clone(),
                     execution_id: execution_id.clone(),
                     user_id: agent_run_start.authorization.user_id.clone(),
-                    agent_id: agent_run_start.authorization.agent_id.clone(),
                     authorization_digest: agent_run_start.authorization_digest.clone(),
                     environment_authorization: agent_run_start.environment_authorization.clone(),
                     image_digest: agent_run_start
@@ -2491,7 +2433,7 @@ fn execute_agent_run(
     )?);
     let workspace_root = PathBuf::from(docker_execution.workspace_root());
     #[cfg(test)]
-    let workspace_root = if native_consumption_tests::owns_run(&agent_run_start.agent_run_id) {
+    let workspace_root = if environment_runtime_tests::owns_run(&agent_run_start.agent_run_id) {
         std::env::temp_dir()
     } else {
         workspace_root
@@ -2522,15 +2464,13 @@ fn execute_agent_run(
     )?);
     let platform_materials = match runtime.block_on(async {
         #[cfg(test)]
-        if native_consumption_tests::owns_run(&agent_run_start.agent_run_id) {
-            // This owned fixture exercises native coordination with an empty
+        if environment_runtime_tests::owns_run(&agent_run_start.agent_run_id) {
+            // This owned fixture exercises ordinary Sessions with an empty
             // execution host. Material MCP discovery has its own protocol gate.
             assert!(agent_run_start.authorization.asset_refs.is_empty());
             return Ok(None);
         }
-        if agent_run_start.authorization.asset_refs.is_empty()
-            && agent_run_start.coordination_session_id.is_none()
-        {
+        if agent_run_start.authorization.asset_refs.is_empty() {
             return Ok(None);
         }
         platform_materials::PlatformMaterialsProvider::connect_current(
@@ -2557,7 +2497,7 @@ fn execute_agent_run(
             );
         }
     };
-    let mut dynamic_tool_contracts = workspace_agent_tool_contracts(&agent_run_start);
+    let mut dynamic_tool_contracts = workspace_tool_contracts();
     dynamic_tool_contracts.extend(retained_tasks::retained_task_contracts());
     if let Some(provider) = &platform_materials {
         dynamic_tool_contracts.extend(provider.contracts.clone());
@@ -2593,7 +2533,6 @@ fn execute_agent_run(
     tool_layer.register_dynamic_tool_provider(Arc::new(WorkspaceArtifactToolProvider::new(
         artifact_publication,
     )))?;
-    register_workspace_agent_tool_providers(&mut tool_layer, &agent_run_start, &api_url, &token)?;
     register_retained_task_provider(&mut tool_layer, docker_execution.clone())?;
     for provider in mcp_bindings.providers {
         tool_layer.register_dynamic_tool_provider(provider)?;
@@ -3062,13 +3001,8 @@ fn execute_agent_run(
             now_ms()?
         ),
     };
-    let turn_control = agent_inputs::turn_control(
-        job_store.clone(),
-        &agent_run_start,
-        input_binding,
-        materialize_supplements,
-        Some(resolved_inputs.clone()),
-    )?;
+    let turn_control =
+        agent_inputs::turn_control(job_store.clone(), input_binding, materialize_supplements)?;
     let live_degraded = Arc::new(AtomicBool::new(false));
     let mut stream_error = None;
     let safe_point_sequence = session_record_sequence.clone();
@@ -3108,18 +3042,6 @@ fn execute_agent_run(
         .as_ref()
         .map_or(0, |checkpoint| checkpoint.session_sequence);
     let pending_recovery_upload = Mutex::new(None::<PendingRecoveryCheckpoint>);
-    let work_trigger = if agent_run_start.native_coordination_session_id.is_some() {
-        match agent_work_trigger::WorkCommitTrigger::new(runtime.handle().clone(), &api_url, &token)
-        {
-            Ok(trigger) => Some(trigger),
-            Err(_) => {
-                eprintln!("agent_work_trigger_deferred reason=setup");
-                None
-            }
-        }
-    } else {
-        None
-    };
     let mut commit_tool_safe_point = |safe_point: ToolSafePoint| {
         let safe_point_started = Instant::now();
         let observed_call = match &safe_point {
@@ -3241,7 +3163,6 @@ fn execute_agent_run(
                         &[event],
                         Some(&checkpoint),
                         &terminal_lease_fence,
-                        work_trigger.as_ref(),
                     )?;
                     accept_session_commit(
                         &mut committed_sequence,
@@ -3565,7 +3486,6 @@ fn execute_agent_run(
                             .as_ref()
                             .map(|(checkpoint, _, _)| checkpoint),
                         &terminal_lease_fence,
-                        work_trigger.as_ref(),
                     )
                 },
             )?;
@@ -4736,19 +4656,9 @@ fn model_initial_input(
     inputs: &ResolvedInputState,
     states: &HashMap<String, DeferredInputResolutionFailureKind>,
 ) -> Result<AgentRunInitialInput, String> {
-    match &start.initial_input {
-        AgentRunStartInitialInput::UserMessage {} => {
+    match start.initial_input {
+        contract::AgentRunStartInitialInput::UserMessage {} => {
             model_user_message(start, inputs, states).map(AgentRunInitialInput::UserMessage)
-        }
-        AgentRunStartInitialInput::UserInput {
-            input_id, message, ..
-        } => Ok(AgentRunInitialInput::UserInput {
-            input_id: input_id.clone(),
-            message: message.clone(),
-            attachments: contract::initial_input_attachments(start)?,
-        }),
-        AgentRunStartInitialInput::HostEvent { input, .. } => {
-            Ok(AgentRunInitialInput::HostEvent(input.clone()))
         }
     }
 }
@@ -4849,7 +4759,6 @@ fn commit_agent_tool_records(
     events: &[SequencedSessionRecord],
     checkpoint: Option<&CheckpointRecord>,
     fence: &RuntimeJobLeaseFence,
-    trigger: Option<&agent_work_trigger::WorkCommitTrigger>,
 ) -> Result<SessionCommitReceipt, String> {
     let receipt = session_delivery::retry(
         || match checkpoint {
@@ -4870,9 +4779,6 @@ fn commit_agent_tool_records(
     )?;
     // The store's append guard and transaction have ended. Downstream stream or
     // capture failures must not prevent waking a successfully committed result.
-    if let Some(trigger) = trigger {
-        trigger.after_commit(start, &receipt);
-    }
     Ok(receipt)
 }
 
@@ -5026,25 +4932,6 @@ fn started_session_records(
     sequence: &mut AgentRunSessionState,
     created_at_ms: i64,
 ) -> Result<Vec<SequencedSessionRecord>, String> {
-    if let AgentRunStartInitialInput::HostEvent { input, .. } = &agent_run_start.initial_input {
-        let mut records = Vec::new();
-        if sequence.is_empty() {
-            let [started, _] = centaeris_core::session::started_agent_run_records(
-                &agent_run_start.authorization.session_id,
-                &agent_run_start.turn_id,
-                &agent_run_start.agent_run_id,
-                &agent_run_start.prompt,
-                created_at_ms,
-            )?;
-            records.push(sequence.record(started)?);
-        }
-        if let Some(record) =
-            sequence.host_event_input_record(&agent_run_start.turn_id, input, created_at_ms)?
-        {
-            records.push(record);
-        }
-        return Ok(records);
-    }
     if sequence.is_empty()
         && matches!(
             agent_run_start.tail_action,
@@ -5053,51 +4940,8 @@ fn started_session_records(
     {
         sequence.reserve_rewritten_user_predecessor()?;
     }
-    let (objective, attachments) = if matches!(
-        agent_run_start.initial_input,
-        AgentRunStartInitialInput::UserInput { .. }
-    ) {
-        // Persist the same model-context rendering that Core uses on the first
-        // request, including image placeholders for durable checkpoint replay.
-        let mut message = centaeris_core::session::state::ChatMessage {
-            message_id: format!("message:{}:user", agent_run_start.turn_id),
-            role: centaeris_core::session::state::MessageRole::User,
-            content: agent_run_start.prompt.clone(),
-            created_at_ms,
-            metadata: HashMap::new(),
-        };
-        let captured = contract::initial_input_attachments(agent_run_start)?;
-        centaeris_core::session::turn_input::attachments::apply_user_input_attachments(
-            &mut message,
-            &captured,
-        );
-        let images: Vec<centaeris_core::model::prepared_prompt::ModelInputImageRefV1> = message
-            .metadata
-            .get(centaeris_core::runtime::keys::metadata::MODEL_INPUT_IMAGES)
-            .map(|raw| serde_json::from_str(raw))
-            .transpose()
-            .map_err(|error| error.to_string())?
-            .unwrap_or_default();
-        let attachments = captured
-            .iter()
-            .map(|item| {
-                let mut value = serde_json::to_value(item).expect("typed attachment serializes");
-                if let Some(image) = images
-                    .iter()
-                    .find(|image| image.input_ref == item.input_ref)
-                {
-                    value["placeholder"] = json!(image.placeholder);
-                }
-                value
-            })
-            .collect();
-        (message.content, attachments)
-    } else {
-        (
-            agent_run_start.prompt.clone(),
-            message_attachments(agent_run_start)?,
-        )
-    };
+    let objective = agent_run_start.prompt.clone();
+    let attachments = message_attachments(agent_run_start)?;
     sequence.start(
         agent_run_start.turn_id.as_str(),
         objective.as_str(),
@@ -5718,11 +5562,7 @@ fn load_existing_session_sequence_on_client(
         },
     )?;
     if upper > 0 {
-        let input_record_type = match agent_run_start.initial_input {
-            AgentRunStartInitialInput::UserMessage {}
-            | AgentRunStartInitialInput::UserInput { .. } => SessionRecordType::UserMessage,
-            AgentRunStartInitialInput::HostEvent { .. } => SessionRecordType::HostEventInput,
-        };
+        let input_record_type = SessionRecordType::UserMessage;
         if types.first() != Some(&SessionRecordType::AgentRunStarted)
             || types.get(1) != Some(&input_record_type)
             || types.iter().any(|kind| {
@@ -7228,10 +7068,9 @@ mod tests {
     #[test]
     fn hosted_runtime_uses_full_tool_capacity_without_changing_core_default() {
         let mut start = agent_run_start();
-        start.agent_instructions = "hosted capacity fixture".into();
+        start.session_instructions = "hosted capacity fixture".into();
         start.model_context_tokens = 123456;
         start.model_max_output_tokens = 64000;
-        start.coordination_session_id = Some("coordination-fixture".into());
         let config = hosted_agent_runtime_config(&start);
         let effective = ToolConcurrencyCoordinator::new(config.tool_parallelism);
         assert_eq!(
@@ -7244,17 +7083,13 @@ mod tests {
             16,
             "Core's general default is independent"
         );
-        assert_eq!(config.agent_instructions, start.agent_instructions);
+        assert_eq!(config.agent_instructions, start.session_instructions);
         assert_eq!(config.model_context_tokens, start.model_context_tokens);
         assert_eq!(
             config.model_max_output_tokens,
             start.model_max_output_tokens
         );
-        assert_eq!(
-            config.required_completion_tool.as_deref(),
-            Some("send_message")
-        );
-        start.coordination_session_id = None;
+        assert!(config.required_completion_tool.is_none());
         assert!(hosted_agent_runtime_config(&start)
             .required_completion_tool
             .is_none());
@@ -7263,7 +7098,7 @@ mod tests {
     pub(super) fn agent_run_start() -> AgentRunStart {
         let mut authorization: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
             serde_json::from_str(include_str!(
-                "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+                "../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
             ))
             .expect("current authorization fixture");
         authorization.session_workspace = crate::agent_run_authorization::SessionWorkspace {
@@ -7283,7 +7118,7 @@ mod tests {
             "agentRunId": "agent_run_1",
             "turnId": "turn_1",
             "prompt": "hello",
-            "agentInstructions": "",
+            "sessionInstructions": "",
             "modelContextTokens": 200000,
             "modelMaxOutputTokens": 32768,
             "authorizationDigest": digest,

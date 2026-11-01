@@ -44,7 +44,7 @@ fn setup() -> (
     // The historical AgentRun below is allocation provenance, never maintenance authority.
     let original: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
         serde_json::from_str(include_str!(
-            "../../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+            "../../../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
         ))
         .unwrap();
     let profile = original.environment_profile.digest().unwrap();

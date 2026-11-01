@@ -1,1 +1,1 @@
-"""Workspace Agent HTTP transport."""
+"""Workspace and Session HTTP transport."""

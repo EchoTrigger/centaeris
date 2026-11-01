@@ -13,8 +13,8 @@ from django.core.management import call_command
 from django.test import SimpleTestCase, TransactionTestCase
 from django.utils import timezone
 
-from .models import Agent, AgentInput, AgentInputDelivery, AgentInputQueue, AgentRun, ModelConfig, PresentationChange, PresentationChangeOutbox, Session, Workspace
-from .presentation_changes import CHANNEL, PROJECTED_CHANNEL, agent_change_key, drain_pending_changes, read_presentation_versions, presentation_change_keys, session_change_key
+from .models import AgentRun, ModelConfig, PresentationChange, PresentationChangeOutbox, Session, Workspace
+from .presentation_changes import CHANNEL, PROJECTED_CHANNEL, drain_pending_changes, read_presentation_versions, presentation_change_keys, session_change_key
 from .testing import create_session
 
 
@@ -27,15 +27,13 @@ class PresentationChangeTests(TransactionTestCase):
         self.workspace = Workspace.objects.create(name="Presentation changes", createdBy=self.user)
         self.workspace.members.add(self.user)
         self.session = create_session(workspace=self.workspace, owner=self.user)
-        self.agent = self.session.agent
         self.model = ModelConfig.objects.create(displayName="Synthetic presentation")
         self.run = AgentRun.objects.create(workspace=self.workspace, session=self.session,
             user=self.user, modelConfig=self.model, prompt="Synthetic presentation")
 
-    def versions(self, *, agent=None, session=None):
+    def versions(self, *, session=None):
         drain_pending_changes()
-        return read_presentation_versions(self.workspace.pk, (agent or self.agent).pk,
-            (session or self.session).pk)
+        return read_presentation_versions(self.workspace.pk, (session or self.session).pk)
 
     def event(self, kind, payload=None):
         # Runtime writes SQL directly. This intentionally bypasses model.save and
@@ -78,13 +76,6 @@ class PresentationChangeTests(TransactionTestCase):
             self.event("model_request_started", {"purpose": purpose, "observations": []})
             self.assertChangedOnly(before, *changed)
 
-    def test_send_message_result_invalidates_history_but_ordinary_tools_do_not(self):
-        before = self.versions()
-        self.event("tool_result", {"toolName": "read", "resultState": "successWithOutput"})
-        self.assertChangedOnly(before, "state")
-        before = self.versions()
-        self.event("tool_result", {"toolName": "send_message", "resultState": "successWithOutput"})
-        self.assertChangedOnly(before, "state", "history")
 
     def test_session_metadata_and_read_fields_change_navigation_without_context(self):
         self.event("assistant_message")
@@ -106,19 +97,6 @@ class PresentationChangeTests(TransactionTestCase):
             modelConfig=self.model, prompt="Second synthetic run")
         self.assertChangedOnly(before, "state", "context", "navigation", "work")
 
-    def test_inputs_and_delivery_acknowledgement_invalidate_history(self):
-        from .agent_run_authorization_factory import create_agent_run_authorization
-        proof = create_agent_run_authorization(self.run, image_digest="sha256:" + "a" * 64)
-        before = self.versions()
-        fact = AgentInput.objects.create(agent=self.agent, session=self.session, input_id="change-input",
-            membership_ref=self.run.membership_ref, sequence=1, accepted_source_sequence=0,
-            body=self.run.prompt, created_at_ms=1)
-        self.assertChangedOnly(before, "history")
-        queue = AgentInputQueue.objects.create(agent_run=self.run, initial_input=fact, authorization_digest=proof.digest)
-        delivery = AgentInputDelivery.objects.create(input=fact, queue=queue)
-        before = self.versions()
-        AgentInputDelivery.objects.filter(pk=delivery.pk).update(acknowledged_at_ms=2)
-        self.assertChangedOnly(before, "history")
 
     def test_same_transaction_coalesces_and_rollback_never_advances_revision(self):
         before = self.versions()
@@ -134,21 +112,20 @@ class PresentationChangeTests(TransactionTestCase):
                 raise RuntimeError("rollback")
         self.assertEqual(self.versions(), committed)
 
-    def test_cross_agent_session_creation_wakes_workspace_navigation_only(self):
-        other = Agent.objects.create(workspace=self.workspace, owner=self.user, name="Other agent")
+    def test_session_creation_wakes_workspace_navigation_only(self):
         before = self.versions()
-        key = presentation_change_keys(self.workspace.pk, self.agent.pk)["navigation"]
+        key = presentation_change_keys(self.workspace.pk)["navigation"]
         cfg = connection.settings_dict
         with psycopg.connect(dbname=cfg["NAME"], user=cfg["USER"], password=cfg["PASSWORD"],
                 host=cfg["HOST"], port=cfg["PORT"], autocommit=True) as listener:
             listener.execute("LISTEN " + CHANNEL)
             with transaction.atomic():
-                unrelated = create_session(workspace=self.workspace, owner=self.user, agent=other)
+                unrelated = create_session(workspace=self.workspace, owner=self.user)
                 self.assertEqual(list(listener.notifies(timeout=.03, stop_after=1)), [])
             notices = list(listener.notifies(timeout=.15))
             self.assertIn(key, [notice.payload for notice in notices])
         self.assertChangedOnly(before, "navigation")
-        self.assertEqual(self.versions(agent=other, session=unrelated)["navigation"],
+        self.assertEqual(self.versions(session=unrelated)["navigation"],
                          self.versions()["navigation"])
 
     def test_noop_writes_and_runtime_lease_churn_do_not_dirty_presentation(self):
@@ -172,7 +149,7 @@ class PresentationChangeTests(TransactionTestCase):
                 Session.objects.filter(pk=self.session.pk).update(title="Private content must not be sent")
                 self.assertEqual(list(listener.notifies(timeout=.03, stop_after=1)), [])
             notices = list(listener.notifies(timeout=.15, stop_after=1))
-            self.assertEqual([notice.payload for notice in notices], [presentation_change_keys(self.workspace.pk, self.agent.pk)["navigation"]])
+            self.assertEqual([notice.payload for notice in notices], [presentation_change_keys(self.workspace.pk)["navigation"]])
             with self.assertRaises(RuntimeError):
                 with transaction.atomic():
                     self.event("assistant_message")
@@ -182,10 +159,10 @@ class PresentationChangeTests(TransactionTestCase):
 
     def test_navigation_only_versions_do_not_bind_an_arbitrary_session(self):
         self.versions()
-        before = read_presentation_versions(self.workspace.pk, self.agent.pk)
+        before = read_presentation_versions(self.workspace.pk)
         self.event("assistant_message")
         drain_pending_changes()
-        self.assertEqual(read_presentation_versions(self.workspace.pk, self.agent.pk), before)
+        self.assertEqual(read_presentation_versions(self.workspace.pk), before)
         self.assertGreater(self.versions()["state"], 0)
         self.assertEqual(session_change_key(self.session.pk, "state"), f"session:{self.session.pk}:state")
 
@@ -195,10 +172,10 @@ class PresentationChangeTests(TransactionTestCase):
             self.event("assistant_message", {"modelMarkdown": str(index)})
         pending = PresentationChangeOutbox.objects.count()
         self.assertEqual(pending, 4)
-        before = read_presentation_versions(self.workspace.pk, self.agent.pk, self.session.pk)
+        before = read_presentation_versions(self.workspace.pk, self.session.pk)
         self.assertEqual(drain_pending_changes(limit=2), 2)
         self.assertEqual(PresentationChangeOutbox.objects.count(), 2)
-        after = read_presentation_versions(self.workspace.pk, self.agent.pk, self.session.pk)
+        after = read_presentation_versions(self.workspace.pk, self.session.pk)
         self.assertGreater(after["state"], before["state"])
         self.assertEqual(drain_pending_changes(limit=2), 2)
         self.assertEqual(drain_pending_changes(limit=2), 0)
@@ -206,12 +183,12 @@ class PresentationChangeTests(TransactionTestCase):
     def test_failed_relay_rolls_back_both_versions_and_consumption(self):
         self.versions()
         self.event("assistant_message")
-        before = read_presentation_versions(self.workspace.pk, self.agent.pk, self.session.pk)
+        before = read_presentation_versions(self.workspace.pk, self.session.pk)
         with self.assertRaises(RuntimeError):
             with transaction.atomic():
                 self.assertEqual(drain_pending_changes(), 1)
                 raise RuntimeError("relay crashed")
-        self.assertEqual(read_presentation_versions(self.workspace.pk, self.agent.pk, self.session.pk), before)
+        self.assertEqual(read_presentation_versions(self.workspace.pk, self.session.pk), before)
         self.assertEqual(PresentationChangeOutbox.objects.count(), 1)
         self.assertEqual(drain_pending_changes(), 1)
         self.assertGreater(self.versions()["state"], before["state"])
@@ -318,7 +295,7 @@ class PresentationChangeTests(TransactionTestCase):
         self.event("assistant_message")  # The new listener deliberately misses this source hint.
         cfg = connection.settings_dict
         key = session_change_key(self.session.pk, "state")
-        before = read_presentation_versions(self.workspace.pk, self.agent.pk, self.session.pk)["state"]
+        before = read_presentation_versions(self.workspace.pk, self.session.pk)["state"]
         with psycopg.connect(dbname=cfg["NAME"], user=cfg["USER"], password=cfg["PASSWORD"],
                 host=cfg["HOST"], port=cfg["PORT"], autocommit=True) as listener:
             listener.execute("LISTEN " + CHANNEL)
@@ -335,32 +312,6 @@ class PresentationChangeTests(TransactionTestCase):
             self.assertEqual(list(listener.notifies(timeout=.03, stop_after=1)), [])
 
 
-@skipUnless(connection.vendor == "postgresql", "presentation triggers require PostgreSQL")
-class WorkPresentationChangeTests(TransactionTestCase):
-    serialized_rollback = True
-
-    def setUp(self):
-        from .test_agent_work import AgentWorkTests
-        AgentWorkTests.setUp(self)
-        self.session = self.source
-
-    versions = PresentationChangeTests.versions
-
-    def test_committed_dispatch_binding_and_child_status_invalidate_owned_work(self):
-        from .test_agent_work import AgentWorkTests
-        AgentWorkTests.dependencies(self)
-        event = AgentWorkTests.request_fact(self)
-        before = self.versions()
-        with patch("app_core.agent_work_return_jobs.schedule_work_return_job"):
-            response = AgentWorkTests.post(self, event)
-        self.assertEqual(response.status_code, 201, response.content)
-        after = self.versions()
-        for kind in ("navigation", "history", "work"):
-            self.assertGreater(after[kind], before[kind])
-        child_id = response.json()["operation"]["agentRunId"]
-        before = after
-        AgentRun.objects.filter(pk=child_id).update(status="completed")
-        self.assertGreater(self.versions()["work"], before["work"])
 
 
 @skipUnless(connection.vendor == "postgresql", "presentation triggers require PostgreSQL")
@@ -370,7 +321,7 @@ class PresentationChangeGcTests(TransactionTestCase):
     def isolate_resource_collectors(self):
         from types import SimpleNamespace
         module = "app_core.management.commands.gc_deleted_resources."
-        results = {"expire_trash": SimpleNamespace(agents=0, sessions=0, sources=0, library_objects=0),
+        results = {"expire_trash": SimpleNamespace(sessions=0, sources=0, library_objects=0),
             "collect_note_history_gc": (0, 0),
             "collect_deleted_resource_gc": SimpleNamespace(planned=[], cleaned=[], blocked=[], failures=[]),
             "collect_workspace_snapshot_gc": SimpleNamespace(planned=[], cleaned=[], blocked=[], failures=[])}
@@ -403,15 +354,15 @@ class PresentationChangeGcTests(TransactionTestCase):
 
 class PresentationChangeBackendTests(SimpleTestCase):
     def test_display_scope_tracks_only_its_five_data_views(self):
-        self.assertEqual(presentation_change_keys('workspace', 'agent', 'session'), {
-            'navigation': 'workspace:workspace:navigation', 'history': 'agent:agent:history',
-            'work': 'agent:agent:work', 'state': 'session:session:state',
+        self.assertEqual(presentation_change_keys('workspace', 'session'), {
+            'navigation': 'workspace:workspace:navigation', 'history': 'workspace:workspace:history',
+            'work': 'workspace:workspace:work', 'state': 'session:session:state',
             'context': 'session:session:context',
         })
 
     def test_live_readers_reject_non_postgres_backends_before_querying(self):
         with patch.object(connections["default"], "vendor", "sqlite"):
-            for operation in (lambda: read_presentation_versions("workspace", "agent"),
+            for operation in (lambda: read_presentation_versions("workspace"),
                               drain_pending_changes):
                 with self.subTest(operation=operation):
                     with self.assertRaisesRegex(RuntimeError, "presentation_changes_require_postgresql"):

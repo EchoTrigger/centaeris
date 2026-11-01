@@ -1,5 +1,4 @@
 from app_core.models import (
-    Agent,
     Artifact,
     Session,
     SessionProject,
@@ -22,60 +21,13 @@ def serialize_workspace(workspace: Workspace, role: str) -> dict:
     }
 
 
-def serialize_agent(agent: Agent) -> dict:
-    from app_core.business_agent_scope import agent_configuration
-    configuration = agent_configuration(agent)
-    version = agent.definition.published_version if agent.definition_id else None
-    avatar = version if version else configuration
-    return {
-        "id": agent.id,
-        "workspaceId": agent.workspace_id,
-        "definitionId": agent.definition_id,
-        "definitionVersionId": version.id if version else None,
-        "isBusinessRoot": agent.business_branches.exists(),
-        "pluginNames": ([item["name"] for item in version.plugin_activation["packages"]] if version else []),
-        "name": version.name if version else configuration.name,
-        "description": version.description if version else configuration.description,
-        "instructions": version.instructions if version else configuration.instructions,
-        "avatarKind": version.avatar_kind if version else configuration.avatar_kind,
-        "avatarUrl": (f"/api/agents/{agent.id}/avatar?v={avatar.avatar_digest}"
-            if avatar.avatar_digest and not agent.is_business_instance else None),
-        "status": agent.status,
-        "deletedAt": agent.deletedAt.isoformat() if agent.deletedAt else None,
-        "createdAt": agent.createdAt.isoformat(),
-        "updatedAt": agent.updatedAt.isoformat(),
-    }
 
 
-def serialize_agent_definition(definition) -> dict:
-    return {
-        "id": definition.id, "workspaceId": definition.workspace_id,
-        "name": definition.name, "description": definition.description,
-        "instructions": definition.instructions, "avatarKind": definition.avatar_kind,
-        "pluginNames": definition.plugin_names,
-        "modelConfigRef": definition.model_config_id, "thinkingMode": definition.thinking_mode or None,
-        "avatarUrl": (f"/api/agent-definitions/{definition.id}/avatar?v={definition.avatar_digest}" if definition.avatar_digest else None),
-        "status": definition.status, "availabilityScope": definition.availability_scope,
-        "membershipIds": sorted(item.membership_id for item in definition.member_grants.all()),
-        "publishedVersionId": definition.published_version_id,
-        "createdAt": definition.created_at.isoformat(), "updatedAt": definition.updated_at.isoformat(),
-    }
 
 
-def serialize_agent_definition_version(version) -> dict:
-    return {
-        "id": version.id, "definitionId": version.definition_id, "version": version.version,
-        "name": version.name, "description": version.description,
-        "instructions": version.instructions, "avatarKind": version.avatar_kind,
-        "pluginNames": [package["name"] for package in version.plugin_activation["packages"]],
-        "modelConfigRef": version.model_config_id, "thinkingMode": version.thinking_mode or None,
-        "avatarUrl": (f"/api/agent-definitions/{version.definition_id}/avatar?v={version.avatar_digest}" if version.avatar_digest else None),
-        "publishedAt": version.published_at.isoformat(),
-    }
 
 
 def serialize_session(session: Session, has_active_agent_run: bool | None = None, *, attention_is_current: bool = False) -> dict:
-    from app_core.agent_work_presentation import initial_input_origin
     from app_core.session_attention import refresh_session_attention, session_attention_snapshot
     if not attention_is_current:
         refresh_session_attention(session)
@@ -86,13 +38,12 @@ def serialize_session(session: Session, has_active_agent_run: bool | None = None
     return {
         "id": session.id,
         "workspaceId": session.workspace_id,
-        "agentId": session.agent_id,
+        "instructions": session.instructions,
         "projectId": session.project_id,
         "currentEnvironmentId": session.current_environment_id,
         "executionMode": "perRun",
         "title": session.title,
         "origin": session.origin,
-        "initialInputOrigin": initial_input_origin(session),
         "status": session.status,
         "deletedAt": session.deletedAt.isoformat() if session.deletedAt else None,
         "isPinned": session.isPinned,
@@ -120,7 +71,6 @@ def serialize_session_project(project: SessionProject) -> dict:
     return {
         "id": project.id,
         "workspaceId": project.workspace_id,
-        "agentId": project.agent_id,
         "name": project.name,
         "createdAt": project.created_at.isoformat(),
     }

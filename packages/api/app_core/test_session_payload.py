@@ -7,7 +7,7 @@ from pathlib import Path
 from .session_payload import decode_session_payload, encode_session_payload
 from django.db import connection
 from django.test import TransactionTestCase
-from . import test_agent_messages as fixture
+from .session_record_test_fixtures import SessionRecordFixture
 from .models import SessionEvent
 
 
@@ -65,15 +65,11 @@ class SessionPayloadCodecTests(unittest.TestCase):
         self.assertTrue(issubclass(SessionPayloadField, models.JSONField))
 
 
-class HostedSessionPayloadTests(TransactionTestCase):
+class HostedSessionPayloadTests(SessionRecordFixture, TransactionTestCase):
     serialized_rollback = True
-    setUp = fixture.AgentMessageTests.setUp
-    bind = fixture.AgentMessageTests.bind
-    message_run = fixture.AgentMessageTests.message_run
-    commit = fixture.AgentMessageTests.commit
 
     def test_tool_output_readback_is_lossless_through_instances_values_and_query_indexes(self):
-        source = self.bind()
+        source = self.session
         run = self.message_run(source)
         self.commit(run, "tool_result", {"toolName": "bash", "resultState": "successWithOutput",
             "modelContent": "kernel\0 and literal \\u0000", "summary": "kernel\0"})
@@ -93,7 +89,7 @@ class HostedSessionPayloadTests(TransactionTestCase):
     def test_migration_refuses_to_remove_the_decoder_after_control_byte_output(self):
         from django.apps import apps
         from types import SimpleNamespace
-        source = self.bind()
+        source = self.session
         run = self.message_run(source)
         self.commit(run, "tool_result", {"toolName": "bash", "resultState": "failed", "modelContent": "failure\0detail"})
         migration = importlib.import_module("app_core.migrations.0006_session_event_payload_storage")

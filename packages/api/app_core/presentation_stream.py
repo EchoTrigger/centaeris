@@ -26,11 +26,10 @@ NAVIGATION_CHUNK_BYTES = 65536
 @dataclass(frozen=True)
 class PresentationScope:
     workspace_id: str
-    agent_id: str
     session_id: str | None = None
 
     def wire(self):
-        return {"workspaceId": self.workspace_id, "agentId": self.agent_id, "sessionId": self.session_id}
+        return {"workspaceId": self.workspace_id, "sessionId": self.session_id}
 
 
 def _water(value):
@@ -54,7 +53,7 @@ def parse_cursor(scope, cursor):
             raise ValueError()
         raw = cursor[3:]
         body = json.loads(base64.b64decode(raw + "=" * (-len(raw) % 4), altchars=b"-_", validate=True))
-        if (not isinstance(body, dict) or set(body) != {"schema", "workspaceId", "agentId", "sessionId", "projectionGeneration", "sourceHighWater"}
+        if (not isinstance(body, dict) or set(body) != {"schema", "workspaceId", "sessionId", "projectionGeneration", "sourceHighWater"}
                 or body["schema"] != CURSOR_SCHEMA or any(body[key] != value for key, value in scope.wire().items())
                 or encode_cursor(scope, body["projectionGeneration"], body["sourceHighWater"]) != cursor):
             raise ValueError()

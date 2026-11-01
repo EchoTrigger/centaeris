@@ -5,7 +5,6 @@ from django.test import TestCase
 from django.utils import timezone
 
 from app_core.models import (
-    Agent,
     Session,
     Source,
     UserLibraryObject,
@@ -33,20 +32,9 @@ class TrashProjectionTests(TestCase):
             user=self.member,
             role="member",
         )
-        self.active_agent = Agent.objects.create(
-            workspace=self.workspace,
-            owner=self.owner,
-            name="Active Agent",
-        )
-        self.deleted_agent = Agent.objects.create(
-            workspace=self.workspace,
-            owner=self.owner,
-            name="Deleted Agent",
-        )
         self.session = Session.objects.create(
             workspace=self.workspace,
             owner=self.owner,
-            agent=self.active_agent,
             title="Needle Session",
             status="deleted",
             deletedAt=timezone.now(),
@@ -68,7 +56,6 @@ class TrashProjectionTests(TestCase):
             status="ready",
         )
         self.client.force_login(self.owner)
-        self.assertEqual(self.client.delete(f"/api/agents/{self.deleted_agent.id}").status_code, 200)
         self.assertEqual(
             self.client.delete(
                 f"/api/workspaces/{self.workspace.id}/sources/{self.source.id}"
@@ -78,7 +65,7 @@ class TrashProjectionTests(TestCase):
         self.assertEqual(self.client.delete(f"/api/library/{self.library.id}").status_code, 200)
 
     def test_unified_trash_filters_truthful_tombstones_and_binds_cursor(self):
-        for item in (self.deleted_agent, self.session, self.source, self.library):
+        for item in (self.session, self.source, self.library):
             item.refresh_from_db()
             self.assertEqual(item.deletedBy_id, self.owner.id)
 
@@ -87,16 +74,16 @@ class TrashProjectionTests(TestCase):
         payload = response.json()
         self.assertEqual(
             {item["kind"] for item in payload["items"]},
-            {"agent", "session", "source", "library"},
+            {"session", "source", "library"},
         )
         self.assertTrue(
             all(item["deletedBy"]["userId"] == str(self.owner.id) for item in payload["items"])
         )
         self.assertIn(
             {
-                "kind": "agent",
-                "id": self.active_agent.id,
-                "label": self.active_agent.name,
+                "kind": "workspace",
+                "id": None,
+                "label": self.workspace.name,
                 "scope": "workspace",
             },
             payload["filterOptions"]["locations"],
@@ -114,9 +101,9 @@ class TrashProjectionTests(TestCase):
         self.assertEqual([item["id"] for item in private["items"]], [self.library.id])
         located = self.client.get(
             f"/api/workspaces/{self.workspace.id}/trash",
-            {"locationKind": "agent", "locationId": self.active_agent.id},
+            {"locationKind": "workspace"},
         ).json()
-        self.assertEqual([item["id"] for item in located["items"]], [self.session.id])
+        self.assertEqual({item["id"] for item in located["items"]}, {self.session.id, self.source.id})
 
         with (
             patch("app_core.http.trash.TRASH_PAGE_SIZE", 1),
@@ -125,7 +112,7 @@ class TrashProjectionTests(TestCase):
             first = self.client.get(f"/api/workspaces/{self.workspace.id}/trash").json()
             changed = self.client.get(
                 f"/api/workspaces/{self.workspace.id}/trash",
-                {"cursor": first["nextCursor"], "kind": "agent"},
+                {"cursor": first["nextCursor"], "kind": "source"},
             )
         self.assertEqual(changed.status_code, 400)
         self.assertEqual(changed.json(), {"error": "trash_cursor_invalid"})

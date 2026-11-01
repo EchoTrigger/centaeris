@@ -9,7 +9,7 @@ from django.test import TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from .models import (Agent, AgentRun, SessionWorkspacePreservation, WorkspaceFileReservation,
+from .models import (AgentRun, SessionWorkspacePreservation, WorkspaceFileReservation,
                      WorkspaceSnapshotObject, WorkspaceSnapshotUpload)
 from .test_workspace_file_http import WorkspaceFileHttpFixture, digest, document
 from .workspace_file_objects import file_key, physical_file_keys
@@ -94,7 +94,7 @@ class WorkspaceFileGcTests(WorkspaceFileHttpFixture, TransactionTestCase):
         self.assertEqual(set(self.collect().cleaned), {head_key, shared_pack})
         self.assertFalse((self.storage_root / shared_pack).exists())
 
-    def test_agent_purge_keeps_retained_session_manifest_and_file_pack(self):
+    def test_retained_session_keeps_its_manifest_and_file_pack(self):
         contents = [b"retained first file", b"retained second file"]
         self.store_files(contents)
         response, _, _ = self.snapshot_upload(document([
@@ -103,8 +103,6 @@ class WorkspaceFileGcTests(WorkspaceFileHttpFixture, TransactionTestCase):
         self.session.refresh_from_db()
         self._lease(self.owner, expired=True)
         self.age_objects()
-        Agent.objects.filter(pk=self.session.agent_id).update(
-            status="deleted", deletedAt=self.old, purgedAt=self.old)
         keys = physical_file_keys({file_key(self.session, digest(content)) for content in contents})
         keys.add(self.session.workspaceStorageKey)
         report = self.collect()

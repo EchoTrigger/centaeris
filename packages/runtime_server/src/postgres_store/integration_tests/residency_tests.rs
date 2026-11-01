@@ -512,7 +512,7 @@ fn sandbox_with_resources(
     usage: ResidentResourceUsage,
 ) -> SandboxFixture {
     let mut original: WorkspaceAgentRunAuthorization = serde_json::from_str(include_str!(
-        "../../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+        "../../../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
     ))
     .unwrap();
     original.agent_run_id = id.into();

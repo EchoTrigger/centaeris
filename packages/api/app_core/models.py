@@ -300,9 +300,6 @@ class ResourceQuerySet(models.QuerySet):
 
 
 class Workspace(models.Model):
-    default_agent_definition = models.ForeignKey(
-        "AgentDefinition", on_delete=models.PROTECT, null=True, blank=True, related_name="default_for_workspaces",
-    )
     objects = ResourceQuerySet.as_manager()
     id = models.CharField(primary_key=True, max_length=64, default=new_workspace_id)
     name = models.CharField(max_length=160)
@@ -779,8 +776,6 @@ class UserAppDelegation(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="app_delegations")
     app = models.ForeignKey(BusinessApplication, on_delete=models.PROTECT, related_name="delegations")
     workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT, related_name="app_delegations")
-    definition = models.ForeignKey("AgentDefinition", on_delete=models.PROTECT, related_name="app_delegations", null=True, blank=True)
-    agent = models.ForeignKey("Agent", on_delete=models.PROTECT, related_name="app_delegations", null=True, blank=True)
     membership_ref = models.CharField(max_length=64, editable=False)
     issuer = models.CharField(max_length=100, default=ISSUER, editable=False)
     audience = models.CharField(max_length=100, default=AUDIENCE, editable=False)
@@ -794,42 +789,11 @@ class UserAppDelegation(models.Model):
     class Meta:
         constraints = [
             models.CheckConstraint(condition=~models.Q(membership_ref=""), name="app_delegation_membership_required"),
-            models.CheckConstraint(condition=(models.Q(definition__isnull=False, agent__isnull=True)
-                | models.Q(definition__isnull=True, agent__isnull=False)), name="app_delegation_target_exactly_one"),
             models.CheckConstraint(condition=models.Q(credential_version__gt=0), name="app_delegation_version_positive"),
         ]
 
     def save(self, *args, **kwargs):
-        from .app_delegation_contract import NATIVE_SCOPES
-        self.scopes = validate_scopes(self.scopes)
-        require_sha256("UserAppDelegation.token_digest", self.token_digest)
-        if (self.definition_id is None) == (self.agent_id is None):
-            raise ValueError("UserAppDelegation requires exactly one target")
-        target_matches = (self.definition.workspace_id == self.workspace_id if self.definition_id else
-            self.agent.workspace_id == self.workspace_id and self.agent.owner_id == self.user_id and self.agent.definition_id is None)
-        if self.issuer != ISSUER or self.audience != AUDIENCE or not target_matches:
-            raise ValueError("UserAppDelegation authority binding mismatch")
-        if self.agent_id and not set(self.scopes) <= NATIVE_SCOPES:
-            raise ValueError("UserAppDelegation native scopes are invalid")
-        if type(self.credential_version) is not int or self.credential_version <= 0:
-            raise ValueError("UserAppDelegation credential version is invalid")
-        fields = ("user_id", "app_id", "workspace_id", "definition_id", "agent_id", "membership_ref", "issuer", "audience",
-                  "scopes", "token_digest", "credential_version", "expires_at")
-        if self._state.adding:
-            if self.credential_version != 1:
-                raise ValueError("UserAppDelegation initial credential version must be one")
-            if self.agent_id and self.agent.status != "active":
-                raise ValueError("UserAppDelegation native Agent must be active")
-            if not WorkspaceMembership.objects.filter(id=self.membership_ref, workspace_id=self.workspace_id,
-                user_id=self.user_id, workspace__status="active", role__in=WORKSPACE_ROLES).exists():
-                raise ValueError("UserAppDelegation requires current membership")
-        else:
-            stored = type(self).objects.values(*fields, "revoked_at").get(pk=self.pk)
-            if any(stored[field] != getattr(self, field) for field in fields):
-                raise ValueError("UserAppDelegation authority is immutable")
-            if stored["revoked_at"] is not None and self.revoked_at != stored["revoked_at"]:
-                raise ValueError("UserAppDelegation revocation is permanent")
-        return super().save(*args, **kwargs)
+        raise ValueError("Agent-target application grants are retired")
 
 
 class AppDelegationAuditEvent(models.Model):
@@ -855,244 +819,6 @@ class AppDelegationAuditEvent(models.Model):
                 or self.actor_id != self.delegation.user_id):
             raise ValueError("app_delegation_audit_binding_rejected")
         kwargs["force_insert"] = True
-        return super().save(*args, **kwargs)
-
-
-class AgentDefinition(models.Model):
-    id = models.CharField(primary_key=True, max_length=64, default=new_agent_definition_id)
-    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT, related_name="agent_definitions")
-    name = models.CharField(max_length=255)
-    description = models.CharField(max_length=128, blank=True, default="")
-    instructions = models.TextField(blank=True, default="")
-    avatar_kind = models.CharField(max_length=16, default="centaeris")
-    avatar_image = models.BinaryField(null=True, blank=True, editable=False)
-    avatar_digest = models.CharField(max_length=64, blank=True, default="", editable=False)
-    model_config = models.ForeignKey(ModelConfig, on_delete=models.PROTECT, null=True, blank=True, related_name="+")
-    thinking_mode = models.CharField(max_length=64, blank=True, default="")
-    plugin_names = models.JSONField(default=list)
-    status = models.CharField(max_length=16, default="active")
-    availability_scope = models.CharField(max_length=16, default="none")
-    published_version = models.ForeignKey(
-        "AgentDefinitionVersion", on_delete=models.PROTECT, related_name="+", null=True, blank=True,
-    )
-    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        constraints = [
-            models.CheckConstraint(condition=models.Q(status__in=("active", "disabled")), name="agent_definition_status_valid"),
-            models.CheckConstraint(condition=models.Q(availability_scope__in=("none", "workspace", "members")), name="agent_definition_scope_valid"),
-            models.CheckConstraint(condition=models.Q(avatar_kind__in=("centaeris", "banana")), name="agent_definition_avatar_valid"),
-        ]
-
-    def save(self, *args, **kwargs):
-        from .plugin_catalog import validate_plugin_names
-        validate_plugin_names(self.plugin_names)
-        self.name = normalize_agent_name(self.name)
-        self.description = normalize_agent_description(self.description)
-        self.instructions = normalize_agent_instructions(self.instructions)
-        require_enum("AgentDefinition.avatar_kind", self.avatar_kind, {"centaeris", "banana"})
-        require_enum("AgentDefinition.status", self.status, {"active", "disabled"})
-        require_enum("AgentDefinition.availability_scope", self.availability_scope, {"none", "workspace", "members"})
-        if self.published_version_id and self.published_version.definition_id != self.id:
-            raise ValueError("AgentDefinition published version binding mismatch")
-        if not self._state.adding:
-            if type(self).objects.values_list("workspace_id", flat=True).get(pk=self.pk) != self.workspace_id:
-                raise ValueError("AgentDefinition workspace is immutable")
-        if self.model_config_id is None and self.thinking_mode:
-            raise ValueError("Unconfigured definition cannot carry thinking mode")
-        if self.thinking_mode:
-            validate_thinking_mode(self.thinking_mode)
-        return super().save(*args, **kwargs)
-
-
-class ImmutableDefinitionVersionQuerySet(models.QuerySet):
-    def update(self, **kwargs):
-        raise ValueError("AgentDefinitionVersion is immutable")
-
-    def delete(self):
-        raise ValueError("AgentDefinitionVersion is immutable")
-
-    def bulk_create(self, objs, batch_size=None, ignore_conflicts=False, update_conflicts=False,
-                    update_fields=None, unique_fields=None):
-        if update_conflicts:
-            raise ValueError("AgentDefinitionVersion is immutable")
-        return super().bulk_create(objs, batch_size=batch_size, ignore_conflicts=ignore_conflicts,
-                                   update_conflicts=False, update_fields=update_fields, unique_fields=unique_fields)
-
-
-class AgentDefinitionVersion(models.Model):
-    objects = ImmutableDefinitionVersionQuerySet.as_manager()
-    id = models.CharField(primary_key=True, max_length=64, default=new_agent_definition_version_id)
-    definition = models.ForeignKey(AgentDefinition, on_delete=models.PROTECT, related_name="versions")
-    version = models.PositiveIntegerField()
-    name = models.CharField(max_length=255)
-    description = models.CharField(max_length=128, blank=True, default="")
-    instructions = models.TextField(blank=True, default="")
-    avatar_kind = models.CharField(max_length=16, default="centaeris")
-    avatar_image = models.BinaryField(null=True, blank=True, editable=False)
-    avatar_digest = models.CharField(max_length=64, blank=True, default="", editable=False)
-    model_config = models.ForeignKey(ModelConfig, on_delete=models.PROTECT, null=True, blank=True, related_name="+")
-    thinking_mode = models.CharField(max_length=64, blank=True, default="")
-    plugin_activation = models.JSONField(default=empty_plugin_activation)
-    published_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
-    published_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["definition", "version"], name="agent_definition_version_unique"),
-            models.CheckConstraint(condition=models.Q(version__gt=0), name="agent_definition_version_positive"),
-            models.CheckConstraint(condition=models.Q(avatar_kind__in=("centaeris", "banana")), name="agent_definition_version_avatar"),
-        ]
-
-    def save(self, *args, **kwargs):
-        from .plugin_catalog import validate_plugin_activation
-        validate_plugin_activation(self.plugin_activation)
-        if not self._state.adding:
-            raise ValueError("AgentDefinitionVersion is immutable")
-        self.name = normalize_agent_name(self.name)
-        self.description = normalize_agent_description(self.description)
-        self.instructions = normalize_agent_instructions(self.instructions)
-        require_enum("AgentDefinitionVersion.avatar_kind", self.avatar_kind, {"centaeris", "banana"})
-        if self.version <= 0:
-            raise ValueError("AgentDefinitionVersion version must be positive")
-        if self.model_config_id is None and self.thinking_mode:
-            raise ValueError("Unconfigured definition cannot carry thinking mode")
-        if self.thinking_mode:
-            validate_thinking_mode(self.thinking_mode)
-        return super().save(*args, **kwargs)
-
-    def delete(self, *args, **kwargs):
-        raise ValueError("AgentDefinitionVersion is immutable")
-
-
-class AgentDefinitionMember(models.Model):
-    definition = models.ForeignKey(AgentDefinition, on_delete=models.PROTECT, related_name="member_grants")
-    membership = models.ForeignKey(WorkspaceMembership, on_delete=models.CASCADE, related_name="agent_definition_grants")
-
-    class Meta:
-        constraints = [models.UniqueConstraint(fields=["definition", "membership"], name="agent_definition_member_unique")]
-
-    def save(self, *args, **kwargs):
-        if self.definition.workspace_id != self.membership.workspace_id:
-            raise ValueError("AgentDefinitionMember workspace binding mismatch")
-        return super().save(*args, **kwargs)
-
-
-class Agent(models.Model):
-    is_business_instance = models.BooleanField(default=False)
-    objects = ResourceQuerySet.as_manager()
-    id = models.CharField(primary_key=True, max_length=64, default=new_agent_id)
-    workspace = models.ForeignKey(
-        Workspace,
-        on_delete=models.PROTECT,
-        related_name="agents",
-    )
-    owner = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.PROTECT,
-        related_name="agents",
-    )
-    definition = models.ForeignKey(
-        AgentDefinition, on_delete=models.PROTECT, related_name="instances", null=True, blank=True,
-    )
-    name = models.CharField(max_length=255)
-    description = models.CharField(max_length=128, blank=True, default="")
-    instructions = models.TextField(blank=True, default="")
-    avatar_kind = models.CharField(max_length=16, default="centaeris")
-    avatar_image = models.BinaryField(null=True, blank=True, editable=False)
-    avatar_digest = models.CharField(max_length=64, blank=True, default="", editable=False)
-    status = models.CharField(max_length=16, default="active")
-    model_config = models.ForeignKey(ModelConfig, on_delete=models.PROTECT, null=True, blank=True, related_name="configured_agents")
-    thinking_mode = models.CharField(max_length=64, blank=True, default="")
-    deletedAt = models.DateTimeField(null=True, blank=True)
-    deletedBy = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.PROTECT,
-        related_name="+",
-        null=True,
-        blank=True,
-    )
-    purgedAt = models.DateTimeField(null=True, blank=True)
-    createdAt = models.DateTimeField(auto_now_add=True)
-    updatedAt = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["workspace", "owner", "definition"],
-                condition=models.Q(is_business_instance=False), name="agent_definition_owner_unique"),
-            models.CheckConstraint(condition=models.Q(model_config__isnull=False) | models.Q(thinking_mode=""),
-                name="agent_unconfigured_model_no_effort"),
-            models.CheckConstraint(
-                condition=(models.Q(avatar_image__isnull=True, avatar_digest="")
-                    | (models.Q(avatar_image__isnull=False) & ~models.Q(avatar_digest=""))),
-                name="agent_avatar_image_consistent",
-            ),
-            models.CheckConstraint(
-                condition=models.Q(avatar_kind__in=("centaeris", "banana")),
-                name="agent_avatar_kind_valid",
-            ),
-            models.CheckConstraint(
-                condition=models.Q(status__in=("active", "deleted")),
-                name="agent_status_valid",
-            ),
-            models.CheckConstraint(
-                condition=(
-                    models.Q(
-                        status="active",
-                        deletedAt__isnull=True,
-                        purgedAt__isnull=True,
-                    )
-                    | (
-                        models.Q(status="deleted", deletedAt__isnull=False)
-                        & (
-                            models.Q(purgedAt__isnull=True)
-                            | models.Q(purgedAt__gte=models.F("deletedAt"))
-                        )
-                    )
-                ),
-                name="agent_deletion_consistency",
-            ),
-        ]
-
-    def save(self, *args, **kwargs):
-        validate_agent_id(self.id)
-        self.name = normalize_agent_name(self.name)
-        self.description = normalize_agent_description(self.description)
-        self.instructions = normalize_agent_instructions(self.instructions)
-        require_enum("Agent.avatar_kind", self.avatar_kind, {"centaeris", "banana"})
-        if (self.definition_id is not None or self.is_business_instance) and self.avatar_digest:
-            raise ValueError("Agent managed configuration cannot have a private avatar")
-        require_enum("Agent.status", self.status, {"active", "deleted"})
-        if (
-            (self.status == "active")
-            != (self.deletedAt is None and self.purgedAt is None)
-            or (
-                self.purgedAt is not None
-                and (self.deletedAt is None or self.purgedAt < self.deletedAt)
-            )
-        ):
-            raise ValueError("Agent deletion state is invalid")
-        if not self._state.adding:
-            stored_scope = type(self).objects.values_list(
-                "workspace_id",
-                "owner_id",
-                "definition_id",
-                "is_business_instance",
-            ).get(pk=self.pk)
-            if stored_scope != (self.workspace_id, self.owner_id, self.definition_id, self.is_business_instance):
-                raise ValueError("Agent ownership is immutable")
-            if self.definition_id:
-                stored_config = type(self).objects.values_list("name", "description", "instructions", "avatar_kind").get(pk=self.pk)
-                if stored_config != (self.name, self.description, self.instructions, self.avatar_kind):
-                    raise ValueError("Agent managed configuration is immutable")
-        elif self.definition_id:
-            version = self.definition.published_version
-            if self.definition.workspace_id != self.workspace_id or version is None:
-                raise ValueError("Agent definition workspace or publication binding mismatch")
-            if (self.name, self.description, self.instructions, self.avatar_kind) != (version.name, version.description, version.instructions, version.avatar_kind):
-                raise ValueError("Agent managed configuration must match its published definition")
         return super().save(*args, **kwargs)
 
 
@@ -1141,80 +867,6 @@ class McpBearerCredential(models.Model):
         return super().save(*args, **kwargs)
 
 
-class AgentConnectorCredentialApproval(models.Model):
-    """A custodian grants one assistant a reference into the encrypted credential store."""
-    id = models.CharField(primary_key=True, max_length=64, default=new_agent_connector_approval_id)
-    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT, related_name="connector_approvals")
-    definition = models.ForeignKey(AgentDefinition, on_delete=models.PROTECT, related_name="connector_approvals")
-    plugin_name = models.CharField(max_length=64)
-    server_id = models.CharField(max_length=64)
-    resource_path = models.CharField(max_length=255)
-    resource_digest = models.CharField(max_length=71)
-    credential = models.ForeignKey(McpBearerCredential, on_delete=models.PROTECT, related_name="assistant_approvals")
-    credential_version = models.PositiveIntegerField()
-    approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
-    approved_at = models.DateTimeField(auto_now_add=True)
-    revoked_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        constraints = [models.CheckConstraint(condition=models.Q(credential_version__gt=0), name="connector_approval_version_positive")]
-
-    def save(self, *args, **kwargs):
-        from .runtime_contract import require_sha256
-        from .plugin_catalog import _require_resource_path
-        validate_lower_kebab("connector plugin", self.plugin_name)
-        validate_lower_kebab("connector server", self.server_id)
-        _require_resource_path(self.resource_path)
-        require_sha256("connector resource digest", self.resource_digest)
-        if self.workspace_id != self.definition.workspace_id or self.plugin_name != self.credential.plugin_name:
-            raise ValueError("Connector approval scope mismatch")
-        if self._state.adding:
-            if self.credential.workspace_id is None:
-                if self.approved_by_id != self.credential.created_by_id or not self.approved_by.is_superuser:
-                    raise ValueError("Connector approval requires the credential custodian")
-            else:
-                if self.credential.workspace_id != self.workspace_id:
-                    raise ValueError("Connector credential workspace mismatch")
-                from .workspace_resources import workspace_resource_admin
-                workspace_resource_admin(self.approved_by, self.workspace_id)
-            if self.credential_version != self.credential.version:
-                raise ValueError("Connector approval credential version mismatch")
-        else:
-            immutable = ("workspace_id", "definition_id", "plugin_name", "server_id", "resource_path",
-                         "resource_digest", "credential_id", "credential_version", "approved_by_id")
-            stored = type(self).objects.values(*immutable, "revoked_at").get(pk=self.pk)
-            if any(stored[field] != getattr(self, field) for field in immutable):
-                raise ValueError("Connector approval is immutable")
-            if stored["revoked_at"] is not None and self.revoked_at != stored["revoked_at"]:
-                raise ValueError("Connector approval revocation is permanent")
-        return super().save(*args, **kwargs)
-
-
-class AgentConnectorBinding(models.Model):
-    id = models.CharField(primary_key=True, max_length=64, default=new_agent_connector_binding_id)
-    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT, related_name="connector_bindings")
-    definition = models.ForeignKey(AgentDefinition, on_delete=models.PROTECT, related_name="connector_bindings")
-    plugin_name = models.CharField(max_length=64)
-    server_id = models.CharField(max_length=64)
-    approval = models.ForeignKey(AgentConnectorCredentialApproval, on_delete=models.PROTECT, related_name="bindings")
-    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        constraints = [models.UniqueConstraint(fields=["workspace", "definition", "plugin_name", "server_id"], name="agent_connector_binding_unique")]
-
-    def save(self, *args, **kwargs):
-        expected = (self.workspace_id, self.definition_id, self.plugin_name, self.server_id)
-        approved = (self.approval.workspace_id, self.approval.definition_id, self.approval.plugin_name, self.approval.server_id)
-        if expected != approved or self.definition.workspace_id != self.workspace_id or self.approval.revoked_at is not None:
-            raise ValueError("Connector binding approval scope mismatch")
-        if not self._state.adding:
-            stored = type(self).objects.values_list("workspace_id", "definition_id", "plugin_name", "server_id").get(pk=self.pk)
-            if stored != expected:
-                raise ValueError("Connector binding scope is immutable")
-        return super().save(*args, **kwargs)
-
-
 class McpCredentialAuditEvent(models.Model):
     id = models.CharField(
         primary_key=True,
@@ -1260,12 +912,6 @@ class SessionProject(models.Model):
         on_delete=models.PROTECT,
         related_name="session_projects",
     )
-    agent = models.ForeignKey(
-        Agent,
-        db_column="agent_id",
-        on_delete=models.PROTECT,
-        related_name="session_projects",
-    )
     name = models.CharField(max_length=100)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -1277,12 +923,7 @@ class Session(models.Model):
         Workspace, on_delete=models.PROTECT, related_name="sessions"
     )
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
-    agent = models.ForeignKey(
-        Agent,
-        db_column="agent_id",
-        on_delete=models.PROTECT,
-        related_name="sessions",
-    )
+    instructions = models.TextField(blank=True, default="")
     project = models.ForeignKey(
         SessionProject,
         db_column="project_id",
@@ -1424,28 +1065,11 @@ class Session(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        validate_agent_id(self.agent_id)
-        if self._state.adding:
-            try:
-                agent_scope = Agent.objects.values_list(
-                    "workspace_id",
-                    "owner_id",
-                ).get(pk=self.agent_id)
-            except Agent.DoesNotExist as error:
-                raise ValueError("Session agent does not exist") from error
-            if agent_scope != (self.workspace_id, self.owner_id):
-                raise ValueError("Session agent ownership mismatch")
-        else:
+        if not self._state.adding:
             stored_scope = type(self).objects.values_list(
-                "agent_id",
-                "workspace_id",
-                "owner_id",
-                "current_environment_id",
-                "current_environment__session_id",
+                "workspace_id", "owner_id", "current_environment_id", "current_environment__session_id",
             ).get(pk=self.pk)
-            if stored_scope[0] != self.agent_id:
-                raise ValueError("Session agent_id is immutable")
-            if stored_scope[1:3] != (self.workspace_id, self.owner_id):
+            if stored_scope[:2] != (self.workspace_id, self.owner_id):
                 raise ValueError("Session ownership is immutable")
         require_enum(
             "Session.origin",
@@ -1488,8 +1112,8 @@ class Session(models.Model):
                 raise
         if not self.current_environment_id:
             raise ValueError("session_environment_binding_invalid")
-        if self.current_environment_id == stored_scope[3]:
-            if stored_scope[4] != self.pk:
+        if self.current_environment_id == stored_scope[2]:
+            if stored_scope[3] != self.pk:
                 raise ValueError("session_environment_binding_invalid")
         elif not SessionEnvironment.objects.using(using).filter(pk=self.current_environment_id, session_id=self.pk).exists():
             raise ValueError("session_environment_binding_invalid")
@@ -1690,188 +1314,6 @@ class AgentRunEnvironmentRelease(models.Model):
         return super().save(*args, **kwargs)
 
 
-class AgentCoordinationSession(models.Model):
-    """Explicit private Agent identity, independent of shared definitions."""
-    agent = models.OneToOneField(Agent, primary_key=True, on_delete=models.CASCADE,
-                                related_name="coordination_binding")
-    session = models.OneToOneField(Session, on_delete=models.CASCADE,
-                                  related_name="coordination_binding")
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    def save(self, *args, **kwargs):
-        if (self.session.agent_id != self.agent_id
-                or self.session.owner_id != self.agent.owner_id
-                or self.session.workspace_id != self.agent.workspace_id):
-            raise ValueError("coordination_session_identity_mismatch")
-        if not self._state.adding or type(self).objects.filter(pk=self.pk).exists():
-            raise ValueError("coordination_session_binding_is_immutable")
-        if self.session.events.exists():
-            raise ValueError("coordination_session_requires_fresh_history")
-        return super().save(*args, **kwargs)
-
-
-class BusinessAgentBranchQuerySet(models.QuerySet):
-    def update(self, **kwargs):
-        raise ValueError("business_agent_branch_is_immutable")
-
-    def bulk_update(self, *args, **kwargs):
-        raise ValueError("business_agent_branch_is_immutable")
-
-    def delete(self):
-        raise ValueError("business_agent_branch_is_immutable")
-
-    def bulk_create(self, *args, **kwargs):
-        raise ValueError("business_agent_branch_requires_validated_creation")
-
-
-class BusinessAgentBranch(models.Model):
-    """One application's exact external subject maps permanently to fresh resources."""
-    objects = BusinessAgentBranchQuerySet.as_manager()
-    id = models.CharField(primary_key=True, max_length=64, default=new_business_agent_branch_id)
-    app = models.ForeignKey(BusinessApplication, on_delete=models.PROTECT, related_name="agent_branches")
-    root_agent = models.ForeignKey(Agent, on_delete=models.PROTECT, related_name="business_branches")
-    business_user_id = models.CharField(max_length=256)
-    agent = models.OneToOneField(Agent, on_delete=models.PROTECT, related_name="business_branch")
-    session = models.OneToOneField(Session, on_delete=models.PROTECT, related_name="business_branch")
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["app", "root_agent", "business_user_id"], name="business_branch_subject_unique"),
-            models.CheckConstraint(condition=~models.Q(business_user_id=""), name="business_branch_subject_nonempty"),
-            models.CheckConstraint(condition=~models.Q(root_agent=models.F("agent")), name="business_branch_agent_distinct"),
-        ]
-
-    def save(self, *args, **kwargs):
-        from .business_agent_branches import validate_business_user_id
-        validate_business_user_id(self.business_user_id)
-        if not self._state.adding:
-            raise ValueError("business_agent_branch_is_immutable")
-        if (self.root_agent_id == self.agent_id or self.root_agent.definition_id != self.agent.definition_id
-                or self.root_agent.is_business_instance or not self.agent.is_business_instance or self.root_agent.status != "active"
-                or self.agent.status != "active" or self.app.status != "active"
-                or self.root_agent.owner_id != self.agent.owner_id
-                or self.root_agent.workspace_id != self.agent.workspace_id
-                or self.session.agent_id != self.agent_id or self.session.owner_id != self.agent.owner_id
-                or self.session.workspace_id != self.agent.workspace_id
-                or type(self).objects.filter(agent_id=self.root_agent_id).exists()
-                or not AgentCoordinationSession.objects.filter(agent_id=self.agent_id, session_id=self.session_id).exists()):
-            raise ValueError("business_agent_branch_binding_rejected")
-        kwargs["force_insert"] = True
-        return super().save(*args, **kwargs)
-
-    def delete(self, *args, **kwargs):
-        raise ValueError("business_agent_branch_is_immutable")
-
-
-class AgentInput(models.Model):
-    """One immutable hosted input fact for pending delivery and retained history."""
-    agent = models.ForeignKey(Agent, on_delete=models.CASCADE, related_name="inputs")
-    session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name="agent_inputs")
-    input_id = models.CharField(max_length=64)
-    membership_ref = models.CharField(max_length=64, editable=False)
-    acting_app = models.ForeignKey(BusinessApplication, on_delete=models.PROTECT, related_name="agent_inputs", null=True, blank=True)
-    app_delegation = models.ForeignKey(UserAppDelegation, on_delete=models.PROTECT, related_name="agent_inputs", null=True, blank=True)
-    credential_version = models.PositiveBigIntegerField(null=True, blank=True, editable=False)
-    sequence = models.PositiveBigIntegerField()
-    accepted_source_sequence = models.PositiveIntegerField()
-    body = models.TextField()
-    attachments = models.JSONField(default=list)
-    created_at_ms = models.BigIntegerField()
-
-    class Meta:
-        indexes = [models.Index(fields=["session", "accepted_source_sequence", "sequence"], name="agent_input_history_order")]
-        constraints = [
-            models.UniqueConstraint(fields=["agent", "input_id"], name="agent_input_identity_unique"),
-            models.UniqueConstraint(fields=["agent", "sequence"], name="agent_input_sequence_unique"),
-            models.CheckConstraint(condition=models.Q(sequence__gt=0), name="agent_input_sequence_positive"),
-            models.CheckConstraint(condition=~models.Q(membership_ref=""), name="agent_input_membership_required"),
-            models.CheckConstraint(condition=(models.Q(acting_app__isnull=True, app_delegation__isnull=True, credential_version__isnull=True)
-                | models.Q(acting_app__isnull=False, app_delegation__isnull=False, credential_version__isnull=False, credential_version__gt=0)),
-                name="agent_input_app_origin_complete"),
-        ]
-
-    def save(self, *args, **kwargs):
-        from .agent_input_contract import validate_input_body, validate_input_id
-        validate_input_id(self.input_id)
-        validate_input_body(self.body, allow_empty=bool(self.attachments))
-        if not self._state.adding:
-            raise ValueError("agent_input_is_immutable")
-        if (self.session.agent_id != self.agent_id or self.session.owner_id != self.agent.owner_id
-                or self.session.workspace_id != self.agent.workspace_id or not self.membership_ref):
-            raise ValueError("agent_input_binding_rejected")
-        if self.acting_app_id is None and self.app_delegation_id is None and self.credential_version is None:
-            pass
-        elif self.acting_app_id is None or self.app_delegation_id is None or type(self.credential_version) is not int:
-            raise ValueError("agent_input_application_origin_incomplete")
-        else:
-            grant = self.app_delegation
-            if (self.credential_version <= 0 or self.credential_version != grant.credential_version
-                    or grant.app_id != self.acting_app_id or grant.user_id != self.agent.owner_id
-                    or grant.workspace_id != self.agent.workspace_id or grant.membership_ref != self.membership_ref
-                    or not BusinessAgentBranch.objects.filter(app_id=grant.app_id,
-                        agent_id=self.agent_id, session_id=self.session_id).filter(
-                            models.Q(root_agent_id=grant.agent_id) if grant.agent_id else
-                            models.Q(root_agent__definition_id=grant.definition_id,
-                                root_agent__owner_id=grant.user_id, root_agent__workspace_id=grant.workspace_id)).exists()):
-                raise ValueError("agent_input_application_origin_binding_rejected")
-        kwargs["force_insert"] = True
-        return super().save(*args, **kwargs)
-
-
-class AgentInputQueue(models.Model):
-    """One admitted coordinator owns intake until its atomic empty close."""
-    agent_run = models.OneToOneField("AgentRun", primary_key=True, on_delete=models.PROTECT,
-        related_name="agent_input_queue")
-    initial_input = models.ForeignKey(AgentInput, null=True, blank=True, on_delete=models.PROTECT,
-        related_name="initial_queues")
-    initial_host = models.ForeignKey("AgentWorkConsumeAttempt", null=True, blank=True, on_delete=models.PROTECT,
-        related_name="initial_queues")
-    authorization_digest = models.CharField(max_length=71)
-    accepting = models.BooleanField(default=True)
-    closed_reason = models.CharField(max_length=64, blank=True, default="")
-    closed_at_ms = models.BigIntegerField(null=True, blank=True)
-
-    class Meta:
-        constraints = [models.CheckConstraint(condition=models.Q(initial_input__isnull=True)
-            | models.Q(initial_host__isnull=True), name="agent_input_queue_one_initial_owner")]
-
-    def save(self, *args, **kwargs):
-        if not self._state.adding:
-            raise ValueError("agent_input_queue_identity_is_immutable")
-        run = self.agent_run
-        if self.authorization_digest != run.authorization.digest:
-            raise ValueError("agent_input_queue_authorization_rejected")
-        if self.initial_input_id is not None and self.initial_host_id is not None:
-            raise ValueError("agent_input_queue_initial_owner_conflict")
-        if self.initial_input_id is not None and (
-            self.initial_input.session_id != run.session_id
-            or self.initial_input.membership_ref != run.membership_ref
-            or self.initial_input.body != run.prompt):
-            raise ValueError("agent_input_queue_initial_binding_rejected")
-        kwargs["force_insert"] = True
-        return super().save(*args, **kwargs)
-
-
-class AgentInputDelivery(models.Model):
-    """Stable input-to-Run ownership; Runtime owns only claim/ACK bookkeeping."""
-    input = models.OneToOneField(AgentInput, primary_key=True, on_delete=models.CASCADE,
-        related_name="delivery")
-    queue = models.ForeignKey(AgentInputQueue, on_delete=models.PROTECT, related_name="deliveries")
-    claim_token = models.TextField(null=True, blank=True)
-    claim_lease_owner = models.TextField(null=True, blank=True)
-    acknowledged_at_ms = models.BigIntegerField(null=True, blank=True)
-
-    def save(self, *args, **kwargs):
-        if not self._state.adding:
-            raise ValueError("agent_input_delivery_identity_is_immutable")
-        run = self.queue.agent_run
-        if self.input.session_id != run.session_id or self.input.membership_ref != run.membership_ref:
-            raise ValueError("agent_input_delivery_binding_rejected")
-        kwargs["force_insert"] = True
-        return super().save(*args, **kwargs)
-
-
 class AgentRun(models.Model):
     id = models.CharField(primary_key=True, max_length=64, default=new_agent_run_id)
     turn_id = models.CharField(max_length=64, default=new_turn_id, unique=True)
@@ -1890,9 +1332,6 @@ class AgentRun(models.Model):
     thinkingMode = models.CharField(max_length=64, blank=True, default="")
     prompt = models.TextField()
     agent_instructions = models.TextField(blank=True, default="")
-    definition_version = models.ForeignKey(
-        AgentDefinitionVersion, on_delete=models.PROTECT, related_name="agent_runs", null=True, blank=True,
-    )
     tailPolicy = models.CharField(max_length=32, default="append")
     rewriteTargetMessageId = models.CharField(max_length=160, blank=True, default="")
     rewriteExpectedTailMessageId = models.CharField(max_length=160, blank=True, default="")
@@ -1929,38 +1368,16 @@ class AgentRun(models.Model):
             raise ValueError("AgentRun model workspace mismatch")
         if (self.acting_app_id is None) != (self.app_delegation_id is None):
             raise ValueError("AgentRun application origin is incomplete")
-        if self.app_delegation_id:
-            delegation = self.app_delegation
-            if (delegation.agent_id is not None or delegation.app_id != self.acting_app_id or delegation.user_id != self.user_id
-                    or delegation.workspace_id != self.workspace_id
-                    or delegation.definition_id != self.session.agent.definition_id):
-                raise ValueError("AgentRun application origin binding mismatch")
+        if self._state.adding and self.app_delegation_id:
+            raise ValueError("Agent-target application grants are retired")
         if not self._state.adding:
             stored_snapshot = type(self).objects.values_list(
-                "acting_app_id", "app_delegation_id", "definition_version_id", "agent_instructions",
-                "session_id", "environment_id", "modelConfig_id", "thinkingMode",
+                "acting_app_id", "app_delegation_id", "agent_instructions", "session_id", "environment_id",
+                "modelConfig_id", "thinkingMode",
             ).get(pk=self.pk)
-            if stored_snapshot[:2] != (self.acting_app_id, self.app_delegation_id):
-                raise ValueError("AgentRun application origin is immutable")
-        if self._state.adding:
-            definition_id = self.session.agent.definition_id
-            if self.definition_version_id:
-                if self.definition_version.definition_id != definition_id:
-                    from .agent_definitions import published_version_for_session, AgentDefinitionUnavailable
-                    membership = WorkspaceMembership.objects.filter(workspace_id=self.workspace_id, user_id=self.user_id).select_related("workspace").first()
-                    try:
-                        expected = published_version_for_session(self.session, membership, acting_app_id=self.acting_app_id) if membership else None
-                    except AgentDefinitionUnavailable:
-                        expected = None
-                    if expected is None or expected.pk != self.definition_version_id:
-                        raise ValueError("AgentRun definition version binding mismatch")
-                if self.agent_instructions != self.definition_version.instructions:
-                    raise ValueError("AgentRun definition version binding mismatch")
-            elif definition_id:
-                raise ValueError("Managed AgentRun requires a published definition version")
-        else:
-            if (stored_snapshot[2:4] != (self.definition_version_id, self.agent_instructions)
-                    or stored_snapshot[6:8] != (self.modelConfig_id, self.thinkingMode)):
+            if stored_snapshot[:3] != (self.acting_app_id, self.app_delegation_id, self.agent_instructions):
+                raise ValueError("AgentRun configuration snapshot is immutable")
+            if stored_snapshot[5:] != (self.modelConfig_id, self.thinkingMode):
                 raise ValueError("AgentRun configuration snapshot is immutable")
         if self.thinkingMode:
             validate_thinking_mode(self.thinkingMode)
@@ -2008,7 +1425,7 @@ class AgentRun(models.Model):
                     raise ValueError("agent_run_environment_binding_invalid")
                 self.environment = session.current_environment
                 return super().save(*args, **kwargs)
-        if stored_snapshot[4:6] != (self.session_id, self.environment_id):
+        if stored_snapshot[3:5] != (self.session_id, self.environment_id):
             raise ValueError("agent_run_environment_binding_immutable")
         return super().save(*args, **kwargs)
 
@@ -2047,42 +1464,6 @@ class HostedOperationReceipt(models.Model):
         ]
 
 
-class AgentWorkSession(models.Model):
-    """Immutable dispatch origin and independent admission, without task state."""
-    session = models.OneToOneField(Session, primary_key=True, on_delete=models.CASCADE, related_name="work_binding")
-    coordination_session = models.ForeignKey(Session, on_delete=models.PROTECT, related_name="dispatched_work")
-    source_run = models.ForeignKey(AgentRun, on_delete=models.PROTECT, related_name="dispatched_work")
-    source_turn_id = models.CharField(max_length=160)
-    source_call_id = models.CharField(max_length=160)
-    # Retain the origin identity through source event erasure, like operation receipts.
-    source_event_id = models.CharField(max_length=160, unique=True)
-    operation = models.OneToOneField(HostedOperationReceipt, on_delete=models.PROTECT, related_name="work_binding")
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        constraints = [models.UniqueConstraint(fields=["source_run", "source_turn_id", "source_call_id"],
-                                              name="agent_work_source_unique")]
-
-    def save(self, *args, **kwargs):
-        if (self.session_id == self.coordination_session_id
-                or self.session.agent_id != self.coordination_session.agent_id
-                or self.session.owner_id != self.coordination_session.owner_id
-                or self.session.workspace_id != self.coordination_session.workspace_id
-                or self.source_run.session_id != self.coordination_session_id
-                or self.source_run.user_id != self.session.owner_id
-                or self.source_run.workspace_id != self.session.workspace_id
-                or self.operation.sessionId != self.session_id
-                or not AgentRun.objects.filter(id=self.operation.agentRunId, session_id=self.session_id,
-                    user_id=self.session.owner_id, workspace_id=self.session.workspace_id,
-                    turn_id=self.operation.turnId).exists()
-                or self.operation.user_id != self.session.owner_id
-                or self.operation.workspace_id != self.session.workspace_id):
-            raise ValueError("agent_work_binding_identity_mismatch")
-        if not self._state.adding or type(self).objects.filter(pk=self.pk).exists():
-            raise ValueError("agent_work_binding_is_immutable")
-        return super().save(*args, **kwargs)
-
-
 class TranscriptOutputCapture(models.Model):
     """Hosted, immutable UTF-8 output associated with a committed Core event."""
 
@@ -2103,59 +1484,6 @@ class TranscriptOutputChunk(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["capture", "index"], name="unique_transcript_output_chunk")]
-
-
-class AgentWorkReturn(models.Model):
-    """Immutable delivered fact; it does not record consumption or task success."""
-    id = models.CharField(primary_key=True, max_length=96)
-    work = models.ForeignKey(AgentWorkSession, on_delete=models.PROTECT, related_name="returns")
-    child_run = models.ForeignKey(AgentRun, on_delete=models.PROTECT, related_name="work_returns")
-    fact_kind = models.CharField(max_length=32)
-    fact_ref = models.CharField(max_length=256)
-    payload = models.JSONField()
-    delivered_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        constraints = [models.UniqueConstraint(fields=["work", "child_run", "fact_kind", "fact_ref"],
-            name="agent_work_return_fact_unique")]
-
-    def save(self, *args, **kwargs):
-        require_enum("AgentWorkReturn.fact_kind", self.fact_kind,
-            {"sessionTerminal", "preAdmissionCancellation", "preAdmissionFailure", "lifecycleFailure"})
-        if self.work.operation.agentRunId != self.child_run_id or self.child_run.session_id != self.work_id:
-            raise ValueError("agent_work_return_identity_mismatch")
-        if not self._state.adding:
-            raise ValueError("agent_work_return_is_immutable")
-        # An INSERT collision lets get_or_create reread the committed winner.
-        # Never let a fresh instance silently UPDATE an existing primary key.
-        kwargs["force_insert"] = True
-        return super().save(*args, **kwargs)
-
-
-class AgentWorkConsumeAttempt(models.Model):
-    """The one explicit first admission for a retained notice, without handling state."""
-    id = models.CharField(primary_key=True, max_length=64, default=new_agent_run_id)
-    notice = models.OneToOneField(AgentWorkReturn, on_delete=models.PROTECT, related_name="first_consume")
-    coordinator_run = models.ForeignKey(AgentRun, null=True, blank=True, on_delete=models.PROTECT, related_name="work_consumes")
-    operation = models.OneToOneField(HostedOperationReceipt, on_delete=models.PROTECT, related_name="work_consume")
-    input_binding = models.JSONField()
-    delivery_sequence = models.PositiveBigIntegerField()
-    created_at_ms = models.BigIntegerField(default=0)
-    claim_token = models.TextField(null=True, blank=True)
-    claim_lease_owner = models.TextField(null=True, blank=True)
-    acknowledged_at_ms = models.BigIntegerField(null=True, blank=True)
-
-    def save(self, *args, **kwargs):
-        if not self._state.adding:
-            raise ValueError("agent_work_consume_is_immutable")
-        if (self.operation.command != "consumeWorkReturn"
-                or self.operation.agentRunId != self.coordinator_run_id
-                or self.operation.turnId != (self.coordinator_run.turn_id if self.coordinator_run_id else None)
-                or self.operation.sessionId != self.notice.work.coordination_session_id
-                or (self.coordinator_run_id and self.coordinator_run.session_id != self.operation.sessionId)):
-            raise ValueError("agent_work_consume_binding_rejected")
-        kwargs["force_insert"] = True
-        return super().save(*args, **kwargs)
 
 
 class SessionWorkspacePreservation(models.Model):
@@ -2316,7 +1644,6 @@ class AgentRunAuthorization(models.Model):
             or self.payload["agentRunId"] != agent_run.id
             or self.payload["workspaceId"] != agent_run.workspace_id
             or self.payload["userId"] != str(agent_run.user_id)
-            or self.payload["agentId"] != agent_run.session.agent_id
             or self.payload["sessionId"] != agent_run.session_id
             or self.payload["modelConfigRef"] != agent_run.modelConfig_id
             or self.payload["thinkingMode"] != (agent_run.thinkingMode or None)
@@ -3212,7 +2539,7 @@ class StorageCleanupRetry(models.Model):
     updatedAt = models.DateTimeField(auto_now=True)
 
     def save(self, *args, **kwargs):
-        require_enum("StorageCleanupRetry.collector", self.collector, {"workspaceSnapshot", "orphanedLibrary"})
+        require_enum("StorageCleanupRetry.collector", self.collector, {"workspaceSnapshot", "orphanedLibrary", "retiredSession"})
         require_enum("StorageCleanupRetry.state", self.state, {"pending", "cleaning", "failed", "cleaned", "quarantined"})
         return super().save(*args, **kwargs)
 

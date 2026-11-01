@@ -28,7 +28,7 @@ def profile():
 class EnvironmentProfileContractTests(SimpleTestCase):
     def test_one_generic_profile_supports_root_and_regular_user_without_capability_fields(self):
         from pathlib import Path
-        root = Path(__file__).resolve().parents[3] / 'tests/workspace/fixtures/agent_run_authorization/v1'
+        root = Path(__file__).resolve().parents[3] / 'tests/workspace/fixtures/agent_run_authorization/v2'
         for name, expected_name in (("valid", "expected"), ("custom", "custom-expected")):
             value = json.loads((root / (name + '.json')).read_text(encoding='utf-8'))
             expected = json.loads((root / (expected_name + '.json')).read_text(encoding='utf-8'))
@@ -166,7 +166,7 @@ class EnvironmentProfileHttpTests(OperationFixture, TestCase):
         self.assertEqual(set(configured.payload), set(default.payload))
         self.assertEqual(configured.payload['environmentProfile'], profile())
         for grant in (configured, default):
-            self.assertEqual(grant.payload['schema'], 'workspace.agent_run_authorization.v1')
+            self.assertEqual(grant.payload['schema'], 'workspace.agent_run_authorization.v2')
             validate_agent_run_authorization_payload(grant.payload)
             self.assertEqual(authorization_digest(grant.payload), grant.digest)
             self.assertEqual(authorization_signature(grant.payload, settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY), grant.signature)

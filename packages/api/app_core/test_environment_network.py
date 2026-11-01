@@ -14,7 +14,7 @@ from .runtime_contract import authorization_digest, authorization_signature, ver
 
 class NetworkAuthorizationTests(SimpleTestCase):
     def test_cross_language_fixtures_sign_network_and_reject_missing_or_mismatched_policy(self):
-        root = Path(__file__).resolve().parents[3] / "tests/workspace/fixtures/agent_run_authorization/v1"
+        root = Path(__file__).resolve().parents[3] / "tests/workspace/fixtures/agent_run_authorization/v2"
         for name in ("valid", "custom"):
             payload = json.loads((root / f"{name}.json").read_text(encoding="utf-8"))
             expected_name = "expected" if name == "valid" else "custom-expected"

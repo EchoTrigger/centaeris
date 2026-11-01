@@ -9,7 +9,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from ninja import Router, Status
 
-from app_core.models import Agent, Session, Source, UserLibraryObject
+from app_core.models import Session, Source, UserLibraryObject
 from app_core.trash_retention import TRASH_RETENTION, trash_cutoff
 from app_core.workspace_access import (
     source_access_map_for_workspace_member,
@@ -22,9 +22,9 @@ from .trash_pagination import TRASH_PAGE_SIZE, read_trash_cursor, trash_page
 
 
 router = Router(tags=["trash"], by_alias=True)
-TRASH_KINDS = frozenset({"agent", "session", "source", "library"})
+TRASH_KINDS = frozenset({"session", "source", "library"})
 TRASH_SCOPES = frozenset({"workspace", "privateLibrary"})
-LOCATION_KINDS = frozenset({"workspace", "agent", "libraryRoot", "libraryFolder"})
+LOCATION_KINDS = frozenset({"workspace", "libraryRoot", "libraryFolder"})
 QUERY_FIELDS = {
     "cursor",
     "query",
@@ -55,7 +55,7 @@ def _read_filters(request) -> dict:
         raise ValueError("trash_filter_invalid")
     if location_kind and location_kind not in LOCATION_KINDS:
         raise ValueError("trash_filter_invalid")
-    location_requires_id = location_kind in {"agent", "libraryFolder"}
+    location_requires_id = location_kind in {"libraryFolder"}
     if location_requires_id != bool(location_id):
         raise ValueError("trash_filter_invalid")
     if deleted_by_user_id:
@@ -121,48 +121,40 @@ def _item(kind: str, item, title: str, scope: str, location: dict) -> dict:
     }
 
 
-def _filter_querysets(filters, agents, sessions, sources, library):
+def _filter_querysets(filters, sessions, sources, library):
     if filters["query"]:
-        agents = agents.filter(name__icontains=filters["query"])
         sessions = sessions.filter(title__icontains=filters["query"])
         sources = sources.filter(name__icontains=filters["query"])
         library = library.filter(displayName__icontains=filters["query"])
     if filters["deletedByUserId"]:
         deleted_by = filters["deletedByUserId"]
-        agents = agents.filter(deletedBy_id=deleted_by)
         sessions = sessions.filter(deletedBy_id=deleted_by)
         sources = sources.filter(deletedBy_id=deleted_by)
         library = library.filter(deletedBy_id=deleted_by)
     if filters["kind"]:
-        agents = agents if filters["kind"] == "agent" else agents.none()
         sessions = sessions if filters["kind"] == "session" else sessions.none()
         sources = sources if filters["kind"] == "source" else sources.none()
         library = library if filters["kind"] == "library" else library.none()
     if filters["scope"] == "workspace":
         library = library.none()
     elif filters["scope"] == "privateLibrary":
-        agents, sessions, sources = agents.none(), sessions.none(), sources.none()
+        sessions, sources = sessions.none(), sources.none()
     location_kind = filters["locationKind"]
     location_id = filters["locationId"]
     if location_kind:
-        agents = agents if location_kind == "workspace" else agents.none()
         sources = sources if location_kind == "workspace" else sources.none()
-        sessions = (
-            sessions.filter(agent_id=location_id)
-            if location_kind == "agent"
-            else sessions.none()
-        )
+        sessions = sessions if location_kind == "workspace" else sessions.none()
         if location_kind == "libraryRoot":
             library = library.filter(parentFolder__isnull=True)
         elif location_kind == "libraryFolder":
             library = library.filter(parentFolder_id=location_id)
         else:
             library = library.none()
-    return agents, sessions, sources, library
+    return sessions, sources, library
 
 
 def _filter_options(workspace, querysets) -> dict:
-    agents, sessions, sources, library = querysets
+    sessions, sources, library = querysets
     actor_ids = set()
     for queryset in querysets:
         actor_ids.update(
@@ -172,12 +164,8 @@ def _filter_options(workspace, querysets) -> dict:
         )
     users = get_user_model().objects.filter(id__in=actor_ids).order_by("username", "id")
     locations = []
-    if agents.exists() or sources.exists():
+    if sessions.exists() or sources.exists():
         locations.append(_location("workspace", None, workspace.name, "workspace"))
-    locations.extend(
-        _location("agent", agent_id, name, "workspace")
-        for agent_id, name in sessions.values_list("agent_id", "agent__name").distinct()
-    )
     if library.filter(parentFolder__isnull=True).exists():
         locations.append(_location("libraryRoot", None, "私人", "privateLibrary"))
     locations.extend(
@@ -233,7 +221,6 @@ def list_trash(request, workspace_id: str):
         if access_level == "control"
     ]
     querysets = (
-        Agent.objects.filter(workspace_id=workspace_id, owner=request.user, **base),
         Session.objects.filter(
             workspace_id=workspace_id,
             owner=request.user,
@@ -247,10 +234,9 @@ def list_trash(request, workspace_id: str):
         UserLibraryObject.objects.filter(owner=request.user, **base),
     )
     filter_options = _filter_options(membership.workspace, querysets)
-    agents, sessions, sources, library = _filter_querysets(filters, *querysets)
-    agents = _after_cursor(agents, "agent", cursor).select_related("deletedBy")
+    sessions, sources, library = _filter_querysets(filters, *querysets)
     sessions = _after_cursor(sessions, "session", cursor).select_related(
-        "agent", "deletedBy"
+        "deletedBy"
     )
     sources = _after_cursor(sources, "source", cursor).select_related("deletedBy")
     library = _after_cursor(library, "library", cursor).select_related(
@@ -259,16 +245,12 @@ def list_trash(request, workspace_id: str):
     workspace_location = _location("workspace", None, membership.workspace.name, "workspace")
     items = [
         *(
-            _item("agent", item, item.name, "workspace", workspace_location)
-            for item in agents[: TRASH_PAGE_SIZE + 1]
-        ),
-        *(
             _item(
                 "session",
                 item,
                 item.title,
                 "workspace",
-                _location("agent", item.agent_id, item.agent.name, "workspace"),
+                workspace_location,
             )
             for item in sessions[: TRASH_PAGE_SIZE + 1]
         ),

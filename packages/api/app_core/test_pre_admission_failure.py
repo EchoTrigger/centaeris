@@ -122,22 +122,7 @@ class PreAdmissionFailureTests(ExecutionPublicationFixture, TransactionTestCase)
         with self.assertRaises(ValueError):
             project_committed_agent_run(self.run, 'completed')
 
-    def test_preview_uses_typed_failure_timestamp(self):
-        from .http.agent_previews import RunFact, _run_fact
-        self.receipt()
-        fact = _run_fact(self.session)
-        self.assertEqual(fact['sourceType'], 'preAdmissionFailure')
-        self.assertEqual(fact['status'], 'failed')
-        self.assertEqual(fact['createdAtMs'], self.at_ms)
-        RunFact.model_validate(fact)
 
-    def test_work_return_uses_failure_receipt(self):
-        from .agent_work_returns import _terminal_fact
-        self.receipt()
-        fact = _terminal_fact(self.run)
-        self.assertEqual(fact, {'kind':'preAdmissionFailure','factRef':self.event_id,
-            'state':'failed','eventType':None,'reasonType':'preAdmissionFailure',
-            'atMs':self.at_ms,'throughSequence':0})
 
     def test_missing_postgres_ledger_is_absent_but_database_errors_propagate(self):
         from django.db import DatabaseError
@@ -155,47 +140,3 @@ class PreAdmissionFailureTests(ExecutionPublicationFixture, TransactionTestCase)
             local.vendor = 'sqlite'
             self.assertIsNone(committed_session_terminal_state(self.run))
             local.cursor.assert_not_called()
-
-from . import test_agent_work_returns as work_fixture
-
-
-class PreAdmissionFailureWorkReturnTests(TransactionTestCase):
-    serialized_rollback = True
-    setUp = work_fixture.AgentWorkReturnTests.setUp
-    dependencies = work_fixture.AgentWorkReturnTests.dependencies
-    post = work_fixture.AgentWorkReturnTests.post
-    request_fact = work_fixture.AgentWorkReturnTests.request_fact
-    child = work_fixture.AgentWorkReturnTests.child
-    publish = work_fixture.AgentWorkReturnTests.publish
-    query = work_fixture.AgentWorkReturnTests.query
-
-    def test_failure_receipt_publishes_one_queryable_immutable_work_return(self):
-        from .models import AgentWorkReturn
-        with patch('app_core.agent_work_return_jobs.schedule_work_return_job', return_value='inserted'):
-            child = self.child()
-        event_id = 'agent_run_pre_admission_failure:' + child.id
-        at_ms = int(timezone.now().timestamp()*1000)
-        payload = {'schema':'runtime.agent_run.pre_admission_failure.v1',
-            'workspaceId':child.workspace_id,'sessionId':child.session_id,'agentRunId':child.id,
-            'authorizationDigest':child.authorization.digest,'jobId':'agent_run.lifecycle:'+child.id,
-            'leaseOwner':'worker:original-owner','failedAtMs':at_ms}
-        with connection.cursor() as cursor:
-            cursor.execute('CREATE SCHEMA IF NOT EXISTS runtime')
-            cursor.execute('CREATE TABLE IF NOT EXISTS runtime.runtime_events ('
-                'event_id text PRIMARY KEY, session_id text NOT NULL, task_id text, '
-                'event_type text NOT NULL, at_ms bigint NOT NULL, visibility text NOT NULL, payload_json text NOT NULL)')
-            cursor.execute('INSERT INTO runtime.runtime_events VALUES (%s,%s,%s,%s,%s,%s,%s)',
-                [event_id,child.session_id,child.id,payload['schema'],at_ms,'internal',json.dumps(payload)])
-        def remove():
-            with connection.cursor() as cursor:
-                cursor.execute('DELETE FROM runtime.runtime_events WHERE event_id=%s',[event_id])
-        self.addCleanup(remove)
-        response = self.publish(child.id)
-        self.assertEqual(response.status_code,201,response.content)
-        notice=response.json()['notice']
-        self.assertEqual(notice['terminal']['kind'],'preAdmissionFailure')
-        self.assertEqual(notice['terminal']['state'],'failed')
-        self.assertEqual(notice['terminal']['atMs'],at_ms)
-        self.assertEqual(AgentWorkReturn.objects.get().fact_kind,'preAdmissionFailure')
-        self.assertEqual(self.publish(child.id).json()['disposition'],'duplicate')
-        self.assertEqual(self.query(notice['noticeId']).json()['notice'],notice)

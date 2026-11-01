@@ -18,7 +18,7 @@ def data(frame):
 
 class PresentationStreamTests(SimpleTestCase):
     def setUp(self):
-        self.scope = PresentationScope("workspace", "agent", "session")
+        self.scope = PresentationScope("workspace", "session")
         self.state = {"sourceHighWater": "2", "agentRun": {
             "agentRunId": "run", "status": "completed", "startedAt": None, "completedAt": None,
         }}
@@ -115,7 +115,7 @@ class PresentationStreamTests(SimpleTestCase):
         self.assertEqual(data(frames[-1])["agentRun"]["status"], "completed")
 
     async def test_scope_mismatch_resets_instead_of_applying_another_sessions_cursor(self):
-        wrong = encode_cursor(PresentationScope("workspace", "agent", "different"), "generation", "1")
+        wrong = encode_cursor(PresentationScope("workspace", "different"), "generation", "1")
         source = stream_presentation(self.scope, self.loader, wrong)
         try:
             frames = await self.until(source, lambda item, frame: item["kind"] == "checkpoint" and frame.startswith("id:"))
@@ -420,7 +420,7 @@ class PresentationRouteContractTests(SimpleTestCase):
                 patch.object(PresentationLoader, "navigation", fixture.loader.navigation), \
                 patch.object(PresentationLoader, "state", fixture.loader.state), \
                 patch.object(PresentationLoader, "page", fixture.loader.page):
-            response = await self.async_client.get("/api/workspaces/workspace/presentation/events", {"agentId": "agent_x", "sessionId": "session"})
+            response = await self.async_client.get("/api/workspaces/workspace/presentation/events", {"sessionId": "session"})
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response["X-Accel-Buffering"], "no")
             self.assertEqual(response["Content-Type"], "text/event-stream")
@@ -435,7 +435,7 @@ class PresentationRouteContractTests(SimpleTestCase):
         self.assertEqual([data(frame)["kind"] for frame in frames], ["navigation", "checkpoint", "snapshot", "checkpoint"])
 
     async def test_anonymous_http_stream_requires_authentication(self):
-        response = await self.async_client.get("/api/workspaces/workspace/presentation/events", {"agentId": "agent_x"})
+        response = await self.async_client.get("/api/workspaces/workspace/presentation/events", {})
         self.assertEqual(response.status_code, 401)
 
     async def test_operation_download_http_is_attachment_and_preserves_full_detail(self):
@@ -501,7 +501,7 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         super().setUp()
         self.create_url = f"/api/workspaces/{self.workspace.id}/sessions"
         with patch("app_core.http.workspaces.request_execution_profile", return_value={"schema": "runtime.execution_profile.v1", "imageDigest": "sha256:" + "a" * 64}):
-            response = self.client.post(self.create_url, json.dumps({"operationId": "presentation-session", "agentId": self.agent.id}), content_type="application/json")
+            response = self.client.post(self.create_url, json.dumps({"operationId": "presentation-session"}), content_type="application/json")
         self.session_id = response.json()["sessionId"]
         self.url = f"/api/workspaces/{self.workspace.id}/presentation/events"
 
@@ -529,7 +529,7 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
                     "content": {"inlineContent": "Ready", "sourceRef": None}, "status": "completed"}}],
             "hasOlder": False, "olderCursor": None, "resumeCursors": [{"streamId": "workspace-transcript.v1", "cursor": "0"}]}
         with patch("app_core.http.presentation.request_transcript_page", return_value=page):
-            response = self.client.get(self.url, {"agentId": self.agent.id, "sessionId": self.session_id})
+            response = self.client.get(self.url, {"sessionId": self.session_id})
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response["X-Accel-Buffering"], "no")
             items = self.consume(response)
@@ -537,27 +537,29 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         navigation = next(item for item in items if item["kind"] == "navigation")
         self.assertEqual(navigation["sessions"][0]["id"], self.session_id)
 
-    def test_anonymous_unknown_query_and_cross_agent_session_are_rejected(self):
-        from .models import Agent
+    def test_anonymous_unknown_query_and_foreign_owned_session_are_rejected(self):
+        from django.contrib.auth import get_user_model
+        from .models import Session
         from django.test import Client
-        self.assertEqual(Client().get(self.url, {"agentId": self.agent.id}).status_code, 401)
-        self.assertEqual(self.client.get(self.url, {"agentId": self.agent.id, "unknown": "1"}).status_code, 400)
-        self.assertEqual(self.client.get(self.url, {"agentId": [self.agent.id, self.agent.id]}).status_code, 400)
-        other = Agent.objects.create(workspace=self.workspace, owner=self.user, name="Other")
-        self.assertEqual(self.client.get(self.url, {"agentId": other.id, "sessionId": self.session_id}).status_code, 404)
+        self.assertEqual(Client().get(self.url).status_code, 401)
+        self.assertEqual(self.client.get(self.url, {"unknown": "1"}).status_code, 400)
+        self.assertEqual(self.client.get(self.url, {"sessionId": [self.session_id, self.session_id]}).status_code, 400)
+        other = get_user_model().objects.create_user(username="foreign-presentation")
+        foreign = Session.objects.create(workspace=self.workspace, owner=other)
+        self.assertEqual(self.client.get(self.url, {"sessionId": foreign.pk}).status_code, 404)
 
     def test_membership_revocation_after_headers_closes_before_first_payload(self):
         from .models import WorkspaceMembership
-        response = self.client.get(self.url, {"agentId": self.agent.id, "sessionId": self.session_id})
+        response = self.client.get(self.url, {"sessionId": self.session_id})
         self.assertEqual(response.status_code, 200)
         WorkspaceMembership.objects.filter(workspace=self.workspace, user=self.user).delete()
         self.assertEqual(self.consume(response), [])
-        retry = self.client.get(self.url, {"agentId": self.agent.id, "sessionId": self.session_id})
+        retry = self.client.get(self.url, {"sessionId": self.session_id})
         self.assertEqual(retry.status_code, 404)
 
     def test_navigation_only_connection_has_no_transcript_read(self):
         with patch("app_core.http.presentation.request_transcript_page") as page:
-            response = self.client.get(self.url, {"agentId": self.agent.id})
+            response = self.client.get(self.url, {})
             self.assertEqual(response.status_code, 200)
             async def read_navigation():
                 try:
@@ -578,14 +580,14 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         from .models import Session
         request = RequestFactory().get("/")
         request.user = self.user
-        loader = PresentationLoader(request, PresentationScope(self.workspace.pk, self.agent.pk))
+        loader = PresentationLoader(request, PresentationScope(self.workspace.pk))
         counts = []
         for count in (1, 40):
-            while Session.objects.filter(agent=self.agent).count() < count:
-                Session.objects.create(workspace=self.workspace, owner=self.user, agent=self.agent)
+            while Session.objects.filter(workspace=self.workspace, owner=self.user).count() < count:
+                Session.objects.create(workspace=self.workspace, owner=self.user)
             with CaptureQueriesContext(connection) as queries, patch.object(Session, "from_db", wraps=Session.from_db) as hydrate:
                 self.assertTrue(async_to_sync(loader.authorized)())
-            # Checking an Agent scope must not hydrate every conversation merely
+            # Checking a Workspace scope must not hydrate every conversation merely
             # because its complete navigation list can be displayed later.
             self.assertEqual(hydrate.call_count, 0)
             counts.append(len(queries))
@@ -601,13 +603,12 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         session = Session.objects.get(pk=self.session_id)
         run = AgentRun.objects.create(workspace=self.workspace, session=session, user=self.user,
             modelConfig=self.model, prompt="Synthetic attention",
-            definition_version=self.agent.definition.published_version,
-            agent_instructions=self.agent.definition.published_version.instructions)
+            agent_instructions=session.instructions)
         append_started(run)
         append_session_records(run, [session_record(run, 3, "agent_run_completed", {"doneReason": "finalized"})])
         request = RequestFactory().get("/")
         request.user = self.user
-        loader = PresentationLoader(request, PresentationScope(self.workspace.pk, self.agent.pk))
+        loader = PresentationLoader(request, PresentationScope(self.workspace.pk))
         self.assertTrue(async_to_sync(loader.authorized)())
         session.refresh_from_db()
         self.assertEqual((session.latestAttentionSequence, session.attentionRevision), (0, 0))
@@ -625,7 +626,7 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
             "sourceHighWater": "0", "blocks": [], "hasOlder": False, "olderCursor": None,
             "resumeCursors": [{"streamId": "workspace-transcript.v1", "cursor": "0"}]}
         with patch("app_core.http.presentation.request_transcript_page", return_value=page):
-            response = self.client.get(self.url, {"agentId": self.agent.id, "sessionId": self.session_id})
+            response = self.client.get(self.url, {"sessionId": self.session_id})
             self.assertEqual(response.status_code, 200)
             self.consume(response)
         run = AgentRun.objects.get(pk=accepted["agentRunId"])
@@ -664,7 +665,7 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         run = AgentRun.objects.get(pk=accepted["agentRunId"])
         request = RequestFactory().get("/")
         request.user = self.user
-        loader = PresentationLoader(request, PresentationScope(self.workspace.pk, self.agent.pk, self.session_id))
+        loader = PresentationLoader(request, PresentationScope(self.workspace.pk, self.session_id))
         original_first = QuerySet.first
         raced = False
 

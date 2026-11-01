@@ -77,10 +77,7 @@ def _current_input(agent_run, input_ref: str, expected_authorization_digest: str
         None,
     )
     if declared is None:
-        from .agent_input_attachments import delivered_attachment
-        declared = delivered_attachment(agent_run, input_ref)
-        if declared is None:
-            raise DeferredInputResolutionError("asset_unavailable")
+        raise DeferredInputResolutionError("asset_unavailable")
     try:
         link = SessionAssetLink.objects.select_related(
             "sourceObject__source",

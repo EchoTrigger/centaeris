@@ -4,7 +4,7 @@ from functools import partial
 from django.db import connection, transaction
 from django.db.models import Q
 
-from .models import Agent, AgentRunAuthorization, Session, SessionWorkspacePreservation, WorkspaceSnapshotObject, WorkspaceSnapshotUpload
+from .models import AgentRunAuthorization, Session, SessionWorkspacePreservation, WorkspaceSnapshotObject, WorkspaceSnapshotUpload
 from .runtime_contract import validate_session_workspace
 from .storage_gc_retry import claim_storage_key, clean_storage_key
 from .workspace_snapshot_publication import collect_key, live_upload_keys, pin_job_ownership, unregistered_key_has_live_owner, require_collected_incarnation, retire_upload_metadata
@@ -63,9 +63,8 @@ def _recent_registry_keys(session, cutoff):
     return keys
 
 
-def _owner_retained(agent, owner, session):
-    return (owner.workspace_id == session.workspace_id and owner.agent_id == agent.pk
-            and agent.workspace_id == owner.workspace_id and owner.purgedAt is None
+def _owner_retained(owner, session):
+    return (owner.workspace_id == session.workspace_id and owner.purgedAt is None
             and owner.workspaceBaselineKnown)
 
 
@@ -96,9 +95,8 @@ def _batch_roots(session, manifest, keys, cutoff):
 
 
 def _lock_owner(session, manifest):
-    agent = Agent.objects.select_for_update().get(pk=session.agent_id)
     owner = Session.objects.select_for_update().get(pk=session.pk)
-    if not _owner_retained(agent, owner, session):
+    if not _owner_retained(owner, session):
         raise WorkspaceRootsUnavailable("workspace_snapshot_owner_changed")
     require_current_roots(owner, manifest)
     pin_job_ownership(owner)
@@ -117,7 +115,7 @@ def _retire_file_reservations(session):
 def collect_reachable_workspace_gc(root, cutoff, dry_run, report):
     from . import workspace_snapshot_gc as gc
     owners = Session.objects.filter(purgedAt__isnull=True).only(
-        "id", "workspace_id", "agent_id", "workspaceBaselineKnown")
+        "id", "workspace_id", "workspaceBaselineKnown")
     for session in owners.order_by("id").iterator():
         prefix = gc._session_prefix(session)
         from .models import WorkspaceFileReservation
@@ -126,7 +124,6 @@ def collect_reachable_workspace_gc(root, cutoff, dry_run, report):
             or WorkspaceSnapshotObject.objects.filter(session=session, kind="temporary", state="collected").exists())
         if not dry_run and needs_retirement:
             with transaction.atomic():
-                Agent.objects.select_for_update().get(pk=session.agent_id)
                 owner = Session.objects.select_for_update().get(pk=session.pk)
                 pin_job_ownership(owner)
                 retire_upload_metadata(owner, cutoff)
