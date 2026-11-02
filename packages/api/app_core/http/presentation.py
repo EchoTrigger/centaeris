@@ -84,7 +84,7 @@ class PresentationLoader:
         # terminal observation must not be attached to an older delivered H.
         with _database_deadline(consistent=True):
             water = SessionEvent.objects.filter(session_id=self.scope.session_id).order_by("-sequence").values_list("sequence", flat=True).first() or 0
-            run = AgentRun.objects.select_related("authorization").filter(session_id=self.scope.session_id, user_id=self.user_id).order_by("-createdAt", "-id").first()
+            run = AgentRun.objects.select_related("authorization", "session").filter(session_id=self.scope.session_id, user_id=self.user_id).order_by("-createdAt", "-id").first()
             if run is not None and run.status in {"queued", "running"}:
                 terminal = committed_session_terminal_state(run)
                 if terminal is not None:

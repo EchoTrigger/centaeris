@@ -3,7 +3,7 @@ import json
 
 from django.db import connection
 
-from .models import SessionEvent
+from .models import AgentRunEnvironmentRelease, SessionEvent
 
 
 ACTIVITY_EVENTS = (
@@ -64,8 +64,11 @@ def presentation_question(run):
 
 
 def presentation_activity(run, source_high_water, *, question, response_accepted):
-    if run is None or run.status not in {"queued", "running"}:
+    if run is None:
         return None
+    if run.status in {"completed", "failed", "cancelled"}:
+        return "preserving" if (run.environment_id == run.session.current_environment_id
+            and not AgentRunEnvironmentRelease.objects.filter(agent_run=run).exists()) else None
     if question is not None:
         return "waitingInput"
     if response_accepted:
@@ -75,5 +78,9 @@ def presentation_activity(run, source_high_water, *, question, response_accepted
     latest = SessionEvent.objects.filter(
         session_id=run.session_id, agent_run_id=run.id, sequence__lte=source_high_water,
         payload__type__in=ACTIVITY_EVENTS,
-    ).order_by("-sequence").values_list("payload__type", flat=True).first()
-    return "thinking" if latest == "model_request_started" else "working"
+    ).order_by("-sequence").values_list("payload", flat=True).first()
+    if latest is not None and latest["type"] == "phase_event":
+        phase = latest["payload"]
+        if phase["stage"] == "model_process_state":
+            return {"retrying": "retrying", "thinking": "thinking"}.get(phase["processState"], "working")
+    return "thinking" if latest is not None and latest["type"] == "model_request_started" else "working"

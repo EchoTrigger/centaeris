@@ -21,10 +21,14 @@ trait PowerIo {
     fn inspect(&mut self, id: &str) -> Result<Option<serde_json::Value>, String>;
     fn change(&mut self, id: &str, action: RunscPowerAction) -> Result<(), String>;
     fn remove_stopped(&mut self, id: &str) -> Result<(), String>;
+    fn stop(&mut self, id: &str) -> Result<(), String>;
 }
 
 struct DockerPowerIo;
 impl PowerIo for DockerPowerIo {
+    fn stop(&mut self, id: &str) -> Result<(), String> {
+        crate::docker_engine::stop(id)
+    }
     fn remove_stopped(&mut self, id: &str) -> Result<(), String> {
         crate::docker_engine::remove_stopped(id)
     }
@@ -273,6 +277,51 @@ fn observe_recovery_target_with(
         .map_err(|_| "runsc_power_observation_unknown".to_string())?
         .map(|facts| physical_state(&facts, allocation, profile))
         .transpose()
+}
+
+/// Freeze a per-Run original for preservation under the current cleanup pin.
+/// Session-owned retained environments must never enter this path.
+pub(crate) fn stop_for_preservation(
+    allocation: &RetainedInstanceAllocation,
+    profile: &EnvironmentProfile,
+) -> Result<Option<RunscPowerObservation>, String> {
+    stop_for_preservation_with(&mut DockerPowerIo, allocation, profile)
+}
+
+fn stop_for_preservation_with(
+    io: &mut impl PowerIo,
+    allocation: &RetainedInstanceAllocation,
+    profile: &EnvironmentProfile,
+) -> Result<Option<RunscPowerObservation>, String> {
+    use centaeris_core::execution::EnvironmentTaskOwner;
+    if !matches!(&allocation.allocation_owner, EnvironmentTaskOwner::AgentRun { run_id }
+        if Some(run_id.as_str()) == allocation.allocation_agent_run_id.as_deref())
+    {
+        return Err("cleanup_per_run_owner_required".into());
+    }
+    let observed = observe_recovery_target_with(io, allocation, profile)?;
+    let id = allocation
+        .container_id
+        .as_deref()
+        .ok_or("runsc_power_container_missing")?;
+    match observed {
+        None => return Ok(None),
+        Some(RunscPowerObservation::Stopped) => return Ok(Some(RunscPowerObservation::Stopped)),
+        Some(RunscPowerObservation::Paused) => {
+            // Docker cannot stop a paused container. Only this per-Run original
+            // is resumed; all subsequent failures retain its writable layer.
+            let _ = io.change(id, RunscPowerAction::Resume);
+            if observe_with(io, id, allocation, profile)? != RunscPowerObservation::Running {
+                return Err("cleanup_stop_resume_unconfirmed".into());
+            }
+        }
+        Some(RunscPowerObservation::Running) => {}
+    }
+    let _ = io.stop(id);
+    match observe_recovery_target_with(io, allocation, profile)? {
+        Some(RunscPowerObservation::Stopped) => Ok(Some(RunscPowerObservation::Stopped)),
+        _ => Err("cleanup_stop_unconfirmed".into()),
+    }
 }
 
 /// Remove an exact stopped original only after the caller commits its file baseline.

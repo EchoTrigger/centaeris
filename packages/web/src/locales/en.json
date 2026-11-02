@@ -1,4 +1,5 @@
 {
+  "appRoute.workspacePreservationPending": "Saving the previous run's workspace. Send again shortly. Your draft is preserved.",
   "operations.pending": "A previous submission still needs confirmation.",
   "operations.accepted": "Your previous submission was accepted.",
   "operations.check": "Check previous submission",
@@ -915,6 +916,9 @@
   "workspaceResources.plugins": "Plugins",
   "workspaceResources.retry": "Retry",
   "transcriptActivity.thinking": "Thinking...",
+  "transcriptActivity.retrying": "Retrying...",
+  "transcriptActivity.preserving": "Saving workspace...",
+  "transcriptActivity.stopping": "Stopping...",
   "transcriptActivity.working": "Working...",
   "transcriptActivity.waitingInput": "Waiting for input...",
   "sessionQuestion.label": "Question",

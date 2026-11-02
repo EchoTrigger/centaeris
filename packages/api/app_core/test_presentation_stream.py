@@ -119,7 +119,7 @@ class PresentationStreamTests(SimpleTestCase):
             self.assertEqual([data(frame)["kind"] for frame in frames[:3]], ["navigation", "checkpoint", "activity"])
             self.assertEqual(activity, {"schema": "workspace.presentation.v1", **self.scope.wire(),
                 "kind": "activity", "agentRunId": "run", "sourceHighWater": "2", "activity": "thinking"})
-            for value in ("waitingInput", "working"):
+            for value in ("waitingInput", "retrying", "thinking", "working"):
                 self.state["activity"] = value
                 versions["state"] += 1
                 changed.set()
@@ -134,6 +134,31 @@ class PresentationStreamTests(SimpleTestCase):
             changed.set()
             terminal = await self.until(source, lambda item, _frame: item["kind"] == "checkpoint" and item["agentRun"]["status"] == "completed")
             self.assertFalse(any(data(frame)["kind"] == "activity" for frame in terminal))
+        finally:
+            await source.aclose()
+
+    async def test_terminal_workspace_activity_is_restored_and_explicitly_cleared_after_release(self):
+        self.loader.state.side_effect = lambda: json.loads(json.dumps(self.state))
+        versions = self.loader.revisions.return_value
+        self.loader.revisions.side_effect = lambda: dict(versions)
+        changed = asyncio.Event()
+        async def wait(_previous):
+            await changed.wait()
+            changed.clear()
+        self.loader.wait_for_change.side_effect = wait
+        self.state["agentRun"]["status"] = "failed"
+        self.state["activity"] = "preserving"
+        source = stream_presentation(self.scope, self.loader)
+        try:
+            initial = await self.until(source, lambda item, frame: item["kind"] == "checkpoint" and frame.startswith("id:"))
+            self.assertEqual(next(data(frame)["activity"] for frame in initial if data(frame)["kind"] == "activity"), "preserving")
+            self.state["activity"] = None
+            versions["state"] += 1
+            changed.set()
+            update = await self.until(source, lambda item, _frame: item["kind"] == "activity")
+            self.assertEqual(data(update[-1]), {"schema": "workspace.presentation.v1", **self.scope.wire(),
+                "kind": "activity", "agentRunId": "run", "sourceHighWater": "2", "activity": None})
+            self.assertFalse(update[-1].startswith("id:"))
         finally:
             await source.aclose()
 
@@ -798,11 +823,12 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         request.user = self.user
         return run, PresentationLoader(request, PresentationScope(self.workspace.pk, self.session_id))
 
-    def activity_event(self, run, sequence, kind):
+    def activity_event(self, run, sequence, kind, payload=None):
         from .models import SessionEvent
         return SessionEvent.objects.create(eventId=f"activity-{sequence}", workspace=self.workspace,
             session_id=self.session_id, agent_run=run, sequence=sequence, agent_run_sequence=sequence,
-            projects_to_agent_run_stream=True, createdAtMs=sequence, payload={"type": kind, "payload": {}})
+            projects_to_agent_run_stream=True, createdAtMs=sequence,
+            payload={"type": kind, "turnId": run.turn_id, "payload": payload or {}})
 
     def test_model_request_activity_survives_reasoning_usage_and_is_bounded_by_water(self):
         from .presentation_activity import presentation_activity
@@ -819,6 +845,45 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         self.assertEqual(async_to_sync(loader.state)()["activity"], "working")
         self.activity_event(run, 6, "model_request_started")
         self.assertEqual(async_to_sync(loader.state)()["activity"], "thinking")
+
+    def test_committed_model_retry_activity_survives_refresh_and_obeys_source_water(self):
+        from .presentation_activity import presentation_activity
+        run, loader = self.activity_fixture()
+        self.activity_event(run, 1, "model_request_started")
+        self.activity_event(run, 2, "phase_event", {
+            "stage": "model_process_state", "processState": "retrying"})
+        self.assertEqual(async_to_sync(loader.state)()["activity"], "retrying")
+        self.assertEqual(presentation_activity(run, 1, question=None, response_accepted=False), "thinking")
+        self.activity_event(run, 3, "reasoning_block")
+        self.assertEqual(async_to_sync(loader.state)()["activity"], "retrying")
+        self.activity_event(run, 4, "phase_event", {
+            "stage": "model_process_state", "processState": "thinking"})
+        self.assertEqual(async_to_sync(loader.state)()["activity"], "thinking")
+        self.activity_event(run, 5, "tool_call")
+        self.assertEqual(async_to_sync(loader.state)()["activity"], "working")
+        self.activity_event(run, 6, "phase_event", {
+            "stage": "model_process_state", "processState": "synthesizing"})
+        self.assertEqual(async_to_sync(loader.state)()["activity"], "working")
+
+    def test_model_process_state_preserves_live_overlay_but_summary_seals_it(self):
+        from .agent_run_stream import _load_committed_overlay_projection, _new_tail_state, _stream_live_candidate, advance_overlay_barrier, live_overlay_is_superseded
+        run, _loader = self.activity_fixture()
+        barriers = {}
+        live = {"turnId": run.turn_id, "afterSequence": 0, "messageId": "live-message",
+            "revision": 1, "text": "answer still arriving"}
+        async def reconnect():
+            return [item async for item in _stream_live_candidate(run, _new_tail_state(0), live)]
+        for sequence, payload in ((1, {"stage": "model_process_state", "processState": "retrying"}),
+                (2, {"stage": "model_process_summary", "message": "committed summary"})):
+            record = self.activity_event(run, sequence, "phase_event", payload)
+            advance_overlay_barrier(barriers, record.payload, sequence)
+            committed_barrier, sealed = async_to_sync(_load_committed_overlay_projection)(run, run.turn_id, "live-message")
+            self.assertEqual((committed_barrier, sealed), (0 if sequence == 1 else 2, False))
+            self.assertEqual(live_overlay_is_superseded(live, barriers), sequence == 2)
+            restored = async_to_sync(reconnect)()
+            self.assertEqual(len(restored), 1 if sequence == 1 else 0)
+            if restored:
+                self.assertIn('"text":"answer still arriving"', restored[0])
 
     def test_current_question_checkpoint_restores_wait_and_consumption_restores_model_activity(self):
         from django.db import connection
@@ -880,7 +945,7 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
 
     def test_terminal_activity_overrides_still_registered_wait_and_queued_needs_no_runtime_table(self):
         from django.db import connection
-        from .models import AgentRun
+        from .models import AgentRun, AgentRunEnvironmentRelease
         run, loader = self.activity_fixture()
         payload = {"schema": "runtime.await_question.v2", "continuationId": "continuation",
             "agentRunId": run.pk, "authorizationDigest": run.authorization.digest,
@@ -892,6 +957,10 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
                 [self.session_id, json.dumps(payload)])
         self.assertEqual(async_to_sync(loader.state)()["activity"], "waitingInput")
         AgentRun.objects.filter(pk=run.pk).update(status="completed")
+        self.assertEqual(async_to_sync(loader.state)()["activity"], "preserving")
+        AgentRunEnvironmentRelease.objects.create(agent_run=run, environment=run.environment,
+            authorization_digest=run.authorization.digest, controller_epoch=1,
+            controller_lease_digest="sha256:" + "b" * 64)
         self.assertIsNone(async_to_sync(loader.state)()["activity"])
         AgentRun.objects.filter(pk=run.pk).update(status="queued")
         # A queued Run has not entered Core's wait state even if stale rows remain.
@@ -900,6 +969,6 @@ class PresentationHttpTests(OperationFixture, TransactionTestCase):
         run.status = "queued"
         with patch("app_core.presentation_activity.connection.cursor") as cursor:
             self.assertEqual(presentation_activity(run, 0, question=None, response_accepted=False), "working")
-            run.status = "completed"
-            self.assertIsNone(presentation_activity(run, 0, question=None, response_accepted=False))
             cursor.assert_not_called()
+        run.status = "completed"
+        self.assertIsNone(presentation_activity(run, 0, question=None, response_accepted=False))

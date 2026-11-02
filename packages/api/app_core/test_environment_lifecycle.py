@@ -6,7 +6,7 @@ from django.db import close_old_connections, connection, transaction
 from django.test import SimpleTestCase, TransactionTestCase
 
 from .agent_run_authorization_factory import create_agent_run_authorization
-from .models import AgentRun, WorkspaceMembership
+from .models import AgentRun, PresentationChangeOutbox, WorkspaceMembership
 from .test_execution_publication_fencing import ExecutionPublicationFixture
 
 
@@ -105,8 +105,12 @@ class EnvironmentControllerTests(ExecutionPublicationFixture, TransactionTestCas
         self.assertEqual(cleanup, self.cleanup(owner=self.replacement))
         with self.assertRaises(ValueError):
             self.acquire(owner=self.replacement)
+        state_changes = PresentationChangeOutbox.objects.filter(key=f"session:{self.session.pk}:state")
+        before_release = state_changes.count()
         receipt = self.release(cleanup, owner=self.replacement)
+        self.assertEqual(state_changes.count(), before_release + 1)
         self.assertEqual(receipt, self.release(cleanup, owner=self.replacement))
+        self.assertEqual(state_changes.count(), before_release + 1)
         from .environment_lifecycle import get_environment_release_receipt
         self.assertEqual(receipt, get_environment_release_receipt(self.run.pk, self.replacement))
         with self.assertRaisesRegex(ValueError, "environment_controller_already_released"):

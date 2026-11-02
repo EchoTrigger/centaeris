@@ -39,7 +39,7 @@ type Props = Readonly<{
   onShowCitation?(citation: CitationSummary, origin: { elementId: string }): void;
   onShowArtifact?(artifact: import("./useTranscriptTurnMetadata").PublishedArtifact): void;
   running?: boolean;
-  activity?: PresentationActivity["activity"];
+  activity?: PresentationActivity["activity"] | "stopping";
   startedAtMs?: number;
   completedAtMs?: number;
 }>;
@@ -549,7 +549,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
                   <a href={artifact.downloadUrl} onClick={onShowArtifact ? (event) => { event.preventDefault(); onShowArtifact(artifact); } : undefined}>{artifact.filename}</a>
                 </span>)}
               </div> : null}
-              {isLast && (isPending ? !pendingTerminal : running) ? <TranscriptActivity activity={activity} /> : null}
+              {isLast && (activity === "preserving" || (isPending ? !pendingTerminal : running)) ? <TranscriptActivity activity={activity} /> : null}
             </div>;
           })}
         </div>

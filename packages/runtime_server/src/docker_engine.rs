@@ -497,6 +497,29 @@ pub(crate) fn remove_stopped(id: &str) -> Result<(), String> {
     crate::observations::timed("dockerRemove", || remove_inner(id, false, false))
 }
 
+/// Stop an authorized original while retaining its writable layer for preservation.
+pub(crate) fn stop(id: &str) -> Result<(), String> {
+    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Docker stop requires an immutable container ID".into());
+    }
+    let engine = shared()?;
+    crate::observations::timed("dockerStop", || {
+        engine.run(MUTATION_TIMEOUT, async {
+            engine
+                .docker
+                .stop_container(
+                    id,
+                    Some(StopContainerOptions {
+                        t: Some(0),
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .map_err(|error| error.to_string())
+        })
+    })
+}
+
 fn remove_inner(id: &str, volumes: bool, force: bool) -> Result<(), String> {
     // Callers verify ownership and pass the immutable ID, never a mutable name.
     if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {

@@ -12,7 +12,7 @@ export type PresentationOperation = Readonly<{
 type Common = PresentationIdentity & Readonly<{ schema: 'workspace.presentation.v1' }>;
 export type PresentationViewRevision = Common & Readonly<{ kind: 'viewRevision'; contextRevision: string; historyRevision: string; workRevision: string }>;
 export type PresentationCheckpoint = Common & Readonly<{ kind: 'checkpoint'; projectionGeneration: string | null; sourceHighWater: string; agentRun: PresentationAgentRun | null }>;
-export type PresentationActivity = Common & Readonly<{ kind: 'activity'; agentRunId: string; sourceHighWater: string; activity: 'thinking' | 'working' | 'waitingInput' }>;
+export type PresentationActivity = Common & Readonly<{ kind: 'activity'; agentRunId: string; sourceHighWater: string; activity: 'thinking' | 'working' | 'waitingInput' | 'retrying' | 'preserving' | null }>;
 export type PendingSessionQuestion = Readonly<{ questionId: string; continuationId: string; turnId: string; question: string; options: readonly string[] }>;
 export type PresentationQuestion = Common & Readonly<{ kind: 'question'; agentRunId: string; sourceHighWater: string; question: PendingSessionQuestion | null }>;
 export type PresentationFrame =
@@ -60,7 +60,7 @@ export function validatePresentationFrame(value: unknown, identity: Presentation
     }
     case 'activity':
       if (typeof value.agentRunId !== 'string' || !value.agentRunId || !isPresentationWater(value.sourceHighWater)
-        || typeof value.activity !== 'string' || !['thinking', 'working', 'waitingInput'].includes(value.activity)) invalid('invalid presentation activity');
+        || (value.activity !== null && (typeof value.activity !== 'string' || !['thinking', 'working', 'waitingInput', 'retrying', 'preserving'].includes(value.activity)))) invalid('invalid presentation activity');
       break;
     case 'viewRevision':
       if (![value.contextRevision, value.historyRevision, value.workRevision].every(isPresentationWater)) invalid('invalid presentation view revision');

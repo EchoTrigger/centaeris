@@ -9,7 +9,7 @@ from django.db import DatabaseError, close_old_connections, connection, transact
 from django.test import Client, TransactionTestCase
 
 from .agent_run_authorization_factory import create_agent_run_authorization
-from .models import AgentRun, HostedOperationReceipt, Session, Workspace, WorkspaceMembership
+from .models import AgentRun, AgentRunAuthorization, AgentRunEnvironmentRelease, HostedOperationReceipt, Session, Workspace, WorkspaceMembership
 from .test_hosted_operations import OperationFixture
 from .testing import create_session
 
@@ -193,6 +193,60 @@ class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
         self.assertEqual(AgentRun.objects.filter(session=target, status__in=['queued', 'running']).count(), 1)
         self.assertEqual(HostedOperationReceipt.objects.count(), 1)
         self.schedule.assert_called_once()
+
+    def test_terminal_workspace_handoff_blocks_submission_until_release_and_freezes_committed_baseline(self):
+        from django.conf import settings
+        from .runtime_contract import verify_agent_run_authorization_signature
+
+        for status in ('completed', 'failed', 'cancelled'):
+            with self.subTest(status=status):
+                target = create_session(workspace=self.workspace, owner=self.user)
+                run = AgentRun.objects.create(workspace=self.workspace, user=self.user, session=target,
+                    modelConfig=self.model, prompt='original', status=status, agent_instructions='')
+                create_agent_run_authorization(run, image_digest='sha256:' + 'a' * 64)
+                client = self.client_for_user()
+                operation = 'handoff-' + status
+                counts = (AgentRun.objects.count(), AgentRunAuthorization.objects.count(),
+                    HostedOperationReceipt.objects.count())
+                response = self.submit(client, session=target.pk, operation=operation)
+                self.assertEqual((response.status_code, response.json()),
+                    (409, {'error': 'session_workspace_preservation_pending'}))
+                self.assertEqual((AgentRun.objects.count(), AgentRunAuthorization.objects.count(),
+                    HostedOperationReceipt.objects.count()), counts)
+
+                identity = {'started': Event()}
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    with transaction.atomic(), connection.cursor() as cursor:
+                        cursor.execute('SELECT pg_backend_pid()')
+                        holder_pid = cursor.fetchone()[0]
+                        Session.objects.select_for_update().get(pk=target.pk)
+                        # Final empty snapshot publication and cleanup release
+                        # both pin this Session before a successor can freeze it.
+                        Session.objects.filter(pk=target.pk).update(workspaceGeneration=1,
+                            workspaceLastAdvancedAgentRun=run)
+                        AgentRunEnvironmentRelease.objects.create(agent_run=run, environment=run.environment,
+                            authorization_digest=run.authorization.digest, controller_epoch=1,
+                            controller_lease_digest='sha256:' + 'b' * 64)
+                        future = pool.submit(self.independently, lambda: self.observed(
+                            lambda: self.submit(client, session=target.pk, operation=operation), identity))
+                        self.wait_for_blocker(future, identity, holder_pid)
+                    response = future.result(timeout=10)
+                self.assertEqual(response.status_code, 202, response.content)
+                successor = AgentRun.objects.get(pk=response.json()['agentRunId'])
+                self.assertEqual(successor.authorization.payload['sessionWorkspace'], {
+                    'generation': 1, 'snapshotSha256': '', 'snapshotSizeBytes': 0,
+                    'expandedSizeBytes': 0, 'fileCount': 0})
+                verify_agent_run_authorization_signature(successor.authorization.payload,
+                    settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY, successor.authorization.signature)
+
+    def test_terminal_handoff_does_not_block_another_session(self):
+        original = create_session(workspace=self.workspace, owner=self.user)
+        run = AgentRun.objects.create(workspace=self.workspace, user=self.user, session=original,
+            modelConfig=self.model, prompt='cleanup pending', status='failed', agent_instructions='')
+        create_agent_run_authorization(run, image_digest='sha256:' + 'a' * 64)
+        target = create_session(workspace=self.workspace, owner=self.user)
+        response = self.submit(self.client_for_user(), session=target.pk)
+        self.assertEqual(response.status_code, 202, response.content)
 
 
     def test_authorization_pin_blocks_non_key_workspace_status_and_member_role_writes(self):

@@ -1,4 +1,5 @@
 {
+  "appRoute.workspacePreservationPending": "正在保存上次运行的工作区，请稍后再发送。草稿已保留。",
   "operations.pending": "上次提交的受理结果仍需确认。",
   "operations.accepted": "上次提交已受理。",
   "operations.check": "检查上次提交",
@@ -915,6 +916,9 @@
   "workspaceResources.plugins": "插件",
   "workspaceResources.retry": "重试",
   "transcriptActivity.thinking": "思考中...",
+  "transcriptActivity.retrying": "重试中...",
+  "transcriptActivity.preserving": "正在保存工作区...",
+  "transcriptActivity.stopping": "停止中...",
   "transcriptActivity.working": "工作中...",
   "transcriptActivity.waitingInput": "等待输入...",
   "sessionQuestion.label": "问题",

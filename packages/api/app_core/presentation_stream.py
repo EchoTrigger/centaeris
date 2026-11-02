@@ -218,10 +218,11 @@ async def _produce(scope, loader, cursor, read_timeout):
                 raise RuntimeError("presentation_authority_water_invalid")
             changed = state != last_state or needs_snapshot
             activity = state["activity"]
-            if activity not in {None, "thinking", "working", "waitingInput"}:
+            if activity not in {None, "thinking", "working", "waitingInput", "retrying", "preserving"}:
                 raise RuntimeError("presentation_activity_invalid")
-            activity_identity = None if activity is None else (state["agentRun"]["agentRunId"], target, activity)
-            activity_changed = activity_identity is not None and activity_identity != last_activity
+            activity_identity = None if state["agentRun"] is None else (state["agentRun"]["agentRunId"], target, activity)
+            activity_changed = (activity_identity is not None and activity_identity != last_activity
+                and (activity is not None or last_activity is not None))
             last_activity = activity_identity
             question = state["question"]
             question_identity = None if state["agentRun"] is None else (state["agentRun"]["agentRunId"], question)

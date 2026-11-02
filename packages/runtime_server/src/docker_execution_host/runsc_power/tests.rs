@@ -14,6 +14,15 @@ struct FakeIo {
     events: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
 }
 impl PowerIo for FakeIo {
+    fn stop(&mut self, id: &str) -> Result<(), String> {
+        self.events.borrow_mut().push("stop");
+        self.inspected_ids.push(id.into());
+        if self.mutation_error {
+            Err("lost Docker stop acknowledgement".into())
+        } else {
+            Ok(())
+        }
+    }
     fn remove_stopped(&mut self, id: &str) -> Result<(), String> {
         self.events.borrow_mut().push("remove");
         self.removals.push(id.into());
@@ -105,6 +114,77 @@ fn io(values: Vec<serde_json::Value>) -> FakeIo {
         events: Default::default(),
     }
 }
+
+#[test]
+fn terminal_per_run_stop_observes_original_before_capture_even_after_lost_ack() {
+    let (a, p) = fixture();
+    let running = facts(&a, &p, false);
+    let mut stopped = running.clone();
+    stopped["State"]["Running"] = false.into();
+    for lost_ack in [false, true] {
+        let mut host = io(vec![running.clone(), stopped.clone()]);
+        host.mutation_error = lost_ack;
+        assert_eq!(
+            stop_for_preservation_with(&mut host, &a, &p).unwrap(),
+            Some(RunscPowerObservation::Stopped)
+        );
+        assert_eq!(*host.events.borrow(), vec!["inspect", "stop", "inspect"]);
+        assert!(
+            host.removals.is_empty(),
+            "stopping must retain files until publication"
+        );
+    }
+    let mut retry = io(vec![stopped]);
+    assert_eq!(
+        stop_for_preservation_with(&mut retry, &a, &p).unwrap(),
+        Some(RunscPowerObservation::Stopped)
+    );
+    assert_eq!(
+        *retry.events.borrow(),
+        vec!["inspect"],
+        "restart must not repeat guest execution"
+    );
+}
+
+#[test]
+fn terminal_paused_original_resumes_only_for_confirmed_stop() {
+    let (a, p) = fixture();
+    let mut stopped = facts(&a, &p, false);
+    stopped["State"]["Running"] = false.into();
+    let mut host = io(vec![facts(&a, &p, true), facts(&a, &p, false), stopped]);
+    assert_eq!(
+        stop_for_preservation_with(&mut host, &a, &p).unwrap(),
+        Some(RunscPowerObservation::Stopped)
+    );
+    assert_eq!(
+        host.mutations,
+        vec![(a.container_id.clone().unwrap(), RunscPowerAction::Resume)]
+    );
+    assert!(host.removals.is_empty());
+}
+
+#[test]
+fn failed_stop_unknown_observation_and_maintenance_owner_never_authorize_capture() {
+    let (mut a, p) = fixture();
+    let running = facts(&a, &p, false);
+    let mut host = io(vec![running.clone(), running.clone()]);
+    host.mutation_error = true;
+    assert!(stop_for_preservation_with(&mut host, &a, &p).is_err());
+    assert!(host.removals.is_empty());
+    let mut host = io(vec![running]);
+    host.observations.push_back(Err("host unavailable".into()));
+    assert!(stop_for_preservation_with(&mut host, &a, &p).is_err());
+    a.allocation_owner = EnvironmentTaskOwner::MaintenanceOperation {
+        operation_id: "maintenance".into(),
+    };
+    let mut host = io(vec![]);
+    assert!(stop_for_preservation_with(&mut host, &a, &p).is_err());
+    assert!(
+        host.events.borrow().is_empty(),
+        "unrelated processes must not be stopped"
+    );
+}
+
 #[test]
 fn pauses_and_resumes_the_exact_container_without_changing_its_identity() {
     let (a, p) = fixture();

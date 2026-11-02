@@ -570,6 +570,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     const scope = presentationScopeKey;
     const isCurrent = () => active && requestScopeRef.current.active && !abortController.signal.aborted && presentationScopeRef.current === scope;
     const selectedSessionId = sessionId || null;
+    let presentedRunId = null;
     const current = transcriptStore.getListSnapshot();
     if (current.sessionId !== selectedSessionId) {
       clearConversationProjection();
@@ -613,9 +614,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
         runControlRevisionRef.current += 1;
         const run = checkpoint.agentRun;
         const active = run && ["queued", "running"].includes(run.status);
+        const currentId = currentRunIdentityRef.current;
         if (run && !active) recordRunTerminal({ sessionId: selectedSessionId, agentRunId: run.agentRunId, status: run.status,
           ...(run.completedAt ? { completedAtMs: Date.parse(run.completedAt) } : {}) });
-        const currentId = currentRunIdentityRef.current;
         if (active && terminalRunIdsRef.current.has(run.agentRunId)) return;
         if (active && currentId !== undefined && currentId !== run.agentRunId
           || !run && currentId) {
@@ -626,21 +627,34 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
         }
         if (run && !active) {
           terminalRunIdsRef.current.add(run.agentRunId);
-          if (currentId !== undefined && currentId !== run.agentRunId) return;
+          if (currentId && currentId !== run.agentRunId) return;
         }
+        presentedRunId = run?.agentRunId ?? null;
+        if (active) setWorkActivity(value => value?.agentRunId === run.agentRunId ? value : null);
         currentRunIdentityRef.current = active ? run.agentRunId : null;
         if (run && acceptedRunTargetRef.current?.agentRunId === run.agentRunId) {
           acceptedRunTargetRef.current = null;
           setAcceptedRunTarget(null);
         }
         updateActiveTranscriptRun(active ? run : null);
-        if (!active) { setWorkActivity(null); setPendingQuestion(null); }
+        if (!active) {
+          setWorkActivity(value => value?.sessionId === selectedSessionId && value.agentRunId === run?.agentRunId
+            && value.activity === "preserving" ? value : null);
+          setPendingQuestion(null);
+        }
         if (active && run.startedAt) setWorkTime(value => ({ ...value, sessionId: selectedSessionId, startedAtMs: Date.parse(run.startedAt), completedAtMs: null }));
         if (!active && run?.completedAt) setWorkTime(value => ({ ...value, sessionId: selectedSessionId, completedAtMs: Date.parse(run.completedAt) }));
       },
       onActivity: activity => {
-        if (!isCurrent() || selectedSessionId === null || currentRunIdentityRef.current !== activity.agentRunId
-          || terminalRunIdsRef.current.has(activity.agentRunId)) return;
+        if (!isCurrent() || selectedSessionId === null || presentedRunId !== activity.agentRunId) return;
+        if (activity.activity === null) {
+          setWorkActivity(value => value?.agentRunId === activity.agentRunId ? null : value);
+          return;
+        }
+        if (activity.activity === "preserving" && (currentRunIdentityRef.current
+          || !terminalRunIdsRef.current.has(activity.agentRunId))) return;
+        if (activity.activity !== "preserving" && (currentRunIdentityRef.current !== activity.agentRunId
+          || terminalRunIdsRef.current.has(activity.agentRunId))) return;
         setWorkActivity({ sessionId: selectedSessionId, agentRunId: activity.agentRunId, activity: activity.activity });
       },
       onQuestion: frame => {
@@ -908,6 +922,8 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
       } else if (errorValue?.message === "operation_input_acceptance_unconfirmed") {
         setError(t("operations.inputUnconfirmed"));
         await checkPendingOperation(true);
+      } else if (errorValue?.message === "session_workspace_preservation_pending") {
+        setError(t("appRoute.workspacePreservationPending"));
       } else if (errorValue?.message === "model_not_found") {
         try {
           const response = await apiResponse(`/api/models?workspaceId=${encodeURIComponent(workspace.id)}`);
@@ -1363,7 +1379,8 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
             historyMemoryPressure={transcriptManagedBytes >= TRANSCRIPT_MEMORY_WARNING_BYTES}
             onReleaseLoadedHistory={releaseLoadedTranscriptHistory}
             running={hasActiveAgentRun || (sending && !["failed", "cancelled", "completed"].includes(pendingUserMessage?.status))}
-            activity={workActivity?.sessionId === sessionId && workActivity.agentRunId === activeAgentRunId ? workActivity.activity : undefined}
+            activity={controlApplies && controlSnapshot.stopRequested && controlPending ? "stopping" : workActivity?.sessionId === sessionId
+              && (workActivity.activity === "preserving" || workActivity.agentRunId === activeAgentRunId) ? workActivity.activity : undefined}
             startedAtMs={workTime?.sessionId === sessionId ? workTime.startedAtMs : undefined}
             completedAtMs={workTime?.sessionId === sessionId ? workTime.completedAtMs : undefined}
           />

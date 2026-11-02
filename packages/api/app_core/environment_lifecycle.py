@@ -186,6 +186,9 @@ def release_environment_controller(run_id, controller_epoch, lease_owner):
         receipt = AgentRunEnvironmentRelease.objects.create(agent_run=run, environment=environment,
             authorization_digest=run.authorization.digest, controller_epoch=controller_epoch,
             controller_lease_digest=controller_lease_digest(lease_owner))
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT public.workspace_presentation_bump_v1(%s)",
+                [f"session:{run.session_id}:state"])
         return _release_result(receipt)
     return _translate_contention(release)
 

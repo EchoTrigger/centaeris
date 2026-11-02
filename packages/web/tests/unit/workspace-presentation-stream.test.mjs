@@ -440,14 +440,14 @@ test('activity frames deliver bound status without advancing applied water or ch
   const activities = [];
   const { store, controller } = fixture({ onActivity: activity => activities.push(activity) });
   await controller.acceptWithBackpressure(entry('checkpoint', checkpoint(), 'applied:0'));
-  for (const activity of ['thinking', 'working', 'waitingInput']) {
+  for (const activity of ['thinking', 'working', 'waitingInput', 'retrying', 'preserving', null]) {
     const frame = entry('activity', { agentRunId: 'run', sourceHighWater: '17', activity });
     await controller.acceptWithBackpressure(readPresentationSseBlock(wire([frame]), identity));
     assert.deepEqual(activities.at(-1), frame.item);
     assert.equal(controller.lastCursor, 'applied:0');
     assert.equal(store.getListSnapshot().appliedSourceHighWater, '0');
   }
-  assert.equal(activities.length, 3);
+  assert.equal(activities.length, 6);
 });
 
 test('activity rejects invalid phases, fields, water, run and scope bindings and any cursor', async () => {

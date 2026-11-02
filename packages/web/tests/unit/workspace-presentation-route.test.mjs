@@ -327,6 +327,38 @@ test("a stale empty checkpoint after receipt handoff cannot remove a currently q
 
 const transcript = f => nodes(f.subject.tree,n=>n.type.name==="TranscriptBlockList")[0].props;
 
+test("workspace preservation survives terminal checkpoints and explicit release clears it",async t=>{
+  const f=await setup(t);
+  await f.send("snapshot",{page});
+  await f.send("checkpoint",checkpoint(run("ended","failed")),"terminal");
+  await f.send("activity",{agentRunId:"ended",sourceHighWater:"10",activity:"preserving"});
+  assert.equal(transcript(f).activity,"preserving");
+  assert.equal(transcript(f).running,false);
+  assert.equal(composer(f).hasActiveAgentRun,false);
+  composer(f).onDraftChange("next draft");await f.subject.settle();
+  await f.send("checkpoint",checkpoint(run("ended","failed")),"terminal-repeat");
+  assert.equal(transcript(f).activity,"preserving");
+  assert.equal(composer(f).draft,"next draft");
+  await f.send("activity",{agentRunId:"ended",sourceHighWater:"10",activity:null});
+  assert.equal(transcript(f).activity,undefined);
+});
+
+test("old Run activity cannot replace or clear a successor's model status",async t=>{
+  const f=await setup(t,false,null,{request:async(path,request)=>path.endsWith("/messages")?receipt(request):undefined});
+  await f.send("snapshot",{page});
+  await f.send("checkpoint",checkpoint(run("ended","failed")),"terminal");
+  await f.send("activity",{agentRunId:"ended",sourceHighWater:"10",activity:"preserving"});
+  await f.send("activity",{agentRunId:"ended",sourceHighWater:"10",activity:null});
+  await startSend(f);
+  await f.send("checkpoint",checkpoint(run()),"successor");
+  await f.send("activity",{agentRunId:"run-new",sourceHighWater:"10",activity:"retrying"});
+  assert.equal(transcript(f).activity,"retrying");
+  for(const activity of ["preserving",null]){
+    await f.send("activity",{agentRunId:"ended",sourceHighWater:"10",activity});
+    assert.equal(transcript(f).activity,"retrying");
+  }
+});
+
 test("Stop is available immediately and cancels the original receipt after acceptance arrives",async t=>{
   let accept;let sent;
   const f=await setup(t,false,null,{request:async(path,request)=>{
@@ -337,6 +369,7 @@ test("Stop is available immediately and cancels the original receipt after accep
   assert.equal(composer(f).hasActiveAgentRun,true);
   const stopping=composer(f).onCancelActiveAgentRun();await tick();await f.subject.settle();
   assert.equal(composer(f).hasActiveAgentRun,true);
+  assert.equal(transcript(f).activity,"stopping");
   assert.equal(f.calls.filter(([path])=>path.endsWith("/cancel")).length,0);
   accept();await stopping;await settleUntil(f,()=>f.calls.some(([path])=>path.endsWith("/cancel")));
   assert.equal(f.calls.filter(([path])=>path.endsWith("/messages")).length,1);
