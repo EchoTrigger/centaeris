@@ -76,15 +76,16 @@ validation.
 | Tool | Behavior |
 | --- | --- |
 | `list_materials` | Discover authorized metadata with `scope` (`all`, `library`, `attached`), name `query`, `folder`, opaque `cursor` and `limit` up to 100. Default `all` means the Run's authorized set; it does not grant access. |
-| `read_material` | Read one `input_ref`. Default `delivery: content` supports line `offset` and `limit` up to 2,000; `delivery: execution_file` installs the original for Python/Skills and rejects content pagination arguments. |
-| `search_materials` | Keyword search authorized inputs; explicit `input_refs` can select Library versions. The default remains attached inputs. `ranking` is `relevance` or `recent`, and `limit` is at most 20. |
+| `read_material` | Read one `input_ref` with an explicit `delivery`. `content` supports line `offset` and `limit` up to 2,000; `execution_file` installs the original for Python/Skills and rejects content pagination arguments. |
+| `search_materials` | Search authorized content in `all` (default), `library`, or `attached` scope. Optional `input_refs` explicitly select at most 128 versions; an empty array selects nothing. `ranking` is `relevance` or `recent`, and `limit` is at most 20. `cursor` continues ranked hits; `processing_cursor` advances bounded material preparation. |
 | `read_material_result` | Continue an immutable saved content result using `result_ref` and its opaque `cursor`. |
 | `get_operation` | Read the status of an `operation_id` owned by this run. |
 | `cancel_operation` | Detach this run's operation without stopping shared processing or deleting its result. |
 
 Representation identities and processing bindings are computed by the platform,
-not supplied by the model. Missing representations yield `pending` with durable
-operation handles. After completion, the caller repeats its read or search.
+not supplied by the model. A missing read representation yields `pending` with
+a durable operation handle. Search can return indexed hits alongside incomplete
+processing coverage. After completion, the caller repeats its read or search.
 Read/search evidence contains bounded content, source identity and locators.
 UTF-8 byte locations and evidence hashes are calculated by
 `material_evidence.py`; locator ranges can include a line terminator excluded
@@ -93,6 +94,42 @@ from returned content and its hash.
 The Runtime provider rejects results exceeding Core's inline output budget
 instead of committing a clipped success with unusable evidence. Callers can
 request smaller read/search windows.
+
+## Personal Library content and search coverage
+
+Library notes retain their original titles, including titles without a filename
+extension. The document processor accepts exact `text/markdown` and `text/plain`
+content types through its strict UTF-8 text reader. Other supported document
+formats retain their existing processing routes. A processor image change alters
+the processing specification digest, so new processing does not reuse an older
+image's representation identity or rewrite the original material.
+
+Implicit Library search is bounded by database queries over current authorized
+owner, generation, hash and processing specification. Its scope is not the
+128-version explicit selection or the protected execution-file inventory.
+PostgreSQL 18 performs Unicode case folding and keyword ranking before fetching
+the bounded hit window. Returned evidence is rebound to current permissions.
+
+Unprocessed materials are admitted through the existing shared processing tasks
+and Run-owned operation handles, at most 20 materials per preparation page.
+Unsupported formats such as ZIP remain available as originals. Failed and
+unsupported materials are reported separately and do not prevent indexed
+materials from returning hits.
+
+Search responses include `coverage`, `operations`, `processingFailures`,
+`nextSearchCursor` and `processingCursor`. `coverage.complete` remains false while
+any scoped material is unprocessed, failed, unsupported, or requires a refreshed
+search window. An empty incomplete window is not proof that the Library has no
+matching content. Ranked cursors retain their search time boundary; changed
+sources or newly processed content set `refreshRequired`, requiring a new search
+without the ranked cursor.
+
+`save_result` preserves one immutable hit window, including its coverage and
+preparation status. `read_material_result` only pages that window's content;
+its cursor is not a ranked-search or material-preparation cursor. Every page
+retains coverage and both search cursors within the model output budget.
+Repeating a committed call reuses its saved window and rechecks current source
+access. New calls can obtain refreshed search and processing status.
 
 ## Original files and Session continuity
 
