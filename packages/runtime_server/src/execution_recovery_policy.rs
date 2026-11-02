@@ -20,6 +20,7 @@ struct DispatchState {
 #[derive(Debug, Default)]
 struct ActivityGate {
     state: Mutex<DispatchState>,
+    input_operations: Mutex<()>,
     changed: Condvar,
     epoch: AtomicU64,
 }
@@ -170,6 +171,10 @@ pub(crate) enum SnapshotCaptureError {
 }
 
 impl ExecutionActivityWitness {
+    pub(crate) fn input_operations(&self) -> &Mutex<()> {
+        &self.gate.input_operations
+    }
+
     pub(crate) fn for_execution(host_instance: u64, execution: &str) -> Result<Self, &'static str> {
         let mut registry = EXECUTION_GATES
             .get_or_init(Default::default)

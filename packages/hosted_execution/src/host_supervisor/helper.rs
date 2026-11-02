@@ -50,7 +50,6 @@ impl TrustedHelperKind {
     pub fn input_limit(self) -> u64 {
         match self {
             Self::PrepareWorkspace
-            | Self::InputInventory
             | Self::SnapshotCollect
             | Self::WorkspaceGeneration
             | Self::WorkspaceWatch
@@ -59,7 +58,10 @@ impl TrustedHelperKind {
             Self::FileSystem | Self::MaterializeInput => MAX_EXECUTION_INPUT_BYTES + JSON_LIMIT + 4,
             Self::SnapshotRestore => HELPER_STREAM_LIMIT,
             Self::SnapshotCapture => JSON_LIMIT + 1024,
-            Self::RevokeInput | Self::ReadArtifact | Self::WorkspaceGenerationRpc => JSON_LIMIT,
+            Self::InputInventory
+            | Self::RevokeInput
+            | Self::ReadArtifact
+            | Self::WorkspaceGenerationRpc => JSON_LIMIT,
         }
     }
 

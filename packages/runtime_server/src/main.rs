@@ -22,6 +22,7 @@ mod host_retirement;
 mod http;
 mod job_protocol;
 mod lifecycle_hooks;
+mod material_execution;
 mod mcp;
 mod observations;
 mod platform_materials;
@@ -2472,7 +2473,16 @@ fn execute_agent_run(
             assert!(agent_run_start.authorization.asset_refs.is_empty());
             return Ok(None);
         }
-        if agent_run_start.authorization.asset_refs.is_empty() {
+        let execution_delivery = Arc::new(material_execution::MaterialExecutionDelivery::new(
+            api_url.clone(),
+            token.clone(),
+            agent_run_start.agent_run_id.clone(),
+            agent_run_start.authorization_digest.clone(),
+            docker_execution.clone(),
+            resolved_inputs.clone(),
+        )?);
+        let personal_library = execution_delivery.restore().await?;
+        if agent_run_start.authorization.asset_refs.is_empty() && !personal_library {
             return Ok(None);
         }
         platform_materials::PlatformMaterialsProvider::connect_current(
@@ -2482,7 +2492,11 @@ fn execute_agent_run(
             agent_run_start.authorization_digest.clone(),
         )
         .await
-        .map(|provider| Some(Arc::new(provider)))
+        .map(|provider| {
+            Some(Arc::new(
+                provider.with_execution_delivery(execution_delivery),
+            ))
+        })
     }) {
         Ok(provider) => provider,
         Err(error) => {

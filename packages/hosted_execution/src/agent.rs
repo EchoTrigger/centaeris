@@ -211,9 +211,110 @@ fn validate_read_only_path(
 
 pub fn run_input_inventory_once() -> Result<(), String> {
     require_root()?;
-    let inventory = load_inventory()?;
+    secure_roots()?;
+    let mut inventory = load_inventory()?;
+    let body = read_stdin(MAX_JSON_BYTES)?;
+    if !body.is_empty() {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ExpectedInputs {
+            inputs: Vec<SandboxMaterializedInput>,
+        }
+        let expected: ExpectedInputs =
+            serde_json::from_slice(&body).map_err(|_| "input inspection invalid")?;
+        if expected.inputs.len() > 64 {
+            return Err("input inspection limit exceeded".into());
+        }
+        let mut changed = false;
+        let mut requested = BTreeSet::new();
+        for input in expected.inputs {
+            requested.insert(input.input_ref.clone());
+            validate_materialized_input(&input)?;
+            if input.state.is_some() {
+                return Err("input inspection must name an active identity".into());
+            }
+            if let Some(existing) = inventory
+                .inputs
+                .iter()
+                .find(|value| value.input_ref == input.input_ref)
+            {
+                if existing.virtual_path != input.virtual_path
+                    || existing.sha256 != input.sha256
+                    || existing.size_bytes != input.size_bytes
+                    || existing.source_version != input.source_version
+                {
+                    return Err("input inspection identity conflict".into());
+                }
+                if existing.state.is_none()
+                    && !recover_protected_input(&data_target(&input.virtual_path)?, &input)?
+                {
+                    return Err("input inventory protected file missing".into());
+                }
+                continue;
+            }
+            let target = data_target(&input.virtual_path)?;
+            if recover_protected_input(&target, &input)? {
+                inventory.inputs.push(input);
+                changed = true;
+            }
+        }
+        if changed {
+            inventory
+                .inputs
+                .sort_by(|left, right| left.input_ref.cmp(&right.input_ref));
+            save_inventory(&inventory)?;
+        }
+        inventory = requested_input_inventory(inventory, &requested);
+    }
     serde_json::to_writer(std::io::stdout(), &inventory)
         .map_err(|error| format!("encode input inventory failed: {error}"))
+}
+
+fn requested_input_inventory(
+    mut inventory: SandboxInputInventory,
+    requested: &BTreeSet<String>,
+) -> SandboxInputInventory {
+    inventory
+        .inputs
+        .retain(|input| requested.contains(&input.input_ref));
+    inventory
+}
+
+#[cfg(unix)]
+fn recover_protected_input(
+    target: &Path,
+    expected: &SandboxMaterializedInput,
+) -> Result<bool, String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    create_symlink_free_directories(
+        workspace_root()?,
+        target.parent().ok_or("input inspection path invalid")?,
+    )?;
+    let metadata = match fs::symlink_metadata(target) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err("input inspection unavailable".into()),
+    };
+    if !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.permissions().mode() & 0o777 != 0o444
+        || metadata.len() != expected.size_bytes
+    {
+        return Err("input inspection protected identity mismatch".into());
+    }
+    let bytes = fs::read(target).map_err(|_| "input inspection read failed")?;
+    if format!("sha256:{:x}", Sha256::digest(&bytes)) != expected.sha256 {
+        return Err("input inspection content mismatch".into());
+    }
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+fn recover_protected_input(
+    _target: &Path,
+    _expected: &SandboxMaterializedInput,
+) -> Result<bool, String> {
+    Err("sandbox helper requires Linux".into())
 }
 
 pub fn run_materialize_input_once() -> Result<(), String> {
@@ -1675,14 +1776,26 @@ fn secure_roots() -> Result<(), String> {
 
 #[cfg(unix)]
 fn install_protected_input(target: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let parent = target
         .parent()
         .ok_or_else(|| "sandbox input target has no parent".to_string())?;
     create_symlink_free_directories(workspace_root()?, parent)?;
     match fs::symlink_metadata(target) {
-        Ok(_) => return Err("sandbox input target already exists".to_string()),
+        Ok(metadata) => {
+            // An interrupted install can seal the original before its inventory
+            // rename. Adopt only that exact root-owned immutable file on replay.
+            if metadata.is_file()
+                && metadata.uid() == 0
+                && metadata.permissions().mode() & 0o777 == 0o444
+                && metadata.len() == bytes.len() as u64
+                && fs::read(target).map_err(|_| "inspect existing sandbox input failed")? == bytes
+            {
+                return Ok(());
+            }
+            return Err("sandbox input target already exists".to_string());
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(format!("inspect sandbox input target failed: {error}")),
     }
@@ -1931,6 +2044,91 @@ fn file_version(metadata: &fs::Metadata) -> (u64, u64, u64, u64, i64, i64, i64, 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn material_inventory_response_contains_only_its_requested_identities() {
+        let original = SandboxMaterializedInput {
+            input_ref: "requested".into(),
+            virtual_path: "inputs/requested.zip".into(),
+            size_bytes: 3,
+            sha256: format!("sha256:{:x}", Sha256::digest(b"zip")),
+            source_version: "1".into(),
+            state: None,
+        };
+        let mut unrelated = original.clone();
+        unrelated.input_ref = "unsettled-other".into();
+        unrelated.virtual_path = "inputs/other.zip".into();
+        let inventory = SandboxInputInventory {
+            schema: SANDBOX_INPUT_INVENTORY_SCHEMA.into(),
+            inputs: vec![original.clone(), unrelated],
+        };
+        let response =
+            requested_input_inventory(inventory.clone(), &BTreeSet::from(["requested".into()]));
+        assert_eq!(response.inputs, vec![original]);
+        assert_eq!(
+            inventory.inputs.len(),
+            2,
+            "the persistent inventory must retain the unrelated input"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interrupted_protected_input_recovers_only_the_exact_original() {
+        if std::env::var("CENTAERIS_INPUT_RECOVERY_FIXTURE").as_deref() == Ok("1") {
+            let root = workspace_root().unwrap();
+            let target = root.join("inputs/original.zip");
+            let bytes = b"original zip bytes";
+            install_protected_input(&target, bytes).unwrap();
+            // Replaying after installation but before inventory persistence must
+            // preserve the sealed original rather than replace or reject it.
+            install_protected_input(&target, bytes).unwrap();
+            assert!(install_protected_input(&target, b"different bytes").is_err());
+            let expected = SandboxMaterializedInput {
+                input_ref: "original".into(),
+                virtual_path: "inputs/original.zip".into(),
+                size_bytes: bytes.len() as u64,
+                sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+                source_version: "1".into(),
+                state: None,
+            };
+            assert!(recover_protected_input(&target, &expected).unwrap());
+            assert!(!recover_protected_input(&root.join("inputs/absent.zip"), &expected).unwrap());
+            let mut changed = expected;
+            changed.sha256 = format!("sha256:{}", "0".repeat(64));
+            assert!(recover_protected_input(&target, &changed).is_err());
+            return;
+        }
+        if unsafe { libc::geteuid() } != 0 {
+            return; // The protected-input contract is exercised by the root helper.
+        }
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-input-recovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agent::tests::interrupted_protected_input_recovers_only_the_exact_original",
+                "--nocapture",
+            ])
+            .env("CENTAERIS_INPUT_RECOVERY_FIXTURE", "1")
+            .env("CENTAERIS_WORKSPACE_ROOT", &root)
+            .env("CENTAERIS_WORKSPACE_USER", "0:0")
+            .output()
+            .unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
     use super::*;
 
     #[cfg(unix)]
