@@ -18,7 +18,7 @@ from starlette.routing import Mount
 from .material_access import bind_inputs, declared_inputs_for_run
 from .material_contract import KnowledgeError
 from .material_identity import representation_id
-from .material_reads import read_materials, search_materials
+from .material_reads import read_materials
 from .material_delivery import save_result, read_result
 from .material_operations import create_operations, operation_result
 from .material_receipts import authorize_call, persist_receipt
@@ -65,11 +65,14 @@ TOOLS = (
         "offset": {"type": "integer", "minimum": 0},
         "limit": {"type": "integer", "minimum": 1, "maximum": 2000},
     }, ("input_ref", "delivery"))),
-    types.Tool(name="search_materials", description="Keyword search this run's authorized materials. Missing representations create durable processing operations; query their status, then search again.", inputSchema=_schema({
+    types.Tool(name="search_materials", description="Search authorized current material content; default all covers personal Library plus attachments. coverage states what is indexed. cursor pages ranked hits; processing_cursor independently advances bounded missing-document preparation. Failed and unsupported documents do not block indexed hits.", inputSchema=_schema({
         "query": {"type": "string", "minLength": 1},
+        "scope": {"enum": ["all", "library", "attached"]},
         "input_refs": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": True, "maxItems": 128},
         "ranking": {"enum": ["relevance", "recent"]},
         "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+        "cursor": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "processing_cursor": {"type": "string", "minLength": 1, "maxLength": 4096},
     }, ("query",))),
     types.Tool(name="read_material_result", description="Continue an immutable saved material result using its result_ref and cursor. Returns exact ranges and the next call; only returned evidence has been read.", inputSchema=_schema({
         "result_ref": {"type": "string", "minLength": 1, "maxLength": 96},
@@ -97,6 +100,20 @@ def execute_tool(context, name, arguments):
     if name == "read_material" and arguments.get("delivery") == "execution_file":
         # Only the Host can report successful installation into the execution environment.
         raise KnowledgeError("material_execution_delivery_requires_host", 409)
+    if name == "search_materials":
+        if call is not None:
+            from .models import MaterialResultSnapshot
+            stored = MaterialResultSnapshot.objects.filter(call=call).first()
+            if stored is not None:
+                result = read_result(access, stored.pk, "0:0")
+                return persist_receipt(access, call, name, result)
+        from .material_library_search import search_library_materials
+        result = search_library_materials(access, query=arguments["query"], scope=arguments.get("scope", "all"),
+            input_refs=arguments.get("input_refs"), ranking=arguments.get("ranking", "relevance"),
+            limit=arguments.get("limit", 10), cursor=arguments.get("cursor"), processing_cursor=arguments.get("processing_cursor"))
+        if call is not None and result["disposition"] == "ready":
+            result = save_result(access, call, result)
+        return persist_receipt(access, call, name, result) if call is not None else result
     declared = declared_inputs_for_run(access.agent_run)
     refs = [arguments["input_ref"]] if name == "read_material" else arguments.get("input_refs", list(declared))
     bindings = []
@@ -116,8 +133,6 @@ def execute_tool(context, name, arguments):
         bindings.append({"inputRef": ref, "representationId": representation_id(identity, access.spec_digest)})
     if name == "read_material":
         result = read_materials(access, bindings, offset=arguments.get("offset"), limit=arguments.get("limit"), full_window=True)
-    elif name == "search_materials":
-        result = search_materials(access, bindings, query=arguments["query"], ranking=arguments.get("ranking", "relevance"), date_range=None, limit=arguments.get("limit", 10), full_window=True)
     else:
         raise ValueError("unknown_tool")
     if result.get("disposition") == "pending":

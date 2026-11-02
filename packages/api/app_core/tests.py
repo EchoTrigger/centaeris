@@ -8045,7 +8045,8 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         from .material_contract import KnowledgeError
         from .material_operations import create_operations
         from .material_leases import claim
-        from .material_reads import read_materials, search_materials
+        from .material_reads import read_materials
+        from .material_library_search import search_library_materials
         from .platform_material_commit import ProcessingOutput, commit_processing_output
         operation_access = authorize_material_access(MaterialAccessContext(agent_run.id, authorization.digest, specification, specDigest))
         pending = read_materials(operation_access, [inputBinding], offset=0, limit=20)
@@ -8129,8 +8130,8 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         self.assertEqual(locator["pageEnd"], 2)
         self.assertNotIn("page", locator)
 
-        searched = search_materials(operation_access, [inputBinding], query="policy",
-                                    ranking="relevance", date_range=None, limit=8)
+        searched = search_library_materials(operation_access, scope="attached", input_refs=[link.id],
+                                            query="policy", ranking="relevance", limit=8)
         self.assertEqual(len(searched["hits"]), 1)
         self.assertNotIn("storageKey", json.dumps(searched))
         hit = searched["hits"][0]
@@ -8140,7 +8141,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         from .platform_mcp_auth import issue_credential
         from .test_platform_mcp import call_material_tool
         token = issue_credential(MaterialAccessContext(agent_run.id, authorization.digest, specification, specDigest))["accessToken"]
-        mcp_read = async_to_sync(call_material_tool)(token, "read_material", {"input_ref": link.id, "offset": 0, "limit": 20})
+        mcp_read = async_to_sync(call_material_tool)(token, "read_material", {"input_ref": link.id, "delivery": "content", "offset": 0, "limit": 20})
         self.assertEqual(mcp_read.json()["result"]["structuredContent"]["items"], ready["items"])
         mcp_search = async_to_sync(call_material_tool)(token, "search_materials", {"query": "policy", "limit": 8})
         self.assertEqual(mcp_search.json()["result"]["structuredContent"]["hits"], searched["hits"])

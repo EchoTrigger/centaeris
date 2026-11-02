@@ -7,6 +7,26 @@ from .material_contract import KnowledgeError, sha256_bytes
 
 # Leave room for the receipt and citation IDs added after page construction.
 PAGE_BUDGET = 48 * 1024
+RESULT_METADATA = (
+    "query", "ranking", "scope", "processingSpecification", "coverage",
+    "nextSearchCursor", "processingCursor", "operations", "processingFailures",
+)
+
+
+def _search_progress(snapshot):
+    coverage = snapshot.get("coverage")
+    if coverage is None:
+        return ""
+    progress = (" Search coverage: " + json.dumps(coverage, sort_keys=True, separators=(",", ":")) + ".")
+    if not coverage["complete"]:
+        progress += " Search is incomplete; an empty hit window does not establish that the Library has no matches."
+    if snapshot.get("nextSearchCursor"):
+        progress += " Continue matching hits with search_materials using the same arguments and cursor=nextSearchCursor."
+    if snapshot.get("processingCursor"):
+        progress += " Continue material preparation with search_materials using the same arguments and processing_cursor=processingCursor."
+    if coverage["refreshRequired"]:
+        progress += " Sources or processed content changed; search again without cursor to include the current versions."
+    return progress
 
 
 def _single_page(snapshot, result_ref, cursor):
@@ -15,12 +35,17 @@ def _single_page(snapshot, result_ref, cursor):
     index, offset = map(int, cursor.split(":"))
     key = "items" if "items" in snapshot else "hits"
     values = snapshot[key]
+    metadata = {name: snapshot[name] for name in RESULT_METADATA if name in snapshot}
+    progress = _search_progress(snapshot)
     if not values:
         if index or offset:
             raise KnowledgeError("material_result_cursor_invalid", 400)
-        return {"disposition": "ready", key: [], "resultRef": result_ref,
+        page = {**metadata, "disposition": "ready", key: [], "resultRef": result_ref,
                 "completeResultSaved": True, "continuation": None,
-                "message": "No matching content. The complete result is preserved."}
+                "message": "No matching content in this result window. The result window is preserved." + progress}
+        if len(json.dumps(page, ensure_ascii=False).encode()) > PAGE_BUDGET:
+            raise KnowledgeError("material_result_metadata_exceeds_budget")
+        return page
     if index >= len(values):
         raise KnowledgeError("material_result_cursor_invalid", 400)
     original = values[index]
@@ -61,7 +86,7 @@ def _single_page(snapshot, result_ref, cursor):
                         if next_cursor else None)
         if not continuation and key == "items" and original.get("nextOffset") is not None:
             continuation = {"tool": "read_material", "arguments": {
-                "input_ref": original["inputRef"], "offset": original["nextOffset"],
+                "input_ref": original["inputRef"], "delivery": "content", "offset": original["nextOffset"],
                 "limit": original.get("maxLines", 2000)}}
         if key == "items":
             item["nextOffset"] = original.get("nextOffset") if next_cursor is None else None
@@ -72,10 +97,10 @@ def _single_page(snapshot, result_ref, cursor):
         total = f" of {original['totalLines']}" if "totalLines" in original else ""
         message = (f"Showing result {index + 1} of {len(values)}, {line_range}{total}; "
                    f"content bytes {offset}–{end} of {len(raw)} (end exclusive). "
-                   "The complete result is preserved. "
+                   "The complete result window is preserved. "
                    + ("More content is available. Continue with " + json.dumps(continuation, ensure_ascii=False)
-                      if continuation else "This result has been fully returned."))
-        return {"message": message, "disposition": "ready", "resultRef": result_ref,
+                      if continuation else "This result window has been fully returned.") + progress)
+        return {**metadata, "message": message, "disposition": "ready", "resultRef": result_ref,
                 "completeResultSaved": True, "resultSha256": snapshot.get("_digest"),
                 "continuation": continuation, key: [item]}
 
@@ -112,9 +137,10 @@ def render_page(snapshot, result_ref, cursor):
                      "continuation": following["continuation"]}
         candidate["message"] = (
             f"Showing results {start_index + 1}–{index + 1} of {len(snapshot['hits'])}. "
-            "Each hit includes the exact returned line and byte range. The complete result is preserved. "
+            "Each hit includes the exact returned line and byte range. The complete result window is preserved. "
             + ("More content is available. Continue with " + json.dumps(candidate["continuation"], ensure_ascii=False)
-               if candidate["continuation"] else "This result has been fully returned."))
+               if candidate["continuation"] else "This result window has been fully returned.")
+            + _search_progress(snapshot))
         if len(json.dumps(candidate, ensure_ascii=False).encode()) > PAGE_BUDGET:
             break
         page = candidate
