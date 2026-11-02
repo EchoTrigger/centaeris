@@ -2,8 +2,10 @@
 
 Workspace owns material authorization, document processing, search, evidence
 receipts and citation presentation. Core owns generic runtime and tool semantics.
-Material scope is the inputs explicitly attached and authorized for an AgentRun,
-not implicit access to the user's entire library.
+Material scope combines signed attached inputs with an immutable per-Run
+personal-library grant. Native Session submissions receive that grant; existing
+accepted Runs keep their original attached-input scope. Every access still checks
+current membership, ownership, lifecycle and content identity.
 
 ## Responsibilities and execution
 
@@ -12,9 +14,9 @@ dedicated Python material Worker -> isolated document processor -> atomic
 platform publication.
 
 Model access follows Runtime's generic MCP client -> Workspace material MCP
-tools. Runtime registers the first-party provider when the run has declared
-inputs. Normal sandbox file reads, image inputs and artifact publication use
-their respective execution contracts.
+tools. Runtime registers the first-party provider when the Run has attached
+inputs or its accepted personal-library grant. Normal sandbox file reads,
+image inputs and artifact publication use their respective execution contracts.
 
 The API owns access decisions, task admission, material storage and database
 records. The material Worker uses the API image and runs
@@ -56,8 +58,10 @@ Runtime owns the reserved provider identity `workspace.materials`. Each
 invocation obtains a fresh credential, opens a separate connection, checks the
 frozen catalog and supplies the actual tool-call ID. Catalog collisions and
 changes during a run fail closed. A whole-invocation timeout and cancellation
-cover connection, discovery and execution; ambiguous calls are not automatically
-replayed. Credentials and trusted headers do not enter model arguments or
+cover connection, discovery and content reads; an original-file transfer that
+has begun admission finishes its bounded Host operation and confirmation before
+reporting cancellation. Ambiguous calls are not automatically replayed.
+Credentials and trusted headers do not enter model arguments or
 history. Credential and material responses use `Cache-Control: no-store`.
 
 Exact HTTP fields and citation response schemas are documented in
@@ -65,15 +69,16 @@ Exact HTTP fields and citation response schemas are documented in
 
 ## Material tools
 
-The current catalog contains five tools. Names and model parameters use
+The current catalog contains six tools. Names and model parameters use
 `lower_snake_case`; public JSON fields use `camelCase`. Unknown arguments fail
 validation.
 
 | Tool | Behavior |
 | --- | --- |
-| `list_materials` | List the run's authorized attached inputs. |
-| `read_material` | Read one `input_ref`, with optional line `offset` and `limit` up to 2,000. |
-| `search_materials` | Keyword search authorized inputs; optional `input_refs`, `ranking` (`relevance` or `recent`) and `limit` up to 20. |
+| `list_materials` | Discover authorized metadata with `scope` (`all`, `library`, `attached`), name `query`, `folder`, opaque `cursor` and `limit` up to 100. Default `all` means the Run's authorized set; it does not grant access. |
+| `read_material` | Read one `input_ref`. Default `delivery: content` supports line `offset` and `limit` up to 2,000; `delivery: execution_file` installs the original for Python/Skills and rejects content pagination arguments. |
+| `search_materials` | Keyword search authorized inputs; explicit `input_refs` can select Library versions. The default remains attached inputs. `ranking` is `relevance` or `recent`, and `limit` is at most 20. |
+| `read_material_result` | Continue an immutable saved content result using `result_ref` and its opaque `cursor`. |
 | `get_operation` | Read the status of an `operation_id` owned by this run. |
 | `cancel_operation` | Detach this run's operation without stopping shared processing or deleting its result. |
 
@@ -88,6 +93,40 @@ from returned content and its hash.
 The Runtime provider rejects results exceeding Core's inline output budget
 instead of committing a clipped success with unusable evidence. Callers can
 request smaller read/search windows.
+
+## Original files and Session continuity
+
+Discovery reads metadata without opening originals or creating Session input
+bindings. Unsupported document formats can still be discovered and fetched as
+originals; discovery is not a promise of parsed content or searchable archive
+members.
+
+An original-file delivery first reserves its immutable identity and capacity in
+a short API transaction, then Runtime downloads and validates its version,
+digest and byte count. The existing Host helper installs a protected read-only
+input and commits its inventory before Runtime confirms delivery. Only then may
+the tool return `kind: execution_file`, an execution `path`, and source metadata.
+That result creates no parsed-content receipt or citation.
+
+The original-file limit is 64 MiB per file. Retained protected inputs, including
+distinct attached versions, are bounded by the existing 128-input validation
+contract and the execution workspace budget. This bound does not limit Library
+discovery: metadata remains paginated over the authorized Library.
+
+`SessionMaterialInput` records the Session's version and stable path, while
+`RunMaterialAdmission` records the current admission and originating tool call.
+New Runs recheck their own grant and current permissions before restoring those
+inputs. A Library version already attached to the Session uses one canonical
+reference and path across both origins. Accepted authorization payloads are not
+rewritten. Migration 0042 gives existing Runs an explicit disabled Library grant.
+
+Unconfirmed reservations are retained across errors until a fenced Host
+reconciliation establishes that the exact input is present or absent. Inventory
+inspection also handles the interrupted file-install/inventory-commit boundary.
+The execution input writer serializes installation and revocation with that
+inspection; snapshot collection excludes concurrent dispatch. Protected inputs
+remain separate from ordinary workspace snapshots and are restored from their
+authoritative Session identities.
 
 ## Durable processing and cancellation
 
@@ -200,9 +239,10 @@ arguments. These probes are not ordinary CI model calls.
 
 ## Capability boundaries
 
-The current server implements the five material tools above, not an unrestricted
-library browser or vector knowledge-base service. Source authorization,
-processing, search and evidence policy belong to Workspace. Additional material
+The current server implements the six material tools above with owner-scoped
+Library discovery and original-file delivery. It does not expose arbitrary host
+paths or a vector knowledge-base service. Source authorization, processing,
+search and evidence policy belong to Workspace. Additional material
 backends using the same contracts are platform work; adding or changing tool
 names also requires updating the Runtime's explicit catalog validation.
 

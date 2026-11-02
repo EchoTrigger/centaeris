@@ -356,6 +356,24 @@ Both entries reject browser Origin headers. See
 [Platform materials and MCP](../architecture/PlatformMaterials.md#mcp-connection-and-authorization)
 for transport constraints and the platform processing lifecycle.
 
+Original-file transport uses four additional internal POST endpoints under
+`/internal/agent-runs/materials/`. They require `X-Internal-Token`, reject unknown
+fields and return successful JSON responses with `Cache-Control: no-store`. All requests bind `agentRunId` and
+`authorizationDigest`; the accepted personal-library grant is a separate,
+immutable platform record and does not change the signed authorization v2.
+
+| Endpoint | Request and result |
+| --- | --- |
+| `context` | `schema: workspace.material.context.read.v1`; returns `workspace.material.context.result.v1`, `personalLibrary`, confirmed `inputs`, and `pendingInputs` requiring Host inspection. |
+| `prepare` | `schema: workspace.material.prepare.v1`, `inputRef`, `callId`; reserves identity and capacity and returns `workspace.material.prepare.result.v1` with `resolvedInput`. This is not a delivery success. |
+| `confirm` | `schema: workspace.material.confirm.v1`, `inputRef`, `sourceVersion`, `sha256`, `callId`; rechecks current authority and records the Host's completed installation. Returns `workspace.material.confirm.result.v1` and `resolvedInput`. |
+| `reconcile` | `schema: workspace.material.reconcile.v1`, current `jobId`/`leaseOwner`, and bounded `inputs` containing exact identity, `state: present\|absent` and observed `admissionIds`. Returns `workspace.material.reconcile.result.v1` with `settledInputRefs`. |
+
+Original bytes still use the existing authenticated `read-input` stream and its
+version, length and digest checks. They are never embedded in MCP results. An
+`execution_file` success is produced by Runtime only after installation, input
+registration and confirmation; it is not a parsed-content evidence receipt.
+
 The authenticated host may send `X-Workspace-Tool-Call-Id` (one nonempty ASCII
 value, at most 160 bytes), never a model argument. The server verifies the
 authorized run's committed tool call, exact arguments and reserved
@@ -363,8 +381,8 @@ authorized run's committed tool call, exact arguments and reserved
 and `citationIds` backed by immutable server receipts. These IDs are provisional:
 only an exact matching durable successful MCP result can publish citation rows.
 Missing headers allow diagnostic material access but create no receipt. The
-Runtime registers the five first-party material tools for runs with declared
-material inputs. There is no opt-in legacy reader or plugin activation. Runtime freezes the discovered catalog and verifies it before each
+Runtime registers the six first-party material tools for Runs with attached
+inputs or their accepted personal-library grant. There is no opt-in legacy reader or plugin activation. Runtime freezes the discovered catalog and verifies it before each
 call, obtains a new short-lived credential per invocation, and isolates call
 headers on separate connections. Configure API allowed hostnames for the private
 connection explicitly; this checkpoint does not change deployed environments.
