@@ -52,6 +52,7 @@ function firstPrompt() {
   return `Synthetic personal Library acceptance. No files are attached. Discover my Library ZIP with exact displayName ${JSON.stringify(expected.displayName)} using list_materials scope=library and query matching that name. `
     + 'Use its returned input_ref with read_material delivery=execution_file exactly once. Do not read its body as content. '
     + 'Use the real returned execution path as ZIP_PATH in the following exact bash command (replace only ZIP_PATH with that path, preserving shell quoting). '
+    + "Preserve the standalone '-' immediately after python3: it executes the script from stdin; the ZIP path is only its argument. "
     + 'Additional skill read calls are permitted. Do not fabricate paths or contents, create a replacement ZIP, or run other bash commands.\n'
     + pythonCommand('ZIP_PATH', false)
     + `\nAfter its successful output, publish_artifact path=/mnt/data/library-total.txt, then reply exactly ${firstMarker}.`;
