@@ -24,4 +24,5 @@ test("counts use English plurals and preserve interpolated content", async () =>
   await instance.changeLanguage("zh-CN");
   assert.equal(instance.t("models.count", { count: 2 }), "2 个模型");
   assert.equal(instance.t("invitation.join", { workspace: "Research <&> 研究" }), "加入 Research <&> 研究");
+  assert.equal(instance.t("libraryObjectRoute.recoverDraft", { title: "任务清单", time: "12:34" }), "恢复 任务清单（12:34）");
 });

@@ -344,6 +344,10 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .spreadsheetState { display: grid; min-height: 0; flex: 1; place-items: center; padding: 32px; color: var(--process-text); }
 .spreadsheetPreview > .officePreview { min-height: 0; flex: 1; }
 .libraryNoteEditor { position: relative; width: min(860px, 100%); margin: 0 auto; }
+.libraryNoteNotice { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; padding: 10px 12px; border: 1px solid var(--outline-variant); border-radius: 8px; background: var(--surface-variant); color: var(--process-text); font-size: 12px; }
+.libraryNoteNotice > span { margin-right: auto; }
+.libraryNoteNotice button { border: 0; border-radius: 5px; background: transparent; color: var(--on-surface); padding: 4px 6px; font: inherit; cursor: pointer; }
+.libraryNoteNotice button:hover { background: var(--surface-container); }
 .libraryNoteEditor textarea { width: 100%; min-height: calc(100vh - 190px); resize: none; border: 0; border-radius: 0; outline: 0; background: transparent; color: var(--on-surface); padding: 0; font-family: inherit; font-size: 16px; line-height: 1.75; }
 .libraryNoteEditor textarea::placeholder { color: var(--process-text); }
 .libraryPreviewUnsupported { display: grid; justify-items: center; gap: 12px; color: var(--muted); text-align: center; }

@@ -41,6 +41,17 @@ generation, not the present head. Deleted notes cannot be resurrected by replay.
 Receipts retain small metadata independently of body history, for the lifetime
 of the owner; there is no expiration that turns an old creation into a new one.
 
+POST creation chooses an available title within the owner's target folder,
+using the same numbering as uploaded files (`note`, `note(1)`, `note(2)`).
+Non-deleted names are compared without case sensitivity; deleted objects do not
+reserve a title. The request digest retains the requested title, while the
+created object, first revision and receipt contain the actual assigned title.
+Retry the original request with its original `saveId` after an unknown outcome:
+replay returns the same object and assigned title without allocating another
+name. Clients adopt the returned `object.displayName` for later saves. Explicit
+PUT/PATCH title changes continue to reject occupied titles with
+`library_name_conflict`.
+
 Titles are independent of literal Markdown. Title changes create a revision and
 increment `contentGeneration`, including generic renames and trash restoration;
 old captured Agent inputs therefore remain stale. Moves alone do not change the

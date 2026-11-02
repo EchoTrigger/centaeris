@@ -45,6 +45,45 @@ class LibraryNoteVersionTests(TransactionTestCase):
         self.assertEqual(conflict.status_code, 409)
         self.assertEqual(conflict.json()["error"], "note_save_id_conflict")
 
+    def test_duplicate_creation_assigns_available_name_and_replays_the_same_receipt(self):
+        first, _ = self.create()
+        second, payload = self.create()
+        self.assertNotEqual(second["object"]["id"], first["object"]["id"])
+        self.assertEqual(second["object"]["displayName"], "note(1)")
+        self.assertEqual(payload["displayName"], "note")
+        replay = self.request("post", "/api/library/notes", payload)
+        self.assertEqual(replay.status_code, 201)
+        self.assertEqual(replay.json(), second)
+        self.assertEqual(UserLibraryObject.objects.count(), 2)
+        self.assertEqual(LibraryNoteRevision.objects.count(), 2)
+        changed = self.request("post", "/api/library/notes", {**payload, "displayName": "note(1)"})
+        self.assertEqual(changed.status_code, 409)
+        self.assertEqual(changed.json()["error"], "note_save_id_conflict")
+        self.assertEqual(self.request("delete", f"/api/library/{first['object']['id']}", {}).status_code, 200)
+        replacement, _ = self.create()
+        self.assertEqual(replacement["object"]["displayName"], "note")
+
+    def test_numbered_note_saves_with_actual_name_and_manual_name_conflicts_are_rejected(self):
+        self.create()
+        numbered, _ = self.create()
+        note_id = numbered["object"]["id"]
+        actual_name = numbered["object"]["displayName"]
+        saved = self.update(note_id, 1, displayName=actual_name)
+        self.assertEqual(saved.status_code, 200, saved.content)
+        self.assertEqual(saved.json()["object"]["displayName"], actual_name)
+        self.assertEqual(saved.json()["appliedGeneration"], 2)
+        conflict = self.update(note_id, 2, displayName="note")
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.json()["error"], "library_name_conflict")
+        renamed = self.request("patch", f"/api/library/{note_id}", {
+            "saveId": uuid4().hex, "baseGeneration": 2, "displayName": "note",
+        })
+        self.assertEqual(renamed.status_code, 409)
+        self.assertEqual(renamed.json()["error"], "library_name_conflict")
+        note = UserLibraryObject.objects.get(pk=note_id)
+        self.assertEqual((note.displayName, note.contentGeneration, note.noteHead.markdown),
+                         (actual_name, 2, "second"))
+
     def test_replay_precedes_generation_check_and_receipt_survives_revision_cleanup(self):
         first, _ = self.create()
         note_id = first["object"]["id"]

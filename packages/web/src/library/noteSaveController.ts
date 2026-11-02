@@ -165,7 +165,8 @@ export class NoteSaveController {
       if (result.saveId !== operation.saveId || !result.object?.id
           || !Number.isSafeInteger(result.appliedGeneration) || result.appliedGeneration < operation.baseGeneration
           || result.object.contentGeneration !== result.appliedGeneration
-          || (operation.noteId && result.object.id !== operation.noteId)) throw new Error("note_save_response_invalid");
+          || (operation.noteId && result.object.id !== operation.noteId)
+          || (!operation.noteId && (typeof result.object.displayName !== "string" || !result.object.displayName.trim()))) throw new Error("note_save_response_invalid");
       this.record.noteId = result.object.id;
       this.record.pending = null;
       if (this.options.baseGeneration > result.appliedGeneration) {
@@ -176,13 +177,20 @@ export class NoteSaveController {
         return;
       }
       this.record.baseGeneration = result.appliedGeneration;
-      this.acknowledged = structuredClone(operation.document);
+      const confirmedDocument = structuredClone(operation.document);
+      if (!operation.noteId) {
+        confirmedDocument.displayName = result.object.displayName!;
+        if (this.record.document.displayName === operation.document.displayName) {
+          this.record.document.displayName = confirmedDocument.displayName;
+        }
+      }
+      this.acknowledged = confirmedDocument;
       await this.persist();
-      if (this.record.sequence === operation.sequence && same(this.record.document, operation.document)) {
+      if (this.record.sequence === operation.sequence && same(this.record.document, confirmedDocument)) {
         await this.cleanConfirmed(operation.sequence);
         this.emit(this.changed() ? this.localStatus() : "saved");
       } else this.emit(this.localStatus());
-      if (this.active) this.options.onConfirmed?.(result, structuredClone(operation.document));
+      if (this.active) this.options.onConfirmed?.(result, structuredClone(confirmedDocument));
     } catch (error) {
       if (this.status === "localError") return;
       const message = error instanceof Error ? error.message : "note_save_failed";
