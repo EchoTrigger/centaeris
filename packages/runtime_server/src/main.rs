@@ -85,7 +85,7 @@ use centaeris_core::model::EmptyModelSessionConfigStore;
 use centaeris_core::model::ToolCallEnvelope;
 use centaeris_core::runtime::contracts::{
     CheckpointKindV1, CheckpointRecord, EventVisibility, RecoveryWorkspaceSnapshotV1,
-    RuntimeAgentRunIdentityV1, RuntimeEvent, RuntimeRecoveryCheckpointV1,
+    RuntimeAgentRunIdentityV1, RuntimeEvent, RuntimeProcessState, RuntimeRecoveryCheckpointV1,
     RUNTIME_RECOVERY_CHECKPOINT_SCHEMA_V1,
 };
 use centaeris_core::runtime::event::RuntimeEventProjection;
@@ -3620,7 +3620,20 @@ fn execute_agent_run(
                 },
                 &model_client,
                 &model_config_store,
-                &mut |event| match event {
+                &mut |event| {
+                    if let Err(error) = persist_model_process_state(
+                        &session_log,
+                        &agent_run_start,
+                        &event,
+                        &session_record_sequence,
+                        &terminal_lease_fence,
+                        &session_stream,
+                    ) {
+                        if stream_error.is_none() {
+                            stream_error = Some(error);
+                        }
+                    }
+                    match event {
                     TurnUpdate::Reasoning { turn_id, request_id, text, .. }
                         if !live_degraded.load(Ordering::Relaxed) => {
                             match session_stream.lock() {
@@ -3819,6 +3832,7 @@ fn execute_agent_run(
                         }
                     }
                     _ => {}
+                    }
                 },
                 cancellation_probe.as_ref(),
                 &turn_control,
@@ -4690,6 +4704,80 @@ fn latch_live_error(live_degraded: &Arc<AtomicBool>, error: LiveTextError) {
     );
 }
 
+fn model_process_state_update(event: &TurnUpdate) -> Option<(&str, RuntimeProcessState)> {
+    match event {
+        TurnUpdate::Status {
+            turn_id,
+            process_state: RuntimeProcessState::Retrying,
+            ..
+        } => Some((turn_id, RuntimeProcessState::Retrying)),
+        TurnUpdate::Reasoning { turn_id, text, .. } if !text.is_empty() => {
+            Some((turn_id, RuntimeProcessState::Thinking))
+        }
+        TurnUpdate::Token {
+            turn_id, content, ..
+        } if !content.is_empty() => Some((turn_id, RuntimeProcessState::Synthesizing)),
+        TurnUpdate::ModelDone {
+            turn_id,
+            process_state,
+            ..
+        } => Some((turn_id, *process_state)),
+        _ => None,
+    }
+}
+
+fn model_process_state_transition<'a>(
+    event: &'a TurnUpdate,
+    sequence: &AgentRunSessionState,
+) -> Option<(&'a str, RuntimeProcessState)> {
+    let Some((turn_id, process_state)) = model_process_state_update(event) else {
+        return None;
+    };
+    let previous = sequence.model_process_state(turn_id);
+    if previous == Some(process_state)
+        || (process_state != RuntimeProcessState::Retrying
+            && previous != Some(RuntimeProcessState::Retrying))
+    {
+        return None;
+    }
+    Some((turn_id, process_state))
+}
+
+fn persist_model_process_state(
+    session_log: &PostgresSessionLog,
+    agent_run_start: &AgentRunStart,
+    event: &TurnUpdate,
+    sequence: &Mutex<AgentRunSessionState>,
+    lease_fence: &RuntimeJobLeaseFence,
+    stream: &Mutex<Option<TransientAgentRunStream>>,
+) -> Result<(), String> {
+    if model_process_state_update(event).is_none() {
+        return Ok(());
+    }
+    let mut guard = sequence
+        .lock()
+        .map_err(|_| "session record sequence lock poisoned".to_string())?;
+    let Some((turn_id, process_state)) = model_process_state_transition(event, &guard) else {
+        return Ok(());
+    };
+    let mut committed_sequence = guard.clone();
+    let Some(record) =
+        committed_sequence.record_model_process_state(turn_id, process_state, now_ms()?)?
+    else {
+        return Ok(());
+    };
+    commit_model_process_record(
+        session_log,
+        agent_run_start,
+        &record,
+        &mut committed_sequence,
+        lease_fence,
+        stream,
+    )?;
+    *guard = committed_sequence;
+    Ok(())
+}
+
 fn persist_model_process_phase(
     session_log: &PostgresSessionLog,
     agent_run_start: &AgentRunStart,
@@ -4707,21 +4795,48 @@ fn persist_model_process_phase(
     else {
         return Ok(());
     };
+    commit_model_process_record(
+        session_log,
+        agent_run_start,
+        &record,
+        &mut committed_sequence,
+        lease_fence,
+        stream,
+    )?;
+    *guard = committed_sequence;
+    Ok(())
+}
+
+fn commit_model_process_record(
+    session_log: &PostgresSessionLog,
+    agent_run_start: &AgentRunStart,
+    record: &SequencedSessionRecord,
+    committed_sequence: &mut AgentRunSessionState,
+    lease_fence: &RuntimeJobLeaseFence,
+    stream: &Mutex<Option<TransientAgentRunStream>>,
+) -> Result<(), String> {
     let receipt = session_log.append_session_records_with_runtime_job_lease_blocking(
         agent_run_start.agent_run_id.as_str(),
-        std::slice::from_ref(&record),
+        std::slice::from_ref(record),
         lease_fence,
     )?;
-    let committed_phase_sequence = committed_phase_sequence(&receipt, &record)?;
-    accept_session_commit_position(&mut committed_sequence, &receipt)?;
+    let committed_phase_sequence = committed_phase_sequence(&receipt, record)?;
+    accept_session_commit_position(committed_sequence, &receipt)?;
     match stream.lock() {
         Ok(mut active_stream) => {
-            settle_live_before_sequence_or_log(
-                &mut active_stream,
-                event.turn_id.as_str(),
-                assistant_message_id(event.turn_id.as_str()).as_str(),
-                committed_phase_sequence,
-            );
+            if record.event.payload["stage"] == "model_process_summary" {
+                let turn_id = record
+                    .event
+                    .turn_id
+                    .as_deref()
+                    .ok_or("model process turn is missing")?;
+                settle_live_before_sequence_or_log(
+                    &mut active_stream,
+                    turn_id,
+                    assistant_message_id(turn_id).as_str(),
+                    committed_phase_sequence,
+                );
+            }
             publish_commit_wake_or_log(&mut active_stream, &receipt);
         }
         Err(_) => {
@@ -4730,7 +4845,6 @@ fn persist_model_process_phase(
             );
         }
     }
-    *guard = committed_sequence;
     Ok(())
 }
 
@@ -8060,6 +8174,88 @@ mod tests {
             .expect("recovery done");
 
         assert_eq!(projection.terminal_text(), "partial complete");
+    }
+
+    #[test]
+    fn model_process_retry_bridge_persists_only_retry_and_first_resumed_progress() {
+        for (progress, expected) in [
+            (
+                TurnUpdate::Reasoning {
+                    session_id: "session".into(),
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    text: "reasoning".into(),
+                },
+                RuntimeProcessState::Thinking,
+            ),
+            (
+                TurnUpdate::Token {
+                    session_id: "session".into(),
+                    turn_id: "turn".into(),
+                    content: "answer".into(),
+                },
+                RuntimeProcessState::Synthesizing,
+            ),
+            (
+                TurnUpdate::ModelDone {
+                    session_id: "session".into(),
+                    turn_id: "turn".into(),
+                    finish_reason: Some("stop".into()),
+                    process_state: RuntimeProcessState::Reviewing,
+                },
+                RuntimeProcessState::Reviewing,
+            ),
+        ] {
+            let mut state = AgentRunSessionState::new("session", "run").unwrap();
+            let retry = TurnUpdate::Status {
+                session_id: "session".into(),
+                turn_id: "turn".into(),
+                message: None,
+                process_state: RuntimeProcessState::Retrying,
+            };
+            assert_eq!(model_process_state_transition(&progress, &state), None);
+            assert_eq!(
+                model_process_state_transition(&retry, &state),
+                Some(("turn", RuntimeProcessState::Retrying))
+            );
+            state
+                .record_model_process_state("turn", RuntimeProcessState::Retrying, 1)
+                .unwrap();
+            assert_eq!(model_process_state_transition(&retry, &state), None);
+            for empty in [
+                TurnUpdate::Reasoning {
+                    session_id: "session".into(),
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    text: String::new(),
+                },
+                TurnUpdate::Token {
+                    session_id: "session".into(),
+                    turn_id: "turn".into(),
+                    content: String::new(),
+                },
+                TurnUpdate::Status {
+                    session_id: "session".into(),
+                    turn_id: "turn".into(),
+                    message: None,
+                    process_state: RuntimeProcessState::Thinking,
+                },
+            ] {
+                assert_eq!(model_process_state_transition(&empty, &state), None);
+            }
+            assert_eq!(
+                model_process_state_transition(&progress, &state),
+                Some(("turn", expected))
+            );
+            state
+                .record_model_process_state("turn", expected, 2)
+                .unwrap();
+            assert_eq!(model_process_state_transition(&progress, &state), None);
+            assert_eq!(
+                model_process_state_transition(&retry, &state),
+                Some(("turn", RuntimeProcessState::Retrying))
+            );
+        }
     }
 
     #[test]

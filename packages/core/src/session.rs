@@ -339,6 +339,7 @@ pub struct AgentRunSessionState {
     committed_tool_call_ids: HashSet<String>,
     committed_tool_result_ids: HashSet<String>,
     committed_phase_turn_ids: HashSet<String>,
+    model_process_states: HashMap<String, RuntimeProcessState>,
     agent_composition_digest: Option<String>,
     compaction_request_identities: HashMap<String, (String, String)>,
     compaction_record_digests: HashMap<String, String>,
@@ -385,6 +386,7 @@ impl AgentRunSessionState {
             committed_tool_call_ids: HashSet::new(),
             committed_tool_result_ids: HashSet::new(),
             committed_phase_turn_ids: HashSet::new(),
+            model_process_states: HashMap::new(),
             agent_composition_digest: None,
             compaction_request_identities: HashMap::new(),
             compaction_record_digests: HashMap::new(),
@@ -563,6 +565,38 @@ impl AgentRunSessionState {
 
     pub fn has_phase_turn(&self, turn_id: &str) -> bool {
         self.committed_phase_turn_ids.contains(turn_id)
+    }
+
+    pub fn model_process_state(&self, turn_id: &str) -> Option<RuntimeProcessState> {
+        self.model_process_states.get(turn_id).copied()
+    }
+
+    /// Records a model process state transition, preserving distinct retry attempts.
+    pub fn record_model_process_state(
+        &mut self,
+        turn_id: &str,
+        process_state: RuntimeProcessState,
+        created_at_ms: i64,
+    ) -> Result<Option<SequencedSessionRecord>, String> {
+        if self.model_process_state(turn_id) == Some(process_state) {
+            return Ok(None);
+        }
+        self.record(canonical_session_record(
+            stable_session_event_id(
+                "model_process_state",
+                &[self.agent_run_id.as_str(), turn_id, &self.next.to_string()],
+            ),
+            SessionRecordType::PhaseEvent,
+            self.session_id.clone(),
+            Some(turn_id.to_string()),
+            Some(self.agent_run_id.clone()),
+            created_at_ms,
+            serde_json::json!({
+                "stage": "model_process_state",
+                "processState": process_state,
+            }),
+        )?)
+        .map(Some)
     }
 
     pub fn provider_usage(&self, turn_id: &str) -> Option<&Value> {
@@ -1169,7 +1203,13 @@ impl AgentRunSessionState {
                     .turn_id
                     .as_deref()
                     .ok_or_else(|| "phase event turn is missing".to_string())?;
-                if !self.committed_phase_turn_ids.insert(turn_id.to_string()) {
+                if event.payload["stage"] == "model_process_state" {
+                    self.model_process_states.insert(
+                        turn_id.to_string(),
+                        serde_json::from_value(event.payload["processState"].clone())
+                            .map_err(|error| format!("invalid model process state: {error}"))?,
+                    );
+                } else if !self.committed_phase_turn_ids.insert(turn_id.to_string()) {
                     return Err(format!("duplicate committed phase event: {turn_id}"));
                 }
             }
@@ -1867,7 +1907,12 @@ fn committed_runtime_projection(
             "Status",
             "running".to_string(),
             RuntimeEventVisibility::User,
-            Some(RuntimeProcessState::Thinking),
+            Some(if record.payload["stage"] == "model_process_state" {
+                serde_json::from_value(record.payload["processState"].clone())
+                    .map_err(|error| format!("invalid model process state: {error}"))?
+            } else {
+                RuntimeProcessState::Thinking
+            }),
             None,
             record.payload.clone(),
         ),
@@ -3798,15 +3843,24 @@ fn validate_phase_event(event: &SessionLogRecord) -> Result<(), String> {
     required_event_turn_id(event)?;
     required_event_agent_run_id(event)?;
     let payload = payload_object(event)?;
-    require_exact_payload_fields(payload, &["stage", "message"], event)?;
     let stage = required_payload_string(payload, "stage", event)?;
-    if stage != "model_process_summary" {
-        return Err(format!(
-            "session.event.v1 {} payload.stage is unsupported: {stage}",
-            event.event_id
-        ));
+    match stage.as_str() {
+        "model_process_summary" => {
+            require_exact_payload_fields(payload, &["stage", "message"], event)?;
+            required_payload_string(payload, "message", event)?;
+        }
+        "model_process_state" => {
+            require_exact_payload_fields(payload, &["stage", "processState"], event)?;
+            serde_json::from_value::<RuntimeProcessState>(payload["processState"].clone())
+                .map_err(|error| format!("invalid model process state: {error}"))?;
+        }
+        _ => {
+            return Err(format!(
+                "session.event.v1 {} payload.stage is unsupported: {stage}",
+                event.event_id
+            ))
+        }
     }
-    required_payload_string(payload, "message", event)?;
     Ok(())
 }
 
@@ -5285,6 +5339,93 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn model_process_states_replay_deduplicate_and_do_not_create_transcript_notices() {
+        use crate::session::transcript::{TranscriptProjectionUpdateV1, TranscriptProjectorV1};
+        let mut state = AgentRunSessionState::new("session", "run").unwrap();
+        let mut restored = state.clone();
+        let mut transcript = TranscriptProjectorV1::new("session".into(), "1".into()).unwrap();
+        let mut event_ids = HashSet::new();
+        for process_state in [
+            RuntimeProcessState::Retrying,
+            RuntimeProcessState::Thinking,
+            RuntimeProcessState::Retrying,
+            RuntimeProcessState::Synthesizing,
+        ] {
+            let record = state
+                .record_model_process_state("turn", process_state, 1)
+                .unwrap()
+                .unwrap();
+            assert!(event_ids.insert(record.event.event_id.clone()));
+            assert_eq!(
+                state
+                    .record_model_process_state("turn", process_state, 2)
+                    .unwrap(),
+                None
+            );
+            let projected = committed_runtime_projection(&record.event, "run").unwrap();
+            assert_eq!(projected.event_type, "Status");
+            assert_eq!(projected.process_state, Some(process_state));
+            assert_eq!(projected.payload, record.event.payload);
+            assert!(
+                matches!(transcript.apply(&record, "stream", &record.sequence.to_string()).unwrap(), TranscriptProjectionUpdateV1::NoDisplayChange { source_high_water, .. } if source_high_water == record.sequence.to_string())
+            );
+            restored.restore(record).unwrap();
+            assert_eq!(restored.model_process_state("turn"), Some(process_state));
+            assert_eq!(
+                restored
+                    .record_model_process_state("turn", process_state, 2)
+                    .unwrap(),
+                None
+            );
+        }
+        assert!(!state.has_phase_turn("turn"));
+        let summary = state
+            .event_for_turn(
+                "turn",
+                SessionRecordType::PhaseEvent,
+                json!({"stage":"model_process_summary", "message":"summary"}),
+                3,
+            )
+            .unwrap();
+        assert!(state.has_phase_turn("turn"));
+        assert!(matches!(
+            transcript.apply(&summary, "stream", "summary").unwrap(),
+            TranscriptProjectionUpdateV1::Patch(_)
+        ));
+        let next = state
+            .record_model_process_state("turn", RuntimeProcessState::Retrying, 4)
+            .unwrap()
+            .unwrap();
+        assert_ne!(next.event.event_id, summary.event.event_id);
+    }
+
+    #[test]
+    fn model_process_state_payload_rejects_unknown_fields_stages_and_states() {
+        for payload in [
+            json!({"stage":"model_process_state", "processState":"working"}),
+            json!({"stage":"model_process_state", "processState":"retrying", "message":"extra"}),
+            json!({"stage":"model_process_state"}),
+            json!({"stage":"model_process_state", "process_state":"retrying"}),
+            json!({"stage":"unknown", "processState":"retrying"}),
+            json!({"stage":"model_process_summary", "processState":"retrying"}),
+        ] {
+            assert!(
+                canonical_session_record(
+                    "event",
+                    SessionRecordType::PhaseEvent,
+                    "session",
+                    Some("turn".into()),
+                    Some("run".into()),
+                    1,
+                    payload.clone()
+                )
+                .is_err(),
+                "accepted {payload}"
+            );
+        }
+    }
 
     #[test]
     fn session_event_ids_are_bounded_and_oversized_ids_loud_fail() {

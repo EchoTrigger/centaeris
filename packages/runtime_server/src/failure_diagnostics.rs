@@ -289,26 +289,30 @@ mod tests {
 
     #[test]
     fn diagnostics_retain_validated_hosted_model_failure_metadata() {
-        let failure = serde_json::json!({
-            "schema": "hosted.model.failure.v1",
-            "reasonType": "provider_unavailable",
-            "httpStatus": 503,
-            "providerAttempts": 6,
-            "retryExhausted": true,
-        });
-        let error =
-            format!("model_client_error(kind=provider_unavailable): hosted_model_error: {failure}");
-        let value = record("run", "core_turn", &error);
-        assert_eq!(value["reason"], "provider_unavailable");
-        assert_eq!(value["modelFailure"], failure);
+        for (reason, status) in [
+            ("provider_unavailable", Some(503)),
+            ("provider_timeout", None),
+        ] {
+            let failure = serde_json::json!({
+                "schema": "hosted.model.failure.v1",
+                "reasonType": reason,
+                "httpStatus": status,
+                "providerAttempts": 6,
+                "retryExhausted": true,
+            });
+            let error = format!("model_client_error(kind={reason}): hosted_model_error: {failure}");
+            let value = record("run", "core_turn", &error);
+            assert_eq!(value["reason"], reason);
+            assert_eq!(value["modelFailure"], failure);
 
-        let mut invalid = failure;
-        invalid["rawProviderOutput"] = "SECRET_TOKEN private model text".into();
-        let error = format!("hosted_model_error: {invalid}");
-        let value = record("run", "core_turn", &error);
-        assert_eq!(value["reason"], "unclassified");
-        assert!(value.get("modelFailure").is_none());
-        assert!(!value.to_string().contains("SECRET_TOKEN"));
-        assert!(!value.to_string().contains("private model text"));
+            let mut invalid = failure;
+            invalid["rawProviderOutput"] = "SECRET_TOKEN private model text".into();
+            let error = format!("hosted_model_error: {invalid}");
+            let value = record("run", "core_turn", &error);
+            assert_eq!(value["reason"], "unclassified");
+            assert!(value.get("modelFailure").is_none());
+            assert!(!value.to_string().contains("SECRET_TOKEN"));
+            assert!(!value.to_string().contains("private model text"));
+        }
     }
 }

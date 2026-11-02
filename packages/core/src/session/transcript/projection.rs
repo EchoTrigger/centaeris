@@ -764,6 +764,7 @@ impl TranscriptProjectorV1 {
                     },
                 })
             }
+            SessionRecordType::PhaseEvent if payload["stage"] == "model_process_state" => None,
             SessionRecordType::PhaseEvent => Some(TranscriptBlockV1 {
                 block_id: format!("notice:{}", event.event_id),
                 block_revision: "1".to_string(),
