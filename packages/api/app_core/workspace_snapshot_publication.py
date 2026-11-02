@@ -76,7 +76,7 @@ def finish_upload(upload_id):
     if upload is None:
         return
     with transaction.atomic():
-        Session.objects.select_for_update().get(pk=owner.pk)
+        Session.objects.select_for_update().get(pk=upload.temporaryObject.session_id)
         WorkspaceSnapshotUpload.objects.filter(pk=upload_id,state="streaming").update(state="abandoned",updatedAt=now)
         WorkspaceSnapshotUpload.objects.filter(pk=upload_id).update(finishedAt=now)
         if not default_storage.exists(upload.temporaryObject.storageKey):

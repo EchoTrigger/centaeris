@@ -10,6 +10,7 @@ from .http import internal
 from .models import Session, StorageCleanupRetry, WorkspaceSnapshotObject, WorkspaceSnapshotUpload
 from .test_execution_publication_fencing import ExecutionPublicationFixture
 from .storage_gc_retry import claim_storage_key,clean_storage_key
+from .workspace_snapshot_publication import finish_upload, register_upload
 
 
 class WorkspaceSnapshotPublicationTests(ExecutionPublicationFixture, TransactionTestCase):
@@ -115,3 +116,25 @@ class WorkspaceSnapshotPublicationTests(ExecutionPublicationFixture, Transaction
             (self.job_id, self.owner, self.authorization.digest, "committed"))
         self.assertIsNotNone(upload.finishedAt)
         self.assertFalse((self.storage_root / upload.temporaryObject.storageKey).exists())
+
+    def test_finish_upload_records_completion_for_nonempty_abandoned_upload(self):
+        _, snapshot = self._body(content=b"nonempty snapshot publication")
+        temporary = self.storage_root / "unfinished.snapshot"
+        temporary.write_bytes(snapshot)
+        with transaction.atomic():
+            Session.objects.select_for_update().get(pk=self.session.pk)
+            upload_id = register_upload(self.session, self.run, {
+                "jobId": self.job_id, "leaseOwner": self.owner,
+                "authorizationDigest": self.authorization.digest,
+            }, self.key(snapshot), temporary)
+        temporary.unlink()
+
+        finish_upload(upload_id)
+
+        upload = WorkspaceSnapshotUpload.objects.select_related("temporaryObject", "finalObject").get(pk=upload_id)
+        self.assertEqual(upload.state, "abandoned")
+        self.assertIsNotNone(upload.finishedAt)
+        self.assertEqual(upload.temporaryObject.session_id, self.session.pk)
+        self.assertEqual(upload.temporaryObject.state, "collected")
+        self.assertIsNotNone(upload.temporaryObject.collectedAt)
+        self.assertEqual(upload.finalObject.state, "live")
