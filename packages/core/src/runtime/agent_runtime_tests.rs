@@ -6271,6 +6271,121 @@ fn query_loop_deleted_image_history_keeps_continuation_available() {
     });
 }
 
+#[tokio::test]
+async fn query_loop_image_host_capacity_failure_does_not_request_model_without_pixels() {
+    use crate::execution::*;
+
+    struct UnavailableImageHost;
+    impl ExecutionHostRunner for UnavailableImageHost {
+        fn status(&self, _: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
+            Ok(ExecutionHostStatus {
+                kind: ExecutionHostKind::LocalProcess,
+                policy_enforced: false,
+                health: ExecutionHostHealth::Ready,
+                detail: None,
+            })
+        }
+
+        fn run_file_system_operation(
+            &self,
+            request: ExecutionFileSystemRequest,
+        ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
+            if request.model_path == "page.png" {
+                return Err(ExecutionFileSystemError::new(
+                    ExecutionFileSystemErrorKind::HostUnavailable,
+                    "task_output_capacity",
+                ));
+            }
+            run_policy_scoped_execution_file_system_operation(request)
+        }
+
+        fn run_host_command(
+            &self,
+            _: Option<&str>,
+            _: ExecutionCommandRequest,
+            _: Option<&ExecutionCancellationProbe>,
+        ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+            panic!("image request preparation must not run commands")
+        }
+    }
+
+    let cwd = std::env::temp_dir();
+    let binding = Arc::new(
+        ExecutionHostBinding::new(
+            ExecutionHostMode::Local,
+            Arc::new(UnavailableImageHost),
+            cwd.clone(),
+            ExecutionPolicy::workspace_write_no_network(&cwd),
+        )
+        .unwrap(),
+    );
+    let tools = ToolLayer::try_new_with_skill_catalog_config_and_execution_host_binding(
+        SkillCatalogLoadConfig::default(),
+        binding,
+    )
+    .unwrap();
+    let store = AgentRuntimeTestStore::new();
+    let manager = SessionManager::new(store.clone());
+    let mut session = SessionStateSnapshot::new("chat-image-host-capacity".into(), 0);
+    let mut metadata = JsonMap::new();
+    metadata.insert(
+        MESSAGE_SEMANTIC_KIND_META_KEY.into(),
+        MESSAGE_SEMANTIC_USER_REQUEST.into(),
+    );
+    metadata.insert(
+        crate::runtime::keys::metadata::MODEL_INPUT_IMAGE_SOURCES.into(),
+        json!([{
+            "sourceKind": "executionFile",
+            "image": {
+                "path": "page.png", "contentType": "image/png",
+                "sha256": format!("sha256:{}", "a".repeat(64)),
+                "byteLength": 68, "widthPx": 2, "heightPx": 3,
+                "placeholder": "[Previously read image]"
+            }
+        }])
+        .to_string(),
+    );
+    MessageHandler::new(MessageHandlerConfig {
+        max_message_chars: 10_000,
+    })
+    .push_user_message(&mut session, "Describe page.png.", metadata);
+    manager.save_session(&session).unwrap();
+    let engine = AgentRuntime::new_for_test_with_tools(
+        store,
+        tools,
+        AgentRuntimeConfig {
+            enable_prompt_compaction: false,
+            ..Default::default()
+        },
+    );
+    let model_client = SubagentReadModelClient {
+        request_count: AtomicUsize::new(0),
+    };
+    let result = engine
+        .process_turn_loop_online_with_model_client_async(
+            AgentRunRequest {
+                session_id: "chat-image-host-capacity".into(),
+                agent_run_identity: None,
+                initial_turn_id: "turn-image-host-capacity".into(),
+                initial_input: AgentRunInitialInput::UserMessage("Continue describing it.".into()),
+                runtime_scope: PromptCompactionScopeV1::main(),
+                resume_from_turn_id: None,
+                auto_continue_after_resume_wait: None,
+            },
+            &model_client,
+            &StaticModelSessionConfigStore {
+                config: Some(ModelSessionConfig::default()),
+            },
+        )
+        .await;
+
+    assert_eq!(
+        result.expect_err("host capacity failure must abort image preparation"),
+        "resolve execution model input image failed: task_output_capacity"
+    );
+    assert_eq!(model_client.request_count.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn query_loop_changed_image_history_does_not_send_different_pixels() {
     assert_unavailable_image_history(|path| {
