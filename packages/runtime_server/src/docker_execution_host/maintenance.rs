@@ -158,7 +158,7 @@ pub(crate) fn provision_environment(
         return Err("provision_physical_identity_rejected".into());
     }
     let fence = binding.fence(&allocation.instance_id)?;
-    retained::takeover(&expected, &facts.id, &fence)?;
+    retained::takeover(&expected, &facts.id, &fence, || Ok(()))?;
     Ok(facts.id)
 }
 

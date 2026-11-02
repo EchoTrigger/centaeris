@@ -398,6 +398,7 @@ pub(crate) fn request_instance(
         } => environment_instance_id,
         Start { fence, .. }
         | Query { fence, .. }
+        | ConsumeOutput { fence, .. }
         | List { fence, .. }
         | Input { fence, .. }
         | QueryInputReceipt { fence, .. }

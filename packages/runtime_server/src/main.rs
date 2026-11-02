@@ -3175,6 +3175,8 @@ fn execute_agent_run(
                         .lock()
                         .map_err(|_| "session record sequence lock poisoned")? =
                         committed_sequence.clone();
+                    // API publication and the Core checkpoint reference are both durable.
+                    docker_execution.confirm_recovery_checkpoint_outputs(&checkpoint.checkpoint_id);
                     recovery_workspace_snapshot = snapshot;
                     recovery_workspace_generation = pending.generation;
                     previous_checkpoint_sequence = checkpoint_sequence;
@@ -3549,6 +3551,8 @@ fn execute_agent_run(
             if let Some((checkpoint, workspace_snapshot, workspace_generation)) =
                 recovery_checkpoint
             {
+                // This branch is downstream of commit_agent_tool_records above.
+                docker_execution.confirm_recovery_checkpoint_outputs(&checkpoint.checkpoint_id);
                 recovery_workspace_snapshot = workspace_snapshot;
                 recovery_workspace_generation = workspace_generation;
                 previous_checkpoint_sequence =

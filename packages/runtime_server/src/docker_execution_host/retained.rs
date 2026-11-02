@@ -95,6 +95,7 @@ pub(super) fn takeover(
     expected: &ContainerExpectation<'_>,
     id: &str,
     fence: &EnvironmentTaskFence,
+    before_workspace: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     crate::observations::timed("controllerTakeover", || {
         let result = relay(
@@ -113,6 +114,8 @@ pub(super) fn takeover(
         }
         Ok(())
     })?;
+    // Takeover has completed; the caller still holds the original authority pin.
+    before_workspace()?;
     use hosted_execution::host_supervisor::{
         HostHelperRequest, HostLaunchTarget, TrustedHelperKind,
     };
@@ -193,7 +196,8 @@ impl DockerExecutionHostRunner {
             | EnvironmentTaskRequest::Query { fence, .. }
             | EnvironmentTaskRequest::Input { fence, .. }
             | EnvironmentTaskRequest::QueryInputReceipt { fence, .. }
-            | EnvironmentTaskRequest::Terminate { fence, .. } => fence,
+            | EnvironmentTaskRequest::Terminate { fence, .. }
+            | EnvironmentTaskRequest::ConsumeOutput { fence, .. } => fence,
         };
         if supplied != &expected_fence {
             return Err("retained task fence mismatch".into());
@@ -406,11 +410,12 @@ impl DockerExecutionHostRunner {
         request.validate()?;
         Ok(request)
     }
-    pub(super) fn supervised_helper(
+    pub(super) fn supervised_helper_for_consumer(
         &self,
         kind: hosted_execution::host_supervisor::TrustedHelperKind,
         input: &[u8],
         output_limit: usize,
+        consumer_id: Option<&str>,
     ) -> Result<Vec<u8>, String> {
         if output_limit as u64 > kind.output_limit() {
             return Err("environment_helper_budget_invalid".into());
@@ -420,6 +425,8 @@ impl DockerExecutionHostRunner {
             input.len() as u64,
             &format!("sha256:{:x}", Sha256::digest(input)),
         )?;
+        let _ = self.flush_consumed_outputs();
+        self.record_output_consumer(&request.fence, &request.operation_id, consumer_id)?;
         let task = self.start_helper_current(&request, &mut Cursor::new(input))?;
         let output = self.finish_helper_current(&request, task)?;
         if output.task.exit_code != Some(0) {
@@ -440,7 +447,20 @@ impl DockerExecutionHostRunner {
         input_length: u64,
         input_digest: &str,
     ) -> Result<(fs::File, Vec<u8>, Option<i32>), String> {
+        self.supervised_helper_file_for_consumer(kind, input, input_length, input_digest, None)
+    }
+
+    pub(super) fn supervised_helper_file_for_consumer(
+        &self,
+        kind: hosted_execution::host_supervisor::TrustedHelperKind,
+        input: &mut fs::File,
+        input_length: u64,
+        input_digest: &str,
+        consumer_id: Option<&str>,
+    ) -> Result<(fs::File, Vec<u8>, Option<i32>), String> {
         let request = self.helper_request(kind, input_length, input_digest)?;
+        let _ = self.flush_consumed_outputs();
+        self.record_output_consumer(&request.fence, &request.operation_id, consumer_id)?;
         let task = self.start_helper_current(&request, input)?;
         let output = self.finish_helper_current(&request, task)?;
         let exit = output.task.exit_code;

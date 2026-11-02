@@ -2,7 +2,7 @@
 use super::*;
 use rusqlite::{params, Connection, OptionalExtension};
 
-const VERSION: i64 = 2;
+const VERSION: i64 = 3;
 fn db(root: &Path, initialize: bool) -> Result<Connection, String> {
     let path = root.join("history.sqlite");
     let exists = path.exists();
@@ -24,7 +24,8 @@ fn db(root: &Path, initialize: bool) -> Result<Connection, String> {
             CREATE TABLE tasks(id TEXT PRIMARY KEY,record TEXT NOT NULL,live INTEGER NOT NULL,hot INTEGER NOT NULL) WITHOUT ROWID;
             CREATE TABLE operations(key BLOB PRIMARY KEY,receipt TEXT NOT NULL,task_id BLOB) WITHOUT ROWID;
             CREATE TABLE owner_barriers(owner TEXT PRIMARY KEY,reason TEXT NOT NULL) WITHOUT ROWID;
-            PRAGMA user_version=2; COMMIT;").map_err(|_|"task_index_unavailable")?;
+            CREATE TABLE output_consumptions(id TEXT PRIMARY KEY,receipt TEXT NOT NULL,reclaimed INTEGER NOT NULL CHECK(reclaimed IN (0,1))) WITHOUT ROWID;
+            PRAGMA user_version=3; COMMIT;").map_err(|_|"task_index_unavailable")?;
     }
     validate(&connection)?;
     connection
@@ -57,7 +58,7 @@ pub(super) fn validate_version(
     } else {
         "owner_barriers"
     };
-    for (table, expected) in [
+    let mut tables = vec![
         ("metadata", vec!["key", "value"]),
         ("tasks", vec!["id", "record", "live", "hot"]),
         ("operations", vec!["key", "receipt", "task_id"]),
@@ -69,7 +70,11 @@ pub(super) fn validate_version(
                 vec!["owner", "reason"]
             },
         ),
-    ] {
+    ];
+    if expected_version >= 3 {
+        tables.push(("output_consumptions", vec!["id", "receipt", "reclaimed"]));
+    }
+    for (table, expected) in tables {
         let mut query = connection
             .prepare(&format!("PRAGMA table_info({table})"))
             .map_err(|_| "task_index_invalid")?;
@@ -93,13 +98,17 @@ pub(super) fn validate_version(
                     name.to_string(),
                     if table == "operations" && (*name == "key" || *name == "task_id") {
                         "BLOB"
-                    } else if *name == "live" || *name == "hot" {
+                    } else if *name == "live" || *name == "hot" || *name == "reclaimed" {
                         "INTEGER"
                     } else {
                         "TEXT"
                     }
                     .to_string(),
-                    if *name == "task_id" { 0i64 } else { 1i64 },
+                    if table == "operations" && *name == "task_id" {
+                        0i64
+                    } else {
+                        1i64
+                    },
                     if index == 0 { 1i64 } else { 0i64 },
                 )
             })
@@ -115,6 +124,9 @@ pub(super) fn validate_version(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "task_index_invalid")?;
     let mut expected_tables = vec![owner_table, "metadata", "operations", "tasks"];
+    if expected_version >= 3 {
+        expected_tables.push("output_consumptions");
+    }
     expected_tables.sort_unstable();
     if names != expected_tables {
         return Err("task_index_invalid".into());
@@ -132,7 +144,14 @@ pub(super) fn validate_version(
         .map_err(|_| "task_index_invalid")?;
     for table in tables {
         let (name, without_rowid) = table.map_err(|_| "task_index_invalid")?;
-        if ["metadata", "tasks", "operations", owner_table].contains(&name.as_str())
+        if [
+            "metadata",
+            "tasks",
+            "operations",
+            "output_consumptions",
+            owner_table,
+        ]
+        .contains(&name.as_str())
             && without_rowid != 1
         {
             return Err("task_index_invalid".into());
@@ -636,10 +655,124 @@ pub(super) fn next_closed(
     }
     Ok(None)
 }
+/// A consumption marker is committed before any corresponding file is removed.
+pub(super) struct OutputConsumption {
+    pub(super) consumer_receipt_id: String,
+    pub(super) reclaimed: bool,
+}
+pub(super) fn output_consumption(
+    root: &Path,
+    id: &str,
+) -> Result<Option<OutputConsumption>, String> {
+    let value: Option<(String, i64)> = db(root, false)?
+        .query_row(
+            "SELECT receipt,reclaimed FROM output_consumptions WHERE id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| "task_index_unavailable")?;
+    value
+        .map(|(consumer_receipt_id, reclaimed)| match reclaimed {
+            0 | 1 => Ok(OutputConsumption {
+                consumer_receipt_id,
+                reclaimed: reclaimed == 1,
+            }),
+            _ => Err("task_index_invalid".into()),
+        })
+        .transpose()
+}
+
+pub(super) fn mark_output_reclaimed(root: &Path, id: &str) -> Result<(), String> {
+    db(root, false)?
+        .execute(
+            "UPDATE output_consumptions SET reclaimed=1 WHERE id=?1 AND reclaimed=0",
+            [id],
+        )
+        .map_err(write_error)?;
+    Ok(())
+}
+
+pub(super) fn output_operations_complete(root: &Path, id: &str) -> Result<bool, String> {
+    let connection = db(root, false)?;
+    let mut statement = connection
+        .prepare("SELECT receipt FROM operations WHERE task_id=?1")
+        .map_err(|_| "task_index_unavailable")?;
+    let entries = statement
+        .query_map([Sha256::digest(id.as_bytes()).as_slice()], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|_| "task_index_unavailable")?;
+    for value in entries {
+        let (_, result): (String, Option<StoredResult>) =
+            decode(value.map_err(|_| "task_index_invalid")?)?;
+        if result.is_none() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+pub(super) fn consume_output(
+    root: &Path,
+    id: &str,
+    consumer_receipt_id: &str,
+) -> Result<(), String> {
+    let mut connection = db(root, false)?;
+    let page_size: usize = connection
+        .pragma_query_value(None, "page_size", |row| row.get(0))
+        .map_err(|_| "task_index_invalid")?;
+    connection
+        .pragma_update(None, "max_page_count", INDEX_BYTES / page_size)
+        .map_err(write_error)?;
+    let tx = connection.transaction().map_err(write_error)?;
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT receipt FROM output_consumptions WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| "task_index_unavailable")?;
+    match existing {
+        Some(existing) if existing != consumer_receipt_id => {
+            return Err("task_output_consumption_conflict".into())
+        }
+        Some(_) => return Ok(()),
+        None => {}
+    }
+    tx.execute(
+        "INSERT INTO output_consumptions(id,receipt,reclaimed) VALUES(?1,?2,0)",
+        params![id, consumer_receipt_id],
+    )
+    .map_err(write_error)?;
+    tx.commit().map_err(write_error)
+}
+
+/// Scan no more than the hot-task bound per admission; later admissions continue.
+pub(super) fn consumed_outputs(root: &Path, after: &str) -> Result<Vec<String>, String> {
+    let connection = db(root, false)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id FROM output_consumptions WHERE reclaimed=0 AND id>?1 ORDER BY id LIMIT ?2",
+        )
+        .map_err(|_| "task_index_unavailable")?;
+    let ids = statement
+        .query_map(params![after, ENVIRONMENT_TASK_MAX_RECORDS], |row| {
+            row.get(0)
+        })
+        .map_err(|_| "task_index_unavailable")?
+        .map(|row| row.map_err(|_| "task_index_invalid".into()))
+        .collect();
+    ids
+}
+
 pub(super) fn forget_closed(root: &Path, id: &str) -> Result<(), String> {
     let mut connection = db(root, false)?;
     let tx = connection
         .transaction()
+        .map_err(|_| "task_index_unavailable")?;
+    tx.execute("DELETE FROM output_consumptions WHERE id=?1", [id])
         .map_err(|_| "task_index_unavailable")?;
     tx.execute(
         "DELETE FROM operations WHERE task_id=?1",
@@ -923,6 +1056,124 @@ mod commit_tests {
         assert!(journal
             .reserve_receipt("endRun:run", &digest(&"end").unwrap())
             .is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+#[cfg(test)]
+mod output_consumption_migration_tests {
+    use super::*;
+
+    #[test]
+    fn version_two_migration_preserves_task_receipts_and_unconsumed_output() {
+        let root = crate::task_service::tests::root();
+        let mut journal = Journal::open(&root, "instance").unwrap();
+        let fence = EnvironmentTaskFence {
+            environment_instance_id: "instance".into(),
+            controller_owner: EnvironmentTaskOwner::AgentRun {
+                run_id: "run".into(),
+            },
+            controller_epoch: 1,
+            controller_purpose: EnvironmentTaskControllerPurpose::Execute,
+        };
+        journal.takeover(fence.clone()).unwrap();
+        let operation = fence.operation_id("retained");
+        let id = task_identity(&fence, &operation).unwrap();
+        let record = Record {
+            digest: "a".repeat(64),
+            creator_owner: fence.controller_owner.clone(),
+            identity_version: TaskIdentityVersion::OwnerV3,
+            creator_epoch: 1,
+            snapshot: EnvironmentTaskSnapshot {
+                task_id: id.clone(),
+                operation_id: operation,
+                scope: owner_scope(&fence.controller_owner),
+                state: EnvironmentTaskState::Exited,
+                exit_code: Some(7),
+                cleanup_complete: true,
+                output_complete: true,
+            },
+        };
+        let key = format!("terminate:{id}:1:stop");
+        journal.tasks.insert(id.clone(), record.clone());
+        journal.receipts.insert(
+            key.clone(),
+            Receipt {
+                digest: "b".repeat(64),
+                result: Some(EnvironmentTaskResult::Mutated {
+                    task: record.snapshot.clone(),
+                }),
+            },
+        );
+        journal.persist(&root).unwrap();
+        let output = root.join("retained.output");
+        fs::write(&output, b"unconsumed result").unwrap();
+        let connection = Connection::open(root.join("history.sqlite")).unwrap();
+        connection
+            .execute_batch("DROP TABLE output_consumptions; PRAGMA user_version=2;")
+            .unwrap();
+        let original_task: String = connection
+            .query_row("SELECT record FROM tasks WHERE id=?1", [&id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let original_receipt: String = connection
+            .query_row(
+                "SELECT receipt FROM operations WHERE key=?1",
+                [Sha256::digest(key.as_bytes()).as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+        let migrated = Journal::open(&root, "instance").unwrap();
+        assert_eq!(
+            migrated.existing(&id, &record.digest).unwrap(),
+            Some(record.snapshot.clone())
+        );
+        assert!(output_consumption(&root, &id).unwrap().is_none());
+        assert_eq!(fs::read(&output).unwrap(), b"unconsumed result");
+        let connection = Connection::open(root.join("history.sqlite")).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            connection
+                .query_row::<String, _, _>("SELECT record FROM tasks WHERE id=?1", [&id], |row| row
+                    .get(0))
+                .unwrap(),
+            original_task
+        );
+        assert_eq!(
+            connection
+                .query_row::<String, _, _>(
+                    "SELECT receipt FROM operations WHERE key=?1",
+                    [Sha256::digest(key.as_bytes()).as_slice()],
+                    |row| row.get(0)
+                )
+                .unwrap(),
+            original_receipt
+        );
+        drop(connection);
+        consume_output(&root, &id, "durable-result").unwrap();
+        assert_eq!(
+            output_consumption(&root, &id)
+                .unwrap()
+                .map(|consumption| consumption.consumer_receipt_id)
+                .as_deref(),
+            Some("durable-result")
+        );
+        assert!(consume_output(&root, &id, "another-result").is_err());
+        let reopened = Journal::open(&root, "instance").unwrap();
+        assert_eq!(
+            reopened.existing(&id, &record.digest).unwrap(),
+            Some(record.snapshot)
+        );
+        assert!(matches!(
+            receipt(&root, &key).unwrap().unwrap().result,
+            Some(EnvironmentTaskResult::Mutated { .. })
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 }

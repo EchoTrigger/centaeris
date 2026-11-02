@@ -1,3 +1,4 @@
+use sha2::Digest as _;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -897,12 +898,19 @@ impl ToolLayer {
             .runtime_context
             .execution_host_binding()
             .map_err(ExecutionModelInputImageError::SourceUnavailable)?;
+        let consumer_id = format!(
+            "image:{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(reference).map_err(|error| {
+                ExecutionModelInputImageError::SourceUnavailable(error.to_string())
+            })?)
+        );
         let output = binding
-            .run_file_system_operation(
+            .run_file_system_operation_for_consumer(
                 reference.path.as_str(),
                 ExecutionFileSystemOperation::ReadFile {
                     max_bytes: MODEL_INPUT_IMAGE_MAX_BYTES,
                 },
+                Some(&consumer_id),
             )
             .map_err(ExecutionModelInputImageError::FileSystem)?;
         let ExecutionFileSystemOutput::ReadFile(output) = output else {
@@ -926,7 +934,16 @@ impl ToolLayer {
                 "execution_model_input_image_metadata_mismatch".to_string(),
             ));
         }
+        // The durable image reference defines reconstruction: read the same source
+        // and validate its original hash, or retain the existing unavailable result.
+        binding.consume_execution_outputs(&consumer_id, &consumer_id);
         Ok(output.bytes)
+    }
+
+    pub(crate) fn consume_tool_execution_outputs(&self, call_id: &str, receipt_id: &str) {
+        if let Some(binding) = self.runtime_context.execution_host_binding.as_ref() {
+            binding.consume_execution_outputs(&format!("tool:{call_id}"), receipt_id);
+        }
     }
 
     pub fn execution_host_kind(&self) -> Option<ExecutionHostKind> {

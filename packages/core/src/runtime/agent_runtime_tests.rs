@@ -92,6 +92,7 @@ struct AgentRuntimeTestState {
     snapshot_save_count: usize,
     snapshot_save_bytes: usize,
     fail_after_input_snapshot: Option<String>,
+    reject_tool_execution_receipts: bool,
     lose_creation_reply: bool,
     snapshot_cas_conflict: Option<(String, String, RuntimeJobRecord)>,
     external_objects: HashMap<String, ExternalContextObject>,
@@ -486,6 +487,11 @@ impl RuntimeStore for AgentRuntimeTestStore {
 
     fn append_event_idempotent(&self, event: RuntimeEvent) -> Result<(), RuntimeStoreError> {
         let mut state = self.state().map_err(RuntimeStoreError::backend)?;
+        if state.reject_tool_execution_receipts && event.event_type == "tool_execution.receipt.v1" {
+            return Err(RuntimeStoreError::backend(
+                "test tool receipt persistence failed",
+            ));
+        }
         if let Some(existing) = state
             .events
             .iter()
@@ -12423,4 +12429,326 @@ async fn query_loop_failed_completed_turn_safe_point_never_returns_success_recei
     assert!(result
         .unwrap_err()
         .contains("injected_completed_turn_commit_failed"));
+}
+
+struct OutputConsumptionTestHost {
+    store: AgentRuntimeTestStore,
+    consumptions: Mutex<Vec<(String, String)>>,
+    image_consumers: Mutex<Vec<String>>,
+    tool_reads: AtomicUsize,
+    image_unavailable: AtomicBool,
+}
+impl OutputConsumptionTestHost {
+    fn new(store: AgentRuntimeTestStore) -> Arc<Self> {
+        Arc::new(Self {
+            store,
+            consumptions: Mutex::new(Vec::new()),
+            image_consumers: Mutex::new(Vec::new()),
+            tool_reads: AtomicUsize::new(0),
+            image_unavailable: AtomicBool::new(false),
+        })
+    }
+    fn tools(self: &Arc<Self>, root: &Path) -> ToolLayer {
+        let binding = Arc::new(
+            crate::execution::ExecutionHostBinding::new(
+                crate::execution::ExecutionHostMode::Local,
+                self.clone(),
+                root.to_path_buf(),
+                crate::execution::ExecutionPolicy::workspace_write_no_network(root),
+            )
+            .unwrap(),
+        );
+        ToolLayer::try_new_with_skill_catalog_config_and_execution_host_binding(
+            SkillCatalogLoadConfig::default(),
+            binding,
+        )
+        .unwrap()
+    }
+}
+impl crate::execution::ExecutionHostRunner for OutputConsumptionTestHost {
+    fn status(
+        &self,
+        _: &crate::execution::ExecutionPolicy,
+    ) -> Result<crate::execution::ExecutionHostStatus, crate::execution::ExecutionError> {
+        Ok(crate::execution::ExecutionHostStatus {
+            kind: crate::execution::ExecutionHostKind::LocalProcess,
+            policy_enforced: false,
+            health: crate::execution::ExecutionHostHealth::Ready,
+            detail: None,
+        })
+    }
+    fn run_file_system_operation(
+        &self,
+        request: crate::execution::ExecutionFileSystemRequest,
+    ) -> Result<
+        crate::execution::ExecutionFileSystemOutput,
+        crate::execution::ExecutionFileSystemError,
+    > {
+        if request.model_path == "note.txt"
+            && matches!(
+                request.operation,
+                crate::execution::ExecutionFileSystemOperation::ReadFile { .. }
+            )
+        {
+            self.tool_reads.fetch_add(1, Ordering::SeqCst);
+        }
+        if request.model_path == "page.png" && self.image_unavailable.load(Ordering::SeqCst) {
+            return Err(crate::execution::ExecutionFileSystemError::new(
+                crate::execution::ExecutionFileSystemErrorKind::HostUnavailable,
+                "task_output_capacity",
+            ));
+        }
+        crate::execution::run_policy_scoped_execution_file_system_operation(request)
+    }
+    fn run_file_system_operation_for_consumer(
+        &self,
+        request: crate::execution::ExecutionFileSystemRequest,
+        consumer_id: Option<&str>,
+    ) -> Result<
+        crate::execution::ExecutionFileSystemOutput,
+        crate::execution::ExecutionFileSystemError,
+    > {
+        if request.model_path == "page.png" {
+            self.image_consumers
+                .lock()
+                .unwrap()
+                .push(consumer_id.unwrap_or("missing").to_string());
+        }
+        self.run_file_system_operation(request)
+    }
+    fn consume_execution_outputs(&self, consumer_id: &str, receipt_id: &str) {
+        if let Some(call_id) = consumer_id.strip_prefix("tool:") {
+            let state = self.store.state().unwrap();
+            let receipt = state
+                .events
+                .iter()
+                .find(|event| event.event_id == receipt_id)
+                .expect("tool output cannot be consumed before its receipt commits");
+            assert_eq!(receipt.event_type, "tool_execution.receipt.v1");
+            let payload: Value = serde_json::from_str(&receipt.payload_json).unwrap();
+            assert_eq!(payload["toolCallId"], call_id);
+        }
+        self.consumptions
+            .lock()
+            .unwrap()
+            .push((consumer_id.into(), receipt_id.into()));
+    }
+    fn run_host_command(
+        &self,
+        _: Option<&str>,
+        _: crate::execution::ExecutionCommandRequest,
+        _: Option<&crate::execution::ExecutionCancellationProbe>,
+    ) -> Result<crate::execution::ExecutionHostCommandOutput, crate::execution::ExecutionError>
+    {
+        panic!("read/image consumption fixture must not execute commands")
+    }
+}
+
+#[tokio::test]
+async fn consumed_tool_output_is_committed_before_release_and_recovery_does_not_execute_again() {
+    let root = temp_dir_path("consumed_tool_output_recovery");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("note.txt"), "durable original output").unwrap();
+    let store = AgentRuntimeTestStore::new();
+    let host = OutputConsumptionTestHost::new(store.clone());
+    let engine = AgentRuntime::new_for_test_with_tools(
+        store.clone(),
+        host.tools(&root),
+        AgentRuntimeConfig::default(),
+    );
+    let session = SessionStateSnapshot::new("consumption-session".into(), 1);
+    let first = engine
+        .execute_tool_calls_async(
+            "consumption-session",
+            "consumption-turn",
+            &session,
+            read_generate_result("consumed-read", "note.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(host.tool_reads.load(Ordering::SeqCst), 1);
+    let first_ack = host.consumptions.lock().unwrap().clone();
+    assert_eq!(first_ack.len(), 1);
+    assert_eq!(first_ack[0].0, "tool:consumed-read");
+    // Reconstruct Core after the local body is no longer needed. Recovery must
+    // use its committed receipt rather than reading the mutable source again.
+    std::fs::remove_file(root.join("note.txt")).unwrap();
+    let recovered = AgentRuntime::new_for_test_with_tools(
+        store,
+        host.tools(&root),
+        AgentRuntimeConfig::default(),
+    );
+    let replay = recovered
+        .execute_tool_calls_async(
+            "consumption-session",
+            "consumption-turn",
+            &session,
+            read_generate_result("consumed-read", "note.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        first.tool_results[0].content,
+        replay.tool_results[0].content
+    );
+    assert_eq!(
+        host.tool_reads.load(Ordering::SeqCst),
+        1,
+        "recovery cannot execute the consumed original read"
+    );
+    let acknowledgements = host.consumptions.lock().unwrap();
+    assert_eq!(acknowledgements.len(), 2);
+    assert_eq!(
+        acknowledgements[0], acknowledgements[1],
+        "recovery confirms the same original receipt"
+    );
+    drop(acknowledgements);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn failed_tool_receipt_commit_cannot_release_the_only_recoverable_output() {
+    let root = temp_dir_path("tool_output_receipt_commit_failure");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("note.txt"), "retain until committed").unwrap();
+    let store = AgentRuntimeTestStore::new();
+    store.state().unwrap().reject_tool_execution_receipts = true;
+    let host = OutputConsumptionTestHost::new(store.clone());
+    let engine = AgentRuntime::new_for_test_with_tools(
+        store.clone(),
+        host.tools(&root),
+        AgentRuntimeConfig::default(),
+    );
+    let session = SessionStateSnapshot::new("failed-consumption-session".into(), 1);
+    let error = engine
+        .execute_tool_calls_async(
+            "failed-consumption-session",
+            "failed-consumption-turn",
+            &session,
+            read_generate_result("uncommitted-read", "note.txt"),
+            None,
+        )
+        .await
+        .expect_err("receipt persistence must fail");
+    assert!(
+        error.contains("test tool receipt persistence failed"),
+        "{error}"
+    );
+    assert_eq!(host.tool_reads.load(Ordering::SeqCst), 1);
+    assert!(host.consumptions.lock().unwrap().is_empty());
+    assert!(!store
+        .state()
+        .unwrap()
+        .events
+        .iter()
+        .any(|event| event.event_type == "tool_execution.receipt.v1"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn consumption_image_reference(
+    root: &Path,
+) -> (
+    Vec<u8>,
+    crate::model::prepared_prompt::ExecutionModelInputImageRefV1,
+) {
+    use sha2::{Digest, Sha256};
+    image::DynamicImage::new_rgb8(2, 3)
+        .save_with_format(root.join("page.png"), image::ImageFormat::Png)
+        .unwrap();
+    let bytes = std::fs::read(root.join("page.png")).unwrap();
+    let reference = crate::model::prepared_prompt::ExecutionModelInputImageRefV1 {
+        path: "page.png".into(),
+        content_type: "image/png".into(),
+        sha256: format!("sha256:{:x}", Sha256::digest(&bytes)),
+        byte_length: bytes.len() as u64,
+        width_px: 2,
+        height_px: 3,
+        placeholder: "[Previously read image]".into(),
+    };
+    (bytes, reference)
+}
+
+#[test]
+fn image_output_consumption_requires_matching_hash_size_type_and_dimensions() {
+    let root = temp_dir_path("verified_image_consumption");
+    std::fs::create_dir_all(&root).unwrap();
+    let (bytes, reference) = consumption_image_reference(&root);
+    let host = OutputConsumptionTestHost::new(AgentRuntimeTestStore::new());
+    let tools = host.tools(&root);
+    let mut invalid = Vec::new();
+    let mut hash = reference.clone();
+    hash.sha256 = format!("sha256:{}", "0".repeat(64));
+    invalid.push(hash);
+    let mut size = reference.clone();
+    size.byte_length += 1;
+    invalid.push(size);
+    let mut content_type = reference.clone();
+    content_type.content_type = "image/jpeg".into();
+    invalid.push(content_type);
+    let mut width = reference.clone();
+    width.width_px += 1;
+    invalid.push(width);
+    let mut height = reference.clone();
+    height.height_px += 1;
+    invalid.push(height);
+    for mismatch in invalid {
+        assert!(tools
+            .resolve_execution_model_input_image(&mismatch)
+            .is_err());
+        assert!(host.consumptions.lock().unwrap().is_empty());
+    }
+    assert_eq!(
+        tools
+            .resolve_execution_model_input_image(&reference)
+            .unwrap(),
+        bytes
+    );
+    let consumers = host.image_consumers.lock().unwrap();
+    let consumed = host.consumptions.lock().unwrap();
+    assert_eq!(consumed.len(), 1);
+    assert_eq!(consumed[0].0, consumers.last().unwrap().as_str());
+    assert_eq!(consumed[0].0, consumed[0].1);
+    assert!(consumed[0].0.starts_with("image:"));
+    drop(consumed);
+    drop(consumers);
+    // Hosts without retained-output support keep their existing no-op behavior.
+    let ordinary = ToolLayer::new().with_cwd(root.clone()).unwrap();
+    assert_eq!(
+        ordinary
+            .resolve_execution_model_input_image(&reference)
+            .unwrap(),
+        bytes
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn missing_changed_or_unavailable_image_source_cannot_acknowledge_consumption() {
+    let root = temp_dir_path("unavailable_image_consumption");
+    std::fs::create_dir_all(&root).unwrap();
+    let (_, reference) = consumption_image_reference(&root);
+    let host = OutputConsumptionTestHost::new(AgentRuntimeTestStore::new());
+    let tools = host.tools(&root);
+    image::DynamicImage::new_rgb8(4, 5)
+        .save_with_format(root.join("page.png"), image::ImageFormat::Png)
+        .unwrap();
+    assert!(tools
+        .resolve_execution_model_input_image(&reference)
+        .is_err());
+    std::fs::remove_file(root.join("page.png")).unwrap();
+    assert!(tools
+        .resolve_execution_model_input_image(&reference)
+        .is_err());
+    host.image_unavailable.store(true, Ordering::SeqCst);
+    let error = tools
+        .resolve_execution_model_input_image(&reference)
+        .unwrap_err();
+    assert!(
+        matches!(error, crate::tool::layer::ExecutionModelInputImageError::FileSystem(ref failure)
+        if failure.kind == crate::execution::ExecutionFileSystemErrorKind::HostUnavailable)
+    );
+    assert!(host.consumptions.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(root).unwrap();
 }

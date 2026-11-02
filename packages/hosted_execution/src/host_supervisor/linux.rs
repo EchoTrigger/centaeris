@@ -951,7 +951,7 @@ fn exchange(
             Ok(None)
         } else if let HostSupervisorRequest::HelperOutput { helper, task_id } = envelope.request {
             let manager = host.existing(&helper.fence.environment_instance_id)?;
-            let (task, mut stdout, mut stderr) = manager.helper_output(&helper, &task_id)?;
+            let mut output = manager.helper_output(&helper, &task_id)?;
             stream
                 .set_write_timeout(Some(Duration::from_secs(30)))
                 .map_err(|_| "host_socket_failed")?;
@@ -959,8 +959,13 @@ fn exchange(
                 stream: &mut stream,
                 written: 0,
             };
-            let result =
-                helpers::send_completed(&mut writer, task, &mut stdout, &mut stderr, helper.kind);
+            let result = helpers::send_completed(
+                &mut writer,
+                output.task,
+                &mut output.stdout,
+                &mut output.stderr,
+                helper.kind,
+            );
             response_started = writer.written > 0;
             result?;
             Ok(None)

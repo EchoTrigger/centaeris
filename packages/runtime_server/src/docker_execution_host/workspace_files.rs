@@ -498,6 +498,7 @@ fn restore_with_writer(
             manifest: Some(manifest),
             observation,
             file_source: None,
+            output_consumers: Vec::new(),
         },
     })
 }

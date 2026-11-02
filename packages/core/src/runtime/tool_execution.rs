@@ -1196,6 +1196,10 @@ impl<
                 ));
             }
             let result = existing.decode_result()?;
+            self.tools_port.consume_tool_execution_outputs(
+                &effective_call.id,
+                &tool_execution_receipt_event_id(session_id, turn_id, &effective_call.id),
+            );
             notify_tool_safe_point(tool_safe_point, intent, effective_call, &result)?;
             return Ok(result);
         }
@@ -1223,6 +1227,12 @@ impl<
             )?)
             .map_err(|error| error.to_string())?;
         facts.receipts.insert(receipt.tool_call_id.clone(), receipt);
+        // This receipt is the recovery authority. Reclaim before a following safe
+        // point needs another helper, while keeping its protected workspace capture.
+        self.tools_port.consume_tool_execution_outputs(
+            &effective_call.id,
+            &tool_execution_receipt_event_id(session_id, turn_id, &effective_call.id),
+        );
         notify_tool_safe_point(tool_safe_point, intent, effective_call, &result)?;
         Ok(result)
     }
@@ -1585,6 +1595,10 @@ impl<
                     lifecycle_hook_contexts.extend(receipt.pre_hook_contexts.clone());
                     pre_hook_contexts_by_id
                         .insert(call.id.clone(), receipt.pre_hook_contexts.clone());
+                    self.tools_port.consume_tool_execution_outputs(
+                        &effective_call.id,
+                        &tool_execution_receipt_event_id(session_id, turn_id, &effective_call.id),
+                    );
                     notify_tool_safe_point(tool_safe_point, &intent, &effective_call, &result)?;
                     if receipt.run_post_hook {
                         lifecycle_hook_calls_by_id.insert(call.id.clone(), effective_call);

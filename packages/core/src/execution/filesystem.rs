@@ -97,17 +97,37 @@ impl ExecutionHostBinding {
         model_path: impl Into<String>,
         operation: ExecutionFileSystemOperation,
     ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
+        let consumer_id = self
+            .operation_scope
+            .as_ref()
+            .map(|scope| format!("tool:{scope}"));
+        self.run_file_system_operation_for_consumer(model_path, operation, consumer_id.as_deref())
+    }
+
+    pub(crate) fn run_file_system_operation_for_consumer(
+        &self,
+        model_path: impl Into<String>,
+        operation: ExecutionFileSystemOperation,
+        consumer_id: Option<&str>,
+    ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
         let model_path = model_path.into();
         validate_execution_model_path(model_path.as_str())?;
-        self.runner
-            .run_file_system_operation(ExecutionFileSystemRequest {
+        self.runner.run_file_system_operation_for_consumer(
+            ExecutionFileSystemRequest {
                 operation_id: self
                     .stable_operation_id("filesystem", &(model_path.as_str(), &operation)),
                 cwd: self.cwd.clone(),
                 policy: self.policy.clone(),
                 model_path,
                 operation,
-            })
+            },
+            consumer_id,
+        )
+    }
+
+    pub(crate) fn consume_execution_outputs(&self, consumer_id: &str, receipt_id: &str) {
+        self.runner
+            .consume_execution_outputs(consumer_id, receipt_id);
     }
 
     pub fn run_command(
@@ -122,7 +142,12 @@ impl ExecutionHostBinding {
             "process",
             &(program.as_str(), args.as_slice(), stable_env, timeout_ms),
         );
-        self.runner.run_host_command(
+        let consumer_id = self
+            .operation_scope
+            .as_ref()
+            .map(|scope| format!("tool:{scope}"));
+        self.runner.run_host_command_for_consumer(
+            consumer_id.as_deref(),
             operation_id.as_deref(),
             ExecutionCommandRequest {
                 program,

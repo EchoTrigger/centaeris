@@ -577,7 +577,7 @@ pub use runtime::PostgresSessionLog;
 pub(crate) use runtime::SessionWireHydrator;
 
 #[cfg(test)]
-mod integration_tests;
+pub(crate) mod integration_tests;
 
 #[cfg(test)]
 mod tests {

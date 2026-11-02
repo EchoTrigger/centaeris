@@ -149,6 +149,9 @@ impl WaitHandoffPublisher<'_> {
             &handoff,
         )?;
         crate::accept_session_commit(&mut next, stream, &receipt)?;
+        // append_wait_handoff committed the same published snapshot's Core root.
+        self.host
+            .confirm_recovery_checkpoint_outputs(&checkpoint.checkpoint_id);
         *sequence = next;
         Ok(())
     }

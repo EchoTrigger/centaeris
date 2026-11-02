@@ -131,7 +131,10 @@ impl Dispatch {
             | EnvironmentTaskRequest::QueryInputReceipt { fence, .. }
             | EnvironmentTaskRequest::Terminate { fence, .. }
             | EnvironmentTaskRequest::EndOperation { fence, .. } => fence.clone(),
-            EnvironmentTaskRequest::EndRun { .. } => return Err("maintenance_task_owner_rejected"),
+            EnvironmentTaskRequest::EndRun { .. }
+            | EnvironmentTaskRequest::ConsumeOutput { .. } => {
+                return Err("maintenance_task_owner_rejected")
+            }
         };
         if actual != expected {
             return Err("maintenance_task_fence_rejected");
@@ -395,7 +398,7 @@ mod frame_tests {
         bytes
     }
     #[test]
-    fn maintenance_command_cannot_add_unsigned_process_environment() {
+    fn maintenance_command_rejects_unsigned_environment_and_output_consumption() {
         let mut auth:MaintenanceAuthorization=serde_json::from_str(include_str!("../../../../tests/workspace/fixtures/environment_maintenance_authorization/v1/valid.json")).unwrap();
         let command = Command {
             program: "/bin/sh".into(),
@@ -451,6 +454,15 @@ mod frame_tests {
         assert_eq!(
             dispatch.validate(),
             Err("maintenance_command_binding_rejected")
+        );
+        dispatch.task.request = EnvironmentTaskRequest::ConsumeOutput {
+            task_id: fence.task_id(&fence.operation_id("command")).unwrap(),
+            fence,
+            consumer_receipt_id: "unsigned-consumer".into(),
+        };
+        assert_eq!(
+            dispatch.validate(),
+            Err("maintenance_task_owner_rejected")
         );
     }
     #[test]

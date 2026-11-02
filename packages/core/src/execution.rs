@@ -197,6 +197,29 @@ pub trait ExecutionHostRunner: Send + Sync {
         request: ExecutionFileSystemRequest,
     ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError>;
 
+    /// Carries the original tool's consumption identity without changing its request bytes.
+    fn run_file_system_operation_for_consumer(
+        &self,
+        request: ExecutionFileSystemRequest,
+        _consumer_id: Option<&str>,
+    ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
+        self.run_file_system_operation(request)
+    }
+
+    /// Hosts without retained replay storage have nothing to reclaim.
+    fn consume_execution_outputs(&self, _consumer_id: &str, _receipt_id: &str) {}
+
+    /// Carries a result consumer separately from the command's execution identity.
+    fn run_host_command_for_consumer(
+        &self,
+        _consumer_id: Option<&str>,
+        operation_id: Option<&str>,
+        request: ExecutionCommandRequest,
+        cancellation_probe: Option<&ExecutionCancellationProbe>,
+    ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+        self.run_host_command(operation_id, request, cancellation_probe)
+    }
+
     /// Must query the original operation; may not probe by starting it again.
     fn recover_host_command(
         &self,

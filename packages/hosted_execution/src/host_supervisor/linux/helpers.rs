@@ -114,7 +114,8 @@ pub(super) fn dispatch_helper(
         Some(input.permit.clone()),
     )?;
     let task = match &result {
-        EnvironmentTaskResult::Task { task, .. } => task.clone(),
+        EnvironmentTaskResult::Task { task, .. }
+        | EnvironmentTaskResult::OutputConsumed { task, .. } => task.clone(),
         _ => return Err("host_helper_start_unconfirmed".into()),
     };
     if !request

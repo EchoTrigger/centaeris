@@ -50,7 +50,7 @@ mod host_retirement_tests;
 mod lease_renewal_tests;
 mod maintenance_authority_tests;
 mod maintenance_completion_schema_tests;
-mod owned_database;
+pub(crate) mod owned_database;
 mod provision_authority_tests;
 mod question_response_tests;
 mod question_wait_notifications;

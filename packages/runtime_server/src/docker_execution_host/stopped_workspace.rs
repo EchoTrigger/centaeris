@@ -424,6 +424,7 @@ fn snapshot_from_tar(
         descriptor,
         manifest,
         file_source: None,
+        output_consumers: Vec::new(),
         observation: WorkspaceProtection::new(),
     })
 }
