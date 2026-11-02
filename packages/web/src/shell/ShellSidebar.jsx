@@ -26,6 +26,7 @@ import {
 import { apiJson, apiResponse, clearCsrfToken } from "../api";
 import { useModalDialog } from "../components/useModalDialog";
 import { WorkspaceAvatar } from "../components/WorkspaceAvatar";
+import { clearWorkspaceIdentityCache } from "./workspaceIdentityCache";
 import { SearchOverlay } from "./SearchOverlay";
 import { TrashPopover } from "./TrashPopover";
 
@@ -334,6 +335,7 @@ export function ShellSidebar({ workspace, sessionProps, recentNavigation, onStar
     setLogoutError("");
     try {
       await apiResponse("/api/logout", { method: "POST" });
+      clearWorkspaceIdentityCache();
       clearCsrfToken();
       navigate("/login", { replace: true });
     } catch {

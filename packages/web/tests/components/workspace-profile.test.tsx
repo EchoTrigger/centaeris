@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import WorkspaceProfileSettings from "../../src/routes/WorkspaceProfileSettings";
 import { apiUrl, configureApi, requireWorkspaces } from "../../src/api";
 import { useWorkspaceDocumentIdentity, workspaceInitialIcon } from "../../src/shell/useWorkspaceDocumentIdentity";
+import { WORKSPACE_IDENTITY_CACHE_KEY, clearWorkspaceIdentityCache } from "../../src/shell/workspaceIdentityCache";
 
 const fixture = vi.hoisted(() => ({ request: vi.fn(), revalidate: vi.fn() }));
 vi.mock("../../src/api", async original => ({ ...await original<object>(), apiJson: (...args: unknown[]) => fixture.request(...args) }));
@@ -16,7 +17,7 @@ beforeEach(() => {
   configureApi({ apiBaseUrl: window.location.origin });
   fixture.request.mockReset(); fixture.revalidate.mockReset();
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); sessionStorage.clear(); vi.restoreAllMocks(); });
 
 test("profile saves only dirty fields, refreshes workspace data and retains a rejected draft", async () => {
   const user = userEvent.setup();
@@ -86,6 +87,9 @@ test("workspace identity follows saved name and avatar and restores every origin
     return null;
   }
   const view = render(<Identity name="<&" avatarUrl={null} />);
+  expect(JSON.parse(sessionStorage.getItem(WORKSPACE_IDENTITY_CACHE_KEY)!)).toEqual({
+    schema: "workspace.identity.v1", workspaceId: "workspace", name: "<&", avatarUrl: null,
+  });
   expect(document.title).toBe("<&");
   const svg = decodeURIComponent(workspaceInitialIcon("<&").split(",")[1]);
   expect(new DOMParser().parseFromString(svg, "image/svg+xml").querySelector("text")?.textContent).toBe("<");
@@ -100,6 +104,24 @@ test("workspace identity follows saved name and avatar and restores every origin
   expect(Array.from(document.querySelectorAll('link[rel="icon"]'))).toEqual(originalIcons);
   expect(document.querySelector('link[rel="apple-touch-icon"]')?.getAttribute("href")).toBe("/touch.png");
   document.head.innerHTML = originalHead;
+  document.title = title;
+});
+
+test("leaving a bootstrapped Workspace restores the platform identity and logout clears the cache", () => {
+  const title = document.title;
+  const head = document.head.innerHTML;
+  document.title = "Cached workspace";
+  document.head.insertAdjacentHTML("beforeend", `<link rel="icon" href="${customAvatar}" data-workspace-identity>`);
+  function Identity() { useWorkspaceDocumentIdentity({ id: "workspace", name: "Saved workspace", avatarUrl: customAvatar }); return null; }
+  const view = render(<Identity />);
+  expect(document.title).toBe("Saved workspace");
+  view.unmount();
+  expect(document.title).toBe("Centaeris");
+  expect(document.head.querySelector('link[rel="icon"]')?.getAttribute("href")).toBe("/centaeris-mark.png");
+  expect(sessionStorage.getItem(WORKSPACE_IDENTITY_CACHE_KEY)).not.toBeNull();
+  clearWorkspaceIdentityCache();
+  expect(sessionStorage.getItem(WORKSPACE_IDENTITY_CACHE_KEY)).toBeNull();
+  document.head.innerHTML = head;
   document.title = title;
 });
 

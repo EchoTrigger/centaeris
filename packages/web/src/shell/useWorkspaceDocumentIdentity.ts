@@ -1,5 +1,6 @@
 import { useLayoutEffect } from "react";
 import { apiUrl } from "../api";
+import { cacheWorkspaceIdentity } from "./workspaceIdentityCache";
 
 export function workspaceInitialIcon(name: string) {
   const initial = (Array.from(name)[0] || "").replace(/[<>&"']/g, character => `&#${character.codePointAt(0)};`);
@@ -8,8 +9,14 @@ export function workspaceInitialIcon(name: string) {
 
 export function useWorkspaceDocumentIdentity(workspace: Readonly<{ id: string; name: string; avatarUrl: string | null }>) {
   useLayoutEffect(() => {
-    const title = document.title;
     const existing = Array.from(document.head.querySelectorAll<HTMLLinkElement>('link[rel~="icon"]'));
+    const title = existing.some(icon => icon.hasAttribute("data-workspace-identity")) ? "Centaeris" : document.title;
+    for (const previous of existing) {
+      if (!previous.hasAttribute("data-workspace-identity")) continue;
+      previous.setAttribute("href", "/centaeris-mark.png");
+      previous.setAttribute("type", "image/png");
+      previous.removeAttribute("data-workspace-identity");
+    }
     for (const previous of existing) previous.remove();
     const icon = document.createElement("link");
     icon.rel = "icon";
@@ -18,10 +25,11 @@ export function useWorkspaceDocumentIdentity(workspace: Readonly<{ id: string; n
     if (workspace.avatarUrl) icon.removeAttribute("type");
     else icon.setAttribute("type", "image/svg+xml");
     document.head.append(icon);
+    cacheWorkspaceIdentity({ id: workspace.id, name: workspace.name, avatarUrl: workspace.avatarUrl });
     return () => {
       document.title = title;
       icon.remove();
       document.head.append(...existing);
     };
-  }, [workspace.name, workspace.avatarUrl]);
+  }, [workspace.id, workspace.name, workspace.avatarUrl]);
 }

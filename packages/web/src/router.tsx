@@ -1,4 +1,5 @@
 import { useWorkspaceDocumentIdentity } from "./shell/useWorkspaceDocumentIdentity";
+import { clearWorkspaceIdentityCache } from "./shell/workspaceIdentityCache";
 
 import { useTranslation } from "./i18n";
 import { useEffect, useState } from "react";
@@ -97,7 +98,7 @@ function RootLayout() {
   }, [auth?.user]);
 
   useEffect(() => {
-    if (!auth?.user) setSessionExpired(false);
+    if (!auth?.user) { setSessionExpired(false); clearWorkspaceIdentityCache(); }
   }, [auth?.user]);
 
   return <>

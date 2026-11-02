@@ -66,6 +66,9 @@ the Session identity. The browser opens ordinary conversations at
 conversation. Workspace layout owns the browser title and favicon: the title
 uses the Workspace name and the icon uses its avatar, or its name's first
 character when no avatar is set, across Session and settings navigation.
+Initial HTML restores a matching Workspace identity from tab-scoped session
+storage before application loading; authenticated Workspace data remains
+authoritative. Logout clears this presentation cache.
 
 Each message submission explicitly selects a currently available
 Workspace model through `modelConfigRef` and an optional `thinkingMode`.
