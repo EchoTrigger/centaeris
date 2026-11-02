@@ -32,6 +32,7 @@ from .schema import ErrorResponse, StrictSchema
 from .serialization import serialize_model_provider, serialize_admin_model
 
 router = Router(tags=["workspace resources"], by_alias=True)
+plugin_upload_router = Router(tags=["workspace resources"], by_alias=True)
 
 
 class ResourceScopeResponse(StrictSchema):
@@ -435,7 +436,7 @@ def test_model(
     )
 
 
-@router.post(
+@plugin_upload_router.post(
     "/workspaces/{workspace_id}/plugins/upload", auth=session_auth, response={200: WorkspacePluginEnvelope} | COMMON_ERROR_RESPONSES
 )
 def upload_plugin(request, workspace_id: str):
