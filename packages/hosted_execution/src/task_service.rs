@@ -36,6 +36,21 @@ fn charged_bytes(metadata: &fs::Metadata) -> u64 {
         metadata.len()
     }
 }
+
+fn output_capacity_diagnostic(
+    budget_bytes: u64,
+    used_bytes: u64,
+    reservation_bytes: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event": "environment_task_admission_rejected",
+        "reason": "task_output_capacity",
+        "budgetBytes": budget_bytes,
+        "usedBytes": used_bytes,
+        "reservationBytes": reservation_bytes,
+    })
+}
+
 struct TaskStorage {
     #[cfg(target_os = "linux")]
     control_root: PathBuf,
@@ -101,19 +116,21 @@ impl TaskStorage {
             if !metadata.is_file() {
                 return Err("task_output_invalid_entry".into());
             }
-            used = used
-                .checked_add(charged_bytes(&metadata))
-                .ok_or("task_output_capacity")?;
+            let charged = charged_bytes(&metadata);
+            used = used.checked_add(charged).ok_or("task_output_capacity")?;
             if entry.path() == path {
-                existing = charged_bytes(&metadata);
+                existing = charged;
             }
         }
-        if used
-            .saturating_sub(existing)
+        let retained = used.saturating_sub(existing);
+        if retained
             .checked_add(required)
-            .ok_or("task_output_capacity")?
-            > self.output_budget_bytes
+            .is_none_or(|total| total > self.output_budget_bytes)
         {
+            eprintln!(
+                "{}",
+                output_capacity_diagnostic(self.output_budget_bytes, retained, required)
+            );
             return Err("task_output_capacity".into());
         }
         OutputLog::open(&path, slots)
