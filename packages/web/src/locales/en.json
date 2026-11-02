@@ -643,6 +643,7 @@
   "trashPopover.deletedBy": "Deleted by",
   "trashPopover.loading2": "Loading…",
   "trashPopover.trashIsEmpty": "Trash is empty",
+  "trashPopover.noMatchingItems": "No items match your filters",
   "trashPopover.itemsStayInTrashFor30DaysBeforeBeing": "Items stay in trash for 30 days before being deleted automatically.",
   "workspaceAccess.youAreNoLongerAMemberOfValue": "You are no longer a member of {{value1}}.",
   "workspaceAccess.youNoLongerHaveAccessToWorkspaceSettings": "You no longer have access to workspace settings.",

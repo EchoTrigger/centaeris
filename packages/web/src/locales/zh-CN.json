@@ -643,6 +643,7 @@
   "trashPopover.deletedBy": "删除者",
   "trashPopover.loading2": "正在读取…",
   "trashPopover.trashIsEmpty": "垃圾桶是空的",
+  "trashPopover.noMatchingItems": "没有符合筛选条件的内容",
   "trashPopover.itemsStayInTrashFor30DaysBeforeBeing": "项目在垃圾桶中保留 30 天，之后自动删除。",
   "workspaceAccess.youAreNoLongerAMemberOfValue": "你已不再是 {{value1}} 的成员。",
   "workspaceAccess.youNoLongerHaveAccessToWorkspaceSettings": "你已没有权限访问工作区设置。",

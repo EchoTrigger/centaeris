@@ -3,7 +3,7 @@ import { useTranslation } from "../i18n";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router";
-import { LoaderCircle, RotateCcw, Trash2 } from "lucide-react";
+import { ChevronDown, LoaderCircle, RotateCcw, Search, Trash2, X } from "lucide-react";
 import { apiJson } from "../api";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
@@ -172,7 +172,7 @@ export function TrashPopover({ open, workspace, anchorRef, onClose }) {
         top: rect.top,
         left,
         bottom: "auto",
-        width: Math.min(420, window.innerWidth - left - 10),
+        width: Math.min(360, window.innerWidth - left - 10),
         maxHeight: Math.min(620, window.innerHeight - rect.top - 10),
       });
     };
@@ -254,36 +254,36 @@ export function TrashPopover({ open, workspace, anchorRef, onClose }) {
 
   return createPortal(<>
     <section className="shTrashPopover" ref={panelRef} role="dialog" aria-label={t("shellSidebar.trash")} style={position}>
-      <header><strong>{t("shellSidebar.trash")}</strong></header>
+      <header><span><Trash2 aria-hidden="true" /><strong>{t("shellSidebar.trash")}</strong></span><button type="button" aria-label={t("workspaceContextPanel.close")} onClick={onClose}><X aria-hidden="true" /></button></header>
       <div className="shTrashTools">
-        <input aria-label={t("trashPopover.searchTrash")} placeholder={t("trashPopover.searchInTrash")} value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} />
+        <label className="shTrashSearch"><Search aria-hidden="true" /><input aria-label={t("trashPopover.searchTrash")} placeholder={t("trashPopover.searchInTrash")} value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} /></label>
         <div className="shTrashFilters">
-          <select aria-label={t("trashPopover.type")} value={kind} onChange={(event) => setKind(event.target.value)}>
-            <option value="">{t("trashPopover.type")}</option>
+          <label data-active={Boolean(kind)}><span>{t("trashPopover.type")}</span><select aria-label={t("trashPopover.type")} value={kind} onChange={(event) => setKind(event.target.value)}>
+            <option value="">{t("libraryRoute.all")}</option>
             <option value="session">{t("searchOverlay.conversations")}</option>
             <option value="source">Source</option>
             <option value="library">Library</option>
-          </select>
-          <select aria-label={t("trashPopover.originalLocation")} value={location} onChange={(event) => setLocation(event.target.value)}>
-            <option value="">{t("trashPopover.originalLocation")}</option>
-            {trash.filterOptions.locations.map((item) => <option key={`${item.kind}:${item.id || "root"}`} value={`${item.kind}|${item.id || ""}`}>{item.scope === "privateLibrary" ? t("agentRoute.private") : t("workspaceChooserRoute.workspace")} · {item.label}</option>)}
-          </select>
-          <select aria-label={t("trashPopover.scope")} value={scope} onChange={(event) => setScope(event.target.value)}>
-            <option value="">{t("trashPopover.scope")}</option>
+          </select><ChevronDown aria-hidden="true" /></label>
+          <label data-active={Boolean(scope)}><span>{t("trashPopover.scope")}</span><select aria-label={t("trashPopover.scope")} value={scope} onChange={(event) => setScope(event.target.value)}>
+            <option value="">{t("libraryRoute.all")}</option>
             <option value="privateLibrary">{t("trashPopover.privateLibrary")}</option>
             <option value="workspace">{t("trashPopover.currentWorkspace")}</option>
-          </select>
-          <select aria-label={t("trashPopover.deletedBy")} value={deletedByUserId} onChange={(event) => setDeletedByUserId(event.target.value)}>
-            <option value="">{t("trashPopover.deletedBy")}</option>
+          </select><ChevronDown aria-hidden="true" /></label>
+          <label data-active={Boolean(location)}><span>{t("trashPopover.originalLocation")}</span><select aria-label={t("trashPopover.originalLocation")} value={location} onChange={(event) => setLocation(event.target.value)}>
+            <option value="">{t("libraryRoute.all")}</option>
+            {trash.filterOptions.locations.map((item) => <option key={`${item.kind}:${item.id || "root"}`} value={`${item.kind}|${item.id || ""}`}>{item.scope === "privateLibrary" ? t("agentRoute.private") : t("workspaceChooserRoute.workspace")} · {item.label}</option>)}
+          </select><ChevronDown aria-hidden="true" /></label>
+          <label data-active={Boolean(deletedByUserId)}><span>{t("trashPopover.deletedBy")}</span><select aria-label={t("trashPopover.deletedBy")} value={deletedByUserId} onChange={(event) => setDeletedByUserId(event.target.value)}>
+            <option value="">{t("libraryRoute.all")}</option>
             {trash.filterOptions.deletedBy.map((item) => <option key={item.userId} value={item.userId}>{item.email}</option>)}
-          </select>
+          </select><ChevronDown aria-hidden="true" /></label>
         </div>
       </div>
       <div className="shTrashPopoverBody">
         {error ? <div className="errorBanner" role="alert">{error}</div> : null}
         {!allLoaded ? <div className="shTrashLoading"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("trashPopover.loading2")}</div> : null}
         <TrashSection feed={trash}>{(item) => <TrashItemRow key={`${item.kind}:${item.id}`} item={item} base={base} busy={Boolean(busyKey)} onClose={onClose} onRestore={restore} onPurge={(kind, target) => setPurgeTarget({ kind, item: target })} />}</TrashSection>
-        {empty ? <div className="shTrashAllEmpty"><p>{t("trashPopover.trashIsEmpty")}</p></div> : null}
+        {empty ? <div className="shTrashAllEmpty" role="status"><Trash2 aria-hidden="true" /><p>{t(search || kind || scope || location || deletedByUserId ? "trashPopover.noMatchingItems" : "trashPopover.trashIsEmpty")}</p></div> : null}
       </div>
       <footer>{t("trashPopover.itemsStayInTrashFor30DaysBeforeBeing")}</footer>
     </section>
