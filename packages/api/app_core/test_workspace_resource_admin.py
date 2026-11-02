@@ -281,9 +281,9 @@ class WorkspacePluginScopeTests(TestCase):
 
     def test_model_selection_rejects_other_workspace_configuration(self):
         from app_core.models import ModelConfig
-        from app_core.agent_model_settings import (
-            selected_model,
-            AgentModelSettingsError,
+        from app_core.session_model_settings import (
+            selected_session_model,
+            SessionModelSettingsError,
         )
 
         own = ModelProvider.objects.create(
@@ -294,11 +294,11 @@ class WorkspacePluginScopeTests(TestCase):
         )
         model = ModelConfig.objects.create(provider=own, modelName="demo")
         self.assertEqual(
-            selected_model(model.id, None, workspace_id=self.workspace.id)[0].id,
+            selected_session_model(self.workspace.id, model.id, None)[0].id,
             model.id,
         )
-        with self.assertRaises(AgentModelSettingsError):
-            selected_model(model.id, None, workspace_id=self.foreign.id)
+        with self.assertRaises(SessionModelSettingsError):
+            selected_session_model(self.foreign.id, model.id, None)
 
 
 from django.test import SimpleTestCase
