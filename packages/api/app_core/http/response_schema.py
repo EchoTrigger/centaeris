@@ -12,32 +12,6 @@ COMMON_ERROR_RESPONSES = {
 }
 
 
-class AgentCoordinationSessionResponse(StrictSchema):
-    schema_id: Literal["agent.coordination_session.v1"] = Field(alias="schema")
-    agent_id: str
-    session_id: str
-
-
-class AgentMessageResponse(StrictSchema):
-    id: str
-    agent_run_id: str
-    turn_id: str
-    tool_call_id: str
-    source_sequence: int
-    created_at_ms: int
-    body: str
-    session_refs: list[str]
-    file_refs: list[str]
-
-
-class AgentMessagesResponse(StrictSchema):
-    schema_id: Literal["agent.messages.v1"] = Field(alias="schema")
-    agent_id: str
-    session_id: str
-    messages: list[AgentMessageResponse]
-    next_after_sequence: int | None
-
-
 class WorkspaceResponse(StrictSchema):
     id: str
     name: str
@@ -246,86 +220,6 @@ class WorkspaceSkillDetailEnvelope(StrictSchema):
     content: str
 
 
-class AgentResponse(StrictSchema):
-    id: str
-    workspace_id: str
-    definition_id: str | None
-    definition_version_id: str | None
-    is_business_root: bool
-    plugin_names: list[str]
-    name: str
-    description: str
-    instructions: str
-    avatar_kind: Literal["centaeris", "banana"]
-    avatar_url: str | None
-    status: Literal["active", "deleted"]
-    deleted_at: str | None
-    created_at: str
-    updated_at: str
-
-
-class AgentEnvelope(StrictSchema):
-    agent: AgentResponse
-
-
-class AgentsEnvelope(StrictSchema):
-    agents: list[AgentResponse]
-
-
-class AgentDefinitionResponse(StrictSchema):
-    id: str
-    workspace_id: str
-    name: str
-    description: str
-    instructions: str
-    plugin_names: list[str]
-    model_config_ref: str | None
-    thinking_mode: str | None
-    avatar_url: str | None
-    avatar_kind: Literal["centaeris", "banana"]
-    status: Literal["active", "disabled"]
-    availability_scope: Literal["none", "workspace", "members"]
-    membership_ids: list[str]
-    published_version_id: str | None
-    created_at: str
-    updated_at: str
-
-
-class AgentDefinitionVersionResponse(StrictSchema):
-    id: str
-    definition_id: str
-    version: int
-    name: str
-    description: str
-    instructions: str
-    plugin_names: list[str]
-    model_config_ref: str | None
-    thinking_mode: str | None
-    avatar_url: str | None
-    avatar_kind: Literal["centaeris", "banana"]
-    published_at: str
-
-
-class AgentDefinitionEnvelope(StrictSchema):
-    definition: AgentDefinitionResponse
-
-
-class AgentDefinitionsEnvelope(StrictSchema):
-    definitions: list[AgentDefinitionResponse]
-
-
-class AgentDefinitionVersionEnvelope(StrictSchema):
-    version: AgentDefinitionVersionResponse
-
-
-class AgentDefinitionVersionsEnvelope(StrictSchema):
-    versions: list[AgentDefinitionVersionResponse]
-
-
-class AvailableAgentDefinitionsEnvelope(StrictSchema):
-    definitions: list[AgentDefinitionVersionResponse]
-
-
 class ContextMcpToolResponse(StrictSchema):
     provider_id: str
     name: str
@@ -411,15 +305,6 @@ class AgentRunEnvironmentResponse(StrictSchema):
 
 class SessionsEnvelope(StrictSchema):
     sessions: list[SessionResponse]
-
-
-class AgentWorkSessionsResponse(StrictSchema):
-    schema_id: Literal["agent.work_sessions.v1"] = Field(alias="schema")
-    agent_id: str
-    workspace_id: str
-    sessions: list[SessionResponse]
-    next_after_session_id: str | None
-    has_more: bool
 
 
 class SessionProjectResponse(StrictSchema):

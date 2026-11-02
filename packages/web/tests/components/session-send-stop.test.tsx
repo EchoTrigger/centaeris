@@ -93,9 +93,9 @@ async function sendCheckpoint(status: "failed" | "cancelled" | null, sourceHighW
     } });
   });
 }
-async function mountConversation(initialSession: typeof row | null = null, snapshot: TranscriptPage = page, workspaceLayout = false) {
+async function mountConversation(initialSession: typeof row | null = row, snapshot: TranscriptPage = page, workspaceLayout = false) {
   fixture.selectedSession = initialSession;
-  render(<MemoryRouter initialEntries={[window.location.pathname + window.location.search]}>{workspaceLayout ? <WorkspaceChatLayout /> : <AppPageContent initialSession={initialSession} workspaceDraft={false} location={{ search: "?sessionId=session", state: null }} modelsVersion={0} onSessionAccepted={() => {}} />}</MemoryRouter>);
+  render(<MemoryRouter initialEntries={[window.location.pathname + window.location.search]}>{workspaceLayout ? <WorkspaceChatLayout /> : <AppPageContent initialSession={initialSession} workspaceDraft={false} location={{ search: "", state: null }} modelsVersion={0} onSessionAccepted={() => {}} />}</MemoryRouter>);
   await waitFor(() => expect(fixture.subscriptions.some(item => item.sessionId === "session" && !item.signal.aborted)).toBe(true));
   const subscription = fixture.subscriptions.findLast(item => item.sessionId === "session" && !item.signal.aborted)!;
   await act(async () => {
@@ -117,7 +117,7 @@ beforeEach(() => {
   sessionStorage.clear(); localStorage.clear(); fixture.activeRun = null; fixture.selectedSession = null;
   fixture.workspace = { id: "workspace", name: "Synthetic workspace", avatarUrl: null };
   vi.stubGlobal("crypto", webcrypto);
-  window.history.replaceState({}, "", "/w/workspace/sessions/session?sessionId=session");
+  window.history.replaceState({}, "", "/w/workspace/sessions/session");
   fixture.request.mockImplementation(async path => {
     if (path === "/api/models?workspaceId=workspace") return { models: [{ id: "model", providerId: "provider", modelName: "model", displayName: "Synthetic model", thinkingModes: [] }] };
     if (path.includes("session-projects")) return { projects: [] };
@@ -133,7 +133,7 @@ afterEach(() => { cleanup(); fixture.subscriptions.length = 0; vi.clearAllMocks(
 test("refreshing workspace profile retains the current Run subscription and conversation draft", async () => {
   fixture.activeRun = { agentRunId: "active-run", status: "running", streamCursor: "0" };
   const user = userEvent.setup();
-  const props = { initialSession: row, workspaceDraft: false, location: { search: "?sessionId=session", state: null }, modelsVersion: 0, onSessionAccepted: () => {} };
+  const props = { initialSession: row, workspaceDraft: false, location: { search: "", state: null }, modelsVersion: 0, onSessionAccepted: () => {} };
   const view = render(<MemoryRouter><AppPageContent {...props} /></MemoryRouter>);
   await waitFor(() => expect(screen.queryByRole("button", { name: "appRoute.stop" })).not.toBeNull());
   await waitFor(() => expect(fixture.subscriptions.some(item => item.sessionId === "session" && !item.signal.aborted)).toBe(true));
@@ -311,7 +311,7 @@ test("restored questions from a later turn accept the original Run receipt and n
     return originalRequest(path, options);
   });
   fixture.activeRun = { agentRunId: 'original-run', status: 'running', streamCursor: '0' };
-  const props = { workspaceDraft: false, location: { search: '?sessionId=session', state: null }, modelsVersion: 0, onSessionAccepted: () => {} };
+  const props = { workspaceDraft: false, location: { search: '', state: null }, modelsVersion: 0, onSessionAccepted: () => {} };
   const mount = () => render(<MemoryRouter><AppPageContent {...props} initialSession={row} /></MemoryRouter>);
   let view = mount();
   const restore = async () => {
@@ -332,7 +332,6 @@ test("restored questions from a later turn accept the original Run receipt and n
   view = mount();
   const currentSubscription = await restore();
   await user.click(screen.getByRole('button', { name: /1 Summary/ }));
-  await user.click(screen.getByRole('button', { name: 'sessionQuestion.send' }));
   await waitFor(() => expect(screen.queryByRole('region', { name: 'Choose delivery' })).toBeNull());
   const responses = callsFor('/responses');
   expect(responses).toHaveLength(1);
@@ -346,7 +345,7 @@ test("restored questions from a later turn accept the original Run receipt and n
   expect(screen.getByRole('region', { name: 'Choose next step' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'sessionQuestion.send' })).toHaveProperty('disabled', true);
   fixture.activeRun = null;
-  view.rerender(<MemoryRouter><AppPageContent {...props} initialSession={{ ...row, id: 'other', title: 'Other Session' }} location={{ search: '?sessionId=other', state: null }} /></MemoryRouter>);
+  view.rerender(<MemoryRouter><AppPageContent {...props} initialSession={{ ...row, id: 'other', title: 'Other Session' }} /></MemoryRouter>);
   await act(async () => oldSubscription.controller.acceptWithBackpressure({ cursor: null, item: {
     schema: 'workspace.presentation.v1', workspaceId: 'workspace', sessionId: 'session', kind: 'question', agentRunId: 'original-run', sourceHighWater: '0',
     question: { questionId: 'old-question', continuationId: 'continuation', turnId: 'original-turn', question: 'Stale question', options: [] },

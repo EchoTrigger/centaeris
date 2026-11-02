@@ -50,7 +50,7 @@ function fixture(context, request) {
   };
   env.response=async(...args)=>{const value=await env.request(...args);return {...value,json:async()=>value};};
   const props={workspaceDraft:true,location:{search:"",state:null},modelsVersion:0,onSessionAccepted:()=>{}};
-  return {data,calls,props,subject:renderer(AppPageContent,props,env)};
+  return {data,calls,props,session,subject:renderer(AppPageContent,props,env)};
 }
 async function send(subject,text) {if (!composer(subject).modelId) { composer(subject).onModelIdChange("model"); await subject.settle(); } composer(subject).onDraftChange(text);await subject.settle();await composer(subject).onSubmit({preventDefault(){}});await new Promise(resolve=>setTimeout(resolve,20));await subject.settle();}
 for(const change of ["text","model","attachment"]) test(`ordinary submit corrects unaccepted ${change} with the original operation identity`,async context=>{
@@ -84,7 +84,7 @@ test("modified submit with an already accepted receipt restores review while kee
 
 test("accepted original in the current Session restores history without consuming the edited draft",async context=>{
  const f=fixture(context,async(_path,options)=>{assert.equal(options,undefined);return receipt("old");});
- f.props.workspaceDraft=false;f.props.location={search:"?sessionId=work",state:null};
+ f.props.workspaceDraft=false;f.props.initialSession=f.session;
  try{await f.subject.settle();f.data.set(pendingKey,JSON.stringify({operationId:"old",fingerprint:"a".repeat(64),assetIds:[],inputChanged:false,receipt:receipt("old")}));await send(f.subject,"edited");assert.equal(composer(f.subject).draft,"edited");assert.equal(f.calls.filter(([,o])=>o?.method==="POST").length,0);assert.equal(nodes(f.subject.tree,n=>n.props.role==="alert")[0].props.children[0],"operations.inputUnconfirmed");assert.equal(f.data.has(pendingKey),false);}
  finally{f.subject.unmount();}
 });

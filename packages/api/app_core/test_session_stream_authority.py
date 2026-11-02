@@ -299,39 +299,25 @@ class SessionStreamAuthorityTests(SimpleTestCase):
 
 
 class SessionStreamAuthorityHttpTests(SimpleTestCase):
-    async def test_route_binds_browser_and_delegation_authority_to_actual_request(self):
+    async def test_route_binds_browser_authority_to_actual_request(self):
         from .http import streaming
 
-        for delegation in (None, SimpleNamespace(id="delegation", credential_version=3)):
-            with self.subTest(delegation=delegation):
-                request = SimpleNamespace(
-                    user=SimpleNamespace(id=42), app_delegation=delegation, headers={},
-                    app_delegation_credential_version=delegation.credential_version if delegation else None,
-                    business_branch_id=None,
-                )
-                run = SimpleNamespace(id="run", session_id="session", status="completed")
+        request = SimpleNamespace(user=SimpleNamespace(id=42), headers={})
+        run = SimpleNamespace(id="run", session_id="session", status="completed")
 
-                async def source():
-                    yield "unused"
+        async def source():
+            yield "unused"
 
-                factory = Mock(return_value=source())
-                authority = Mock(return_value=True)
-                with patch.object(streaming, "_prepare_agent_run_stream", AsyncMock(return_value=(run, 0))), \
-                        patch.object(streaming, "stream_agent_run_session_items_async", factory), \
-                        patch.object(streaming, "session_authority_is_current", authority):
-                    response = await streaming.agent_run_events(request, "session", "run")
-                    await response.aclose()
-                    callback = factory.call_args.kwargs.get("authority_check")
-                    self.assertIsNotNone(callback)
-                    # Later request mutation cannot change the stream's bound identity.
-                    request.user.id = 99
-                    request.app_delegation = SimpleNamespace(id="other-delegation")
-                    request.app_delegation_credential_version = 99
-                    request.business_branch_id = "another-branch"
-                    self.assertTrue(await callback())
-                authority.assert_called_once_with(
-                    42, "session", delegation_id=delegation.id if delegation else None,
-                    scope="events:read",
-                    credential_version=delegation.credential_version if delegation else None,
-                    business_branch_id=None,
-                )
+        factory = Mock(return_value=source())
+        authority = Mock(return_value=True)
+        with patch.object(streaming, "_prepare_agent_run_stream", AsyncMock(return_value=(run, 0))), \
+                patch.object(streaming, "stream_agent_run_session_items_async", factory), \
+                patch.object(streaming, "session_authority_is_current", authority):
+            response = await streaming.agent_run_events(request, "session", "run")
+            await response.aclose()
+            callback = factory.call_args.kwargs.get("authority_check")
+            self.assertIsNotNone(callback)
+            # Later request mutation cannot change the stream's bound identity.
+            request.user.id = 99
+            self.assertTrue(await callback())
+        authority.assert_called_once_with(42, "session")

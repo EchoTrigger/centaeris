@@ -46,18 +46,13 @@ def _database_deadline(*, consistent=False):
 
 class PresentationLoader:
     def __init__(self, request, scope):
-        # Preserve the existing list authorization and delegated branch boundary.
+        # Preserve the existing Session list authorization.
         self.request = copy.copy(request)
         self.request.GET = QueryDict(mutable=True)
         self.scope = scope
         self.user_id = request.user.id
-        delegation = getattr(request, "app_delegation", None)
-        self.delegation_id = delegation.id if delegation is not None else None
-        self.credential_version = getattr(request, "app_delegation_credential_version", None)
-        self.business_branch_id = getattr(request, "business_branch_id", None)
         session_key = getattr(getattr(request, "session", None), "session_key", None) or ""
-        self.observation_key = (self.user_id, scope, self.delegation_id, self.credential_version,
-                                self.business_branch_id, hashlib.sha256(session_key.encode()).hexdigest())
+        self.observation_key = (self.user_id, scope, hashlib.sha256(session_key.encode()).hexdigest())
 
     @stream_database_call
     def authorized(self):
@@ -65,11 +60,7 @@ class PresentationLoader:
             if self.scope.session_id is not None:
                 if not Session.objects.filter(id=self.scope.session_id, workspace_id=self.scope.workspace_id).exists():
                     return False
-                # The established helper already checks active user, owner,
-                # Agent, membership, definition visibility and delegation.
-                return session_authority_is_current(self.user_id, self.scope.session_id,
-                    delegation_id=self.delegation_id, scope="sessions:read",
-                    credential_version=self.credential_version, business_branch_id=self.business_branch_id)
+                return session_authority_is_current(self.user_id, self.scope.session_id)
             user = get_user_model().objects.filter(id=self.user_id, is_active=True).first()
             if user is None:
                 return False
@@ -200,12 +191,8 @@ def _operation_download(request, session_id, event_id):
         scope = PresentationScope(session.workspace_id, session.id)
         loader = PresentationLoader(request, scope)
         # Use the synchronous authorization implementation on this ORM thread,
-        # retaining the existing delegated-session and membership checks.
-        delegation = getattr(request, "app_delegation", None)
-        if not session_authority_is_current(request.user.id, session_id,
-                delegation_id=delegation.id if delegation is not None else None, scope="sessions:read",
-                credential_version=getattr(request, "app_delegation_credential_version", None),
-                business_branch_id=getattr(request, "business_branch_id", None)):
+        # retaining the existing Session ownership and membership checks.
+        if not session_authority_is_current(request.user.id, session_id):
             return None
         record = operation_records(SessionEvent.objects.filter(session_id=session_id,
             eventId=event_id, payload__type__in=("tool_call", "tool_result"))).first()

@@ -39,6 +39,7 @@ pub struct ArchiveSummary {
     pub manifest: SandboxWorkspaceSnapshotManifest,
 }
 
+#[cfg(test)]
 pub fn encode<R: Read>(
     manifest: &SandboxWorkspaceSnapshotManifest,
     mut open: impl FnMut(&SandboxWorkspaceSnapshotFile) -> io::Result<R>,
@@ -54,6 +55,7 @@ pub fn encode<R: Read>(
 /// an uncompressed frame. The entire body must end at the last declared byte.
 /// Keep output isolated until success: even a final source error can leave a
 /// complete-looking compressed archive in the destination.
+#[cfg(test)]
 pub fn encode_ordered(
     manifest: &SandboxWorkspaceSnapshotManifest,
     mut body: impl Read,
@@ -69,8 +71,10 @@ pub fn encode_ordered(
     Ok(summary)
 }
 
+#[cfg(test)]
 type ArchiveWriter<W> = tar::Builder<zstd::stream::write::Encoder<'static, MeasuredWriter<W>>>;
 
+#[cfg(test)]
 fn encode_with<W: Write>(
     manifest: &SandboxWorkspaceSnapshotManifest,
     output: W,
@@ -312,6 +316,7 @@ fn summary(
     }
 }
 
+#[cfg(test)]
 fn append_file<W: Write>(
     archive: &mut tar::Builder<W>,
     path: &str,
@@ -329,6 +334,7 @@ fn append_file<W: Write>(
     archive.append_data(&mut header, path, source)
 }
 
+#[cfg(test)]
 fn append_verified_file<W: Write>(
     archive: &mut tar::Builder<W>,
     file: &SandboxWorkspaceSnapshotFile,
@@ -412,6 +418,7 @@ impl<R: Read> Read for VerifiedReader<'_, R> {
     }
 }
 
+#[cfg(test)]
 struct MeasuredWriter<W> {
     inner: W,
     limit: u64,
@@ -419,6 +426,7 @@ struct MeasuredWriter<W> {
     digest: Sha256,
 }
 
+#[cfg(test)]
 impl<W> MeasuredWriter<W> {
     fn new(inner: W, limit: u64) -> Self {
         Self {
@@ -430,6 +438,7 @@ impl<W> MeasuredWriter<W> {
     }
 }
 
+#[cfg(test)]
 impl<W: Write> Write for MeasuredWriter<W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if bytes.len() as u64 > self.limit - self.bytes {

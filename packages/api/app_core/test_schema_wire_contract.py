@@ -2,7 +2,7 @@ from django.test import SimpleTestCase
 from pydantic import ValidationError
 
 from app_core.http.schema import ModelsEnvelope
-from app_core.http.response_schema import AgentCoordinationSessionResponse
+from app_core.http.response_schema import WorkspaceSkillsEnvelope
 from app_core.http.workspaces import SessionMetadataRequest, SessionReadRequest
 
 
@@ -45,10 +45,10 @@ class SchemaWireContractTests(SimpleTestCase):
                 SessionReadRequest.model_validate(payload)
 
     def test_schema_literal_keeps_its_exceptional_wire_name(self):
-        payload = {"schema": "agent.coordination_session.v1", "agentId": "agent_1", "sessionId": "session_1"}
-        self.assertEqual(AgentCoordinationSessionResponse.model_validate(payload).model_dump(), payload)
+        payload = {"schema": "workspace.skill.catalog.result.v1", "skills": []}
+        self.assertEqual(WorkspaceSkillsEnvelope.model_validate(payload).model_dump(), payload)
         for field in ["schemaId", "schema_id"]:
             invalid = dict(payload)
             invalid[field] = invalid.pop("schema")
             with self.subTest(field=field), self.assertRaises(ValidationError):
-                AgentCoordinationSessionResponse.model_validate(invalid)
+                WorkspaceSkillsEnvelope.model_validate(invalid)

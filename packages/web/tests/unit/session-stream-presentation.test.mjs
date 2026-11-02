@@ -36,7 +36,7 @@ async function setup(context, tailPage = page("Retained authoritative answer"), 
   context.after(() => { globalThis.window = oldWindow; globalThis.document = oldDocument; });
   const attempt = deferred();
   const session = { id: "session", workspaceId: "workspace", projectId: null, title: "Synthetic Session", origin: "user", status: "active", deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: true, updatedAt: "2026-10-05T00:00:00Z",  currentEnvironmentId: null, executionMode: "perRun", latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", isManuallyUnread: false };
-  const env = environment({ location: { search: "?sessionId=session", state: null },
+  const env = environment({ location: { search: "", state: null },
     request: async path => ({ json: async () => path === "/api/models?workspaceId=workspace" ? { models: idle ? [{ id: "model", providerId: "provider", modelName: "synthetic", displayName: "Synthetic", thinkingModes: [] }] : [] }
       : path.includes("session-projects") ? { projects: [] }
       : path.endsWith("/assets") ? { assets: [] }
@@ -44,7 +44,7 @@ async function setup(context, tailPage = page("Retained authoritative answer"), 
     transport: { loadActiveAgentRun: async () => ({agentRun: idle ? null : {agentRunId:"run",status:"running",streamCursor:"cursor:0"}}), loadOlder: async () => { throw new Error("unexpected older history request"); } },
     stream: options => { env.streamOptions = options; const pending = env.nextAttempt ?? attempt; env.nextAttempt = null; return pending.promise; },
   });
-  const subject = renderer(AppPageContent, {  workspaceDraft: false, location: env.location, modelsVersion: 0 }, env);
+  const subject = renderer(AppPageContent, { initialSession: session, workspaceDraft: false, location: env.location, modelsVersion: 0 }, env);
   await subject.settle();
   assert.ok(env.streamOptions, `the selected Session started its stream; ${JSON.stringify(nodes(subject.tree, node => node.props.className === 'errorBanner').map(node => node.props.children))}`);
   const frame = (kind, body, cursor = null) => ({ cursor, item: {

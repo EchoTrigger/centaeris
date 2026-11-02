@@ -44,7 +44,7 @@ async function setup(t, draft=false, navigationRead=null, controls={}) {
     value.onConnection("running");
     return new Promise(resolve=>value.signal.addEventListener("abort",resolve,{once:true}));
   }});
-  const props={workspaceDraft:draft,location:{search:draft?"?new=1":"?sessionId=session",state:null},modelsVersion:0,onSessionAccepted:path=>controls.accepted?.(path)};
+  const props={initialSession:draft?null:row(),workspaceDraft:draft,location:{search:draft?"?new=1":"",state:null},modelsVersion:0,onSessionAccepted:path=>controls.accepted?.(path)};
   const subject=renderer(AppPageContent,props,env);
   t.after(()=>subject.unmount());
   await subject.settle();
@@ -205,7 +205,7 @@ test("new Session acceptance exposes Stop before its follow-up read and preserve
   assert.equal(f.calls.filter(([path])=>path==="/api/sessions/session/agent-runs/run-new/cancel").length,1);
   releaseRead({json:async()=>({session:row()})});await tick();await f.subject.settle();
   assert.ok(acceptedPath.endsWith("/sessions/session"));
-  f.props.workspaceDraft=false;f.props.location.search="?sessionId=session";
+  f.props.workspaceDraft=false;f.props.initialSession=row();f.props.location.search="";
   await f.subject.settle();
   assert.equal(composer(f).activeAgentRunId,"run-new");
 });
@@ -220,7 +220,7 @@ for(const outcome of ["terminal","failure"]){
     }});
     await f.send("snapshot",{page});await f.send("checkpoint",checkpoint(run()),"old-run");
     const old=composer(f).onCancelActiveAgentRun();await tick();
-    f.props.location.search="?sessionId=other";await f.subject.settle();
+    f.props.initialSession=row({id:"other"});await f.subject.settle();
     await f.send("snapshot",{page:{...page,sessionId:"other"}});
     await f.send("checkpoint",checkpoint(run("other-run","running")),"new-run");
     const current=composer(f).onCancelActiveAgentRun();await tick();await f.subject.settle();
@@ -479,7 +479,7 @@ test("a new conversation pending input never appears in another Session while it
   if(path.endsWith("/cancel"))return {json:async()=>({agentRunId:"run-new",status:"queued",disposition:"requested"})};
  }});
  await startSend(f,()=>Boolean(accept));await composer(f).onCancelActiveAgentRun();
- f.props.workspaceDraft=false;f.props.location.search="?sessionId=other";await f.subject.settle();
+ f.props.workspaceDraft=false;f.props.initialSession=row({id:"other"});f.props.location.search="";await f.subject.settle();
  assert.equal(transcript(f).sessionId,"other");
  assert.equal(transcript(f).pendingUserMessage,null);
  accept();await settleUntil(f,()=>f.calls.some(([path])=>path.endsWith("/cancel")));

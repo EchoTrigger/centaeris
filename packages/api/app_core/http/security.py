@@ -5,7 +5,7 @@ from ninja.utils import check_csrf
 from ninja.security import APIKeyHeader, HttpBearer, SessionAuth
 
 from app_core.api_memory import authenticate_request
-from app_core.app_delegations import DelegationRejected, authenticate_delegation, authorize_delegated_request
+from app_core.app_delegations import DelegationRejected
 from app_core.app_delegation_contract import SCOPES
 
 
@@ -64,13 +64,8 @@ class ProductUsageAuth(HttpBearer):
         super().__init__()
         if scope not in SCOPES:
             raise ValueError("unknown delegation scope")
-        self.scope = scope
 
     def __call__(self, request):
-        request.app_delegation = None
-        request.app_delegation_credential_version = None
-        request.business_branch = None
-        request.business_branch_id = None
         if "Authorization" not in request.headers:
             return session_auth(request)
         if settings.SESSION_COOKIE_NAME in request.COOKIES or request.user.is_authenticated:
@@ -78,17 +73,10 @@ class ProductUsageAuth(HttpBearer):
         parts = request.headers["Authorization"].split(" ")
         if len(parts) != 2 or parts[0].lower() != "bearer":
             raise DelegationRejected("delegation_invalid", 401)
-        user = self.authenticate(request, parts[1])
-        authenticate_request(request)
-        return user
+        return self.authenticate(request, parts[1])
 
     def authenticate(self, request, token):
-        grant = authenticate_delegation(token, self.scope)
-        authorize_delegated_request(request, grant)
-        request.user = grant.user
-        request.app_delegation = grant
-        request.app_delegation_credential_version = grant.credential_version
-        return grant.user
+        raise DelegationRejected("delegation_not_available", 401)
 
 
 def usage_auth(scope):

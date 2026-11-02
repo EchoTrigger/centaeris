@@ -37,16 +37,10 @@ async def agent_run_events(request, session_id: str, agent_run_id: str):
     agent_run, cursor = prepared
     bind_agent_run(agent_run.id)
     user_id = request.user.id
-    delegation = request.app_delegation
-    delegation_id = delegation.id if delegation is not None else None
-    credential_version = request.app_delegation_credential_version if delegation is not None else None
-    business_branch_id = request.business_branch_id if delegation is not None else None
 
     async def authority_check():
         return await stream_database_call(session_authority_is_current)(
-            user_id, session_id, delegation_id=delegation_id, scope="events:read",
-            credential_version=credential_version,
-            business_branch_id=business_branch_id,
+            user_id, session_id,
         )
 
     response = OwnedAsyncStreamingHttpResponse(

@@ -108,7 +108,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
   const [operationReviewLink, setOperationReviewLink] = useState(null);
   const navigate = useNavigate();
   const searchParams = new URLSearchParams(location.search);
-  const requestedSessionId = initialSession?.id || searchParams.get("sessionId") || "";
+  const requestedSessionId = initialSession?.id || "";
   const requestedProjectId = searchParams.get("projectId") || "";
   const requestedPrompt = searchParams.get("prompt") || "";
   const startFresh = searchParams.get("new") === "1";
