@@ -65,6 +65,7 @@ RESOLVED_INPUT_FIELDS = {
 OWNER_KINDS = {"sourceObject", "userLibraryObject", "artifact"}
 EVIDENCE_KINDS = {"workspaceSource", "userProvided", "generatedArtifact"}
 MAX_DECLARED_INPUTS = 64
+MAX_PROJECTED_INPUTS = 128
 
 
 def build_agent_run_authorization_payload(
@@ -86,6 +87,9 @@ def build_agent_run_authorization_payload(
         input_ref not in available_input_refs for input_ref in normalized_message_asset_refs
     ):
         raise ValueError("messageAssetRefs must reference authorized session assets")
+    from .library_materials import personal_library_allowed, remap_library_attachments
+    if personal_library_allowed(agent_run):
+        asset_refs, normalized_message_asset_refs = remap_library_attachments(agent_run, asset_refs, normalized_message_asset_refs)
     payload = {
         "schema": AGENT_RUN_AUTHORIZATION_SCHEMA,
         "id": authorization_id,

@@ -64,6 +64,10 @@ def allocated_virtual_paths(agent_run) -> dict[str, str]:
     }
     if len({path.casefold() for path in allocated.values()}) != len(allocated):
         raise ValueError("AgentRun input virtualPath collision")
+    from .models import SessionMaterialInput
+    if getattr(agent_run, "session_id", None):
+        allocated.update({item.input_ref: item.resolved["virtualPath"] for item in
+            SessionMaterialInput.objects.filter(session_id=agent_run.session_id, input_ref__in=allocated)})
     return allocated
 
 

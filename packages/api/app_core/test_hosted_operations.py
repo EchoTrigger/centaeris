@@ -65,6 +65,8 @@ class HostedOperationTests(OperationFixture, TestCase):
     def test_submit_response_loss_and_terminal_replay_ignore_mutable_dependencies(self):
         first = self.post()
         self.assertEqual(first.status_code, 202, first.content)
+        from .models import RunMaterialScope
+        self.assertTrue(RunMaterialScope.objects.get(agent_run_id=first.json()["agentRunId"]).personal_library)
         self.model.enabled = False
         self.model.save(update_fields=["enabled"])
         self.profile.side_effect = RuntimeError("offline")

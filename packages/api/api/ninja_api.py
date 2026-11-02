@@ -13,6 +13,7 @@ from app_core.http.errors import install_error_handlers
 from app_core.http.health import router as health_router
 from app_core.http.environment_profiles import router as environment_profiles_router
 from app_core.http.internal import router as internal_router
+from app_core.http.material_inputs import router as material_inputs_router
 from app_core.http.internal_model import router as internal_model_router
 from app_core.http.jobs import router as jobs_router
 from app_core.http.library import router as library_router
@@ -64,6 +65,7 @@ api.add_router("/api", streaming_router)
 api.add_router("/api", presentation_router)
 api.add_router("/api", trash_router)
 api.add_router("/internal", internal_router)
+api.add_router("/internal", material_inputs_router)
 api.add_router("/internal", environment_profiles_router)
 api.add_router("/internal", environment_maintenance_router)
 api.add_router("/internal", internal_model_router)

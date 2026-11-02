@@ -1307,7 +1307,14 @@ def create_session_message(
                 agent_run,
                 message_asset_refs=attachment_refs,
                 image_digest=execution_profile["imageDigest"],
+                personal_library=True,
             )
+            from app_core.material_files import check_original_budget
+            from app_core.material_contract import KnowledgeError
+            try:
+                check_original_budget(agent_run)
+            except KnowledgeError as error:
+                raise AgentSessionCreationError(error.status, error.code) from error
             if session.title == "New chat":
                 session.title = prompt[:80]
             session.updatedAt = timezone.now()

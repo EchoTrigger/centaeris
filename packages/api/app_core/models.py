@@ -2301,6 +2301,42 @@ class SessionAssetLink(models.Model):
         return super().save(*args, **kwargs)
 
 
+class RunMaterialScope(models.Model):
+    agent_run = models.OneToOneField(AgentRun, on_delete=models.CASCADE, primary_key=True)
+    personal_library = models.BooleanField(default=False)
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError("RunMaterialScope is immutable")
+        return super().save(*args, **kwargs)
+
+
+class SessionMaterialInput(models.Model):
+    id = models.CharField(primary_key=True, max_length=96)
+    session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name="materialInputs")
+    identity_key = models.CharField(max_length=64)
+    input_ref = models.CharField(max_length=1024)
+    resolved = models.JSONField()
+    confirmed = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["session", "identity_key"], name="session_material_identity_unique"),
+            models.UniqueConstraint(fields=["session", "input_ref"], name="session_material_ref_unique"),
+        ]
+
+
+class RunMaterialAdmission(models.Model):
+    agent_run = models.ForeignKey(AgentRun, on_delete=models.CASCADE)
+    material_input = models.ForeignKey(SessionMaterialInput, on_delete=models.CASCADE, related_name="admissions")
+    origin_call = models.ForeignKey(SessionEvent, on_delete=models.SET_NULL, null=True)
+    confirmed = models.BooleanField(default=False)
+    settled_absent = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["agent_run", "material_input", "origin_call"], name="run_material_admission_unique")]
+
+
 class MaterialProcessingTask(models.Model):
     """Durable dispatch intent for one shared processed representation."""
     representationId = models.CharField(primary_key=True, max_length=96)

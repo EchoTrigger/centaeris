@@ -79,7 +79,23 @@ def bind_inputs(agent_run, digest: str, requests: list, spec_digest: str) -> lis
     for request in requests:
         declared = declared_by_ref.get(request["inputRef"])
         if declared is None:
-            raise KnowledgeError("knowledge_input_not_authorized", 403)
+            from .library_materials import personal_library_allowed
+            if not personal_library_allowed(agent_run):
+                raise KnowledgeError("knowledge_input_not_authorized", 403)
+            from .library_materials import resolve_library_input, input_identity
+            try:
+                library = resolve_library_input(agent_run, request["inputRef"])
+            except DeferredInputResolutionError as error:
+                raise KnowledgeError(error.errorCode, 403) from error
+            if library is None:
+                raise KnowledgeError("knowledge_input_not_authorized", 403)
+            resolved, source, owner = library
+            identity = input_identity(resolved)
+            expected = representation_id(identity, spec_digest)
+            if request["representationId"] != expected:
+                raise KnowledgeError("knowledge_representation_binding_mismatch")
+            bound.append(BoundInput(resolved, source, owner, identity, expected))
+            continue
         identity = declared["inputIdentity"]
         expected = representation_id(identity, spec_digest)
         if request["representationId"] != expected:
@@ -96,6 +112,12 @@ def bind_inputs(agent_run, digest: str, requests: list, spec_digest: str) -> lis
 
 
 def _input_owner(agent_run, input_ref: str, resolved: dict):
+    from .models import UserLibraryObject
+    if resolved.get("ownerKind") == "userLibraryObject":
+        try:
+            return UserLibraryObject.objects.get(pk=resolved["objectRef"], owner_id=agent_run.user_id)
+        except UserLibraryObject.DoesNotExist:
+            raise KnowledgeError("knowledge_input_not_authorized", 403) from None
     try:
         link = SessionAssetLink.objects.select_related(
             "sourceObject", "userLibraryObject", "artifact"

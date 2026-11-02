@@ -52,12 +52,19 @@ def _schema(properties, required=()):
 
 
 TOOLS = (
-    types.Tool(name="list_materials", description="List materials explicitly attached and authorized for this run; not the user's entire library.", inputSchema=_schema({})),
+    types.Tool(name="list_materials", description="Discover authorized material metadata in library, attached, or all scope. query filters names, not body text. Use nextCursor to continue.", inputSchema=_schema({
+        "scope": {"enum": ["library", "attached", "all"]},
+        "query": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "folder": {"type": "string", "maxLength": 64},
+        "cursor": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+    })),
     types.Tool(name="read_material", description="Read an authorized material. Missing representations create durable processing operations; use get_operation for their status, then read again.", inputSchema=_schema({
         "input_ref": {"type": "string", "minLength": 1},
+        "delivery": {"enum": ["content", "execution_file"]},
         "offset": {"type": "integer", "minimum": 0},
         "limit": {"type": "integer", "minimum": 1, "maximum": 2000},
-    }, ("input_ref",))),
+    }, ("input_ref", "delivery"))),
     types.Tool(name="search_materials", description="Keyword search this run's authorized materials. Missing representations create durable processing operations; query their status, then search again.", inputSchema=_schema({
         "query": {"type": "string", "minLength": 1},
         "input_refs": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": True, "maxItems": 128},
@@ -83,15 +90,30 @@ def execute_tool(context, name, arguments):
     if name == "read_material_result":
         result = read_result(access, arguments["result_ref"], arguments["cursor"])
         return persist_receipt(access, call, name, result) if call is not None else result
+    if name == "list_materials":
+        from .material_discovery import list_materials
+        return list_materials(access, scope=arguments.get("scope", "all"), query=arguments.get("query"),
+                              folder=arguments.get("folder"), cursor=arguments.get("cursor"), limit=arguments.get("limit", 50))
+    if name == "read_material" and arguments.get("delivery") == "execution_file":
+        # Only the Host can report successful installation into the execution environment.
+        raise KnowledgeError("material_execution_delivery_requires_host", 409)
     declared = declared_inputs_for_run(access.agent_run)
     refs = [arguments["input_ref"]] if name == "read_material" else arguments.get("input_refs", list(declared))
-    if any(ref not in declared for ref in refs):
-        raise KnowledgeError("knowledge_input_not_authorized", 403)
-    bindings = [{"inputRef": ref, "representationId": representation_id(declared[ref]["inputIdentity"], access.spec_digest)} for ref in refs]
-    if name == "list_materials":
-        # Revalidate current source permissions and generations, not just the snapshot.
-        bind_inputs(access.agent_run, access.authorization_digest, bindings, access.spec_digest)
-        return {"items": [{"inputRef": ref, "displayName": declared[ref]["displayName"], "contentType": declared[ref]["contentType"], "sizeBytes": declared[ref]["sizeBytes"]} for ref in refs]}
+    bindings = []
+    for ref in refs:
+        if ref in declared:
+            identity = declared[ref]["inputIdentity"]
+        else:
+            from .library_materials import resolve_library_input, input_identity
+            from .assets import DeferredInputResolutionError
+            try:
+                library = resolve_library_input(access.agent_run, ref)
+            except DeferredInputResolutionError as error:
+                raise KnowledgeError(error.errorCode, 403) from error
+            if library is None:
+                raise KnowledgeError("knowledge_input_not_authorized", 403)
+            identity = input_identity(library[0])
+        bindings.append({"inputRef": ref, "representationId": representation_id(identity, access.spec_digest)})
     if name == "read_material":
         result = read_materials(access, bindings, offset=arguments.get("offset"), limit=arguments.get("limit"), full_window=True)
     elif name == "search_materials":

@@ -43,7 +43,7 @@ def input_storage_batch(agent_run, expected_authorization_digest: str):
     return resolve
 
 
-def _current_input(agent_run, input_ref: str, expected_authorization_digest: str, verified=None) -> dict:
+def verify_input_run(agent_run, expected_authorization_digest: str, verified=None):
     if not agent_run_membership_is_current(agent_run):
         raise DeferredInputBindingError("AgentRun WorkspaceMembership is no longer current")
     authorization = agent_run.authorization
@@ -68,6 +68,15 @@ def _current_input(agent_run, input_ref: str, expected_authorization_digest: str
             verified[:] = [deepcopy(candidate)]
     if not agent_run_binding_matches(authorization.payload, agent_run):
         raise DeferredInputBindingError("AgentRun authorization binding mismatch")
+    return authorization
+
+
+def _current_input(agent_run, input_ref: str, expected_authorization_digest: str, verified=None) -> dict:
+    authorization = verify_input_run(agent_run, expected_authorization_digest, verified)
+    from .library_materials import resolve_library_input
+    library = resolve_library_input(agent_run, input_ref)
+    if library is not None:
+        return {"resolvedInput": library[0], "contentSource": library[1]}
     declared = next(
         (
             item

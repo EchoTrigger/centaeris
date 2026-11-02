@@ -33,6 +33,7 @@ from app_core.deferred_input import (
 from app_core.models import Session, AgentRun
 from app_core.material_contract import KnowledgeError
 from app_core.runtime_contract import (
+    MAX_PROJECTED_INPUTS,
     agent_run_binding_matches,
     authorization_digest,
     require_opaque_ref,
@@ -731,12 +732,14 @@ def _workspace_advanced_by_agent_run(session: Session, frozen: dict, agent_run: 
 
 
 def _workspace_budget_fits(agent_run: AgentRun, expanded_size_bytes: int) -> bool:
+    from app_core.material_files import reserved_original_bytes
     inputs_size_bytes = sum(
         item["sizeBytes"] for item in agent_run.authorization.payload["assetRefs"]
     )
     return (
         expanded_size_bytes
         + inputs_size_bytes
+        + reserved_original_bytes(agent_run)
         + SESSION_WORKSPACE_RESTORE_OVERHEAD_BYTES
         <= agent_run.authorization.payload["environmentProfile"]["resources"]["workspaceBytes"]
     )
@@ -1273,6 +1276,9 @@ def _prepare_deferred_input_read(request):
                 str(body["inputRef"]),
                 str(body["authorizationDigest"]),
             )
+            if not any(item["inputRef"] == body["inputRef"] for item in agent_run.authorization.payload["assetRefs"]):
+                from app_core.library_materials import resolve_library_input
+                resolve_library_input(agent_run, str(body["inputRef"]), require_admission=True)
             if (
                 resolved_input["sourceVersion"] != body["sourceVersion"]
                 or resolved_input["sha256"] != body["sha256"]
@@ -1295,7 +1301,7 @@ def validate_projected_inputs(request):
             set(body) != {"schema", "agentRunId", "authorizationDigest", "inputs"}
             or body["schema"] != "runtime.projected_input.validate.v1"
             or not isinstance(body["inputs"], list)
-            or len(body["inputs"]) > 128
+            or len(body["inputs"]) > MAX_PROJECTED_INPUTS
         ):
             raise ValueError("projected_input_validation_invalid")
         expected_fields = {
