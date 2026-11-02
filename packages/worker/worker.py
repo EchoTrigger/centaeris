@@ -15,7 +15,6 @@ import urllib.parse
 import uuid
 import observations
 from contextlib import contextmanager
-from datetime import datetime
 
 RUNTIME_INTERNAL_URL = os.environ["RUNTIME_INTERNAL_URL"].rstrip("/")
 API_INTERNAL_URL = os.environ["API_INTERNAL_URL"].rstrip("/")
@@ -33,7 +32,7 @@ JOB_WAIT_FAILURE_BACKOFF_SECONDS = 1
 OUTBOX_POLL_INTERVAL_SECONDS = 1
 RECONCILE_INTERVAL_SECONDS = 5
 CONTROL_PAGE_LIMIT = 100
-WORKER_JOB_KINDS = ("agent_run.lifecycle", "worker.noop", "agent_work.return")
+WORKER_JOB_KINDS = ("agent_run.lifecycle", "worker.noop")
 CONTROL_HTTP_TIMEOUT_SECONDS = int(os.environ.get("RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS", "5"))
 if not 1 <= CONTROL_HTTP_TIMEOUT_SECONDS <= 1_000_000:
     raise ValueError("RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS must be between 1 and 1000000")
@@ -944,9 +943,6 @@ def _execute_claimed_job(job, lease_owner):
             if job["jobKind"] == "worker.noop":
                 output_refs = []
                 completed = True
-            elif job["jobKind"] == "agent_work.return":
-                output_refs = []
-                completed = execute_work_return_job(job, lease_owner, require_healthy_lease)
             else:
                 output_refs = []
                 completed = execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease)
@@ -985,37 +981,7 @@ def _execute_claimed_job(job, lease_owner):
             )
             fail_claimed_job(job, lease_owner, "agent_run_lifecycle_failed", False)
             return
-        if job["jobKind"] == "agent_work.return":
-            fail_claimed_job(job, lease_owner, reason, False)
-            return
         raise
-
-
-def execute_work_return_job(job, lease_owner, require_healthy_lease):
-    deadline = time.monotonic() + CONTROL_HTTP_TIMEOUT_SECONDS
-    prefix = "agent_work.return:"
-    identity = job["jobId"].removeprefix(prefix)
-    if (not job["jobId"].startswith(prefix) or not valid_runtime_job_id(identity)
-            or job.get("payloadRef") != "record:agent_work:" + identity
-            or job.get("idempotencyKey") != job["jobId"]):
-        raise RuntimeError("work_return_job_binding_invalid")
-    require_healthy_lease()
-    result = api_request("/internal/agent-work/returns/materialize",
-        {"schema": "workspace.agent_work.return_materialize.v1", "workAgentRunId": identity},
-        "work_return_materialize_unavailable", timeout=deadline - time.monotonic())
-    require_healthy_lease()
-    if (not isinstance(result, dict) or set(result) != {"schema", "disposition", "notice"}
-            or result["schema"] != "workspace.agent_work.return_materialized.v1"
-            or result["disposition"] not in {"delivered", "duplicate", "pending", "notWork"}):
-        raise RuntimeError("work_return_materialize_invalid")
-    if result["disposition"] in {"pending", "notWork"}:
-        if result["notice"] is not None:
-            raise RuntimeError("work_return_materialize_invalid")
-        yield_job(job["jobId"], lease_owner, now_ms() + AGENT_RUN_LIFECYCLE_RECHECK_MS, "work_return_pending")
-        return False
-    if result["notice"] is None:
-        raise RuntimeError("work_return_materialize_invalid")
-    return True
 
 
 def execute_next_job(slot_index):
@@ -1167,242 +1133,6 @@ class LifecycleReconciler:
         self.waiter_after = waiter_page_next(waiters, {"reconciled"}, self.waiter_after)
         return {"runtimeJobs": runtime, "runLifecycle": lifecycle, "waiters": waiters,
             **({'cleanupPending': cleanup_pending} if cleanup_pending is not None else {})}
-
-def work_cursor(value):
-    if value is None:
-        return None
-    if not isinstance(value, dict) or set(value) != {"insertedAt", "eventId"}:
-        raise RuntimeError("agent_work_discovery_cursor_invalid")
-    if not isinstance(value["eventId"], str) or not 1 <= len(value["eventId"]) <= 160 or not value["eventId"].strip():
-        raise RuntimeError("agent_work_discovery_cursor_invalid")
-    try:
-        timestamp = datetime.fromisoformat(value["insertedAt"])
-        if timestamp.utcoffset() is None:
-            raise ValueError
-    except (ValueError, TypeError):
-        raise RuntimeError("agent_work_discovery_cursor_invalid") from None
-    return timestamp, value["eventId"]
-
-
-class WorkRequestReconciler:
-    def __init__(self, stopped=None):
-        self.after = self.through = None
-        self.stopped = stopped or threading.Event()
-
-    def __call__(self):
-        if self.stopped.is_set():
-            return
-        deadline = time.monotonic() + RECONCILE_INTERVAL_SECONDS
-        page = api_request("/internal/agent-work/discover",
-            {"schema":"workspace.agent_work.discover.v1", "limit":CONTROL_PAGE_LIMIT,
-             "after":self.after, "through":self.through}, "agent_work_discovery_unavailable",
-            timeout=RECONCILE_INTERVAL_SECONDS)
-        if not isinstance(page, dict) or set(page) != {"schema", "entries", "through", "next"} or page["schema"] != "workspace.agent_work.discovered.v1":
-            raise RuntimeError("agent_work_discovery_invalid")
-        entries = page["entries"]
-        if not isinstance(entries, list) or len(entries) > CONTROL_PAGE_LIMIT:
-            raise RuntimeError("agent_work_discovery_invalid")
-        upper = work_cursor(page["through"])
-        previous = work_cursor(self.after)
-        if self.through is not None and work_cursor(self.through) != upper:
-            raise RuntimeError("agent_work_discovery_cursor_invalid")
-        for entry in entries:
-            if not isinstance(entry, dict) or set(entry) != {"cursor", "sourceEventId"}:
-                raise RuntimeError("agent_work_discovery_invalid")
-            current = work_cursor(entry["cursor"])
-            if current is None or upper is None or current > upper or previous is not None and current <= previous:
-                raise RuntimeError("agent_work_discovery_cursor_invalid")
-            if entry["sourceEventId"] is not None and entry["sourceEventId"] != entry["cursor"]["eventId"]:
-                raise RuntimeError("agent_work_discovery_invalid")
-            previous = current
-        next_cursor = work_cursor(page["next"])
-        if next_cursor is not None and (not entries or next_cursor != previous):
-            raise RuntimeError("agent_work_discovery_cursor_invalid")
-        self.through = page["through"]
-        for entry in entries:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or self.stopped.is_set():
-                return
-            # Advance every examined source, including errors/lost responses.
-            # No unprocessed tail is carried in memory across control rounds.
-            self.after = entry["cursor"]
-            if entry["sourceEventId"] is not None:
-                try:
-                    api_request("/internal/agent-work/materialize",
-                        {"schema":"workspace.agent_work.materialize.v1", "sourceEventId":entry["sourceEventId"]},
-                        "agent_work_recovery_pending", timeout=min(10, remaining))
-                except Exception as error:
-                    print(f"work recovery pending: {type(error).__name__}", file=sys.stderr, flush=True)
-        if page["next"] is None:
-            self.after = self.through = None
-
-
-def notice_cursor(value):
-    if value is None:
-        return None
-    if not isinstance(value, str) or re.fullmatch(r"work-return:[a-f0-9]{64}", value) is None:
-        raise RuntimeError("agent_work_consume_cursor_invalid")
-    return value
-
-
-class WorkReturnConsumer:
-    """Accept notices once; the same scan binds retained pending acceptances."""
-    def __init__(self, stopped=None):
-        self.after = self.through = None
-        self.stopped = stopped or threading.Event()
-
-    def __call__(self):
-        if self.stopped.is_set():
-            return
-        deadline = time.monotonic() + RECONCILE_INTERVAL_SECONDS
-        page = api_request("/internal/agent-work/returns/consume/discover",
-            {"schema": "workspace.agent_work.consume_discover.v1", "limit": CONTROL_PAGE_LIMIT,
-             "after": self.after, "through": self.through}, "agent_work_consume_discovery_unavailable",
-            timeout=RECONCILE_INTERVAL_SECONDS)
-        if (not isinstance(page, dict) or set(page) != {"schema", "entries", "through", "next"}
-                or page["schema"] != "workspace.agent_work.consume_discovered.v1"
-                or not isinstance(page["entries"], list) or len(page["entries"]) > CONTROL_PAGE_LIMIT):
-            raise RuntimeError("agent_work_consume_page_invalid")
-        upper, next_cursor = notice_cursor(page["through"]), notice_cursor(page["next"])
-        if self.through is not None and upper != self.through:
-            raise RuntimeError("agent_work_consume_cursor_invalid")
-        previous = self.after
-        for entry in page["entries"]:
-            if not isinstance(entry, dict) or set(entry) != {"cursor", "noticeId", "operationId"}:
-                raise RuntimeError("agent_work_consume_page_invalid")
-            current = notice_cursor(entry["cursor"])
-            if (current is None or upper is None or current > upper
-                    or previous is not None and current <= previous or entry["noticeId"] != current
-                    or not isinstance(entry["operationId"], str)
-                    or re.fullmatch(r"agent-work-consume:[a-f0-9]{64}", entry["operationId"]) is None):
-                raise RuntimeError("agent_work_consume_page_invalid")
-            previous = current
-        if next_cursor is not None and (not page["entries"] or next_cursor != previous):
-            raise RuntimeError("agent_work_consume_cursor_invalid")
-        self.through = upper
-        for entry in page["entries"]:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or self.stopped.is_set():
-                return
-            # Denied and lost responses advance only this scanned row. Later
-            # passes revisit unaccepted notices and accepted, unbound carriers.
-            self.after = entry["cursor"]
-            try:
-                response = api_request("/internal/agent-work/returns/consume",
-                    {"schema": "workspace.agent_work.consume.v1", "noticeId": entry["noticeId"],
-                     "operationId": entry["operationId"]}, "agent_work_consume_pending", timeout=min(10, remaining))
-                if (not isinstance(response, dict) or response.get("schema") != "workspace.agent_work.consumed.v1"
-                        or response.get("noticeId") != entry["noticeId"]):
-                    raise RuntimeError("agent_work_consume_response_invalid")
-                if response.get("disposition") == "accepted":
-                    operation = response.get("operation")
-                    if (set(response) != {"schema", "disposition", "noticeId", "attemptId", "operation"}
-                            or not isinstance(response["attemptId"], str) or not response["attemptId"].strip()
-                            or not isinstance(operation, dict)
-                            or not {"agentRunId", "turnId"} <= set(operation)):
-                        raise RuntimeError("agent_work_consume_response_invalid")
-                    run_id, turn_id = operation["agentRunId"], operation["turnId"]
-                    if ((run_id is None) != (turn_id is None)
-                            or run_id is not None and (not isinstance(run_id, str) or not run_id.strip()
-                                or not isinstance(turn_id, str) or not turn_id.strip())):
-                        raise RuntimeError("agent_work_consume_response_invalid")
-                else:
-                    raise RuntimeError("agent_work_consume_response_invalid")
-            except Exception as error:
-                print(f"work consume pending: {type(error).__name__}", file=sys.stderr, flush=True)
-        if next_cursor is None:
-            self.after = self.through = None
-
-
-class WorkReturnAudit:
-    """A shared, rate-limited repair page; Core owns per-work retries."""
-    def __init__(self, stopped=None):
-        self.stopped = stopped or threading.Event()
-
-    def __call__(self):
-        now = time.monotonic()
-        if self.stopped.is_set():
-            return
-        deadline = now + CONTROL_HTTP_TIMEOUT_SECONDS
-        work_deadline = now + CONTROL_HTTP_TIMEOUT_SECONDS * 0.8
-        page = api_request("/internal/agent-work/returns/audit/claim",
-            {"schema": "workspace.agent_work.return_audit.claim.v1", "limit": CONTROL_PAGE_LIMIT},
-            "work_return_audit_unavailable", timeout=deadline - time.monotonic())
-        if (not isinstance(page, dict) or page.get("schema") != "workspace.agent_work.return_audit.claimed.v1"
-                or page.get("disposition") not in {"idle", "claimed"}):
-            raise RuntimeError("work_return_audit_invalid")
-        if page["disposition"] == "idle":
-            if set(page) != {"schema", "disposition"}:
-                raise RuntimeError("work_return_audit_invalid")
-            return
-        if (set(page) != {"schema", "disposition", "leaseOwner", "after", "through", "next", "entries"}
-                or not valid_lease_owner(page["leaseOwner"])
-                or not isinstance(page["entries"], list) or len(page["entries"]) > CONTROL_PAGE_LIMIT):
-            raise RuntimeError("work_return_audit_invalid")
-        after = page["after"]
-        for cursor in (after, page["through"], page["next"]):
-            if cursor is not None and (not isinstance(cursor, str) or not 1 <= len(cursor) <= 64):
-                raise RuntimeError("work_return_audit_invalid")
-        previous = after
-        for entry in page["entries"]:
-            if (not isinstance(entry, dict) or set(entry) != {"cursor", "workAgentRunId", "materialized"}
-                    or not isinstance(entry["cursor"], str) or not 1 <= len(entry["cursor"]) <= 64
-                    or not isinstance(entry["workAgentRunId"], str) or not 1 <= len(entry["workAgentRunId"]) <= 64
-                    or type(entry["materialized"]) is not bool or page["through"] is None
-                    or entry["cursor"] > page["through"] or previous is not None and entry["cursor"] <= previous):
-                raise RuntimeError("work_return_audit_invalid")
-            previous = entry["cursor"]
-        if page["next"] is not None and (not page["entries"] or page["next"] != previous):
-            raise RuntimeError("work_return_audit_invalid")
-        for entry in page["entries"]:
-            if self.stopped.is_set() or time.monotonic() >= work_deadline:
-                break
-            if not entry["materialized"]:
-                try:
-                    result = api_request("/internal/agent-work/returns/schedule",
-                        {"schema": "workspace.agent_work.return_schedule.v1", "workAgentRunId": entry["workAgentRunId"]},
-                        "work_return_schedule_unavailable", timeout=work_deadline - time.monotonic())
-                    if (not isinstance(result, dict) or set(result) != {"schema", "disposition"}
-                            or result["schema"] != "workspace.agent_work.return_scheduled.v1"
-                            or result["disposition"] not in {"inserted", "existing", "delivered"}):
-                        raise RuntimeError("work_return_schedule_invalid")
-                except RuntimeError as error:
-                    if (getattr(error, "http_status", None) == 409
-                            and getattr(error, "http_error_code", None) == "agent_work_return_binding_rejected"):
-                        # This exact rejection precedes enqueue. The source stays
-                        # authoritative and is revisited on the next whole pass.
-                        print(f"work return audit rejected: run={entry['workAgentRunId']} status=409",
-                              file=sys.stderr, flush=True)
-                    else:
-                        # Authentication, unknown source and lost results cannot
-                        # move past work whose durable schedule is unconfirmed.
-                        print(f"work return audit pending: run={entry['workAgentRunId']} error={type(error).__name__}",
-                              file=sys.stderr, flush=True)
-                        break
-            after = entry["cursor"]
-        if self.stopped.is_set() or time.monotonic() >= deadline:
-            return
-        finished = api_request("/internal/agent-work/returns/audit/finish",
-            {"schema": "workspace.agent_work.return_audit.finish.v1", "leaseOwner": page["leaseOwner"],
-             "after": after, "complete": page["next"] is None and after == previous},
-            "work_return_audit_finish_unavailable", timeout=deadline - time.monotonic())
-        if finished != {"schema": "workspace.agent_work.return_audit.finished.v1", "disposition": "recorded"}:
-            raise RuntimeError("work_return_audit_finish_invalid")
-
-
-class WorkReturnReconciler:
-    """Use the existing return control thread with an independent budget per pass."""
-    def __init__(self, stopped=None):
-        self.publisher = WorkReturnAudit(stopped)
-        self.consumer = WorkReturnConsumer(stopped)
-
-    def __call__(self):
-        try:
-            self.publisher()
-        except Exception as error:
-            print(f"work return delivery pending: {type(error).__name__}", file=sys.stderr, flush=True)
-        self.consumer()
-
 
 def run_loop(operation, interval_seconds, stopped=None):
     while stopped is None or not stopped.is_set():
@@ -1587,16 +1317,6 @@ def run_worker_service():
             target=run_loop,
             args=(LifecycleReconciler(), RECONCILE_INTERVAL_SECONDS, stopped),
             name="workspace-reconciler",
-        ),
-        threading.Thread(
-            target=run_loop,
-            args=(WorkRequestReconciler(stopped), RECONCILE_INTERVAL_SECONDS, stopped),
-            name="workspace-work-reconciler",
-        ),
-        threading.Thread(
-            target=run_loop,
-            args=(WorkReturnReconciler(stopped), RECONCILE_INTERVAL_SECONDS, stopped),
-            name="workspace-work-return-publisher",
         ),
     ]
     job_threads = [
