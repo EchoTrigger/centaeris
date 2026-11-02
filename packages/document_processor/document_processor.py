@@ -686,7 +686,7 @@ def process(request_path: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="centaeris-process-") as directory:
         preview = None
         workbook = None
-        if suffix in TEXT_SUFFIXES:
+        if suffix in TEXT_SUFFIXES or request["contentType"] in {"text/plain", "text/markdown"}:
             pages = process_text(source)
         elif suffix == ".pdf" or request["contentType"] == "application/pdf":
             pages = process_pdf(source)

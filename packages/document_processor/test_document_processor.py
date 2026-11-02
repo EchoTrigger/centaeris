@@ -202,6 +202,59 @@ class DocumentProcessorTests(unittest.TestCase):
                 processor.sha256_bytes(b"first\nsecond"),
             )
 
+    def test_explicit_text_mime_processes_library_titles_without_rewriting_them(self):
+        for display_name, content_type in [
+            ("个人库笔记", "text/markdown"),
+            ("会议记录 v1.0", "text/markdown"),
+            ("plain input", "text/plain"),
+            ("notes.data", "text/plain"),
+        ]:
+            with self.subTest(display_name=display_name, content_type=content_type):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    source = root / "source"
+                    output = root / "output"
+                    request = root / "request.json"
+                    source.write_text("正文第一行\nsecond line", encoding="utf-8")
+                    request.write_text(json.dumps({
+                        "schema": "knowledge.processing.request.v1", "inputPath": str(source),
+                        "displayName": display_name, "contentType": content_type,
+                        "outputDirectory": str(output),
+                    }), encoding="utf-8")
+
+                    processor.process(request)
+
+                    canonical = (output / "canonical.md").read_text(encoding="utf-8")
+                    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+                    self.assertEqual(canonical, f"# {display_name}\n\n## Page 1\n\n正文第一行\nsecond line\n\n")
+                    self.assertEqual(manifest["pages"][0]["pageText"]["route"], "nativeText")
+                    self.assertEqual(manifest["pages"][0]["pageText"]["text"], "正文第一行\nsecond line")
+
+    def test_unknown_mime_and_zip_remain_unsupported_and_text_stays_strict_utf8(self):
+        for display_name, content_type, content, error in [
+            ("unknown", "application/octet-stream", b"unknown data", "unsupported document type"),
+            ("unknown", "text/plain-other", b"unknown data", "unsupported document type"),
+            ("archive.zip", "application/zip", b"PK\x05\x06" + b"\0" * 18, "unsupported document type"),
+            ("plain input", "text/plain", b"\xff\xfe\x00", "text input is not valid UTF-8"),
+        ]:
+            with self.subTest(display_name=display_name, content_type=content_type):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    source = root / "source"
+                    output = root / "output"
+                    request = root / "request.json"
+                    source.write_bytes(content)
+                    request.write_text(json.dumps({
+                        "schema": "knowledge.processing.request.v1", "inputPath": str(source),
+                        "displayName": display_name, "contentType": content_type,
+                        "outputDirectory": str(output),
+                    }), encoding="utf-8")
+
+                    with self.assertRaisesRegex(processor.ProcessingError, error):
+                        processor.process(request)
+
+                    self.assertEqual(list(output.iterdir()), [])
+
     def test_real_text_pdf_keeps_native_text_and_stable_page_numbers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
