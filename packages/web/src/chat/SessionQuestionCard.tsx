@@ -16,7 +16,8 @@ export function SessionQuestionCard({ question, onAnswer }: Readonly<{
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const submitting = useRef(false);
-  const answer = [selected === null ? "" : `${selected + 1}. ${question.options[selected]}`, text.trim()].filter(Boolean).join("\n\n");
+  const answerFor = (index: number | null) => [index === null ? "" : `${index + 1}. ${question.options[index]}`, text.trim()].filter(Boolean).join("\n\n");
+  const answer = answerFor(selected);
   async function submit(value: SessionQuestionAnswer) {
     if (submitting.current) return;
     submitting.current = true;
@@ -38,7 +39,11 @@ export function SessionQuestionCard({ question, onAnswer }: Readonly<{
     <p className="sessionQuestionHeading">{question.question}</p>
     <div className="sessionQuestionOptions" aria-label={t("sessionQuestion.choose")}>
       {question.options.map((option, index) => <button type="button" className="sessionQuestionOption" key={index}
-        disabled={sending} aria-pressed={selected === index} onClick={() => setSelected(value => value === index ? null : index)}>
+        disabled={sending} aria-pressed={selected === index} onClick={() => {
+          if (submitting.current) return;
+          setSelected(index);
+          void submit({ action: "answer", answer: answerFor(index) });
+        }}>
         <span className="sessionQuestionNumber">{index + 1}</span>{" "}<span className="sessionQuestionOptionCopy">{option}</span><ArrowRight aria-hidden="true" />
       </button>)}
     </div>

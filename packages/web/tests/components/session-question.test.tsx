@@ -12,7 +12,6 @@ test("collapse only hides the question and preserves its answer draft", async ()
   const user = userEvent.setup();
   const answer = vi.fn();
   render(<SessionQuestionCard question={question} onAnswer={answer} />);
-  await user.click(screen.getByRole("button", { name: /1 Summary/ }));
   await user.type(screen.getByRole("textbox"), "Include evidence");
   await user.click(screen.getByRole("button", { name: "sessionQuestion.collapse" }));
   expect(screen.queryByRole("textbox")).toBeNull();
@@ -21,7 +20,27 @@ test("collapse only hides the question and preserves its answer draft", async ()
   expect(screen.getByRole("textbox").getAttribute("disabled")).toBeNull();
   expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Include evidence");
   await user.click(screen.getByRole("button", { name: "sessionQuestion.send" }));
-  expect(answer).toHaveBeenCalledWith({ action: "answer", answer: "1. Summary\n\nInclude evidence" });
+  expect(answer).toHaveBeenCalledWith({ action: "answer", answer: "Include evidence" });
+});
+
+test("clicking an option immediately submits its number and existing supplemental text once", async () => {
+  const user = userEvent.setup();
+  let resolve!: () => void;
+  const answer = vi.fn(() => new Promise<void>(done => { resolve = done; }));
+  render(<SessionQuestionCard question={question} onAnswer={answer} />);
+  await user.type(screen.getByRole("textbox"), "Include evidence");
+  const selected = screen.getByRole("button", { name: /2 Task list/ }) as HTMLButtonElement;
+  await user.dblClick(selected);
+  expect(answer).toHaveBeenCalledTimes(1);
+  expect(answer).toHaveBeenCalledWith({ action: "answer", answer: "2. Task list\n\nInclude evidence" });
+  expect(selected.getAttribute("aria-pressed")).toBe("true");
+  expect(selected.disabled).toBe(true);
+  await user.click(screen.getByRole("button", { name: /1 Summary/ }));
+  await user.click(screen.getByRole("button", { name: "sessionQuestion.sending" }));
+  await user.click(screen.getByRole("button", { name: "sessionQuestion.skip" }));
+  expect(answer).toHaveBeenCalledTimes(1);
+  expect(selected.getAttribute("aria-pressed")).toBe("true");
+  await act(async () => resolve());
 });
 
 test("sending prevents duplicate answers and skip is an explicit separate action", async () => {
@@ -47,9 +66,15 @@ test("a failed answer keeps the question and permits retry", async () => {
   const user = userEvent.setup();
   const answer = vi.fn().mockRejectedValueOnce(new Error("Disconnected")).mockResolvedValue(undefined);
   render(<SessionQuestionCard question={question} onAnswer={answer} />);
+  await user.type(screen.getByRole("textbox"), "Include evidence");
   await user.click(screen.getByRole("button", { name: /2 Task list/ }));
-  await user.click(screen.getByRole("button", { name: "sessionQuestion.send" }));
+  expect(answer).toHaveBeenCalledTimes(1);
   expect(screen.getByRole("alert").textContent).toBe("sessionQuestion.failed");
-  await user.click(screen.getByRole("button", { name: "sessionQuestion.send" }));
+  expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Include evidence");
+  expect(screen.getByRole("button", { name: /2 Task list/ }).getAttribute("aria-pressed")).toBe("true");
+  await user.click(screen.getByRole("button", { name: /2 Task list/ }));
   expect(answer).toHaveBeenCalledTimes(2);
+  expect(answer).toHaveBeenNthCalledWith(1, { action: "answer", answer: "2. Task list\n\nInclude evidence" });
+  expect(answer).toHaveBeenNthCalledWith(2, { action: "answer", answer: "2. Task list\n\nInclude evidence" });
+  expect(screen.queryByRole("alert")).toBeNull();
 });
