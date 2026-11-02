@@ -155,3 +155,59 @@ print('WORKSPACE_RECOVERY_READ '+hashlib.sha256(data).hexdigest())
 """
         arguments = [output_directory, expected['filename'], expected['sha256'][7:], sample['phase']]
     return shlex.join(['python3', '-c', program, *arguments])
+
+
+TERMINAL_MARKER = 'PERF_TERMINAL_WORKSPACE '
+
+
+def terminal_sample(text, model):
+    if not isinstance(text, str) or not text.startswith(TERMINAL_MARKER):
+        raise ValueError('terminal workspace fixture marker required')
+    sample = json.loads(text[len(TERMINAL_MARKER):])
+    retained = model == 'perf-terminal-retained'
+    fields = {'schema', 'caseId', 'phase'} | ({'oracleCommand', 'oracleArguments'} if retained else set())
+    if (not isinstance(sample, dict) or set(sample) != fields
+            or sample['schema'] != 'workspace.terminal.fixture.v1'
+            or not isinstance(sample['caseId'], str) or not re.fullmatch('[a-f0-9]{32}', sample['caseId'])
+            or sample['phase'] not in ({'oracleHold', 'oracleRead'} if retained else {'writeHold', 'writeFail', 'read'})):
+        raise ValueError('strict terminal workspace fixture required')
+    if retained and (not isinstance(sample['oracleCommand'], str)
+            or not 1 <= len(sample['oracleCommand']) <= 16384
+            or not isinstance(sample['oracleArguments'], list)
+            or len(sample['oracleArguments']) not in (0, 4)
+            or any(not isinstance(value, str) or len(value) > 16384 for value in sample['oracleArguments'])
+            or (sample['phase'] == 'oracleHold' and sample['oracleArguments'][:2] != ['-u', '-c'])
+            or (sample['phase'] == 'oracleRead' and sample['oracleArguments'])):
+        raise ValueError('bounded retained oracle fixture required')
+    return sample
+
+
+def terminal_action(sample, rounds):
+    """Bounded actual tool intentions, followed by cancellation hold or HTTP failure."""
+    phase = sample['phase']
+    if phase in {'writeHold', 'writeFail', 'read'}:
+        if rounds == 0:
+            recovery = {'schema': 'workspace.recovery.fixture.v1', 'caseId': sample['caseId'],
+                        'phase': 'read' if phase == 'read' else 'write'}
+            return 'bash', {'command': recovery_command(recovery), 'timeout_ms': 10000}
+        if phase != 'read':
+            return ('hold' if phase == 'writeHold' else 'fail'), None
+        path = '/mnt/data/' + recovery_expectation(sample['caseId'])['filename']
+        limit = 2
+    else:
+        if phase == 'oracleHold':
+            if rounds == 0:
+                return 'background_task_start', {'program': 'python3', 'args': sample['oracleArguments'],
+                                                  'cwd': '/mnt/data', 'timeout_ms': 240000}
+            if rounds == 1:
+                return 'bash', {'command': sample['oracleCommand'], 'timeout_ms': 20000}
+            return 'hold', None
+        if rounds == 0:
+            return 'bash', {'command': sample['oracleCommand'], 'timeout_ms': 20000}
+        path = '/mnt/data/runsc-rotation-' + sample['caseId'] + '-A.txt'
+        limit = 2
+    if rounds == 1:
+        return 'publish_artifact', {'path': path}
+    if rounds == limit:
+        return 'final', None
+    raise ValueError('terminal workspace tool budget exceeded')
