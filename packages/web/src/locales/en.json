@@ -940,5 +940,7 @@
   "workspaceProfile.save": "Save changes",
   "workspaceProfile.saving": "Saving...",
   "workspaceProfile.saved": "Workspace updated.",
-  "workspaceProfile.saveFailed": "Unable to save workspace changes. Try again."
+  "workspaceProfile.saveFailed": "Unable to save workspace changes. Try again.",
+  "materialTool.executionFileAction": "Fetch original",
+  "materialTool.executionFileReady": "Original available for execution"
 }

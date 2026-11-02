@@ -261,9 +261,15 @@ function TranscriptToolNode({ store, call, operation, outputRef, status }: Reado
   const kind = opText(operation.kind) || opText(operation.toolName) || opText(call.toolName);
   const isCommand = kind === "command" || kind === "bash" || Boolean(command);
   const summary = operationInlineSummary(operation, call);
-  const category = toolGroupIconCategory([{ toolName: opText(operation.toolName) || opText(call.toolName), description: "", target: "", status: status === "running" ? "running" : failed ? "error" : "completed" }]) ?? "command";
+  const toolName = opText(operation.toolName) || opText(call.toolName);
+  const delivery = opText(input?.delivery);
+  const executionFile = toolName === "read_material" && delivery === "execution_file";
+  const category = toolGroupIconCategory([{ toolName, delivery, description: "", target: "", status: status === "running" ? "running" : failed ? "error" : "completed" }]) ?? "command";
   const ActivityIcon = TOOL_GROUP_ICONS[category];
-  const title = `${t(`toolGroup.${category}.${status === "running" ? "running" : "completed"}`)} ${summary}`;
+  const executionFileReady = status === "completed" && !["failed", "denied", "aborted"].includes(opText(operation.resultState));
+  const title = executionFile
+    ? t(executionFileReady ? "materialTool.executionFileReady" : "materialTool.executionFileAction")
+    : `${t(`toolGroup.${category}.${status === "running" ? "running" : "completed"}`)} ${summary}`;
   const diff = opText(operation.diffPreview);
   const text = opText(operation.modelContent) || opText(operation.outputPreview);
   const error = opText(operation.error);
@@ -349,6 +355,7 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
         sourceSequence: block.orderKey.sourceSequence,
         callId,
         call: (record?.call ?? {}) as Record<string, unknown>,
+        resultState: opText(record?.result?.resultState),
         operations: (record?.operations ?? []) as readonly Record<string, unknown>[],
         outputRef: contentReference(body.outputRef),
         detailSourceEventId: record?.previewTruncated ? opText(record.detailSourceEventId) : "",
@@ -377,7 +384,7 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
                     <TranscriptToolNode
                       store={store}
                       call={{ ...entry.call, toolName: opText(entry.body.toolName) }}
-                      operation={{ callId: entry.callId, toolName: opText(entry.body.toolName), text: opText(entry.body.summary) }}
+                      operation={{ callId: entry.callId, toolName: opText(entry.body.toolName), text: opText(entry.body.summary), resultState: entry.resultState }}
                       outputRef={entry.outputRef}
                       status={entry.unconfirmed ? "unconfirmed" : (entry.body.status === "queued" ? "running" : entry.body.status) as ToolDisplayStatus}
                       key={entry.callId}

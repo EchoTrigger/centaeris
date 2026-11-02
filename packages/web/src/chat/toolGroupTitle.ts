@@ -5,6 +5,7 @@ export type ToolGroupOperation = Readonly<{
   description: string;
   target: string;
   status: ToolGroupOperationStatus;
+  delivery?: string;
 }>;
 
 export type ToolGroupCategory =
@@ -21,6 +22,7 @@ type Translate = (key: string, options?: Record<string, unknown>) => string;
 const TOOL_CATEGORIES: Record<string, ToolGroupCategory> = {
   bash: "command",
   read: "read",
+  read_material: "read",
   write: "edit",
   edit: "edit",
   publish_artifact: "publishArtifact",
@@ -41,15 +43,16 @@ export const TOOL_GROUP_CATEGORY_ORDER: readonly ToolGroupCategory[] = [
   "taskOutput",
 ];
 
-function toolCategory(toolName: string): ToolGroupCategory {
-  return TOOL_CATEGORIES[toolName] ?? "command";
+function toolCategory(operation: ToolGroupOperation): ToolGroupCategory {
+  if (operation.toolName === "read_material" && operation.delivery === "execution_file") return "command";
+  return TOOL_CATEGORIES[operation.toolName] ?? "command";
 }
 
 // The group header icon is the first category present in display order.
 export function toolGroupIconCategory(
   operations: readonly ToolGroupOperation[],
 ): ToolGroupCategory | null {
-  const present = new Set(operations.map((operation) => toolCategory(operation.toolName)));
+  const present = new Set(operations.map(toolCategory));
   return TOOL_GROUP_CATEGORY_ORDER.find((category) => present.has(category)) ?? null;
 }
 
@@ -67,7 +70,7 @@ export function formatToolGroupTitle(
   if (operations.length === 0) return t("toolGroup.unknown");
   if (operations.length === 1) {
     const operation = operations[0];
-    const category = toolCategory(operation.toolName);
+    const category = toolCategory(operation);
     if (category === "command" && operation.description) return operation.description;
     if ((category === "read" || category === "edit") && operation.target) {
       return `${t(`toolGroup.${category}.${verbStatus(operation.status)}`)} ${operation.target}`;
@@ -78,7 +81,7 @@ export function formatToolGroupTitle(
   }
   const groups = new Map<ToolGroupCategory, { count: number; status: ToolGroupOperationStatus }>();
   for (const operation of operations) {
-    const category = toolCategory(operation.toolName);
+    const category = toolCategory(operation);
     const existing = groups.get(category);
     if (existing === undefined) {
       groups.set(category, { count: 1, status: operation.status });

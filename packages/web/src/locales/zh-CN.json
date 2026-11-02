@@ -940,5 +940,7 @@
   "workspaceProfile.save": "保存更改",
   "workspaceProfile.saving": "保存中…",
   "workspaceProfile.saved": "工作区已更新。",
-  "workspaceProfile.saveFailed": "无法保存工作区更改，请重试。"
+  "workspaceProfile.saveFailed": "无法保存工作区更改，请重试。",
+  "materialTool.executionFileAction": "取用原件",
+  "materialTool.executionFileReady": "原件已可供执行处理"
 }

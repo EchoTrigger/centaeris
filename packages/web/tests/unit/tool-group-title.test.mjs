@@ -37,6 +37,12 @@ test("unknown tools are treated as commands without an external-tool category", 
   assert.doesNotMatch(formatToolGroupTitle(operations, translator("en")), /tool/i);
 });
 
+test("material content reads use the read category while original-file delivery does not claim a content read", () => {
+  assert.equal(toolGroupIconCategory([operation("read_material", "completed", { delivery: "content" })]), "read");
+  assert.equal(toolGroupIconCategory([operation("read_material", "completed", { delivery: "execution_file" })]), "command");
+  assert.equal(formatToolGroupTitle([operation("read_material", "completed", { delivery: "content" })], translator("en")), "Read 1 file");
+});
+
 test("the published-artifact tool keeps its own category", () => {
   const operations = [operation("publish_artifact"), operation("bash")];
   assert.equal(formatToolGroupTitle(operations, translator("en")), "Published 1 artifact, Ran 1 command");
