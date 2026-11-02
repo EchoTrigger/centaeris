@@ -5171,7 +5171,10 @@ fn provider_response_was_interrupted(error: &str) -> bool {
 }
 
 fn public_agent_failure_reason<'a>(internal_error: &'a str, transition_reason: &'a str) -> &'a str {
-    if let Some(reason) = internal_error.strip_prefix("read AGENTS.md failed: ") {
+    if let Some(reason) = internal_error
+        .strip_prefix("read AGENTS.md failed: ")
+        .or_else(|| internal_error.strip_prefix("resolve execution model input image failed: "))
+    {
         if centaeris_core::execution::environment_task_capacity_rejection(reason) {
             return reason;
         }
@@ -8416,41 +8419,50 @@ mod tests {
 
     #[test]
     fn helper_failures_keep_rpc_stage_through_public_terminal() {
-        for (detail, reason, message) in [
+        for (internal, reason, message) in [
             (
-                "execution input rejected: task_journal_capacity; the command was already started",
+                "read AGENTS.md failed: execution input rejected: task_journal_capacity; the command was already started",
                 "execution_input_rejected",
                 "input was not accepted",
             ),
             (
-                "execution start outcome is unknown; do not repeat the operation",
+                "read AGENTS.md failed: execution start outcome is unknown; do not repeat the operation",
                 "execution_start_unknown",
                 "start outcome is unknown",
             ),
             (
-                "execution input outcome is unknown; do not repeat the operation",
+                "read AGENTS.md failed: execution input outcome is unknown; do not repeat the operation",
                 "execution_input_unknown",
                 "input delivery is unconfirmed",
             ),
             (
-                "execution query outcome is unknown; do not repeat the operation",
+                "read AGENTS.md failed: execution query outcome is unknown; do not repeat the operation",
                 "execution_query_unknown",
                 "result could not be confirmed",
             ),
             (
-                "execution output unavailable; do not repeat the command",
+                "read AGENTS.md failed: execution output unavailable; do not repeat the command",
                 "execution_output_unavailable",
                 "output is unavailable",
             ),
             (
+                "read AGENTS.md failed: task_journal_capacity",
                 "task_journal_capacity",
+                "not started",
+            ),
+            (
+                "resolve execution model input image failed: task_output_capacity",
+                "task_output_capacity",
+                "not started",
+            ),
+            (
+                "resolve execution model input image failed: task_journal_capacity",
                 "task_journal_capacity",
                 "not started",
             ),
         ] {
-            let internal = format!("read AGENTS.md failed: {detail}");
             assert_eq!(
-                public_agent_failure_reason(&internal, "core_run_failed"),
+                public_agent_failure_reason(internal, "core_run_failed"),
                 reason
             );
             let start = agent_run_start();

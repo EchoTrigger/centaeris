@@ -32,6 +32,12 @@ fn classify_error(error: &str) -> &str {
     if error == "cleanup execution environment lost" {
         return "cleanup_execution_environment_lost";
     }
+    if let Some(reason) = error
+        .strip_prefix("resolve execution model input image failed: ")
+        .filter(|reason| centaeris_core::execution::environment_task_capacity_rejection(reason))
+    {
+        return reason;
+    }
     [
         "execution activity changed during workspace snapshot collection",
         "snapshot manifest length is invalid",
@@ -207,6 +213,22 @@ mod tests {
             ),
             (
                 "cleanup execution environment lost: PRIVATE_TOKEN /private/path",
+                "unclassified",
+            ),
+            (
+                "resolve execution model input image failed: task_output_capacity",
+                "task_output_capacity",
+            ),
+            (
+                "resolve execution model input image failed: task_journal_capacity",
+                "task_journal_capacity",
+            ),
+            (
+                "resolve execution model input image failed: task_output_capacity: PRIVATE_TOKEN /private/path",
+                "unclassified",
+            ),
+            (
+                "resolve execution model input image failed: task_journal_capacity: PRIVATE_TOKEN /private/path",
                 "unclassified",
             ),
         ] {

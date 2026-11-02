@@ -1,4 +1,4 @@
-//! Wait only after a definitive rejection of an original, unaccepted Start.
+//! Wait for occupied execution slots, preserving the original unaccepted Start.
 use std::time::Duration;
 
 pub(super) fn start<T>(
@@ -10,9 +10,10 @@ pub(super) fn start<T>(
     loop {
         match attempt() {
             Ok(value) => return Ok(value),
-            Err(error)
-                if error == "environment_host_busy"
-                    || centaeris_core::execution::environment_task_capacity_rejection(&error) => {}
+            // A definitive rejection proves only that this RPC was not accepted.
+            // Retained output/history budgets need consumption or Run closure;
+            // waiting here cannot provide either while this Run owns the slot.
+            Err(error) if matches!(error.as_str(), "environment_host_busy" | "task_capacity") => {}
             Err(error) => return Err(error),
         }
         let mut remaining = [100, 250, 500, 1000][backoff];
