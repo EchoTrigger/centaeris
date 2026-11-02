@@ -222,7 +222,7 @@ export function createRouter() {
                   children: [
                     { path: "app", element: <></> },
                     { path: "sessions/:sessionId", element: <></> },
-                    ...["preferences", "security", "general", "members", "groups", "plugins", "models", "platform-models", "global-plugins", "workspace-resources", "environment"].map((section) => ({ path: `settings/${section}`, Component: SettingsRoute })),
+                    ...["preferences", "security", "general", "workspace-profile", "members", "groups", "plugins", "models", "platform-models", "global-plugins", "workspace-resources", "environment"].map((section) => ({ path: `settings/${section}`, Component: SettingsRoute })),
                   ],
                 },
                 { path: "trash/sessions/:sessionId", Component: TrashSessionRoute },

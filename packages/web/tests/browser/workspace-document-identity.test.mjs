@@ -22,7 +22,10 @@ test("Workspace tab persists across Agent, Session and settings navigation and r
         await waitFor(() => evaluate("Boolean(document.querySelector('button'))"), "identity controls");
         const original = await identity();
         await click("Open workspace");
-        const research = { title: "Research workspace", icons: [{ href: "/centaeris-mark.png", type: "image/png" }], apple: "/centaeris-mark.png" };
+        const initialHref = (await identity()).icons[0].href;
+        assert.ok(initialHref.startsWith("data:image/svg+xml,"));
+        assert.ok(decodeURIComponent(initialHref).includes(">R</text>"));
+        const research = { title: "Research workspace", icons: [{ href: initialHref, type: "image/svg+xml" }], apple: "/centaeris-mark.png" };
         assert.deepEqual(await identity(), research);
         for (const page of ["Second Agent", "Session", "Settings", "Renamed Agent with custom avatar", "First Agent"]) {
           await click(page);
@@ -30,7 +33,11 @@ test("Workspace tab persists across Agent, Session and settings navigation and r
           assert.deepEqual(await identity(), research, `${page} keeps the Workspace tab identity`);
         }
         await click("Rename workspace"); assert.deepEqual(await identity(), { ...research, title: "Renamed workspace" });
-        await click("Switch workspace"); assert.deepEqual(await identity(), { ...research, title: "Build workspace" });
+        await click("Switch workspace");
+        const build = await identity();
+        assert.equal(build.title, "Build workspace");
+        assert.ok(decodeURIComponent(build.icons[0].href).includes(">B</text>"));
+        assert.equal(build.icons.length, 1);
         await click("Leave workspace"); assert.deepEqual(await identity(), original);
         await click("Open workspace"); assert.deepEqual(await identity(), research);
         await click("Leave workspace"); assert.deepEqual(await identity(), original);

@@ -4,7 +4,7 @@ import { useWorkspaceDocumentIdentity } from "../../src/shell/useWorkspaceDocume
 
 if (new URLSearchParams(location.search).has("withoutIcon")) document.querySelector('link[rel="icon"]')!.remove();
 function Workspace({ id, name }: { id: string; name: string }) {
-  useWorkspaceDocumentIdentity({ id, name });
+  useWorkspaceDocumentIdentity({ id, name, avatarUrl: null });
   const [page, setPage] = useState("First Agent");
   return <><h1>{page}</h1>{["First Agent", "Second Agent", "Session", "Settings", "Renamed Agent with custom avatar"].map(label =>
     <button key={label} type="button" onClick={() => setPage(label)}>{label}</button>)}</>;

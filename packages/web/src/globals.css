@@ -813,6 +813,16 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .accountSecurityActions button { min-width: 92px; height: 34px; border: 0; border-radius: 6px; background: var(--solid-surface); color: var(--solid-text); padding: 0 14px; font: inherit; font-size: 11px; font-weight: 600; }
 .accountSecurityActions button:hover:not(:disabled) { background: var(--solid-surface); }
 .accountSecurityActions button:disabled { background: var(--surface-container); cursor: default; }
+.workspaceProfileAvatarRow { display: flex; align-items: center; gap: 16px; }
+.workspaceProfileAvatar.shWsAvatar { width: 64px; height: 64px; font-size: 28px; border-radius: 10px; }
+.workspaceProfileAvatarRow strong, .workspaceProfileAvatarRow small { display: block; }
+.workspaceProfileAvatarRow strong { font-size: 12px; }
+.workspaceProfileAvatarRow small { margin-top: 5px; color: var(--process-text); font-size: 11px; }
+.workspaceProfileAvatarActions { display: flex; gap: 12px; margin-top: 10px; }
+.workspaceProfileAvatarActions button { padding: 0; border: 0; background: transparent; color: var(--on-surface); font: inherit; font-size: 11px; cursor: pointer; }
+.workspaceProfileAvatarActions button:disabled { opacity: .5; cursor: default; }
+.workspaceProfileActions { gap: 8px; }
+.workspaceProfileActions button[type="button"] { background: var(--surface-container); color: var(--on-surface); }
 .preferenceSettings { width: min(900px, calc(100% - 88px)); margin: 0 auto; padding: 42px 0 72px; }
 .preferenceSettings > section > h1 { margin: 0; border-bottom: 1px solid var(--outline-variant); color: var(--on-surface); padding: 0 0 17px; font-size: 18px; font-weight: 600; letter-spacing: -.015em; }
 .preferenceRow { display: flex; min-height: 96px; align-items: center; justify-content: space-between; gap: 32px; cursor: pointer; }

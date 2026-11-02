@@ -238,6 +238,7 @@ class NinjaContractTests(TestCase):
     def test_ordinary_public_json_operations_publish_success_schemas(self):
         schema = api.get_openapi_schema()
         raw_response_paths = {
+            "/api/workspaces/{workspace_id}/avatar/{digest}",
             "/api/agents/{agent_id}/avatar",
             "/api/agent-definitions/{definition_id}/avatar",
             "/api/sso/{provider_id}/callback",
@@ -420,6 +421,7 @@ class NinjaContractTests(TestCase):
         leaked_projection = {
             "id": str(workspace.id),
             "name": workspace.name,
+            "avatarUrl": None,
             "description": "",
             "status": "active",
             "role": "member",

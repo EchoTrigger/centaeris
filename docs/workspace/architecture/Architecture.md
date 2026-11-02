@@ -64,8 +64,8 @@ files, environment binding, active Run and durable operation receipts retain
 the Session identity. The browser opens ordinary conversations at
 `/w/{workspaceId}/sessions/{sessionId}`; `/w/{workspaceId}/app` starts a new
 conversation. Workspace layout owns the browser title and favicon: the title
-uses the Workspace name and the icon remains the platform mark across Session
-and settings navigation.
+uses the Workspace name and the icon uses its avatar, or its name's first
+character when no avatar is set, across Session and settings navigation.
 
 Each message submission explicitly selects a currently available
 Workspace model through `modelConfigRef` and an optional `thinkingMode`.

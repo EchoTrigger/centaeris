@@ -924,5 +924,18 @@
   "sessionQuestion.skip": "Skip",
   "sessionQuestion.send": "Send",
   "sessionQuestion.sending": "Sending...",
-  "sessionQuestion.failed": "Unable to send your answer. Try again."
+  "sessionQuestion.failed": "Unable to send your answer. Try again.",
+  "workspaceProfile.title": "Basic information",
+  "workspaceProfile.settings": "Workspace settings",
+  "workspaceProfile.name": "Workspace name",
+  "workspaceProfile.avatar": "Workspace avatar",
+  "workspaceProfile.avatarHint": "PNG, JPG or WebP, up to 1 MiB.",
+  "workspaceProfile.upload": "Upload avatar",
+  "workspaceProfile.remove": "Remove avatar",
+  "workspaceProfile.avatarInvalid": "Choose a PNG, JPG or WebP image up to 1 MiB.",
+  "workspaceProfile.avatarReadFailed": "Unable to read this image. Choose it again.",
+  "workspaceProfile.save": "Save changes",
+  "workspaceProfile.saving": "Saving...",
+  "workspaceProfile.saved": "Workspace updated.",
+  "workspaceProfile.saveFailed": "Unable to save workspace changes. Try again."
 }

@@ -37,7 +37,7 @@ window.fetch = async (input, options = {}) => {
   return json(url.pathname.endsWith("/note") ? document : { object: document.object });
 };
 const router = createMemoryRouter([{ id: "authenticated", loader: () => ({ user: { id: "note-browser-owner", email: "fixture", isStaff: false, isSuperuser: false } }), children: [
-  { id: "workspace", path: "/w/fixture", loader: () => ({ workspace: { id: "fixture", name: "Notes", role: "member" }, notes: [] }), children: [
+  { id: "workspace", path: "/w/fixture", loader: () => ({ workspace: { id: "fixture", name: "Notes", role: "member", avatarUrl: null }, notes: [] }), children: [
     { path: "library/:libraryObjectId", Component: LibraryObjectRoute },
   ] },
 ] }], { initialEntries: ["/w/fixture/library/browser-note"] });

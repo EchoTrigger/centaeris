@@ -17,6 +17,7 @@ import {
   Plus,
   Search,
   SlidersHorizontal,
+  Settings2,
   SquarePen,
   Trash2,
   Upload,
@@ -24,6 +25,7 @@ import {
 } from "lucide-react";
 import { apiJson, apiResponse, clearCsrfToken } from "../api";
 import { useModalDialog } from "../components/useModalDialog";
+import { WorkspaceAvatar } from "../components/WorkspaceAvatar";
 import { SearchOverlay } from "./SearchOverlay";
 import { TrashPopover } from "./TrashPopover";
 
@@ -65,27 +67,28 @@ function WorkspaceHeader({ workspace, workspaces, user, logoutBusy, logoutError,
     <div className="shWs">
       <details className="shWsMenu" ref={detailsRef}>
         <summary className="shWsButton" role="button" aria-label={t("shellSidebar.valueWorkspaceMenu", { value1: workspace.name })}>
-          <span className="shWsAvatar" aria-hidden="true">{workspace.name.slice(0, 1)}</span>
+          <WorkspaceAvatar workspace={workspace} />
           <span className="shWsName">{workspace.name}</span>
           <ChevronDown aria-hidden="true" />
         </summary>
         <nav className="shWsMenuPopover" aria-label={t("shellSidebar.valueWorkspaceActions", { value1: workspace.name })}>
           <div className="shWsMenuIdentity">
-            <span className="shWsAvatar" aria-hidden="true">{workspace.name.slice(0, 1)}</span>
+            <WorkspaceAvatar workspace={workspace} />
             <span><strong>{workspace.name}</strong><small>{WORKSPACE_ROLE_LABELS()[workspace.role]}</small></span>
           </div>
           <div className="shWsMenuDivider" />
           <div className="shWsMenuAccount">{user.email}</div>
           <Link to={`${base}/settings/preferences`} state={{ returnTo }}><SlidersHorizontal aria-hidden="true" />{t("shellSidebar.settings")}</Link>
+          {["owner", "admin"].includes(workspace.role) ? <Link to={`${base}/settings/workspace-profile`} state={{ returnTo }}><Settings2 aria-hidden="true" />{t("workspaceProfile.settings")}</Link> : null}
           {workspaces.length > 1 ? <div className="shWsMenuWorkspaces" role="group" aria-label={t("shellSidebar.switchWorkspace")}>
             {workspaces.map((item) => item.id === workspace.id
               ? <span className="shWsMenuWorkspace isCurrent" aria-current="page" key={item.id}>
-                  <span className="shWsAvatar" aria-hidden="true">{item.name.slice(0, 1)}</span>
+                  <WorkspaceAvatar workspace={item} />
                   <span>{item.name}</span>
                   <Check aria-hidden="true" />
                 </span>
               : <Link className="shWsMenuWorkspace" to={`/w/${encodeURIComponent(item.id)}/app`} key={item.id}>
-                  <span className="shWsAvatar" aria-hidden="true">{item.name.slice(0, 1)}</span>
+                  <WorkspaceAvatar workspace={item} />
                   <span>{item.name}</span>
                 </Link>)}
           </div> : null}

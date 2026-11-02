@@ -16,11 +16,13 @@ import PluginSettings from "./PluginSettings";
 import WorkspaceGroupsRoute from "./WorkspaceGroupsRoute";
 import WorkspaceMembersRoute from "./WorkspaceMembersRoute";
 import EnvironmentSettings from "./EnvironmentSettings";
+import WorkspaceProfileSettings from "./WorkspaceProfileSettings";
 
 const ADMIN_ROLES = new Set(["owner", "admin"]);
 const SECTIONS = () => ({
   preferences: { label: t("settingsRoute.preferences"), title: t("settingsRoute.preferences"), icon: SlidersHorizontal, group: "", account: true },
   general: { label: t("pluginSettings.general"), title: t("pluginSettings.general"), icon: Settings2, group: "", account: true },
+  "workspace-profile": { label: t("workspaceProfile.title"), title: t("workspaceProfile.title"), icon: Settings2, group: t("settingsRoute.workspace") },
   members: { label: t("invitationActivationRoute.member"), title: t("settingsRoute.membersAndPermissions"), icon: Users, group: t("settingsRoute.workspace") },
   environment: { label: t("environmentSettings.title"), title: t("environmentSettings.title"), icon: Settings2, group: t("settingsRoute.workspace") },
   groups: { label: t("settingsRoute.groups"), title: t("settingsRoute.groups"), icon: UsersRound, group: t("settingsRoute.workspace"), hiddenInNav: true },
@@ -155,6 +157,7 @@ export default function SettingsPage() {
 
   const body = section === "preferences" ? <Preferences userId={user.id} />
     : section === "security" ? <AccountSecurity />
+    : section === "workspace-profile" ? <WorkspaceProfileSettings key={workspace.id} workspace={workspace} onClose={() => navigate(closeTo)} />
     : section === "workspace-resources" ? <OperatorWorkspaceResources isSuperuser={Boolean(user?.isSuperuser)} />
     : section === "members" ? <WorkspaceMembersRoute embedded />
     : section === "environment" ? <EnvironmentSettings key={workspace.id} workspace={workspace} />

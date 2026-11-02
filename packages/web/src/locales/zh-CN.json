@@ -924,5 +924,18 @@
   "sessionQuestion.skip": "跳过",
   "sessionQuestion.send": "发送",
   "sessionQuestion.sending": "发送中...",
-  "sessionQuestion.failed": "回答发送失败，请重试。"
+  "sessionQuestion.failed": "回答发送失败，请重试。",
+  "workspaceProfile.title": "基本信息",
+  "workspaceProfile.settings": "工作区设置",
+  "workspaceProfile.name": "工作区名称",
+  "workspaceProfile.avatar": "工作区头像",
+  "workspaceProfile.avatarHint": "PNG、JPG 或 WebP，最大 1 MiB。",
+  "workspaceProfile.upload": "上传头像",
+  "workspaceProfile.remove": "移除头像",
+  "workspaceProfile.avatarInvalid": "请选择不超过 1 MiB 的 PNG、JPG 或 WebP 图片。",
+  "workspaceProfile.avatarReadFailed": "无法读取这张图片，请重新选择。",
+  "workspaceProfile.save": "保存更改",
+  "workspaceProfile.saving": "保存中…",
+  "workspaceProfile.saved": "工作区已更新。",
+  "workspaceProfile.saveFailed": "无法保存工作区更改，请重试。"
 }

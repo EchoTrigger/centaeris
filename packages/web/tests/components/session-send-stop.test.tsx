@@ -18,7 +18,7 @@ const fixture = vi.hoisted(() => ({
   subscriptions: [] as Subscription[],
   navigate: vi.fn(),
   selectedSession: null as SessionSummary | null,
-  user: { id: "user" }, workspace: { id: "workspace", name: "Synthetic workspace" },
+  user: { id: "user" }, workspace: { id: "workspace", name: "Synthetic workspace", avatarUrl: null as string | null },
   activeRun: null as { agentRunId: string; status: string; streamCursor: string } | null,
 }));
 
@@ -115,6 +115,7 @@ async function chooseModel() {
 
 beforeEach(() => {
   sessionStorage.clear(); localStorage.clear(); fixture.activeRun = null; fixture.selectedSession = null;
+  fixture.workspace = { id: "workspace", name: "Synthetic workspace", avatarUrl: null };
   vi.stubGlobal("crypto", webcrypto);
   window.history.replaceState({}, "", "/w/workspace/sessions/session?sessionId=session");
   fixture.request.mockImplementation(async path => {
@@ -128,6 +129,24 @@ beforeEach(() => {
   });
 });
 afterEach(() => { cleanup(); fixture.subscriptions.length = 0; vi.clearAllMocks(); vi.unstubAllGlobals(); sessionStorage.clear(); localStorage.clear(); });
+
+test("refreshing workspace profile retains the current Run subscription and conversation draft", async () => {
+  fixture.activeRun = { agentRunId: "active-run", status: "running", streamCursor: "0" };
+  const user = userEvent.setup();
+  const props = { initialSession: row, workspaceDraft: false, location: { search: "?sessionId=session", state: null }, modelsVersion: 0, onSessionAccepted: () => {} };
+  const view = render(<MemoryRouter><AppPageContent {...props} /></MemoryRouter>);
+  await waitFor(() => expect(screen.queryByRole("button", { name: "appRoute.stop" })).not.toBeNull());
+  await waitFor(() => expect(fixture.subscriptions.some(item => item.sessionId === "session" && !item.signal.aborted)).toBe(true));
+  const current = fixture.subscriptions.findLast(item => item.sessionId === "session" && !item.signal.aborted)!;
+  const count = fixture.subscriptions.length;
+  await user.type(screen.getByRole("textbox", { name: "appRoute.message" }), "Keep this draft");
+  fixture.workspace = { ...fixture.workspace, name: "Renamed workspace", avatarUrl: `/api/workspaces/workspace/avatar/${"a".repeat(64)}` };
+  view.rerender(<MemoryRouter><AppPageContent {...props} /></MemoryRouter>);
+  expect(fixture.subscriptions).toHaveLength(count);
+  expect(current.signal.aborted).toBe(false);
+  expect((screen.getByRole("textbox", { name: "appRoute.message" }) as HTMLTextAreaElement).value).toBe("Keep this draft");
+  expect(screen.queryByRole("button", { name: "appRoute.stop" })).not.toBeNull();
+});
 
 test("Send immediately exposes Stop and a deferred receipt cancels only its original Run", async () => {
   const user = userEvent.setup(), accepted = deferred<unknown>();

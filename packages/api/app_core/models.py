@@ -303,6 +303,8 @@ class Workspace(models.Model):
     objects = ResourceQuerySet.as_manager()
     id = models.CharField(primary_key=True, max_length=64, default=new_workspace_id)
     name = models.CharField(max_length=160)
+    avatar_image = models.BinaryField(null=True, blank=True)
+    avatar_digest = models.CharField(max_length=64, blank=True, default="")
     description = models.TextField(blank=True, default="")
     execution_network = models.CharField(max_length=14, default="disabled",
         choices=[("disabled", "Disabled"), ("publicInternet", "Internet")])
@@ -323,7 +325,12 @@ class Workspace(models.Model):
 
     class Meta:
         constraints = [models.CheckConstraint(condition=models.Q(execution_network__in=["disabled", "publicInternet"]),
-            name="workspace_execution_network_valid")]
+            name="workspace_execution_network_valid"),
+            models.CheckConstraint(
+                condition=(models.Q(avatar_image__isnull=True, avatar_digest="")
+                    | models.Q(avatar_image__isnull=False, avatar_digest__regex=r"^[0-9a-f]{64}$")),
+                name="workspace_avatar_image_consistent",
+            )]
 
     def save(self, *args, **kwargs):
         require_enum("Workspace.status", self.status, {"active", "archived"})

@@ -41,6 +41,7 @@ class AgentMessagesResponse(StrictSchema):
 class WorkspaceResponse(StrictSchema):
     id: str
     name: str
+    avatar_url: str | None
     description: str
     status: str
     role: Literal["owner", "admin", "member"]
@@ -48,6 +49,10 @@ class WorkspaceResponse(StrictSchema):
 
 class WorkspacesEnvelope(StrictSchema):
     workspaces: list[WorkspaceResponse]
+
+
+class WorkspaceEnvelope(StrictSchema):
+    workspace: WorkspaceResponse
 
 
 class WorkspaceMemberResponse(StrictSchema):

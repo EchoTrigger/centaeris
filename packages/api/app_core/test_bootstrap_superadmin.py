@@ -175,6 +175,7 @@ class WorkspaceAccessTests(TestCase):
                     {
                         "id": self.workspace.id,
                         "name": "Default",
+                        "avatarUrl": None,
                         "description": "",
                         "status": "active",
                         "role": "owner",

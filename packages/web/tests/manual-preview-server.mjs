@@ -52,7 +52,7 @@ const server = http.createServer(async (request, response) => {
   }
   if (url.pathname === "/api/csrf") return json(response, 200, { csrfToken: "preview-csrf" });
   if (url.pathname === "/api/me") return json(response, 200, { user: { id: "user_1", email: preview.role === "owner" ? "owner@example.com" : "member@example.com", isStaff: false, isSuperuser: false } });
-  if (url.pathname === "/api/workspaces") return json(response, 200, { workspaces: [{ id: "ws_1", name: "Default", status: "active", role: preview.role }] });
+  if (url.pathname === "/api/workspaces") return json(response, 200, { workspaces: [{ id: "ws_1", name: "Default", avatarUrl: null, status: "active", role: preview.role }] });
   if (url.pathname === "/api/workspaces/ws_1/presentation/events") {
     response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store" });
     response.write(`data: ${JSON.stringify({schema:"workspace.presentation.v1", kind:"navigation", workspaceId:"ws_1", sessionId:null, snapshotId:"preview", offset:0, hasMore:false, sessions:[]})}\n\n`);

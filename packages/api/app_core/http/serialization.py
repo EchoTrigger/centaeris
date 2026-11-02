@@ -15,6 +15,8 @@ def serialize_workspace(workspace: Workspace, role: str) -> dict:
     return {
         "id": workspace.id,
         "name": workspace.name,
+        "avatarUrl": (f"/api/workspaces/{workspace.id}/avatar/{workspace.avatar_digest}"
+                      if workspace.avatar_digest else None),
         "description": workspace.description,
         "status": workspace.status,
         "role": role,

@@ -45,12 +45,25 @@ Sessions are not entry points for ordinary Session work.
 
 | Action | Method and path | Input |
 | --- | --- | --- |
+| Update Workspace profile (owner/admin) | `PATCH /api/workspaces/{workspaceId}/profile` | `name`; optional `avatarDataUrl` |
+| Read Workspace avatar (current member) | `GET /api/workspaces/{workspaceId}/avatar/{digest}` | Exact current avatar digest |
 | List the user's active Sessions | `GET /api/workspaces/{workspaceId}/sessions` | No query fields |
 | Create an empty Session | `POST /api/workspaces/{workspaceId}/sessions` | `operationId`, optional `projectId` |
 | Read a Session | `GET /api/sessions/{sessionId}` | No Agent selector |
 | Update Session metadata | `PATCH /api/sessions/{sessionId}` | One or more of `title`, `isPinned`, `isUnread` |
 | Create a Session project | `POST /api/workspaces/{workspaceId}/session-projects` | `name` |
 | Submit a message | `POST /api/workspaces/{workspaceId}/sessions/{sessionId}/messages` | `operationId`, `modelConfigRef`; optional `text`, `thinkingMode`, `attachmentRefs`, `projectId`, `tailAction` |
+
+Workspace profile updates require a trimmed, non-empty `name` of at most 160
+characters. Omitting `avatarDataUrl` keeps the avatar; `null` removes it.
+Uploads accept base64 PNG, JPEG or WebP data URLs, with at most 1 MiB of decoded
+source bytes. The API verifies and decodes the image, applies EXIF orientation,
+and stores a centered 256 × 256 PNG without source metadata. Name and avatar
+changes commit together. The response is `{workspace: WorkspaceResponse}`;
+every Workspace response includes required `avatarUrl` (a first-party path or
+`null`). Avatar reads require current active Workspace membership and the exact
+current digest, and return `image/png`, `X-Content-Type-Options: nosniff`, and
+`Cache-Control: private, no-store`.
 
 Session responses retain the existing Workspace, project, environment, title, origin, status,
 pin, attention, active-Run and update metadata, without `agentId` or
@@ -79,8 +92,8 @@ Workspace presentation uses
 `sessionId` and `Last-Event-ID` for recovery. Its frame identity is
 `workspaceId` plus nullable `sessionId`; navigation carries the current Session
 records. Unknown selectors, including `agentId`, fail validation. Browser title
-and favicon belong to the Workspace layout, using its name and the platform mark
-through Session and settings navigation.
+and favicon belong to the Workspace layout, using its name and avatar (or its
+name's first character when no avatar is set) through Session and settings navigation.
 
 An active Run also emits an `activity` frame with exactly `schema:
 "workspace.presentation.v1"`, `kind: "activity"`, `workspaceId`, `sessionId`,

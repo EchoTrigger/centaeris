@@ -60,7 +60,7 @@ const text = value => Array.isArray(value) ? value.map(text).join("") : typeof v
 export const button = (tree, label) => nodes(tree, node => node.type === "button" && (text(node.props.children) === label || node.props["aria-label"] === label))[0];
 export function environment(overrides = {}) {
   const state = {
-    workspace: { id: "workspace", name: "Synthetic workspace", role: "member" },
+    workspace: { id: "workspace", name: "Synthetic workspace", role: "member", avatarUrl: null },
     user: { id: "user" },
     location: { pathname: "/w/workspace/app", search: "", state: null },
     navigations: [], revalidationCount: 0, modal: null,
