@@ -82,6 +82,39 @@ Keep `packages/core` host-agnostic. Public JSON and Host fields use exact
 `lower_snake_case`. Unsupported versions and unknown fields fail rather than
 gaining compatibility aliases.
 
+### State ownership and lifecycle
+
+When introducing mutable state or a resource handle, identify its owner, sharing
+scope, and lifetime before choosing where to store it. The owner is responsible
+for creating or acquiring it and for releasing it or explicitly transferring
+that responsibility.
+
+Pass operation-specific dependencies as arguments. Bind longer-lived
+dependencies to the instance that uses them during construction. A method may
+use dependencies held by its receiver. Business logic must not discover the
+current Workspace, Session, Run, or Environment through mutable global state,
+including an externally linked mutable global variable, a module singleton,
+or a process-wide current-instance lookup. Immutable constants are allowed.
+
+Use process-wide mutable coordination only when independent callers must
+coordinate within the same process. State what they coordinate, which callers
+share an entry, which key separates unrelated callers, and when entries are
+removed. Distinguish the lifetime of the registry from the lifetime of each
+entry. State which data is transient and which authority, if any, restores it
+after a restart.
+
+For resources with different lifetimes, assign cleanup separately. A consumer
+may release its own handle. Ending a shared or longer-lived resource requires
+authority from that resource's owner. Define what happens on normal completion
+and on the relevant interruption paths, such as cancellation or disconnection.
+
+During review, use the constructor, call site, and cleanup path to establish
+ownership. Document any sharing or recovery rule that those paths do not make
+clear. Verify observable isolation and cleanup using the repository's
+[test-quality policy](docs/development/Testing.md#test-quality).
+
+### Validation
+
 Use the locked toolchains and dependencies described in
 [Building](docs/development/Building.md). Add the smallest focused regression
 that proves a behavior or contract boundary. Do not add tests that only mirror
