@@ -445,7 +445,7 @@ fn postgres_retirement_pending_other_environment_does_not_block_healthy_run_clea
     let mut b = run(&store, &mut db, "run-b", 2);
     b.original.session_id = "session-b".into();
     let digest = b.original.digest().unwrap();
-    db.batch_execute("INSERT INTO public.app_core_session VALUES('session-b','ws_1','user_1','centaeris','environment-b',NULL); INSERT INTO public.app_core_sessionenvironment VALUES('environment-b','session-b','run-b',2,'owner-run-b','execute',false); UPDATE public.app_core_agentrun SET session_id='session-b',environment_id='environment-b' WHERE id='run-b'").unwrap();
+    db.batch_execute("INSERT INTO public.app_core_session(id,workspace_id,owner_id,current_environment_id) VALUES('session-b','ws_1','user_1','environment-b'); INSERT INTO public.app_core_sessionenvironment(id,session_id,controller_run_id,controller_epoch,controller_lease_owner,controller_purpose,controller_released) VALUES('environment-b','session-b','run-b',2,'owner-run-b','execute',false); UPDATE public.app_core_agentrun SET session_id='session-b',environment_id='environment-b' WHERE id='run-b'").unwrap();
     db.execute("UPDATE public.app_core_agentrunauthorization SET digest=$1,payload=$2::text::jsonb,signature=$3 WHERE agent_run_id='run-b'", &[&digest,&serde_json::to_string(&b.original).unwrap(),&b.original.signature(KEY).unwrap()]).unwrap();
     db.execute("UPDATE runtime.runtime_jobs SET session_id='session-b',idempotency_key=$1 WHERE job_id='agent_run.lifecycle:run-b'", &[&format!("agent_run.lifecycle:run-b:{digest}")]).unwrap();
     let mut binding = b.grant.payload.clone();

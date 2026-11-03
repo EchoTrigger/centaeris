@@ -240,7 +240,7 @@ mod tests {
         }
         let mut request = request(b"");
         request.kind = TrustedHelperKind::InputInventory;
-        request.input_length = 1;
+        request.input_length = request.kind.input_limit() + 1;
         assert!(receive_input(&std::env::temp_dir(), &request, &mut NoRead).is_err());
         request.input_length = 0;
         request.fence.controller_purpose = EnvironmentTaskControllerPurpose::Cleanup;
