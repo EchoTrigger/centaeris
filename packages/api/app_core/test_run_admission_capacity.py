@@ -1,6 +1,5 @@
 """Bound unfinished Run admission while preserving immutable operation replay."""
 import json
-import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from django.conf import settings
@@ -81,20 +80,11 @@ class ApiRunQueueCapacityTests(test_hosted_operations.OperationFixture, Transact
                 client = Client()
                 client.force_login(self.user)
                 barrier.wait(timeout=5)
-                deadline = time.monotonic() + 5
                 body = json.dumps({"operationId": "next-run",
                                    "text": "one remaining slot", "modelConfigRef": self.model.pk})
-                while True:
-                    response = client.post(f"/api/workspaces/{workspace.pk}/sessions/new/messages",
-                        content_type="application/json", data=body)
-                    result = response.json()
-                    if (response.status_code != 503 or result != {"error": "execution_admission_busy"}
-                            or time.monotonic() >= deadline):
-                        return response.status_code, result
-                    # Lock contention is not evidence that the remaining slot
-                    # was enforced. Retry the exact identity until capacity is
-                    # observed or the bounded contention allowance expires.
-                    time.sleep(0.02)
+                response = client.post(f"/api/workspaces/{workspace.pk}/sessions/new/messages",
+                    content_type="application/json", data=body)
+                return response.status_code, response.json()
             finally:
                 close_old_connections()
 
