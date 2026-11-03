@@ -237,15 +237,11 @@ pub(super) fn acquire_file_write_guard(
     path_identity: &str,
     runtime_context: &ToolRuntimeContext,
 ) -> Result<FileWriteGuard, String> {
-    let durable_claim = acquire_durable_file_write_claim(path_identity, runtime_context)?;
+    // Reject a concurrent local writer before adopting a same-owner durable claim.
+    // Otherwise its failed acquisition would release the active writer's claim.
     let process_lease =
-        match acquire_file_write_lease(path_identity, runtime_context.write_lease_owner()) {
-            Ok(lease) => lease,
-            Err(error) => {
-                drop(durable_claim);
-                return Err(error);
-            }
-        };
+        acquire_file_write_lease(path_identity, runtime_context.write_lease_owner())?;
+    let durable_claim = acquire_durable_file_write_claim(path_identity, runtime_context)?;
     Ok(FileWriteGuard {
         _durable_claim: durable_claim,
         _process_lease: process_lease,
