@@ -25,7 +25,7 @@ const { useSessionNavigationActions } = await import(await subjectLoader()(url("
 const session = { currentEnvironmentId:null, executionMode:null, deletedAt:null,  isUnread:false, isManuallyUnread:false, latestAttentionSequence:"0", readThroughSequence:"0", attentionRevision:"0", id: "work", workspaceId: "workspace", title: "Synthetic work", status: "active", origin: "user", isPinned: false, projectId: null, hasActiveAgentRun: false, updatedAt: "2026-10-01T00:00:00Z" };
 const component = (tree, name) => nodes(tree, node => node.type.name === name)[0];
 
-test("ordinary Session preview starts at navigation width and preserves intentional resizing and draft", async context => {
+test("ordinary Session preview starts with automatic sizing and preserves intentional resizing and draft", async context => {
   const previousWindow = globalThis.window; const previousStorage = globalThis.sessionStorage;
   globalThis.window = { innerWidth: 2048, addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {} };
   globalThis.sessionStorage = { getItem: () => null };
@@ -38,24 +38,24 @@ test("ordinary Session preview starts at navigation width and preserves intentio
   const panel = () => component(subject.tree, "ConnectedWorkspaceContextPanel");
   try {
     await subject.settle();
-    assert.equal(panel().props.browserWidthPx, 270);
+    assert.equal(panel().props.browserWidthPx, null);
     component(subject.tree, "WorkspaceComposer").props.onDraftChange("Synthetic unsent draft"); await subject.settle();
     panel().props.onBrowserWidthChange(286); await subject.settle();
     assert.equal(panel().props.browserWidthPx, 286);
     panel().props.onBrowserWidthChange(12); await subject.settle();
     assert.equal(panel().props.browserWidthPx, 270);
     panel().props.onBrowserWidthChange(10000); await subject.settle();
-    assert.equal(panel().props.browserWidthPx, 1298);
+    assert.equal(panel().props.browserWidthPx, 1458);
     panel().props.onClose(); await subject.settle();
     assert.equal(component(subject.tree, "WorkspaceComposer").props.draft, "Synthetic unsent draft");
-    assert.equal(panel().props.browserWidthPx, 1298, "closing retains the user's chosen width");
+    assert.equal(panel().props.browserWidthPx, 1458, "closing retains the user's chosen width");
     window.innerWidth = 1280; await subject.settle();
-    assert.equal(panel().props.browserWidthPx, 1298, "viewport changes retain the preference for CSS to clip");
+    assert.equal(panel().props.browserWidthPx, 1458, "viewport changes retain the preference for CSS to clip");
     panel().props.onBrowserWidthChange(10000); await subject.settle();
-    assert.equal(panel().props.browserWidthPx, 530, "intentional resize reserves 480px beside the visible navigation");
+    assert.equal(panel().props.browserWidthPx, 690, "intentional resize reserves room for conversation beside the visible navigation");
     component(subject.tree, "ShellSidebar").props.onCollapse(); await subject.settle();
     panel().props.onBrowserWidthChange(10000); await subject.settle();
-    assert.equal(panel().props.browserWidthPx, 800, "collapsed navigation gives its width back to the available region");
+    assert.equal(panel().props.browserWidthPx, 960, "collapsed navigation gives its width back to the available region");
     assert.equal(component(subject.tree, "WorkspaceComposer").props.draft, "Synthetic unsent draft");
   } finally { subject.unmount(); }
 });

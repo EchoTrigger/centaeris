@@ -87,12 +87,12 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .secondary { display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); padding: 7px 10px; text-decoration: none; }
 .secondary:hover:not(:disabled) { background: var(--surface-container); transform: translateY(-1px); }
 
-.workspaceWorkbench { --workspace-navigation-space: var(--workspace-sidebar-width); --browser-panel-max-width: min(75vw, max(var(--workspace-sidebar-width), calc(100vw - var(--workspace-navigation-space) - 480px))); display: grid; grid-template-columns: var(--workspace-sidebar-width) minmax(0, 1fr) 0; grid-template-rows: 40px minmax(0, 1fr); width: 100%; height: 100vh; overflow: hidden; background: var(--surface-color); transition: grid-template-columns 220ms var(--motion-sidebar); }
+.workspaceWorkbench { --workspace-navigation-space: var(--workspace-sidebar-width); --browser-panel-default-width: calc((100% - var(--workspace-navigation-space)) / 2); --browser-panel-max-width: min(75vw, max(var(--workspace-sidebar-width), calc(100vw - var(--workspace-navigation-space) - 320px))); display: grid; grid-template-columns: var(--workspace-sidebar-width) minmax(0, 1fr) 0; grid-template-rows: 40px minmax(0, 1fr); width: 100%; height: 100vh; overflow: hidden; background: var(--surface-color); transition: grid-template-columns 220ms var(--motion-sidebar); }
 .workspaceWorkbench.withoutSidebar { --workspace-navigation-space: 0px; grid-template-columns: 0 minmax(0, 1fr) 0; }
 .workspaceWorkbench.withContextPanel { grid-template-columns: var(--workspace-sidebar-width) minmax(0, 1fr) var(--workspace-sidebar-width); }
 .workspaceWorkbench.withoutSidebar.withContextPanel { grid-template-columns: 0 minmax(0, 1fr) var(--workspace-sidebar-width); }
-.workspaceWorkbench.withFilePreview { grid-template-columns: var(--workspace-sidebar-width) minmax(0, 1fr) min(var(--browser-panel-width, var(--workspace-sidebar-width)), var(--browser-panel-max-width)); }
-.workspaceWorkbench.withoutSidebar.withFilePreview { grid-template-columns: 0 minmax(0, 1fr) min(var(--browser-panel-width, var(--workspace-sidebar-width)), var(--browser-panel-max-width)); }
+.workspaceWorkbench.withFilePreview { grid-template-columns: var(--workspace-sidebar-width) minmax(0, 1fr) min(var(--browser-panel-width, var(--browser-panel-default-width)), var(--browser-panel-max-width)); }
+.workspaceWorkbench.withoutSidebar.withFilePreview { grid-template-columns: 0 minmax(0, 1fr) min(var(--browser-panel-width, var(--browser-panel-default-width)), var(--browser-panel-max-width)); }
 .workspaceSidebarSlot { grid-column: 1; grid-row: 1 / -1; width: 100%; min-width: 0; min-height: 0; overflow: hidden; border-right: 1px solid var(--outline-variant); background: var(--surface-variant); }
 .workspaceWorkbench.withoutSidebar .workspaceSidebarSlot { border-right-width: 0; }
 .workspaceSidebar { display: flex; width: var(--workspace-sidebar-width); min-width: var(--workspace-sidebar-width); height: 100%; min-height: 0; flex-direction: column; overflow: hidden; background: var(--surface-variant); }
@@ -1087,17 +1087,17 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 @keyframes targetedStage { from { background: var(--surface-variant); } to { background: transparent; } }
 @keyframes conversationMessageEnter { from { transform: translateY(10px) scale(.99); } to { transform: translateY(0) scale(1); } }
 
-/* Reserve at least 480px for conversation beside the preview. Smaller
+/* Reserve at least 320px for conversation beside the preview, as on Desktop. Smaller
    workbenches put the preview above the independently scrolling chat. */
 @media (max-width: 1169px) {
   .workspaceWorkbench.withContextPanel { grid-template-columns: var(--workspace-sidebar-width) minmax(0, 1fr) 0; grid-template-rows: 40px auto minmax(0, 1fr); }
   .workspaceWorkbench.withoutSidebar.withContextPanel { grid-template-columns: 0 minmax(0, 1fr) 0; }
   .workspaceWorkbench.withContextPanel .workspaceChatColumn { grid-row: 3; }
-  .workspaceWorkbench.withContextPanel .workspaceContextPanel { position: relative; z-index: 35; grid-column: 2; grid-row: 2; justify-self: end; width: min(var(--browser-panel-width, var(--workspace-sidebar-width)), calc(100% - 32px)); height: min(50dvh, calc(100dvh - 144px)); min-height: 0; margin: 0 16px 12px; border: 1px solid var(--outline-variant); border-radius: 12px; box-shadow: 0 8px 20px var(--scrim); }
+  .workspaceWorkbench.withContextPanel .workspaceContextPanel { position: relative; z-index: 35; grid-column: 2; grid-row: 2; justify-self: end; width: min(var(--browser-panel-width, calc(100% - 32px)), calc(100% - 32px)); height: min(50dvh, calc(100dvh - 144px)); min-height: 0; margin: 0 16px 12px; border: 1px solid var(--outline-variant); border-radius: 12px; box-shadow: 0 8px 20px var(--scrim); }
 }
 /* A collapsed navigation leaves enough space for the same wide layout sooner. */
 @media (min-width: 900px) and (max-width: 1169px) {
-  .workspaceWorkbench.withoutSidebar.withContextPanel { grid-template-columns: 0 minmax(0, 1fr) min(var(--browser-panel-width, var(--workspace-sidebar-width)), var(--browser-panel-max-width)); grid-template-rows: 40px minmax(0, 1fr); }
+  .workspaceWorkbench.withoutSidebar.withContextPanel { grid-template-columns: 0 minmax(0, 1fr) min(var(--browser-panel-width, var(--browser-panel-default-width)), var(--browser-panel-max-width)); grid-template-rows: 40px minmax(0, 1fr); }
   .workspaceWorkbench.withoutSidebar.withContextPanel .workspaceChatColumn { grid-row: 2; }
   .workspaceWorkbench.withoutSidebar.withContextPanel .workspaceContextPanel { grid-column: 3; grid-row: 2; justify-self: stretch; width: auto; height: 100%; margin: 0; border: 0; border-left: 1px solid var(--outline-variant); border-radius: 0; box-shadow: none; }
 }

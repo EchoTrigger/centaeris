@@ -180,7 +180,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
   const [loadingOlderHistory, setLoadingOlderHistory] = useState(false);
   const [activeTranscriptRun, setActiveTranscriptRun] = useState(null);
   const [contextPanel, setContextPanel] = useState(CLOSED_CONTEXT_PANEL);
-  const [browserPanelWidthPx, setBrowserPanelWidthPx] = useState(270);
+  const [browserPanelWidthPx, setBrowserPanelWidthPx] = useState(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const attachmentDialogRef = useModalDialog({ open: Boolean(attachmentPreview), onClose: () => setAttachmentPreview(null) });
   const previewRequestIdRef = useRef(0);
@@ -1279,7 +1279,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     const sidebarWidth = isSidebarOpen && window.innerWidth > 760 ? 270 : 0;
     const mainWidth = window.innerWidth - sidebarWidth;
     const wide = window.innerWidth >= (isSidebarOpen ? 1170 : 900);
-    const maxWidthPx = Math.max(270, Math.floor(wide ? Math.min(window.innerWidth * 0.75, mainWidth - 480) : mainWidth - 32));
+    const maxWidthPx = Math.max(270, Math.floor(wide ? Math.min(window.innerWidth * 0.75, mainWidth - 320) : mainWidth - 32));
     setBrowserPanelWidthPx(Math.min(maxWidthPx, Math.max(270, Math.round(widthPx))));
   }, [isSidebarOpen]);
   const groupedSessions = useMemo(() => groupSessionNavigation(sessions, projects), [projects, sessions]);
@@ -1313,7 +1313,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
   return (
     <main
       className={`workspaceWorkbench ${isSidebarOpen ? "withSidebar" : "withoutSidebar"} ${contextPanelClass}`}
-      style={{ "--browser-panel-width": `${browserPanelWidthPx}px` }}
+      style={{ "--browser-panel-width": browserPanelWidthPx == null ? undefined : `${browserPanelWidthPx}px` }}
     >
       <div className="workspaceSidebarSlot">
         {isSidebarOpen ? <ShellSidebar
