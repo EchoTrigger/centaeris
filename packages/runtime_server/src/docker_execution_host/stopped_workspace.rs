@@ -1,6 +1,11 @@
 //! Recover a stopped original's writable-root workspace without starting a guest.
 use super::*;
 use crate::postgres_store::execution_instances::RetainedInstanceAllocation;
+use std::collections::BTreeSet;
+
+const INPUT_INVENTORY_PATH: &str = "/run/centaeris/inputs.json";
+const INPUT_INVENTORY_JSON_LIMIT: u64 = 1024 * 1024;
+const INPUT_INVENTORY_ARCHIVE_LIMIT: u64 = INPUT_INVENTORY_JSON_LIMIT + 64 * 1024;
 
 trait CaptureIo {
     fn observe(
@@ -9,6 +14,7 @@ trait CaptureIo {
         profile: &EnvironmentProfile,
     ) -> Result<serde_json::Value, String>;
     fn download(&mut self, id: &str, root: &str, limit: u64) -> Result<fs::File, String>;
+    fn inventory(&mut self, id: &str) -> Result<Option<fs::File>, String>;
 }
 struct DockerCaptureIo;
 impl CaptureIo for DockerCaptureIo {
@@ -32,6 +38,13 @@ impl CaptureIo for DockerCaptureIo {
     }
     fn download(&mut self, id: &str, root: &str, limit: u64) -> Result<fs::File, String> {
         crate::docker_engine::download_archive(id, root, limit)
+    }
+    fn inventory(&mut self, id: &str) -> Result<Option<fs::File>, String> {
+        crate::docker_engine::download_archive_if_present(
+            id,
+            INPUT_INVENTORY_PATH,
+            INPUT_INVENTORY_ARCHIVE_LIMIT,
+        )
     }
 }
 
@@ -62,12 +75,14 @@ fn capture_with(
         .ok_or("stopped_workspace_identity_missing")?;
     let before = io.observe(allocation, profile)?;
     validate_stopped_backing(&before, allocation, profile)?;
+    let protected_paths = protected_input_paths(io.inventory(id)?.as_mut())?;
     let mut archive = io.download(id, &profile.workspace_root, input_limit)?;
     let artifact = snapshot_from_tar(
         &mut archive,
         &profile.workspace_root,
         input_limit,
         profile.resources.workspace_bytes,
+        &protected_paths,
     )?;
     let after = io.observe(allocation, profile)?;
     validate_stopped_backing(&after, allocation, profile)?;
@@ -77,6 +92,62 @@ fn capture_with(
         }
     }
     Ok(artifact)
+}
+
+fn protected_input_paths(archive: Option<&mut fs::File>) -> Result<BTreeSet<String>, String> {
+    let inventory = if let Some(raw) = archive {
+        preflight_tar(raw, INPUT_INVENTORY_ARCHIVE_LIMIT)?;
+        let mut bytes = None;
+        let mut tar = tar::Archive::new(raw);
+        for entry in tar
+            .entries()
+            .map_err(|_| "stopped_input_inventory_archive_invalid")?
+        {
+            let mut entry = entry.map_err(|_| "stopped_input_inventory_archive_invalid")?;
+            if bytes.is_some()
+                || !entry.header().entry_type().is_file()
+                || entry.path_bytes().as_ref() != b"inputs.json"
+                || entry.size() > INPUT_INVENTORY_JSON_LIMIT
+            {
+                return Err("stopped_input_inventory_archive_invalid".into());
+            }
+            let mut body = Vec::new();
+            entry
+                .read_to_end(&mut body)
+                .map_err(|_| "stopped_input_inventory_archive_invalid")?;
+            bytes = Some(body);
+        }
+        serde_json::from_slice::<SandboxInputInventory>(
+            &bytes.ok_or("stopped_input_inventory_archive_invalid")?,
+        )
+        .map_err(|_| "stopped_input_inventory_invalid")?
+    } else {
+        SandboxInputInventory::default()
+    };
+    if inventory.schema != SANDBOX_INPUT_INVENTORY_SCHEMA {
+        return Err("stopped_input_inventory_schema_rejected".into());
+    }
+    let mut paths = BTreeSet::new();
+    let mut previous = None;
+    for input in &inventory.inputs {
+        if input.input_ref.trim().is_empty()
+            || input.input_ref.len() > 160
+            || input.source_version.trim().is_empty()
+            || input.size_bytes > centaeris_core::execution::MAX_EXECUTION_INPUT_BYTES
+            || !is_workspace_sha256(&input.sha256)
+            || previous.is_some_and(|value: &str| value >= input.input_ref.as_str())
+            || input.virtual_path.trim() != input.virtual_path
+        {
+            return Err("stopped_input_inventory_invalid".into());
+        }
+        let path = relative_path(&format!("r/{}", input.virtual_path), "r", false)?
+            .ok_or("stopped_input_inventory_path_rejected")?;
+        if !paths.insert(path) {
+            return Err("stopped_input_inventory_invalid".into());
+        }
+        previous = Some(input.input_ref.as_str());
+    }
+    Ok(paths)
 }
 
 fn canonical_absolute(path: &str) -> bool {
@@ -288,6 +359,7 @@ fn snapshot_from_tar(
     root: &str,
     input_limit: u64,
     expanded_limit: u64,
+    protected_paths: &BTreeSet<String>,
 ) -> Result<ImmutableWorkspaceSnapshot, String> {
     preflight_tar(raw, input_limit)?;
     let root = root
@@ -327,6 +399,15 @@ fn snapshot_from_tar(
             if directory {
                 continue;
             }
+            let executable = entry
+                .header()
+                .mode()
+                .map_err(|_| "stopped_workspace_mode_invalid")?
+                & 0o111
+                != 0;
+            if protected_paths.contains(&path) {
+                continue;
+            }
             expanded = expanded
                 .checked_add(entry.size())
                 .ok_or("stopped_workspace_logical_budget_exceeded")?;
@@ -354,12 +435,7 @@ fn snapshot_from_tar(
                 path: path.clone(),
                 size_bytes: length,
                 sha256: format!("sha256:{:x}", digest.finalize()),
-                executable: entry
-                    .header()
-                    .mode()
-                    .map_err(|_| "stopped_workspace_mode_invalid")?
-                    & 0o111
-                    != 0,
+                executable,
             };
             manifest_budget = manifest_budget
                 .checked_add(
@@ -505,6 +581,7 @@ mod tests {
     struct FakeIo {
         facts: VecDeque<Result<serde_json::Value, String>>,
         archive: Option<Result<fs::File, String>>,
+        inventory: Option<Result<Option<fs::File>, String>>,
         downloads: Vec<(String, String, u64)>,
     }
     impl CaptureIo for FakeIo {
@@ -521,13 +598,153 @@ mod tests {
             self.downloads.push((id.into(), path.into(), limit));
             self.archive.take().expect("only one download")
         }
+        fn inventory(&mut self, _: &str) -> Result<Option<fs::File>, String> {
+            self.inventory.take().expect("only one inventory read")
+        }
     }
     fn io(facts: &serde_json::Value, bytes: &[u8]) -> FakeIo {
         FakeIo {
             facts: VecDeque::from([Ok(facts.clone()), Ok(facts.clone())]),
             archive: Some(Ok(spool(bytes))),
+            inventory: Some(Ok(None)),
             downloads: vec![],
         }
+    }
+
+    #[test]
+    fn stopped_capture_excludes_active_and_invalidated_originals_but_keeps_ordinary_inputs_files() {
+        let (a, p, facts) = fixture();
+        let bytes = archive(&[
+            ("app/", tar::EntryType::Directory, b"", 0o755),
+            ("app/inputs/", tar::EntryType::Directory, b"", 0o755),
+            (
+                "app/inputs/library.zip",
+                tar::EntryType::Regular,
+                b"zip",
+                0o444,
+            ),
+            (
+                "app/inputs/removed.zip",
+                tar::EntryType::Regular,
+                b"",
+                0o444,
+            ),
+            (
+                "app/inputs/ordinary.txt",
+                tar::EntryType::Regular,
+                b"ordinary",
+                0o644,
+            ),
+            ("app/total.txt", tar::EntryType::Regular, b"42\n", 0o644),
+        ]);
+        let inventory = serde_json::json!({"schema":SANDBOX_INPUT_INVENTORY_SCHEMA,"inputs":[
+            {"inputRef":"a","virtualPath":"inputs/library.zip","sizeBytes":3,"sha256":format!("sha256:{:x}",Sha256::digest(b"zip")),"sourceVersion":"1"},
+            {"inputRef":"b","virtualPath":"inputs/removed.zip","sizeBytes":3,"sha256":format!("sha256:{:x}",Sha256::digest(b"zip")),"sourceVersion":"1","state":"access_revoked"}
+        ]});
+        let encoded = serde_json::to_vec(&inventory).unwrap();
+        let inventory_archive =
+            archive(&[("inputs.json", tar::EntryType::Regular, &encoded, 0o600)]);
+        let mut docker = io(&facts, &bytes);
+        docker.inventory = Some(Ok(Some(spool(&inventory_archive))));
+        let artifact = capture_with(&mut docker, &a, &p, 100_000).unwrap();
+        assert_eq!(
+            artifact
+                .manifest
+                .unwrap()
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["inputs/ordinary.txt", "total.txt"]
+        );
+        assert_eq!(artifact.descriptor.expanded_size_bytes, 11);
+        assert!(
+            docker.inventory.is_none(),
+            "read the protected inventory once"
+        );
+        for entries in [
+            vec![
+                ("app/", tar::EntryType::Directory, b"".as_slice(), 0o755),
+                (
+                    "app/inputs/library.zip",
+                    tar::EntryType::Symlink,
+                    b"".as_slice(),
+                    0o444,
+                ),
+            ],
+            vec![
+                ("app/", tar::EntryType::Directory, b"".as_slice(), 0o755),
+                (
+                    "app/inputs/library.zip",
+                    tar::EntryType::Regular,
+                    b"zip".as_slice(),
+                    0o444,
+                ),
+                (
+                    "app/inputs/library.zip",
+                    tar::EntryType::Regular,
+                    b"zip".as_slice(),
+                    0o444,
+                ),
+            ],
+        ] {
+            let unsafe_archive = archive(&entries);
+            let mut docker = io(&facts, &unsafe_archive);
+            docker.inventory = Some(Ok(Some(spool(&inventory_archive))));
+            assert!(
+                capture_with(&mut docker, &a, &p, 100_000).is_err(),
+                "excluded originals still obey node and duplicate-path validation"
+            );
+        }
+    }
+
+    #[test]
+    fn stopped_input_inventory_absence_and_empty_inventory_exclude_nothing() {
+        assert!(protected_input_paths(None).unwrap().is_empty());
+        let empty = serde_json::to_vec(&SandboxInputInventory::default()).unwrap();
+        let mut raw = spool(&archive(&[(
+            "inputs.json",
+            tar::EntryType::Regular,
+            &empty,
+            0o600,
+        )]));
+        assert!(protected_input_paths(Some(&mut raw)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn stopped_input_inventory_errors_fail_closed_before_workspace_download() {
+        let (a, p, facts) = fixture();
+        let workspace = archive(&[("app/", tar::EntryType::Directory, b"", 0o755)]);
+        let valid = serde_json::json!({"schema":SANDBOX_INPUT_INVENTORY_SCHEMA,"inputs":[]});
+        let mut unknown = valid.clone();
+        unknown["schema"] = "unknown".into();
+        let invalid_path = serde_json::json!({"schema":SANDBOX_INPUT_INVENTORY_SCHEMA,"inputs":[
+            {"inputRef":"a","virtualPath":"../outside","sizeBytes":3,"sha256":format!("sha256:{:x}",Sha256::digest(b"zip")),"sourceVersion":"1"}
+        ]});
+        for body in [
+            b"not JSON".to_vec(),
+            serde_json::to_vec(&unknown).unwrap(),
+            serde_json::to_vec(&invalid_path).unwrap(),
+        ] {
+            let mut docker = io(&facts, &workspace);
+            docker.inventory = Some(Ok(Some(spool(&archive(&[(
+                "inputs.json",
+                tar::EntryType::Regular,
+                &body,
+                0o600,
+            )])))));
+            assert!(capture_with(&mut docker, &a, &p, 100_000).is_err());
+            assert!(
+                docker.archive.is_some(),
+                "bad inventory must not become an empty exclusion set"
+            );
+        }
+        let mut unavailable = io(&facts, &workspace);
+        unavailable.inventory = Some(Err("archive transport failed".into()));
+        assert!(capture_with(&mut unavailable, &a, &p, 100_000).is_err());
+        assert!(unavailable.archive.is_some());
+        let mut corrupt = spool(b"not a tar archive");
+        assert!(protected_input_paths(Some(&mut corrupt)).is_err());
     }
 
     #[test]
@@ -640,8 +857,12 @@ mod tests {
             ("app/a", tar::EntryType::Regular, b"abc", 0o600),
         ]);
         assert!(capture_with(&mut io(&facts, &bytes), &a, &p, 1).is_err());
-        assert!(snapshot_from_tar(&mut spool(&bytes), "/app", 100_000, 2).is_err());
-        assert!(snapshot_from_tar(&mut spool(&bytes), "/app", 100_000, 0).is_err());
+        assert!(
+            snapshot_from_tar(&mut spool(&bytes), "/app", 100_000, 2, &BTreeSet::new()).is_err()
+        );
+        assert!(
+            snapshot_from_tar(&mut spool(&bytes), "/app", 100_000, 0, &BTreeSet::new()).is_err()
+        );
     }
     #[test]
     fn host_unknown_or_raced_power_identity_and_mount_changes_never_publish_a_snapshot() {
@@ -759,7 +980,7 @@ mod tests {
             .unwrap();
         let bytes = builder.into_inner().unwrap();
         assert!(
-            matches!(snapshot_from_tar(&mut spool(&bytes),"/app",20*1024*1024,0),Err(error) if error=="stopped_workspace_manifest_budget_exceeded")
+            matches!(snapshot_from_tar(&mut spool(&bytes),"/app",20*1024*1024,0,&BTreeSet::new()),Err(error) if error=="stopped_workspace_manifest_budget_exceeded")
         );
         let mut builder = tar::Builder::new(Vec::new());
         for index in 0..=ARCHIVE_ENTRY_LIMIT {
@@ -774,7 +995,7 @@ mod tests {
         }
         let bytes = builder.into_inner().unwrap();
         assert!(
-            matches!(snapshot_from_tar(&mut spool(&bytes),"/app",20*1024*1024,0),Err(error) if error=="stopped_workspace_entry_budget_exceeded")
+            matches!(snapshot_from_tar(&mut spool(&bytes),"/app",20*1024*1024,0,&BTreeSet::new()),Err(error) if error=="stopped_workspace_entry_budget_exceeded")
         );
     }
     #[test]

@@ -165,6 +165,10 @@ inspection; snapshot collection excludes concurrent dispatch. Protected inputs
 remain separate from ordinary workspace snapshots and are restored from their
 authoritative Session identities.
 
+Stopped-container capture reads the original instance's persisted input inventory
+without starting the guest and excludes those exact paths, including revoked
+entries. Ordinary files under `inputs/` remain part of the workspace snapshot.
+
 ## Durable processing and cancellation
 
 `MaterialProcessingTask` is shared by representation identity.
