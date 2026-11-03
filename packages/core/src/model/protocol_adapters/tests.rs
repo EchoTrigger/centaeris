@@ -472,7 +472,14 @@ fn kimi_test_registry() -> ModelProviderRegistry {
 }
 
 fn build_kimi_request(model: &str, thinking_mode: Option<&str>) -> ModelClientRequest {
-    let provider_id = if matches!(model, "k3" | "kimi-for-coding") {
+    let provider_id = if matches!(
+        model,
+        "k3" | "k3-256k"
+            | "k3.1-pro"
+            | "k3.1-pro-highspeed"
+            | "kimi-for-coding"
+            | "kimi-for-coding-highspeed"
+    ) {
         "kimi-code.default"
     } else {
         "kimi.default"
@@ -1419,55 +1426,61 @@ fn kimi_models_use_their_native_output_and_thinking_fields() {
         ))),
     );
 
-    let k3 = client
-        .build_http_request(&build_kimi_request("kimi-k3", Some("max")), true)
-        .expect("build Kimi K3 request");
-    let k3_body =
-        serde_json::from_str::<Value>(k3.body_json.as_str()).expect("parse Kimi K3 request");
-    assert_eq!(
-        k3_body.get("max_completion_tokens").and_then(Value::as_u64),
-        Some(131_072)
-    );
-    assert!(k3_body.get("max_tokens").is_none());
-    assert_eq!(
-        k3_body.get("reasoning_effort").and_then(Value::as_str),
-        Some("max")
-    );
-    assert!(k3_body.get("thinking").is_none());
+    for model in [
+        "kimi-k3",
+        "kimi-k3.1-pro",
+        "kimi-k3.1-pro-highspeed",
+        "k3",
+        "k3-256k",
+        "k3.1-pro",
+        "k3.1-pro-highspeed",
+        "kimi-for-coding",
+    ] {
+        for effort in ["low", "high", "max"] {
+            let request = client
+                .build_http_request(&build_kimi_request(model, Some(effort)), true)
+                .expect("build Kimi request");
+            let body: Value = serde_json::from_str(&request.body_json).unwrap();
+            assert_eq!(body["max_completion_tokens"], 131_072);
+            assert!(body.get("max_tokens").is_none());
+            assert_eq!(body["reasoning_effort"], effort);
+            assert!(body.get("thinking").is_none());
+        }
+        for unsupported in ["none", "medium", "preserved"] {
+            let error = client
+                .build_http_request(&build_kimi_request(model, Some(unsupported)), true)
+                .expect_err("unsupported Kimi effort must be rejected before transport");
+            assert_eq!(error.kind, ModelClientErrorKind::InvalidRequest);
+        }
+    }
 
     let k27 = client
-        .build_http_request(
-            &build_kimi_request("kimi-for-coding", Some("preserved")),
-            true,
-        )
-        .expect("build Kimi K2.7 Code request");
+        .build_http_request(&build_kimi_request("kimi-for-coding-highspeed", None), true)
+        .expect("build Kimi K2.7 Code Highspeed request");
     let k27_body = serde_json::from_str::<Value>(k27.body_json.as_str())
-        .expect("parse Kimi K2.7 Code request");
+        .expect("parse Kimi K2.7 Code Highspeed request");
     assert_eq!(
         k27_body.pointer("/thinking/type").and_then(Value::as_str),
         Some("enabled")
     );
-    assert_eq!(
-        k27_body.pointer("/thinking/keep").and_then(Value::as_str),
-        Some("all")
-    );
+    assert!(k27_body.pointer("/thinking/keep").is_none());
     assert!(k27_body.get("reasoning_effort").is_none());
 }
 
 #[test]
-fn kimi_preserved_thinking_models_reject_forced_tool_choice() {
+fn kimi_coding_model_rejects_forced_tool_choice() {
     let client = OpenAiCompatibleModelClient::new(
         kimi_test_registry(),
         MockJsonHttpTransport::with_response(Err(crate::model::TransportError::Network(
             "unused transport".to_string(),
         ))),
     );
-    let mut request = build_kimi_request("kimi-for-coding", Some("preserved"));
+    let mut request = build_kimi_request("kimi-for-coding", Some("high"));
     request.prepared_prompt.tool_choice = ModelToolChoice::Required;
 
     let error = client
         .build_http_request(&request, true)
-        .expect_err("Kimi K2.7 Code forced tool choice must fail loudly");
+        .expect_err("Kimi coding forced tool choice must fail loudly");
     assert_eq!(error.kind, ModelClientErrorKind::InvalidRequest);
     assert!(error
         .message

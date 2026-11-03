@@ -16,13 +16,12 @@
       "httpHeaders": {},
       "models": [
         {
-          "model": "gpt-6-sol",
-          "displayName": "GPT-6 Sol",
+          "model": "gpt-6.1-sol",
+          "displayName": "GPT-6.1 Sol",
           "contextTokens": 1050000,
           "maxOutputTokens": 128000,
           "thinkingMode": "high",
           "thinkingModes": [
-            "none",
             "low",
             "medium",
             "high",
@@ -58,6 +57,24 @@
           "maxOutputTokens": 128000,
           "thinkingMode": "high",
           "thinkingModes": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "gpt-6.1-terra",
+          "displayName": "GPT-6.1 Terra",
+          "contextTokens": 1050000,
+          "maxOutputTokens": 128000,
+          "thinkingMode": "medium",
+          "thinkingModes": [
+            "none",
             "low",
             "medium",
             "high",
@@ -106,8 +123,8 @@
           "apiBaseOverride": null
         },
         {
-          "model": "claude-sonnet-5",
-          "displayName": "Claude Sonnet 5",
+          "model": "claude-sonnet-5-5",
+          "displayName": "Claude Sonnet 5.5",
           "contextTokens": 1000000,
           "maxOutputTokens": 128000,
           "thinkingMode": "high",
@@ -128,6 +145,23 @@
           "contextTokens": 1000000,
           "maxOutputTokens": 128000,
           "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "claude-haiku-5-5",
+          "displayName": "Claude Haiku 5.5",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 128000,
+          "thinkingMode": "medium",
           "thinkingModes": [
             "low",
             "medium",
@@ -160,6 +194,21 @@
         {
           "model": "deepseek-flash",
           "displayName": "DeepSeek Flash",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 384000,
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "deepseek-v4-pro",
+          "displayName": "DeepSeek V4 Pro",
           "contextTokens": 1000000,
           "maxOutputTokens": 384000,
           "thinkingMode": "high",
@@ -226,6 +275,36 @@
           "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
+        },
+        {
+          "model": "kimi-k3.1-pro",
+          "displayName": "Kimi K3.1 Pro",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 131072,
+          "thinkingMode": "max",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "kimi-k3.1-pro-highspeed",
+          "displayName": "Kimi K3.1 Pro Highspeed",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 131072,
+          "thinkingMode": "max",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
         }
       ],
       "tier": "direct_api",
@@ -281,6 +360,36 @@
           "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
+        },
+        {
+          "model": "kimi-k3.1-pro",
+          "displayName": "Kimi K3.1 Pro",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 131072,
+          "thinkingMode": "max",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "kimi-k3.1-pro-highspeed",
+          "displayName": "Kimi K3.1 Pro Highspeed",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 131072,
+          "thinkingMode": "max",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
         }
       ],
       "tier": "direct_api",
@@ -321,6 +430,23 @@
           "thinkingMode": null,
           "thinkingModes": [],
           "supportsVision": false,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "MiniMax-M3.1-Flash",
+          "displayName": "MiniMax M3.1 Flash",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 128000,
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         }
@@ -365,6 +491,23 @@
           "supportsVision": false,
           "apiOverride": null,
           "apiBaseOverride": null
+        },
+        {
+          "model": "MiniMax-M3.1-Flash",
+          "displayName": "MiniMax M3.1 Flash",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 128000,
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
         }
       ],
       "tier": "direct_api",
@@ -391,7 +534,7 @@
           "maxOutputTokens": 131072,
           "thinkingMode": null,
           "thinkingModes": [],
-          "supportsVision": false,
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         },
@@ -402,7 +545,18 @@
           "maxOutputTokens": 131072,
           "thinkingMode": null,
           "thinkingModes": [],
-          "supportsVision": false,
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "mimo-v2.6-pro-ultraspeed",
+          "displayName": "MiMo V2.6 Pro UltraSpeed",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 131072,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         }
@@ -435,7 +589,7 @@
             "high",
             "max"
           ],
-          "supportsVision": false,
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         },
@@ -451,6 +605,36 @@
             "max"
           ],
           "supportsVision": false,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "glm-5.3-flashx",
+          "displayName": "GLM-5.3 FlashX",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 131072,
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "glm-5.3-flashx-legal",
+          "displayName": "GLM-5.3 FlashX Legal",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 131072,
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         }
@@ -483,7 +667,7 @@
             "high",
             "max"
           ],
-          "supportsVision": false,
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         },
@@ -499,6 +683,36 @@
             "max"
           ],
           "supportsVision": false,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "glm-5.3-flashx",
+          "displayName": "GLM-5.3 FlashX",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 131072,
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "glm-5.3-flashx-legal",
+          "displayName": "GLM-5.3 FlashX Legal",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 131072,
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         }
@@ -527,7 +741,7 @@
           "maxOutputTokens": 131072,
           "thinkingMode": null,
           "thinkingModes": [],
-          "supportsVision": false,
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         },
@@ -538,7 +752,7 @@
           "maxOutputTokens": 131072,
           "thinkingMode": null,
           "thinkingModes": [],
-          "supportsVision": false,
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         }
@@ -567,7 +781,7 @@
           "maxOutputTokens": 131072,
           "thinkingMode": null,
           "thinkingModes": [],
-          "supportsVision": false,
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         },
@@ -578,7 +792,7 @@
           "maxOutputTokens": 131072,
           "thinkingMode": null,
           "thinkingModes": [],
-          "supportsVision": false,
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         }
@@ -606,7 +820,12 @@
           "contextTokens": 500000,
           "maxOutputTokens": 65536,
           "thinkingMode": "high",
-          "thinkingModes": ["low", "medium", "high", "xhigh"],
+          "thinkingModes": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
           "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
@@ -650,6 +869,17 @@
           "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
+        },
+        {
+          "model": "mistral-large-4",
+          "displayName": "Mistral Large 4",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 32768,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
         }
       ],
       "tier": "direct_api",
@@ -675,18 +905,26 @@
           "contextTokens": 1048576,
           "maxOutputTokens": 65536,
           "thinkingMode": "medium",
-          "thinkingModes": ["low", "medium", "high"],
+          "thinkingModes": [
+            "low",
+            "medium",
+            "high"
+          ],
           "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         },
         {
-          "model": "gemini-3.1-pro-preview",
-          "displayName": "Gemini 3.1 Pro Preview",
+          "model": "gemini-4-argon",
+          "displayName": "Gemini 4 Argon",
           "contextTokens": 1048576,
           "maxOutputTokens": 65536,
           "thinkingMode": "high",
-          "thinkingModes": ["low", "medium", "high"],
+          "thinkingModes": [
+            "low",
+            "medium",
+            "high"
+          ],
           "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
@@ -726,10 +964,70 @@
         },
         {
           "model": "kimi-for-coding",
-          "displayName": "Kimi K2.7 Code",
+          "displayName": "Kimi K2.8 Preview",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 131072,
+          "thinkingMode": "max",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "k3.1-pro",
+          "displayName": "Kimi K3.1 Pro",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 131072,
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "k3.1-pro-highspeed",
+          "displayName": "Kimi K3.1 Pro Highspeed",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 131072,
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "k3-256k",
+          "displayName": "Kimi K3 256K",
           "contextTokens": 262144,
           "maxOutputTokens": 131072,
-          "thinkingMode": "preserved",
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "kimi-for-coding-highspeed",
+          "displayName": "Kimi K2.7 Code Highspeed",
+          "contextTokens": 262144,
+          "maxOutputTokens": 131072,
+          "thinkingMode": null,
           "thinkingModes": [],
           "supportsVision": true,
           "apiOverride": null,
@@ -782,6 +1080,56 @@
           "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
+        },
+        {
+          "model": "minimax-m3.1-flash",
+          "displayName": "MiniMax M3.1 Flash",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 128000,
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "mimo-v2.6-flash",
+          "displayName": "MiMo V2.6 Flash",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 131072,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "mimo-v2.6-pro",
+          "displayName": "MiMo V2.6 Pro",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 131072,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "qwen3.8-flash",
+          "displayName": "Qwen 3.8 Flash",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 131072,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
         }
       ],
       "tier": "coding_plan",
@@ -830,6 +1178,21 @@
           "supportsVision": false,
           "apiOverride": null,
           "apiBaseOverride": null
+        },
+        {
+          "model": "glm-5.3-flash",
+          "displayName": "GLM-5.3 Flash",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 131072,
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
         }
       ],
       "tier": "coding_plan",
@@ -850,13 +1213,13 @@
       "httpHeaders": {},
       "models": [
         {
-          "model": "glm-5.2",
-          "displayName": "GLM-5.2",
+          "model": "glm-5.3",
+          "displayName": "GLM-5.3",
           "contextTokens": 1000000,
           "maxOutputTokens": 131072,
           "thinkingMode": "high",
           "thinkingModes": [
-            "none",
+            "low",
             "high",
             "max"
           ],
@@ -865,24 +1228,17 @@
           "apiBaseOverride": null
         },
         {
-          "model": "glm-5-turbo",
-          "displayName": "GLM-5 Turbo",
-          "contextTokens": 200000,
+          "model": "glm-5.3-flash",
+          "displayName": "GLM-5.3 Flash",
+          "contextTokens": 1000000,
           "maxOutputTokens": 131072,
-          "thinkingMode": null,
-          "thinkingModes": [],
-          "supportsVision": false,
-          "apiOverride": null,
-          "apiBaseOverride": null
-        },
-        {
-          "model": "glm-4.7",
-          "displayName": "GLM-4.7",
-          "contextTokens": 204800,
-          "maxOutputTokens": 131072,
-          "thinkingMode": null,
-          "thinkingModes": [],
-          "supportsVision": false,
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         }
@@ -933,6 +1289,56 @@
           "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
+        },
+        {
+          "model": "minimax/minimax-m3.1-flash",
+          "displayName": "MiniMax M3.1 Flash",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 128000,
+          "thinkingMode": "high",
+          "thinkingModes": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "xiaomi/mimo-v2.6-flash",
+          "displayName": "MiMo V2.6 Flash",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 131072,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "xiaomi/mimo-v2.6-pro",
+          "displayName": "MiMo V2.6 Pro",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 131072,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "Qwen/Qwen3.8-Flash",
+          "displayName": "Qwen 3.8 Flash",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 131072,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": true,
+          "apiOverride": null,
+          "apiBaseOverride": null
         }
       ],
       "tier": "coding_plan",
@@ -963,7 +1369,7 @@
             "medium",
             "xhigh"
           ],
-          "supportsVision": false,
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         },
@@ -974,7 +1380,7 @@
           "maxOutputTokens": 65536,
           "thinkingMode": null,
           "thinkingModes": [],
-          "supportsVision": false,
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         },
@@ -986,6 +1392,17 @@
           "thinkingMode": null,
           "thinkingModes": [],
           "supportsVision": false,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "qwen3.8-flash",
+          "displayName": "Qwen 3.8 Flash",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 131072,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         }
@@ -1018,7 +1435,7 @@
             "medium",
             "xhigh"
           ],
-          "supportsVision": false,
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         },
@@ -1029,7 +1446,7 @@
           "maxOutputTokens": 65536,
           "thinkingMode": null,
           "thinkingModes": [],
-          "supportsVision": false,
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         },
@@ -1041,6 +1458,17 @@
           "thinkingMode": null,
           "thinkingModes": [],
           "supportsVision": false,
+          "apiOverride": null,
+          "apiBaseOverride": null
+        },
+        {
+          "model": "qwen3.8-flash",
+          "displayName": "Qwen 3.8 Flash",
+          "contextTokens": 1000000,
+          "maxOutputTokens": 131072,
+          "thinkingMode": null,
+          "thinkingModes": [],
+          "supportsVision": true,
           "apiOverride": null,
           "apiBaseOverride": null
         }

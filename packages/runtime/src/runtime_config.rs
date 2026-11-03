@@ -1832,7 +1832,7 @@ mod tests {
             )
             .expect("set effort");
         };
-        select(&mut state, "google.default", "gemini-3.1-pro-preview");
+        select(&mut state, "google.default", "gemini-4-argon");
         assert_eq!(
             default_record(&state).model_thinking_mode.as_deref(),
             Some("high")
@@ -1844,7 +1844,7 @@ mod tests {
             Some("high")
         );
         effort(&mut state, "xhigh");
-        select(&mut state, "google.default", "gemini-3.1-pro-preview");
+        select(&mut state, "google.default", "gemini-4-argon");
         assert_eq!(
             default_record(&state).model_thinking_mode.as_deref(),
             Some("low")
