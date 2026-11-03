@@ -1109,14 +1109,16 @@ pub(crate) async fn compact_context(
         session_id.as_str(),
         agent_runtime.cwd.as_path(),
     )?;
+    let engine_config = agent_runtime_config(session_id.as_str(), &runtime_config, None)?;
     let runtime = build_agent_runtime(AgentRuntimeBuildRequest {
         store,
         session_id: session_id.clone(),
-        concurrency_scope_id: session_id.clone(),
+        tool_concurrency: event_writer
+            .tool_concurrency_for_session(&session_id, engine_config.tool_parallelism)?,
         cwd: agent_runtime.cwd,
         execution_owner: identity.agent_run_id,
         bash_path: runtime_config.bash_path.as_deref().map(PathBuf::from),
-        runtime_config: agent_runtime_config(session_id.as_str(), &runtime_config, None)?,
+        runtime_config: engine_config,
         native_plugin_activation: None,
         execution_cancellation_probe: None,
         file_mutation_commit_port: None,
@@ -1817,7 +1819,7 @@ async fn run_manual_context_compaction(
 pub(crate) struct AgentRuntimeBuildRequest {
     pub(crate) store: RuntimeStoreActor,
     pub(crate) session_id: String,
-    pub(crate) concurrency_scope_id: String,
+    pub(crate) tool_concurrency: ToolConcurrencyCoordinator,
     pub(crate) cwd: PathBuf,
     pub(crate) execution_owner: String,
     pub(crate) bash_path: Option<PathBuf>,
@@ -1833,7 +1835,7 @@ pub(crate) fn build_agent_runtime(
     let AgentRuntimeBuildRequest {
         store,
         session_id,
-        concurrency_scope_id,
+        tool_concurrency,
         cwd,
         execution_owner,
         bash_path,
@@ -1847,9 +1849,6 @@ pub(crate) fn build_agent_runtime(
     }
     if execution_owner.trim().is_empty() {
         return Err("executionOwner is required".to_string());
-    }
-    if concurrency_scope_id.trim().is_empty() {
-        return Err("concurrencyScopeId is required".to_string());
     }
     let (
         dynamic_tool_registry,
@@ -1938,10 +1937,6 @@ pub(crate) fn build_agent_runtime(
     if let Some(port) = file_mutation_commit_port {
         tool_layer = tool_layer.with_file_mutation_commit_port(port);
     }
-    let tool_concurrency = ToolConcurrencyCoordinator::global_for_scope(
-        format!("session:{concurrency_scope_id}"),
-        runtime_config.tool_parallelism,
-    )?;
     Ok(AgentRuntime::new(
         agent_runtime_job_store()?,
         store,
@@ -2304,7 +2299,8 @@ async fn run_session_agent_run(
     let runtime = build_agent_runtime(AgentRuntimeBuildRequest {
         store: store.clone(),
         session_id: session_id.clone(),
-        concurrency_scope_id: session_id.clone(),
+        tool_concurrency: event_writer
+            .tool_concurrency_for_session(&session_id, engine_config.tool_parallelism)?,
         cwd: agent_runtime.cwd.clone(),
         execution_owner: agent_run_identity.agent_run_id.clone(),
         bash_path: runtime_config.bash_path.as_deref().map(PathBuf::from),

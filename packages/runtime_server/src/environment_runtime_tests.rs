@@ -61,6 +61,7 @@ fn environment_runtime_server() {
         store: store.clone(),
         job_store: backend.clone(),
         tool_layers: Arc::new(Mutex::new(HashMap::new())),
+        tool_concurrency_registry: Default::default(),
         execution_profile: Arc::new(RuntimeExecutionProfile {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
             image_digest: format!("sha256:{}", "a".repeat(64)),

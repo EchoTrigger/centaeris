@@ -22,6 +22,28 @@ An adapter may translate identities, transport, storage, or process behavior. It
 must not define a second prompt, tool loop, continuation state machine, or
 Session truth.
 
+## Tool concurrency ownership
+
+Core's `ToolConcurrencyCoordinator` enforces tool capacity and serial-tool
+exclusion. Hosts own `ToolConcurrencyRegistry` instances and inject resolved
+coordinators into `AgentRuntime::new`. Equal scope strings share a budget only
+within the same registry.
+
+| Object | Owner and sharing | Lifetime |
+| --- | --- | --- |
+| Local registry | `RuntimeServerClientHub`, shared by connections and background work | Runtime service |
+| Hosted registry | `HttpServerState`, shared by request-state clones | Runtime Server service |
+| Scope coordinator | Local main Run, compaction and child Agents use the parent Session scope; hosted executors and provider-poll contexts use their source Session scope | Last executor/context holding its coordinator |
+| Tool permit | One admitted tool invocation | Released on completion, cancellation or task drop |
+
+Registry entries are weak references. Expired entries are swept on the next
+lookup; a live scope rejects conflicting normalized capacities. Disconnecting
+a client or dropping a request does not terminate budgets held by executors.
+Budgets are process-local transient coordination, with no persistent capacity
+reservation to restore after restart. Core's `global_for_scope` constructor is
+replaced by `registry.for_scope`; callers must hold a registry at their service
+boundary and pass the returned coordinator explicitly.
+
 ## Request flow
 
 1. A Host opens or creates a Session through the Local Runtime protocol.

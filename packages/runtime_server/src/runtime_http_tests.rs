@@ -11,12 +11,46 @@ fn http_state(runtime: Arc<tokio::runtime::Runtime>) -> HttpServerState {
         store: Arc::new(RuntimeStoreActor::start(job_store.clone()).unwrap()),
         job_store: Arc::new(job_store),
         tool_layers: Default::default(),
+        tool_concurrency_registry: Default::default(),
         execution_profile: Arc::new(RuntimeExecutionProfile {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
             image_digest: "sha256:synthetic-http-fixture".into(),
         }),
         request_capacity: request_capacity::RequestCapacity::for_http_tests(Duration::from_secs(2)),
     }
+}
+
+#[test]
+fn service_tool_budgets_survive_request_state_drop_and_isolate_server_instances() {
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    let (server, independent) = {
+        let _guard = runtime.enter();
+        (http_state(runtime.clone()), http_state(runtime.clone()))
+    };
+    let request = server.clone();
+    let parent = server
+        .tool_concurrency_registry
+        .for_scope("session:parent", 1)
+        .unwrap();
+    let child = request
+        .tool_concurrency_registry
+        .for_scope("session:parent", 1)
+        .unwrap();
+    let other = independent
+        .tool_concurrency_registry
+        .for_scope("session:parent", 1)
+        .unwrap();
+    drop(request);
+
+    runtime.block_on(async {
+        let permit = parent.acquire_async().await;
+        let waiting = child.acquire_async();
+        tokio::pin!(waiting);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        assert!(futures::poll!(std::pin::pin!(other.acquire_async())).is_ready());
+        drop(permit);
+        let _child_permit = waiting.await;
+    });
 }
 
 /// Storage regressions exercise the production Router with their owned database.

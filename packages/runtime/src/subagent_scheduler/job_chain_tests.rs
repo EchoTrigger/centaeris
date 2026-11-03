@@ -274,14 +274,17 @@ async fn join_result(parent: &str, row: &RuntimeJobRecord) {
     .unwrap();
     let identity =
         agent_runtime::native_agent_run_identity("parent-result-join", parent, &cwd).unwrap();
+    let engine_config = subagent_engine_config(&config, None).unwrap();
     let runtime = agent_runtime::build_agent_runtime(agent_runtime::AgentRuntimeBuildRequest {
         store: agent_runtime::agent_runtime_store_actor().unwrap(),
         session_id: parent.into(),
-        concurrency_scope_id: parent.into(),
+        tool_concurrency: centaeris_core::runtime::ToolConcurrencyCoordinator::new(
+            engine_config.tool_parallelism,
+        ),
         cwd,
         execution_owner: "parent-result-join".into(),
         bash_path: config.bash_path.as_deref().map(PathBuf::from),
-        runtime_config: subagent_engine_config(&config, None).unwrap(),
+        runtime_config: engine_config,
         native_plugin_activation: None,
         execution_cancellation_probe: None,
         file_mutation_commit_port: None,

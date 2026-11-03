@@ -485,6 +485,9 @@ fn main() -> Result<(), String> {
         store,
         job_store,
         tool_layers,
+        tool_concurrency_registry: Arc::new(
+            centaeris_core::runtime::ToolConcurrencyRegistry::default(),
+        ),
         execution_profile,
         request_capacity: request_capacity::RequestCapacity::from_env()?,
     };
@@ -1112,6 +1115,7 @@ struct HttpServerState {
     store: Arc<RuntimeStoreActor>,
     job_store: Arc<PostgresRuntimeStore>,
     tool_layers: ToolLayerRegistry,
+    tool_concurrency_registry: Arc<centaeris_core::runtime::ToolConcurrencyRegistry>,
     execution_profile: Arc<RuntimeExecutionProfile>,
     request_capacity: request_capacity::RequestCapacity,
 }
@@ -1800,6 +1804,7 @@ fn execute_agent_run(
     lifecycle_job_id: String,
     lifecycle_lease_owner: String,
     tool_layers: ToolLayerRegistry,
+    tool_concurrency_registry: Arc<centaeris_core::runtime::ToolConcurrencyRegistry>,
 ) -> Result<AgentRunStepOutcome, String> {
     let startup_started = Instant::now();
     let redis_url = env::var("REDIS_URL").map_err(|_| "REDIS_URL is required".to_string())?;
@@ -2563,7 +2568,7 @@ fn execute_agent_run(
             agent_run_start.agent_run_id.clone(),
         )?));
     let agent_runtime_config = hosted_agent_runtime_config(&agent_run_start);
-    let tool_concurrency = ToolConcurrencyCoordinator::global_for_scope(
+    let tool_concurrency = tool_concurrency_registry.for_scope(
         format!("session:{}", agent_run_start.authorization.session_id),
         agent_runtime_config.tool_parallelism,
     )?;

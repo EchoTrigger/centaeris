@@ -426,15 +426,17 @@ async fn run_parent_batch(
         return Ok(());
     }
     let runtime_config = runtime_config::get(runtime_config::AgentRuntimeConfigGetRequest {})?;
+    let engine_config = subagent_engine_config(&runtime_config, None)?;
     let observer_runtime =
         agent_runtime::build_agent_runtime(agent_runtime::AgentRuntimeBuildRequest {
             store: snapshots.clone(),
             session_id: session_id.to_string(),
-            concurrency_scope_id: session_id.to_string(),
+            tool_concurrency: event_writer
+                .tool_concurrency_for_session(session_id, engine_config.tool_parallelism)?,
             cwd: cwd.clone(),
             execution_owner: worker_id.clone(),
             bash_path: runtime_config.bash_path.as_deref().map(PathBuf::from),
-            runtime_config: subagent_engine_config(&runtime_config, None)?,
+            runtime_config: engine_config,
             native_plugin_activation: None,
             execution_cancellation_probe: None,
             file_mutation_commit_port: None,
@@ -745,7 +747,10 @@ impl ElectronSubagentRunner {
             agent_runtime::build_agent_runtime(agent_runtime::AgentRuntimeBuildRequest {
                 store: self.store.clone(),
                 session_id: binding.child_session_id.clone(),
-                concurrency_scope_id: self.parent_session_id.clone(),
+                tool_concurrency: self.event_writer.tool_concurrency_for_session(
+                    &self.parent_session_id,
+                    engine_config.tool_parallelism,
+                )?,
                 cwd: self.cwd.clone(),
                 execution_owner: req.job.job_id.clone(),
                 bash_path: runtime_config.bash_path.as_deref().map(PathBuf::from),
