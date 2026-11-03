@@ -1957,8 +1957,9 @@ impl<
         &self,
         session: &SessionStateSnapshot,
         generate_result: &GenerateResult,
-    ) -> Result<(), String> {
+    ) -> Result<Option<question::ValidatedQuestionCall>, String> {
         let mut complete_turn_call_count = 0usize;
+        let mut question_call = None;
         for call in &generate_result.tool_calls {
             if !self.tool_is_projected_for_execution(session, call.name.as_str())? {
                 return Err(format!(
@@ -1967,7 +1968,7 @@ impl<
                 ));
             }
             if call.name == question::TOOL_NAME {
-                question::question_from_result(generate_result)?;
+                question_call = question::ValidatedQuestionCall::from_result(generate_result)?;
                 continue;
             }
             if self.tools_port.tool_turn_behavior(call.name.as_str())?
@@ -1982,7 +1983,7 @@ impl<
                     .to_string(),
             );
         }
-        Ok(())
+        Ok(question_call)
     }
 
     pub(super) fn should_complete_turn_after_tool_success(

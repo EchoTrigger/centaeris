@@ -107,6 +107,9 @@ async fn model_question_resumes_original_run_and_closes_one_provider_tool_result
     for action in ["answer", "skip"] {
         let store = AgentRuntimeTestStore::new();
         let engine = AgentRuntime::new_for_test(store.clone(), config());
+        let mut original = question_generate_result();
+        original.tool_calls[0].args_json =
+            "{ \"options\": [\"First\", \"Second\"], \"question\": \"Which approach?\" }".into();
         let paused = engine
             .process_turn_with_stream_sink_async(
                 ProcessTurnRequest {
@@ -114,7 +117,7 @@ async fn model_question_resumes_original_run_and_closes_one_provider_tool_result
                     turn_id: "question-turn".into(),
                     input: TurnInput::UserMessage("Please ask".into()),
                     agent_run_identity: Some(identity()),
-                    generate_result: question_generate_result(),
+                    generate_result: original.clone(),
                     agent_run_resource_usage: AgentRunResourceUsageV1::default(),
                 },
                 None,
@@ -128,6 +131,15 @@ async fn model_question_resumes_original_run_and_closes_one_provider_tool_result
             serde_json::from_str(&checkpoint.payload_json).unwrap();
         wait.validate().unwrap();
         assert_eq!(wait.question.options, ["First", "Second"]);
+        assert_eq!(wait.tool_call.id, original.tool_calls[0].id);
+        assert_eq!(wait.tool_call.name, original.tool_calls[0].name);
+        assert_eq!(wait.tool_call.args_json, original.tool_calls[0].args_json);
+        let event = paused
+            .runtime_events
+            .iter()
+            .find(|event| event.event_type == "QuestionRequired")
+            .unwrap();
+        assert_eq!(event.payload, serde_json::to_value(&wait.question).unwrap());
         // A reconstructed engine with no response must stay paused without another provider call.
         let restored = AgentRuntime::new_for_test(store.clone(), config());
         assert_eq!(
@@ -221,6 +233,154 @@ async fn model_question_resumes_original_run_and_closes_one_provider_tool_result
             .unwrap();
         assert_eq!(completed.stop, AgentRunStop::Finalized);
         assert_eq!(model.0.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn question_wait_rejects_invalid_input_and_does_not_publish_after_write_failure() {
+    for (case, mut generate, enabled) in [
+        ("denied", question_generate_result(), false),
+        ("invalid", question_generate_result(), true),
+        ("write_failure", question_generate_result(), true),
+    ] {
+        let store = AgentRuntimeTestStore::new();
+        if case == "invalid" {
+            generate.tool_calls[0].args_json = r#"{"question":"","options":["One","Two"]}"#.into();
+        }
+        if case == "write_failure" {
+            let wait =
+                question::QuestionCheckpoint::new(&identity(), "question-turn", &generate).unwrap();
+            store
+                .append_event(RuntimeEvent {
+                    event_id: format!("runtime_wait:{}:waiting", wait.continuation_id),
+                    session_id: "question-session".into(),
+                    task_id: Some("question-turn".into()),
+                    event_type: "conflicting_event".into(),
+                    at_ms: 0,
+                    visibility: EventVisibility::Internal,
+                    payload_json: "{}".into(),
+                })
+                .unwrap();
+        }
+        let engine = AgentRuntime::new_for_test(
+            store.clone(),
+            if enabled {
+                config()
+            } else {
+                AgentRuntimeConfig::default()
+            },
+        );
+        let mut updates = Vec::new();
+        let result = engine
+            .process_turn_with_stream_sink_async(
+                ProcessTurnRequest {
+                    session_id: "question-session".into(),
+                    turn_id: "question-turn".into(),
+                    input: TurnInput::UserMessage("Please ask".into()),
+                    agent_run_identity: Some(identity()),
+                    generate_result: generate,
+                    agent_run_resource_usage: AgentRunResourceUsageV1::default(),
+                },
+                Some(&mut |update| updates.push(update)),
+            )
+            .await;
+        let error = result.unwrap_err();
+        match case {
+            "denied" => assert!(
+                error.contains("not permitted by the projected tool policy"),
+                "{error}"
+            ),
+            "invalid" => assert_eq!(error, "question_requires_text_and_two_to_six_options"),
+            _ => assert_eq!(error, "runtime event idempotency conflict"),
+        }
+        assert!(
+            store
+                .load_checkpoint_by_turn("question-session", "question-turn")
+                .unwrap()
+                .is_none(),
+            "{case}"
+        );
+        assert!(!updates.iter().any(|update| matches!(update, TurnUpdate::RuntimeEvent { event } if event.event_type == "QuestionRequired")), "{case}");
+    }
+}
+
+#[tokio::test]
+async fn public_question_routing_retains_serialized_snapshot_and_checkpoint_contract() {
+    let store = AgentRuntimeTestStore::new();
+    let checkpoints = TurnCheckpointStore::new(store);
+    let result = question_generate_result();
+    let routed = checkpoints
+        .route_after_generate_async(RouteGenerateResultRequest {
+            session_id: "question-session".into(),
+            turn_id: "question-turn".into(),
+            state: build_agent_state(result.clone()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(routed.continuation, QueryContinuation::AwaitQuestion);
+    let expected = question::question_from_result(&result).unwrap().unwrap();
+    let snapshot = serde_json::to_value(&routed.state).unwrap();
+    let serialized_question = snapshot["pending_question_json"].as_str().unwrap();
+    assert_eq!(
+        serde_json::from_str::<question::Question>(serialized_question).unwrap(),
+        expected
+    );
+    let persisted = checkpoints
+        .persist_query_state_async(PersistQueryStateRequest {
+            session_id: "question-session".into(),
+            turn_id: "question-turn".into(),
+            at_ms: 1,
+            state: routed.state,
+            agent_run_identity: Some(identity()),
+        })
+        .await
+        .unwrap();
+    let wait: question::QuestionCheckpoint =
+        serde_json::from_str(&persisted.checkpoint.payload_json).unwrap();
+    wait.validate().unwrap();
+    assert_eq!(wait.question, expected);
+    assert_eq!(wait.tool_call.args_json, result.tool_calls[0].args_json);
+}
+
+#[tokio::test]
+async fn question_wait_recovery_rejects_tampered_tool_call_binding() {
+    for field in ["id", "name", "args"] {
+        let store = AgentRuntimeTestStore::new();
+        let engine = AgentRuntime::new_for_test(store.clone(), config());
+        let paused = engine
+            .process_turn_with_stream_sink_async(
+                ProcessTurnRequest {
+                    session_id: "question-session".into(),
+                    turn_id: "question-turn".into(),
+                    input: TurnInput::UserMessage("Please ask".into()),
+                    agent_run_identity: Some(identity()),
+                    generate_result: question_generate_result(),
+                    agent_run_resource_usage: AgentRunResourceUsageV1::default(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let mut wait: question::QuestionCheckpoint =
+            serde_json::from_str(&paused.checkpoint.unwrap().payload_json).unwrap();
+        match field {
+            "id" => wait.tool_call.id = "other".into(),
+            "name" => wait.tool_call.name = "other".into(),
+            _ => {
+                wait.tool_call.args_json =
+                    r#"{"question":"Other?","options":["First","Second"]}"#.into()
+            }
+        }
+        store.state().unwrap().checkpoints[0].payload_json = serde_json::to_string(&wait).unwrap();
+        let error = engine
+            .resume_turn_with_agent_run_identity_async(
+                "question-session",
+                "question-turn",
+                Some(&identity()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error, "question_tool_call_binding_mismatch", "{field}");
     }
 }
 

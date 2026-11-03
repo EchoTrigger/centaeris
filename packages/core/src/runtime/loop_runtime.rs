@@ -2714,12 +2714,14 @@ impl<
     pub(super) async fn route_after_generate_with_retry(
         &self,
         req: RouteGenerateResultRequest,
+        question: Option<question::ValidatedQuestionCall>,
         stage: &str,
         recovery_policy_trace_json: &mut Vec<String>,
     ) -> Result<RouteGenerateResultResponse, String> {
         recovery::route_after_generate_with_retry(
             &self.checkpoint_store,
             req,
+            question,
             stage,
             self.config.max_recovery_attempts,
             recovery_policy_trace_json,
@@ -2730,12 +2732,14 @@ impl<
     pub(super) async fn persist_query_state_with_retry(
         &self,
         req: PersistQueryStateRequest,
+        question: question::ValidatedQuestionCall,
         stage: &str,
         recovery_policy_trace_json: &mut Vec<String>,
     ) -> Result<SubmitTurnResponse, String> {
         recovery::persist_query_state_with_retry(
             &self.checkpoint_store,
             req,
+            question,
             stage,
             self.config.max_recovery_attempts,
             recovery_policy_trace_json,

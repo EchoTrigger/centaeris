@@ -118,7 +118,8 @@ impl<
         {
             return Err("provider returned an empty final response without tool calls".to_string());
         }
-        self.validate_tool_turn_behavior_preflight(&session, &effective_generate_result)?;
+        let question_call =
+            self.validate_tool_turn_behavior_preflight(&session, &effective_generate_result)?;
         let system_prompt_manifest_json = self.apply_system_prompt_template(
             &mut session,
             &req,
@@ -145,6 +146,7 @@ impl<
                     turn_id: req.turn_id.clone(),
                     state: route_state,
                 },
+                question_call.clone(),
                 "route_after_response",
                 &mut recovery_policy_trace_json,
             )
@@ -181,6 +183,7 @@ impl<
                         state: routed.state.clone(),
                         agent_run_identity: req.agent_run_identity.clone(),
                     },
+                    question_call.clone().ok_or("question_payload_required")?,
                     "persist_runtime_wait",
                     &mut recovery_policy_trace_json,
                 )
@@ -228,12 +231,11 @@ impl<
                     req.session_id.as_str(),
                     req.turn_id.as_str(),
                     req.turn_id.as_str(),
-                    serde_json::from_str(
-                        routed
-                            .state
-                            .pending_question_json
-                            .as_deref()
-                            .ok_or("question_payload_required")?,
+                    serde_json::to_value(
+                        question_call
+                            .as_ref()
+                            .ok_or("question_payload_required")?
+                            .question(),
                     )
                     .map_err(|error| format!("invalid question payload: {error}"))?,
                 ));

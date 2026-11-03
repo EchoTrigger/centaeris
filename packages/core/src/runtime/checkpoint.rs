@@ -61,6 +61,7 @@ impl<S: RuntimeStore + RuntimeStoreTransactionPort> TurnCheckpointStore<S> {
     fn persist_query_state(
         &self,
         req: PersistQueryStateRequest,
+        validated: Option<&super::question::ValidatedQuestionCall>,
     ) -> Result<SubmitTurnResponse, String> {
         let state = req.state;
         let done_reason = state
@@ -79,14 +80,22 @@ impl<S: RuntimeStore + RuntimeStoreTransactionPort> TurnCheckpointStore<S> {
             .as_ref()
             .ok_or_else(|| "runtime_wait_requires_agent_run_identity".to_string())?;
         agent_run_identity.validate()?;
-        let wait = super::question::QuestionCheckpoint::new(
-            agent_run_identity,
-            req.turn_id.as_str(),
-            state
-                .generate_result
-                .as_ref()
-                .ok_or("question_generate_result_required")?,
-        )?;
+        let wait = if let Some(validated) = validated {
+            super::question::QuestionCheckpoint::from_validated(
+                agent_run_identity,
+                req.turn_id.as_str(),
+                validated,
+            )?
+        } else {
+            super::question::QuestionCheckpoint::new(
+                agent_run_identity,
+                req.turn_id.as_str(),
+                state
+                    .generate_result
+                    .as_ref()
+                    .ok_or("question_generate_result_required")?,
+            )?
+        };
         let continuation_id = wait.continuation_id.clone();
         let checkpoint = CheckpointRecord {
             checkpoint_id: format!("checkpoint:{continuation_id}"),
@@ -133,17 +142,15 @@ impl<S: RuntimeStore + RuntimeStoreTransactionPort> TurnCheckpointStore<S> {
     fn route_after_generate(
         &self,
         req: RouteGenerateResultRequest,
+        question: Option<&super::question::Question>,
     ) -> Result<RouteGenerateResultResponse, String> {
         let mut state = req.state;
-        if let Some(question) = super::question::question_from_result(
-            state
-                .generate_result
-                .as_ref()
-                .ok_or("generate_result_required")?,
-        )? {
+        state
+            .generate_result
+            .as_ref()
+            .ok_or("generate_result_required")?;
+        if question.is_some() {
             state.done_reason = Some(DoneReason::Question);
-            state.pending_question_json =
-                Some(serde_json::to_string(&question).map_err(|error| error.to_string())?);
             return Ok(RouteGenerateResultResponse {
                 continuation: QueryContinuation::AwaitQuestion,
                 decision: LoopDecision {
@@ -190,18 +197,53 @@ where
     ) -> Result<SubmitTurnResponse, String> {
         let checkpoint_store = self.clone();
         run_blocking_runtime_operation("persist_query_state", move || {
-            checkpoint_store.persist_query_state(req)
+            checkpoint_store.persist_query_state(req, None)
         })
         .await
     }
 
     pub async fn route_after_generate_async(
         &self,
-        req: RouteGenerateResultRequest,
+        mut req: RouteGenerateResultRequest,
     ) -> Result<RouteGenerateResultResponse, String> {
         let checkpoint_store = self.clone();
         run_blocking_runtime_operation("route_after_generate", move || {
-            checkpoint_store.route_after_generate(req)
+            let question = super::question::question_from_result(
+                req.state
+                    .generate_result
+                    .as_ref()
+                    .ok_or("generate_result_required")?,
+            )?;
+            if let Some(question) = &question {
+                req.state.pending_question_json =
+                    Some(serde_json::to_string(question).map_err(|error| error.to_string())?);
+            }
+            checkpoint_store.route_after_generate(req, question.as_ref())
+        })
+        .await
+    }
+
+    pub(super) async fn persist_validated_question_async(
+        &self,
+        req: PersistQueryStateRequest,
+        question: super::question::ValidatedQuestionCall,
+    ) -> Result<SubmitTurnResponse, String> {
+        let checkpoint_store = self.clone();
+        run_blocking_runtime_operation("persist_query_state", move || {
+            checkpoint_store.persist_query_state(req, Some(&question))
+        })
+        .await
+    }
+
+    pub(super) async fn route_validated_generate_async(
+        &self,
+        req: RouteGenerateResultRequest,
+        question: Option<super::question::ValidatedQuestionCall>,
+    ) -> Result<RouteGenerateResultResponse, String> {
+        let checkpoint_store = self.clone();
+        run_blocking_runtime_operation("route_after_generate", move || {
+            checkpoint_store
+                .route_after_generate(req, question.as_ref().map(|value| value.question()))
         })
         .await
     }
