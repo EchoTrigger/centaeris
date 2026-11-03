@@ -3231,14 +3231,16 @@ impl ModelClient for OnlinePromptCompactionModelClient {
 }
 
 fn temp_dir_path(suffix: &str) -> std::path::PathBuf {
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock moved backwards")
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "centaeris_agent_runtime_{suffix}_{}_{}",
+        "centaeris_agent_runtime_{suffix}_{}_{}_{}",
         std::process::id(),
-        nanos
+        nanos,
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
     ))
 }
 
