@@ -1082,52 +1082,17 @@
           "apiBaseOverride": null
         },
         {
-          "model": "minimax-m3.1-flash",
-          "displayName": "MiniMax M3.1 Flash",
-          "contextTokens": 1000000,
-          "maxOutputTokens": 128000,
+          "model": "deepseek-v4-pro",
+          "displayName": "DeepSeek V4 Pro",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 384000,
           "thinkingMode": "high",
           "thinkingModes": [
             "low",
-            "medium",
             "high",
-            "xhigh",
             "max"
           ],
-          "supportsVision": true,
-          "apiOverride": null,
-          "apiBaseOverride": null
-        },
-        {
-          "model": "mimo-v2.6-flash",
-          "displayName": "MiMo V2.6 Flash",
-          "contextTokens": 1048576,
-          "maxOutputTokens": 131072,
-          "thinkingMode": null,
-          "thinkingModes": [],
-          "supportsVision": true,
-          "apiOverride": null,
-          "apiBaseOverride": null
-        },
-        {
-          "model": "mimo-v2.6-pro",
-          "displayName": "MiMo V2.6 Pro",
-          "contextTokens": 1048576,
-          "maxOutputTokens": 131072,
-          "thinkingMode": null,
-          "thinkingModes": [],
-          "supportsVision": true,
-          "apiOverride": null,
-          "apiBaseOverride": null
-        },
-        {
-          "model": "qwen3.8-flash",
-          "displayName": "Qwen 3.8 Flash",
-          "contextTokens": 1000000,
-          "maxOutputTokens": 131072,
-          "thinkingMode": null,
-          "thinkingModes": [],
-          "supportsVision": true,
+          "supportsVision": false,
           "apiOverride": null,
           "apiBaseOverride": null
         }
@@ -1291,52 +1256,17 @@
           "apiBaseOverride": null
         },
         {
-          "model": "minimax/minimax-m3.1-flash",
-          "displayName": "MiniMax M3.1 Flash",
-          "contextTokens": 1000000,
-          "maxOutputTokens": 128000,
+          "model": "deepseek/deepseek-v4-pro",
+          "displayName": "DeepSeek V4 Pro",
+          "contextTokens": 1048576,
+          "maxOutputTokens": 384000,
           "thinkingMode": "high",
           "thinkingModes": [
             "low",
-            "medium",
             "high",
-            "xhigh",
             "max"
           ],
-          "supportsVision": true,
-          "apiOverride": null,
-          "apiBaseOverride": null
-        },
-        {
-          "model": "xiaomi/mimo-v2.6-flash",
-          "displayName": "MiMo V2.6 Flash",
-          "contextTokens": 1048576,
-          "maxOutputTokens": 131072,
-          "thinkingMode": null,
-          "thinkingModes": [],
-          "supportsVision": true,
-          "apiOverride": null,
-          "apiBaseOverride": null
-        },
-        {
-          "model": "xiaomi/mimo-v2.6-pro",
-          "displayName": "MiMo V2.6 Pro",
-          "contextTokens": 1048576,
-          "maxOutputTokens": 131072,
-          "thinkingMode": null,
-          "thinkingModes": [],
-          "supportsVision": true,
-          "apiOverride": null,
-          "apiBaseOverride": null
-        },
-        {
-          "model": "Qwen/Qwen3.8-Flash",
-          "displayName": "Qwen 3.8 Flash",
-          "contextTokens": 1000000,
-          "maxOutputTokens": 131072,
-          "thinkingMode": null,
-          "thinkingModes": [],
-          "supportsVision": true,
+          "supportsVision": false,
           "apiOverride": null,
           "apiBaseOverride": null
         }

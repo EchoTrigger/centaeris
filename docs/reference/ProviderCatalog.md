@@ -32,9 +32,8 @@ K2.7 model has thinking enabled without an effort selector. See the
 [Kimi Code model configuration](https://www.kimi.com/code/docs/kimi-code/models.html).
 
 Provider routes retain their own model IDs. OpenCode Go and Command Code GOAT
-include the existing DeepSeek/GLM entries and the low-cost MiniMax M3.1 Flash,
-MiMo V2.6 Pro/Flash, and Qwen 3.8 Flash additions. Their model IDs and endpoints
-come from the [OpenCode Go](https://opencode.ai/docs/go/) and
+include DeepSeek V4.1 Flash, DeepSeek V4 Pro, and GLM-5.3 Flash. Their model IDs
+and endpoints come from the [OpenCode Go](https://opencode.ai/docs/go/) and
 [Command Code](https://commandcode.ai/docs/reference/cli/models) references.
 
 Catalog output limits configure ordinary request budgets. Kimi K3.1 retains its
