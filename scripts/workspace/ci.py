@@ -8,6 +8,8 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
+BACKEND_STAGES = ("Contracts", "RuntimePostgres", "ApiPostgres", "Support")
+STAGES = ("All", "Rust", "Web", *BACKEND_STAGES)
 sys.path.insert(0, str(ROOT / "scripts"))
 try:
     from products import rust_packages
@@ -39,7 +41,7 @@ def run(label, args, capture=False):
 
 
 def main(skip_frontend_tests=False, stage="All"):
-    if stage not in ("All", "Rust", "Python", "Web"):
+    if stage not in STAGES:
         raise ValueError(f"Unknown hosted gate stage: {stage}")
     py = sys.executable
     pnpm = "pnpm.cmd" if os.name == "nt" else "pnpm"
@@ -52,8 +54,6 @@ def main(skip_frontend_tests=False, stage="All"):
         ("Core source resolution", ["node", "--test", "scripts/workspace/core-source.test.mjs"]),
         ("Monorepo Core source", ["node", "--test", "scripts/workspace/source-revision.test.mjs"]),
         ("Rust toolchain consistency", ["node", "--test", "scripts/workspace/rust-toolchain.test.mjs"]),
-
-
         ("Transcript exporter cache isolation", [py, "-B", "scripts/workspace/test_transcript_schema.py"]),
         ("Transcript generated contract", [py, "scripts/workspace/transcript-schema.py", "--check"]),
         ("Outbox gate isolation and discovery guards", [py, "scripts/workspace/test_runtime_outbox_gate.py"]),
@@ -67,7 +67,6 @@ def main(skip_frontend_tests=False, stage="All"):
         ("Performance harness isolation", [py, "-m", "unittest", "discover", "-s", "perf/tests", "-v"]),
         ("Performance workload metrics", ["node", "--test", "perf/tests/k6-metrics.test.mjs"]),
         ("Document processor tests", ["uv", "run", "--frozen", "--package", "centaeris-document-processor", "python", "scripts/workspace/python_test_gate.py", "document_processor"]),
-        ("Django fresh migration", [*api, "packages/api/manage.py", "migrate", "--noinput", "--settings=api.migration_test_settings"]),
         ("Django migration drift", [*api, "packages/api/manage.py", "makemigrations", "--check", "--dry-run", "--settings=api.migration_test_settings", "--skip-checks"]),
         ("Full Django PostgreSQL suite", [*api, "scripts/workspace/python_test_gate.py", "api"]),
         ("First-party MCP Rust/Python client", [*api, "scripts/workspace/platform-mcp-client-gate.py"]),
@@ -90,29 +89,48 @@ def main(skip_frontend_tests=False, stage="All"):
     rust_labels = {"Core source resolution", "Monorepo Core source", "Rust toolchain consistency",
                    "Transcript exporter cache isolation", "Transcript generated contract"}
     web_labels = {"Node install", "Shared frontend types", "Web production validation", "Web fixture toolchain", "Web fixture source", "Web unit tests", "Web component interactions"}
+    backend_labels = {
+        "Contracts": {"Portable CI behavior", "Product version parity", "Outbox gate isolation and discovery guards",
+                      "Authorization gate guards", "AgentRun authorization parity", "Deployment identity contracts",
+                      "Django migration drift"},
+        "RuntimePostgres": {"Outbox PostgreSQL regressions"},
+        "ApiPostgres": {"Full Django PostgreSQL suite", "First-party MCP Rust/Python client"},
+        "Support": {"Workspace Harbor adapter regressions", "Python discovery gate regressions", "Worker tests",
+                    "Retained acceptance fixture guards", "Performance harness isolation", "Performance workload metrics",
+                    "Document processor tests", "Performance artifact validation"},
+    }
     if stage == "Rust":
         gates = [gate for gate in gates if gate[0] in rust_labels] + rust_gates
     elif stage == "Web":
         gates = [gate for gate in gates if gate[0] in web_labels]
-    elif stage == "Python":
-        gates = [gate for gate in gates if gate[0] not in rust_labels | web_labels]
+    elif stage in BACKEND_STAGES:
+        gates = [gate for gate in gates if gate[0] in backend_labels[stage]]
     else:
         gates = gates[:5] + rust_gates + gates[5:]
+    failures = []
     for label, args in gates:
         started = time.monotonic()
         try:
             run(label, args)
+        except (subprocess.CalledProcessError, OSError) as error:
+            if stage not in BACKEND_STAGES:
+                raise
+            failures.append(label)
+            print(f"FAILED: {label}: {error}", file=sys.stderr, flush=True)
         finally:
             print(f"<== {label}: {time.monotonic() - started:.3f}s", flush=True)
-    config = json.loads(run("Compose structure", ["docker", "compose", "--env-file", ".env.example", "config", "--format", "json"], capture=True))
-    for name, consumer in (("document-processor", "material-worker"), ("workspace-general", "runtime")):
-        if name not in config["services"] or config["services"][name].get("profiles") or not config["services"][consumer]["depends_on"].get(name):
-            raise RuntimeError(f"Required execution image is not enabled: {name}")
+    if stage in ("All", "Contracts"):
+        config = json.loads(run("Compose structure", ["docker", "compose", "--env-file", ".env.example", "config", "--format", "json"], capture=True))
+        for name, consumer in (("document-processor", "material-worker"), ("workspace-general", "runtime")):
+            if name not in config["services"] or config["services"][name].get("profiles") or not config["services"][consumer]["depends_on"].get(name):
+                raise RuntimeError(f"Required execution image is not enabled: {name}")
+    if failures:
+        raise RuntimeError("Workspace checks failed: " + ", ".join(failures))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-frontend-tests", action="store_true")
-    parser.add_argument("--stage", choices=("All", "Rust", "Python", "Web"), default="All")
+    parser.add_argument("--stage", choices=STAGES, default="All")
     args = parser.parse_args()
     main(args.skip_frontend_tests, args.stage)

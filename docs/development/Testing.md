@@ -29,11 +29,19 @@ release requirements call for them. Generic skill checklists do not expand the
 agreed scope. Sub-agents receive a bounded validation scope and report existing
 results for reuse instead of repeating each other's checks.
 
-The hosted Python CI runs the complete API suite and support checks sequentially
-in `workspace-python`. Each invocation owns its test database and temporary
-storage. Skipped tests and discovery/execution mismatches fail the gate. Fresh
-schema and migration drift checks run before the API suite; each gate reports
+The hosted Python CI runs independent Contracts, Support, RuntimePostgres and
+ApiPostgres matrix jobs with fail-fast disabled. Runtime and API jobs each own
+their PostgreSQL service; pure checks do not start one. Every selected job must
+pass the required aggregate check. Each invocation owns its test database and
+temporary storage. Skipped tests and discovery/execution mismatches fail the
+discovery gate. The API suite creates and migrates a fresh PostgreSQL database;
+schema drift is checked separately without a running database. Each gate reports
 its elapsed time.
+
+Runtime PostgreSQL tests compile one test executable and reuse it for discovery
+and execution. Contract and support checks report independent failures together
+and return a failing exit status. Migration tests use
+`isolated_migration_database` instead of recreating the runner's shared schema.
 
 Frontend visual design uses manual appearance acceptance rather than TDD.
 Frontend browser and Desktop window end-to-end checks are not CI or release

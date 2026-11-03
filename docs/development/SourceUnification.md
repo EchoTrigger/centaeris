@@ -45,7 +45,10 @@ The Python workspace and uv.lock remain unchanged. Local builds do not run uv.
 python scripts/ci.py Source --frontend-tests
 python scripts/workspace/ci.py --stage Rust
 python scripts/workspace/ci.py --stage Web
-python scripts/workspace/ci.py --stage Python
+python scripts/workspace/ci.py --stage Contracts
+python scripts/workspace/ci.py --stage RuntimePostgres
+python scripts/workspace/ci.py --stage ApiPostgres
+python scripts/workspace/ci.py --stage Support
 python scripts/workspace/ci.py
 python scripts/products.py build tui
 python scripts/products.py build desktop
