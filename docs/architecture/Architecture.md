@@ -35,7 +35,8 @@ within the same registry.
 | Hosted registry | `HttpServerState`, created in Runtime Server `main` | Clones of that service's request state and dispatched execution steps | Last service/request/step handle |
 | Local scope coordinator | Main/compaction `AgentRuntime` and subagent observer/worker runtimes | Same service and parent Session, including resumed Runs | Last runtime holding the coordinator |
 | Hosted scope coordinator | `AgentRuntime`, retained `HostedRuntimeContext`, and its worker clones | Same service and source Session, including resumed execution steps and child Agents | Last executor/context clone; confirmed teardown removes the matching Run's retained context |
-| Tool permit | One admitted tool invocation | One invocation, including its result safe point | Completion, cancellation or task drop releases the permit |
+| Parallel tool permit | Spawned tool task | One parallel invocation | Released when the spawned task exits. The parent applies the result sink after joining that task. |
+| Serial tool permit | Executor running the serial invocation | One serial invocation, including its result sink when present | Released when the serial invocation scope exits, after the result sink returns or as its error propagates. |
 
 The local `EventWriter::tool_concurrency_for_session` resolves the budget from
 its service. Main Runs and manual compaction supply their Session ID. Subagent
