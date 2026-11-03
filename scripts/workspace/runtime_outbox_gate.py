@@ -107,6 +107,9 @@ def main(argv=()):
                 ['cargo', 'test', '--locked', '-p', 'runtime_server',
                  'postgres_store::integration_tests::provision_authority_tests', '--']]
     exact_tests = [
+        'question_response_tests::postgres_question_response_receipt_replays_after_consumption_and_preserves_yield_wake',
+        'question_wait_notifications::postgres_question_wait_presentation_changes_are_atomic_and_idempotent',
+        'wait_handoff_tests::postgres_question_wait_handoff_preserves_bound_snapshot_and_rejects_schema_relabeling',
         'checkpoint_requests::postgres_direct_store_validates_checkpoint_requests_before_transactions',
         'snapshot_cas_tests::postgres_snapshot_cas_rejects_stale_writers_and_preserves_concurrent_results',
         'postgres_transcript_concurrent_duplicate_commit_is_idempotent',

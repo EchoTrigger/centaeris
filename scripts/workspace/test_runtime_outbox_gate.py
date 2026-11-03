@@ -16,6 +16,9 @@ class OutboxGateTests(unittest.TestCase):
     def test_default_runner_discovers_and_executes_shared_admission_regressions(self):
         group = 'postgres_store::integration_tests::shared_admission_tests'
         expected = {
+            'postgres_store::integration_tests::question_response_tests::postgres_question_response_receipt_replays_after_consumption_and_preserves_yield_wake',
+            'postgres_store::integration_tests::question_wait_notifications::postgres_question_wait_presentation_changes_are_atomic_and_idempotent',
+            'postgres_store::integration_tests::wait_handoff_tests::postgres_question_wait_handoff_preserves_bound_snapshot_and_rejects_schema_relabeling',
             group + '::postgres_four_independent_live_environments_share_observed_resources',
             group + '::postgres_unmeasured_residents_keep_full_declarations_and_block_third_environment',
             group + '::postgres_real_resident_pressure_does_not_wake_itself_on_preparation_unlock',

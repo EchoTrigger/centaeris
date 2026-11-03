@@ -460,10 +460,7 @@ mod frame_tests {
             fence,
             consumer_receipt_id: "unsigned-consumer".into(),
         };
-        assert_eq!(
-            dispatch.validate(),
-            Err("maintenance_task_owner_rejected")
-        );
+        assert_eq!(dispatch.validate(), Err("maintenance_task_owner_rejected"));
     }
     #[test]
     fn maintenance_filesystem_frame_binds_bounded_raw_binary_and_rejects_extra_or_changed_bytes() {
