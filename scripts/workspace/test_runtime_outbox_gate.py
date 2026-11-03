@@ -28,13 +28,16 @@ class OutboxGateTests(unittest.TestCase):
         }
         required = gate.required_tests()
         self.assertTrue(expected.issubset(set(required)))
+        rewrite = 'postgres_store::integration_tests::postgres_fenced_rewrite_tombstones_completed_tool_request'
+        catalog = {*required, rewrite}
         for executable in (None, 'runtime-tests.exe'):
             with self.subTest(executable=executable):
                 discovered, executed = set(), set()
 
                 def run(command, **kwargs):
                     selected_filter = command[5] if executable is None else command[1]
-                    selected = {name for name in required if selected_filter in name}
+                    selected = {name for name in catalog
+                                if (name == selected_filter if '--exact' in command else selected_filter in name)}
                     if '--list' in command:
                         discovered.update(selected)
                         return SimpleNamespace(stdout=''.join(name + ': test\n' for name in sorted(selected or {selected_filter})))
@@ -51,6 +54,8 @@ class OutboxGateTests(unittest.TestCase):
                     gate.main(args)
                 self.assertTrue(expected.issubset(discovered))
                 self.assertTrue(expected.issubset(executed))
+                self.assertIn(rewrite, discovered)
+                self.assertIn(rewrite, executed)
                 driver.connect.assert_called_once()
 
     def test_host_retirement_cases_are_required_and_discovered_before_database_creation(self):
@@ -147,8 +152,15 @@ class OutboxGateTests(unittest.TestCase):
             gate.validate_required_tests(['unrelated_test', *names[1:]])
 
     def test_empty_discovery_cannot_pass(self):
-        with self.assertRaises(RuntimeError):
-            gate.discovered_tests('0 tests, 0 benchmarks')
+        identity = 'postgres_store::tests::postgres_outbox_case'
+        for output in ('0 tests, 0 benchmarks', f'{identity}: test\n{identity}: test\n'):
+            with self.subTest(output=output), self.assertRaises(RuntimeError):
+                gate.discovered_tests(output)
+            driver = SimpleNamespace(connect=lambda **kwargs: self.fail('database opened before discovery proof'), sql=SimpleNamespace())
+            with patch.dict(sys.modules, {'psycopg': driver}), \
+                 patch.object(gate.subprocess, 'run', return_value=SimpleNamespace(stdout=output)):
+                with self.assertRaisesRegex(RuntimeError, 'selected_case.*outbox test discovery is empty or contains duplicates'):
+                    gate.main(['--test-filter', 'selected_case'])
         self.assertEqual(gate.discovered_tests('postgres_store::tests::postgres_outbox_case: test\n'), ['postgres_store::tests::postgres_outbox_case'])
 
     def test_default_gate_discovers_current_schema_cases_before_opening_database(self):

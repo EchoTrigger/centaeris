@@ -147,7 +147,7 @@ def main(argv=()):
         'postgres_runtime_job_wait_is_notified_and_closes_lost_wakeups',
         'postgres_session_terminal_append_fences_reclaimed_lease_owner',
         'postgres_peer_observation_reuses_one_observer_and_detects_live_clients',
-        'postgres_fenced_rewrite_tombstones_completed_dispatch_request',
+        'postgres_fenced_rewrite_tombstones_completed_tool_request',
         'postgres_pre_admission_cancellation_is_durable_fenced_and_history_free',
         'recovery_orchestration_releases_capacity_before_followup_store_work',
         'postgres_new_user_turn_after_unpaired_tool_call_fails_admission',
@@ -182,7 +182,10 @@ def main(argv=()):
         discovered = subprocess.run([*command, '--ignored', '--list'], cwd=root,
                                     env=env,
                                     capture_output=True, text=True, check=True)
-        names.extend(discovered_tests(discovered.stdout))
+        try:
+            names.extend(discovered_tests(discovered.stdout))
+        except RuntimeError as error:
+            raise RuntimeError(f'Runtime PostgreSQL discovery failed for {command!r}: {error}') from error
     if len(names) != len(set(names)):
         raise RuntimeError('Runtime PostgreSQL test discovery contains duplicates')
     validate_required_tests(names, args.test_filter)
