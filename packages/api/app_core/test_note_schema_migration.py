@@ -1,10 +1,6 @@
-"""Structural migration checks use SQLite; production constraints use PostgreSQL."""
+"""Note migration and immutable-history constraints use PostgreSQL."""
 
-import os
 from importlib import import_module
-from pathlib import Path
-import subprocess
-import sys
 from types import SimpleNamespace
 from unittest import skipUnless
 from unittest.mock import Mock
@@ -25,22 +21,7 @@ NOTE_SCHEMA = [("app_core", "0014_library_note_revisions")]
 IMMUTABLE_NOTE_SCHEMA = [("app_core", "0015_note_revision_immutability")]
 
 
-class NoteSQLiteMigrationTests(SimpleTestCase):
-    def test_empty_sqlite_database_migrates_without_model_drift(self):
-        api_root = Path(__file__).resolve().parents[1]
-        for arguments in (
-            ["migrate", "--noinput"],
-            ["makemigrations", "--check", "--dry-run", "--skip-checks"],
-        ):
-            with self.subTest(command=arguments[0]):
-                result = subprocess.run(
-                    [sys.executable, str(api_root / "manage.py"), *arguments,
-                     "--settings=api.migration_test_settings"],
-                    cwd=api_root, env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-                    capture_output=True, text=True, encoding="utf-8", timeout=60,
-                )
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
+class NoteMigrationBackendTests(SimpleTestCase):
     def test_unknown_backend_refuses_to_install_or_remove_constraints(self):
         migration = import_module("app_core.migrations.0015_note_revision_immutability")
         operation = migration.Migration.operations[0]

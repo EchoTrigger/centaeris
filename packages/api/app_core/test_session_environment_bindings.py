@@ -9,7 +9,9 @@ from .test_execution_publication_fencing import ExecutionPublicationFixture
 from .test_hosted_operations import OperationFixture
 
 
-class SessionEnvironmentHttpTests(OperationFixture, TestCase):
+class SessionEnvironmentHttpTests(OperationFixture, TransactionTestCase):
+    serialized_rollback = True
+
     def environment(self, session_id):
         response = self.client.get(f"/api/sessions/{session_id}")
         self.assertEqual(response.status_code, 200, response.content)
@@ -34,7 +36,8 @@ class SessionEnvironmentHttpTests(OperationFixture, TestCase):
         self.assertEqual(self.post(url).json(), first.json())
         first_run = AgentRun.objects.get(pk=first.json()["agentRunId"])
         signed = (first_run.authorization.payload, first_run.authorization.digest, first_run.authorization.signature)
-        AgentRun.objects.filter(pk=first_run.pk).update(status="completed")
+        from .testing import release_simulated_run
+        release_simulated_run(self, first_run)
         second = self.post(url, operationId="submit-2")
         self.assertEqual(second.status_code, 202, second.content)
         self.assertNotEqual(second.json()["agentRunId"], first_run.pk)

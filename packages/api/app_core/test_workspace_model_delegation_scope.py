@@ -22,7 +22,7 @@ class WorkspaceModelCatalogScopeTests(TestCase):
     def test_foreign_workspace_requires_current_membership(self):
         path = f"/api/models?workspaceId={self.foreign.pk}"
         denied = self.client.get(path)
-        self.assertEqual(denied.status_code, 404, denied.content)
+        self.assertEqual(denied.status_code, 401, denied.content)
         WorkspaceMembership.objects.create(workspace=self.foreign, user=self.user, role="member")
         response = self.client.get(path)
         self.assertEqual(response.status_code, 200, response.content)

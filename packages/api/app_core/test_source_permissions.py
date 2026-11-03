@@ -635,7 +635,7 @@ class SourcePermissionTests(TestCase):
         self.assertEqual(invalid.json(), {"error": "trash_cursor_invalid"})
         cross_endpoint = self.client.get(
             f"/api/workspaces/{self.workspace.id}/trash",
-            {"cursor": first["nextCursor"], "kind": "agent"},
+            {"cursor": first["nextCursor"], "kind": "session"},
         )
         self.assertEqual(cross_endpoint.status_code, 400)
         self.assertEqual(cross_endpoint.json(), {"error": "trash_cursor_invalid"})

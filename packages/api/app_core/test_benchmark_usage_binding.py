@@ -33,7 +33,7 @@ class BenchmarkUsageBindingTests(TestCase):
         self.scope = {'expected_db': database, 'expected_user': user, 'session_id': 'sess_1', 'run_id': 'agent_run_1'}
 
     def payload(self, version):
-        name = 'v1/valid.json' if version == 0 else 'v1/custom.json'
+        name = 'v2/valid.json' if version == 0 else 'v2/custom.json'
         value = json.loads((ROOT / 'tests/workspace/fixtures/agent_run_authorization' / name).read_text(encoding='utf-8'))
         validate_agent_run_authorization_payload(value)
         return value

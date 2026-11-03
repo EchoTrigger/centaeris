@@ -11,7 +11,7 @@ import tempfile
 from django.conf import settings
 from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase, override_settings
+from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 
 from .models import AgentRun, Session, SessionAssetLink, SessionEvent, WorkspaceMembership
@@ -21,7 +21,9 @@ from .workspace_snapshot_gc import collect_workspace_snapshot_gc
 from .test_execution_publication_fencing import prepare_workspace_files
 
 
-class SessionWorkspaceRetentionTests(OperationFixture, TestCase):
+class SessionWorkspaceRetentionTests(OperationFixture, TransactionTestCase):
+    serialized_rollback = True
+
     def test_month_old_committed_workspace_and_session_facts_survive_gc_and_continuation(self):
         storage = self.enterContext(tempfile.TemporaryDirectory(prefix="session-workspace-retention-"))
         self.enterContext(override_settings(MEDIA_ROOT=storage))
@@ -72,6 +74,9 @@ class SessionWorkspaceRetentionTests(OperationFixture, TestCase):
         old = timezone.now() - timedelta(days=35)
         Session.objects.filter(pk=session.pk).update(createdAt=old, updatedAt=old)
         AgentRun.objects.filter(pk=run.pk).update(status="completed", completedAt=old)
+        from .environment_lifecycle import acquire_environment_cleanup_controller, release_environment_controller
+        cleanup = acquire_environment_cleanup_controller(run.pk, lease_owner)
+        release_environment_controller(run.pk, cleanup["controllerEpoch"], lease_owner)
         os.utime(Path(storage) / session.workspaceStorageKey, (old.timestamp(), old.timestamp()))
         facts = (list(SessionEvent.objects.filter(session=session).values()),
                  list(SessionAssetLink.objects.filter(session=session).values()),

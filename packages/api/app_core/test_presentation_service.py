@@ -58,7 +58,7 @@ class PresentationServiceTests(SimpleTestCase):
         def make_hub(reader, hints, keys, **options):
             captured.update(reader=reader, hints=hints, keys=keys, **options)
             return SimpleNamespace()
-        scope = SimpleNamespace(workspace_id="workspace", agent_id="agent", session_id="session")
+        scope = SimpleNamespace(workspace_id="workspace", session_id="session")
         connection = MagicMock()
         positions = dict(navigation=0, state=0, context=0, history=0, work=0)
         with patch.object(service, "PresentationObserverHub", side_effect=make_hub), patch.object(service, "_listener_connection_parameters") as parameters, patch.object(service, "connection", connection), patch.object(service.transaction, "atomic", return_value=nullcontext()), patch.object(service, "read_presentation_versions", return_value=positions) as read, patch.object(service, "drain_pending_changes", return_value=3) as drain:
@@ -66,14 +66,14 @@ class PresentationServiceTests(SimpleTestCase):
             parameters.assert_not_called()
             self.assertEqual(await captured["reader"](scope), positions)
             self.assertEqual(await captured["drain"](), 3)
-            read.assert_called_once_with("workspace", "agent", "session")
+            read.assert_called_once_with("workspace", "session")
             drain.assert_called_once_with(limit=256)
             cursor = connection.cursor.return_value.__enter__.return_value
             self.assertEqual(cursor.execute.call_count, 2)
             for call in cursor.execute.call_args_list:
                 self.assertIn("statement_timeout", call.args[0])
                 self.assertIn("5s", call.args[0])
-            self.assertIn("agent:agent:history", captured["keys"](scope))
+            self.assertIn("workspace:workspace:history", captured["keys"](scope))
 
     def test_listener_connection_parameters_preserve_target_without_sync_cursor_or_pool(self):
         from . import presentation_service as service

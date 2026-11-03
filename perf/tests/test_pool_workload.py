@@ -50,7 +50,7 @@ class WorkloadTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(module, "Client", Client), \
-                patch.object(module, "setup", return_value=("w", "a", "m")):
+                patch.object(module, "setup", return_value=("w", "m")):
             result = module.run_workload(object(), directory, seconds=.01, interval=.001)
             self.assertFalse(result["ok"])
             self.assertEqual(calls, ["/api/workspaces/w/sessions/new/messages"])
@@ -115,7 +115,7 @@ class WorkloadTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(module, "Client", Client), \
-                patch.object(module, "setup", return_value=("w", "a", "m")), \
+                patch.object(module, "setup", return_value=("w", "m")), \
                 patch.object(module, "durable_runs", return_value=[]):
             result = module.run_workload(object(), directory, seconds=.02, interval=.01)
         self.assertFalse(result["ok"])
@@ -126,7 +126,7 @@ class WorkloadTests(unittest.TestCase):
         stop = threading.Event()
         stop.set()
         with tempfile.TemporaryDirectory() as directory, \
-                patch.object(module, "setup", return_value=("w", "a", "m")):
+                patch.object(module, "setup", return_value=("w", "m")):
             result = module.run_workload(object(), directory, stop=stop)
         self.assertFalse(result["ok"])
         self.assertEqual(result["accepted"], [])

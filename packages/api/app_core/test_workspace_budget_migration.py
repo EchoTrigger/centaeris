@@ -6,9 +6,8 @@ from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 from django.utils import timezone
 
-from .migration_authorization_fixtures import historical_digest, historical_signature
+from .migration_authorization_fixtures import historical_digest, historical_signature, historical_fixture as fixture
 from .migration_testing import isolated_migration_database
-from .test_agent_run_authorization import fixture
 from .test_unified_environment_profile import profile
 
 

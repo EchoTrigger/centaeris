@@ -123,6 +123,8 @@ class WorkspaceProfileTests(TestCase):
 
 
 class WorkspaceProfileMigrationTests(TransactionTestCase):
+    serialized_rollback = True
+
     def test_forward_preserves_existing_name_and_adds_empty_avatar(self):
         old = [("app_core", "0040_question_responses")]
         current = [("app_core", "0041_workspace_avatar")]

@@ -102,119 +102,92 @@ class SessionOwnershipTests(TestCase):
 
 
 class SessionOwnershipMigrationTests(TransactionTestCase):
+    serialized_rollback = True
+
     migrate_from = ("app_core", "0037_merge_workspace_resources_and_agents")
     migrate_to = ("app_core", "0039_remove_session_instructions")
 
-    def _restore_current_test_schema(self):
-        if self._schema_is_current or connection.vendor != "postgresql":
-            return
-        self.assertTrue(connection.settings_dict["NAME"].startswith("test_"))
-        connection.rollback()
-        with connection.cursor() as cursor:
-            cursor.execute("DROP SCHEMA public CASCADE")
-            cursor.execute("CREATE SCHEMA public")
-        executor = MigrationExecutor(connection)
-        executor.migrate(executor.loader.graph.leaf_nodes())
-
     def test_ordinary_history_and_original_signature_survive_coordinator_retirement(self):
-        self._schema_is_current = False
-        self.addCleanup(self._restore_current_test_schema)
-        executor = MigrationExecutor(connection)
-        # The migration is deliberately forward-only; construct the old schema
-        # in this fresh test DB instead of reversing an applied retirement.
-        from django.db.migrations.recorder import MigrationRecorder
-        if connection.vendor == "postgresql":
-            self.assertTrue(connection.settings_dict["NAME"].startswith("test_"),
-                "Schema recreation is restricted to a Django-owned test_ database")
-            with connection.cursor() as cursor:
-                cursor.execute("DROP SCHEMA public CASCADE")
-                cursor.execute("CREATE SCHEMA public")
-        else:
+        from .migration_testing import isolated_migration_database
+        with isolated_migration_database([self.migrate_from], route_current_models=True) as isolated:
+            connection = isolated
+            executor = MigrationExecutor(connection)
+            old = executor.loader.project_state([self.migrate_from]).apps
+            get = lambda name: old.get_model("app_core", name)
+            user = get_user_model().objects.create_user(username="migration-owner")
+            workspace = get("Workspace").objects.create(name="Before", createdBy_id=user.pk)
+            member = get("WorkspaceMembership").objects.create(workspace=workspace, user_id=user.pk, role="owner")
+            agent = get("Agent").objects.create(workspace=workspace, owner_id=user.pk, name="Retired", instructions="Do not copy")
+            with transaction.atomic(using=connection.alias):
+                ordinary = get("Session").objects.create(workspace=workspace, owner_id=user.pk, agent=agent)
+                env = get("SessionEnvironment").objects.create(session=ordinary)
+                get("Session").objects.filter(pk=ordinary.pk).update(current_environment=env)
+                coordinator = get("Session").objects.create(workspace=workspace, owner_id=user.pk, agent=agent)
+                coord_env = get("SessionEnvironment").objects.create(session=coordinator)
+                get("Session").objects.filter(pk=coordinator.pk).update(current_environment=coord_env)
+                get("AgentCoordinationSession").objects.create(agent=agent, session=coordinator)
+            from pathlib import Path
+            from django.utils import timezone
+            vector = json.loads((Path(__file__).resolve().parents[3] / "tests/workspace/fixtures/agent_run_authorization/v1/valid.json").read_text())
+            for environment in (env, coord_env):
+                get("SessionEnvironment").objects.filter(pk=environment.pk).update(
+                    environment_profile=vector["environmentProfile"], environment_profile_digest=vector["environmentProfileDigest"],
+                    environment_profile_operation_id="historical-bound-profile", environment_profile_bound_at=timezone.now())
+            model = get("ModelConfig").objects.create()
+            run = get("AgentRun").objects.create(workspace=workspace, session=ordinary, environment=env,
+                user_id=user.pk, modelConfig=model, membership_ref=member.pk, prompt="history", status="completed", agent_instructions="Historical Run snapshot")
+            payload = {"schema":"workspace.agent_run_authorization.v1", "agentId":agent.pk, "opaque":"historical"}
+            get("AgentRunAuthorization").objects.create(agent_run=run, payload=payload, digest="original-digest", signature="original-signature")
+            get("SessionEvent").objects.create(eventId="history-event", workspace=workspace, session=ordinary,
+                agent_run=run, sequence=1, agent_run_sequence=1, projects_to_agent_run_stream=True, payload={"type":"user_message"}, createdAtMs=1)
+            coord_run = get("AgentRun").objects.create(workspace=workspace, session=coordinator, environment=coord_env,
+                user_id=user.pk, modelConfig=model, membership_ref=member.pk, prompt="discard", status="completed")
+            release = get("AgentRunEnvironmentRelease").objects.create(agent_run=coord_run, environment=coord_env,
+                authorization_digest="original-coordinator-digest", controller_epoch=1,
+                controller_lease_digest="sha256:"+"f"*64)
+            artifact = get("Artifact").objects.create(workspace=workspace, session=coordinator, agent_run=coord_run,
+                createdBy_id=user.pk, displayName="Retired", contentType="text/plain", sizeBytes=1,
+                sha256="sha256:"+"c"*64, storageKey="exact-coordinator-artifact", status="published")
+            ordinary_artifact = get("Artifact").objects.create(workspace=workspace, session=ordinary, agent_run=run,
+                createdBy_id=user.pk, displayName="Keep", contentType="text/plain", sizeBytes=1,
+                sha256="sha256:"+"d"*64, storageKey="ordinary-artifact", status="published")
+            app = get("BusinessApplication").objects.create(name="Old app", created_by_id=user.pk, status="active")
+            delegation = get("UserAppDelegation").objects.create(user_id=user.pk, app=app, workspace=workspace,
+                agent=agent, membership_ref=member.pk, scopes=["sessions:read"], token_digest="sha256:"+"e"*64)
+            migration = import_module("app_core.migrations.0038_session_ownership")
+            get("AgentRun").objects.filter(pk=run.pk).update(status="queued")
             with connection.schema_editor() as editor:
-                state = executor.loader.project_state([self.migrate_to])
-                for model in reversed(list(state.apps.get_app_config("app_core").get_models())):
-                    editor.delete_model(model)
-            MigrationRecorder(connection).migration_qs.filter(app="app_core").delete()
-        executor = MigrationExecutor(connection)
-        dependencies = [node for node in executor.loader.graph.leaf_nodes() if node[0] != "app_core"]
-        executor.migrate([self.migrate_from, *dependencies])
-        old = executor.loader.project_state([self.migrate_from]).apps
-        get = lambda name: old.get_model("app_core", name)
-        user = get_user_model().objects.create_user(username="migration-owner")
-        workspace = get("Workspace").objects.create(name="Before", createdBy_id=user.pk)
-        member = get("WorkspaceMembership").objects.create(workspace=workspace, user_id=user.pk, role="owner")
-        agent = get("Agent").objects.create(workspace=workspace, owner_id=user.pk, name="Retired", instructions="Do not copy")
-        with transaction.atomic():
-            ordinary = get("Session").objects.create(workspace=workspace, owner_id=user.pk, agent=agent)
-            env = get("SessionEnvironment").objects.create(session=ordinary)
-            get("Session").objects.filter(pk=ordinary.pk).update(current_environment=env)
-            coordinator = get("Session").objects.create(workspace=workspace, owner_id=user.pk, agent=agent)
-            coord_env = get("SessionEnvironment").objects.create(session=coordinator)
-            get("Session").objects.filter(pk=coordinator.pk).update(current_environment=coord_env)
-            get("AgentCoordinationSession").objects.create(agent=agent, session=coordinator)
-        from pathlib import Path
-        from django.utils import timezone
-        vector = json.loads((Path(__file__).resolve().parents[3] / "tests/workspace/fixtures/agent_run_authorization/v1/valid.json").read_text())
-        for environment in (env, coord_env):
-            get("SessionEnvironment").objects.filter(pk=environment.pk).update(
-                environment_profile=vector["environmentProfile"], environment_profile_digest=vector["environmentProfileDigest"],
-                environment_profile_operation_id="historical-bound-profile", environment_profile_bound_at=timezone.now())
-        model = get("ModelConfig").objects.create()
-        run = get("AgentRun").objects.create(workspace=workspace, session=ordinary, environment=env,
-            user_id=user.pk, modelConfig=model, membership_ref=member.pk, prompt="history", status="completed", agent_instructions="Historical Run snapshot")
-        payload = {"schema":"workspace.agent_run_authorization.v1", "agentId":agent.pk, "opaque":"historical"}
-        get("AgentRunAuthorization").objects.create(agent_run=run, payload=payload, digest="original-digest", signature="original-signature")
-        get("SessionEvent").objects.create(eventId="history-event", workspace=workspace, session=ordinary,
-            agent_run=run, sequence=1, agent_run_sequence=1, projects_to_agent_run_stream=True, payload={"type":"user_message"}, createdAtMs=1)
-        coord_run = get("AgentRun").objects.create(workspace=workspace, session=coordinator, environment=coord_env,
-            user_id=user.pk, modelConfig=model, membership_ref=member.pk, prompt="discard", status="completed")
-        release = get("AgentRunEnvironmentRelease").objects.create(agent_run=coord_run, environment=coord_env,
-            authorization_digest="original-coordinator-digest", controller_epoch=1,
-            controller_lease_digest="sha256:"+"f"*64)
-        artifact = get("Artifact").objects.create(workspace=workspace, session=coordinator, agent_run=coord_run,
-            createdBy_id=user.pk, displayName="Retired", contentType="text/plain", sizeBytes=1,
-            sha256="sha256:"+"c"*64, storageKey="exact-coordinator-artifact", status="published")
-        ordinary_artifact = get("Artifact").objects.create(workspace=workspace, session=ordinary, agent_run=run,
-            createdBy_id=user.pk, displayName="Keep", contentType="text/plain", sizeBytes=1,
-            sha256="sha256:"+"d"*64, storageKey="ordinary-artifact", status="published")
-        app = get("BusinessApplication").objects.create(name="Old app", created_by_id=user.pk, status="active")
-        delegation = get("UserAppDelegation").objects.create(user_id=user.pk, app=app, workspace=workspace,
-            agent=agent, membership_ref=member.pk, scopes=["sessions:read"], token_digest="sha256:"+"e"*64)
-        migration = import_module("app_core.migrations.0038_session_ownership")
-        get("AgentRun").objects.filter(pk=run.pk).update(status="queued")
-        with connection.schema_editor() as editor:
-            with self.assertRaisesRegex(RuntimeError, "settled_runs"):
-                migration.retire_agent_data(old, editor)
-        get("AgentRun").objects.filter(pk=run.pk).update(status="completed")
-        executor = MigrationExecutor(connection)
-        executor.migrate([("app_core", "0038_session_ownership")])
-        intermediate = executor.loader.project_state([("app_core", "0038_session_ownership")]).apps
-        intermediate.get_model("app_core", "Session").objects.filter(pk=ordinary.pk).update(instructions="Unrequested Session configuration")
-        executor = MigrationExecutor(connection)
-        executor.migrate([self.migrate_to])
-        self._schema_is_current = True
-        current = executor.loader.project_state([self.migrate_to]).apps
-        self.assertFalse(current.get_model("app_core", "Session").objects.filter(pk=coordinator.pk).exists())
-        current.get_model("app_core", "Session").objects.filter(pk=ordinary.pk).update(title="After configuration removal")
-        session = current.get_model("app_core", "Session").objects.get(pk=ordinary.pk)
-        self.assertEqual(current.get_model("app_core", "AgentRun").objects.get(pk=run.pk).agent_instructions, "Historical Run snapshot")
-        grant = current.get_model("app_core", "AgentRunAuthorization").objects.get(agent_run_id=run.pk)
-        self.assertEqual((grant.payload, grant.digest, grant.signature), (payload, "original-digest", "original-signature"))
-        self.assertTrue(current.get_model("app_core", "SessionEvent").objects.filter(pk="history-event").exists())
-        self.assertTrue(current.get_model("app_core", "Artifact").objects.filter(pk=ordinary_artifact.pk).exists())
-        self.assertFalse(current.get_model("app_core", "Artifact").objects.filter(pk=artifact.pk).exists())
-        retry = current.get_model("app_core", "StorageCleanupRetry").objects.get(storageKey="exact-coordinator-artifact")
-        self.assertEqual((retry.collector, retry.state), ("retiredSession", "pending"))
-        self.assertIsNotNone(current.get_model("app_core", "UserAppDelegation").objects.get(pk=delegation.pk).revoked_at)
-        if connection.vendor == "postgresql":
-            # The migration's narrow coordinator deletion permission is gone;
-            # retained ordinary profile and release history remain immutable.
-            with self.assertRaisesMessage(DatabaseError, "environment_profile_binding_immutable"):
-                with transaction.atomic():
-                    current.get_model("app_core", "SessionEnvironment").objects.filter(pk=env.pk).update(environment_profile_digest="changed")
-            kept_release = current.get_model("app_core", "AgentRunEnvironmentRelease").objects.create(
-                agent_run_id=run.pk, environment_id=env.pk, authorization_digest="original-digest",
-                controller_epoch=1, controller_lease_digest="sha256:"+"a"*64)
-            with self.assertRaisesMessage(DatabaseError, "environment_release_immutable"):
-                with transaction.atomic():
-                    current.get_model("app_core", "AgentRunEnvironmentRelease").objects.filter(pk=kept_release.pk).delete()
+                with self.assertRaisesRegex(RuntimeError, "settled_runs"):
+                    migration.retire_agent_data(old, editor)
+            get("AgentRun").objects.filter(pk=run.pk).update(status="completed")
+            executor = MigrationExecutor(connection)
+            executor.migrate([("app_core", "0038_session_ownership")])
+            intermediate = executor.loader.project_state([("app_core", "0038_session_ownership")]).apps
+            intermediate.get_model("app_core", "Session").objects.filter(pk=ordinary.pk).update(instructions="Unrequested Session configuration")
+            executor = MigrationExecutor(connection)
+            executor.migrate([self.migrate_to])
+            current = executor.loader.project_state([self.migrate_to]).apps
+            self.assertFalse(current.get_model("app_core", "Session").objects.filter(pk=coordinator.pk).exists())
+            current.get_model("app_core", "Session").objects.filter(pk=ordinary.pk).update(title="After configuration removal")
+            session = current.get_model("app_core", "Session").objects.get(pk=ordinary.pk)
+            self.assertEqual(current.get_model("app_core", "AgentRun").objects.get(pk=run.pk).agent_instructions, "Historical Run snapshot")
+            grant = current.get_model("app_core", "AgentRunAuthorization").objects.get(agent_run_id=run.pk)
+            self.assertEqual((grant.payload, grant.digest, grant.signature), (payload, "original-digest", "original-signature"))
+            self.assertTrue(current.get_model("app_core", "SessionEvent").objects.filter(pk="history-event").exists())
+            self.assertTrue(current.get_model("app_core", "Artifact").objects.filter(pk=ordinary_artifact.pk).exists())
+            self.assertFalse(current.get_model("app_core", "Artifact").objects.filter(pk=artifact.pk).exists())
+            retry = current.get_model("app_core", "StorageCleanupRetry").objects.get(storageKey="exact-coordinator-artifact")
+            self.assertEqual((retry.collector, retry.state), ("retiredSession", "pending"))
+            self.assertIsNotNone(current.get_model("app_core", "UserAppDelegation").objects.get(pk=delegation.pk).revoked_at)
+            if connection.vendor == "postgresql":
+                # The migration's narrow coordinator deletion permission is gone;
+                # retained ordinary profile and release history remain immutable.
+                with self.assertRaisesMessage(DatabaseError, "environment_profile_binding_immutable"):
+                    with transaction.atomic(using=connection.alias):
+                        current.get_model("app_core", "SessionEnvironment").objects.filter(pk=env.pk).update(environment_profile_digest="changed")
+                kept_release = current.get_model("app_core", "AgentRunEnvironmentRelease").objects.create(
+                    agent_run_id=run.pk, environment_id=env.pk, authorization_digest="original-digest",
+                    controller_epoch=1, controller_lease_digest="sha256:"+"a"*64)
+                with self.assertRaisesMessage(DatabaseError, "environment_release_immutable"):
+                    with transaction.atomic(using=connection.alias):
+                        current.get_model("app_core", "AgentRunEnvironmentRelease").objects.filter(pk=kept_release.pk).delete()

@@ -318,44 +318,6 @@ class PersonalLibraryMaterialTests(PersonalLibraryMaterialFixture, TestCase):
         self.assertIsNone(remainder["nextCursor"])
         self.assertEqual(SessionMaterialInput.objects.count(), 128)
 
-    def test_new_run_acceptance_rejects_new_129th_attachment_but_allows_retained_identity(self):
-        run = self.new_run()
-        first = None
-        for index in range(128):
-            original, call_id = self.prepare(run, self.note if index == 0 else self.new_note(f"Retained {index}", ""))
-            confirm_original(run.pk, run.authorization.digest, original["inputRef"],
-                             original["sourceVersion"], original["sha256"], call_id)
-            if first is None:
-                first = original
-        run.status = "completed"
-        run.save(update_fields=["status"])
-        overflow = self.new_note("Extra attachment", "")
-        link = self.attach(overflow)
-        self.client.force_login(self.user)
-        url = f"/api/workspaces/{self.workspace.pk}/sessions/{self.session.pk}/messages"
-        body = {"operationId": "reject-input-overflow", "text": "Use the new file", "modelConfigRef": self.model.pk,
-                "attachmentRefs": [link.pk]}
-        from .models import HostedOperationReceipt, AgentRunAuthorization, RunMaterialScope
-        before = (AgentRun.objects.count(), AgentRunAuthorization.objects.count(), RunMaterialScope.objects.count())
-        with patch("app_core.http.workspaces.request_execution_profile", return_value={
-                "schema": "runtime.execution_profile.v1", "imageDigest": "sha256:" + "a" * 64}), \
-                patch("app_core.http.workspaces.schedule_agent_run_lifecycle", return_value="inserted") as schedule:
-            rejected = self.client.post(url, json.dumps(body), content_type="application/json")
-            self.assertEqual(rejected.status_code, 409, rejected.content)
-            self.assertEqual(rejected.json(), {"error": "material_execution_input_count_exceeded"})
-            self.assertEqual((AgentRun.objects.count(), AgentRunAuthorization.objects.count(), RunMaterialScope.objects.count()), before)
-            self.assertFalse(HostedOperationReceipt.objects.filter(operationId=body["operationId"]).exists())
-            schedule.assert_not_called()
-            link.delete()
-            same = self.attach(self.note)
-            accepted = self.client.post(url, json.dumps({**body, "operationId": "accept-retained-input",
-                "attachmentRefs": [same.pk]}), content_type="application/json")
-            self.assertEqual(accepted.status_code, 202, accepted.content)
-            accepted_run = AgentRun.objects.get(pk=accepted.json()["agentRunId"])
-            self.assertEqual(accepted_run.authorization.payload["assetRefs"][0]["inputRef"], first["inputRef"])
-            self.assertEqual(accepted_run.authorization.payload["messageAssetRefs"], [first["inputRef"]])
-            self.assertEqual(SessionMaterialInput.objects.count(), 128)
-            schedule.assert_called_once()
 
 
 @override_settings(SANDBOX_WORKSPACE_BYTES=131072)
@@ -421,3 +383,46 @@ class PersonalLibraryScopeMigrationTests(TransactionTestCase):
             self.assertFalse(scope.personal_library)
             accepted = after.get_model("app_core", "AgentRunAuthorization").objects.using(database.alias).get(agent_run_id=run.pk)
             self.assertEqual((accepted.payload, accepted.digest, accepted.signature), frozen)
+
+
+class PersonalLibraryAdmissionTests(PersonalLibraryMaterialFixture, TransactionTestCase):
+    serialized_rollback = True
+
+    def test_new_run_acceptance_rejects_new_129th_attachment_but_allows_retained_identity(self):
+        run = self.new_run()
+        first = None
+        for index in range(128):
+            original, call_id = self.prepare(run, self.note if index == 0 else self.new_note(f"Retained {index}", ""))
+            confirm_original(run.pk, run.authorization.digest, original["inputRef"],
+                             original["sourceVersion"], original["sha256"], call_id)
+            if first is None:
+                first = original
+        from .testing import release_simulated_run
+        release_simulated_run(self, run)
+        overflow = self.new_note("Extra attachment", "")
+        link = self.attach(overflow)
+        self.client.force_login(self.user)
+        url = f"/api/workspaces/{self.workspace.pk}/sessions/{self.session.pk}/messages"
+        body = {"operationId": "reject-input-overflow", "text": "Use the new file", "modelConfigRef": self.model.pk,
+                "attachmentRefs": [link.pk]}
+        from .models import HostedOperationReceipt, AgentRunAuthorization, RunMaterialScope
+        before = (AgentRun.objects.count(), AgentRunAuthorization.objects.count(), RunMaterialScope.objects.count())
+        with patch("app_core.http.workspaces.request_execution_profile", return_value={
+                "schema": "runtime.execution_profile.v1", "imageDigest": "sha256:" + "a" * 64}), \
+                patch("app_core.http.workspaces.schedule_agent_run_lifecycle", return_value="inserted") as schedule:
+            rejected = self.client.post(url, json.dumps(body), content_type="application/json")
+            self.assertEqual(rejected.status_code, 409, rejected.content)
+            self.assertEqual(rejected.json(), {"error": "material_execution_input_count_exceeded"})
+            self.assertEqual((AgentRun.objects.count(), AgentRunAuthorization.objects.count(), RunMaterialScope.objects.count()), before)
+            self.assertFalse(HostedOperationReceipt.objects.filter(operationId=body["operationId"]).exists())
+            schedule.assert_not_called()
+            link.delete()
+            same = self.attach(self.note)
+            accepted = self.client.post(url, json.dumps({**body, "operationId": "accept-retained-input",
+                "attachmentRefs": [same.pk]}), content_type="application/json")
+            self.assertEqual(accepted.status_code, 202, accepted.content)
+            accepted_run = AgentRun.objects.get(pk=accepted.json()["agentRunId"])
+            self.assertEqual(accepted_run.authorization.payload["assetRefs"][0]["inputRef"], first["inputRef"])
+            self.assertEqual(accepted_run.authorization.payload["messageAssetRefs"], [first["inputRef"]])
+            self.assertEqual(SessionMaterialInput.objects.count(), 128)
+            schedule.assert_called_once()

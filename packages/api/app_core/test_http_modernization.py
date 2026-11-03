@@ -189,8 +189,8 @@ class NinjaContractTests(TestCase):
             {"type": "string", "format": "uri"},
         )
 
-    def test_agent_avatar_publishes_png_bytes_and_json_errors(self):
-        operation = api.get_openapi_schema()["paths"]["/api/agents/{agent_id}/avatar"]["get"]
+    def test_workspace_avatar_publishes_png_bytes_and_json_errors(self):
+        operation = api.get_openapi_schema()["paths"]["/api/workspaces/{workspace_id}/avatar/{digest}"]["get"]
         responses = {str(code): definition for code, definition in operation["responses"].items()}
         self.assertEqual(
             responses["200"].get("content"),

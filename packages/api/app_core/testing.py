@@ -5,6 +5,20 @@ def create_session(*, workspace, owner, **fields):
     return Session.objects.create(workspace=workspace, owner=owner, **fields)
 
 
+def release_simulated_run(test_case, agent_run):
+    """Drive business release for a Run whose execution is simulated."""
+    from .environment_lifecycle import (
+        acquire_environment_controller, acquire_environment_cleanup_controller,
+        release_environment_controller,
+    )
+    owner = leased_lifecycle_job_fixture(test_case, agent_run)
+    acquire_environment_controller(agent_run.pk, owner)
+    agent_run.status = "completed"
+    agent_run.save(update_fields=["status", "updatedAt"])
+    cleanup = acquire_environment_cleanup_controller(agent_run.pk, owner)
+    return release_environment_controller(agent_run.pk, cleanup["controllerEpoch"], owner)
+
+
 def fenced_start_fixture(agent_run, *, execution_mode='perRun'):
     """Arrange persisted controller facts for serializer/input fixtures only.
 

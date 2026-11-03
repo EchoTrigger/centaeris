@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from django.conf import settings
 from django.db import IntegrityError, connection, transaction
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.test import SimpleTestCase, TransactionTestCase, override_settings
 
 from .environment_profile import environment_profile_digest, validate_environment_profile
 from .models import AgentRun, Session, SessionEnvironment
@@ -70,7 +70,9 @@ class EnvironmentProfileContractTests(SimpleTestCase):
 
 
 @override_settings(ENVIRONMENT_MAINTENANCE_TOKEN=MAINTENANCE)
-class EnvironmentProfileHttpTests(OperationFixture, TestCase):
+class EnvironmentProfileHttpTests(OperationFixture, TransactionTestCase):
+    serialized_rollback = True
+
     def setUp(self):
         super().setUp()
         if connection.vendor == 'sqlite':
@@ -176,7 +178,8 @@ class EnvironmentProfileHttpTests(OperationFixture, TestCase):
         target = self.create_url + f'/{self.session_id}/messages'
         first = self.post(target)
         self.assertEqual(first.status_code, 202, first.content)
-        AgentRun.objects.filter(pk=first.json()['agentRunId']).update(status='completed')
+        from .testing import release_simulated_run
+        release_simulated_run(self, AgentRun.objects.get(pk=first.json()['agentRunId']))
         second = self.post(target, operationId='second')
         self.assertEqual(second.status_code, 202, second.content)
         self.assertEqual(AgentRun.objects.get(pk=second.json()['agentRunId']).authorization.payload['environmentProfile'], profile())

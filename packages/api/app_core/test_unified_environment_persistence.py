@@ -10,7 +10,9 @@ from .runtime_contract import authorization_digest
 from .test_hosted_operations import OperationFixture
 
 
-class EnvironmentProfilePersistenceTests(OperationFixture, TestCase):
+class EnvironmentProfilePersistenceTests(OperationFixture, TransactionTestCase):
+    serialized_rollback = True
+
     def test_first_authorization_freezes_defaults_and_later_runs_reuse_exact_profile(self):
         first = self.post()
         self.assertEqual(first.status_code, 202, first.content)
@@ -21,7 +23,8 @@ class EnvironmentProfilePersistenceTests(OperationFixture, TestCase):
         run.environment.refresh_from_db()
         self.assertEqual(run.environment.environment_profile, frozen)
         self.assertEqual(run.environment.environment_profile_digest, environment_profile_digest(frozen))
-        AgentRun.objects.filter(pk=run.pk).update(status='completed')
+        from .testing import release_simulated_run
+        release_simulated_run(self, run)
         self.profile.return_value = {'schema': 'runtime.execution_profile.v1', 'imageDigest': 'sha256:' + 'b' * 64}
         with override_settings(SANDBOX_CPU_MILLI=9999):
             second = self.post(self.create_url + f'/{run.session_id}/messages', operationId='second')

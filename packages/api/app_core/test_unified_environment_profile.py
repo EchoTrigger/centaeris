@@ -21,9 +21,7 @@ def profile():
 
 def payload():
     value = fixture()
-    for field in ("imageCapability", "imageDigest", "resources", "network", "benchmarkProfile", "benchmarkProfileDigest"):
-        value.pop(field, None)
-    value.update(schema="workspace.agent_run_authorization.v1", environmentProfile=profile(),
+    value.update(environmentProfile=profile(),
         environmentProfileDigest="sha256:" + hashlib.sha256(json.dumps(profile(), ensure_ascii=False,
             separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest())
     return value
@@ -54,7 +52,7 @@ class UnifiedEnvironmentAuthorizationTests(SimpleTestCase):
                 ("imageDigest", profile()["imageDigest"]), ("network", "disabled")):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 authorization_digest(value | {field: content})
-        for schema in ("workspace.agent_run_authorization.v2", "workspace.agent_run_authorization.v3"):
+        for schema in ("workspace.agent_run_authorization.v1", "workspace.agent_run_authorization.v3"):
             with self.subTest(schema=schema), self.assertRaises(ValueError):
                 authorization_digest(value | {"schema": schema})
         for field in ("environmentProfile", "environmentProfileDigest"):
@@ -75,12 +73,13 @@ class UnifiedEnvironmentAuthorizationTests(SimpleTestCase):
         value = payload()
         run = SimpleNamespace(id=value["agentRunId"], workspace_id=value["workspaceId"],
             user_id=value["userId"], session_id=value["sessionId"], modelConfig_id=value["modelConfigRef"],
-            thinkingMode=None, definition_version_id=None, workspace=object(),
-            session=SimpleNamespace(agent_id=value["agentId"], workspaceBaselineKnown=True), environment=SimpleNamespace(
+            thinkingMode=None, workspace=object(),
+            session=SimpleNamespace(workspaceBaselineKnown=True), environment=SimpleNamespace(
                 environment_profile=value["environmentProfile"], environment_profile_digest=value["environmentProfileDigest"],
                 network="disabled", benchmark_profile=None))
         with patch("app_core.runtime_contract.session_workspace_for_session", return_value=value["sessionWorkspace"]), \
-                patch("app_core.runtime_contract.plugin_activation_for_workspace", return_value=value["pluginActivation"]):
+                patch("app_core.runtime_contract.plugin_activation_for_workspace", return_value=value["pluginActivation"]), \
+                patch("app_core.library_materials.personal_library_allowed", return_value=False):
             built = build_agent_run_authorization_payload(run, value["id"], image_digest="sha256:" + "b" * 64,
                 declared_inputs=value["assetRefs"], message_asset_refs=value["messageAssetRefs"])
         self.assertEqual(set(built), set(value))

@@ -395,13 +395,12 @@ mod tests {
             database.execute("INSERT INTO app_core_sessionevent (\"eventId\",workspace_id,session_id,agent_run_id,sequence,agent_run_sequence,projects_to_agent_run_stream,payload,\"createdAtMs\",\"insertedAt\") VALUES ($1,$2,$3,$4,$5,$5,true,$6::text::jsonb,1,now())",
                 &[&event["eventId"].as_str().unwrap(), &text("workspaceId"), &text("sessionId"), &text("runId"), &sequence, &event.to_string()]).unwrap();
         };
-        let mut next =
-            json!({"tool":"read_material", "arguments":{"input_ref":text("inputRef"),"limit":10}});
+        let mut next = json!({"tool":"read_material", "arguments":{"input_ref":text("inputRef"),"delivery":"content","limit":10}});
         let mut collected = String::new();
         for index in 0..100 {
             let reject = next.is_null();
             if reject {
-                next = json!({"tool":"read_material", "arguments":{"input_ref":"not-authorized"}});
+                next = json!({"tool":"read_material", "arguments":{"input_ref":"not-authorized","delivery":"content"}});
             }
             let call = ToolCallEnvelope {
                 id: format!("material-client-{index}"),
@@ -433,6 +432,9 @@ mod tests {
                 "{}",
                 result.content
             );
+            if reject {
+                assert_eq!(result.content, "knowledge_input_not_authorized");
+            }
             if !reject {
                 assert!(
                     result.content.len()

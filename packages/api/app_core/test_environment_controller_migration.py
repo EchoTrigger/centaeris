@@ -4,8 +4,12 @@ from django.db import transaction
 from django.test import TransactionTestCase
 
 from .migration_testing import isolated_migration_database
-from .runtime_contract import authorization_digest, authorization_signature
-from .test_agent_run_authorization import fixture, KEY
+from .migration_authorization_fixtures import (
+    historical_digest as authorization_digest,
+    historical_fixture as fixture,
+    historical_signature as authorization_signature,
+)
+from .test_agent_run_authorization import KEY
 
 
 class EnvironmentControllerMigrationTests(TransactionTestCase):

@@ -59,7 +59,7 @@ class CaptureWorkloadTests(unittest.TestCase):
         accepted = {"sessionId": "session", "agentRunId": "run"}
         client.call.side_effect = [{"csrfToken": "synthetic"}, {}, {"csrfToken": "synthetic"},
             {"provider": {"id": "provider"}}, {"id": "model"},
-            {"workspaces": [{"id": "workspace"}]}, {"agents": [{"id": "agent"}]}, accepted]
+            {"workspaces": [{"id": "workspace"}]}, accepted]
         client.observe.side_effect = lambda _accepted, _index, observations, _stop: observations.append(
             {"terminal": "agent_run_completed"})
         data = b"Command completed successfully with exit code 0.\nstdout:\n" + (

@@ -132,7 +132,7 @@ connections.close_all()
 class IndependentGcCollectorTests(SimpleTestCase):
     def run_collectors(self, *, resource_failure=False, snapshot_failure=False):
         with (
-            patch(f"{COMMAND}.expire_trash", return_value=TrashExpirationReport(0, 0, 0, 0)),
+            patch(f"{COMMAND}.expire_trash", return_value=TrashExpirationReport(0, 0, 0)),
             patch(f"{COMMAND}.collect_note_history_gc", return_value=(0, 0)) as notes,
             patch(f"{COMMAND}.drain_pending_changes", return_value=0) as presentation,
             patch(

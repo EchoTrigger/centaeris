@@ -467,18 +467,25 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
         self._assert_no_upload_temporaries()
 
     def _download_body(self):
+        from .environment_lifecycle import acquire_environment_cleanup_controller, release_environment_controller
+        from .testing import leased_lifecycle_job_fixture
         body, snapshot = self._body()
         self.assertEqual(self._post(body).status_code, 201)
         self.session.refresh_from_db()
-        self.authorization.delete()
+        self.run.status = "completed"
+        self.run.save(update_fields=["status", "updatedAt"])
+        cleanup = acquire_environment_cleanup_controller(self.run.pk, self.owner)
+        release_environment_controller(self.run.pk, cleanup["controllerEpoch"], self.owner)
+        self._delete_job()
+        self.run = AgentRun.objects.create(
+            workspace=self.workspace, session=self.session, user=self.user,
+            modelConfig=self.model, prompt="read persisted workspace", status="running",
+        )
         self.authorization = create_agent_run_authorization(
             self.run, image_digest="sha256:" + "a" * 64,
         )
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "UPDATE runtime.runtime_jobs SET idempotency_key=%s WHERE job_id=%s",
-                [f"{self.job_id}:{self.authorization.digest}", self.job_id],
-            )
+        self.job_id = f"agent_run.lifecycle:{self.run.pk}"
+        self.owner = leased_lifecycle_job_fixture(self, self.run, isolate_schema=False)
         return {
             "schema": "runtime.session_workspace.download.v1",
             "jobId": self.job_id, "leaseOwner": self.owner,
