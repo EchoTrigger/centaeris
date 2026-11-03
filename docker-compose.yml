@@ -374,7 +374,7 @@ services:
       MATERIAL_PROCESSOR_NAMESPACE: ${COMPOSE_PROJECT_NAME:-centaeris-workspace}
       MATERIAL_PROCESSOR_IMAGE: *document-processor-image
       MATERIAL_PROCESSOR_DEVICE: *processor-device
-      OCI_RUNTIME: ${OCI_RUNTIME-runsc}
+      MATERIAL_PROCESSOR_RUNTIME: ${MATERIAL_PROCESSOR_RUNTIME-runsc}
     volumes:
       - *upload-temp-mount
       - type: volume

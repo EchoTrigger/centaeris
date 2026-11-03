@@ -340,13 +340,20 @@ lifecycle. Then stop workers and run the forward migration with
 migration. It creates a new current Environment binding with `workspaceBytes`;
 old Environments, Run bindings, signed grants and committed workspace descriptors
 remain unchanged. Start the matching API/Runtime version together after migration.
-Compose and the material Worker default `OCI_RUNTIME` to `runsc`. Install and
+Compose defaults Session execution's `OCI_RUNTIME` and the material Worker's
+independent `MATERIAL_PROCESSOR_RUNTIME` to `runsc`. Install and
 register gVisor on the Docker host before using that profile. Hosts without
 gVisor, including local Docker Desktop test environments, must explicitly set
-`OCI_RUNTIME=runc`, `RUNTIME_NATIVE_SHARED_ADMISSION=0`, and explicitly empty
+`OCI_RUNTIME=runc`, `MATERIAL_PROCESSOR_RUNTIME=runc`,
+`RUNTIME_NATIVE_SHARED_ADMISSION=0`, and explicitly empty
 values for both runsc scheduling variables. Runtime selection accepts exactly `runsc` or `runc`; an empty,
 invalid or unregistered selection fails rather than falling back. Existing
 private `.env` values are not replaced when the default changes.
+
+Document-processing task containers have a separate fixed budget of 4 GiB,
+four CPU cores and 512 processes/threads. The process budget covers LibreOffice
+conversion and PaddleOCR initialization under gVisor; 64 is insufficient for
+these paths. Session sandbox resource settings do not change this budget.
 
 The Docker `runsc` registration must explicitly include exactly one
 `--overlay2=none` runtime argument. This makes guest workspace writes reach the

@@ -26,9 +26,10 @@ class ProcessorArchiveTests(SimpleTestCase):
                 self.assert_created_runtime(runtime, runtime)
 
     def assert_created_runtime(self, configured, expected):
-        environment = {"MATERIAL_PROCESSOR_NAMESPACE": "owned", "MATERIAL_PROCESSOR_IMAGE": "processor-image"}
+        environment = {"MATERIAL_PROCESSOR_NAMESPACE": "owned", "MATERIAL_PROCESSOR_IMAGE": "processor-image",
+                       "OCI_RUNTIME": "runc" if expected == "runsc" else "runsc"}
         if configured is not None:
-            environment["OCI_RUNTIME"] = configured
+            environment["MATERIAL_PROCESSOR_RUNTIME"] = configured
         client = Mock()
         client.images.get.return_value.id = "sha256:processor"
         client.containers.create.side_effect = RuntimeError("spec_creation_stopped")
@@ -39,11 +40,12 @@ class ProcessorArchiveTests(SimpleTestCase):
         self.assertEqual(client.containers.create.call_args.kwargs["runtime"], expected)
         self.assertEqual(client.containers.create.call_count, 1)
 
-    def test_processor_cpu_quota_fits_four_core_hosts(self):
+    def test_processor_resources_support_office_and_ocr_on_four_core_hosts(self):
         for device in ("cpu", "gpu:0"):
             with self.subTest(device=device):
                 options = material_processor.container_options("runc", device)
                 self.assertEqual(options["nano_cpus"], 4_000_000_000)
+                self.assertEqual(options["pids_limit"], 512)
 
     def test_orphan_spec_cleanup_is_owned_and_does_not_interrupt_recent_creation(self):
         worker = object.__new__(material_processor.MaterialWorker)
