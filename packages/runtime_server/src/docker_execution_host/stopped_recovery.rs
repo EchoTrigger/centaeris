@@ -1,4 +1,4 @@
-//! Capture and publish a stopped original workspace before its cleanup.
+//! Stop, capture and publish a per-Run original workspace before its cleanup.
 use super::*;
 use crate::postgres_store::cleanup_preservation::{CleanupRecovery, CleanupRecoveryEvidence};
 use crate::postgres_store::cleanup_receipts::CleanupTarget;
@@ -30,7 +30,7 @@ pub(crate) fn prepare(target: &CleanupTarget) -> Result<Option<PreparedStoppedRe
     prepare_instance_with(
         allocation,
         &origin_authorization.environment_profile,
-        runsc_power::observe_recovery_target,
+        runsc_power::stop_for_preservation,
         stopped_workspace::capture_stopped_workspace,
     )
 }
@@ -52,7 +52,7 @@ fn prepare_instance_with(
         Some(
             runsc_power::RunscPowerObservation::Running
             | runsc_power::RunscPowerObservation::Paused,
-        ) => return Ok(None),
+        ) => return Err("cleanup_stop_unconfirmed".into()),
         Some(runsc_power::RunscPowerObservation::Stopped) => {
             let limit = profile
                 .resources
@@ -165,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn live_paused_and_exact_absence_do_not_read_an_unrelated_archive() {
+    fn unconfirmed_stop_and_exact_absence_do_not_read_an_unrelated_archive() {
         let (allocation, profile) = fixture();
         for state in [
             runsc_power::RunscPowerObservation::Running,
@@ -177,8 +177,7 @@ mod tests {
                 |_, _| Ok(Some(state)),
                 |_, _, _| panic!("live or paused target must not be archived")
             )
-            .unwrap()
-            .is_none());
+            .is_err());
         }
         let absent = prepare_instance_with(
             &allocation,

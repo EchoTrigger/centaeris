@@ -3,7 +3,7 @@
 :root[data-theme] :is(.markdownContent,.workspaceUserMessage,.workspaceComposer textarea,.workProgressStatus,.workProgressSummary,.workspaceActivityGroup,.workspaceLiveStatus,.reasoningPreview,.workspaceLiveStatusElapsed,.agent-operation-summary,.agent-tool-node-action,.agent-tool-bash-status,.agent-tool-command-label,.workspaceToolOutputStatus,.workspaceStageSummary) {
   font-size: var(--chat-body-size); line-height: var(--chat-body-leading);
 }
-:root[data-theme] :is(.workspaceUserMessageMeta,.workspaceAssistantMessageMeta,.workspaceCitationSources,.workspaceArtifactInline,.filePreviewHeader nav,.filePreviewHeader nav strong,.filePreviewState) {
+:root[data-theme] :is(.workspaceUserMessageMeta,.workspaceAssistantMessageMeta,.agent-tool-node-status,.agent-tool-detail-section-header,.workspaceCitationSources,.workspaceArtifactInline,.filePreviewHeader nav,.filePreviewHeader nav strong,.filePreviewState) {
   font-size: var(--chat-meta-size); line-height: var(--chat-meta-leading);
 }
 :root[data-theme] :is(.workspaceUserMessageMeta,.workspaceAssistantMessageMeta) svg {

@@ -36,7 +36,6 @@ class FixtureClient:
             ("POST", "/api/admin/model-providers"): {"provider": {"id": "synthetic-provider"}},
             ("POST", "/api/admin/models"): {"model": {"id": "synthetic-model"}},
             ("GET", "/api/workspaces"): {"workspaces": [{"id": "synthetic-workspace"}]},
-            ("GET", "/api/workspaces/synthetic-workspace/agents"): {"agents": [{"id": "synthetic-agent"}]},
             ("POST", "/api/workspaces/synthetic-workspace/sessions/new/messages"): {
                 "sessionId": "synthetic-session", "agentRunId": "synthetic-run"},
         }
@@ -93,7 +92,6 @@ class FixtureInitializationTests(unittest.TestCase):
             messages = [payload for method, path, payload in client.calls
                         if method == "POST" and path.endswith("/sessions/new/messages")]
             self.assertEqual(len(messages), 1)
-            self.assertEqual(messages[0]["agentId"], "synthetic-agent")
             self.assertEqual(messages[0]["modelConfigRef"], "synthetic-model")
             self.assertEqual(messages[0]["attachmentRefs"], [])
             self.assertTrue(messages[0]["operationId"])
@@ -112,10 +110,10 @@ class FixtureInitializationTests(unittest.TestCase):
             bootstrap.main()
         self.assert_fixture(client, "perf-instant", submitted=True)
 
-    def test_pool_initialization_returns_bound_workspace_agent_and_model(self):
+    def test_pool_initialization_returns_workspace_and_model(self):
         client = FixtureClient()
         self.assertEqual(pool_workload.setup(self.stack(), client),
-                         ("synthetic-workspace", "synthetic-agent", "synthetic-model"))
+                         ("synthetic-workspace", "synthetic-model"))
         self.assert_fixture(client, "perf-paced", submitted=False)
 
     def test_transcript_initialization_reaches_accepted_run(self):

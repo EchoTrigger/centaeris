@@ -5,13 +5,11 @@ import unicodedata
 
 from django.conf import settings
 
-from .agent_identity import validate_agent_id
 from .models import validate_thinking_mode
 from .plugin_catalog import plugin_activation_for_workspace, validate_plugin_activation
-from .agent_definitions import uses_workspace_plugins
 
 
-AGENT_RUN_AUTHORIZATION_SCHEMA = "workspace.agent_run_authorization.v1"
+AGENT_RUN_AUTHORIZATION_SCHEMA = "workspace.agent_run_authorization.v2"
 RESOLVED_INPUT_SCHEMA = "runtime.resolved_input.v1"
 DECLARED_INPUT_SCHEMA = "runtime.declared_input.v1"
 AGENT_RUN_START_SCHEMA = "workspace.agent_run.start.v1"
@@ -22,7 +20,6 @@ AGENT_RUN_AUTHORIZATION_FIELDS = {
     "organizationId",
     "workspaceId",
     "userId",
-    "agentId",
     "sessionId",
     "agentRunId",
     "sessionWorkspace",
@@ -68,6 +65,7 @@ RESOLVED_INPUT_FIELDS = {
 OWNER_KINDS = {"sourceObject", "userLibraryObject", "artifact"}
 EVIDENCE_KINDS = {"workspaceSource", "userProvided", "generatedArtifact"}
 MAX_DECLARED_INPUTS = 64
+MAX_PROJECTED_INPUTS = 128
 
 
 def build_agent_run_authorization_payload(
@@ -89,13 +87,15 @@ def build_agent_run_authorization_payload(
         input_ref not in available_input_refs for input_ref in normalized_message_asset_refs
     ):
         raise ValueError("messageAssetRefs must reference authorized session assets")
+    from .library_materials import personal_library_allowed, remap_library_attachments
+    if personal_library_allowed(agent_run):
+        asset_refs, normalized_message_asset_refs = remap_library_attachments(agent_run, asset_refs, normalized_message_asset_refs)
     payload = {
         "schema": AGENT_RUN_AUTHORIZATION_SCHEMA,
         "id": authorization_id,
         "organizationId": "default_org",
         "workspaceId": agent_run.workspace_id,
         "userId": str(agent_run.user_id),
-        "agentId": agent_run.session.agent_id,
         "sessionId": agent_run.session_id,
         "agentRunId": agent_run.id,
         "sessionWorkspace": session_workspace_for_session(agent_run.session),
@@ -106,11 +106,7 @@ def build_agent_run_authorization_payload(
         "messageAssetRefs": normalized_message_asset_refs,
         "environmentProfile": agent_run.environment.environment_profile,
         "environmentProfileDigest": agent_run.environment.environment_profile_digest,
-        "pluginActivation": (
-            agent_run.definition_version.plugin_activation
-            if agent_run.definition_version_id and not uses_workspace_plugins(agent_run.session.agent, agent_run.acting_app_id)
-            else plugin_activation_for_workspace(agent_run.workspace)
-        ),
+        "pluginActivation": plugin_activation_for_workspace(agent_run.workspace),
     }
     validate_agent_run_authorization_payload(payload)
     return payload
@@ -152,7 +148,7 @@ def _authorization_signature_for_digest(digest: str, signing_key: str, *, schema
         raise ValueError("AgentRun authorization signing key is required")
     signature = hmac.new(
         signing_key.encode("utf-8"),
-        ("workspace:agent-run-authorization:v1\0" + digest).encode("utf-8"),
+        ("workspace:agent-run-authorization:v2\0" + digest).encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
     return f"hmac-sha256:{signature}"
@@ -186,7 +182,6 @@ def agent_run_binding_matches(payload: dict, agent_run, *, session=None) -> bool
         and payload["workspaceId"] == agent_run.workspace_id
         and payload["sessionId"] == agent_run.session_id
         and payload["userId"] == str(agent_run.user_id)
-        and payload["agentId"] == (agent_run.session if session is None else session).agent_id
         and payload["modelConfigRef"] == agent_run.modelConfig_id
         and agent_run_environment_matches(agent_run, session=session)
     )
@@ -203,14 +198,12 @@ def validate_agent_run_authorization_payload(payload: dict) -> None:
         "organizationId",
         "workspaceId",
         "userId",
-        "agentId",
-        "sessionId",
+            "sessionId",
         "agentRunId",
         "modelConfigRef",
         "artifactScopeRef",
     ]:
         require_opaque_ref(name, payload[name])
-    validate_agent_id(payload["agentId"])
     if payload["thinkingMode"] is not None:
         validate_thinking_mode(payload["thinkingMode"])
     validate_session_workspace(payload["sessionWorkspace"])

@@ -104,6 +104,82 @@ fn output_budget_exhaustion_and_cleanup_preserve_control_receipts_and_fence() {
 }
 
 #[test]
+fn output_capacity_diagnostic_reports_only_admission_budget_values() {
+    assert_eq!(
+        output_capacity_diagnostic(67_813_376, 66_772_797, 1_060_864),
+        serde_json::json!({
+            "event": "environment_task_admission_rejected",
+            "reason": "task_output_capacity",
+            "budgetBytes": 67_813_376,
+            "usedBytes": 66_772_797,
+            "reservationBytes": 1_060_864,
+        })
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn observed_output_pressure_rejects_without_losing_committed_results() {
+    for used_bytes in [66_772_797, 66_907_442] {
+        let p = root();
+        let control = p.join("control");
+        let output = p.join("output");
+        fs::create_dir(&control).unwrap();
+        fs::create_dir(&output).unwrap();
+        let storage = TaskStorage::new(control.clone(), output.clone(), 67_813_376).unwrap();
+        let mut journal = Journal::open(&control, "instance").unwrap();
+        let fence = fixture_fence("instance", "run", 1);
+        journal.takeover_persist(fence.clone(), &control).unwrap();
+        let record = fixture_record("instance", "run", 1, "committed", false);
+        let id = record.snapshot.task_id.clone();
+        let digest = record.digest.clone();
+        journal.tasks.insert(id.clone(), record);
+        journal.persist(&control).unwrap();
+        let index_before = fs::read(control.join("history.sqlite")).unwrap();
+
+        let mut log = storage.open_output(&id, 1).unwrap();
+        log.append(EnvironmentTaskStream::Stdout, b"committed output")
+            .unwrap();
+        log.compact().unwrap();
+        drop(log);
+        let committed_path = output.join(format!("{id}.output"));
+        let committed_bytes = charged_bytes(&fs::metadata(&committed_path).unwrap());
+        // Sparse retained history reproduces the observed charge without writing
+        // tens of MiB of unrelated output into this focused regression.
+        let retained = File::create(output.join("retained.output")).unwrap();
+        retained.set_len(used_bytes - committed_bytes).unwrap();
+        assert_eq!(
+            charged_bytes(&retained.metadata().unwrap()) + committed_bytes,
+            used_bytes
+        );
+
+        assert!(matches!(
+            storage.open_output("next", ENVIRONMENT_TASK_OUTPUT_BYTES / CHUNK),
+            Err(error) if error == "task_output_capacity"
+        ));
+        assert!(!output.join("next.output").exists());
+        assert_eq!(
+            fs::read(control.join("history.sqlite")).unwrap(),
+            index_before
+        );
+        let reopened = Journal::open(&control, "instance").unwrap();
+        assert!(reopened.check(&fence).is_ok());
+        assert_eq!(
+            reopened.existing(&id, &digest).unwrap().unwrap().exit_code,
+            Some(0)
+        );
+        let mut log = OutputLog::open_retained(&committed_path).unwrap();
+        let (chunks, _, _, gap, _) = log.read(0, ENVIRONMENT_TASK_READ_BYTES).unwrap();
+        assert!(!gap);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].data, b"committed output");
+        drop(log);
+        drop(retained);
+        fs::remove_dir_all(p).unwrap();
+    }
+}
+
+#[test]
 fn control_serialized_budget_refuses_oversize_without_overwriting_committed_record() {
     let p = root();
     let mut journal = Journal::open(&p, "i").unwrap();

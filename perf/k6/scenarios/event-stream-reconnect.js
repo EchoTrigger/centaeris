@@ -31,12 +31,12 @@ export const options = {
 };
 
 export function setup() {
-  const { workspaceId, agentId, modelId } = configuredTarget('long');
+  const { workspaceId, modelId } = configuredTarget('long');
   const { store, csrf } = login();
   const runs = [];
   const count = Number(__ENV.MARATHON_RUNS || 3);
   for (let i = 0; i < count; i += 1) {
-    runs.push(startRun(store, csrf, workspaceId, agentId, modelId, `Churn target ${i}.`));
+    runs.push(startRun(store, csrf, workspaceId, modelId, `Churn target ${i}.`));
   }
   return { store, runs };
 }

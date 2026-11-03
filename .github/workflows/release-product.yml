@@ -63,8 +63,12 @@ jobs:
       - name: Build and validate the selected local product
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           if ($env:PRODUCT -eq 'desktop') {
-            ./scripts/desktop-ui-acceptance.ps1
+            python scripts/ci.py Node --frontend-tests
+            pnpm --filter @centaeris/electron-host run build
+            pnpm --filter @centaeris/electron-host run check:dist-licenses
+            pnpm --filter @centaeris/electron-host run smoke:runtime
           } else {
             ./scripts/build-tui.ps1
           }

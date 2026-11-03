@@ -2,7 +2,7 @@ import { t } from "../i18n";
 import { useTranslation } from "../i18n";
 import { useEffect, useState } from "react";
 import { Link, useLoaderData, useLocation, useNavigate } from "react-router";
-import { Building2 } from "lucide-react";
+import { WorkspaceAvatar } from "../components/WorkspaceAvatar";
 import { OnboardingUtilities } from "../components/OnboardingUtilities";
 
 const WORKSPACE_ROLE_LABELS = () => ({ owner: t("workspaceChooserRoute.owner"), admin: t("invitationActivationRoute.administrator"), member: t("invitationActivationRoute.member") });
@@ -32,7 +32,7 @@ export default function WorkspaceChooserRoute() {
         <nav aria-label={t("workspaceChooserRoute.workspace")}>
           {workspaces.map((workspace) => (
             <Link to={`/w/${encodeURIComponent(workspace.id)}/app`} key={workspace.id}>
-              <span><Building2 aria-hidden="true" /></span>
+              <WorkspaceAvatar workspace={workspace} />
               <strong>{workspace.name}</strong>
               <small>{WORKSPACE_ROLE_LABELS()[workspace.role]}</small>
             </Link>

@@ -94,12 +94,12 @@ pub(crate) mod lifecycle_control;
 pub(crate) mod maintenance;
 pub(crate) mod pre_admission_failure;
 pub(crate) mod provision;
+mod question;
 mod reliability;
 pub(crate) mod residency;
 mod resource_commit;
 pub(crate) mod runsc_rotation;
 mod runtime;
-pub(crate) use runtime::validate_hosted_native_input;
 mod schema;
 mod transactions;
 mod transcript;
@@ -577,7 +577,7 @@ pub use runtime::PostgresSessionLog;
 pub(crate) use runtime::SessionWireHydrator;
 
 #[cfg(test)]
-mod integration_tests;
+pub(crate) mod integration_tests;
 
 #[cfg(test)]
 mod tests {

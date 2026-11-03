@@ -61,7 +61,7 @@ class EnvironmentProvisionTests(TransactionTestCase):
         payload = grant['payload']
         self.assertEqual(payload['operationKind'], 'provision')
         self.assertEqual(payload['userId'], str(self.session.owner_id))
-        self.assertEqual(payload['agentId'], self.session.agent_id)
+        self.assertEqual(payload['sessionId'], self.session.pk)
         self.assertEqual(payload['environmentProfile'], profile())
         self.assertEqual(payload['environmentProfileDigest'], self.bound['profileDigest'])
         self.assertNotIn('instanceId', payload)
@@ -97,20 +97,12 @@ class EnvironmentProvisionTests(TransactionTestCase):
         self.environment.refresh_from_db()
         self.assertTrue(self.environment.controller_released)
 
-    def test_native_shared_agent_provision_uses_workspace_activation(self):
-        from .models import Agent, AgentDefinition, AgentDefinitionVersion, WorkspaceMembership
-        user = self.session.owner
-        WorkspaceMembership.objects.create(workspace=self.workspace, user=user, role='owner')
-        definition = AgentDefinition.objects.create(workspace=self.workspace, name='Provision agent', created_by=user,
-            availability_scope='workspace')
-        version = AgentDefinitionVersion.objects.create(definition=definition, version=1, name='Provision agent',
-            published_by=user)
-        definition.published_version = version
-        definition.save(update_fields=['published_version'])
-        Agent.objects.filter(pk=self.session.agent_id).update(definition=definition)
+    def test_provision_uses_workspace_activation(self):
+        from .test_agent_run_authorization import fixture
+        snapshot = fixture()['pluginActivation']
         with patch('app_core.environment_provision.plugin_activation_for_workspace',
-                return_value=version.plugin_activation) as activation:
+                return_value=snapshot) as activation:
             response = self.issue()
         self.assertEqual(response.status_code, 200, response.content)
-        activation.assert_called_once()
-        self.assertEqual(response.json()['payload']['pluginActivation'], version.plugin_activation)
+        activation.assert_called_once_with(self.workspace)
+        self.assertEqual(response.json()['payload']['pluginActivation'], snapshot)

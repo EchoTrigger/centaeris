@@ -112,7 +112,7 @@ Event stream connection-open and first actual event have separate millisecond
 Trends. Committed frames use the real API `session.stream.item.v1` contract and
 must match the requested Run/session. Run and artifact timings are milliseconds.
 
-Every K6 workload requires `API_BASE`, `PERF_WORKSPACE_ID`, `PERF_AGENT_ID` and
+Every K6 workload requires `API_BASE`, `PERF_WORKSPACE_ID` and
 `PERF_MODEL_REFS` (JSON object with `short`, `tools` and/or `long` model IDs).
 Only models needed by that scenario are required. There is no first-workspace
 selection and the K6 workloads never create global providers or models. Prepare

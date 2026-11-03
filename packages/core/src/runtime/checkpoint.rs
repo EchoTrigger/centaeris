@@ -1,8 +1,8 @@
 use serde_json::json;
 
 use crate::runtime::contracts::{
-    CheckpointKindV1, CheckpointRecord, EventVisibility, RuntimeAgentRunIdentityV1,
-    RuntimeAwaitQuestionCheckpointV1, RuntimeEvent, RuntimeWaitChangedV1, RuntimeWaitStatusV1,
+    CheckpointKindV1, CheckpointRecord, EventVisibility, RuntimeAgentRunIdentityV1, RuntimeEvent,
+    RuntimeWaitChangedV1, RuntimeWaitStatusV1,
 };
 use crate::runtime::query_loop::{
     decide_loop_step, AgentStateSnapshot, ContinueHop, DoneReason, LoopDecision, ToolsRoute,
@@ -79,10 +79,13 @@ impl<S: RuntimeStore + RuntimeStoreTransactionPort> TurnCheckpointStore<S> {
             .as_ref()
             .ok_or_else(|| "runtime_wait_requires_agent_run_identity".to_string())?;
         agent_run_identity.validate()?;
-        let wait = RuntimeAwaitQuestionCheckpointV1::new(
+        let wait = super::question::QuestionCheckpoint::new(
             agent_run_identity,
             req.turn_id.as_str(),
-            req.turn_id.as_str(),
+            state
+                .generate_result
+                .as_ref()
+                .ok_or("question_generate_result_required")?,
         )?;
         let continuation_id = wait.continuation_id.clone();
         let checkpoint = CheckpointRecord {
@@ -132,6 +135,24 @@ impl<S: RuntimeStore + RuntimeStoreTransactionPort> TurnCheckpointStore<S> {
         req: RouteGenerateResultRequest,
     ) -> Result<RouteGenerateResultResponse, String> {
         let mut state = req.state;
+        if let Some(question) = super::question::question_from_result(
+            state
+                .generate_result
+                .as_ref()
+                .ok_or("generate_result_required")?,
+        )? {
+            state.done_reason = Some(DoneReason::Question);
+            state.pending_question_json =
+                Some(serde_json::to_string(&question).map_err(|error| error.to_string())?);
+            return Ok(RouteGenerateResultResponse {
+                continuation: QueryContinuation::AwaitQuestion,
+                decision: LoopDecision {
+                    next_hop: ContinueHop::Tools,
+                    tools_route: Some(ToolsRoute::Execute),
+                },
+                state,
+            });
+        }
         let decision = decide_loop_step(&state);
         apply_decision_to_state(&mut state, &decision)?;
         Ok(RouteGenerateResultResponse {

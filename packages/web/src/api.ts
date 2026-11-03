@@ -134,7 +134,7 @@ export function jsonOptions(method: string, body: unknown): RequestInit {
 }
 
 export type WorkspaceRole = "owner" | "admin" | "member";
-export type WorkspaceSummary = { id: string; name: string; role: WorkspaceRole; status?: string };
+export type WorkspaceSummary = { id: string; name: string; role: WorkspaceRole; status?: string; avatarUrl: string | null };
 
 export function requireWorkspaces(value: unknown): WorkspaceSummary[] {
   if (!Array.isArray(value) || value.some((workspace) => (
@@ -143,6 +143,9 @@ export function requireWorkspaces(value: unknown): WorkspaceSummary[] {
     || typeof workspace.id !== "string"
     || !workspace.id
     || typeof workspace.name !== "string"
+    || (workspace.avatarUrl !== null && (typeof workspace.avatarUrl !== "string"
+      || !workspace.avatarUrl.startsWith(`/api/workspaces/${encodeURIComponent(workspace.id)}/avatar/`)
+      || !/^[a-f0-9]{64}$/.test(workspace.avatarUrl.slice(`/api/workspaces/${encodeURIComponent(workspace.id)}/avatar/`.length))))
     || typeof workspace.role !== "string"
     || !["owner", "admin", "member"].includes(workspace.role)
   ))) throw new Error("workspaces_invalid");

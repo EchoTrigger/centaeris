@@ -15,6 +15,7 @@ import secrets
 import ssl
 import tempfile
 import threading
+from unittest.mock import patch
 
 from asgiref.testing import ApplicationCommunicator
 from cryptography import x509
@@ -81,6 +82,9 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
     serialized_rollback = True
 
     def setUp(self):
+        self.enterContext(patch.dict(os.environ, {name: "" for name in (
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy",
+        )}))
         configure_gateway(self)
         self.provider_ready = threading.Event()
         self.provider_release = threading.Event()

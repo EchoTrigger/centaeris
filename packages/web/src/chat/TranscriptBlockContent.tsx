@@ -32,7 +32,7 @@ import { TranscriptContentReader } from "./transcriptContentReader";
 import { loadTranscriptContentRange } from "./transcriptContentRanges";
 import { TranscriptReferencedContent } from "./TranscriptReferencedContent";
 import { TranscriptMessageMeta } from "./TranscriptMessageMeta";
-import { formatToolGroupTitle, toolGroupIconCategory, type ToolGroupCategory } from "./toolGroupTitle";
+import { toolGroupIconCategory, type ToolGroupCategory } from "./toolGroupTitle";
 import type { TranscriptContentRef } from "./transcriptContract";
 import type { TranscriptToolOperationRegistry } from "./transcriptToolOperations";
 import type { TranscriptLiveOverlay, TranscriptViewStore } from "./transcriptViewStore";
@@ -112,7 +112,8 @@ function ReferencedContent({ store, reference, mode = "markdown", allowVisuals =
     return candidate?.refId === reference.refId && candidate.revision === reference.revision
       && candidate.byteLength === reference.byteLength;
   };
-  const coveredByLive = live !== null && ((Boolean(live.text) && sameReference(live.messageId))
+  const coveredByLive = live !== null && ((Boolean(live.text) && (sameReference(live.messageId)
+    || sameReference(store.getLiveTextReplacementBlockId() ?? "")))
     || (Boolean(live.reasoning?.text) && sameReference(live.reasoning?.blockId ?? "")));
   const evicted = store.isPresentationContentEvicted(reference);
   const streamedBody = useRef<HTMLDivElement>(null);
@@ -236,48 +237,72 @@ function operationInlineSummary(operation: Record<string, unknown>, call: Record
   const input = opObject(call.normalizedInput);
   const description = opText(input?.description);
   const command = opText(input?.command);
-  const target = opText(operation.path)
+  const target = opText(operation.path) || opText(input?.path)
     || opText(operation.query)
     || opText(operation.text)
     || opText(call.displayTarget);
-  return [description || command, target, toolName].find((value) => value.length > 0) || toolName;
+  return [command, target || opText(input?.path), description, toolName].find((value) => value.length > 0) || toolName;
 }
 
-function TranscriptToolNode({ store, call, operation, outputRef, failed }: Readonly<{
+type ToolDisplayStatus = "running" | "completed" | "failed" | "interrupted" | "unconfirmed";
+
+function TranscriptToolNode({ store, call, operation, outputRef, status }: Readonly<{
   store: TranscriptViewStore;
   call: Record<string, unknown>;
   operation: Record<string, unknown>;
   outputRef: TranscriptContentRef | null;
-  failed: boolean;
+  status: ToolDisplayStatus;
 }>) {
+  const { t } = useTranslation();
+  const failed = status === "failed" || status === "interrupted";
   const [expanded, setExpanded] = useState(false);
   const input = opObject(call.normalizedInput);
   const command = opText(input?.command);
   const kind = opText(operation.kind) || opText(operation.toolName) || opText(call.toolName);
-  const isCommand = kind === "command" || kind === "bash";
+  const isCommand = kind === "command" || kind === "bash" || Boolean(command);
   const summary = operationInlineSummary(operation, call);
+  const toolName = opText(operation.toolName) || opText(call.toolName);
+  const delivery = opText(input?.delivery);
+  const executionFile = toolName === "read_material" && delivery === "execution_file";
+  const category = toolGroupIconCategory([{ toolName, delivery, description: "", target: "", status: status === "running" ? "running" : failed ? "error" : "completed" }]) ?? "command";
+  const ActivityIcon = TOOL_GROUP_ICONS[category];
+  const executionFileReady = status === "completed" && !["failed", "denied", "aborted"].includes(opText(operation.resultState));
+  const title = executionFile
+    ? t(executionFileReady ? "materialTool.executionFileReady" : "materialTool.executionFileAction")
+    : `${t(`toolGroup.${category}.${status === "running" ? "running" : "completed"}`)} ${summary}`;
   const diff = opText(operation.diffPreview);
-  const text = opText(operation.modelContent) || opText(operation.outputPreview) || opText(operation.error);
-  const hasDetail = Boolean((isCommand && command) || diff || text || outputRef);
+  const text = opText(operation.modelContent) || opText(operation.outputPreview);
+  const error = opText(operation.error);
+  const hasDetail = Boolean((isCommand && command) || diff || text || error || outputRef);
   const Header = hasDetail ? "button" : "div";
   return (
-    <div className={`agent-operation-group agent-tool-node${failed ? " error" : ""}`}>
+    <div className={`agent-operation-group agent-tool-node ${status}${failed ? " error" : ""}`}>
       <Header
         className="agent-operation-summary agent-tool-node-summary"
         {...(hasDetail ? { type: "button", "aria-expanded": expanded, onClick: () => setExpanded((value) => !value) } : {})}
       >
-        <span className="agent-tool-node-action is-inline-summary" title={summary}>{summary}</span>
+        <ActivityIcon className="agent-tool-node-icon" aria-hidden="true" />
+        <span className="agent-tool-node-action is-inline-summary" title={title}>{title}</span>
+        <span className="agent-tool-node-status">{t(`transcriptTool.status.${status}`)}</span>
         {hasDetail ? <span className={`agent-operation-chevron ${expanded ? "open" : ""}`} aria-hidden="true" /> : null}
       </Header>
       <AnimatedDisclosure expanded={hasDetail && expanded}>
         <div className="agent-operation-body agent-tool-node-body">
-          <div className="agent-tool-command-card">
-            {isCommand && command ? <pre className="agent-tool-bash-command">{`$ ${command}`}</pre> : null}
-            {diff ? <pre className="agent-tool-output-block is-diff">{diff}</pre> : null}
-            {text ? <pre className={`agent-tool-output-block${failed ? " is-error" : ""}`}>{text}</pre> : null}
-            {outputRef
-              ? <TranscriptToolOutput store={store} reference={outputRef} failed={failed} />
-              : null}
+          <div className="agent-tool-command-card agent-tool-detail-card">
+            {isCommand && command ? <section className="agent-tool-detail-section is-command" aria-label={t("transcriptTool.command")}>
+              <div className="agent-tool-detail-section-header"><span className="agent-tool-detail-section-title">{t("transcriptTool.command")}</span></div>
+              <div className="agent-tool-command-viewport"><pre className="agent-tool-bash-command">{`$ ${command}`}</pre></div>
+            </section> : null}
+            {diff ? <section className="agent-tool-detail-section is-diff" aria-label={t("transcriptTool.changes")}>
+              <div className="agent-tool-detail-section-header"><span className="agent-tool-detail-section-title">{t("transcriptTool.changes")}</span></div>
+              <pre className="agent-tool-output-block is-diff">{diff}</pre>
+            </section> : null}
+            {text || error || outputRef ? <section className="agent-tool-detail-section is-output" aria-label={t("transcriptTool.output")}>
+              <div className="agent-tool-detail-section-header"><span className="agent-tool-detail-section-title">{t("transcriptTool.output")}</span></div>
+              {text ? <pre className={`agent-tool-output-block${failed ? " is-error" : ""}`}>{text}</pre> : null}
+              {error ? <pre className="agent-tool-output-block is-error" role="alert">{error}</pre> : null}
+              {outputRef ? <TranscriptToolOutput store={store} reference={outputRef} failed={failed} /> : null}
+            </section> : null}
           </div>
         </div>
       </AnimatedDisclosure>
@@ -308,7 +333,6 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
   runEnded?: boolean;
 }>) {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(false);
   const listIdentity = useTranscriptIdentity(store);
   const listViewEpoch = listIdentity.viewEpoch;
   const registrySnapshot = useToolOperationsSnapshot(toolOperations);
@@ -331,52 +355,17 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
         sourceSequence: block.orderKey.sourceSequence,
         callId,
         call: (record?.call ?? {}) as Record<string, unknown>,
+        resultState: opText(record?.result?.resultState),
         operations: (record?.operations ?? []) as readonly Record<string, unknown>[],
         outputRef: contentReference(body.outputRef),
         detailSourceEventId: record?.previewTruncated ? opText(record.detailSourceEventId) : "",
-        failed: body.status === "failed" || body.status === "interrupted",
         unconfirmed: runEnded && (body.status === "running" || body.status === "queued"),
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
   if (entries.length === 0) return null;
-  const operations = entries.flatMap((entry) => {
-    const description = opText(opObject(entry.call.normalizedInput)?.description);
-    const callTarget = opText(opObject(entry.call.normalizedInput)?.path)
-      || opText(entry.body.summary)
-      || opText(entry.call.displayTarget);
-    const status = entry.failed || entry.unconfirmed
-      ? ("error" as const)
-      : entry.body.status === "running" || entry.body.status === "queued"
-        ? ("running" as const)
-        : ("completed" as const);
-    if (entry.operations.length === 0) {
-      return [{ toolName: opText(entry.body.toolName), description, target: callTarget, status }];
-    }
-    return entry.operations.map((operation) => ({
-      toolName: opText(operation.toolName) || opText(entry.body.toolName),
-      description,
-      target: opText(operation.path) || opText(operation.query) || opText(operation.text) || callTarget,
-      status,
-    }));
-  });
-  const unconfirmed = entries.filter(entry => entry.unconfirmed).length;
-  const title = unconfirmed > 0
-    ? t("transcriptTool.resultsUnconfirmed", { count: unconfirmed })
-    : formatToolGroupTitle(operations, t);
-  const GroupIcon = TOOL_GROUP_ICONS[toolGroupIconCategory(operations) ?? "command"];
-  const hasDetail = entries.some((entry) => entry.operations.length > 0 || entry.outputRef !== null || Boolean(entry.detailSourceEventId));
-  const Header = hasDetail ? "button" : "div";
   return (
     <div className="workspaceActivityGroupRecord">
-      <Header
-        className="workspaceActivityGroup"
-        {...(hasDetail ? { type: "button", "aria-expanded": expanded, onClick: () => setExpanded((value) => !value) } : {})}
-      >
-        <GroupIcon aria-hidden="true" />
-        <span title={title}>{title}</span>
-        {hasDetail ? <ChevronDown className={`workspaceActivityGroupChevron ${expanded ? "isExpanded" : ""}`} aria-hidden="true" /> : null}
-      </Header>
       {entries.map(entry => {
         const sources = citations?.get(entry.sourceSequence) ?? [];
         return sources.length ? <div className="workspaceCitationSources" key={entry.sourceSequence}>
@@ -388,19 +377,16 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
           })}
         </div> : null;
       })}
-      <AnimatedDisclosure expanded={hasDetail && expanded}>
-        <div className="workspaceActivityDetails">
-          <div className="workspaceActivityDetailsInner">
-            <div className="agent-tool-node-list">
+      <div className="agent-tool-node-list">
               {entries.flatMap((entry) => {
                 if (entry.operations.length === 0) {
                   return [
                     <TranscriptToolNode
                       store={store}
-                      call={entry.call}
-                      operation={{ callId: entry.callId, toolName: opText(entry.body.toolName), text: opText(entry.body.summary) }}
+                      call={{ ...entry.call, toolName: opText(entry.body.toolName) }}
+                      operation={{ callId: entry.callId, toolName: opText(entry.body.toolName), text: opText(entry.body.summary), resultState: entry.resultState }}
                       outputRef={entry.outputRef}
-                      failed={entry.failed}
+                      status={entry.unconfirmed ? "unconfirmed" : (entry.body.status === "queued" ? "running" : entry.body.status) as ToolDisplayStatus}
                       key={entry.callId}
                     />,
                   ];
@@ -408,36 +394,29 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
                 return entry.operations.map((operation, index) => (
                   <TranscriptToolNode
                     store={store}
-                    call={entry.call}
+                    call={{ ...entry.call, toolName: opText(entry.body.toolName) }}
                     operation={operation}
                     outputRef={opText(operation.callId) === entry.callId ? entry.outputRef : null}
-                    failed={entry.failed}
+                    status={entry.unconfirmed ? "unconfirmed" : (entry.body.status === "queued" ? "running" : entry.body.status) as ToolDisplayStatus}
                     key={`${entry.callId}:${opText(operation.toolName)}:${index}`}
                   />
                 ));
               })}
-            </div>
-            {listIdentity.sessionId ? entries.filter(entry => entry.detailSourceEventId).map(entry => <a key={entry.callId}
+      </div>
+      {listIdentity.sessionId ? entries.filter(entry => entry.detailSourceEventId).map(entry => <a key={entry.callId}
               href={apiUrl(`/api/sessions/${encodeURIComponent(listIdentity.sessionId as string)}/presentation/operation?sourceEventId=${encodeURIComponent(entry.detailSourceEventId)}`)} download>
               {t("libraryObjectRoute.downloadFile")}
             </a>) : null}
-          </div>
-        </div>
-      </AnimatedDisclosure>
     </div>
   );
 }
 
-export type TranscriptInitialInputOrigin = Readonly<{ messageId: string; agentId: string; agentName: string }>;
-
 export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   store,
   blockId,
-  initialInputOrigin,
 }: Readonly<{
   store: TranscriptViewStore;
   blockId: string;
-  initialInputOrigin?: TranscriptInitialInputOrigin | null;
 }>) {
   const { t } = useTranslation();
   const block = useTranscriptBlock(store, blockId);
@@ -463,7 +442,6 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   if (kind === "userText") {
     return (
       <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id={block.blockId}>
-        {initialInputOrigin?.messageId === block.blockId ? <span className="workspaceUserMessageOrigin">{t("transcript.sendByAgent", { agentName: initialInputOrigin.agentName })}</span> : null}
         <div className="workspaceUserMessage">
           {text ?? (reference ? <ReferencedContent store={store} reference={reference} mode="plain" /> : null)}
         </div>

@@ -234,7 +234,10 @@ class EnvironmentNetworkMigrationTests(TransactionTestCase):
 
         latest = MigrationExecutor(connection).loader.graph.leaf_nodes("app_core")
         with isolated_migration_database(latest, route_current_models=True) as database:
-            fixture = self.fixture(database, latest)
+            apps = MigrationExecutor(database).loader.project_state(latest).apps
+            user = apps.get_model("auth", "User").objects.using(database.alias).create(username="network-race")
+            workspace = apps.get_model("app_core", "Workspace").objects.using(database.alias).create(
+                name="Network", createdBy_id=user.pk)
             writer = database.copy(alias=database.alias + "_policy_writer")
             changed = False
             insertion = f'INSERT INTO {database.ops.quote_name(SessionEnvironment._meta.db_table)}'
@@ -245,13 +248,13 @@ class EnvironmentNetworkMigrationTests(TransactionTestCase):
                     changed = True
                     with writer.cursor() as cursor:
                         cursor.execute("UPDATE app_core_workspace SET execution_network=%s WHERE id=%s",
-                                       ["publicInternet", fixture.workspace.pk])
+                                       ["publicInternet", workspace.pk])
                 return execute(sql, params, many, context)
 
             try:
                 with database.execute_wrapper(change_policy_before_environment_insert):
                     session = Session.objects.using(database.alias).create(
-                        workspace_id=fixture.workspace.pk, owner_id=fixture.user.pk, agent_id=fixture.agent.pk)
+                        workspace_id=workspace.pk, owner_id=user.pk)
             finally:
                 writer.close()
             self.assertTrue(changed, "the fixture must commit the policy change between read and insert")

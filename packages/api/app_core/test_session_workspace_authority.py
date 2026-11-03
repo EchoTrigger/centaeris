@@ -17,15 +17,14 @@ class SessionWorkspaceAuthorityContractTests(SimpleTestCase):
         from .test_agent_run_authorization import fixture
         wire = fixture()
         run = SimpleNamespace(
-            session=SimpleNamespace(agent_id=wire["agentId"], workspaceBaselineKnown=False,
+            session=SimpleNamespace(workspaceBaselineKnown=False,
                 workspaceGeneration=0, workspaceSnapshotSha256="", workspaceSnapshotSizeBytes=0,
                 workspaceExpandedSizeBytes=0, workspaceFileCount=0),
             workspace_id=wire["workspaceId"], user_id=wire["userId"], session_id=wire["sessionId"],
             id=wire["agentRunId"], modelConfig_id=wire["modelConfigRef"], thinkingMode=wire["thinkingMode"],
             environment=SimpleNamespace(environment_profile=wire["environmentProfile"],
                 environment_profile_digest=wire["environmentProfileDigest"]),
-            definition_version_id="fixture-version",
-            definition_version=SimpleNamespace(plugin_activation=wire["pluginActivation"]))
+            workspace=SimpleNamespace())
         with self.assertRaisesMessage(ValueError, "session_workspace_baseline_unavailable"):
             build_agent_run_authorization_payload(run, wire["id"], image_digest="sha256:" + "b" * 64,
                 declared_inputs=[])
@@ -42,8 +41,7 @@ class SessionWorkspaceAuthorityTests(OperationFixture, TestCase):
         session.refresh_from_db()
         run = AgentRun.objects.create(session=session, workspace=self.workspace, user=self.user,
             modelConfig=self.model, prompt="continue original session",
-            definition_version=self.agent.definition.published_version,
-            agent_instructions=self.agent.definition.published_version.instructions)
+            agent_instructions="Session instructions")
         with self.assertRaisesMessage(ValueError, "session_workspace_baseline_unavailable"):
             create_agent_run_authorization(run, image_digest="sha256:" + "a" * 64)
         self.assertFalse(hasattr(run, "authorization"))

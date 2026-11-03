@@ -12,35 +12,10 @@ COMMON_ERROR_RESPONSES = {
 }
 
 
-class AgentCoordinationSessionResponse(StrictSchema):
-    schema_id: Literal["agent.coordination_session.v1"] = Field(alias="schema")
-    agent_id: str
-    session_id: str
-
-
-class AgentMessageResponse(StrictSchema):
-    id: str
-    agent_run_id: str
-    turn_id: str
-    tool_call_id: str
-    source_sequence: int
-    created_at_ms: int
-    body: str
-    session_refs: list[str]
-    file_refs: list[str]
-
-
-class AgentMessagesResponse(StrictSchema):
-    schema_id: Literal["agent.messages.v1"] = Field(alias="schema")
-    agent_id: str
-    session_id: str
-    messages: list[AgentMessageResponse]
-    next_after_sequence: int | None
-
-
 class WorkspaceResponse(StrictSchema):
     id: str
     name: str
+    avatar_url: str | None
     description: str
     status: str
     role: Literal["owner", "admin", "member"]
@@ -48,6 +23,10 @@ class WorkspaceResponse(StrictSchema):
 
 class WorkspacesEnvelope(StrictSchema):
     workspaces: list[WorkspaceResponse]
+
+
+class WorkspaceEnvelope(StrictSchema):
+    workspace: WorkspaceResponse
 
 
 class WorkspaceMemberResponse(StrictSchema):
@@ -241,86 +220,6 @@ class WorkspaceSkillDetailEnvelope(StrictSchema):
     content: str
 
 
-class AgentResponse(StrictSchema):
-    id: str
-    workspace_id: str
-    definition_id: str | None
-    definition_version_id: str | None
-    is_business_root: bool
-    plugin_names: list[str]
-    name: str
-    description: str
-    instructions: str
-    avatar_kind: Literal["centaeris", "banana"]
-    avatar_url: str | None
-    status: Literal["active", "deleted"]
-    deleted_at: str | None
-    created_at: str
-    updated_at: str
-
-
-class AgentEnvelope(StrictSchema):
-    agent: AgentResponse
-
-
-class AgentsEnvelope(StrictSchema):
-    agents: list[AgentResponse]
-
-
-class AgentDefinitionResponse(StrictSchema):
-    id: str
-    workspace_id: str
-    name: str
-    description: str
-    instructions: str
-    plugin_names: list[str]
-    model_config_ref: str | None
-    thinking_mode: str | None
-    avatar_url: str | None
-    avatar_kind: Literal["centaeris", "banana"]
-    status: Literal["active", "disabled"]
-    availability_scope: Literal["none", "workspace", "members"]
-    membership_ids: list[str]
-    published_version_id: str | None
-    created_at: str
-    updated_at: str
-
-
-class AgentDefinitionVersionResponse(StrictSchema):
-    id: str
-    definition_id: str
-    version: int
-    name: str
-    description: str
-    instructions: str
-    plugin_names: list[str]
-    model_config_ref: str | None
-    thinking_mode: str | None
-    avatar_url: str | None
-    avatar_kind: Literal["centaeris", "banana"]
-    published_at: str
-
-
-class AgentDefinitionEnvelope(StrictSchema):
-    definition: AgentDefinitionResponse
-
-
-class AgentDefinitionsEnvelope(StrictSchema):
-    definitions: list[AgentDefinitionResponse]
-
-
-class AgentDefinitionVersionEnvelope(StrictSchema):
-    version: AgentDefinitionVersionResponse
-
-
-class AgentDefinitionVersionsEnvelope(StrictSchema):
-    versions: list[AgentDefinitionVersionResponse]
-
-
-class AvailableAgentDefinitionsEnvelope(StrictSchema):
-    definitions: list[AgentDefinitionVersionResponse]
-
-
 class ContextMcpToolResponse(StrictSchema):
     provider_id: str
     name: str
@@ -376,13 +275,11 @@ class InitialInputOriginResponse(StrictSchema):
 class SessionResponse(StrictSchema):
     id: str
     workspace_id: str
-    agent_id: str
     project_id: str | None
     current_environment_id: str
     execution_mode: Literal["perRun"]
     title: str
     origin: str
-    initial_input_origin: InitialInputOriginResponse | None
     status: Literal["active", "deleted"]
     deleted_at: str | None
     is_pinned: bool
@@ -410,19 +307,9 @@ class SessionsEnvelope(StrictSchema):
     sessions: list[SessionResponse]
 
 
-class AgentWorkSessionsResponse(StrictSchema):
-    schema_id: Literal["agent.work_sessions.v1"] = Field(alias="schema")
-    agent_id: str
-    workspace_id: str
-    sessions: list[SessionResponse]
-    next_after_session_id: str | None
-    has_more: bool
-
-
 class SessionProjectResponse(StrictSchema):
     id: str
     workspace_id: str
-    agent_id: str
     name: str
     created_at: str
 
@@ -530,7 +417,7 @@ class TrashActorResponse(StrictSchema):
 
 
 class TrashLocationResponse(StrictSchema):
-    kind: Literal["workspace", "agent", "libraryRoot", "libraryFolder"]
+    kind: Literal["workspace", "libraryRoot", "libraryFolder"]
     id: str | None
     label: str
     scope: Literal["workspace", "privateLibrary"]
@@ -538,7 +425,7 @@ class TrashLocationResponse(StrictSchema):
 
 class TrashItemResponse(StrictSchema):
     id: str
-    kind: Literal["agent", "session", "source", "library"]
+    kind: Literal["session", "source", "library"]
     title: str
     deleted_at: str
     expires_at: str
@@ -799,7 +686,7 @@ class TranscriptCitationsResponse(StrictSchema):
 
 class HostedOperationResponse(StrictSchema):
     operation_id: str
-    command: Literal["createSession", "submitMessage"]
+    command: Literal["createSession", "submitMessage", "respondQuestion"]
     status: Literal["accepted"]
     session_id: str
     agent_run_id: str | None

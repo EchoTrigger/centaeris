@@ -341,9 +341,10 @@ impl ApiModelClient {
                     Ok(received) => received,
                     Err(_) if terminal_received => break,
                     Err(_) => {
-                        return Err(model_proxy_outcome_unknown(
+                        return Err(ModelClientError::new(
                             ModelClientErrorKind::Timeout,
                             "api model stream idle timeout",
+                            true,
                         ))
                     }
                 };
@@ -2066,6 +2067,147 @@ mod tests {
             stop.send(()).unwrap();
             server.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn api_model_stream_idle_timeout_resets_partial_output_and_bounds_retries() {
+        for partial in ["none", "content", "reasoning", "incomplete_tool"] {
+            for recover in [true, false] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let (stop, mut stopped) = tokio::sync::oneshot::channel();
+                let server = tokio::spawn(async move {
+                    let mut calls = 0;
+                    let mut idle_connections = Vec::new();
+                    loop {
+                        let (mut stream, _) = tokio::select! {
+                            incoming = listener.accept() => incoming.unwrap(),
+                            _ = &mut stopped => break,
+                        };
+                        read_http_request(&mut stream).await;
+                        calls += 1;
+                        if recover && calls == 3 {
+                            let body = "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"delta\",\"delta\":\"ok\"}\n\ndata: {\"schema\":\"api.model.stream.v1\",\"type\":\"result\",\"text\":\"ok\",\"toolCalls\":[],\"usage\":null}\n\n";
+                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                        } else {
+                            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+                            let reasoning = "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"reasoning\",\"text\":\"private reasoning\"}\n\n";
+                            let content = "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"delta\",\"delta\":\"partial\"}\n\n";
+                            let body = match partial {
+                                "content" => content.to_string(),
+                                "reasoning" => reasoning.to_string(),
+                                "incomplete_tool" => format!("{reasoning}{content}data: {{\"schema\":\"api.model.stream.v1\",\"type\":\"result\",\"text\":\"partial\",\"toolCalls\":[{{\"id\":\"half\",\"name\":\"exec\",\"argsJson\":\""),
+                                _ => String::new(),
+                            };
+                            if !body.is_empty() {
+                                stream
+                                    .write_all(format!("{:X}\r\n{body}\r\n", body.len()).as_bytes())
+                                    .await
+                                    .unwrap();
+                            }
+                            idle_connections.push(stream);
+                        }
+                    }
+                    calls
+                });
+                let mut client = model_client(format!("http://{address}"), None, 1024);
+                client.stream_idle_timeout = std::time::Duration::from_millis(30);
+                let mut request = model_request();
+                request.session_config.max_retries = 5;
+                request.session_config.retry_backoff_ms = 0;
+                let mut events = Vec::new();
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    client.generate_stream(&request, &mut |event| events.push(event)),
+                )
+                .await
+                .expect("idle retries must finish within their bound");
+                let attempts = if recover { 3 } else { 6 };
+                if recover {
+                    let response = result.expect("idle timeout should recover");
+                    assert_eq!(response.provider_attempts, attempts);
+                    assert_eq!(response.generate_result.content, "ok");
+                    assert!(response.generate_result.tool_calls.is_empty());
+                } else {
+                    let error = result.expect_err("six idle attempts must exhaust the budget");
+                    assert_eq!(error.kind, ModelClientErrorKind::Timeout);
+                    assert!(!error.retryable);
+                    assert_eq!(error.provider_attempts, attempts);
+                    assert_eq!(error.provider_code.as_deref(), Some("provider_timeout"));
+                    let failure = hosted_model_failure(&error.message).unwrap();
+                    assert_eq!(failure.reason_type, "provider_timeout");
+                    assert_eq!(failure.provider_attempts, attempts);
+                    assert!(failure.retry_exhausted);
+                    assert_eq!(failure.http_status, None);
+                }
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(
+                            event,
+                            ModelClientStreamEvent::Status {
+                                process_state: RuntimeProcessState::Retrying,
+                                ..
+                            }
+                        ))
+                        .count(),
+                    attempts as usize - 1
+                );
+                assert_eq!(events.iter().filter(|event| matches!(event, ModelClientStreamEvent::ReplaceContent { content } if content.is_empty())).count(), if matches!(partial, "content" | "incomplete_tool") { attempts as usize - 1 } else { 0 });
+                assert_eq!(events.iter().filter(|event| matches!(event, ModelClientStreamEvent::Reasoning { text } if text.is_empty())).count(), if matches!(partial, "reasoning" | "incomplete_tool") { attempts as usize - 1 } else { 0 });
+                assert!(!events
+                    .iter()
+                    .any(|event| matches!(event, ModelClientStreamEvent::ToolCallReady { .. })));
+                stop.send(()).unwrap();
+                assert_eq!(server.await.unwrap(), attempts);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_model_stream_during_retry_backoff_prevents_redispatch() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_request(&mut stream).await;
+            let body = "data: {\"schema\":\"api.model.stream.v1\",\"type\":\"error\",\"reasonType\":\"provider_timeout\",\"httpStatus\":null}\n\n";
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            tokio::select! {
+                incoming = listener.accept() => panic!("cancelled retry must not dispatch: {incoming:?}"),
+                _ = &mut stopped => {}
+            }
+        });
+        let client = model_client(format!("http://{address}"), None, 1024);
+        let mut request = model_request();
+        request.session_config.max_retries = 5;
+        request.session_config.retry_backoff_ms = 100;
+        let (retrying, mut retried) = tokio::sync::oneshot::channel();
+        let mut retrying = Some(retrying);
+        {
+            let mut sink = |event| {
+                if matches!(
+                    event,
+                    ModelClientStreamEvent::Status {
+                        process_state: RuntimeProcessState::Retrying,
+                        ..
+                    }
+                ) {
+                    retrying.take().unwrap().send(()).unwrap();
+                }
+            };
+            let pending = client.generate_stream(&request, &mut sink);
+            tokio::pin!(pending);
+            tokio::select! {
+                _ = &mut retried => {},
+                result = &mut pending => panic!("model call finished before cancellation: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("retry backoff was never reached"),
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        stop.send(()).unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]

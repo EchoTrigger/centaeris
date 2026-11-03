@@ -13,7 +13,7 @@ class AuthorizationFlowTests(SimpleTestCase):
         payload = fixture()
         self.run = SimpleNamespace(id=payload["agentRunId"], workspace_id=payload["workspaceId"],
             session_id=payload["sessionId"], user_id=payload["userId"], modelConfig_id=payload["modelConfigRef"],
-            thinkingMode=payload["thinkingMode"], session=SimpleNamespace(id=payload["sessionId"], agent_id=payload["agentId"]),
+            thinkingMode=payload["thinkingMode"], session=SimpleNamespace(id=payload["sessionId"]),
             environment_id="environment-test", environment=SimpleNamespace(
                 id="environment-test", session_id=payload["sessionId"], environment_profile=payload["environmentProfile"],
                 environment_profile_digest=payload["environmentProfileDigest"], network="disabled"))
@@ -22,7 +22,7 @@ class AuthorizationFlowTests(SimpleTestCase):
         self.digest = self.run.authorization.digest
         self.membership = self.enterContext(patch.object(inputs, "agent_run_membership_is_current", return_value=True))
         self.enterContext(patch("app_core.runtime_client.agent_run_membership_is_current", return_value=True))
-        self.delivered = self.enterContext(patch("app_core.agent_input_attachments.delivered_attachment", return_value=None))
+        self.resource_lookup = self.enterContext(patch("app_core.library_materials.resolve_library_input", return_value=None))
 
     def resolve(self):
         return inputs.resolved_input_storage(self.run, "undeclared", self.digest)
@@ -30,13 +30,13 @@ class AuthorizationFlowTests(SimpleTestCase):
     def test_valid_authorization_reaches_resource_scope_check(self):
         with self.assertRaisesRegex(inputs.DeferredInputResolutionError, "asset_unavailable"):
             self.resolve()
-        self.delivered.assert_called_once_with(self.run, "undeclared")
+        self.resource_lookup.assert_called_once_with(self.run, "undeclared")
 
     def test_historical_grant_cannot_authorize_a_changed_network_snapshot(self):
         self.run.environment.network = "publicInternet"
         with self.assertRaisesRegex(inputs.DeferredInputBindingError, "binding mismatch"):
             self.resolve()
-        self.delivered.assert_not_called()
+        self.resource_lookup.assert_not_called()
 
     def test_membership_failure_precedes_corrupt_payload(self):
         self.membership.return_value = False
@@ -64,9 +64,6 @@ class AuthorizationFlowTests(SimpleTestCase):
                 with self.assertRaisesRegex(inputs.DeferredInputBindingError, "binding mismatch"):
                     self.resolve()
                 setattr(self.run, field, original)
-        self.run.session.agent_id = "other"
-        with self.assertRaisesRegex(inputs.DeferredInputBindingError, "binding mismatch"):
-            self.resolve()
 
     def test_startup_also_binds_thinking_mode(self):
         self.assertIs(_validate_agent_run_binding(self.run), self.run.authorization)

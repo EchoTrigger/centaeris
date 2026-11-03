@@ -8,7 +8,7 @@ execution and tool semantics; the host supervisor owns physical processes.
 
 The API binds the profile before the first Run authorization or explicit
 provision operation. Ordinary Sessions freeze their profile when first used.
-The current `workspace.agent_run_authorization.v1` signs the complete profile and
+The current `workspace.agent_run_authorization.v2` signs the complete profile and
 its digest. Start, step and teardown each use their current v1 contract, with
 controller authority required for both `perRun` and `retained` lifetimes.
 

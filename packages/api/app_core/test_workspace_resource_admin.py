@@ -227,10 +227,8 @@ class WorkspacePluginScopeTests(TestCase):
 
     def test_workspace_install_pins_package_without_replacing_shared_catalog(self):
         from django.core.files.uploadedfile import SimpleUploadedFile
-        from app_core.plugin_install_source import UploadedZip
         from app_core.test_plugin_upload import _plugin_zip
         from app_core.workspace_plugins import (
-            install_workspace_plugin,
             workspace_plugin_catalog,
             remove_workspace_plugin,
         )
@@ -251,11 +249,14 @@ class WorkspacePluginScopeTests(TestCase):
         with patch(
             "app_core.workspace_plugins.request_plugin_inspection", return_value=package
         ):
-            install_workspace_plugin(
-                self.admin,
-                self.workspace.id,
-                UploadedZip(SimpleUploadedFile("banana.zip", _plugin_zip())),
+            self.client.force_login(self.admin)
+            response = self.client.post(
+                f"/api/workspaces/{self.workspace.id}/plugins/upload",
+                data={"file": SimpleUploadedFile("banana.zip", _plugin_zip())},
             )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()["plugin"]["name"], "banana")
+        self.assertTrue(response.json()["plugin"]["enabled"])
         self.assertEqual(load_plugin_catalog()["packages"], [])
         self.assertEqual(
             workspace_plugin_catalog(self.workspace)["packages"], [package]
@@ -273,17 +274,50 @@ class WorkspacePluginScopeTests(TestCase):
                 / ".centaeris-plugin/plugin.json"
             ).is_file()
         )
+        detail_url = f"/api/workspaces/{self.workspace.id}/plugins/banana"
+        detail = self.client.get(detail_url)
+        self.assertEqual(detail.status_code, 200, detail.content)
+        self.assertEqual(detail.json()["plugin"]["name"], "banana")
+        disabled = self.client.patch(
+            detail_url,
+            data=json.dumps({"enabled": False}),
+            content_type="application/json",
+        )
+        self.assertEqual(disabled.status_code, 200, disabled.content)
+        self.assertFalse(disabled.json()["plugin"]["enabled"])
         with self.assertRaises(PermissionError):
             remove_workspace_plugin(self.other, self.workspace.id, "banana")
         remove_workspace_plugin(self.admin, self.workspace.id, "banana")
         self.assertEqual(workspace_plugin_catalog(self.workspace)["packages"], [])
         self.assertEqual(load_plugin_catalog()["packages"], [])
 
+    def test_upload_requires_authenticated_workspace_administrator(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from app_core.test_plugin_upload import _plugin_zip
+
+        upload_url = f"/api/workspaces/{self.workspace.id}/plugins/upload"
+        response = self.client.post(upload_url)
+        self.assertEqual(response.status_code, 401, response.content)
+        member = User.objects.create_user("member")
+        WorkspaceMembership.objects.create(
+            workspace=self.workspace, user=member, role="member"
+        )
+        with patch("app_core.workspace_plugins.request_plugin_inspection") as inspect:
+            for user in (member, self.other):
+                with self.subTest(user=user.username):
+                    self.client.force_login(user)
+                    response = self.client.post(
+                        upload_url,
+                        data={"file": SimpleUploadedFile("banana.zip", _plugin_zip())},
+                    )
+                    self.assertEqual(response.status_code, 404, response.content)
+            inspect.assert_not_called()
+
     def test_model_selection_rejects_other_workspace_configuration(self):
         from app_core.models import ModelConfig
-        from app_core.agent_model_settings import (
-            selected_model,
-            AgentModelSettingsError,
+        from app_core.session_model_settings import (
+            selected_session_model,
+            SessionModelSettingsError,
         )
 
         own = ModelProvider.objects.create(
@@ -294,11 +328,11 @@ class WorkspacePluginScopeTests(TestCase):
         )
         model = ModelConfig.objects.create(provider=own, modelName="demo")
         self.assertEqual(
-            selected_model(model.id, None, workspace_id=self.workspace.id)[0].id,
+            selected_session_model(self.workspace.id, model.id, None)[0].id,
             model.id,
         )
-        with self.assertRaises(AgentModelSettingsError):
-            selected_model(model.id, None, workspace_id=self.foreign.id)
+        with self.assertRaises(SessionModelSettingsError):
+            selected_session_model(self.foreign.id, model.id, None)
 
 
 from django.test import SimpleTestCase

@@ -39,7 +39,7 @@ this inventory does not duplicate their field lists.
 
 ## Endpoint inventory
 
-There are 29 method/path entries, including the parameterized job read. All
+There are 30 method/path entries, including the parameterized job read. All
 require `X-Internal-Token` when reaching a supported operation. Admission and
 body/header validation occur before that token check. Successful responses are
 JSON; the status column below describes success, not every failure outcome.
@@ -54,6 +54,7 @@ identity, lifecycle binding and current storage fences remain domain checks.
 | POST | `/agent-runs/step` | Validate the lifecycle lease and execute or resume the Run; return its disposition and terminal/waiting information | 200 |
 | POST | `/agent-runs/cancel` | Persist a scoped cancellation request or return the existing terminal state; acceptance does not establish a new terminal fact | 200 |
 | POST | `/internal/agent-runs/supplement` | Admit or replay a supplement in the existing bounded Run queue; return its identity and queue revision | 202 |
+| POST | `/internal/agent-runs/question-response` | Persist an idempotent answer or skip under original signed Run control and wake its existing lifecycle Job | 200 |
 | POST | `/agent-runs/teardown` | Require a valid lifecycle lease and terminal Run, close supplements, settle child jobs and remove the sandbox/context | 200 |
 
 ### Jobs

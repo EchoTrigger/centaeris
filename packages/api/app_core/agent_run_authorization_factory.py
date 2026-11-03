@@ -17,6 +17,7 @@ def create_agent_run_authorization(
     *,
     image_digest: str,
     declared_inputs: list[dict] | None = None,
+    personal_library: bool = False,
 ) -> AgentRunAuthorization:
     with plugin_lifecycle_lock():
         if not agent_run_membership_is_current(agent_run):
@@ -27,6 +28,8 @@ def create_agent_run_authorization(
             raise ValueError("session_workspace_baseline_unavailable")
         from .environment_profile import freeze_run_environment_profile
         freeze_run_environment_profile(agent_run, image_digest)
+        from .models import RunMaterialScope
+        RunMaterialScope.objects.create(agent_run=agent_run, personal_library=personal_library)
         authorization_id = new_agent_run_authorization_id()
         payload = build_agent_run_authorization_payload(
             agent_run,

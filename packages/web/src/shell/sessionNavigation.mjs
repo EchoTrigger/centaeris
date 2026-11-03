@@ -29,3 +29,8 @@ export function groupSessionNavigation(sessions, projects) {
     });
     return grouped;
 }
+
+export function sessionChatPath(workspaceId, sessionId) {
+  if (![workspaceId, sessionId].every(value => typeof value === "string" && value && value.trim() === value)) throw new Error("session_identity_invalid");
+  return `/w/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`;
+}

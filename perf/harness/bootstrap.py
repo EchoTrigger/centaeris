@@ -129,22 +129,10 @@ def main():
     print(f"     workspace: {workspace['id']}")
 
     status, body = call(
-        "GET", f"/api/workspaces/{workspace['id']}/agents"
-    )
-    body = step("agents", status, body, ok=(200,))
-    agents = body.get("agents") or []
-    if not agents:
-        print("FAIL: 没有可用 agent（bootstrap 应该播种默认 agent）")
-        sys.exit(1)
-    agent = agents[0]
-    print(f"     agent: {agent['id']}")
-
-    status, body = call(
         "POST",
         f"/api/workspaces/{workspace['id']}/sessions/new/messages",
         {
             "operationId": uuid.uuid4().hex,
-            "agentId": agent["id"],
             "text": "Run the perf smoke: call your tool once, then finish.",
             "attachmentRefs": [],
             "modelConfigRef": model_id,

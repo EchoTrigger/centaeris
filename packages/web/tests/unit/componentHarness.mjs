@@ -60,12 +60,10 @@ const text = value => Array.isArray(value) ? value.map(text).join("") : typeof v
 export const button = (tree, label) => nodes(tree, node => node.type === "button" && (text(node.props.children) === label || node.props["aria-label"] === label))[0];
 export function environment(overrides = {}) {
   const state = {
-    workspace: { id: "workspace", role: "member" },
+    workspace: { id: "workspace", name: "Synthetic workspace", role: "member", avatarUrl: null },
     user: { id: "user" },
-    agents: [{ id: "agent", workspaceId: "workspace", name: "Synthetic Agent", status: "active", avatarKind: "centaeris" }],
-    location: { pathname: "/w/workspace/settings/agents", search: "?agentId=agent", state: null },
+    location: { pathname: "/w/workspace/app", search: "", state: null },
     navigations: [], revalidationCount: 0, modal: null,
-    agentPresentation: { historyRevision: "0", workRevision: "0", navigation: null, error: false, retry() {} },
     blocker: { state: "unblocked", resets: 0, proceeds: 0, reset() { this.state = "unblocked"; this.resets++; }, proceed() { this.state = "proceeding"; this.proceeds++; } },
     ...overrides,
   };
@@ -79,34 +77,21 @@ export function deferred() {
   return { promise, resolve, reject };
 }
 export class ApiError extends Error { constructor(message, status) { super(message); this.status = status; } }
-export function tailRefreshFixture(_testContext) {
-  return async subject => {
-    const state = subject.environment.agentPresentation;
-    state.historyRevision = String(BigInt(state.historyRevision) + 1n);
-    await subject.settle();
-  };
-}
 const moduleUrl = import.meta.url;
 const dataUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 const stub = (specifier, source) => [specifier, dataUrl(`import {context,useRef} from ${JSON.stringify(moduleUrl)}; ${source}`)];
-export function subjectLoader({ realModal = false, realDocumentPreview = false, realMessageList = false, extraOverrides = [] } = {}) {
+export function subjectLoader({ realModal = false, realDocumentPreview = false, extraOverrides = [] } = {}) {
   const overrides = new Map([
     ["react", dataUrl(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useLayoutEffect} from ${JSON.stringify(moduleUrl)};`)],
-    stub("react-router", 'export const Link=()=>null; export const useRouteLoaderData=id=>id==="authenticated"?{user:context.user}:({workspace:context.workspace,agents:context.agents}); export const useNavigate=()=>context.navigate; export const useLocation=()=>context.location; export const useRevalidator=()=>context.revalidator; export const useBlocker=value=>{context.blocker.predicate=value;context.blocker.shouldBlock=typeof value==="function"?value({currentLocation:context.location,nextLocation:context.nextLocation||{...context.location,search:"?agentId=other"}}):Boolean(value);return context.router?context.router.getBlocker("model-draft",value):context.blocker;};'),
-    stub("../agent-chat/useAgentPresentation", "export const useAgentPresentation=()=>context.agentPresentation;"),
+    stub("react-router", 'export const Link=()=>null; export const useRouteLoaderData=id=>id==="authenticated"?{user:context.user}:({workspace:context.workspace}); export const useNavigate=()=>context.navigate; export const useLocation=()=>context.location; export const useRevalidator=()=>context.revalidator; export const useBlocker=value=>{context.blocker.predicate=value;context.blocker.shouldBlock=typeof value==="function"?value({currentLocation:context.location,nextLocation:context.nextLocation||{...context.location,search:"?new=1"}}):Boolean(value);return context.router?context.router.getBlocker("model-draft",value):context.blocker;};'),
     stub("../api", `export {ApiError} from ${JSON.stringify(moduleUrl)}; export const apiJson=(...args)=>context.request(...args); export const apiResponse=(...args)=>context.request(...args); export const clearCsrfToken=()=>{}; export const apiUrl=path=>path; export const jsonOptions=(method,value)=>({method,body:JSON.stringify(value)});`),
     stub("../components/DocumentPreview", "export const DocumentPreview=()=>null;"),
     stub("react-dom", "export const createPortal=(children)=>children;"),
-    ...["../shell/ShellPage", "../shell/AgentMark", "../agent-chat/AgentMessageList", "../agent-chat/AgentSessionPreviewShell", "../agent-chat/AgentSessionActivityPreview", "../shell/AgentEditorModal"].map(specifier => stub(specifier, `export const ${specifier.split("/").at(-1)}=()=>null;`)),
+    ...["../shell/ShellPage"].map(specifier => stub(specifier, `export const ${specifier.split("/").at(-1)}=()=>null;`)),
   ]);
   if (realDocumentPreview) {
     overrides.delete("../components/DocumentPreview");
     overrides.set(...stub("./TextFilePreview", "export const TextFilePreview=()=>null;"));
-  }
-  if (realMessageList) {
-    overrides.delete("../agent-chat/AgentMessageList");
-    overrides.set(...stub("../chat/MarkdownContent", "export const MarkdownContent=()=>null;"));
-    overrides.set(...stub("./AgentSessionReference", "export const AgentSessionReference=()=>null;"));
   }
   for (const [specifier, target] of extraOverrides) overrides.set(specifier, target);
   if (!realModal) overrides.set(...stub("../components/useModalDialog", "export const useModalDialog=value=>{context.modal=value;return useRef(null);};"));

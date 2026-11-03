@@ -1,4 +1,6 @@
 import os
+import json
+import subprocess
 import sys
 from types import SimpleNamespace
 import unittest
@@ -8,14 +10,20 @@ import runtime_outbox_gate as gate
 
 
 def discovery_output(command):
-    selected = [name for name in gate.required_tests() if command[5] in name]
-    return SimpleNamespace(stdout=''.join(name + ': test\n' for name in selected or [command[5]]))
+    selected = [name for name in gate.required_tests() if command[1] in name]
+    return SimpleNamespace(stdout=''.join(name + ': test\n' for name in selected or [command[1]]))
 
 
 class OutboxGateTests(unittest.TestCase):
+    def setUp(self):
+        self.build = self.enterContext(patch.object(gate, 'build_test_executable', return_value='runtime-tests'))
+
     def test_default_runner_discovers_and_executes_shared_admission_regressions(self):
         group = 'postgres_store::integration_tests::shared_admission_tests'
         expected = {
+            'postgres_store::integration_tests::question_response_tests::postgres_question_response_receipt_replays_after_consumption_and_preserves_yield_wake',
+            'postgres_store::integration_tests::question_wait_notifications::postgres_question_wait_presentation_changes_are_atomic_and_idempotent',
+            'postgres_store::integration_tests::wait_handoff_tests::postgres_question_wait_handoff_preserves_bound_snapshot_and_rejects_schema_relabeling',
             group + '::postgres_four_independent_live_environments_share_observed_resources',
             group + '::postgres_unmeasured_residents_keep_full_declarations_and_block_third_environment',
             group + '::postgres_real_resident_pressure_does_not_wake_itself_on_preparation_unlock',
@@ -25,13 +33,19 @@ class OutboxGateTests(unittest.TestCase):
         }
         required = gate.required_tests()
         self.assertTrue(expected.issubset(set(required)))
+        rewrite = 'postgres_store::integration_tests::postgres_fenced_rewrite_tombstones_completed_tool_request'
+        catalog = {*required, rewrite}
         for executable in (None, 'runtime-tests.exe'):
             with self.subTest(executable=executable):
+                self.build.reset_mock()
                 discovered, executed = set(), set()
 
                 def run(command, **kwargs):
-                    selected_filter = command[5] if executable is None else command[1]
-                    selected = {name for name in required if selected_filter in name}
+                    self.assertIn('127.0.0.1', kwargs['env']['NO_PROXY'].split(','))
+                    self.assertIn('localhost', kwargs['env']['NO_PROXY'].split(','))
+                    selected_filter = command[1]
+                    selected = {name for name in catalog
+                                if (name == selected_filter if '--exact' in command else selected_filter in name)}
                     if '--list' in command:
                         discovered.update(selected)
                         return SimpleNamespace(stdout=''.join(name + ': test\n' for name in sorted(selected or {selected_filter})))
@@ -48,7 +62,10 @@ class OutboxGateTests(unittest.TestCase):
                     gate.main(args)
                 self.assertTrue(expected.issubset(discovered))
                 self.assertTrue(expected.issubset(executed))
+                self.assertIn(rewrite, discovered)
+                self.assertIn(rewrite, executed)
                 driver.connect.assert_called_once()
+                self.assertEqual(self.build.call_count, 1 if executable is None else 0)
 
     def test_host_retirement_cases_are_required_and_discovered_before_database_creation(self):
         group = 'postgres_store::integration_tests::host_retirement_tests::'
@@ -70,7 +87,7 @@ class OutboxGateTests(unittest.TestCase):
     def test_recovery_pagination_and_cas_paths_are_selected(self):
         filters = set()
         def discover(command, **kwargs):
-            filters.add(command[5])
+            filters.add(command[1])
             return discovery_output(command)
         driver = SimpleNamespace(connect=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("discovery complete")), sql=SimpleNamespace())
         with patch.dict(sys.modules, {"psycopg": driver}), patch.object(gate.subprocess, "run", discover):
@@ -103,7 +120,7 @@ class OutboxGateTests(unittest.TestCase):
         with patch.dict(sys.modules, {"psycopg": driver}), patch.object(gate.subprocess, "run", discover):
             with self.assertRaisesRegex(RuntimeError, "no database opened"):
                 gate.main()
-        filters = {command[5] for command in calls}
+        filters = {command[1] for command in calls}
         self.assertTrue({
             "postgres_store::integration_tests::retained_instance_tests",
             "postgres_store::integration_tests::cleanup_migration_tests",
@@ -144,8 +161,15 @@ class OutboxGateTests(unittest.TestCase):
             gate.validate_required_tests(['unrelated_test', *names[1:]])
 
     def test_empty_discovery_cannot_pass(self):
-        with self.assertRaises(RuntimeError):
-            gate.discovered_tests('0 tests, 0 benchmarks')
+        identity = 'postgres_store::tests::postgres_outbox_case'
+        for output in ('0 tests, 0 benchmarks', f'{identity}: test\n{identity}: test\n'):
+            with self.subTest(output=output), self.assertRaises(RuntimeError):
+                gate.discovered_tests(output)
+            driver = SimpleNamespace(connect=lambda **kwargs: self.fail('database opened before discovery proof'), sql=SimpleNamespace())
+            with patch.dict(sys.modules, {'psycopg': driver}), \
+                 patch.object(gate.subprocess, 'run', return_value=SimpleNamespace(stdout=output)):
+                with self.assertRaisesRegex(RuntimeError, 'selected_case.*outbox test discovery is empty or contains duplicates'):
+                    gate.main(['--test-filter', 'selected_case'])
         self.assertEqual(gate.discovered_tests('postgres_store::tests::postgres_outbox_case: test\n'), ['postgres_store::tests::postgres_outbox_case'])
 
     def test_default_gate_discovers_current_schema_cases_before_opening_database(self):
@@ -175,7 +199,7 @@ class OutboxGateTests(unittest.TestCase):
              patch.object(gate.subprocess, "run", discover):
             with self.assertRaisesRegex(RuntimeError, "no database opened"):
                 gate.main()
-        filters = {command[5] for command, _limit in calls}
+        filters = {command[1] for command, _limit in calls}
         self.assertTrue({
             "postgres_store::integration_tests::postgres_expired_lease_budget_persists_backoff_fencing_and_isolation",
             "postgres_store::integration_tests::postgres_lease_budget_forward_migration_preserves_published_job_facts",
@@ -200,11 +224,27 @@ class OutboxGateTests(unittest.TestCase):
         with patch.dict(sys.modules, {'psycopg': driver}), patch.object(gate.subprocess, 'run', discover):
             with self.assertRaisesRegex(RuntimeError, 'after discovery'):
                 gate.main()
-        selected = {command[5] for command in calls if '--exact' in command}
+        selected = {command[1] for command in calls if '--exact' in command}
         self.assertTrue(expected.issubset(selected))
 
 
+class RuntimeBuildTests(unittest.TestCase):
+    def test_cargo_build_selects_the_runtime_test_executable(self):
+        artifacts = [
+            {'reason': 'compiler-artifact', 'target': {'name': 'runtime_server', 'kind': ['bin']},
+             'profile': {'test': test}, 'executable': executable}
+            for test, executable in ((False, '/build/runtime_server'), (True, '/build/runtime_tests'))
+        ]
+        result = subprocess.CompletedProcess([], 0, stdout='\n'.join(map(json.dumps, artifacts)))
+        with patch.object(gate.subprocess, 'run', return_value=result) as build:
+            self.assertEqual(gate.build_test_executable('/source', {}), '/build/runtime_tests')
+        build.assert_called_once()
+
+
 class ScopedOutboxGateTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(gate, 'build_test_executable', return_value='runtime-tests'))
+
     def test_scoped_compiled_runner_checks_selected_manifest_before_opening_database(self):
         selected = [name for name in gate.required_tests() if 'runsc_rotation_tests::' in name]
         self.assertTrue(selected)

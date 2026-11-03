@@ -1,11 +1,42 @@
 # Workspace release gate
 
 The shared [Session environment](../../development/SessionEnvironments.md)
-requires current v1 Python/Rust signature parity, profile and controller
+requires current Python/Rust signature parity, profile and controller
 authorization tests, typed provision/task ownership, and PostgreSQL forward
 migration tests. Start, step and teardown use the same contract for both physical
 lifetime policies. Cancel and supplement verify the original Run identity without
 requiring environment execution authority.
+
+Current runtime authorization uses `workspace.agent_run_authorization.v2` and
+`workspace:agent-run-authorization:v2\0`. It binds user, Workspace, Session and
+Run identities without a business Agent field. Start instructions use
+`sessionInstructions`; start accepts `initialInput: {"type":"userMessage"}`.
+Unknown `agentId`, `agentInstructions`, coordination fields and retired initial
+input carriers must fail rather than act as compatibility aliases. Core runtime
+role identifiers, including child `AgentRef`, remain technical execution identity.
+
+Independent provision uses `workspace.environment_provision_authorization.v2`
+and its v2 signature domain. Its exact request includes `workspaceId` and `userId`,
+with no `agentId`. Execute, cleanup and provision must retain original signed
+authority, profile, controller epoch, lease and physical release checks. Memory
+uses the `workspace_memory_scope_v2` user/Workspace scope across Sessions while
+retaining its URI, guarded writes and mutation lock. Migration must not copy or
+merge retired user/Agent memory directories.
+
+Session-first acceptance requires ordinary Session preservation, unchanged old
+Run grant payload/digest/signature bytes, strict rejection of retired write
+contracts, and refusal to migrate while execution or physical cleanup ownership
+remains unsettled. Historical `execution_instances` provenance is not by itself
+an active resource debit. Resident holdings, pending retirement, unreleased
+controllers and active Runs require their actual settlement boundaries.
+
+The private Agent configuration, coordination Session, `dispatch_work`,
+`send_message`, work-return confirmation/publication, application Chat and Agent
+delegation entry points are retired. Core `subagent.run`, child result projection,
+`task_output`, cancellation and runtime-job wait recovery remain in scope; these
+do not establish independent product work Sessions or environments. Session API
+and embed are subsequent work. Requirements here are acceptance obligations,
+not a claim that the new candidate passed a release or deployment gate.
 
 Host acceptance covers Docker/runc identity and incarnation, the profile's user,
 environment and network, private host controls, sealed helpers, output EOF,
@@ -32,56 +63,12 @@ the public AgentRun, native verification and confirmed retirement. Focused
 boundary tests and mock transports are recorded separately from that integrated
 result. See [benchmark execution](../architecture/BenchmarkExecution.md).
 
-The prepared Agent input ledger is not an execution-intake or Read gate pass.
-Before integrating this capability, require the following behavioral evidence
-against the frozen Core contract:
-
-- Same scoped ID/body replays one retained fact; conflicting content fails and
-  concurrent distinct inputs receive one server order without dropped bodies.
-- Queue ACK and restart preserve exact original text in the same carrier.
-- Successful main-model uptake exposes exactly the actual input IDs and the
-  committed fact reference/time; admission, claim, ACK and failed uptake do not
-  establish Read. A batch may consume multiple inputs for one reply.
-- Idle, active and Final-race paths hand off in one serialized coordination chain
-  with no fork, dropped input or duplicate acceptance. Already generated
-  `send_message` output may commit before newly arrived input is taken up.
-- Ordinary text does not approve, answer or release a special wait.
-- Active native work-return uptake preserves notice consumption exclusivity;
-  multiple immutable attempts may bind one Run without replacing its original
-  initial input. The FK migration preserves existing facts and refuses unsafe
-  reversal once multiple notices use one Run.
-- Current ACL and original execution membership are rechecked. Handled
-  confirmation is added only after these input identity boundaries pass.
-- Native `confirm_work_return` uses exactly `notice_id` and `attempt_id`; the
-  accepted Run and original source identities are supplied by the server.
-  Read-only validation and a committed call alone must remain unhandled.
-  Require actual Core/provider/PostgreSQL evidence for split call/result commits,
-  both native and user initial inputs, stable confirmation projection and
-  `continueTurn`. Rejected stale leases, transaction rollback, forged success
-  receipts and authority revoked after validation must leave no successful
-  confirmation result. Original membership revocation/rejoin never revives it.
-  Failed results, ordinary Final, `send_message`, ACK and Read are not confirmation.
-  The extra commit guard applies only to this tool's successful result; retain
-  other tools' behavior and admission/Session/job lock order. Existing
-  `get_work_request` response carries notice, attempt and confirmation evidence
-  without new query parameters, a new get tool, handled storage or scan thread.
-- Input acceptance and every production output append share the same Session
-  transaction lock. Immutable waterline anchors replay unchanged; one-snapshot
-  pagination cannot skip a concurrent input when output commits. Full scoped
-  cursor positions advance over ignored candidates without timestamp sorting.
-- Unanchored legacy inputs and retained owner settings are not guessed or lost
-  by migrations. New/default Agents require configuration; no model fallback
-  is inferred from browser preferences, catalog order or recent Sessions.
-- Owner settings apply to new coordinator Run authorization snapshots. Existing
-  Runs retain their original model/effort when settings change or are cleared.
-  Work-return initial-input validation must use the admitted Run snapshot, not
-  require it to match a previous source Run's model.
-- Changing the Agent setting cannot launder source signature, model/effort or
-  original membership tampering. An old source model becoming unavailable does
-  not override an otherwise valid new Agent coordinator policy.
-- Generic messages cannot start/fork a dedicated coordinator, even with the
-  same model. A binding created during profile resolution is rechecked before
-  Run/receipt insertion. Ordinary work Sessions keep their explicit model path.
+Ordinary Session input acceptance must preserve the admitted user message and
+attachments, durable supplement claim/ack and original Run identity through
+restart. Ordinary text cannot approve, answer or release a special wait. Core
+HostEvent wait recovery must continue to use the original accepted input and
+wait authorization; retiring Workspace coordination carriers does not remove
+that Core contract.
 
 Run from the repository root. Any failure blocks release.
 
@@ -102,7 +89,7 @@ uncommitted and wrong-Execution rejection, immutable/idempotent publication,
 equal-length snapshot replacement, UTF-8 continuation, transaction rollback on
 a failed chunk, deletion during blocked chunk I/O, and forward migration without
 fabricated captures. Capture identity tests additionally cover missing/corrupt
-chunks, membership revocation, immediate deletion and expired-Agent cleanup.
+chunks, membership revocation, immediate deletion and Session cleanup.
 The Rust `transcript_capture` tests exercise Core's real large-result spill via
 a synthetic host and verify that archive-budget exhaustion leaves tool success
 unchanged. The ignored Rust Django-contract entry point is deliberately executed
@@ -290,6 +277,13 @@ material-link failures.
 
 Gates must not read production data, real Plugin content, or developer secrets.
 
+<details>
+<summary>Historical Agent definitions and connectors acceptance</summary>
+
+The following records describe the retired Agent business configuration and
+connector authority paths. Preserve their historical evidence; their commands,
+counts and acceptance statements do not certify the Session-first candidate.
+
 Shared Agent definition acceptance covers administrator-only draft management,
 immutable publication, default-denied and Workspace/member availability, and
 foreign-member rejection. Member grants bind current membership identities;
@@ -398,6 +392,8 @@ paths; plugin selection and activation retain their empty defaults.
 Fresh-schema, SQLite migration/drift and PostgreSQL constraints must
 also pass. The fresh-Docker gate checks the new leaf only on a disposable host;
 source tests do not certify that deployment acceptance has run.
+
+</details>
 
 API PostgreSQL pool changes additionally use the bounded connection-pool controller described
 in `perf/README.md`. It records actual serving-process pool statistics, typed
@@ -512,6 +508,13 @@ The local gate also checks document streaming beyond 1000 PDF pages/image
 frames, UTF-8 locations, bounded incremental output, and API manifest validation.
 These are synthetic/native-parser checks; they do not replace user acceptance
 with real Office documents or real OCR model measurements.
+
+<details>
+<summary>Historical coordination messages and private work acceptance</summary>
+
+The following coordination tools, input carriers, return jobs and endpoints are
+retired. These retained descriptions and evidence are historical references,
+not current commands or acceptance gates.
 
 ## Private Agent message acceptance
 
@@ -766,20 +769,19 @@ must remain read-only and preserve original membership/current read authority at
 admission. These gates certify first automatic admission, not explicit retry,
 Read, handled confirmation, UI wiring or the complete handling lifecycle.
 
-The first release has no existing released deployment data to migrate. Its
-recovery acceptance covers current-version persistence, process restart and
-owned execution loss through production `execute_agent_run`, as specified below.
-An earlier public Git pin or a mixed test producer is not a released deployment
-data baseline. Retain historical uncovered-wait rejection evidence; do not report
-that rejection as a successful recovery or relax checkpoint validation.
+</details>
 
-After a version has been released with persisted deployment data, a compatible
-upgrade must use a golden sample produced by that exact released stack and resume
-through the candidate's production `execute_agent_run`, preserving Run, Turn,
-job and authorization identity within the documented supported recovery boundary.
+## Core execution and wait recovery acceptance
+
+Recovery acceptance covers current-version persistence, process restart and
+owned execution loss through production `execute_agent_run`. An upgrade with
+persisted deployment data must use a sample produced by the actual supported
+source stack and preserve its Session history and supported recovery identities.
 A hand-restored snapshot or mixed producer does not satisfy that acceptance.
-Failures within that supported boundary remain release blockers. This acceptance
-does not certify automatic worker wake, retries or full child model execution.
+The Session-first migration preserves historical signed Run facts and rejects
+unsettled execution/cleanup responsibility; it does not re-sign v1 grants or
+promise to resume a v1 in-flight Run under v2 authority. Retain uncovered-wait
+rejection evidence as a negative case, not successful recovery.
 
 Current runtime Job wait handoffs have the following acceptance.
 Core and host regressions must allow one completed native child's verified
@@ -815,6 +817,13 @@ real-container fault validation remains required before release and runs after
 the isolated stack has been built. Keep the historical uncovered-wait rejection
 distinct from current-boundary recovery results; it is a negative safety case,
 not a cross-release migration result for this first release.
+
+<details>
+<summary>Historical Agent application and delegation acceptance</summary>
+
+These Agent Chat, native coordination and delegation entry points are retired.
+The original login and application evidence is retained as historical context;
+it is not proof of a new Session API or embed implementation.
 
 ## User-app delegation acceptance
 
@@ -939,6 +948,8 @@ Run the focused branch metadata and existing branch tests, Web unit tests,
 production lint/typecheck/build, and the actual settings component's isolated
 browser fixture. No runtime semantic change or migration is implied by these
 metadata and presentation checks.
+
+</details>
 
 ## Authorization consolidation acceptance (2026-09-15)
 

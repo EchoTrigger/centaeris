@@ -25,7 +25,7 @@ def _read_versions(scope):
     with transaction.atomic():
         with connection.cursor() as cursor:
             cursor.execute("SET LOCAL statement_timeout='5s'")
-        return read_presentation_versions(scope.workspace_id, scope.agent_id, scope.session_id)
+        return read_presentation_versions(scope.workspace_id, scope.session_id)
 
 
 @stream_database_call
@@ -41,6 +41,6 @@ def create_presentation_hub():
         return listen_presentation_changes(ready, connection_parameters=_listener_connection_parameters)
 
     def change_keys(scope):
-        return presentation_change_keys(scope.workspace_id, scope.agent_id, scope.session_id).values()
+        return presentation_change_keys(scope.workspace_id, scope.session_id).values()
 
     return PresentationObserverHub(_read_versions, hints, change_keys, drain=_drain_pending)

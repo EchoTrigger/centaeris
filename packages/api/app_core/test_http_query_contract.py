@@ -1,47 +1,27 @@
 """Query multiplicity, route errors and authorization order over real HTTP routes."""
 from django.test import TestCase
 
-from . import test_agent_messages
+from .session_record_test_fixtures import SessionRecordFixture
 
 
-class HttpQueryContractTests(TestCase):
-    setUp = test_agent_messages.AgentMessageTests.setUp
+class HttpQueryContractTests(SessionRecordFixture, TestCase):
 
-    def test_optional_scalar_queries_reject_unknown_and_repeated_fields(self):
-        routes = [
-            (f"/api/agents/{self.agent.id}/work-sessions", "limit", "1", "agent_work_sessions_cursor_invalid"),
-            (f"/api/agents/{self.agent.id}/history", "limit", "1", "agent_history_cursor_invalid"),
-            (f"/api/agents/{self.agent.id}/inputs", "limit", "1", "agent_inputs_cursor_invalid"),
-            (f"/api/agents/{self.agent.id}/messages", "limit", "1", "agent_messages_cursor_invalid"),
-            (f"/api/workspaces/{self.workspace.id}/sessions", "agentId", self.agent.id, "session_filter_unsupported"),
-        ]
-        for path, field, value, error in routes:
-            for query in ("unknown=1", f"{field}={value}&{field}={value}", f"{field}={value}&{field}="):
-                with self.subTest(path=path, query=query):
-                    response = self.client.get(f"{path}?{query}")
-                    self.assertEqual(response.status_code, 400, response.content)
-                    expected = ({"error": "request_invalid", "fields": ["query.limit"]}
-                                if field == "limit" and query.endswith("limit=") else {"error": error})
-                    self.assertEqual(response.json(), expected)
-
-    def test_workspace_project_agent_filter_is_optional_but_scalar_and_business_app_is_required(self):
-        path = f"/api/workspaces/{self.workspace.id}/session-projects"
-        for query in ("unknown=1", f"agentId={self.agent.id}&agentId={self.agent.id}", f"agentId={self.agent.id}&agentId="):
+    def test_session_list_rejects_unknown_and_repeated_filters(self):
+        path = f"/api/workspaces/{self.workspace.pk}/sessions"
+        for query in ("unknown=1", "sessionId=one&sessionId=two", "sessionId="):
             response = self.client.get(f"{path}?{query}")
-            self.assertEqual(response.status_code, 400)
-            self.assertEqual(response.json(), {"error": "session_project_filter_invalid"})
-        self.assertEqual(self.client.get(f"{path}?agentId=").json(), {"error": "agent_id_invalid"})
-        for query in ({}, {"agentId": self.agent.id}):
-            response = self.client.get(path, query)
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json(), {"projects": []})
-        for suffix in ("", "/missing-branch/sessions"):
-            path = f"/api/agents/{self.agent.id}/business-branches{suffix}"
-            for query in ("", "limit=1", "appId=test&appId=test", "appId=test&unknown=1"):
-                with self.subTest(path=path, query=query):
-                    response = self.client.get(f"{path}?{query}")
-                    self.assertEqual(response.status_code, 400)
-                    self.assertEqual(response.json(), {"error": "business_branch_request_invalid"})
+            self.assertEqual(response.status_code, 400, response.content)
+            self.assertEqual(response.json(), {"error": "session_filter_unsupported"})
+
+    def test_workspace_projects_accept_no_filters(self):
+        path = f"/api/workspaces/{self.workspace.pk}/session-projects"
+        for query in ("unknown=1", "projectId=one&projectId=two", "projectId="):
+            response = self.client.get(f"{path}?{query}")
+            self.assertEqual(response.status_code, 400, response.content)
+            self.assertEqual(response.json(), {"error": "session_project_filter_unsupported"})
+        response = self.client.get(path)
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json(), {"projects": []})
 
     def test_authorization_still_precedes_query_rejection(self):
         path = f"/api/workspaces/{self.workspace.id}/session-projects?unknown=1"
@@ -54,7 +34,7 @@ class HttpQueryContractTests(TestCase):
         self.assertEqual(response.json(), {"error": "workspace_not_found"})
 
     def test_transcript_scalar_queries_and_repeatable_sequences_keep_distinct_contracts(self):
-        base = f"/api/sessions/{self.work.id}/transcript"
+        base = f"/api/sessions/{self.session.id}/transcript"
         for suffix, query, code in [
             ("", "sourceHighWater=0&sourceHighWater=0&projectionGeneration=test", "transcript_page_query_invalid"),
             ("/patches", "afterSourceHighWater=0&projectionGeneration=test&projectionGeneration=test", "transcript_patch_query_invalid"),

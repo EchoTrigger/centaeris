@@ -1,12 +1,5 @@
-#[cfg(test)]
-use centaeris_core::session::restore_runtime_snapshot_from_session_records;
 mod agent_inputs;
-#[cfg(test)]
-mod agent_inputs_tests;
-mod agent_messages;
 mod agent_run_authorization;
-mod agent_work;
-mod agent_work_trigger;
 mod api_model_client;
 mod artifact_publication;
 mod contract;
@@ -15,6 +8,8 @@ mod docker_engine;
 mod docker_execution_host;
 mod docker_storage;
 mod environment_authorization;
+#[cfg(test)]
+mod environment_runtime_tests;
 mod environment_stdio;
 mod environment_supervisor;
 mod execution_capacity;
@@ -27,11 +22,8 @@ mod host_retirement;
 mod http;
 mod job_protocol;
 mod lifecycle_hooks;
-#[cfg(test)]
-mod lifecycle_test_fixture;
+mod material_execution;
 mod mcp;
-#[cfg(test)]
-mod native_consumption_tests;
 mod observations;
 mod platform_materials;
 mod postgres_store;
@@ -93,7 +85,7 @@ use centaeris_core::model::EmptyModelSessionConfigStore;
 use centaeris_core::model::ToolCallEnvelope;
 use centaeris_core::runtime::contracts::{
     CheckpointKindV1, CheckpointRecord, EventVisibility, RecoveryWorkspaceSnapshotV1,
-    RuntimeAgentRunIdentityV1, RuntimeEvent, RuntimeRecoveryCheckpointV1,
+    RuntimeAgentRunIdentityV1, RuntimeEvent, RuntimeProcessState, RuntimeRecoveryCheckpointV1,
     RUNTIME_RECOVERY_CHECKPOINT_SCHEMA_V1,
 };
 use centaeris_core::runtime::event::RuntimeEventProjection;
@@ -133,8 +125,8 @@ use centaeris_core::tool::layer::{ToolExecutionResult, ToolLayer};
 use centaeris_core::tool::{DynamicToolRegistry, ToolErrorInfo, ToolFailureKind};
 use centaeris_model_catalog::model_catalog;
 use contract::{
-    AgentRunCancelRequest, AgentRunStart, AgentRunStartInitialInput, AgentRunStepRequest,
-    AgentRunSupplementRequest, AgentRunTailAction, HostEventInputRequest,
+    AgentRunCancelRequest, AgentRunStart, AgentRunStepRequest, AgentRunSupplementRequest,
+    AgentRunTailAction, HostEventInputRequest,
 };
 use deferred_input_resolver::{ApiDeferredInputResolver, ApiModelInputImageResolver};
 use docker_execution_host::{
@@ -1788,58 +1780,12 @@ fn terminalize_agent_run_failure(
     })
 }
 
-fn workspace_agent_tool_contracts(
-    agent_run_start: &AgentRunStart,
-) -> Vec<centaeris_core::tool::DynamicToolContract> {
-    let mut contracts = workspace_tool_contracts();
-    if agent_run_start.coordination_session_id.is_some() {
-        contracts.push(agent_messages::message_tool_contract());
-    }
-    if agent_run_start.native_coordination_session_id.is_some() {
-        contracts.push(agent_work::work_tool_contract());
-        contracts.push(agent_work::work_query_tool_contract());
-        contracts.push(agent_work::work_confirmation_tool_contract());
-    }
-    contracts
-}
-
-fn register_workspace_agent_tool_providers(
-    tool_layer: &mut ToolLayer,
-    agent_run_start: &AgentRunStart,
-    api_url: &str,
-    token: &str,
-) -> Result<(), String> {
-    if agent_run_start.coordination_session_id.is_some() {
-        tool_layer.register_dynamic_tool_provider(Arc::new(
-            agent_messages::WorkspaceAgentMessageProvider::new(
-                api_url.to_owned(),
-                token.to_owned(),
-                &agent_run_start.authorization,
-                agent_run_start.authorization_digest.clone(),
-            )?,
-        ))?;
-    }
-    if agent_run_start.native_coordination_session_id.is_some() {
-        tool_layer.register_dynamic_tool_provider(Arc::new(
-            agent_work::WorkspaceAgentWorkProvider::new(
-                api_url.to_owned(),
-                token.to_owned(),
-                &agent_run_start.authorization,
-                agent_run_start.authorization_digest.clone(),
-            )?,
-        ))?;
-    }
-    Ok(())
-}
-
 fn hosted_agent_runtime_config(start: &AgentRunStart) -> AgentRuntimeConfig {
     AgentRuntimeConfig {
+        question_input:
+            centaeris_core::runtime::question::QuestionInputCapability::PersistentResponses,
         tool_parallelism: centaeris_core::runtime::MAX_TOOL_PARALLELISM,
-        required_completion_tool: start
-            .coordination_session_id
-            .is_some()
-            .then(|| "send_message".to_string()),
-        agent_instructions: start.agent_instructions.clone(),
+        agent_instructions: start.session_instructions.clone(),
         model_context_tokens: start.model_context_tokens,
         model_max_output_tokens: start.model_max_output_tokens,
         ..AgentRuntimeConfig::default()
@@ -1961,25 +1907,31 @@ fn execute_agent_run(
     let cancellation_probe_cache = Arc::new(Mutex::new(None));
     let cached_cancellation_probe = cancellation_probe_cache.clone();
     let cancellation_probe: Arc<ExecutionCancellationProbe> = Arc::new(move || {
-        cached_execution_control_reason(&cached_cancellation_probe, || {
-            let now =
-                now_ms().map_err(|error| format!("run_execution_control_probe_failed:{error}"))?;
-            let state = cancellation_job_store
-                .agent_run_execution_control_state(
-                    cancellation_agent_run_id.as_str(),
-                    cancellation_lifecycle_job_id.as_str(),
-                    cancellation_lifecycle_lease_owner.as_str(),
-                    now,
-                )
-                .map_err(|error| format!("run_execution_control_probe_failed:{error}"))?;
-            Ok(if state.cancellation_requested {
-                Some("agent_run_cancel_requested".to_string())
-            } else if !state.lifecycle_lease_current {
-                Some("agent_run_lifecycle_lease_lost".to_string())
-            } else {
-                None
-            })
-        })
+        observations::execution_boundary(
+            "executionControlCheck",
+            &cancellation_agent_run_id,
+            || {
+                cached_execution_control_reason(&cached_cancellation_probe, || {
+                    let now = now_ms()
+                        .map_err(|error| format!("run_execution_control_probe_failed:{error}"))?;
+                    let state = cancellation_job_store
+                        .agent_run_execution_control_state(
+                            cancellation_agent_run_id.as_str(),
+                            cancellation_lifecycle_job_id.as_str(),
+                            cancellation_lifecycle_lease_owner.as_str(),
+                            now,
+                        )
+                        .map_err(|error| format!("run_execution_control_probe_failed:{error}"))?;
+                    Ok(if state.cancellation_requested {
+                        Some("agent_run_cancel_requested".to_string())
+                    } else if !state.lifecycle_lease_current {
+                        Some("agent_run_lifecycle_lease_lost".to_string())
+                    } else {
+                        None
+                    })
+                })
+            },
+        )
     });
     match cancellation_probe.as_ref()()?.as_deref() {
         Some("agent_run_cancel_requested") => {
@@ -2266,7 +2218,6 @@ fn execute_agent_run(
                     agent_run_id: agent_run_start.agent_run_id.clone(),
                     execution_id: execution_id.clone(),
                     user_id: agent_run_start.authorization.user_id.clone(),
-                    agent_id: agent_run_start.authorization.agent_id.clone(),
                     authorization_digest: agent_run_start.authorization_digest.clone(),
                     environment_authorization: agent_run_start.environment_authorization.clone(),
                     image_digest: agent_run_start
@@ -2485,7 +2436,7 @@ fn execute_agent_run(
     )?);
     let workspace_root = PathBuf::from(docker_execution.workspace_root());
     #[cfg(test)]
-    let workspace_root = if native_consumption_tests::owns_run(&agent_run_start.agent_run_id) {
+    let workspace_root = if environment_runtime_tests::owns_run(&agent_run_start.agent_run_id) {
         std::env::temp_dir()
     } else {
         workspace_root
@@ -2516,15 +2467,22 @@ fn execute_agent_run(
     )?);
     let platform_materials = match runtime.block_on(async {
         #[cfg(test)]
-        if native_consumption_tests::owns_run(&agent_run_start.agent_run_id) {
-            // This owned fixture exercises native coordination with an empty
+        if environment_runtime_tests::owns_run(&agent_run_start.agent_run_id) {
+            // This owned fixture exercises ordinary Sessions with an empty
             // execution host. Material MCP discovery has its own protocol gate.
             assert!(agent_run_start.authorization.asset_refs.is_empty());
             return Ok(None);
         }
-        if agent_run_start.authorization.asset_refs.is_empty()
-            && agent_run_start.coordination_session_id.is_none()
-        {
+        let execution_delivery = Arc::new(material_execution::MaterialExecutionDelivery::new(
+            api_url.clone(),
+            token.clone(),
+            agent_run_start.agent_run_id.clone(),
+            agent_run_start.authorization_digest.clone(),
+            docker_execution.clone(),
+            resolved_inputs.clone(),
+        )?);
+        let personal_library = execution_delivery.restore().await?;
+        if agent_run_start.authorization.asset_refs.is_empty() && !personal_library {
             return Ok(None);
         }
         platform_materials::PlatformMaterialsProvider::connect_current(
@@ -2534,7 +2492,11 @@ fn execute_agent_run(
             agent_run_start.authorization_digest.clone(),
         )
         .await
-        .map(|provider| Some(Arc::new(provider)))
+        .map(|provider| {
+            Some(Arc::new(
+                provider.with_execution_delivery(execution_delivery),
+            ))
+        })
     }) {
         Ok(provider) => provider,
         Err(error) => {
@@ -2551,7 +2513,7 @@ fn execute_agent_run(
             );
         }
     };
-    let mut dynamic_tool_contracts = workspace_agent_tool_contracts(&agent_run_start);
+    let mut dynamic_tool_contracts = workspace_tool_contracts();
     dynamic_tool_contracts.extend(retained_tasks::retained_task_contracts());
     if let Some(provider) = &platform_materials {
         dynamic_tool_contracts.extend(provider.contracts.clone());
@@ -2587,7 +2549,6 @@ fn execute_agent_run(
     tool_layer.register_dynamic_tool_provider(Arc::new(WorkspaceArtifactToolProvider::new(
         artifact_publication,
     )))?;
-    register_workspace_agent_tool_providers(&mut tool_layer, &agent_run_start, &api_url, &token)?;
     register_retained_task_provider(&mut tool_layer, docker_execution.clone())?;
     for provider in mcp_bindings.providers {
         tool_layer.register_dynamic_tool_provider(provider)?;
@@ -3056,13 +3017,8 @@ fn execute_agent_run(
             now_ms()?
         ),
     };
-    let turn_control = agent_inputs::turn_control(
-        job_store.clone(),
-        &agent_run_start,
-        input_binding,
-        materialize_supplements,
-        Some(resolved_inputs.clone()),
-    )?;
+    let turn_control =
+        agent_inputs::turn_control(job_store.clone(), input_binding, materialize_supplements)?;
     let live_degraded = Arc::new(AtomicBool::new(false));
     let mut stream_error = None;
     let safe_point_sequence = session_record_sequence.clone();
@@ -3102,18 +3058,6 @@ fn execute_agent_run(
         .as_ref()
         .map_or(0, |checkpoint| checkpoint.session_sequence);
     let pending_recovery_upload = Mutex::new(None::<PendingRecoveryCheckpoint>);
-    let work_trigger = if agent_run_start.native_coordination_session_id.is_some() {
-        match agent_work_trigger::WorkCommitTrigger::new(runtime.handle().clone(), &api_url, &token)
-        {
-            Ok(trigger) => Some(trigger),
-            Err(_) => {
-                eprintln!("agent_work_trigger_deferred reason=setup");
-                None
-            }
-        }
-    } else {
-        None
-    };
     let mut commit_tool_safe_point = |safe_point: ToolSafePoint| {
         let safe_point_started = Instant::now();
         let observed_call = match &safe_point {
@@ -3139,14 +3083,25 @@ fn execute_agent_run(
             ToolSafePoint::ModelRequestStarted(_) => "model_request_safe_point",
             ToolSafePoint::DurableToolCall { .. } => "tool_call_safe_point",
             ToolSafePoint::DurableReceipt { .. } => "tool_receipt_safe_point",
+            ToolSafePoint::CompletedTurn(_) => "completed_turn_safe_point",
             _ => "other_safe_point",
         };
         let result = failure_diagnostics::observe(&agent_run_start.agent_run_id, stage, || {
-            let mut pending_recovery_upload = pending_recovery_upload
-                .lock()
-                .map_err(|_| "pending recovery upload lock poisoned")?;
+            let mut pending_recovery_upload = observations::execution_boundary(
+                "recoveryUploadLock",
+                &agent_run_start.agent_run_id,
+                || {
+                    pending_recovery_upload
+                        .lock()
+                        .map_err(|_| "pending recovery upload lock poisoned")
+                },
+            )?;
             if !safe_point_live_degraded.load(Ordering::Relaxed) {
-                match flush_live_stream(&safe_point_stream) {
+                match observations::execution_boundary(
+                    "safePointLiveFlush",
+                    &agent_run_start.agent_run_id,
+                    || flush_live_stream(&safe_point_stream),
+                ) {
                     Ok(()) => {}
                     Err(error) => latch_live_error(&safe_point_live_degraded, error),
                 }
@@ -3163,10 +3118,16 @@ fn execute_agent_run(
                 _ => None,
             };
             let now = now_ms()?;
-            let mut committed_sequence = safe_point_sequence
-                .lock()
-                .map_err(|_| "session record sequence lock poisoned".to_string())?
-                .clone();
+            let mut committed_sequence = observations::execution_boundary(
+                "safePointSequenceRead",
+                &agent_run_start.agent_run_id,
+                || {
+                    safe_point_sequence
+                        .lock()
+                        .map(|sequence| sequence.clone())
+                        .map_err(|_| "session record sequence lock poisoned".to_string())
+                },
+            )?;
             let wait_for_upload = matches!(
                 &safe_point,
                 ToolSafePoint::DurableToolCall { .. }
@@ -3175,9 +3136,15 @@ fn execute_agent_run(
             );
             let completed_upload = if wait_for_upload {
                 observations::timed("recoveryUploadFence", || {
-                    Ok(pending_recovery_upload
-                        .as_mut()
-                        .and_then(|pending| pending.upload.take(true)))
+                    observations::execution_boundary(
+                        "recoveryUploadFence",
+                        &agent_run_start.agent_run_id,
+                        || {
+                            Ok(pending_recovery_upload
+                                .as_mut()
+                                .and_then(|pending| pending.upload.take(true)))
+                        },
+                    )
                 })?
             } else {
                 pending_recovery_upload
@@ -3212,7 +3179,6 @@ fn execute_agent_run(
                         &[event],
                         Some(&checkpoint),
                         &terminal_lease_fence,
-                        work_trigger.as_ref(),
                     )?;
                     accept_session_commit(
                         &mut committed_sequence,
@@ -3223,6 +3189,8 @@ fn execute_agent_run(
                         .lock()
                         .map_err(|_| "session record sequence lock poisoned")? =
                         committed_sequence.clone();
+                    // API publication and the Core checkpoint reference are both durable.
+                    docker_execution.confirm_recovery_checkpoint_outputs(&checkpoint.checkpoint_id);
                     recovery_workspace_snapshot = snapshot;
                     recovery_workspace_generation = pending.generation;
                     previous_checkpoint_sequence = checkpoint_sequence;
@@ -3345,11 +3313,17 @@ fn execute_agent_run(
                                 &current_generation,
                             ));
                     let workspace_snapshot = if should_collect {
-                        let Some(prepared) = docker_execution.prepare_recovery_workspace(
-                            &workspace_lease,
-                            checkpoint_id.as_str(),
-                            &recovery_workspace_snapshot,
-                            workspace_input_upper_bound_bytes,
+                        let Some(prepared) = observations::execution_boundary(
+                            "recoveryWorkspacePrepare",
+                            &agent_run_start.agent_run_id,
+                            || {
+                                docker_execution.prepare_recovery_workspace(
+                                    &workspace_lease,
+                                    checkpoint_id.as_str(),
+                                    &recovery_workspace_snapshot,
+                                    workspace_input_upper_bound_bytes,
+                                )
+                            },
                         )?
                         else {
                             // Commit the real model request, but neither publish an unstable
@@ -3518,31 +3492,53 @@ fn execute_agent_run(
                     .map(|reason| Err(format!("fatal_execution_outcome:{reason}")))
                     .unwrap_or(Ok(()));
             }
-            let receipt = commit_agent_tool_records(
-                &session_log,
-                &agent_run_start,
-                &events,
-                recovery_checkpoint
-                    .as_ref()
-                    .map(|(checkpoint, _, _)| checkpoint),
-                &terminal_lease_fence,
-                work_trigger.as_ref(),
+            let receipt = observations::execution_boundary(
+                "safePointRecordCommit",
+                &agent_run_start.agent_run_id,
+                || {
+                    commit_agent_tool_records(
+                        &session_log,
+                        &agent_run_start,
+                        &events,
+                        recovery_checkpoint
+                            .as_ref()
+                            .map(|(checkpoint, _, _)| checkpoint),
+                        &terminal_lease_fence,
+                    )
+                },
             )?;
             if let Some((call_id, Some(tool_ok))) = &observed_call {
                 run_timings.tool_committed(call_id, *tool_ok);
             }
-            accept_session_commit(
-                &mut committed_sequence,
-                &mut *session_stream_guard(&safe_point_stream)?,
-                &receipt,
+            observations::execution_boundary(
+                "safePointLivePublish",
+                &agent_run_start.agent_run_id,
+                || {
+                    accept_session_commit(
+                        &mut committed_sequence,
+                        &mut *session_stream_guard(&safe_point_stream)?,
+                        &receipt,
+                    )
+                },
             )?;
-            *safe_point_sequence
-                .lock()
-                .map_err(|_| "session record sequence lock poisoned".to_string())? =
-                committed_sequence;
+            observations::execution_boundary(
+                "safePointSequenceWrite",
+                &agent_run_start.agent_run_id,
+                || {
+                    *safe_point_sequence
+                        .lock()
+                        .map_err(|_| "session record sequence lock poisoned".to_string())? =
+                        committed_sequence;
+                    Ok::<_, String>(())
+                },
+            )?;
             // Capture publication is downstream of the durable Core event and
             // must never change its successful tool outcome or trigger replay.
-            if let Ok(mut capture) = docker_execution.transcript_capture.lock() {
+            if let Ok(mut capture) = observations::execution_boundary(
+                "transcriptCaptureLock",
+                &agent_run_start.agent_run_id,
+                || docker_execution.transcript_capture.lock(),
+            ) {
                 transcript_capture::publish_committed(
                     job_store.as_ref().clone(),
                     docker_execution.execution_id().to_string(),
@@ -3569,6 +3565,8 @@ fn execute_agent_run(
             if let Some((checkpoint, workspace_snapshot, workspace_generation)) =
                 recovery_checkpoint
             {
+                // This branch is downstream of commit_agent_tool_records above.
+                docker_execution.confirm_recovery_checkpoint_outputs(&checkpoint.checkpoint_id);
                 recovery_workspace_snapshot = workspace_snapshot;
                 recovery_workspace_generation = workspace_generation;
                 previous_checkpoint_sequence =
@@ -3622,7 +3620,20 @@ fn execute_agent_run(
                 },
                 &model_client,
                 &model_config_store,
-                &mut |event| match event {
+                &mut |event| {
+                    if let Err(error) = persist_model_process_state(
+                        &session_log,
+                        &agent_run_start,
+                        &event,
+                        &session_record_sequence,
+                        &terminal_lease_fence,
+                        &session_stream,
+                    ) {
+                        if stream_error.is_none() {
+                            stream_error = Some(error);
+                        }
+                    }
+                    match event {
                     TurnUpdate::Reasoning { turn_id, request_id, text, .. }
                         if !live_degraded.load(Ordering::Relaxed) => {
                             match session_stream.lock() {
@@ -3821,6 +3832,7 @@ fn execute_agent_run(
                         }
                     }
                     _ => {}
+                    }
                 },
                 cancellation_probe.as_ref(),
                 &turn_control,
@@ -3996,7 +4008,7 @@ fn execute_agent_run(
                 &terminal_lease_fence,
                 &mut *session_stream_guard(&session_stream)?,
             )?;
-            if response.stop == AgentRunStop::RuntimeJobWait {
+            {
                 let turn = response
                     .last_turn
                     .as_ref()
@@ -4678,19 +4690,9 @@ fn model_initial_input(
     inputs: &ResolvedInputState,
     states: &HashMap<String, DeferredInputResolutionFailureKind>,
 ) -> Result<AgentRunInitialInput, String> {
-    match &start.initial_input {
-        AgentRunStartInitialInput::UserMessage {} => {
+    match start.initial_input {
+        contract::AgentRunStartInitialInput::UserMessage {} => {
             model_user_message(start, inputs, states).map(AgentRunInitialInput::UserMessage)
-        }
-        AgentRunStartInitialInput::UserInput {
-            input_id, message, ..
-        } => Ok(AgentRunInitialInput::UserInput {
-            input_id: input_id.clone(),
-            message: message.clone(),
-            attachments: contract::initial_input_attachments(start)?,
-        }),
-        AgentRunStartInitialInput::HostEvent { input, .. } => {
-            Ok(AgentRunInitialInput::HostEvent(input.clone()))
         }
     }
 }
@@ -4700,6 +4702,80 @@ fn latch_live_error(live_degraded: &Arc<AtomicBool>, error: LiveTextError) {
     eprintln!(
         "live text streaming degraded to memory-only: {error}; transitionReason=live_text_degraded"
     );
+}
+
+fn model_process_state_update(event: &TurnUpdate) -> Option<(&str, RuntimeProcessState)> {
+    match event {
+        TurnUpdate::Status {
+            turn_id,
+            process_state: RuntimeProcessState::Retrying,
+            ..
+        } => Some((turn_id, RuntimeProcessState::Retrying)),
+        TurnUpdate::Reasoning { turn_id, text, .. } if !text.is_empty() => {
+            Some((turn_id, RuntimeProcessState::Thinking))
+        }
+        TurnUpdate::Token {
+            turn_id, content, ..
+        } if !content.is_empty() => Some((turn_id, RuntimeProcessState::Synthesizing)),
+        TurnUpdate::ModelDone {
+            turn_id,
+            process_state,
+            ..
+        } => Some((turn_id, *process_state)),
+        _ => None,
+    }
+}
+
+fn model_process_state_transition<'a>(
+    event: &'a TurnUpdate,
+    sequence: &AgentRunSessionState,
+) -> Option<(&'a str, RuntimeProcessState)> {
+    let Some((turn_id, process_state)) = model_process_state_update(event) else {
+        return None;
+    };
+    let previous = sequence.model_process_state(turn_id);
+    if previous == Some(process_state)
+        || (process_state != RuntimeProcessState::Retrying
+            && previous != Some(RuntimeProcessState::Retrying))
+    {
+        return None;
+    }
+    Some((turn_id, process_state))
+}
+
+fn persist_model_process_state(
+    session_log: &PostgresSessionLog,
+    agent_run_start: &AgentRunStart,
+    event: &TurnUpdate,
+    sequence: &Mutex<AgentRunSessionState>,
+    lease_fence: &RuntimeJobLeaseFence,
+    stream: &Mutex<Option<TransientAgentRunStream>>,
+) -> Result<(), String> {
+    if model_process_state_update(event).is_none() {
+        return Ok(());
+    }
+    let mut guard = sequence
+        .lock()
+        .map_err(|_| "session record sequence lock poisoned".to_string())?;
+    let Some((turn_id, process_state)) = model_process_state_transition(event, &guard) else {
+        return Ok(());
+    };
+    let mut committed_sequence = guard.clone();
+    let Some(record) =
+        committed_sequence.record_model_process_state(turn_id, process_state, now_ms()?)?
+    else {
+        return Ok(());
+    };
+    commit_model_process_record(
+        session_log,
+        agent_run_start,
+        &record,
+        &mut committed_sequence,
+        lease_fence,
+        stream,
+    )?;
+    *guard = committed_sequence;
+    Ok(())
 }
 
 fn persist_model_process_phase(
@@ -4719,21 +4795,48 @@ fn persist_model_process_phase(
     else {
         return Ok(());
     };
+    commit_model_process_record(
+        session_log,
+        agent_run_start,
+        &record,
+        &mut committed_sequence,
+        lease_fence,
+        stream,
+    )?;
+    *guard = committed_sequence;
+    Ok(())
+}
+
+fn commit_model_process_record(
+    session_log: &PostgresSessionLog,
+    agent_run_start: &AgentRunStart,
+    record: &SequencedSessionRecord,
+    committed_sequence: &mut AgentRunSessionState,
+    lease_fence: &RuntimeJobLeaseFence,
+    stream: &Mutex<Option<TransientAgentRunStream>>,
+) -> Result<(), String> {
     let receipt = session_log.append_session_records_with_runtime_job_lease_blocking(
         agent_run_start.agent_run_id.as_str(),
-        std::slice::from_ref(&record),
+        std::slice::from_ref(record),
         lease_fence,
     )?;
-    let committed_phase_sequence = committed_phase_sequence(&receipt, &record)?;
-    accept_session_commit_position(&mut committed_sequence, &receipt)?;
+    let committed_phase_sequence = committed_phase_sequence(&receipt, record)?;
+    accept_session_commit_position(committed_sequence, &receipt)?;
     match stream.lock() {
         Ok(mut active_stream) => {
-            settle_live_before_sequence_or_log(
-                &mut active_stream,
-                event.turn_id.as_str(),
-                assistant_message_id(event.turn_id.as_str()).as_str(),
-                committed_phase_sequence,
-            );
+            if record.event.payload["stage"] == "model_process_summary" {
+                let turn_id = record
+                    .event
+                    .turn_id
+                    .as_deref()
+                    .ok_or("model process turn is missing")?;
+                settle_live_before_sequence_or_log(
+                    &mut active_stream,
+                    turn_id,
+                    assistant_message_id(turn_id).as_str(),
+                    committed_phase_sequence,
+                );
+            }
             publish_commit_wake_or_log(&mut active_stream, &receipt);
         }
         Err(_) => {
@@ -4742,7 +4845,6 @@ fn persist_model_process_phase(
             );
         }
     }
-    *guard = committed_sequence;
     Ok(())
 }
 
@@ -4791,7 +4893,6 @@ fn commit_agent_tool_records(
     events: &[SequencedSessionRecord],
     checkpoint: Option<&CheckpointRecord>,
     fence: &RuntimeJobLeaseFence,
-    trigger: Option<&agent_work_trigger::WorkCommitTrigger>,
 ) -> Result<SessionCommitReceipt, String> {
     let receipt = session_delivery::retry(
         || match checkpoint {
@@ -4812,9 +4913,6 @@ fn commit_agent_tool_records(
     )?;
     // The store's append guard and transaction have ended. Downstream stream or
     // capture failures must not prevent waking a successfully committed result.
-    if let Some(trigger) = trigger {
-        trigger.after_commit(start, &receipt);
-    }
     Ok(receipt)
 }
 
@@ -4968,25 +5066,6 @@ fn started_session_records(
     sequence: &mut AgentRunSessionState,
     created_at_ms: i64,
 ) -> Result<Vec<SequencedSessionRecord>, String> {
-    if let AgentRunStartInitialInput::HostEvent { input, .. } = &agent_run_start.initial_input {
-        let mut records = Vec::new();
-        if sequence.is_empty() {
-            let [started, _] = centaeris_core::session::started_agent_run_records(
-                &agent_run_start.authorization.session_id,
-                &agent_run_start.turn_id,
-                &agent_run_start.agent_run_id,
-                &agent_run_start.prompt,
-                created_at_ms,
-            )?;
-            records.push(sequence.record(started)?);
-        }
-        if let Some(record) =
-            sequence.host_event_input_record(&agent_run_start.turn_id, input, created_at_ms)?
-        {
-            records.push(record);
-        }
-        return Ok(records);
-    }
     if sequence.is_empty()
         && matches!(
             agent_run_start.tail_action,
@@ -4995,51 +5074,8 @@ fn started_session_records(
     {
         sequence.reserve_rewritten_user_predecessor()?;
     }
-    let (objective, attachments) = if matches!(
-        agent_run_start.initial_input,
-        AgentRunStartInitialInput::UserInput { .. }
-    ) {
-        // Persist the same model-context rendering that Core uses on the first
-        // request, including image placeholders for durable checkpoint replay.
-        let mut message = centaeris_core::session::state::ChatMessage {
-            message_id: format!("message:{}:user", agent_run_start.turn_id),
-            role: centaeris_core::session::state::MessageRole::User,
-            content: agent_run_start.prompt.clone(),
-            created_at_ms,
-            metadata: HashMap::new(),
-        };
-        let captured = contract::initial_input_attachments(agent_run_start)?;
-        centaeris_core::session::turn_input::attachments::apply_user_input_attachments(
-            &mut message,
-            &captured,
-        );
-        let images: Vec<centaeris_core::model::prepared_prompt::ModelInputImageRefV1> = message
-            .metadata
-            .get(centaeris_core::runtime::keys::metadata::MODEL_INPUT_IMAGES)
-            .map(|raw| serde_json::from_str(raw))
-            .transpose()
-            .map_err(|error| error.to_string())?
-            .unwrap_or_default();
-        let attachments = captured
-            .iter()
-            .map(|item| {
-                let mut value = serde_json::to_value(item).expect("typed attachment serializes");
-                if let Some(image) = images
-                    .iter()
-                    .find(|image| image.input_ref == item.input_ref)
-                {
-                    value["placeholder"] = json!(image.placeholder);
-                }
-                value
-            })
-            .collect();
-        (message.content, attachments)
-    } else {
-        (
-            agent_run_start.prompt.clone(),
-            message_attachments(agent_run_start)?,
-        )
-    };
+    let objective = agent_run_start.prompt.clone();
+    let attachments = message_attachments(agent_run_start)?;
     sequence.start(
         agent_run_start.turn_id.as_str(),
         objective.as_str(),
@@ -5267,7 +5303,10 @@ fn provider_response_was_interrupted(error: &str) -> bool {
 }
 
 fn public_agent_failure_reason<'a>(internal_error: &'a str, transition_reason: &'a str) -> &'a str {
-    if let Some(reason) = internal_error.strip_prefix("read AGENTS.md failed: ") {
+    if let Some(reason) = internal_error
+        .strip_prefix("read AGENTS.md failed: ")
+        .or_else(|| internal_error.strip_prefix("resolve execution model input image failed: "))
+    {
         if centaeris_core::execution::environment_task_capacity_rejection(reason) {
             return reason;
         }
@@ -5660,11 +5699,7 @@ fn load_existing_session_sequence_on_client(
         },
     )?;
     if upper > 0 {
-        let input_record_type = match agent_run_start.initial_input {
-            AgentRunStartInitialInput::UserMessage {}
-            | AgentRunStartInitialInput::UserInput { .. } => SessionRecordType::UserMessage,
-            AgentRunStartInitialInput::HostEvent { .. } => SessionRecordType::HostEventInput,
-        };
+        let input_record_type = SessionRecordType::UserMessage;
         if types.first() != Some(&SessionRecordType::AgentRunStarted)
             || types.get(1) != Some(&input_record_type)
             || types.iter().any(|kind| {
@@ -7170,10 +7205,9 @@ mod tests {
     #[test]
     fn hosted_runtime_uses_full_tool_capacity_without_changing_core_default() {
         let mut start = agent_run_start();
-        start.agent_instructions = "hosted capacity fixture".into();
+        start.session_instructions = "hosted capacity fixture".into();
         start.model_context_tokens = 123456;
         start.model_max_output_tokens = 64000;
-        start.coordination_session_id = Some("coordination-fixture".into());
         let config = hosted_agent_runtime_config(&start);
         let effective = ToolConcurrencyCoordinator::new(config.tool_parallelism);
         assert_eq!(
@@ -7186,17 +7220,13 @@ mod tests {
             16,
             "Core's general default is independent"
         );
-        assert_eq!(config.agent_instructions, start.agent_instructions);
+        assert_eq!(config.agent_instructions, start.session_instructions);
         assert_eq!(config.model_context_tokens, start.model_context_tokens);
         assert_eq!(
             config.model_max_output_tokens,
             start.model_max_output_tokens
         );
-        assert_eq!(
-            config.required_completion_tool.as_deref(),
-            Some("send_message")
-        );
-        start.coordination_session_id = None;
+        assert!(config.required_completion_tool.is_none());
         assert!(hosted_agent_runtime_config(&start)
             .required_completion_tool
             .is_none());
@@ -7205,7 +7235,7 @@ mod tests {
     pub(super) fn agent_run_start() -> AgentRunStart {
         let mut authorization: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
             serde_json::from_str(include_str!(
-                "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+                "../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
             ))
             .expect("current authorization fixture");
         authorization.session_workspace = crate::agent_run_authorization::SessionWorkspace {
@@ -7225,7 +7255,7 @@ mod tests {
             "agentRunId": "agent_run_1",
             "turnId": "turn_1",
             "prompt": "hello",
-            "agentInstructions": "",
+            "sessionInstructions": "",
             "modelContextTokens": 200000,
             "modelMaxOutputTokens": 32768,
             "authorizationDigest": digest,
@@ -8147,6 +8177,88 @@ mod tests {
     }
 
     #[test]
+    fn model_process_retry_bridge_persists_only_retry_and_first_resumed_progress() {
+        for (progress, expected) in [
+            (
+                TurnUpdate::Reasoning {
+                    session_id: "session".into(),
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    text: "reasoning".into(),
+                },
+                RuntimeProcessState::Thinking,
+            ),
+            (
+                TurnUpdate::Token {
+                    session_id: "session".into(),
+                    turn_id: "turn".into(),
+                    content: "answer".into(),
+                },
+                RuntimeProcessState::Synthesizing,
+            ),
+            (
+                TurnUpdate::ModelDone {
+                    session_id: "session".into(),
+                    turn_id: "turn".into(),
+                    finish_reason: Some("stop".into()),
+                    process_state: RuntimeProcessState::Reviewing,
+                },
+                RuntimeProcessState::Reviewing,
+            ),
+        ] {
+            let mut state = AgentRunSessionState::new("session", "run").unwrap();
+            let retry = TurnUpdate::Status {
+                session_id: "session".into(),
+                turn_id: "turn".into(),
+                message: None,
+                process_state: RuntimeProcessState::Retrying,
+            };
+            assert_eq!(model_process_state_transition(&progress, &state), None);
+            assert_eq!(
+                model_process_state_transition(&retry, &state),
+                Some(("turn", RuntimeProcessState::Retrying))
+            );
+            state
+                .record_model_process_state("turn", RuntimeProcessState::Retrying, 1)
+                .unwrap();
+            assert_eq!(model_process_state_transition(&retry, &state), None);
+            for empty in [
+                TurnUpdate::Reasoning {
+                    session_id: "session".into(),
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    text: String::new(),
+                },
+                TurnUpdate::Token {
+                    session_id: "session".into(),
+                    turn_id: "turn".into(),
+                    content: String::new(),
+                },
+                TurnUpdate::Status {
+                    session_id: "session".into(),
+                    turn_id: "turn".into(),
+                    message: None,
+                    process_state: RuntimeProcessState::Thinking,
+                },
+            ] {
+                assert_eq!(model_process_state_transition(&empty, &state), None);
+            }
+            assert_eq!(
+                model_process_state_transition(&progress, &state),
+                Some(("turn", expected))
+            );
+            state
+                .record_model_process_state("turn", expected, 2)
+                .unwrap();
+            assert_eq!(model_process_state_transition(&progress, &state), None);
+            assert_eq!(
+                model_process_state_transition(&retry, &state),
+                Some(("turn", RuntimeProcessState::Retrying))
+            );
+        }
+    }
+
+    #[test]
     fn model_process_phase_is_durable_once_and_tool_round_is_not_an_assistant_message() {
         let agent_run_start = agent_run_start();
         let mut sequence = agent_run_session_state(&agent_run_start);
@@ -8521,41 +8633,50 @@ mod tests {
 
     #[test]
     fn helper_failures_keep_rpc_stage_through_public_terminal() {
-        for (detail, reason, message) in [
+        for (internal, reason, message) in [
             (
-                "execution input rejected: task_journal_capacity; the command was already started",
+                "read AGENTS.md failed: execution input rejected: task_journal_capacity; the command was already started",
                 "execution_input_rejected",
                 "input was not accepted",
             ),
             (
-                "execution start outcome is unknown; do not repeat the operation",
+                "read AGENTS.md failed: execution start outcome is unknown; do not repeat the operation",
                 "execution_start_unknown",
                 "start outcome is unknown",
             ),
             (
-                "execution input outcome is unknown; do not repeat the operation",
+                "read AGENTS.md failed: execution input outcome is unknown; do not repeat the operation",
                 "execution_input_unknown",
                 "input delivery is unconfirmed",
             ),
             (
-                "execution query outcome is unknown; do not repeat the operation",
+                "read AGENTS.md failed: execution query outcome is unknown; do not repeat the operation",
                 "execution_query_unknown",
                 "result could not be confirmed",
             ),
             (
-                "execution output unavailable; do not repeat the command",
+                "read AGENTS.md failed: execution output unavailable; do not repeat the command",
                 "execution_output_unavailable",
                 "output is unavailable",
             ),
             (
+                "read AGENTS.md failed: task_journal_capacity",
                 "task_journal_capacity",
+                "not started",
+            ),
+            (
+                "resolve execution model input image failed: task_output_capacity",
+                "task_output_capacity",
+                "not started",
+            ),
+            (
+                "resolve execution model input image failed: task_journal_capacity",
                 "task_journal_capacity",
                 "not started",
             ),
         ] {
-            let internal = format!("read AGENTS.md failed: {detail}");
             assert_eq!(
-                public_agent_failure_reason(&internal, "core_run_failed"),
+                public_agent_failure_reason(internal, "core_run_failed"),
                 reason
             );
             let start = agent_run_start();

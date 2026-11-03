@@ -44,7 +44,7 @@ test("admission preserves the timer reconciliation identity and start time, incl
   const lifecycleLoader = createJsxSubjectLoader(new Map([
     ["react", stub(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useLayoutEffect} from ${JSON.stringify(harness)}; export const useSyncExternalStore=(_subscribe,read)=>read();`)],
     ["./useTranscriptCitations", stub('export const useTranscriptCitations=()=>({citations:[],error:false});')],
-    ["./useTranscriptTurnMetadata", stub('export const useTranscriptTurnMetadata=()=>new Map();')],
+    ["./useTranscriptTurnMetadata", stub(`import {context} from ${JSON.stringify(harness)}; export const useTranscriptTurnMetadata=()=>context.workTimes;`)],
     ["./TranscriptBlockContent", stub('export const TranscriptBlockRow=()=>null; export const TranscriptLiveTail=()=>null; export const TranscriptToolGroupCard=()=>null;')],
   ]));
   const { TranscriptBlockList: List } = await import(await lifecycleLoader(fileURLToPath(new URL("../../src/chat/TranscriptBlockList.tsx", import.meta.url))));
@@ -56,7 +56,8 @@ test("admission preserves the timer reconciliation identity and start time, incl
   const props = { store, sessionId: null, pendingUserMessage: { ...pending, sessionId: null, agentRunId: null }, running: true, startedAtMs: pending.startedAtMs };
   const oldWindow = globalThis.window;
   globalThis.window = { requestAnimationFrame() { return 1; }, cancelAnimationFrame() {} };
-  const subject = renderer(List.type, props, {});
+  const environment = { workTimes: new Map() };
+  const subject = renderer(List.type, props, environment);
   context.after(() => { subject.unmount(); globalThis.window = oldWindow; });
   const identity = () => {
     const turn = nodes(subject.tree, node => node.props.className === "workspaceTranscriptTurn").at(-1);
@@ -71,11 +72,31 @@ test("admission preserves the timer reconciliation identity and start time, incl
   await subject.settle(); assert.deepEqual(identity(), before);
   props.pendingUserMessage = null;
   await subject.settle(); assert.deepEqual(identity(), before, "clearing the accepted placeholder must not remount the timer");
+  props.startedAtMs = 3000;
+  environment.workTimes.set("2", { startedAtMs: 3000, completedAtMs: null, artifacts: [] });
+  await subject.settle(); assert.deepEqual(identity(), before, "the later server start must not reset the submitted work clock");
+  props.running = false;
+  environment.workTimes.clear();
+  await subject.settle();
+  assert.deepEqual(identity(), before, "the timer remains visible while admission and metadata reads catch up");
+  assert.equal(nodes(subject.tree, node => node.type.name === "WorkProgress")[0].props.running, true);
+  props.completedAtMs = 9000;
+  environment.workTimes.set("2", { startedAtMs: 3000, completedAtMs: 9000, artifacts: [] });
+  await subject.settle();
+  assert.deepEqual(identity(), before, "completion keeps the same start rather than subtracting admission time");
+  const finished = nodes(subject.tree, node => node.type.name === "WorkProgress")[0];
+  assert.equal(finished.props.running, false);
+  assert.equal(finished.props.completedAtMs, 9000);
   const admitted = nodes(subject.tree, node => node.props.className === "workspaceTranscriptTurn")[0];
   props.pendingUserMessage = { ...pending, startedAtMs: 2000, agentRunId: "next-run" };
   await subject.settle();
   assert.equal(nodes(subject.tree, node => node.props.className === "workspaceTranscriptTurn")[0].key, admitted.key,
     "the next send must not remount the preceding work period");
+  props.pendingUserMessage = null;
+  props.sessionId = "other-session";
+  await subject.settle();
+  assert.equal(nodes(subject.tree, node => node.type.name === "WorkProgress")[0].props.startedAtMs, 3000,
+    "a local submission clock must not leak to another Session with the same run ID");
 });
 
 test("accepted input stays visible until its own committed user message arrives", () => {

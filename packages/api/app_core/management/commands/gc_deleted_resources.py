@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from app_core.deleted_resource_gc import (
     collect_deleted_resource_gc,
+    collect_retired_session_gc,
     collect_orphaned_library_gc,
     expire_trash,
 )
@@ -36,6 +37,7 @@ class Command(BaseCommand):
         collectors = [
             ("Trash expiration", lambda: self.expire(dry_run)),
             ("Note history GC", lambda: self.note_history(dry_run)),
+            ("Retired Session storage GC", lambda: self.retired(dry_run)),
             ("Deleted resource GC", lambda: self.deleted(cutoff, dry_run)),
             ("Workspace snapshot GC", lambda: self.snapshots(cutoff, dry_run)),
             ("Presentation invalidation relay", lambda: self.presentation(dry_run)),
@@ -70,10 +72,15 @@ class Command(BaseCommand):
         expired = expire_trash(trash_cutoff(), dry_run)
         action = "Would expire" if dry_run else "Expired"
         self.stdout.write(
-            f"{action} {expired.agents} agents, {expired.sessions} sessions, "
+            f"{action} {expired.sessions} sessions, "
             f"{expired.sources} sources, {expired.library_objects} library objects"
         )
         return 0
+
+    def retired(self, dry_run):
+        report = collect_retired_session_gc(dry_run)
+        self.stdout.write(f"Retired Session storage: {len(report.planned)} planned, {len(report.cleaned)} cleaned, {len(report.blocked)} referenced")
+        return len(report.failures)
 
     def note_history(self, dry_run):
         count, failures = collect_note_history_gc(dry_run)

@@ -269,13 +269,13 @@ maintenance token.
 `benchmark_seed.py` requires the matching generated fixture identity, actual
 PostgreSQL database/user, the benchmark migration, and empty user/business tables.
 The shared descriptor validator is mounted as `/harness/workspace_plan.py`.
-It creates a random account, Workspace, Agent, encrypted ProviderCredential, and
+It creates a random account, Workspace, encrypted ProviderCredential, and
 ModelConfig from the supplied descriptor using `openai-completions`. It makes no
 model request and creates no Session, Run, execution, receipt, or terminal facts.
 The seed records `model` and `modelSha256` (the canonical JSON SHA-256 used by
 `workspace_plan.canonical_digest`); launch checks both against the plan before any
 model admission. Null thinking creates an empty configured mode and no supported
-modes; a configured mode is passed explicitly through both Agent and setup paths.
+modes; a configured mode is passed explicitly through model and setup paths.
 
 The resulting `benchmark-seed.json` is mode 0600 in the private storage volume;
 it contains account credentials and business IDs, never the provider key.

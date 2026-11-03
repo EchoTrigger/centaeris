@@ -312,7 +312,7 @@ class OwnedUsageReader:
     WHERE r.id={parameter('run_id')} AND r.session_id={parameter('session_id')} AND env.session_id=r.session_id
     AND env.environment_profile IS NOT NULL
     AND env.network=env.environment_profile->>'network'
-    AND a.payload->>'schema'='workspace.agent_run_authorization.v1'
+    AND a.payload->>'schema'='workspace.agent_run_authorization.v2'
     AND a.payload->'environmentProfile'=env.environment_profile
     AND a.payload->>'environmentProfileDigest'=env.environment_profile_digest))"""
 

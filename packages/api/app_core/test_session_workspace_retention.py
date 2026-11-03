@@ -11,18 +11,19 @@ import tempfile
 from django.conf import settings
 from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase, override_settings
+from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 
 from .models import AgentRun, Session, SessionAssetLink, SessionEvent, WorkspaceMembership
-from . import test_agent_messages
 from .test_hosted_operations import OperationFixture
 from .testing import leased_lifecycle_job_fixture
 from .workspace_snapshot_gc import collect_workspace_snapshot_gc
 from .test_execution_publication_fencing import prepare_workspace_files
 
 
-class SessionWorkspaceRetentionTests(OperationFixture, TestCase):
+class SessionWorkspaceRetentionTests(OperationFixture, TransactionTestCase):
+    serialized_rollback = True
+
     def test_month_old_committed_workspace_and_session_facts_survive_gc_and_continuation(self):
         storage = self.enterContext(tempfile.TemporaryDirectory(prefix="session-workspace-retention-"))
         self.enterContext(override_settings(MEDIA_ROOT=storage))
@@ -35,9 +36,14 @@ class SessionWorkspaceRetentionTests(OperationFixture, TestCase):
         self.assertEqual(first.status_code, 202, first.content)
         run = AgentRun.objects.get(pk=first.json()["agentRunId"])
         original_grant = deepcopy((run.authorization.payload, run.authorization.digest, run.authorization.signature))
-        test_agent_messages.AgentMessageTests.commit(self, run, "user_message", {
+        SessionEvent.objects.create(workspace=run.workspace, session=run.session, agent_run=run,
+            eventId="original-history", sequence=1, agent_run_sequence=1,
+            projects_to_agent_run_stream=True, createdAtMs=1,
+            payload={"schemaVersion":"session.event.v1", "eventVersion":1, "type":"user_message",
+                "eventId":"original-history", "sessionId":run.session_id, "agentRunId":run.pk,
+                "turnId":run.turn_id,"createdAtMs":1,"sequence":1,"payload":{
             "messageId": "original-message", "text": "original history", "attachments": [],
-        })
+        }})
         lease_owner = leased_lifecycle_job_fixture(self, run)
         content = b"authoritative committed workspace"
         manifest = json.dumps({"schema": "workspace.snapshot.v1", "files": [{
@@ -68,6 +74,9 @@ class SessionWorkspaceRetentionTests(OperationFixture, TestCase):
         old = timezone.now() - timedelta(days=35)
         Session.objects.filter(pk=session.pk).update(createdAt=old, updatedAt=old)
         AgentRun.objects.filter(pk=run.pk).update(status="completed", completedAt=old)
+        from .environment_lifecycle import acquire_environment_cleanup_controller, release_environment_controller
+        cleanup = acquire_environment_cleanup_controller(run.pk, lease_owner)
+        release_environment_controller(run.pk, cleanup["controllerEpoch"], lease_owner)
         os.utime(Path(storage) / session.workspaceStorageKey, (old.timestamp(), old.timestamp()))
         facts = (list(SessionEvent.objects.filter(session=session).values()),
                  list(SessionAssetLink.objects.filter(session=session).values()),

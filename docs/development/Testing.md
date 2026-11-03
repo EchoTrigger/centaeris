@@ -29,13 +29,23 @@ release requirements call for them. Generic skill checklists do not expand the
 agreed scope. Sub-agents receive a bounded validation scope and report existing
 results for reuse instead of repeating each other's checks.
 
-The hosted Python CI runs the complete API suite and support checks sequentially
-in `workspace-python`. Each invocation owns its test database and temporary
-storage. Skipped tests and discovery/execution mismatches fail the gate. Fresh
-schema and migration drift checks run before the API suite; each gate reports
+The hosted Python CI runs independent Contracts, Support, RuntimePostgres and
+ApiPostgres matrix jobs with fail-fast disabled. Runtime and API jobs each own
+their PostgreSQL service; pure checks do not start one. Every selected job must
+pass the required aggregate check. Each invocation owns its test database and
+temporary storage. Skipped tests and discovery/execution mismatches fail the
+discovery gate. The API suite creates and migrates a fresh PostgreSQL database;
+schema drift is checked separately without a running database. Each gate reports
 its elapsed time.
 
+Runtime PostgreSQL tests compile one test executable and reuse it for discovery
+and execution. Contract and support checks report independent failures together
+and return a failing exit status. Migration tests use
+`isolated_migration_database` instead of recreating the runner's shared schema.
+
 Frontend visual design uses manual appearance acceptance rather than TDD.
+Frontend browser and Desktop window end-to-end checks are not CI or release
+gates. Maintainers manually accept visual appearance and interaction behavior.
 Implement and iterate on layout, icons, spacing, color and typography directly.
 Focused behavioral tests still protect parsing, validation, requests, state
 transitions, streaming, recovery, accessibility interactions and content
@@ -324,12 +334,15 @@ On Windows use `python`. Windows distribution acceptance additionally runs
 
 The gate checks formatting, the Rust workspace, Clippy with warnings denied,
 focused Core and SQLite integration, all Rust tests and Desktop/UI source checks.
-Packaging and packaged-application smoke checks remain in the Windows release stage.
+Packaging, headless Runtime smoke checks and non-UI installer checks remain in
+the Windows release stage. Installer checks cover registration, versions, busy
+Runtime protection, replacement, uninstall/reinstall and retained Session/config
+data without launching a Desktop window.
 
 Shared frontend primitive changes also run `pnpm --filter web run test:components`.
 These mounted React tests protect controlled model/effort choices, focus,
 dismissal, confirmation and drafts. Web retains its own page and transcript
-interaction policy. With `CHROME_BIN` pointing to a local Chromium executable,
+interaction policy. For optional local investigation, with `CHROME_BIN` pointing to a local Chromium executable,
 `pnpm --filter web run test:chat-ui` checks production styles, floating-control
 placement, transcript folding and reading position in the browser. The shared
 package has its own `typecheck` script, run by both frontend product gates.

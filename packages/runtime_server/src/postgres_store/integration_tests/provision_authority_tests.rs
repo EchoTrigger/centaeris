@@ -13,7 +13,7 @@ fn sign(payload: ProvisionBinding) -> ProvisionAuthorization {
         signature: String::new(),
     };
     let mut mac = Hmac::<Sha256>::new_from_slice(KEY).unwrap();
-    mac.update(b"workspace:environment-provision-authorization:v1\0");
+    mac.update(b"workspace:environment-provision-authorization:v2\0");
     mac.update(auth.digest().unwrap().as_bytes());
     auth.signature = format!("hmac-sha256:{:x}", mac.finalize().into_bytes());
     auth
@@ -21,7 +21,7 @@ fn sign(payload: ProvisionBinding) -> ProvisionAuthorization {
 fn setup() -> (String, PostgresRuntimeStore, Client, ProvisionAuthorization) {
     let (url, store, mut db) = retained_instance_tests::setup();
     let vector: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../tests/workspace/fixtures/environment_provision_authorization/v1/valid.json"
+        "../../../../../tests/workspace/fixtures/environment_provision_authorization/v2/valid.json"
     ))
     .unwrap();
     let mut payload: ProvisionBinding = serde_json::from_value(vector["payload"].clone()).unwrap();
@@ -33,6 +33,11 @@ fn setup() -> (String, PostgresRuntimeStore, Client, ProvisionAuthorization) {
         "sha256:{:x}",
         Sha256::digest(b"workspace:environment-controller-lease:v1\0provision-lease")
     );
+    let request = crate::agent_run_authorization::canonical_json(
+        serde_json::to_value(payload.request()).unwrap(),
+    )
+    .unwrap();
+    payload.request_digest = format!("sha256:{:x}", Sha256::digest(request.as_bytes()));
     let auth = sign(payload);
     db.batch_execute("DROP TABLE IF EXISTS public.app_core_environmentmaintenancegrant,public.app_core_environmentmaintenanceoperation CASCADE;
         ALTER TABLE public.app_core_sessionenvironment ADD COLUMN IF NOT EXISTS controller_maintenance_operation_id text,ADD COLUMN IF NOT EXISTS environment_profile jsonb,ADD COLUMN IF NOT EXISTS environment_profile_digest text;

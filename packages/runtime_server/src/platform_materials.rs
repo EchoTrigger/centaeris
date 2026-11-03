@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use centaeris_core::tool::layer::{
@@ -23,6 +24,7 @@ pub(crate) struct PlatformMaterialsProvider {
     http: reqwest::Client,
     pub(crate) contracts: Vec<DynamicToolContract>,
     discovered: Value,
+    execution_delivery: Option<Arc<crate::material_execution::MaterialExecutionDelivery>>,
 }
 
 #[derive(Deserialize)]
@@ -34,6 +36,14 @@ struct Credential {
 }
 
 impl PlatformMaterialsProvider {
+    pub(crate) fn with_execution_delivery(
+        mut self,
+        delivery: Arc<crate::material_execution::MaterialExecutionDelivery>,
+    ) -> Self {
+        self.execution_delivery = Some(delivery);
+        self
+    }
+
     pub(crate) async fn connect_current(
         api_url: String,
         internal_token: String,
@@ -111,6 +121,7 @@ impl PlatformMaterialsProvider {
                 .map_err(|_| "build platform credential client failed")?,
             contracts: Vec::new(),
             discovered: Value::Null,
+            execution_delivery: None,
         };
         let client = provider.client(None).await?;
         validate_tool_names(
@@ -223,6 +234,30 @@ impl PlatformMaterialsProvider {
             .as_object()
             .cloned()
             .ok_or("invalid material arguments")?;
+        if request.tool_name == "read_material"
+            && arguments.get("delivery").and_then(Value::as_str) == Some("execution_file")
+        {
+            if arguments.len() != 2 || !arguments.contains_key("input_ref") {
+                return Err("execution file delivery requires only input_ref and delivery".into());
+            }
+            let input_ref = arguments["input_ref"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or("material input ref invalid")?;
+            let result = self
+                .execution_delivery
+                .as_ref()
+                .ok_or("execution file delivery unavailable")?
+                .fetch(input_ref, &request.tool_call_id)
+                .await?;
+            return Ok(DynamicToolProviderResponse {
+                content: result.to_string(),
+                details: json!({"schema":"runtime.material_execution.result.v1","result":result}),
+                is_error: false,
+                facts: Vec::new(),
+                transition_reason: Some("material_execution_delivery".into()),
+            });
+        }
         let result = client.call(&request.tool_name, arguments, TIMEOUT).await?;
         // Do not acknowledge a successful citable result that Core would clip.
         if result.content.len() > centaeris_core::tool::layer::MODEL_TOOL_RESULT_MAX_BYTES {
@@ -242,6 +277,42 @@ impl DynamicToolProvider for PlatformMaterialsProvider {
     ) -> Pin<Box<dyn Future<Output = Result<DynamicToolProviderResponse, String>> + Send + 'a>>
     {
         Box::pin(async move {
+            let execution_file = request.tool_name == "read_material"
+                && serde_json::from_str::<Value>(&request.args_json)
+                    .ok()
+                    .and_then(|args| {
+                        args.get("delivery")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .as_deref()
+                    == Some("execution_file");
+            if execution_file {
+                if request
+                    .cancellation_probe
+                    .as_ref()
+                    .map(|probe| probe())
+                    .transpose()?
+                    .flatten()
+                    .is_some()
+                {
+                    return Err("platform material call cancelled".into());
+                }
+                // A started installation must settle its host/API responsibility.
+                // Dropping a blocking helper future would leave an unacknowledged file.
+                let result = self.invoke(&request).await;
+                if request
+                    .cancellation_probe
+                    .as_ref()
+                    .map(|probe| probe())
+                    .transpose()?
+                    .flatten()
+                    .is_some()
+                {
+                    return Err("platform material call cancelled".into());
+                }
+                return result;
+            }
             tokio::select! {
                 biased;
                 _ = request.wait_for_cancellation() => Err("platform material call cancelled".into()),
@@ -324,13 +395,12 @@ mod tests {
             database.execute("INSERT INTO app_core_sessionevent (\"eventId\",workspace_id,session_id,agent_run_id,sequence,agent_run_sequence,projects_to_agent_run_stream,payload,\"createdAtMs\",\"insertedAt\") VALUES ($1,$2,$3,$4,$5,$5,true,$6::text::jsonb,1,now())",
                 &[&event["eventId"].as_str().unwrap(), &text("workspaceId"), &text("sessionId"), &text("runId"), &sequence, &event.to_string()]).unwrap();
         };
-        let mut next =
-            json!({"tool":"read_material", "arguments":{"input_ref":text("inputRef"),"limit":10}});
+        let mut next = json!({"tool":"read_material", "arguments":{"input_ref":text("inputRef"),"delivery":"content","limit":10}});
         let mut collected = String::new();
         for index in 0..100 {
             let reject = next.is_null();
             if reject {
-                next = json!({"tool":"read_material", "arguments":{"input_ref":"not-authorized"}});
+                next = json!({"tool":"read_material", "arguments":{"input_ref":"not-authorized","delivery":"content"}});
             }
             let call = ToolCallEnvelope {
                 id: format!("material-client-{index}"),
@@ -362,6 +432,9 @@ mod tests {
                 "{}",
                 result.content
             );
+            if reject {
+                assert_eq!(result.content, "knowledge_input_not_authorized");
+            }
             if !reject {
                 assert!(
                     result.content.len()

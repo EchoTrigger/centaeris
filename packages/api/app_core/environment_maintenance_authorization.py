@@ -55,15 +55,14 @@ def sign_maintenance_authorization(payload, signing_key):
         DOMAIN + digest.encode("ascii"), hashlib.sha256).hexdigest()
 
 
-PROVISION_SCHEMA = 'workspace.environment_provision_authorization.v1'
-PROVISION_DOMAIN = b'workspace:environment-provision-authorization:v1\0'
+PROVISION_SCHEMA = 'workspace.environment_provision_authorization.v2'
+PROVISION_DOMAIN = b'workspace:environment-provision-authorization:v2\0'
 PROVISION_FIELDS = {'schema', 'operationKind', 'workspaceId', 'sessionId', 'environmentId', 'operationId',
-    'userId', 'agentId', 'environmentProfile', 'environmentProfileDigest', 'pluginActivation',
+    'userId', 'environmentProfile', 'environmentProfileDigest', 'pluginActivation',
     'controllerOwner', 'controllerEpoch', 'controllerLeaseDigest', 'controllerPurpose', 'requestDigest', 'expiresAtMs'}
 
 
 def sign_provision_authorization(payload, signing_key):
-    from .agent_identity import validate_agent_id
     from .environment_profile import environment_profile_digest
     from .plugin_catalog import validate_plugin_activation
     if not isinstance(signing_key, str) or not signing_key:
@@ -71,10 +70,9 @@ def sign_provision_authorization(payload, signing_key):
     if (not isinstance(payload, dict) or set(payload) != PROVISION_FIELDS
             or payload['schema'] != PROVISION_SCHEMA or payload['operationKind'] != 'provision'):
         raise ValueError('provision_authorization_fields_invalid')
-    for field in ('workspaceId', 'sessionId', 'environmentId', 'operationId', 'userId', 'agentId'):
+    for field in ('workspaceId', 'sessionId', 'environmentId', 'operationId', 'userId'):
         if not _matches(payload[field], r'[A-Za-z0-9_.:-]{1,160}'):
             raise ValueError('provision_authorization_identity_invalid')
-    validate_agent_id(payload['agentId'])
     if payload['controllerOwner'] != {'kind': 'maintenanceOperation', 'operationId': payload['operationId']}:
         raise ValueError('provision_authorization_owner_invalid')
     for field in ('controllerEpoch', 'expiresAtMs'):

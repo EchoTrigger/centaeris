@@ -21,31 +21,25 @@ def _identity(value):
     return value
 
 
-def agent_change_key(agent_id, kind):
-    if kind not in {"navigation", "history", "work"}:
-        raise ValueError("presentation_change_kind_invalid")
-    return f"agent:{_identity(agent_id)}:{kind}"
-
-
 def session_change_key(session_id, kind):
     if kind not in {"state", "context"}:
         raise ValueError("presentation_change_kind_invalid")
     return f"session:{_identity(session_id)}:{kind}"
 
 
-def presentation_change_keys(workspace_id, agent_id, session_id=None):
-    # Session navigation spans the workspace; history and work stay Agent-scoped.
+def presentation_change_keys(workspace_id, session_id=None):
+    # Display versions share the Workspace, with Session-specific detail views.
     keys = {"navigation": f"workspace:{_identity(workspace_id)}:navigation",
-            **{kind: agent_change_key(agent_id, kind) for kind in ("history", "work")}}
+            **{kind: f"workspace:{_identity(workspace_id)}:{kind}" for kind in ("history", "work")}}
     if session_id is not None:
         keys.update({kind: session_change_key(session_id, kind) for kind in ("state", "context")})
     return keys
 
 
-def read_presentation_versions(workspace_id, agent_id, session_id=None, *, using="default"):
+def read_presentation_versions(workspace_id, session_id=None, *, using="default"):
     if connections[using].vendor != "postgresql":
         raise RuntimeError("presentation_changes_require_postgresql")
-    keys = presentation_change_keys(workspace_id, agent_id, session_id)
+    keys = presentation_change_keys(workspace_id, session_id)
     positions = dict(PresentationChange.objects.using(using).filter(key__in=keys.values()).values_list("key", "revision"))
     return {kind: positions.get(keys.get(kind), 0)
             for kind in ("navigation", "history", "work", "state", "context")}

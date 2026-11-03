@@ -138,9 +138,13 @@ jobs:
     if: ${{ needs.scope.outputs.workspacePython == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: [Contracts, Support, RuntimePostgres, ApiPostgres]
     services:
       postgres-test:
-        image: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+        image: ${{ contains(fromJSON('["RuntimePostgres", "ApiPostgres"]'), matrix.stage) && 'postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15' || '' }}
         env:
           POSTGRES_DB: centaeris
           POSTGRES_USER: centaeris
@@ -173,10 +177,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-rust-${{ hashFiles('rust-toolchain.toml') }}-workspace-python-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-rust-${{ hashFiles('rust-toolchain.toml') }}-workspace-python-${{ matrix.stage }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-rust-${{ hashFiles('rust-toolchain.toml') }}-workspace-python-
-      - run: python scripts/workspace/ci.py --stage Python
+      - run: python scripts/workspace/ci.py --stage ${{ matrix.stage }}
 
   web:
     needs: scope

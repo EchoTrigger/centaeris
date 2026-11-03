@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ApiError } from "../../src/api.ts";
 
 const scope = { userId: "user", workspaceId: "workspace", command: "submitMessage" };
-const input = { text: "private prompt", modelConfigRef: "model", agentId: "agent" };
+const input = { text: "private prompt", modelConfigRef: "model", };
 const accepted = (operationId) => ({ operationId, command: "submitMessage", status: "accepted", sessionId: "session", agentRunId: "run", turnId: "turn" });
 function storage() {
   const data = new Map();
@@ -286,15 +286,15 @@ test("reviewing ambiguous input uses a real new-tab link and consumes metadata o
   const id = first.pending().operationId;
   const calls = [];
   const checking = client(store, async (_path, options) => { assert.equal(options, undefined); calls.push("receipt"); return accepted(id); });
-  const link = acceptedConversationReviewLink("workspace", { id: "session", agentId: "another-agent" });
+  const link = acceptedConversationReviewLink("workspace", { id: "session" });
   const html = renderToStaticMarkup(createElement("a", link, "Review"));
-  assert.match(html, /href="\/w\/workspace\/agents\/another-agent\?sessionId=session"/);
+  assert.match(html, /href="\/w\/workspace\/sessions\/session"/);
   assert.match(html, /target="_blank"/);
   assert.match(html, /rel="noopener"/);
   await assert.rejects(consumeReviewedOperation(checking, id, async () => { throw new ApiError("session_not_found", 404); }));
   assert.ok(checking.pending());
   await consumeReviewedOperation(checking, id, async (sessionId) => {
-    assert.equal(sessionId, "session"); calls.push("session"); return { id: "session", agentId: "another-agent" };
+    assert.equal(sessionId, "session"); calls.push("session"); return { id: "session" };
   });
   assert.deepEqual(calls, ["receipt", "receipt", "session"]);
   assert.equal(checking.pending(), null);
@@ -351,4 +351,19 @@ test("dispatch hooks expose the exact operation before its single POST", async (
     onDispatch: () => order.push("dispatch"),
   });
   assert.deepEqual(order, ["identity", "dispatch", "post"]);
+});
+
+
+test("a lost question response recovers its original Run receipt without another answer POST", async () => {
+  const calls = []; let id;
+  const operation = new OperationClient({ ...scope, command: "respondQuestion" }, { storage: storage(), request: async (path, options) => {
+    calls.push(options?.method || "GET");
+    if (options) { id = JSON.parse(options.body).operationId; throw new TypeError("response lost"); }
+    assert.equal(path, `/api/workspaces/workspace/operations/respondQuestion/${id}`);
+    return { ...accepted(id), command: "respondQuestion" };
+  } });
+  assert.deepEqual(await operation.submit("/responses", { continuationId: "continuation", action: "answer", answer: "1. Summary" }), { ...accepted(id), command: "respondQuestion" });
+  assert.deepEqual(calls, ["POST", "GET"]);
+  operation.complete(id);
+  assert.equal(operation.pending(), null);
 });

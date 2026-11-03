@@ -22,6 +22,7 @@ mod prompt_compaction_runtime;
 mod prompt_projection;
 mod provider_polling;
 pub mod query_loop;
+pub mod question;
 mod recovery;
 mod run_result;
 use run_result::RunResultCollector;
@@ -634,11 +635,20 @@ impl<
         )?;
         Ok(
             crate::extension::composition::AgentCompositionEnvironmentV1 {
-                tool_contracts: tool_projection::build_generate_tool_contracts(
-                    self.tools_port.dynamic_tool_registry(),
-                    self.config.allowed_tools.as_deref(),
-                    self.tools_port.execution_host_kind(),
-                )?,
+                tool_contracts: {
+                    let mut contracts = tool_projection::build_generate_tool_contracts(
+                        self.tools_port.dynamic_tool_registry(),
+                        self.config.allowed_tools.as_deref(),
+                        self.tools_port.execution_host_kind(),
+                    )?;
+                    if self.config.question_input
+                        == question::QuestionInputCapability::PersistentResponses
+                        && self.config.allowed_tools.is_none()
+                    {
+                        contracts.push(question::tool_contract());
+                    }
+                    contracts
+                },
                 skill_catalog_digest,
                 plugin_activation_digest,
                 hook_composition_digest: self.lifecycle_hooks.composition_digest()?,

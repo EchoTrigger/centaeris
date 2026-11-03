@@ -12,7 +12,7 @@ from django.test import TransactionTestCase
 
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .http import internal
-from .models import Agent, Session, WorkspaceSnapshotObject, WorkspaceSnapshotUpload
+from .models import Session, WorkspaceSnapshotObject, WorkspaceSnapshotUpload
 from .runtime_schema_test_helpers import isolate_runtime_schema
 from . import test_workspace_snapshot_gc as fixtures
 from .workspace_snapshot_gc import collect_workspace_snapshot_gc

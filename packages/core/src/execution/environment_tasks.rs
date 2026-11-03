@@ -326,6 +326,12 @@ pub enum EnvironmentTaskRequest {
     List {
         fence: EnvironmentTaskFence,
     },
+    /// Release retained bytes only after the consumer has a recoverable result.
+    ConsumeOutput {
+        fence: EnvironmentTaskFence,
+        task_id: String,
+        consumer_receipt_id: String,
+    },
     Input {
         fence: EnvironmentTaskFence,
         task_id: String,
@@ -374,6 +380,7 @@ impl EnvironmentTaskRequest {
             .validate()?,
             Self::Start { fence, .. }
             | Self::Query { fence, .. }
+            | Self::ConsumeOutput { fence, .. }
             | Self::List { fence }
             | Self::Input { fence, .. }
             | Self::QueryInputReceipt { fence, .. }
@@ -418,7 +425,9 @@ impl EnvironmentTaskRequest {
             Self::Start { fence, scope, .. } => {
                 fence.authorize_start(scope)?;
             }
-            Self::Input { fence, .. } | Self::QueryInputReceipt { fence, .. } => {
+            Self::Input { fence, .. }
+            | Self::QueryInputReceipt { fence, .. }
+            | Self::ConsumeOutput { fence, .. } => {
                 fence.authorize_execution()?;
             }
             Self::EndRun { fence, run_id, .. }
@@ -451,6 +460,25 @@ impl EnvironmentTaskRequest {
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             {
                 return Err("task_invalid_input_digest".into());
+            }
+        }
+        if let Self::ConsumeOutput {
+            task_id,
+            consumer_receipt_id,
+            ..
+        } = self
+        {
+            if task_id.is_empty()
+                || task_id.len() > 160
+                || !task_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                || consumer_receipt_id.is_empty()
+                || consumer_receipt_id.len() > 160
+                || consumer_receipt_id.chars().any(char::is_control)
+                || consumer_receipt_id.trim() != consumer_receipt_id
+            {
+                return Err("task_invalid_output_consumption".into());
             }
         }
         if let Self::Start { env, .. } = self {
@@ -495,6 +523,11 @@ pub struct EnvironmentTaskOutputChunk {
     deny_unknown_fields
 )]
 pub enum EnvironmentTaskResult {
+    /// The original task identity remains durable after its bytes are released.
+    OutputConsumed {
+        task: EnvironmentTaskSnapshot,
+        consumer_receipt_id: String,
+    },
     Listed {
         tasks: Vec<EnvironmentTaskSnapshot>,
     },
@@ -562,6 +595,30 @@ impl EnvironmentTaskResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn output_consumption_is_an_explicit_fenced_request_with_exact_fields() {
+        let mut value = serde_json::json!({
+            "operation":"consumeOutput", "fence": owner_fence("agentRun", "r", 1, "execute"),
+            "taskId":"task-original", "consumerReceiptId":"durable-receipt"
+        });
+        let request: EnvironmentTaskRequest = serde_json::from_value(value.clone()).unwrap();
+        request.validate_authority().unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), value);
+        value["consumerReceiptId"] = serde_json::json!("");
+        assert_eq!(
+            serde_json::from_value::<EnvironmentTaskRequest>(value.clone())
+                .unwrap()
+                .validate_authority()
+                .unwrap_err(),
+            "task_invalid_output_consumption"
+        );
+        value["consumerReceiptId"] = serde_json::json!("durable-receipt");
+        value["skipVerify"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<EnvironmentTaskRequest>(value).is_err());
+        assert!(environment_task_capacity_rejection("task_output_capacity"));
+        assert!(!environment_task_capacity_rejection("task_output_consumed"));
+    }
+
     #[test]
     fn start_environment_is_native_bounded_and_cannot_contain_invalid_names_or_nul() {
         let make = |env: serde_json::Value| {

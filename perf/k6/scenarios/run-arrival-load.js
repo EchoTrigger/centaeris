@@ -32,15 +32,15 @@ export const options = {
 };
 
 export function setup() {
-  const { workspaceId, agentId, modelId } = configuredTarget('short');
+  const { workspaceId, modelId } = configuredTarget('short');
   const { store, csrf } = login();
-  return { store, csrf, workspaceId, agentId, modelId };
+  return { store, csrf, workspaceId, modelId };
 }
 
 export function admitRun(data) {
   try {
     const started = Date.now();
-    const { sessionId, agentRunId } = startRun(data.store, data.csrf, data.workspaceId, data.agentId, data.modelId);
+    const { sessionId, agentRunId } = startRun(data.store, data.csrf, data.workspaceId, data.modelId);
     createLatency.add(Date.now() - started);
     runAccepted.add(1);
     createErrors.add(0);

@@ -21,7 +21,7 @@ function scenario(capability, { failed = false } = {}) {
       assert.ok(Object.values(checks).every(predicate => predicate(value)));
     },
     login: () => ({ store: { sessionid: 'owned' }, csrf: 'csrf' }),
-    configuredTarget: profile => ({ workspaceId: 'workspace', agentId: 'agent', modelId: { short: 'instant', tools: 'tools', long: 'long' }[profile] }), request() {},
+    configuredTarget: profile => ({ workspaceId: 'workspace', modelId: { short: 'instant', tools: 'tools', long: 'long' }[profile] }), request() {},
     startRun(...args) {
       admissions.push(args);
       if (failed) throw new Error('admission failure');
@@ -102,7 +102,7 @@ test('mixed soak preserves three independent arrival streams and model selection
   assert.deepEqual(configs.map(config => config.rate), [10, 2, 1]);
   assert.deepEqual(configs.map(config => config.timeUnit), ['1m', '1m', '5m']);
   for (const config of configs) { assert.equal(config.duration, '4h'); s.context[config.exec](setup); }
-  assert.deepEqual(s.admissions.map(args => args[4]), ['instant', 'tools', 'long']);
+  assert.deepEqual(s.admissions.map(args => args[3]), ['instant', 'tools', 'long']);
   assert.equal(s.waits.length, 0);
 });
 

@@ -2,7 +2,6 @@
   "schema": "workspace.presentation.fixtures.v1",
   "scope": {
     "workspaceId": "workspace",
-    "agentId": "agent",
     "sessionId": "session"
   },
   "frames": [
@@ -10,22 +9,19 @@
       "schema": "workspace.presentation.v1",
       "kind": "navigation",
       "workspaceId": "workspace",
-      "agentId": "agent",
       "sessionId": "session",
-      "snapshotId": "333d9a6c76bd03f9d932047a67a9e0b0d94d04a0122620b20d2e16f5eadd8eae",
+      "snapshotId": "119ac89b9a27609d8642dc5b02a4cf0482abb50fb4a955da1d64ae38c4ee6a49",
       "offset": 0,
       "hasMore": false,
       "sessions": [
         {
           "id": "session",
           "workspaceId": "workspace",
-          "agentId": "agent",
           "projectId": null,
           "currentEnvironmentId": null,
           "executionMode": "perRun",
           "title": "Fixture conversation",
           "origin": "user",
-          "initialInputOrigin": null,
           "status": "active",
           "deletedAt": null,
           "isPinned": false,
@@ -43,7 +39,6 @@
       "schema": "workspace.presentation.v1",
       "kind": "snapshot",
       "workspaceId": "workspace",
-      "agentId": "agent",
       "sessionId": "session",
       "page": {
         "schema": "transcript.page.v1",
@@ -83,7 +78,6 @@
       "schema": "workspace.presentation.v1",
       "kind": "patches",
       "workspaceId": "workspace",
-      "agentId": "agent",
       "sessionId": "session",
       "page": {
         "schema": "transcript.patch.page.v1",
@@ -100,7 +94,6 @@
       "schema": "workspace.presentation.v1",
       "kind": "content",
       "workspaceId": "workspace",
-      "agentId": "agent",
       "sessionId": "session",
       "range": {
         "schema": "transcript.content.range.v1",
@@ -120,7 +113,6 @@
       "schema": "workspace.presentation.v1",
       "kind": "live",
       "workspaceId": "workspace",
-      "agentId": "agent",
       "sessionId": "session",
       "agentRunId": "run",
       "live": {
@@ -135,7 +127,6 @@
       "schema": "workspace.presentation.v1",
       "kind": "checkpoint",
       "workspaceId": "workspace",
-      "agentId": "agent",
       "sessionId": "session",
       "projectionGeneration": "generation",
       "sourceHighWater": "2",
@@ -150,7 +141,6 @@
       "schema": "workspace.presentation.v1",
       "kind": "reset",
       "workspaceId": "workspace",
-      "agentId": "agent",
       "sessionId": "session",
       "reason": "projectionInvalidated"
     },
@@ -158,7 +148,6 @@
       "schema": "workspace.presentation.v1",
       "kind": "operation",
       "workspaceId": "workspace",
-      "agentId": "agent",
       "sessionId": "session",
       "detail": {
         "kind": "result",
@@ -186,22 +175,19 @@
       "schema": "workspace.presentation.v1",
       "kind": "navigation",
       "workspaceId": "workspace",
-      "agentId": "agent",
       "sessionId": "session",
-      "snapshotId": "333d9a6c76bd03f9d932047a67a9e0b0d94d04a0122620b20d2e16f5eadd8eae",
+      "snapshotId": "119ac89b9a27609d8642dc5b02a4cf0482abb50fb4a955da1d64ae38c4ee6a49",
       "offset": 0,
       "hasMore": false,
       "sessions": [
         {
           "id": "session",
           "workspaceId": "workspace",
-          "agentId": "agent",
           "projectId": null,
           "currentEnvironmentId": null,
           "executionMode": "perRun",
           "title": "Fixture conversation",
           "origin": "user",
-          "initialInputOrigin": null,
           "status": "active",
           "deletedAt": null,
           "isPinned": false,
@@ -219,7 +205,6 @@
       "schema": "workspace.presentation.v1",
       "kind": "checkpoint",
       "workspaceId": "workspace",
-      "agentId": "agent",
       "sessionId": "session",
       "projectionGeneration": null,
       "sourceHighWater": "2",
@@ -234,7 +219,6 @@
       "schema": "workspace.presentation.v1",
       "kind": "snapshot",
       "workspaceId": "workspace",
-      "agentId": "agent",
       "sessionId": "session",
       "page": {
         "schema": "transcript.page.v1",
@@ -274,7 +258,6 @@
       "schema": "workspace.presentation.v1",
       "kind": "checkpoint",
       "workspaceId": "workspace",
-      "agentId": "agent",
       "sessionId": "session",
       "projectionGeneration": "generation",
       "sourceHighWater": "2",
@@ -286,5 +269,5 @@
       }
     }
   ],
-  "initialCursor": "p1.eyJhZ2VudElkIjoiYWdlbnQiLCJwcm9qZWN0aW9uR2VuZXJhdGlvbiI6ImdlbmVyYXRpb24iLCJzY2hlbWEiOiJ3b3Jrc3BhY2UucHJlc2VudGF0aW9uLmN1cnNvci52MSIsInNlc3Npb25JZCI6InNlc3Npb24iLCJzb3VyY2VIaWdoV2F0ZXIiOiIyIiwid29ya3NwYWNlSWQiOiJ3b3Jrc3BhY2UifQ"
+  "initialCursor": "p1.eyJwcm9qZWN0aW9uR2VuZXJhdGlvbiI6ImdlbmVyYXRpb24iLCJzY2hlbWEiOiJ3b3Jrc3BhY2UucHJlc2VudGF0aW9uLmN1cnNvci52MSIsInNlc3Npb25JZCI6InNlc3Npb24iLCJzb3VyY2VIaWdoV2F0ZXIiOiIyIiwid29ya3NwYWNlSWQiOiJ3b3Jrc3BhY2UifQ"
 }

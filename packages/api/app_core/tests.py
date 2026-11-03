@@ -55,7 +55,6 @@ from .model_adapter.openai_responses import (
     stream_open_ai_responses,
 )
 from .models import (
-    Agent,
     Artifact,
     ArtifactPublication,
     Session,
@@ -112,7 +111,7 @@ from .session_event import (
     project_committed_agent_run,
     rebuild_agent_run_citation_projection,
 )
-from .testing import create_session, publish_agent_test_policy
+from .testing import create_session
 from . import agent_run_stream
 
 
@@ -358,16 +357,10 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
         workspace = Workspace.objects.create(name="Profile unavailable", createdBy=user)
         workspace.members.add(user)
-        agent = Agent.objects.create(
-            workspace=workspace,
-            owner=user,
-            name="Centaeris",
-        )
         model = ModelConfig.objects.create(
             displayName="Profile model",
             modelName="profile-model",
         )
-        publish_agent_test_policy(agent, model_config=model)
         self.client.force_login(user)
 
         with patch(
@@ -380,7 +373,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
                     {
                         "operationId": "test-operation-338",
                         "text": "hello",
-                        "agentId": agent.id,
                         "modelConfigRef": model.id,
                     }
                 ),
@@ -402,18 +394,11 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
         workspace = Workspace.objects.create(name="默认工作区", createdBy=user)
         workspace.members.add(user)
-        Agent.objects.create(
-            id="centaeris",
-            workspace=workspace,
-            owner=user,
-            name="Centaeris",
-        )
         model = ModelConfig.objects.create(
             displayName="Fake Model",
             modelName="fake-model",
         )
 
-        publish_agent_test_policy(Agent.objects.get(id="centaeris"), model_config=model)
 
         loginResponse = self.client.post(
             "/api/login",
@@ -444,7 +429,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
                 data=json.dumps({
                     "operationId": "test-operation-400",
                     "text": "帮我看牙科 SOP",
-                    "agentId": "centaeris",
                     "modelConfigRef": model.id,
                 }),
                 content_type="application/json",
@@ -625,95 +609,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertNotIn("contentDigest", stream)
         self.assertIn('"type":"assistant_message"', stream)
 
-    def test_sessions_are_bound_to_an_immutable_agent_identity(self):
-        user = User.objects.create_user(
-            username="agent-sessions@example.com", password="password"
-        )
-        workspace = Workspace.objects.create(name="Agent sessions", createdBy=user)
-        workspace.members.add(user)
-        self.client.force_login(user)
-
-        first = create_session(
-            workspace=workspace,
-            owner=user,
-            agent_id="centaeris",
-        )
-        second = create_session(
-            workspace=workspace,
-            owner=user,
-            agent_id="research-agent",
-        )
-
-        response = self.client.get(
-            f"/api/workspaces/{workspace.id}/sessions?agentId=centaeris"
-        )
-        self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(
-            [(item["id"], item["agentId"]) for item in response.json()["sessions"]],
-            [(first.id, "centaeris")],
-        )
-        response = self.client.get(
-            f"/api/workspaces/{workspace.id}/sessions?agentId=research-agent"
-        )
-        self.assertEqual(
-            [(item["id"], item["agentId"]) for item in response.json()["sessions"]],
-            [(second.id, "research-agent")],
-        )
-
-        first.agent_id = "research-agent"
-        with self.assertRaisesRegex(ValueError, "agent_id is immutable"):
-            first.save()
-
-        create_session(
-            workspace=workspace,
-            owner=user,
-            agent_id="猫" * 64,
-        )
-        with self.assertRaisesRegex(ValueError, "agent_id_invalid"):
-            create_session(
-                workspace=workspace,
-                owner=user,
-                agent_id="猫" * 65,
-            )
-
-    def test_session_message_requires_or_matches_agent_identity(self):
-        user = User.objects.create_user(
-            username="agent-message@example.com", password="password"
-        )
-        workspace = Workspace.objects.create(name="Agent message", createdBy=user)
-        workspace.members.add(user)
-        model = ModelConfig.objects.create(id="agent-message-model", displayName="Fake")
-        session = create_session(
-            workspace=workspace,
-            owner=user,
-            agent_id="centaeris",
-        )
-        publish_agent_test_policy(session.agent, model_config=model)
-        self.client.force_login(user)
-
-        missing = self.client.post(
-            f"/api/workspaces/{workspace.id}/sessions/new/messages",
-            data=json.dumps({"operationId": "test-operation-650", "text": "hello", "modelConfigRef": model.id}),
-            content_type="application/json",
-        )
-        self.assertEqual(missing.status_code, 400, missing.content)
-        self.assertEqual(missing.json(), {"error": "agent_id_required"})
-
-        mismatch = self.client.post(
-            f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
-            data=json.dumps(
-                {
-                    "operationId": "test-operation-658",
-                    "text": "hello",
-                    "agentId": "research-agent",
-                    "modelConfigRef": model.id,
-                }
-            ),
-            content_type="application/json",
-        )
-        self.assertEqual(mismatch.status_code, 409, mismatch.content)
-        self.assertEqual(mismatch.json(), {"error": "session_agent_mismatch"})
-        self.assertFalse(session.agent_runs.exists())
 
     def test_agent_run_lifecycle_scheduling_gap_keeps_agent_run_input_without_forging_session_event(self):
         user = User.objects.create_user(username="schedule-gap@example.com", password="password")
@@ -721,9 +616,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
         workspace.members.add(user)
         model = ModelConfig.objects.create(id="schedule-gap-model", displayName="Fake")
         session = create_session(workspace=workspace, owner=user)
-        session.agent.instructions = "Keep the answer grounded."
-        session.agent.save(update_fields=["instructions", "updatedAt"])
-        publish_agent_test_policy(session.agent, model_config=model)
         self.client.force_login(user)
 
         with patch(
@@ -739,7 +631,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(response.status_code, 202)
         agent_run = AgentRun.objects.get(session=session)
         self.assertEqual(agent_run.prompt, "hello")
-        self.assertEqual(agent_run.agent_instructions, "Keep the answer grounded.")
+        self.assertEqual(agent_run.agent_instructions, "")
         self.assertEqual(agent_run.transitionReason, "agent_run_lifecycle_schedule_pending")
         self.assertTrue(AgentRunAuthorization.objects.filter(agent_run=agent_run).exists())
         self.assertFalse(SessionEvent.objects.filter(agent_run=agent_run).exists())
@@ -1948,7 +1840,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
             id="fake-model", displayName="Fake"
         )
         session = create_session(workspace=workspace, owner=user)
-        publish_agent_test_policy(session.agent, model_config=model)
         self.client.force_login(user)
         payload = {"text": "hello", "modelConfigRef": model.id}
 
@@ -2116,30 +2007,21 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
         workspace = Workspace.objects.create(name="默认工作区", createdBy=user)
         workspace.members.add(user)
-        Agent.objects.create(
-            id="centaeris",
-            workspace=workspace,
-            owner=user,
-            name="Centaeris",
-        )
         model = ModelConfig.objects.create(id="project-model", displayName="Fake")
-        publish_agent_test_policy(Agent.objects.get(id="centaeris"), model_config=model)
         self.client.force_login(user)
 
         created = self.client.post(
             f"/api/workspaces/{workspace.id}/session-projects",
-            data=json.dumps({"agentId": "centaeris", "name": "  Lumi  "}),
+            data=json.dumps({"name": "  Lumi  "}),
             content_type="application/json",
         )
 
         self.assertEqual(created.status_code, 201, created.content)
         project = created.json()["project"]
         self.assertEqual(project["name"], "Lumi")
-        self.assertEqual(project["agentId"], "centaeris")
         self.assertEqual(
             self.client.get(
                 f"/api/workspaces/{workspace.id}/session-projects",
-                {"agentId": "centaeris"},
             ).json()["projects"],
             [project],
         )
@@ -2156,7 +2038,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
                 {
                     "operationId": "test-operation-2061",
                     "text": "project child",
-                    "agentId": "centaeris",
                     "projectId": project["id"],
                     "modelConfigRef": model.id,
                 }
@@ -2173,7 +2054,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
 
         rejected = self.client.post(
             f"/api/workspaces/{workspace.id}/sessions",
-            data=json.dumps({"operationId": "test-operation-2082", "agentId": "centaeris", "projectId": "banana"}),
+            data=json.dumps({"operationId": "test-operation-2082", "projectId": "banana"}),
             content_type="application/json",
         )
         self.assertEqual(rejected.status_code, 404)
@@ -2220,13 +2101,11 @@ class ApiVerticalSliceTests(TransactionTestCase):
             {
                 "id": pinned.id,
                 "workspaceId": workspace.id,
-                "agentId": "centaeris",
                 "projectId": None,
                 "currentEnvironmentId": pinned.current_environment_id,
                 "executionMode": "perRun",
                 "title": "Renamed",
                 "origin": "user",
-                "initialInputOrigin": None,
                 "status": "active",
                 "deletedAt": None,
                 "isPinned": True,
@@ -2945,7 +2824,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         agentRunStart = fenced_start_fixture(agent_run)
         self.assertEqual(agentRunStart["schema"], "workspace.agent_run.start.v1")
         self.assertEqual(agentRunStart["initialInput"], {"type": "userMessage"})
-        self.assertEqual(agentRunStart["agentInstructions"], "Prefer primary sources.")
+        self.assertEqual(agentRunStart["sessionInstructions"], "Prefer primary sources.")
         self.assertEqual(agentRunStart["authorization"], authorization.payload)
         self.assertEqual(agentRunStart["authorizationDigest"], authorization.digest)
         self.assertEqual(agentRunStart["modelContextTokens"], model.contextTokens)
@@ -3911,7 +3790,6 @@ class ApiVerticalSliceTests(TransactionTestCase):
         session = create_session(
             workspace=workspace,
             owner=user,
-            agent_id="banana-agent",
         )
         advancedRun = AgentRun.objects.create(
             workspace=workspace,
@@ -3937,7 +3815,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
             prompt="hello",
         )
         authorization = create_agent_run_authorization(agent_run)
-        self.assertEqual(authorization.payload["agentId"], "banana-agent")
+        self.assertEqual(authorization.payload["sessionId"], session.id)
         self.assertEqual(
             authorization.payload["sessionWorkspace"],
             {
@@ -3958,7 +3836,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
 
     def test_agent_run_authorization_digest_is_stable(self):
         fixtures = (Path(__file__).resolve().parents[3]
-                    / "tests/workspace/fixtures/agent_run_authorization/v1")
+                    / "tests/workspace/fixtures/agent_run_authorization/v2")
         payload = json.loads((fixtures / "valid.json").read_text(encoding="utf-8"))
         expected = json.loads((fixtures / "expected.json").read_text(encoding="utf-8"))
         digest = authorization_digest(payload)
@@ -4485,46 +4363,9 @@ class McpBearerCredentialAcceptanceTests(TestCase):
             username="member@example.com",
             password="password",
         )
-        self.workspace = Workspace.objects.create(
-            name="Default", createdBy=self.member
-        )
-        self.workspace.members.add(self.member)
-        WorkspacePluginEnablement.objects.create(
-            workspace=self.workspace,
-            pluginName="banana",
-        )
-        self.model = ModelConfig.objects.create(id="fake-model", displayName="Fake")
-        self.session = create_session(
-            workspace=self.workspace,
-            owner=self.member,
-        )
-        self.agent_run = AgentRun.objects.create(
-            workspace=self.workspace,
-            session=self.session,
-            user=self.member,
-            modelConfig=self.model,
-            prompt="hello",
-        )
-        self.authorization = create_agent_run_authorization(self.agent_run)
 
-    def resolve(self, credential_ref: str):
-        return self.client.post(
-            "/internal/mcp-bearer-credentials/resolve",
-            data=json.dumps(
-                {
-                    "schema": "runtime.mcp_bearer_credential.resolve.v1",
-                    "agentRunId": self.agent_run.id,
-                    "authorizationRef": self.authorization.id,
-                    "authorizationDigest": self.authorization.digest,
-                    "pluginName": "banana",
-                    "credentialRef": credential_ref,
-                }
-            ),
-            content_type="application/json",
-            HTTP_X_INTERNAL_TOKEN="test-internal-token",
-        )
-
-    def test_superuser_manages_encrypted_bearer_bound_to_frozen_plugin(self):
+    def test_superuser_manages_encrypted_bearer_credentials(self):
+        from .credentials import decrypt_credential_secret
         self.client.force_login(self.member)
         self.assertEqual(
             self.client.get("/api/admin/mcp-bearer-credentials").status_code,
@@ -4553,15 +4394,7 @@ class McpBearerCredentialAcceptanceTests(TestCase):
         self.assertEqual(listed.status_code, 200)
         self.assertNotIn("test-secret", json.dumps(listed.json()))
 
-        resolved = self.resolve("banana-source")
-        self.assertEqual(resolved.status_code, 200)
-        self.assertEqual(
-            resolved.json(),
-            {
-                "schema": "runtime.mcp_bearer_credential.resolved.v1",
-                "token": "test-secret",
-            },
-        )
+        self.assertEqual(decrypt_credential_secret(stored.encrypted_secret), "test-secret")
 
         rotated = self.client.post(
             f"/api/admin/mcp-bearer-credentials/{credential_id}/rotate",
@@ -4570,25 +4403,25 @@ class McpBearerCredentialAcceptanceTests(TestCase):
         )
         self.assertEqual(rotated.status_code, 200)
         self.assertEqual(rotated.json()["credential"]["version"], 2)
-        self.assertEqual(
-            self.resolve("banana-source").json()["token"], "replacement-secret"
-        )
+        stored.refresh_from_db()
+        self.assertEqual(decrypt_credential_secret(stored.encrypted_secret), "replacement-secret")
+        self.assertNotIn("replacement-secret", json.dumps(rotated.json()))
 
         deleted = self.client.delete(
             f"/api/admin/mcp-bearer-credentials/{credential_id}"
         )
         self.assertEqual(deleted.status_code, 204)
-        self.assertEqual(self.resolve("banana-source").status_code, 404)
+        self.assertFalse(McpBearerCredential.objects.filter(pk=credential_id).exists())
         self.assertEqual(
             list(
                 McpCredentialAuditEvent.objects.order_by("created_at").values_list(
                     "action", flat=True
                 )
             ),
-            ["created", "resolved", "rotated", "resolved", "deleted"],
+            ["created", "rotated", "deleted"],
         )
 
-    def test_resolution_rejects_unfrozen_plugin_and_missing_internal_auth(self):
+    def test_invalid_bearer_secret_is_rejected_before_storage(self):
         self.client.force_login(self.admin)
         invalid = self.client.post(
             "/api/admin/mcp-bearer-credentials",
@@ -4603,49 +4436,14 @@ class McpBearerCredentialAcceptanceTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(invalid.status_code, 400)
-        created = self.client.post(
-            "/api/admin/mcp-bearer-credentials",
-            data=json.dumps(
-                {
-                    "pluginName": "banana",
-                    "credentialRef": "banana-source",
-                    "displayName": "Banana source",
-                    "secret": "test-secret",
-                }
-            ),
-            content_type="application/json",
-        )
-        self.assertEqual(created.status_code, 201)
-        unauthenticated = self.client.post(
-            "/internal/mcp-bearer-credentials/resolve",
-            data="{}",
-            content_type="application/json",
-        )
-        self.assertEqual(unauthenticated.status_code, 401)
-
-        WorkspacePluginEnablement.objects.all().delete()
-        other_run = AgentRun.objects.create(
-            workspace=self.workspace,
-            session=self.session,
-            user=self.member,
-            modelConfig=self.model,
-            prompt="hello again",
-        )
-        other_authorization = create_agent_run_authorization(other_run)
-        self.agent_run = other_run
-        self.authorization = other_authorization
-        rejected = self.resolve("banana-source")
-        self.assertEqual(rejected.status_code, 409)
-        self.assertEqual(
-            rejected.json(), {"error": "mcp_credential_authorization_invalid"}
-        )
+        self.assertFalse(McpBearerCredential.objects.exists())
 
 
 
 
 
 
-class ModelAdminAcceptanceTests(TestCase):
+class ModelAdminFixture:
     def setUp(self):
         self.admin = User.objects.create_superuser(
             username="admin@example.com", email="admin@example.com", password="password"
@@ -4678,7 +4476,7 @@ class ModelAdminAcceptanceTests(TestCase):
         )
 
 
-
+class ModelAdminAcceptanceTests(ModelAdminFixture, TestCase):
     def test_provider_first_configuration_creates_no_preset_models(self):
         self.client.force_login(self.admin)
         created = self.client.post(
@@ -4860,105 +4658,6 @@ class ModelAdminAcceptanceTests(TestCase):
             ["high", "max"],
         )
 
-    @patch("app_core.http.model_management.request_model_catalog")
-    def test_catalog_reconciliation_previews_and_revises_presets_without_rotating_key(
-        self, request_model_catalog
-    ):
-        def definition(name, context):
-            return {"model": name, "displayName": name, "contextTokens": context,
-                    "maxOutputTokens": 4096, "thinkingMode": None, "thinkingModes": [],
-                    "apiOverride": None, "apiBaseOverride": None}
-
-        provider = {"catalogId": "banana", "displayName": "Banana",
-                    "api": "openai-completions", "apiBase": "https://api.example.test/v1",
-                    "models": [definition("old", 64000), definition("keep", 64000)]}
-        request_model_catalog.return_value = {"providers": [provider]}
-        self.client.force_login(self.admin)
-        created = self.client.post(
-            "/api/admin/model-provider-templates/banana/instantiate",
-            data=json.dumps({"secret": "test-provider-secret"}), content_type="application/json",
-        )
-        self.assertEqual(created.status_code, 201)
-        provider_id = created.json()["provider"]["id"]
-        credential = ProviderCredential.objects.get(provider_id=provider_id)
-        version = credential.version
-        old = ModelConfig.objects.get(provider_id=provider_id, modelName="keep", isCurrent=True)
-
-        provider["displayName"] = "Banana API"
-        provider["api"] = "anthropic-messages"
-        provider["apiBase"] = "https://new.example.test/anthropic"
-        provider["models"] = [definition("keep", 128000), definition("new", 64000)]
-        workspace = Workspace.objects.create(name="Reconciliation", createdBy=self.admin)
-        workspace.members.add(self.admin)
-        agent = Agent.objects.create(workspace=workspace, owner=self.admin, name="Agent")
-        session = Session.objects.create(workspace=workspace, owner=self.admin, agent=agent)
-        retiring = ModelConfig.objects.get(provider_id=provider_id, modelName="old", isCurrent=True)
-        policy_version = publish_agent_test_policy(agent, model_config=retiring)
-        run = AgentRun.objects.create(workspace=workspace, session=session, user=self.admin,
-                                      modelConfig=retiring, prompt="Finish first",
-                                      definition_version=policy_version, agent_instructions=policy_version.instructions)
-        create_agent_run_authorization(run)
-        preview = self.client.get("/api/admin/model-catalog-reconciliation")
-        self.assertEqual(preview.status_code, 200)
-        self.assertFalse(preview.json()["blocked"])
-        self.assertEqual({change["action"] for change in preview.json()["providers"][0]["changes"]},
-                         {"rename_provider", "update_provider_route", "retire", "revise", "add"})
-        retired = next(change for change in preview.json()["providers"][0]["changes"]
-                       if change["action"] == "retire")
-        self.assertEqual(retired["activeAgentRunIds"], [run.id])
-        run.status = "completed"
-        run.save(update_fields=["status", "updatedAt"])
-        self.assertEqual(
-            self.client.get("/api/admin/model-catalog-reconciliation").json()["digest"],
-            preview.json()["digest"],
-        )
-        run.status = "queued"
-        run.save(update_fields=["status", "updatedAt"])
-        self.assertEqual(self.client.post(
-            "/api/admin/model-catalog-reconciliation",
-            data=json.dumps({"expectedDigest": "stale"}), content_type="application/json",
-        ).status_code, 409)
-        applied = self.client.post(
-            "/api/admin/model-catalog-reconciliation",
-            data=json.dumps({"expectedDigest": preview.json()["digest"]}),
-            content_type="application/json",
-        )
-        self.assertEqual(applied.status_code, 200)
-        self.assertEqual(applied.json()["providers"][0]["changes"], [])
-        self.assertEqual(set(ModelConfig.objects.filter(provider_id=provider_id, isCurrent=True)
-                             .values_list("modelName", flat=True)), {"keep", "new"})
-        revised = ModelConfig.objects.get(provider_id=provider_id, modelName="keep", isCurrent=True)
-        self.assertEqual(revised.familyId, old.familyId)
-        self.assertEqual(revised.revision, old.revision + 1)
-        old.refresh_from_db()
-        self.assertFalse(old.isCurrent)
-        run.refresh_from_db()
-        self.assertEqual(run.modelConfig_id, retiring.id)
-        from .model_adapter.common import resolve_model_route
-        self.assertEqual(resolve_model_route(run.modelConfig),
-                         ("openai-completions", "https://api.example.test/v1"))
-        self.assertEqual(ModelConfig.objects.get(provider_id=provider_id, modelName="keep",
-                                                 isCurrent=True).resolvedApi,
-                         "anthropic-messages")
-        credential.refresh_from_db()
-        self.assertEqual(credential.version, version)
-        updated_provider = ModelProvider.objects.get(id=provider_id)
-        self.assertEqual(updated_provider.displayName, "Banana API")
-        self.assertEqual(updated_provider.apiBase, "https://new.example.test/anthropic")
-        run.status = "completed"
-        run.save(update_fields=["status", "updatedAt"])
-        with patch("app_core.http.workspaces.schedule_agent_run_lifecycle"):
-            continued = self.client.post(
-                f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
-                data=json.dumps({"operationId": "test-operation-5027", "text": "Continue with the updated model", "agentId": agent.id,
-                                 "modelConfigRef": revised.id}),
-                content_type="application/json",
-            )
-        self.assertEqual(continued.status_code, 202)
-        next_run = AgentRun.objects.get(id=continued.json()["agentRunId"])
-        self.assertEqual(next_run.session_id, session.id)
-        self.assertEqual(next_run.modelConfig_id, revised.id)
-
     def test_model_display_name_is_optional_and_public_dto_falls_back_to_model_name(self):
         self.client.force_login(self.admin)
         created = self.client.post(
@@ -5060,7 +4759,6 @@ class ModelAdminAcceptanceTests(TestCase):
         workspace = Workspace.objects.create(name="Default", createdBy=self.admin)
         workspace.members.add(self.member)
         session = create_session(workspace=workspace, owner=self.member)
-        publish_agent_test_policy(session.agent, model_config=ModelConfig.objects.create(displayName="Available session model"))
         for modelRef in [modelId, "banana"]:
             rejected = self.client.post(
                 f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
@@ -5394,6 +5092,107 @@ class ModelAdminAcceptanceTests(TestCase):
         self.assertEqual(result["errorKeyword"], "provider_authentication_failed")
         self.assertNotIn("provider body with credential", json.dumps(result))
         self.assertEqual(client.chat.completions.create.call_args.kwargs["max_tokens"], 32)
+
+
+class ModelCatalogReconciliationTests(ModelAdminFixture, TransactionTestCase):
+    serialized_rollback = True
+
+    @patch("app_core.http.model_management.request_model_catalog")
+    def test_catalog_reconciliation_previews_and_revises_presets_without_rotating_key(
+        self, request_model_catalog
+    ):
+        def definition(name, context):
+            return {"model": name, "displayName": name, "contextTokens": context,
+                    "maxOutputTokens": 4096, "thinkingMode": None, "thinkingModes": [],
+                    "apiOverride": None, "apiBaseOverride": None}
+
+        provider = {"catalogId": "banana", "displayName": "Banana",
+                    "api": "openai-completions", "apiBase": "https://api.example.test/v1",
+                    "models": [definition("old", 64000), definition("keep", 64000)]}
+        request_model_catalog.return_value = {"providers": [provider]}
+        self.client.force_login(self.admin)
+        created = self.client.post(
+            "/api/admin/model-provider-templates/banana/instantiate",
+            data=json.dumps({"secret": "test-provider-secret"}), content_type="application/json",
+        )
+        self.assertEqual(created.status_code, 201)
+        provider_id = created.json()["provider"]["id"]
+        credential = ProviderCredential.objects.get(provider_id=provider_id)
+        version = credential.version
+        old = ModelConfig.objects.get(provider_id=provider_id, modelName="keep", isCurrent=True)
+
+        provider["displayName"] = "Banana API"
+        provider["api"] = "anthropic-messages"
+        provider["apiBase"] = "https://new.example.test/anthropic"
+        provider["models"] = [definition("keep", 128000), definition("new", 64000)]
+        workspace = Workspace.objects.create(name="Reconciliation", createdBy=self.admin)
+        workspace.members.add(self.admin)
+        session = create_session(workspace=workspace, owner=self.admin)
+        retiring = ModelConfig.objects.get(provider_id=provider_id, modelName="old", isCurrent=True)
+        run = AgentRun.objects.create(workspace=workspace, session=session, user=self.admin,
+                                      modelConfig=retiring, prompt="Finish first",
+                                      agent_instructions="")
+        create_agent_run_authorization(run)
+        preview = self.client.get("/api/admin/model-catalog-reconciliation")
+        self.assertEqual(preview.status_code, 200)
+        self.assertFalse(preview.json()["blocked"])
+        self.assertEqual({change["action"] for change in preview.json()["providers"][0]["changes"]},
+                         {"rename_provider", "update_provider_route", "retire", "revise", "add"})
+        retired = next(change for change in preview.json()["providers"][0]["changes"]
+                       if change["action"] == "retire")
+        self.assertEqual(retired["activeAgentRunIds"], [run.id])
+        run.status = "completed"
+        run.save(update_fields=["status", "updatedAt"])
+        self.assertEqual(
+            self.client.get("/api/admin/model-catalog-reconciliation").json()["digest"],
+            preview.json()["digest"],
+        )
+        run.status = "queued"
+        run.save(update_fields=["status", "updatedAt"])
+        self.assertEqual(self.client.post(
+            "/api/admin/model-catalog-reconciliation",
+            data=json.dumps({"expectedDigest": "stale"}), content_type="application/json",
+        ).status_code, 409)
+        applied = self.client.post(
+            "/api/admin/model-catalog-reconciliation",
+            data=json.dumps({"expectedDigest": preview.json()["digest"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(applied.status_code, 200)
+        self.assertEqual(applied.json()["providers"][0]["changes"], [])
+        self.assertEqual(set(ModelConfig.objects.filter(provider_id=provider_id, isCurrent=True)
+                             .values_list("modelName", flat=True)), {"keep", "new"})
+        revised = ModelConfig.objects.get(provider_id=provider_id, modelName="keep", isCurrent=True)
+        self.assertEqual(revised.familyId, old.familyId)
+        self.assertEqual(revised.revision, old.revision + 1)
+        old.refresh_from_db()
+        self.assertFalse(old.isCurrent)
+        run.refresh_from_db()
+        self.assertEqual(run.modelConfig_id, retiring.id)
+        from .model_adapter.common import resolve_model_route
+        self.assertEqual(resolve_model_route(run.modelConfig),
+                         ("openai-completions", "https://api.example.test/v1"))
+        self.assertEqual(ModelConfig.objects.get(provider_id=provider_id, modelName="keep",
+                                                 isCurrent=True).resolvedApi,
+                         "anthropic-messages")
+        credential.refresh_from_db()
+        self.assertEqual(credential.version, version)
+        updated_provider = ModelProvider.objects.get(id=provider_id)
+        self.assertEqual(updated_provider.displayName, "Banana API")
+        self.assertEqual(updated_provider.apiBase, "https://new.example.test/anthropic")
+        from .testing import release_simulated_run
+        release_simulated_run(self, run)
+        with patch("app_core.http.workspaces.schedule_agent_run_lifecycle"):
+            continued = self.client.post(
+                f"/api/workspaces/{workspace.id}/sessions/{session.id}/messages",
+                data=json.dumps({"operationId": "test-operation-5027", "text": "Continue with the updated model",
+                                 "modelConfigRef": revised.id}),
+                content_type="application/json",
+            )
+        self.assertEqual(continued.status_code, 202)
+        next_run = AgentRun.objects.get(id=continued.json()["agentRunId"])
+        self.assertEqual(next_run.session_id, session.id)
+        self.assertEqual(next_run.modelConfig_id, revised.id)
 
 
 class ModelProtocolAdapterTests(TestCase):
@@ -7026,7 +6825,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
     def test_new_session_first_message_atomically_creates_uploaded_asset_and_run(
         self, schedule_agent_run_lifecycle
     ):
-        publish_agent_test_policy(self.session.agent, model_config=self.model)
         self.client.force_login(self.member)
 
         response = self.client.post(
@@ -7034,7 +6832,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
             data={
                 "operationId": "test-operation-7102",
                 "text": "read the attached PDF",
-                "agentId": "centaeris",
                 "modelConfigRef": self.model.id,
                 "files": SimpleUploadedFile(
                     "policy.pdf",
@@ -7108,7 +6905,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
                 {
                     "operationId": "test-operation-7174",
                     "text": "must not create a session",
-                    "agentId": "centaeris",
                     "modelConfigRef": self.model.id,
                     "attachmentRefs": ["banana"],
                 }
@@ -7126,7 +6922,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         self.model.thinkingModes = ["low", "vendor-high"]
         self.model.thinkingMode = "vendor-high"
         self.model.save(update_fields=["thinkingModes", "thinkingMode"])
-        publish_agent_test_policy(self.session.agent, model_config=self.model, thinking_mode="vendor-high")
         self.client.force_login(self.member)
 
         rejected = self.client.post(
@@ -7134,7 +6929,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
             data=json.dumps({
                 "operationId": "test-operation-7199",
                 "text": "reject unknown effort",
-                "agentId": "centaeris",
                 "modelConfigRef": self.model.id,
                 "thinkingMode": "banana",
             }),
@@ -7148,7 +6942,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
             data=json.dumps({
                 "operationId": "test-operation-7212",
                 "text": "use selected effort",
-                "agentId": "centaeris",
                 "modelConfigRef": self.model.id,
                 "thinkingMode": "low",
             }),
@@ -7164,7 +6957,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
     def test_new_session_first_message_rolls_back_upload_when_authorization_fails(self):
         from .assets import delete_stored_object_for_gc
 
-        publish_agent_test_policy(self.session.agent, model_config=self.model)
         self.client.force_login(self.member)
         before = {
             "sessions": Session.objects.count(),
@@ -7190,7 +6982,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
                 data={
                     "operationId": "test-operation-7252",
                     "text": "must roll back",
-                    "agentId": "centaeris",
                     "modelConfigRef": self.model.id,
                     "files": SimpleUploadedFile(
                         "rollback.pdf",
@@ -7219,7 +7010,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         self.prepare_allowed_source_input(b"expected")
         with default_storage.open(self.allowedObject.storageKey, "wb") as output:
             output.write(b"tampered")
-        publish_agent_test_policy(self.session.agent, model_config=self.model)
         self.client.force_login(self.member)
 
         response = self.client.post(
@@ -7239,7 +7029,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         original = b"original"
         replacement = b"replacement"
         link = self.prepare_allowed_source_input(original)
-        publish_agent_test_policy(self.session.agent, model_config=self.model)
         self.client.force_login(self.member)
         response = self.client.post(
             f"/api/workspaces/{self.workspace.id}/sessions/{self.session.id}/messages",
@@ -7725,14 +7514,6 @@ class WorkspaceAssetAcceptanceTests(TestCase):
 
     def test_deleted_resource_gc_expires_all_trash_domains_after_thirty_days(self):
         deleted_at = timezone.now() - timedelta(days=31)
-        agent = Agent.objects.create(
-            workspace=self.workspace,
-            owner=self.member,
-            name="Expired Agent",
-        )
-        agent.status = "deleted"
-        agent.deletedAt = deleted_at
-        agent.save(update_fields=["status", "deletedAt", "updatedAt"])
         self.session.status = "deleted"
         self.session.deletedAt = deleted_at
         self.session.save(update_fields=["status", "deletedAt", "updatedAt"])
@@ -7757,17 +7538,15 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         output = io.StringIO()
         call_command("gc_deleted_resources", stdout=output)
 
-        agent.refresh_from_db()
         self.session.refresh_from_db()
         self.source.refresh_from_db()
         library.refresh_from_db()
         self.allowedObject.refresh_from_db()
-        self.assertIsNotNone(agent.purgedAt)
         self.assertIsNotNone(self.session.purgedAt)
         self.assertIsNotNone(self.source.purgedAt)
         self.assertIsNotNone(library.purgedAt)
         self.assertEqual(self.allowedObject.status, "deleted")
-        self.assertIn("Expired 1 agents, 1 sessions, 1 sources, 1 library objects", output.getvalue())
+        self.assertIn("Expired 1 sessions, 1 sources, 1 library objects", output.getvalue())
 
     def test_deleted_resource_gc_records_failure_and_retries_original_storage(self):
         storageKey, sizeBytes, sha256 = self.store_bytes("gc/retry.txt", b"retry")
@@ -8021,10 +7800,11 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         listed = async_to_sync(call_material_tool)(token, "list_materials", {})
         self.assertEqual(listed.status_code, 200, listed.text)
         self.assertEqual([item["inputRef"] for item in listed.json()["result"]["structuredContent"]["items"]], [link.id])
-        pending = async_to_sync(call_material_tool)(token, "read_material", {"input_ref": link.id})
+        pending = async_to_sync(call_material_tool)(token, "read_material", {"input_ref": link.id, "delivery": "content"})
         self.assertEqual(pending.json()["result"]["structuredContent"]["disposition"], "pending")
-        denied = async_to_sync(call_material_tool)(token, "read_material", {"input_ref": "foreign"})
+        denied = async_to_sync(call_material_tool)(token, "read_material", {"input_ref": "foreign", "delivery": "content"})
         self.assertTrue(denied.json()["result"]["isError"])
+        self.assertEqual(denied.json()["result"]["content"][0]["text"], "knowledge_input_not_authorized")
         SourceGrant.objects.filter(source=self.source).delete()
         revoked = async_to_sync(call_material_tool)(token, "list_materials", {})
         self.assertTrue(revoked.json()["result"]["isError"])
@@ -8115,9 +7895,9 @@ class WorkspaceAssetAcceptanceTests(TestCase):
             response = async_to_sync(call_material_tool)(token, name, args)
             self.assertEqual(response.status_code, 200, response.text)
             return response.json()["result"]
-        first = call(tokens[0], "read_material", {"input_ref": link.id})["structuredContent"]["operations"][0]
-        replay = call(tokens[0], "read_material", {"input_ref": link.id})["structuredContent"]["operations"][0]
-        second = call(tokens[1], "read_material", {"input_ref": link.id})["structuredContent"]["operations"][0]
+        first = call(tokens[0], "read_material", {"input_ref": link.id, "delivery": "content"})["structuredContent"]["operations"][0]
+        replay = call(tokens[0], "read_material", {"input_ref": link.id, "delivery": "content"})["structuredContent"]["operations"][0]
+        second = call(tokens[1], "read_material", {"input_ref": link.id, "delivery": "content"})["structuredContent"]["operations"][0]
         self.assertEqual(first, replay)
         self.assertNotEqual(first["operationId"], second["operationId"])
         self.assertEqual(MaterialProcessingTask.objects.count(), 1)
@@ -8190,7 +7970,8 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         from .material_contract import KnowledgeError
         from .material_operations import create_operations
         from .material_leases import claim
-        from .material_reads import read_materials, search_materials
+        from .material_reads import read_materials
+        from .material_library_search import search_library_materials
         from .platform_material_commit import ProcessingOutput, commit_processing_output
         operation_access = authorize_material_access(MaterialAccessContext(agent_run.id, authorization.digest, specification, specDigest))
         pending = read_materials(operation_access, [inputBinding], offset=0, limit=20)
@@ -8274,8 +8055,8 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         self.assertEqual(locator["pageEnd"], 2)
         self.assertNotIn("page", locator)
 
-        searched = search_materials(operation_access, [inputBinding], query="policy",
-                                    ranking="relevance", date_range=None, limit=8)
+        searched = search_library_materials(operation_access, scope="attached", input_refs=[link.id],
+                                            query="policy", ranking="relevance", limit=8)
         self.assertEqual(len(searched["hits"]), 1)
         self.assertNotIn("storageKey", json.dumps(searched))
         hit = searched["hits"][0]
@@ -8285,7 +8066,7 @@ class WorkspaceAssetAcceptanceTests(TestCase):
         from .platform_mcp_auth import issue_credential
         from .test_platform_mcp import call_material_tool
         token = issue_credential(MaterialAccessContext(agent_run.id, authorization.digest, specification, specDigest))["accessToken"]
-        mcp_read = async_to_sync(call_material_tool)(token, "read_material", {"input_ref": link.id, "offset": 0, "limit": 20})
+        mcp_read = async_to_sync(call_material_tool)(token, "read_material", {"input_ref": link.id, "delivery": "content", "offset": 0, "limit": 20})
         self.assertEqual(mcp_read.json()["result"]["structuredContent"]["items"], ready["items"])
         mcp_search = async_to_sync(call_material_tool)(token, "search_materials", {"query": "policy", "limit": 8})
         self.assertEqual(mcp_search.json()["result"]["structuredContent"]["hits"], searched["hits"])

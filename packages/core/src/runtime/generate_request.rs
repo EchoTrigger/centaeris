@@ -1,5 +1,7 @@
 use super::driver::AsyncGenerateDriverPromptCompactionCandidateProducer;
 use super::*;
+use crate::execution::ExecutionFileSystemErrorKind;
+use crate::tool::layer::ExecutionModelInputImageError;
 
 type ResolvedModelInputImages = (
     Vec<ModelMessageV1>,
@@ -175,12 +177,24 @@ impl<
         &self,
         session: &SessionStateSnapshot,
     ) -> Result<(Vec<ModelToolDefinition>, String), String> {
-        tool_projection::build_generate_tool_projection(
+        let (mut definitions, guidance) = tool_projection::build_generate_tool_projection(
             session,
             self.tools_port.dynamic_tool_registry(),
             self.config.allowed_tools.as_deref(),
             self.tools_port.execution_host_kind(),
-        )
+        )?;
+        if self.config.question_input == question::QuestionInputCapability::PersistentResponses
+            && self.config.allowed_tools.is_none()
+        {
+            if definitions
+                .iter()
+                .any(|tool| tool.name == question::TOOL_NAME)
+            {
+                return Err("reserved_user_input_tool_collision".into());
+            }
+            definitions.push(question::tool_definition());
+        }
+        Ok((definitions, guidance))
     }
 
     #[cfg(test)]
@@ -879,12 +893,27 @@ impl<
                 };
                 (content_type, placeholder, input_ref.as_str(), resolved)
             }
-            ModelInputImageSourceRefV1::ExecutionFile { image } => (
-                &image.content_type,
-                &image.placeholder,
-                image.path.as_str(),
-                self.tools_port.resolve_execution_model_input_image(image),
-            ),
+            ModelInputImageSourceRefV1::ExecutionFile { image } => {
+                let resolved = match self.tools_port.resolve_execution_model_input_image(image) {
+                    Ok(bytes) => Ok(bytes),
+                    Err(error) => {
+                        if matches!(&error, ExecutionModelInputImageError::FileSystem(failure)
+                            if failure.kind == ExecutionFileSystemErrorKind::HostUnavailable)
+                        {
+                            // Host admission/transport failure is not a missing historical source.
+                            // Do not send a model request with pixels omitted for this failure.
+                            return Err(error.to_string());
+                        }
+                        Err(error.to_string())
+                    }
+                };
+                (
+                    &image.content_type,
+                    &image.placeholder,
+                    image.path.as_str(),
+                    resolved,
+                )
+            }
         };
         Ok(match resolved {
             Ok(bytes) => ResolvedImageSource::Available(content_type.clone(), placeholder.clone(), bytes),

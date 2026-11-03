@@ -12,6 +12,9 @@ from .note_content import StoredObject
 
 class MaterialAccessContractTests(SimpleTestCase):
     def setUp(self):
+        scope = patch("app_core.library_materials.personal_library_allowed", return_value=False)
+        scope.start()
+        self.addCleanup(scope.stop)
         self.identity = {
             "ownerKind": "sourceObject", "ownerId": "source_1",
             "generation": 3, "sha256": "sha256:" + "a" * 64,
@@ -39,7 +42,6 @@ class MaterialAccessContractTests(SimpleTestCase):
             "specification": patch.object(access, "processing_spec_digest", return_value=self.spec_digest),
             "batch": patch.object(access, "input_storage_batch"),
             "links": patch.object(access.SessionAssetLink.objects, "select_related"),
-            "supplements": patch.object(access, "delivered_attachments", return_value=[]),
         }
         for name, patcher in patches.items():
             setattr(self, name, patcher.start())

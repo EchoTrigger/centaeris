@@ -206,8 +206,9 @@ class IsolationTests(unittest.TestCase):
                 self.assertEqual(values['RUNTIME_RUNSC_IDLE_PAUSE_MS'], '' if expected == 'runc' else '3000')
                 command, env = control.compose_command(control.ROOT, path, ['config', '--format', 'json'])
                 services = json.loads(control.run(command, env=env))['services']
-                for name in ('runtime', 'material-worker'):
-                    self.assertEqual(services[name]['environment']['OCI_RUNTIME'], expected)
+                self.assertEqual(services['runtime']['environment']['OCI_RUNTIME'], expected)
+                self.assertEqual(services['material-worker']['environment']['MATERIAL_PROCESSOR_RUNTIME'],
+                                 values['MATERIAL_PROCESSOR_RUNTIME'])
 
     def test_init_rejects_invalid_runtime_without_creating_an_environment(self):
         for value in ('', 'RUNSC', ' runsc ', 'unknown'):

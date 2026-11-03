@@ -1,3 +1,4 @@
+use sha2::Digest as _;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -6,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::execution::{
-    classify_execution_host_failure, ExecutionCancellationProbe, ExecutionFileSystemErrorKind,
-    ExecutionFileSystemOperation, ExecutionFileSystemOutput, ExecutionHostBinding,
-    ExecutionHostFailureKind, ExecutionHostKind, ExecutionHostMode,
+    classify_execution_host_failure, ExecutionCancellationProbe, ExecutionFileSystemError,
+    ExecutionFileSystemErrorKind, ExecutionFileSystemOperation, ExecutionFileSystemOutput,
+    ExecutionHostBinding, ExecutionHostFailureKind, ExecutionHostKind, ExecutionHostMode,
 };
 use crate::execution::{ExecutionPolicy, FileSystemPolicy, NetworkPolicy};
 use crate::extension::skills::{SkillCatalogLoadConfig, SkillIndex};
@@ -53,6 +54,35 @@ pub struct ToolInvocationRequest {
     pub tool_call_id: String,
     pub tool_name: String,
     pub args_json: String,
+}
+
+#[derive(Debug)]
+pub enum ExecutionModelInputImageError {
+    SourceUnavailable(String),
+    FileSystem(ExecutionFileSystemError),
+}
+
+impl std::fmt::Display for ExecutionModelInputImageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceUnavailable(message) => formatter.write_str(message),
+            Self::FileSystem(error) => {
+                write!(
+                    formatter,
+                    "resolve execution model input image failed: {error}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExecutionModelInputImageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::SourceUnavailable(_) => None,
+            Self::FileSystem(error) => Some(error),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -860,34 +890,60 @@ impl ToolLayer {
     pub fn resolve_execution_model_input_image(
         &self,
         reference: &ExecutionModelInputImageRefV1,
-    ) -> Result<Vec<u8>, String> {
-        reference.validate()?;
-        let binding = self.runtime_context.execution_host_binding()?;
+    ) -> Result<Vec<u8>, ExecutionModelInputImageError> {
+        reference
+            .validate()
+            .map_err(ExecutionModelInputImageError::SourceUnavailable)?;
+        let binding = self
+            .runtime_context
+            .execution_host_binding()
+            .map_err(ExecutionModelInputImageError::SourceUnavailable)?;
+        let consumer_id = format!(
+            "image:{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(reference).map_err(|error| {
+                ExecutionModelInputImageError::SourceUnavailable(error.to_string())
+            })?)
+        );
         let output = binding
-            .run_file_system_operation(
+            .run_file_system_operation_for_consumer(
                 reference.path.as_str(),
                 ExecutionFileSystemOperation::ReadFile {
                     max_bytes: MODEL_INPUT_IMAGE_MAX_BYTES,
                 },
+                Some(&consumer_id),
             )
-            .map_err(|error| format!("resolve execution model input image failed: {error}"))?;
+            .map_err(ExecutionModelInputImageError::FileSystem)?;
         let ExecutionFileSystemOutput::ReadFile(output) = output else {
-            return Err(
+            return Err(ExecutionModelInputImageError::SourceUnavailable(
                 "resolve execution model input image returned an unexpected result".to_string(),
-            );
+            ));
         };
         if output.file_hash != reference.sha256 {
-            return Err("execution_model_input_image_hash_mismatch".to_string());
+            return Err(ExecutionModelInputImageError::SourceUnavailable(
+                "execution_model_input_image_hash_mismatch".to_string(),
+            ));
         }
-        let (content_type, width_px, height_px) = inspect_model_input_image(&output.bytes)?;
+        let (content_type, width_px, height_px) = inspect_model_input_image(&output.bytes)
+            .map_err(ExecutionModelInputImageError::SourceUnavailable)?;
         if content_type != reference.content_type
             || output.bytes.len() as u64 != reference.byte_length
             || width_px != reference.width_px
             || height_px != reference.height_px
         {
-            return Err("execution_model_input_image_metadata_mismatch".to_string());
+            return Err(ExecutionModelInputImageError::SourceUnavailable(
+                "execution_model_input_image_metadata_mismatch".to_string(),
+            ));
         }
+        // The durable image reference defines reconstruction: read the same source
+        // and validate its original hash, or retain the existing unavailable result.
+        binding.consume_execution_outputs(&consumer_id, &consumer_id);
         Ok(output.bytes)
+    }
+
+    pub(crate) fn consume_tool_execution_outputs(&self, call_id: &str, receipt_id: &str) {
+        if let Some(binding) = self.runtime_context.execution_host_binding.as_ref() {
+            binding.consume_execution_outputs(&format!("tool:{call_id}"), receipt_id);
+        }
     }
 
     pub fn execution_host_kind(&self) -> Option<ExecutionHostKind> {

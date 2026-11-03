@@ -10,7 +10,7 @@ use std::{
     process::{ChildStdin, Command, Stdio},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc, Mutex, Weak,
     },
     thread,
     time::{Duration, Instant},
@@ -156,6 +156,8 @@ struct Manager {
     journal: Journal,
     live: BTreeMap<String, Live>,
     logs: BTreeMap<String, Arc<Mutex<OutputLog>>>,
+    output_readers: BTreeMap<String, Weak<()>>,
+    consumed_after: String,
     container_absent: bool,
     stop_reaper: bool,
     drain_workers: Arc<AtomicUsize>,
@@ -215,6 +217,8 @@ impl Manager {
             journal,
             live: BTreeMap::new(),
             logs,
+            output_readers: BTreeMap::new(),
+            consumed_after: String::new(),
             container_absent: false,
             stop_reaper: false,
             drain_workers: Arc::new(AtomicUsize::new(0)),
@@ -267,6 +271,32 @@ impl Manager {
         cursor: u64,
         max: usize,
     ) -> Result<EnvironmentTaskResult, String> {
+        // Active hot tasks cannot have a consumption receipt. Keep their
+        // high-frequency Query path entirely in memory.
+        let can_be_consumed = self.journal.tasks.get(id).is_none_or(|record| {
+            record.snapshot.state == EnvironmentTaskState::Exited
+                && record.snapshot.cleanup_complete
+                && record.snapshot.output_complete
+        });
+        if can_be_consumed {
+            if let Some(consumption) = store::output_consumption(&self.storage.control_root, id)? {
+                let task = self
+                    .journal
+                    .tasks
+                    .get(id)
+                    .cloned()
+                    .or(store::task(&self.storage.control_root, id)?)
+                    .ok_or("task_not_found")?
+                    .snapshot;
+                if !consumption.reclaimed {
+                    self.release_consumed_output(id)?;
+                }
+                return Ok(EnvironmentTaskResult::OutputConsumed {
+                    task,
+                    consumer_receipt_id: consumption.consumer_receipt_id,
+                });
+            }
+        }
         if !self.journal.tasks.contains_key(id) {
             let task = store::task(&self.storage.control_root, id)?
                 .ok_or("task_not_found")?
@@ -317,6 +347,112 @@ impl Manager {
         self.persist()?;
         Ok(None)
     }
+    fn release_consumed_output(&mut self, id: &str) -> Result<(), String> {
+        let consumption = store::output_consumption(&self.storage.control_root, id)?
+            .ok_or("task_output_not_consumed")?;
+        if consumption.reclaimed {
+            return Ok(());
+        }
+        if self.live.contains_key(id)
+            || self
+                .logs
+                .get(id)
+                .is_some_and(|log| Arc::strong_count(log) > 1)
+            || self
+                .output_readers
+                .get(id)
+                .and_then(Weak::upgrade)
+                .is_some()
+        {
+            return Err("task_output_in_use".into());
+        }
+        self.logs.remove(id);
+        let mut roots = vec![self.storage.output_root.clone()];
+        let mut paths = vec![self.storage.output_root.join(format!("{id}.output"))];
+        if let Some(root) = &self.helper_root {
+            roots.push(root.clone());
+            paths.extend([
+                root.join(format!("{id}.stdout")),
+                root.join(format!("{id}.stderr")),
+            ]);
+        }
+        for path in paths {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err("task_output_reclamation_pending".into()),
+            }
+        }
+        for root in roots {
+            File::open(root)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| "task_output_reclamation_pending")?;
+        }
+        store::mark_output_reclaimed(&self.storage.control_root, id)?;
+        self.output_readers.remove(id);
+        Ok(())
+    }
+    fn collect_consumed_output(&mut self) -> Result<(), String> {
+        let mut ids = store::consumed_outputs(&self.storage.control_root, &self.consumed_after)?;
+        if ids.is_empty() && !self.consumed_after.is_empty() {
+            self.consumed_after.clear();
+            ids = store::consumed_outputs(&self.storage.control_root, "")?;
+        }
+        for id in ids {
+            self.consumed_after.clone_from(&id);
+            match self.release_consumed_output(&id) {
+                Ok(()) => {}
+                Err(error) if error == "task_output_in_use" => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+    fn consume_output(
+        &mut self,
+        fence: &EnvironmentTaskFence,
+        id: &str,
+        consumer_receipt_id: &str,
+    ) -> Result<EnvironmentTaskResult, String> {
+        self.journal.check(fence)?;
+        let record = self
+            .journal
+            .tasks
+            .get(id)
+            .cloned()
+            .or(store::task(&self.storage.control_root, id)?)
+            .ok_or("task_not_found")?;
+        if record.creator_owner != fence.controller_owner {
+            return Err("task_output_consumer_denied".into());
+        }
+        if record.snapshot.state != EnvironmentTaskState::Exited
+            || !record.snapshot.cleanup_complete
+            || !record.snapshot.output_complete
+        {
+            return Err("task_output_not_consumable".into());
+        }
+        let existing = store::output_consumption(&self.storage.control_root, id)?;
+        if let Some(existing) = existing {
+            if existing.consumer_receipt_id != consumer_receipt_id {
+                return Err("task_output_consumption_conflict".into());
+            }
+            if !existing.reclaimed {
+                self.release_consumed_output(id)?;
+            }
+        } else {
+            self.persist()?;
+            if !store::output_operations_complete(&self.storage.control_root, id)? {
+                return Err("task_output_not_consumable".into());
+            }
+            self.journal.preflight(1024)?;
+            store::consume_output(&self.storage.control_root, id, consumer_receipt_id)?;
+            self.release_consumed_output(id)?;
+        }
+        Ok(EnvironmentTaskResult::OutputConsumed {
+            task: record.snapshot,
+            consumer_receipt_id: consumer_receipt_id.into(),
+        })
+    }
     fn collect_closed_history(&mut self) -> Result<(), String> {
         let current = self
             .journal
@@ -328,7 +464,13 @@ impl Manager {
         while let Some((id, _)) = store::next_closed(&self.storage.control_root, &after, &current)?
         {
             after = id.clone();
-            if self.live.contains_key(&id) {
+            if self.live.contains_key(&id)
+                || self
+                    .output_readers
+                    .get(&id)
+                    .and_then(Weak::upgrade)
+                    .is_some()
+            {
                 continue;
             }
             self.logs.remove(&id);
@@ -478,6 +620,7 @@ impl Manager {
                 m.persist()?;
                 m.retire_history(fence.controller_epoch)?;
                 m.collect_closed_history()?;
+                m.collect_consumed_output()?;
                 Ok(EnvironmentTaskResult::TakenOver { fence })
             }
             EnvironmentTaskRequest::Query {
@@ -489,6 +632,11 @@ impl Manager {
                 m.journal.check(&fence)?;
                 m.query(&task_id, cursor, max_bytes as usize)
             }
+            EnvironmentTaskRequest::ConsumeOutput {
+                fence,
+                task_id,
+                consumer_receipt_id,
+            } => m.consume_output(&fence, &task_id, &consumer_receipt_id),
             EnvironmentTaskRequest::List { fence } => {
                 m.journal.check(&fence)?;
                 let ids: Vec<_> = m.journal.tasks.keys().cloned().collect();
@@ -534,6 +682,8 @@ impl Manager {
                     return Err("task_invalid_cwd".into());
                 }
                 m.retire_history(fence.controller_epoch)?;
+                m.collect_closed_history()?;
+                m.collect_consumed_output()?;
                 m.journal.check_admission()?;
                 let snapshot = EnvironmentTaskSnapshot {
                     task_id: id.clone(),

@@ -26,11 +26,10 @@ NAVIGATION_CHUNK_BYTES = 65536
 @dataclass(frozen=True)
 class PresentationScope:
     workspace_id: str
-    agent_id: str
     session_id: str | None = None
 
     def wire(self):
-        return {"workspaceId": self.workspace_id, "agentId": self.agent_id, "sessionId": self.session_id}
+        return {"workspaceId": self.workspace_id, "sessionId": self.session_id}
 
 
 def _water(value):
@@ -54,7 +53,7 @@ def parse_cursor(scope, cursor):
             raise ValueError()
         raw = cursor[3:]
         body = json.loads(base64.b64decode(raw + "=" * (-len(raw) % 4), altchars=b"-_", validate=True))
-        if (not isinstance(body, dict) or set(body) != {"schema", "workspaceId", "agentId", "sessionId", "projectionGeneration", "sourceHighWater"}
+        if (not isinstance(body, dict) or set(body) != {"schema", "workspaceId", "sessionId", "projectionGeneration", "sourceHighWater"}
                 or body["schema"] != CURSOR_SCHEMA or any(body[key] != value for key, value in scope.wire().items())
                 or encode_cursor(scope, body["projectionGeneration"], body["sourceHighWater"]) != cursor):
             raise ValueError()
@@ -152,6 +151,8 @@ async def _produce(scope, loader, cursor, read_timeout):
         reset_reason = "cursorInvalid"
     navigation = None
     last_state = None
+    last_activity = None
+    last_question = object()
     last_live = object()
     last_versions = None
     last_view_revision = None
@@ -216,11 +217,26 @@ async def _produce(scope, loader, cursor, read_timeout):
             if not _water(target):
                 raise RuntimeError("presentation_authority_water_invalid")
             changed = state != last_state or needs_snapshot
+            activity = state["activity"]
+            if activity not in {None, "thinking", "working", "waitingInput", "retrying", "preserving"}:
+                raise RuntimeError("presentation_activity_invalid")
+            activity_identity = None if state["agentRun"] is None else (state["agentRun"]["agentRunId"], target, activity)
+            activity_changed = (activity_identity is not None and activity_identity != last_activity
+                and (activity is not None or last_activity is not None))
+            last_activity = activity_identity
+            question = state["question"]
+            question_identity = None if state["agentRun"] is None else (state["agentRun"]["agentRunId"], question)
+            question_changed = question_identity != last_question
+            last_question = question_identity
             if changed:
                 # This authority observation is useful even if the Runtime read
                 # then fails. It has no id and cannot acknowledge missing text.
                 yield _encode(scope, "checkpoint", projectionGeneration=generation,
                               sourceHighWater=target, agentRun=state["agentRun"])
+                if activity_changed:
+                    yield _encode(scope, "activity", agentRunId=activity_identity[0], sourceHighWater=target, activity=activity)
+                if question_changed and question_identity is not None and state["agentRun"]["status"] in {"queued", "running"}:
+                    yield _encode(scope, "question", agentRunId=question_identity[0], sourceHighWater=target, question=question)
                 if int(water) > int(target):
                     reset_reason, needs_snapshot = "cursorInvalid", True
                 if not needs_snapshot:

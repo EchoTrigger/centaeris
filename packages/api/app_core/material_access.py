@@ -9,7 +9,6 @@ Input resolution retains current permission, signature and source identity check
 from dataclasses import dataclass
 
 from .assets import DeferredInputResolutionError
-from .agent_input_attachments import delivered_attachments
 from .deferred_input import DeferredInputBindingError, input_storage_batch
 from .material_contract import BoundInput, KnowledgeError
 from .material_identity import processing_spec_digest, representation_id
@@ -36,7 +35,7 @@ class MaterialAccess:
 
 def authorize_material_access(context: MaterialAccessContext) -> MaterialAccess:
     try:
-        agent_run = AgentRun.objects.select_related("authorization", "user", "environment").get(id=context.agent_run_id)
+        agent_run = AgentRun.objects.select_related("authorization", "user", "environment", "session").get(id=context.agent_run_id)
     except (KeyError, AgentRun.DoesNotExist) as error:
         raise KnowledgeError("knowledge_agent_run_not_found", 404) from error
     if not agent_run_membership_is_current(agent_run):
@@ -56,10 +55,6 @@ def authorize_material_access(context: MaterialAccessContext) -> MaterialAccess:
 
 def declared_inputs_for_run(agent_run):
     declared = {item["inputRef"]: item for item in agent_run.authorization.payload["assetRefs"]}
-    for capture in delivered_attachments(agent_run):
-        if capture["inputRef"] in declared and declared[capture["inputRef"]] != capture:
-            raise KnowledgeError("knowledge_input_binding_invalid")
-        declared[capture["inputRef"]] = capture
     return declared
 
 
@@ -84,7 +79,23 @@ def bind_inputs(agent_run, digest: str, requests: list, spec_digest: str) -> lis
     for request in requests:
         declared = declared_by_ref.get(request["inputRef"])
         if declared is None:
-            raise KnowledgeError("knowledge_input_not_authorized", 403)
+            from .library_materials import personal_library_allowed
+            if not personal_library_allowed(agent_run):
+                raise KnowledgeError("knowledge_input_not_authorized", 403)
+            from .library_materials import resolve_library_input, input_identity
+            try:
+                library = resolve_library_input(agent_run, request["inputRef"])
+            except DeferredInputResolutionError as error:
+                raise KnowledgeError(error.errorCode, 403) from error
+            if library is None:
+                raise KnowledgeError("knowledge_input_not_authorized", 403)
+            resolved, source, owner = library
+            identity = input_identity(resolved)
+            expected = representation_id(identity, spec_digest)
+            if request["representationId"] != expected:
+                raise KnowledgeError("knowledge_representation_binding_mismatch")
+            bound.append(BoundInput(resolved, source, owner, identity, expected))
+            continue
         identity = declared["inputIdentity"]
         expected = representation_id(identity, spec_digest)
         if request["representationId"] != expected:
@@ -101,6 +112,12 @@ def bind_inputs(agent_run, digest: str, requests: list, spec_digest: str) -> lis
 
 
 def _input_owner(agent_run, input_ref: str, resolved: dict):
+    from .models import UserLibraryObject
+    if resolved.get("ownerKind") == "userLibraryObject":
+        try:
+            return UserLibraryObject.objects.get(pk=resolved["objectRef"], owner_id=agent_run.user_id)
+        except UserLibraryObject.DoesNotExist:
+            raise KnowledgeError("knowledge_input_not_authorized", 403) from None
     try:
         link = SessionAssetLink.objects.select_related(
             "sourceObject", "userLibraryObject", "artifact"

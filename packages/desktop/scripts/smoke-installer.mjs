@@ -113,13 +113,6 @@ try {
   assert.equal(await fs.stat(path.join(installDirectory, "old-installation-marker.txt")).then(() => true, () => false), false);
   assert.equal(await fs.readFile(sentinel, "utf8"), "preserve installed user data");
 
-  console.log("[installer-smoke] launch installed Desktop and verify session/config persistence");
-  result = await run(process.execPath, [path.join(import.meta.dirname, "smoke-window.mjs")], {
-    env: { ...environment, CENTAERIS_ELECTRON_SMOKE_EXE: applicationExe },
-  });
-  assert.equal(result.code, 0, result.output);
-  console.log(result.output);
-
   console.log("[installer-smoke] uninstall and reinstall while retaining user data");
   await uninstall();
   result = await install();
@@ -139,7 +132,7 @@ try {
   transport = null;
   await delay(8_000);
   await uninstall();
-  console.log(JSON.stringify({ ok: true, checked: ["install", "perUserRegistration", "applicationVersion", "busyRuntimePreserved", "replacement", "installedWindow", "sessionPersistence", "uninstall", "reinstall", "userDataRetained", "unicodePath"] }));
+  console.log(JSON.stringify({ ok: true, checked: ["install", "perUserRegistration", "applicationVersion", "busyRuntimePreserved", "replacement", "sessionPersistence", "uninstall", "reinstall", "userDataRetained", "unicodePath"] }));
 } finally {
   if (transport) { await transport.requestAppExit(); await delay(8_000); }
   if (installed) await uninstall();

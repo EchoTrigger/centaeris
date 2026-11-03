@@ -14,10 +14,13 @@ node scripts/workspace/core-source.mjs
 python scripts/ci.py Rust
 python scripts/workspace/ci.py --stage Rust
 python scripts/workspace/ci.py --stage Web
-python scripts/workspace/ci.py --stage Python
+python scripts/workspace/ci.py --stage Contracts
+python scripts/workspace/ci.py --stage RuntimePostgres
+python scripts/workspace/ci.py --stage ApiPostgres
+python scripts/workspace/ci.py --stage Support
 ```
 
-The Python gate requires TEST_POSTGRES_* to identify a disposable database.
+The PostgreSQL gates require TEST_POSTGRES_* to identify a disposable database.
 The default hosted CI entry runs all retained hosted checks. Use python3 on
 systems without a python alias. No uv installation is performed by local Rust
 or Desktop/TUI build entries.

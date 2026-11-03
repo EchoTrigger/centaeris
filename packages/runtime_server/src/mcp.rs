@@ -319,7 +319,7 @@ impl McpCredentialResolver {
             .await
             .map_err(|_| "decode MCP connector authorization response failed".to_string())?;
         if resolved.schema != "runtime.mcp_connector.authorized.v1"
-            || !matches!(resolved.scope.as_str(), "private" | "managed")
+            || resolved.scope != "workspace"
             || !valid_binding_digest(&resolved.binding_digest)
             || resolved
                 .token
@@ -616,7 +616,7 @@ mod tests {
     }
 
     fn authorized_reply(digest: char, token: Option<&str>) -> serde_json::Value {
-        json!({"schema":"runtime.mcp_connector.authorized.v1", "scope":"managed",
+        json!({"schema":"runtime.mcp_connector.authorized.v1", "scope":"workspace",
             "bindingDigest": format!("sha256:{}", digest.to_string().repeat(64)), "token":token})
     }
 
@@ -1429,7 +1429,7 @@ mod tests {
     async fn connector_uses_current_authorization_api() {
         let (url, requests, task) = fake_authorization_api(vec![(
             axum::http::StatusCode::OK,
-            json!({"schema":"runtime.mcp_connector.authorized.v1", "scope":"managed",
+            json!({"schema":"runtime.mcp_connector.authorized.v1", "scope":"workspace",
                 "bindingDigest":format!("sha256:{}", "a".repeat(64)), "token":"test-secret"}),
         )])
         .await;

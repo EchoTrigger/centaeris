@@ -279,6 +279,8 @@ def _load_terminal_sequence(agent_run_id: str) -> int | None:
 def advance_overlay_barrier(barriers: dict[str, int], event: dict, sequence: int) -> None:
     if event.get("type") not in OVERLAY_BARRIER_EVENT_TYPES:
         return
+    if event["type"] == "phase_event" and event["payload"].get("stage") == "model_process_state":
+        return
     turn_id = event.get("turnId")
     if not isinstance(turn_id, str) or not turn_id:
         raise RuntimeError("committed overlay barrier identity is invalid")
@@ -301,6 +303,7 @@ def _load_committed_overlay_projection(
             payload__turnId=turn_id,
             payload__type__in=OVERLAY_BARRIER_EVENT_TYPES,
         )
+        .exclude(payload__type="phase_event", payload__payload__stage="model_process_state")
         .order_by("-sequence")
         .values_list("sequence", flat=True)
         .first()

@@ -7,8 +7,8 @@ Logo licenses and attribution live beside the assets.
 
 Desktop displays providers by catalog tier and obtains models from Runtime.
 Credentials determine availability. Each model's selected reasoning mode is
-persisted independently and must belong to its supported modes. Configured
-provider and model identities are validated exactly when loaded.
+persisted independently. Saved selections and preferences are read as stored;
+model availability and supported modes are checked when selected or used.
 
 Core protocol adapters own provider request and response semantics. Anthropic
 continuations preserve content blocks and thinking signatures. Gemini's
@@ -19,7 +19,23 @@ Hosted consumers obtain the catalog from their selected Core revision. Workspace
 must pin a publicly reachable Core commit and compile against that exact source.
 Hosted configuration and deployment policy belong to the Workspace repository.
 
-Catalog changes require catalog validation, adapter tests, and the local release
-gate. Tests cover model identity uniqueness, route and reasoning-mode validation,
-tool continuation, and persistent per-model preferences. Live provider acceptance
-uses separately configured credentials and is not implied by unit tests.
+Catalog data changes use catalog validation and directly affected checks.
+Adapter changes also run their focused protocol tests. Tests cover model identity
+uniqueness, route and reasoning-mode validation, tool continuation, and persistent
+per-model preferences. Live provider acceptance uses separately configured
+credentials and is not implied by unit tests.
+
+Kimi Code uses `k3.1-pro`, `k3.1-pro-highspeed`, `k3`, `k3-256k`,
+`kimi-for-coding` (K2.8 Preview), and `kimi-for-coding-highspeed` (K2.7 Code).
+The first five expose `low`, `high`, and `max` reasoning effort; the high-speed
+K2.7 model has thinking enabled without an effort selector. See the
+[Kimi Code model configuration](https://www.kimi.com/code/docs/kimi-code/models.html).
+
+Provider routes retain their own model IDs. OpenCode Go and Command Code GOAT
+include DeepSeek V4.1 Flash, DeepSeek V4 Pro, and GLM-5.3 Flash. Their model IDs
+and endpoints come from the [OpenCode Go](https://opencode.ai/docs/go/) and
+[Command Code](https://commandcode.ai/docs/reference/cli/models) references.
+
+Catalog output limits configure ordinary request budgets. Kimi K3.1 retains its
+documented 131,072-token default; Gemini 4 Argon uses its synchronous 65,536-token
+limit. Extended-output services use separate provider contracts.

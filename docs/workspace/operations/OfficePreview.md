@@ -20,6 +20,14 @@ conversion timeout, then publishes `preview.pdf` using the normal immutable
 derived-representation contract. Conversion failures remain task failures; they
 do not replace or mutate the original object.
 
+The material Worker creates a separate container for each processing task using
+`MATERIAL_PROCESSOR_RUNTIME` (default `runsc`), independently of Session execution's
+`OCI_RUNTIME`. Its budget is 4 GiB, four CPU cores and 512 processes/threads.
+The Compose `document-processor` service only publishes the processor specification;
+its runtime and process limit do not configure the task containers. Office
+conversion and OCR require the task budget even when specification startup and
+native PDF text extraction succeed.
+
 ## Request lifecycle
 
 `GET /api/office-preview/{ownerKind}/{objectId}` accepts

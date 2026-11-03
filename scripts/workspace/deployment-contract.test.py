@@ -287,26 +287,30 @@ sys.stdout.write(re.sub(pattern,replace,text))
         self.assertFalse(runtime.get("command"))
 
     def test_sandbox_and_material_processor_default_to_runsc(self):
-        for values in ({}, {"OCI_RUNTIME": None}):
+        for values in ({}, {"OCI_RUNTIME": None, "MATERIAL_PROCESSOR_RUNTIME": None}):
             services = compose_config(**values)["services"]
-            for service in ("runtime", "material-worker"):
+            for service, variable in (("runtime", "OCI_RUNTIME"),
+                                      ("material-worker", "MATERIAL_PROCESSOR_RUNTIME")):
                 with self.subTest(values=values, service=service):
-                    self.assertEqual(services[service]["environment"]["OCI_RUNTIME"], "runsc")
+                    self.assertEqual(services[service]["environment"][variable], "runsc")
 
-    def test_explicit_runc_override_reaches_both_execution_services(self):
-        services = compose_config(OCI_RUNTIME="runc", RUNTIME_NATIVE_SHARED_ADMISSION="0",
-            RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS="", RUNTIME_RUNSC_IDLE_PAUSE_MS="")["services"]
-        self.assertEqual(services["runtime"]["environment"]["RUNTIME_NATIVE_SHARED_ADMISSION"], "0")
-        for service in ("runtime", "material-worker"):
-            with self.subTest(service=service):
-                self.assertEqual(services[service]["environment"]["OCI_RUNTIME"], "runc")
+    def test_sandbox_and_material_processor_runtime_overrides_are_independent(self):
+        for sandbox, processor in (("runc", "runsc"), ("runsc", "runc")):
+            with self.subTest(sandbox=sandbox, processor=processor):
+                services = compose_config(OCI_RUNTIME=sandbox, MATERIAL_PROCESSOR_RUNTIME=processor,
+                    RUNTIME_NATIVE_SHARED_ADMISSION="0", RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS="",
+                    RUNTIME_RUNSC_IDLE_PAUSE_MS="")["services"]
+                self.assertEqual(services["runtime"]["environment"]["RUNTIME_NATIVE_SHARED_ADMISSION"], "0")
+                self.assertEqual(services["runtime"]["environment"]["OCI_RUNTIME"], sandbox)
+                self.assertEqual(services["material-worker"]["environment"]["MATERIAL_PROCESSOR_RUNTIME"], processor)
 
     def test_compose_does_not_replace_an_explicit_invalid_runtime(self):
         for value in ("", "RUNSC", "unknown", "runc,runsc"):
-            services = compose_config(OCI_RUNTIME=value)["services"]
-            for service in ("runtime", "material-worker"):
+            services = compose_config(OCI_RUNTIME=value, MATERIAL_PROCESSOR_RUNTIME=value)["services"]
+            for service, variable in (("runtime", "OCI_RUNTIME"),
+                                      ("material-worker", "MATERIAL_PROCESSOR_RUNTIME")):
                 with self.subTest(value=value, service=service):
-                    self.assertEqual(services[service]["environment"]["OCI_RUNTIME"], value)
+                    self.assertEqual(services[service]["environment"][variable], value)
 
     def test_default_sandbox_resources_reach_authorization_service(self):
         for overrides in ({}, {"RUNTIME_NATIVE_SHARED_ADMISSION": None, "DOCKER_CREATE_CONCURRENCY": None,

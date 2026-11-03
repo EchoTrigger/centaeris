@@ -7,7 +7,7 @@ const url = source => `data:text/javascript;base64,${Buffer.from(source).toStrin
 const api = url(`import {context,ApiError} from ${JSON.stringify(harness)}; export {ApiError}; export const apiJson=(...args)=>context.request(...args); export const apiUrl=path=>path; export const jsonOptions=(method,value)=>({method,body:JSON.stringify(value)});`);
 const load = subjectLoader({ extraOverrides: [
   ["../api.ts", api], ["../api", api],
-  ["react-router", url(`import {context} from ${JSON.stringify(harness)}; export const Link=()=>null; export const useNavigate=()=>context.navigate; export const useRouteLoaderData=id=>id==="authenticated"?{user:context.user}:{workspace:context.workspace,agents:context.agents}; export const useSearchParams=()=>[new URLSearchParams()];`)],
+  ["react-router", url(`import {context} from ${JSON.stringify(harness)}; export const Link=()=>null; export const useNavigate=()=>context.navigate; export const useRouteLoaderData=id=>id==="authenticated"?{user:context.user}:{workspace:context.workspace}; export const useSearchParams=()=>[new URLSearchParams()];`)],
   ["../i18n", url('export const t=key=>key; export const useTranslation=()=>({t}); export const i18n={resolvedLanguage:"en"};')],
   ["../chat/MarkdownContent", url('export const MarkdownContent=()=>null;')],
 ] });
@@ -34,7 +34,7 @@ async function retry(subject) {
   button(subject.tree, "libraryRoute.startChat").props.onClick(); await new Promise(resolve => setTimeout(resolve, 20)); await subject.settle();
   button(subject.tree, "libraryObjectRoute.retry").props.onClick(); await subject.settle();
 }
-for (const resource of ["Session", "Agent"]) test(`Library recovery clears a terminal deleted ${resource} operation and allows new materials`, async () => {
+for (const resource of ["Session"]) test(`Library recovery clears a terminal deleted ${resource} operation and allows new materials`, async () => {
   const f = fixture(async (path, options) => {
     if (!options) throw new ApiError("operation_resource_unavailable", 410);
     return { ...receipt(JSON.parse(options.body).operationId), sessionId: "new-session" };
@@ -76,7 +76,7 @@ test("late terminal recovery after workspace switch keeps the old scope metadata
 test("material association errors retain the accepted receipt, including a matching terminal code", async () => {
   const f = fixture(async (path, options) => {
     if (path.includes("/operations/")) return receipt("old");
-    if (!options) return { session: { id: "deleted", agentId: "agent" } };
+    if (!options) return { session: { id: "deleted", workspaceId: "workspace" } };
     throw new ApiError("operation_resource_unavailable", 410);
   });
   try {
@@ -95,7 +95,7 @@ test("late terminal recovery after unmount keeps pending metadata", async () => 
 test("starting chat with identical pending inputs clears the terminal lookup without resubmitting", async () => {
   const { createHash } = await import("node:crypto");
   const f = fixture(async () => { throw new ApiError("operation_resource_unavailable", 410); });
-  const fingerprint = createHash("sha256").update(JSON.stringify({ assetIds: ["material"], input: { agentId: "agent" }, path: "/api/workspaces/workspace/sessions", uploads: [] })).digest("hex");
+  const fingerprint = createHash("sha256").update(JSON.stringify({ assetIds: ["material"], input: {}, path: "/api/workspaces/workspace/sessions", uploads: [] })).digest("hex");
   f.data.set(key, JSON.stringify({ ...metadata("old"), fingerprint }));
   try {
     await f.subject.settle(); nodes(f.subject.tree, n => n.type === "input" && n.props.type === "checkbox")[0].props.onChange(); await f.subject.settle();

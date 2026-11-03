@@ -1,6 +1,5 @@
 import logging
 from app_core.app_delegations import DelegationRejected
-from app_core.business_agent_scope import BusinessAgentConfigurationUnavailable
 
 from ninja.errors import HttpError, ValidationError
 
@@ -15,26 +14,17 @@ from .security import (
 logger = logging.getLogger(__name__)
 
 VALIDATION_ERROR_CODES = {
+    "update_workspace_profile": "workspace_profile_invalid",
     "start_sso_login": "sso_request_invalid",
     "start_sso_link": "sso_request_invalid",
     "unlink_external_identity": "sso_request_invalid",
     "register_business_app": "business_app_request_invalid",
     "update_business_app": "business_app_request_invalid",
-    "issue_app_delegation": "delegation_request_invalid",
-    "rotate_app_delegation": "delegation_request_invalid",
-    "resolve_business_agent_branch": "business_branch_request_invalid",
     "approve_assistant_credential": "mcp_connector_request_invalid",
     "bind_assistant_connector": "mcp_connector_request_invalid",
-    "create_agent_definition": "agent_definition_invalid",
-    "update_agent_definition": "agent_definition_invalid",
-    "publish_agent_definition": "agent_definition_invalid",
-    "set_agent_definition_availability": "agent_definition_invalid",
-    "use_agent_definition": "agent_definition_invalid",
     "change_password": "account_password_request_invalid",
     "request_password_reset": "account_password_reset_request_invalid",
     "confirm_password_reset": "account_password_reset_request_invalid",
-    "create_agent": "agent_invalid",
-    "update_agent": "agent_invalid",
     "create_source": "invalid_source",
     "update_source": "invalid_source",
     "create_source_grant": "invalid_source_grant",
@@ -65,11 +55,6 @@ VALIDATION_ERROR_CODES = {
 # errors retain the public protocol code owned by the selected operation.
 VALIDATION_ERROR_CODE_OVERRIDES = {
     ("POST", "list_registered_business_apps"): "business_app_request_invalid",
-    ("POST", "list_app_delegations"): "delegation_request_invalid",
-    ("POST", "list_agent_definitions"): "agent_definition_invalid",
-    ("PATCH", "get_agent_definition"): "agent_definition_invalid",
-    ("POST", "list_agent_definition_versions"): "agent_definition_invalid",
-    ("POST", "list_agents"): "agent_invalid",
     ("POST", "list_sources"): "invalid_source",
     ("POST", "list_credentials"): "credential_invalid",
     ("POST", "list_models"): "model_config_invalid",
@@ -105,9 +90,6 @@ def _mapped_error_code(request, *, malformed_json: bool) -> str:
 
 
 def install_error_handlers(api) -> None:
-    @api.exception_handler(BusinessAgentConfigurationUnavailable)
-    def business_agent_configuration_unavailable(request, error):
-        return api.create_response(request, {"error": str(error)}, status=409)
 
     @api.exception_handler(DelegationRejected)
     def delegation_rejected(request, error):

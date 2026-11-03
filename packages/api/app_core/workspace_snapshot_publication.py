@@ -7,7 +7,7 @@ from django.core.files.storage import default_storage
 from django.db import connection, transaction
 from django.utils import timezone
 
-from .models import Agent, Session, StorageCleanupRetry, WorkspaceSnapshotObject, WorkspaceSnapshotUpload, new_workspace_publication_token
+from .models import Session, StorageCleanupRetry, WorkspaceSnapshotObject, WorkspaceSnapshotUpload, new_workspace_publication_token
 from .resource_commit import require_durable_commit
 from .storage_gc_retry import rearm_storage_key
 
@@ -38,7 +38,7 @@ def _object(session, run, key, kind):
 
 
 def register_upload(session, run, body, final_key, temporary_path):
-    """The caller owns Agent→Session locks before either namespace can be used."""
+    """The caller owns Session ownership locks before either namespace can be used."""
     from .http.internal import SessionWorkspaceError
     require_durable_commit(connection, SessionWorkspaceError("session_workspace_durability_required"))
     temporary_key = Path(temporary_path).relative_to(Path(default_storage.path(""))).as_posix()
@@ -76,9 +76,7 @@ def finish_upload(upload_id):
     if upload is None:
         return
     with transaction.atomic():
-        owner=Session.objects.only("agent_id").get(pk=upload.temporaryObject.session_id)
-        Agent.objects.select_for_update().get(pk=owner.agent_id)
-        Session.objects.select_for_update().get(pk=owner.pk)
+        Session.objects.select_for_update().get(pk=upload.temporaryObject.session_id)
         WorkspaceSnapshotUpload.objects.filter(pk=upload_id,state="streaming").update(state="abandoned",updatedAt=now)
         WorkspaceSnapshotUpload.objects.filter(pk=upload_id).update(finishedAt=now)
         if not default_storage.exists(upload.temporaryObject.storageKey):

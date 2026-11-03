@@ -4,7 +4,7 @@ import { useTranslation } from "../i18n";
 import { sortSessionNavigation } from "./sessionNavigation.mjs";
 import { mergeSessionAttention } from "./sessionReadState";
 
-// Both Agent and ordinary Session entry points act on the same hosted records.
+// Session views act on the same hosted records.
 // Callers own their projection and any navigation after deleting the open chat.
 export function useSessionNavigationActions({ scopeKey, sessions, onChangeSessions, onError, onDeleted }) {
   const { t } = useTranslation();
@@ -42,7 +42,7 @@ export function useSessionNavigationActions({ scopeKey, sessions, onChangeSessio
         method: "PATCH", body: JSON.stringify(metadata), signal: controller.signal,
       });
       if (controller.signal.aborted || currentScope.current !== scope) return null;
-      if (!data?.session || data.session.id !== targetSessionId || data.session.workspaceId !== expected.workspaceId || data.session.agentId !== expected.agentId) throw new Error("session_metadata_response_invalid");
+      if (!data?.session || data.session.id !== targetSessionId || data.session.workspaceId !== expected.workspaceId) throw new Error("session_metadata_response_invalid");
       onChangeSessions(items => sortSessionNavigation(items.map(item => item.id === targetSessionId ? mergeSessionAttention(item, data.session) : item)));
       return data.session;
     } finally {

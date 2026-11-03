@@ -131,7 +131,10 @@ impl Dispatch {
             | EnvironmentTaskRequest::QueryInputReceipt { fence, .. }
             | EnvironmentTaskRequest::Terminate { fence, .. }
             | EnvironmentTaskRequest::EndOperation { fence, .. } => fence.clone(),
-            EnvironmentTaskRequest::EndRun { .. } => return Err("maintenance_task_owner_rejected"),
+            EnvironmentTaskRequest::EndRun { .. }
+            | EnvironmentTaskRequest::ConsumeOutput { .. } => {
+                return Err("maintenance_task_owner_rejected")
+            }
         };
         if actual != expected {
             return Err("maintenance_task_fence_rejected");
@@ -367,7 +370,7 @@ mod frame_tests {
     use hosted_execution::protocol::FileSystemFrameMetadata;
     fn frame(content: Vec<u8>) -> Vec<u8> {
         let mut auth:MaintenanceAuthorization=serde_json::from_str(include_str!("../../../../tests/workspace/fixtures/environment_maintenance_authorization/v1/valid.json")).unwrap();
-        let profile:crate::agent_run_authorization::EnvironmentProfile=serde_json::from_value(serde_json::from_str::<serde_json::Value>(include_str!("../../../../tests/workspace/fixtures/environment_provision_authorization/v1/valid.json")).unwrap()["payload"]["environmentProfile"].clone()).unwrap();
+        let profile:crate::agent_run_authorization::EnvironmentProfile=serde_json::from_value(serde_json::from_str::<serde_json::Value>(include_str!("../../../../tests/workspace/fixtures/environment_provision_authorization/v2/valid.json")).unwrap()["payload"]["environmentProfile"].clone()).unwrap();
         let (metadata, raw) = FileSystemFrameMetadata::from_request(
             centaeris_core::execution::ExecutionFileSystemRequest {
                 operation_id: None,
@@ -395,7 +398,7 @@ mod frame_tests {
         bytes
     }
     #[test]
-    fn maintenance_command_cannot_add_unsigned_process_environment() {
+    fn maintenance_command_rejects_unsigned_environment_and_output_consumption() {
         let mut auth:MaintenanceAuthorization=serde_json::from_str(include_str!("../../../../tests/workspace/fixtures/environment_maintenance_authorization/v1/valid.json")).unwrap();
         let command = Command {
             program: "/bin/sh".into(),
@@ -452,6 +455,12 @@ mod frame_tests {
             dispatch.validate(),
             Err("maintenance_command_binding_rejected")
         );
+        dispatch.task.request = EnvironmentTaskRequest::ConsumeOutput {
+            task_id: fence.task_id(&fence.operation_id("command")).unwrap(),
+            fence,
+            consumer_receipt_id: "unsigned-consumer".into(),
+        };
+        assert_eq!(dispatch.validate(), Err("maintenance_task_owner_rejected"));
     }
     #[test]
     fn maintenance_filesystem_frame_binds_bounded_raw_binary_and_rejects_extra_or_changed_bytes() {

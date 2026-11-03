@@ -48,22 +48,10 @@ def issue_provision_authorization(environment_id, body):
                 [environment.pk])
             if cursor.fetchone() is not None:
                 raise MaintenanceError('provision_allocation_exists')
-        from .agent_definitions import uses_workspace_plugins
-        if session.agent.definition_id and not uses_workspace_plugins(session.agent):
-            from .agent_definitions import AgentDefinitionUnavailable, published_version_for_agent
-            from .models import WorkspaceMembership
-            membership = WorkspaceMembership.objects.filter(workspace=workspace, user_id=session.owner_id).first()
-            if membership is None:
-                raise MaintenanceError('provision_agent_authority_unavailable')
-            try:
-                activation = published_version_for_agent(session.agent, membership).plugin_activation
-            except (AgentDefinitionUnavailable, AttributeError):
-                raise MaintenanceError('provision_agent_authority_unavailable') from None
-        else:
-            activation = plugin_activation_for_workspace(workspace)
+        activation = plugin_activation_for_workspace(workspace)
         request = {'kind': 'provisionEnvironment', 'environmentProfile': environment.environment_profile,
             'environmentProfileDigest': environment.environment_profile_digest, 'userId': str(session.owner_id),
-            'agentId': session.agent_id, 'pluginActivation': activation}
+            'workspaceId': workspace.pk, 'pluginActivation': activation}
         digest = _digest(request)
         operation = EnvironmentMaintenanceOperation.objects.create(operation_id=body['operationId'], operation_kind='provision',
             workspace=workspace, session=session, environment=environment, request=request, request_digest=digest,
@@ -74,7 +62,7 @@ def issue_provision_authorization(environment_id, body):
         deadline = _now_ms() + LEASE_MS
         payload = {'schema': PROVISION_SCHEMA, 'operationKind': 'provision', 'operationId': operation.pk,
             'workspaceId': workspace.pk, 'sessionId': session.pk, 'environmentId': environment.pk,
-            **{name: request[name] for name in ('environmentProfile', 'environmentProfileDigest', 'userId', 'agentId', 'pluginActivation')},
+            **{name: request[name] for name in ('environmentProfile', 'environmentProfileDigest', 'userId', 'pluginActivation')},
             'controllerOwner': {'kind': 'maintenanceOperation', 'operationId': operation.pk},
             'controllerEpoch': epoch, 'controllerLeaseDigest': lease, 'controllerPurpose': 'execute',
             'requestDigest': digest, 'expiresAtMs': deadline}

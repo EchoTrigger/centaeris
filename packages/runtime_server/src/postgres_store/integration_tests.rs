@@ -50,8 +50,10 @@ mod host_retirement_tests;
 mod lease_renewal_tests;
 mod maintenance_authority_tests;
 mod maintenance_completion_schema_tests;
-mod owned_database;
+pub(crate) mod owned_database;
 mod provision_authority_tests;
+mod question_response_tests;
+mod question_wait_notifications;
 mod residency_tests;
 mod resource_lifecycle_tests;
 pub(super) mod retained_instance_tests;
@@ -2560,55 +2562,6 @@ fn postgres_runtime_store_persists_core_state_and_claims_jobs_once() {
             .as_deref(),
         Some("{\"snapshot\":true}")
     );
-    let wait_checkpoint = CheckpointRecord {
-        checkpoint_id: "checkpoint:wait-pg".to_string(),
-        kind: centaeris_core::runtime::contracts::CheckpointKindV1::Wait,
-        session_id: "session_pg".to_string(),
-        turn_id: "turn_wait_pg".to_string(),
-        status: "waiting".to_string(),
-        done_reason: Some("question".to_string()),
-        updated_at_ms: 5,
-        payload_json: "{\"schema\":\"runtime.await_question.v1\"}".to_string(),
-    };
-    store
-        .save_wait_checkpoint(SaveWaitCheckpointRequest {
-            checkpoint: wait_checkpoint.clone(),
-            event: RuntimeEvent {
-                event_id: "runtime_wait_pg_waiting".to_string(),
-                session_id: "session_pg".to_string(),
-                task_id: Some("turn_wait_pg".to_string()),
-                event_type: "runtime_wait_changed.v1".to_string(),
-                at_ms: 5,
-                visibility: EventVisibility::Internal,
-                payload_json: "{\"status\":\"waiting\"}".to_string(),
-            },
-        })
-        .expect("atomic wait transition");
-    store
-        .consume_wait_checkpoint(ConsumeWaitCheckpointRequest {
-            checkpoint: wait_checkpoint,
-            events: vec![RuntimeEvent {
-                event_id: "runtime_wait_pg_resumed".to_string(),
-                session_id: "session_pg".to_string(),
-                task_id: Some("turn_wait_pg".to_string()),
-                event_type: "runtime_wait_changed.v1".to_string(),
-                at_ms: 6,
-                visibility: EventVisibility::Internal,
-                payload_json: "{\"status\":\"resumed\"}".to_string(),
-            }],
-        })
-        .expect("atomic wait consumption");
-    assert!(store
-        .load_checkpoint_by_turn("session_pg", "turn_wait_pg")
-        .expect("wait checkpoint removed")
-        .is_none());
-    assert_eq!(
-        store
-            .list_events("session_pg", 10, 0)
-            .expect("runtime events")
-            .len(),
-        2
-    );
     store
         .schedule_runtime_job(ScheduleRuntimeJobRequest {
             job: job("job_pg", "key_pg"),
@@ -2988,7 +2941,7 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
     let session_id = "session_fenced_terminal";
     let mut authorization: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
         serde_json::from_str(include_str!(
-            "../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+            "../../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
         ))
         .unwrap();
     authorization.agent_run_id = agent_run_id.into();
@@ -3000,7 +2953,7 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
         turn_id: "turn_pg_fenced_terminal".into(),
         prompt: "fence terminal".into(),
         initial_input: crate::contract::AgentRunStartInitialInput::UserMessage {},
-        agent_instructions: "Read committed work history.".into(),
+        session_instructions: "Read committed work history.".into(),
         model_context_tokens: 200_000,
         model_max_output_tokens: 32_768,
         authorization_digest: authorization.digest().unwrap(),
@@ -3014,8 +2967,6 @@ fn terminal_append_consumes_waiter_contract(terminal_type: SessionRecordType) {
             ),
         authorization,
         tail_action: crate::contract::AgentRunTailAction::Append,
-        coordination_session_id: None,
-        native_coordination_session_id: None,
     };
     let mut lifecycle_job = job(
         "agent_run.lifecycle:agent_run_fenced_terminal",
@@ -4668,9 +4619,9 @@ fn postgres_transcript_old_block_encoding_generation_is_invalidated_and_reinitia
 
 #[test]
 #[ignore = "requires destructive dedicated Postgres test database"]
-fn postgres_fenced_rewrite_tombstones_completed_dispatch_request() {
+fn postgres_fenced_rewrite_tombstones_completed_tool_request() {
     use centaeris_core::session::{rewrite_last_user_tail_tombstone, RewriteLastUserTailRequest};
-    use centaeris_core::tool::{DynamicToolContract, DynamicToolRegistry};
+    use centaeris_core::tool::DynamicToolRegistry;
 
     let _guard = TEST_LOCK.lock().unwrap();
     let url = test_url();
@@ -4697,13 +4648,10 @@ fn postgres_fenced_rewrite_tombstones_completed_dispatch_request() {
         "Dispatch work".into(),
     );
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let contract: DynamicToolContract = serde_json::from_str(include_str!(
-        "../../../api/app_core/contracts/dispatch_work.json"
-    ))
-    .unwrap();
+    let contract = crate::workspace_tools::workspace_tool_contracts().remove(0);
     let registry = DynamicToolRegistry::from_contracts(vec![contract]).unwrap();
     let digest = registry
-        .find_contract("dispatch_work")
+        .find_contract("publish_artifact")
         .unwrap()
         .contract_digest()
         .unwrap();
@@ -4736,7 +4684,7 @@ fn postgres_fenced_rewrite_tombstones_completed_dispatch_request() {
             3,
             SessionRecordType::ToolCall,
             serde_json::json!({
-            "callId":"dispatch-one","toolName":"dispatch_work","providerId":"workspace.agent_work",
+            "callId":"dispatch-one","toolName":"publish_artifact","providerId":"centaeris.artifact",
             "toolContractDigest":digest,"displayTarget":"Private Agent work",
             "normalizedInput":{"objective":"Complete objective","session_refs":[],"file_refs":[]}}),
         ),
@@ -4744,7 +4692,7 @@ fn postgres_fenced_rewrite_tombstones_completed_dispatch_request() {
             4,
             SessionRecordType::ToolResult,
             serde_json::json!({
-            "callId":"dispatch-one","toolName":"dispatch_work","resultState":"successWithOutput",
+            "callId":"dispatch-one","toolName":"publish_artifact","resultState":"successWithOutput",
             "modelContent":"Request accepted for Session commit","fullOutputPath":null,"outputStartByte":null,
             "outputByteLength":35,"outputComplete":true,"summary":"Request recorded",
             "operations":[],"modelInputImages":[],"latencyMs":0}),

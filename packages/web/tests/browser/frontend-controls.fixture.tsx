@@ -26,7 +26,7 @@ function Fixture() {
       <div className="workspaceMessages"><button type="button" onClick={() => setConfirm(true)}>Open confirmation</button></div>
       <WorkspaceComposer fileInputRef={input} isHome={false} onSubmit={event => event.preventDefault()}
         pendingAttachments={[]} pendingUploadFiles={[]} draft={draft} onDraftChange={setDraft} enterStartsNewLine={false}
-        activeAgentName="Synthetic Agent" workspaceAvailable sending={false} loadingHistory={false} hasActiveAgentRun={false}
+        workspaceName="Synthetic workspace" workspaceAvailable sending={false} loadingHistory={false} hasActiveAgentRun={false}
         uploadingAttachment={false} onUploadAttachment={noop} sessionId={null} currentModel={models.find(item => item.id === modelId)}
         thinkingMode={effort} onThinkingModeChange={value => { choices.push(value); setEffort(value); }}
         modelGroups={[{ provider: "synthetic", label: "Synthetic provider", models }]} modelId={modelId}

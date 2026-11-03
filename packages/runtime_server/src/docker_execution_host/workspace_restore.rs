@@ -133,6 +133,7 @@ pub(super) fn prepare(
         helper_frame: ImmutableWorkspaceSnapshot {
             file: frame,
             file_source: None,
+            output_consumers: Vec::new(),
             descriptor,
             manifest,
             observation,

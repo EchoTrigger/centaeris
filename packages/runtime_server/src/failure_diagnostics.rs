@@ -32,6 +32,12 @@ fn classify_error(error: &str) -> &str {
     if error == "cleanup execution environment lost" {
         return "cleanup_execution_environment_lost";
     }
+    if let Some(reason) = error
+        .strip_prefix("resolve execution model input image failed: ")
+        .filter(|reason| centaeris_core::execution::environment_task_capacity_rejection(reason))
+    {
+        return reason;
+    }
     [
         "execution activity changed during workspace snapshot collection",
         "snapshot manifest length is invalid",
@@ -98,7 +104,8 @@ pub(crate) fn observe<T>(
     stage: &'static str,
     operation: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    operation().inspect_err(|error| report(agent_run_id, stage, error))
+    crate::observations::execution_boundary(stage, agent_run_id, operation)
+        .inspect_err(|error| report(agent_run_id, stage, error))
 }
 
 #[cfg(test)]
@@ -208,6 +215,22 @@ mod tests {
                 "cleanup execution environment lost: PRIVATE_TOKEN /private/path",
                 "unclassified",
             ),
+            (
+                "resolve execution model input image failed: task_output_capacity",
+                "task_output_capacity",
+            ),
+            (
+                "resolve execution model input image failed: task_journal_capacity",
+                "task_journal_capacity",
+            ),
+            (
+                "resolve execution model input image failed: task_output_capacity: PRIVATE_TOKEN /private/path",
+                "unclassified",
+            ),
+            (
+                "resolve execution model input image failed: task_journal_capacity: PRIVATE_TOKEN /private/path",
+                "unclassified",
+            ),
         ] {
             let value = record("run", "teardown_workspace_preservation", error);
             assert_eq!(value["reason"], reason);
@@ -266,26 +289,30 @@ mod tests {
 
     #[test]
     fn diagnostics_retain_validated_hosted_model_failure_metadata() {
-        let failure = serde_json::json!({
-            "schema": "hosted.model.failure.v1",
-            "reasonType": "provider_unavailable",
-            "httpStatus": 503,
-            "providerAttempts": 6,
-            "retryExhausted": true,
-        });
-        let error =
-            format!("model_client_error(kind=provider_unavailable): hosted_model_error: {failure}");
-        let value = record("run", "core_turn", &error);
-        assert_eq!(value["reason"], "provider_unavailable");
-        assert_eq!(value["modelFailure"], failure);
+        for (reason, status) in [
+            ("provider_unavailable", Some(503)),
+            ("provider_timeout", None),
+        ] {
+            let failure = serde_json::json!({
+                "schema": "hosted.model.failure.v1",
+                "reasonType": reason,
+                "httpStatus": status,
+                "providerAttempts": 6,
+                "retryExhausted": true,
+            });
+            let error = format!("model_client_error(kind={reason}): hosted_model_error: {failure}");
+            let value = record("run", "core_turn", &error);
+            assert_eq!(value["reason"], reason);
+            assert_eq!(value["modelFailure"], failure);
 
-        let mut invalid = failure;
-        invalid["rawProviderOutput"] = "SECRET_TOKEN private model text".into();
-        let error = format!("hosted_model_error: {invalid}");
-        let value = record("run", "core_turn", &error);
-        assert_eq!(value["reason"], "unclassified");
-        assert!(value.get("modelFailure").is_none());
-        assert!(!value.to_string().contains("SECRET_TOKEN"));
-        assert!(!value.to_string().contains("private model text"));
+            let mut invalid = failure;
+            invalid["rawProviderOutput"] = "SECRET_TOKEN private model text".into();
+            let error = format!("hosted_model_error: {invalid}");
+            let value = record("run", "core_turn", &error);
+            assert_eq!(value["reason"], "unclassified");
+            assert!(value.get("modelFailure").is_none());
+            assert!(!value.to_string().contains("SECRET_TOKEN"));
+            assert!(!value.to_string().contains("private model text"));
+        }
     }
 }

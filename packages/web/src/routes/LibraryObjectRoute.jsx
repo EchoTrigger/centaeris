@@ -95,12 +95,15 @@ function LibraryPreviewPageContent() {
       onState: state => {
         if (epoch !== loadEpochRef.current || controllerRef.current !== controller) return;
         setSaveState(state);
-        setError(state.error && state.status !== "conflict" ? t("libraryObjectRoute.unableToSaveValue", { value1: state.error }) : "");
+        setError(state.error && state.status !== "conflict"
+          ? state.error === "library_name_conflict" ? t("libraryObjectRoute.nameConflictHelp") : t("libraryObjectRoute.saveFailedHelp") : "");
       },
       onConfirmed: (result, confirmedDocument) => {
         if (epoch !== loadEpochRef.current || controllerRef.current !== controller) return;
         confirmedNoteRef.current = { note: result.object, document: confirmedDocument };
         setItem(result.object);
+        const currentTitle = controller.state.draft.document.displayName;
+        setNoteTitle(currentTitle === "Untitled" ? "" : currentTitle);
         if (!note.id && controller.state.status === "saved") {
           navigate(`${base}/library/${encodeURIComponent(result.object.id)}${folderId ? `?folder=${encodeURIComponent(folderId)}` : ""}`, { replace: true, state: null });
         }
@@ -161,8 +164,9 @@ function LibraryPreviewPageContent() {
         setMarkdown(body);
         setRenamingTitle(!note.id);
         beginController(note, document, epoch);
+        const currentDraftKey = controllerRef.current.state.draft.key;
         const local = await draftStore().list(String(user.id), note.id || clientDraftId);
-        if (epoch === loadEpochRef.current) setDrafts(local);
+        if (epoch === loadEpochRef.current) setDrafts(local.filter(record => record.key !== currentDraftKey));
       }
     } catch (requestError) {
       if (epoch === loadEpochRef.current) setError(t("libraryObjectRoute.unableToOpenFileValue", { value1: requestError.message }));
@@ -288,7 +292,7 @@ function LibraryPreviewPageContent() {
     </header>
     <section className={`libraryPreviewBody${isNote ? " libraryNotePreview" : ""}${isMarkdown ? " isMarkdown" : ""}${isCode ? " isCode" : ""}`}>
       {loading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryObjectRoute.openingFile")}</div> : <>{error && <div className="errorBanner libraryError" role="alert">{error}<button type="button" onClick={() => { if (controllerRef.current) void controllerRef.current.flush(); else void load(); }}>{t("libraryObjectRoute.retry")}</button></div>}{isNote ? <div className="libraryNoteEditor">
-        {drafts.length > 0 && <div className="errorBanner" role="status"><span>{t("libraryObjectRoute.draftsAvailable")}</span>{drafts.map(record => <button type="button" key={record.key} onClick={() => recoverDraft(record)}>{t("libraryObjectRoute.recoverDraft", { title: record.document.displayName, time: new Date(record.updatedAt).toLocaleString() })}</button>)}<button type="button" onClick={() => setDrafts([])}>{t("libraryObjectRoute.useServerVersion")}</button></div>}
+        {drafts.length > 0 && <div className="libraryNoteNotice" role="status"><span>{t("libraryObjectRoute.draftsAvailable")}</span>{drafts.map(record => <button type="button" key={record.key} onClick={() => recoverDraft(record)}>{t("libraryObjectRoute.recoverDraft", { title: record.document.displayName, time: new Date(record.updatedAt).toLocaleString() })}</button>)}<button type="button" onClick={() => setDrafts([])}>{t("libraryObjectRoute.useServerVersion")}</button></div>}
         {saveState?.status === "conflict" && <div className="errorBanner" role="alert"><span>{t("libraryObjectRoute.conflictHelp")}</span><button type="button" onClick={() => void compareRemote()}>{t("libraryObjectRoute.compare")}</button><button type="button" onClick={saveCopy}>{t("libraryObjectRoute.saveCopy")}</button>{comparison && <button type="button" onClick={resubmit}>{t("libraryObjectRoute.resubmit")}</button>}</div>}
         {comparison && <section aria-label={t("libraryObjectRoute.compare")}><label>{t("libraryObjectRoute.localVersion")}<strong>{noteTitle}</strong><textarea readOnly value={markdown} /></label><label>{t("libraryObjectRoute.serverVersion")}<strong>{comparison.object.displayName}</strong><textarea readOnly value={comparison.markdown} /></label></section>}
         <textarea value={markdown} onChange={(event) => updateNote(noteTitle, event.target.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void controllerRef.current?.flush(); } }} aria-label={t("libraryObjectRoute.noteContent")} placeholder={t("libraryObjectRoute.startWritingOrTypeForCommands")} /></div> : error ? null : isImage(item) ? <img className="libraryPreviewImage" src={apiUrl(`/api/library/${item.id}/preview`)} alt={item.displayName} /> : isSpreadsheet ? <SpreadsheetPreview className="libraryPreviewFrame" src={apiUrl(`/api/spreadsheet-preview/userLibraryObject/${item.id}`)} printSrc={officePreviewUrl("userLibraryObject", item.id)} title={item.displayName} /> : canEmbed(item) ? <DocumentPreview className={isMarkdown ? "libraryMarkdownPreview" : isCode ? "libraryCodePreview" : "libraryPreviewFrame"} src={officeFileType(item.displayName) ? officePreviewUrl("userLibraryObject", item.id) : apiUrl(`/api/library/${item.id}/preview`)} title={item.displayName} contentType={item.contentType} /> : <div className="libraryPreviewUnsupported"><FileText aria-hidden="true" /><strong>{item.displayName}</strong><span>{t("libraryObjectRoute.onlinePreviewIsUnavailableForThisFileType")}</span><a href={apiUrl(`/api/library/${item.id}/download`)}><Download aria-hidden="true" />{t("libraryObjectRoute.downloadFile")}</a></div>}</>}

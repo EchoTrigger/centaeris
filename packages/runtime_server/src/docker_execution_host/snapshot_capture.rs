@@ -59,7 +59,7 @@ fn capture_and_cache(
                     manifest: manifest.clone(),
                 })
         }
-        SnapshotCaptureResult::Unchanged => {
+        SnapshotCaptureResult::Unchanged(_) => {
             if request.baseline.is_none() {
                 return Err("snapshot capture returned an unbound receipt".into());
             }
@@ -100,7 +100,7 @@ impl DockerExecutionHostRunner {
                 SnapshotCaptureResult::Snapshot(artifact) => {
                     artifact.descriptor.expanded_size_bytes
                 }
-                SnapshotCaptureResult::Unchanged => {
+                SnapshotCaptureResult::Unchanged(_) => {
                     // A verified receipt never invokes the spool factory.
                     observation.count(ProtectionMetric::SpoolWrittenBytes, 0, true);
                     expected.expanded_size_bytes
@@ -131,11 +131,23 @@ impl DockerExecutionHostRunner {
         input
             .write_all(&bytes)
             .map_err(|_| "snapshot_capture_spool_unavailable")?;
-        let (mut output, stderr, exit) = self.supervised_helper_file(
+        // The guest capture sequence restarts with the Runtime process. Keep
+        // different physical helpers distinct across that restart as well.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "snapshot_capture_identity_invalid")?
+            .as_nanos();
+        let consumer_id = format!(
+            "snapshot:{}:{stamp}:{}",
+            std::process::id(),
+            capture_request.capture_id
+        );
+        let (mut output, stderr, exit) = self.supervised_helper_file_for_consumer(
             hosted_execution::host_supervisor::TrustedHelperKind::SnapshotCapture,
             &mut input,
             bytes.len() as u64,
             &format!("sha256:{:x}", Sha256::digest(&bytes)),
+            Some(&consumer_id),
         )?;
         let result = read_capture(&mut output, capture_request, |source| {
             let mut artifact = capture_snapshot_artifact_observed(
@@ -148,7 +160,16 @@ impl DockerExecutionHostRunner {
             workspace_files::prepare(&mut artifact)?;
             Ok(artifact)
         });
-        finish_observed_capture(result, Ok(exit), &stderr, observation)
+        let mut result = finish_observed_capture(result, Ok(exit), &stderr, observation)?;
+        // Both outcomes retain only a link; a committed recovery checkpoint
+        // must still prove the body has a durable consumer before reclamation.
+        match &mut result {
+            SnapshotCaptureResult::Snapshot(artifact) => {
+                artifact.output_consumers.push(consumer_id)
+            }
+            SnapshotCaptureResult::Unchanged(consumers) => consumers.push(consumer_id),
+        }
+        Ok(result)
     }
 }
 
@@ -201,7 +222,7 @@ impl From<&RecoveryWorkspaceSnapshotV1> for WorkspaceSnapshotDescriptor {
 
 pub(super) enum SnapshotCaptureResult {
     Snapshot(ImmutableWorkspaceSnapshot),
-    Unchanged,
+    Unchanged(Vec<String>),
 }
 
 fn read_capture<R: Read>(
@@ -248,7 +269,7 @@ fn read_capture<R: Read>(
             {
                 return Err("snapshot capture receipt has trailing bytes".into());
             }
-            Ok(SnapshotCaptureResult::Unchanged)
+            Ok(SnapshotCaptureResult::Unchanged(Vec::new()))
         }
         SnapshotCaptureDisposition::Snapshot => {
             if response.baseline_snapshot_sha256.is_some() {
@@ -358,7 +379,7 @@ mod tests {
             |_| panic!("unchanged content must not allocate a full snapshot spool"),
         )
         .unwrap();
-        assert!(matches!(result, SnapshotCaptureResult::Unchanged));
+        assert!(matches!(result, SnapshotCaptureResult::Unchanged(_)));
     }
 
     #[test]
@@ -463,12 +484,16 @@ mod tests {
         .unwrap();
         assert!(cache.lock().unwrap().is_some());
         let mut first_capture = String::new();
-        capture_and_cache(&cache, &descriptor, |request| {
+        let reused = capture_and_cache(&cache, &descriptor, |request| {
             first_capture = request.capture_id.clone();
             assert!(request.baseline.is_some());
-            Ok(SnapshotCaptureResult::Unchanged)
+            Ok(SnapshotCaptureResult::Unchanged(vec![
+                "reused-helper".into()
+            ]))
         })
         .unwrap();
+        assert!(matches!(reused, SnapshotCaptureResult::Unchanged(consumers)
+            if consumers == vec!["reused-helper"]));
         // An apparently valid full frame followed by a failed helper exit does
         // not seed the cache, and discards the previous cache entry.
         assert!(capture_and_cache(&cache, &descriptor, |request| {
@@ -567,18 +592,20 @@ mod tests {
                             },
                         )?;
                         assert_eq!(
-                            matches!(result, SnapshotCaptureResult::Unchanged),
+                            matches!(result, SnapshotCaptureResult::Unchanged(_)),
                             expect_baseline
                         );
-                        Ok(PreparedRecoveryContent::Unchanged(
-                            RecoveryWorkspaceSnapshotV1 {
+                        Ok(PreparedRecoveryContent::Unchanged {
+                            snapshot: RecoveryWorkspaceSnapshotV1 {
                                 object_ref: Some("verified-baseline".into()),
                                 snapshot_sha256: descriptor.sha256.clone(),
                                 snapshot_size_bytes: descriptor.size_bytes,
                                 expanded_size_bytes: descriptor.expanded_size_bytes,
                                 file_count: descriptor.file_count,
                             },
-                        ))
+                            checkpoint_id: "verified-checkpoint".into(),
+                            output_consumers: Vec::new(),
+                        })
                     },
                 )
                 .unwrap()

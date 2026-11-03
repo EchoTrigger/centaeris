@@ -19,7 +19,6 @@ from app_core.credentials import (
 from .security import session_auth
 from . import model_management as mm
 from . import mcp_credentials as mc
-from .assistant_connectors import ConnectorApprovalRequest, ConnectorApprovalEnvelope
 from .response_schema import (
     AdminModelResponse,
     COMMON_ERROR_RESPONSES,
@@ -33,6 +32,7 @@ from .schema import ErrorResponse, StrictSchema
 from .serialization import serialize_model_provider, serialize_admin_model
 
 router = Router(tags=["workspace resources"], by_alias=True)
+plugin_upload_router = Router(tags=["workspace resources"], by_alias=True)
 
 
 class ResourceScopeResponse(StrictSchema):
@@ -305,10 +305,6 @@ def remove_credential(request, workspace_id: str, credential_id: str):
             credential = McpBearerCredential.objects.select_for_update().get(
                 pk=credential_id, workspace_id=workspace_id
             )
-            if credential.assistant_approvals.exists():
-                return JsonResponse(
-                    {"error": "mcp_bearer_credential_in_use"}, status=409
-                )
             mc._record_audit(credential, "deleted", request.user)
             credential.delete()
             return HttpResponse(status=204)
@@ -440,7 +436,7 @@ def test_model(
     )
 
 
-@router.post(
+@plugin_upload_router.post(
     "/workspaces/{workspace_id}/plugins/upload", auth=session_auth, response={200: WorkspacePluginEnvelope} | COMMON_ERROR_RESPONSES
 )
 def upload_plugin(request, workspace_id: str):
@@ -497,110 +493,6 @@ def uninstall_plugin(request, workspace_id: str, plugin_name: str):
         return JsonResponse({"error": "workspace_not_found"}, status=404)
     except PluginLifecycleError as error:
         return JsonResponse({"error": error.code}, status=409)
-
-
-@router.post(
-    "/workspaces/{workspace_id}/mcp-bearer-credentials/{credential_id}/assistant-approvals",
-    auth=session_auth,
-    response={201: ConnectorApprovalEnvelope} | COMMON_ERROR_RESPONSES,
-)
-def approve_local_assistant_credential(
-    request, workspace_id: str, credential_id: str, payload: ConnectorApprovalRequest
-):
-    from app_core.models import AgentDefinition, AgentConnectorCredentialApproval
-    from app_core.assistant_connectors import connector_resource, ConnectorRejected
-    from app_core.plugin_catalog import require_current_plugin_activation
-    from .assistant_connectors import _approval_response
-
-    try:
-        with transaction.atomic():
-            workspace = workspace_resource_admin(request.user, workspace_id)
-            if payload.workspace_id != workspace.id:
-                return JsonResponse(
-                    {"error": "mcp_credential_approval_scope_invalid"}, status=400
-                )
-            definition = (
-                AgentDefinition.objects.select_for_update(of=("self",))
-                .filter(id=payload.definition_id, workspace=workspace)
-                .select_related("published_version")
-                .first()
-            )
-            credential = (
-                McpBearerCredential.objects.select_for_update()
-                .filter(id=credential_id, workspace=workspace)
-                .first()
-            )
-            if definition is None or credential is None:
-                return JsonResponse(
-                    {"error": "mcp_credential_approval_scope_not_found"}, status=404
-                )
-            if definition.published_version is None:
-                return JsonResponse(
-                    {"error": "agent_definition_not_published"}, status=409
-                )
-            require_current_plugin_activation(
-                workspace, definition.published_version.plugin_activation
-            )
-            resource = connector_resource(
-                definition.published_version.plugin_activation,
-                credential.plugin_name,
-                payload.server_id,
-            )
-            if resource["credentialRef"] != credential.credential_ref:
-                return JsonResponse(
-                    {"error": "mcp_credential_approval_scope_invalid"}, status=400
-                )
-            approval = AgentConnectorCredentialApproval.objects.create(
-                workspace=workspace,
-                definition=definition,
-                plugin_name=credential.plugin_name,
-                server_id=payload.server_id,
-                resource_path=resource["resourcePath"],
-                resource_digest=resource["resourceDigest"],
-                credential=credential,
-                credential_version=credential.version,
-                approved_by=request.user,
-            )
-            return JsonResponse({"approval": _approval_response(approval)}, status=201)
-    except PermissionError:
-        return JsonResponse({"error": "workspace_not_found"}, status=404)
-    except (ConnectorRejected, ValueError, KeyError, OSError):
-        return JsonResponse(
-            {"error": "mcp_credential_approval_scope_invalid"}, status=400
-        )
-
-
-@router.delete(
-    "/workspaces/{workspace_id}/mcp-assistant-credential-approvals/{approval_id}",
-    auth=session_auth,
-    response={204: None} | COMMON_ERROR_RESPONSES,
-)
-def revoke_local_assistant_credential(request, workspace_id: str, approval_id: str):
-    from django.utils import timezone
-    from app_core.models import AgentConnectorCredentialApproval
-
-    try:
-        with transaction.atomic():
-            workspace_resource_admin(request.user, workspace_id)
-            approval = (
-                AgentConnectorCredentialApproval.objects.select_for_update()
-                .filter(
-                    pk=approval_id,
-                    workspace_id=workspace_id,
-                    credential__workspace_id=workspace_id,
-                )
-                .first()
-            )
-            if approval is None:
-                return JsonResponse(
-                    {"error": "mcp_credential_approval_not_found"}, status=404
-                )
-            if approval.revoked_at is None:
-                approval.revoked_at = timezone.now()
-                approval.save(update_fields=["revoked_at"])
-            return HttpResponse(status=204)
-    except PermissionError:
-        return JsonResponse({"error": "workspace_not_found"}, status=404)
 
 
 @router.get("/admin/workspace-resources", auth=session_auth, response={200: WorkspaceResourceMetadataEnvelope} | COMMON_ERROR_RESPONSES)

@@ -22,9 +22,9 @@ for (const initialStaggerMs of [0, 1250]) test(`stagger ${initialStaggerMs}: fou
     const context = vm.createContext({ __ENV: { PERF_ENVIRONMENT_COUNT: '4', PERF_RUNS_PER_ENVIRONMENT: '3', PERF_SAMPLES_PATH: 'external-samples.json', PERF_BETWEEN_RUN_MS: '5000', PERF_INITIAL_STAGGER_MS: String(initialStaggerMs), PERF_RUN_TERMINAL_TIMEOUT_SECONDS: String(terminalTimeout), PERF_K6_BUDGET: budget(terminalTimeout, 5000, initialStaggerMs) },
       sleep(seconds) { sleeps.push(seconds); clock += seconds * 1000; }, open: () => JSON.stringify(samples), execution, Date: { now: () => clock }, Trend: Metric, Rate: Metric, Counter: Metric,
       console: { log(value) { records.push(JSON.parse(value.slice('PERF_RUN '.length))); } },
-      configuredTarget: () => ({ workspaceId: 'workspace', agentId: 'agent', modelId: 'model' }),
+      configuredTarget: () => ({ workspaceId: 'workspace', modelId: 'model' }),
       login: () => ({ store: {}, csrf: 'csrf' }),
-      startRun(store, csrf, workspaceId, agentId, modelId, text, options) {
+      startRun(store, csrf, workspaceId, modelId, text, options) {
         requests.push({ vu, text, admittedAtMs: clock, ...options });
         return { sessionId: `session-${vu}`, agentRunId: 'run-' + options.sampleId, operationId: options.operationId };
       },
@@ -78,9 +78,9 @@ test('declared terminal budgets and idle gaps fit three real rolling iterations 
         PERF_BETWEEN_RUN_MS: '30000', PERF_INITIAL_STAGGER_MS: '0', PERF_SAMPLES_PATH: 'samples.json', PERF_K6_BUDGET: budget(300, 30000) },
       execution, Date: { now: () => clock }, Trend: Metric, Rate: Metric, Counter: Metric,
       open: () => JSON.stringify(samples), sleep(seconds) { clock += seconds * 1000; },
-      configuredTarget: () => ({ workspaceId: 'workspace', agentId: 'agent', modelId: 'model' }), login: () => ({ store: {}, csrf: 'csrf' }),
+      configuredTarget: () => ({ workspaceId: 'workspace', modelId: 'model' }), login: () => ({ store: {}, csrf: 'csrf' }),
       console: { log(value) { const record = JSON.parse(value.slice('PERF_RUN '.length)); if (record.phase === 'verified') verified.push(record); } },
-      startRun(_store, _csrf, _workspace, _agent, _model, _text, options) {
+      startRun(_store, _csrf, _workspace, _model, _text, options) {
         starts.push({ vu, at: clock, ...options }); clock += 60000;
         return { sessionId: `session-${vu}`, agentRunId: `run-${options.sampleId}` };
       },
@@ -130,9 +130,9 @@ test('dense memory profile reaches each admitted prompt without fixture verifica
       execution: { vu: { idInTest: vu, iterationInScenario: 0 } }, open: () => JSON.stringify(samples),
       Trend: Metric, Rate: Metric, Counter: Metric, Date: { now: () => 1000 }, sleep() {},
       console: { log(value) { records.push(JSON.parse(value.slice('PERF_RUN '.length))); } },
-      configuredTarget: () => ({ workspaceId: 'workspace', agentId: 'agent', modelId: 'model' }),
+      configuredTarget: () => ({ workspaceId: 'workspace', modelId: 'model' }),
       login: () => ({ store: {}, csrf: 'csrf' }),
-      startRun(_store, _csrf, _workspace, _agent, _model, text, options) {
+      startRun(_store, _csrf, _workspace, _model, text, options) {
         prompts.push(JSON.parse(text.slice('PERF_FIXED_WORKLOAD '.length)));
         return { sessionId: `session-${vu}`, agentRunId: `run-${options.sampleId}` };
       },

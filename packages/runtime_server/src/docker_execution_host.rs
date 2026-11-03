@@ -1,8 +1,10 @@
 mod admission_wait;
 mod environment;
 mod environment_container;
+mod execution_inputs;
 mod maintenance;
 mod network;
+mod output_consumption;
 mod retained;
 mod retained_commands;
 pub(crate) mod runsc_power;
@@ -219,11 +221,15 @@ struct MemoryMount {
     scope_key: String,
 }
 
-fn memory_mount(user_id: &str, agent_id: &str, volume_name: String) -> Result<MemoryMount, String> {
-    if user_id.trim().is_empty() || agent_id.trim().is_empty() {
+fn memory_mount(
+    user_id: &str,
+    workspace_id: &str,
+    volume_name: String,
+) -> Result<MemoryMount, String> {
+    if user_id.trim().is_empty() || workspace_id.trim().is_empty() {
         return Err("Agent Memory binding is invalid".to_string());
     }
-    let identity = serde_json::to_vec(&("agent_memory_scope_v1", user_id, agent_id))
+    let identity = serde_json::to_vec(&("workspace_memory_scope_v2", user_id, workspace_id))
         .map_err(|error| format!("encode Agent Memory scope failed: {error}"))?;
     Ok(MemoryMount {
         volume_name,
@@ -343,6 +349,7 @@ pub struct DockerExecutionHostRunner {
     recovery_activity: ExecutionActivityWitness,
     recovery_snapshot: Mutex<Option<WorkspaceReuseEvidence>>,
     snapshot_capture_cache: Mutex<Option<SnapshotCaptureCache>>,
+    output_consumption: Mutex<output_consumption::OutputConsumption>,
     pre_dispatch_loss: AtomicBool,
     deferred_extension_dispatch: AtomicBool,
     container_name: String,
@@ -362,7 +369,6 @@ pub struct DockerExecutionHostRunner {
     api_url: String,
     api_token: String,
     api_client: reqwest::blocking::Client,
-    input_lock: Mutex<()>,
     materialized_inputs: Mutex<BTreeMap<String, SandboxMaterializedInput>>,
     resident_store: Option<Arc<PostgresRuntimeStore>>,
     resident_lease: Option<centaeris_core::session::RuntimeJobLeaseFence>,
@@ -389,7 +395,6 @@ pub struct DockerExecutionHostRequest<'a> {
     pub agent_run_id: String,
     pub execution_id: String,
     pub user_id: String,
-    pub agent_id: String,
     pub authorization_digest: String,
     pub environment_authorization: crate::environment_authorization::EnvironmentAuthorization,
     pub image_digest: String,
@@ -490,17 +495,21 @@ impl DockerExecutionHostRunner {
         {
             return Err("benchmark network differs from signed authorization".into());
         }
+
         #[cfg(test)]
-        if crate::native_consumption_tests::owns_identity(&request.user_id, &request.agent_id) {
+        if crate::environment_runtime_tests::owns_identity(&request.user_id, &request.workspace_id)
+        {
             assert!(
                 !request.has_execution_fact,
                 "fresh execution required by native fixture"
             );
             validate_plugin_activation_snapshot(request.plugin_activation)?;
             assert!(request.plugin_activation.packages.is_empty());
-            let allocation =
-                crate::native_consumption_tests::prepare_owned_allocation(&request, before_create)?;
-            crate::native_consumption_tests::register_owned_run(&request.agent_run_id);
+            let allocation = crate::environment_runtime_tests::prepare_owned_allocation(
+                &request,
+                before_create,
+            )?;
+            crate::environment_runtime_tests::register_owned_run(&request.agent_run_id);
             let mut runner = tests::test_docker_execution_host_runner();
             runner.container_name = format!("native-consume-test:{}", request.execution_id);
             runner.agent_run_id = request.agent_run_id;
@@ -542,7 +551,6 @@ impl DockerExecutionHostRunner {
             agent_run_id,
             execution_id,
             user_id,
-            agent_id,
             authorization_digest,
             environment_authorization,
             image_digest,
@@ -580,7 +588,7 @@ impl DockerExecutionHostRunner {
         let plugin_mounts = plugin_mounts(plugin_activation)?;
         let memory_mount = memory_mount(
             user_id.as_str(),
-            agent_id.as_str(),
+            workspace_id.as_str(),
             docker_volume_name_from_environment(AGENT_MEMORY_VOLUME_NAME_ENV)?,
         )?;
         prepare_memory_scope(&memory_mount)?;
@@ -668,7 +676,15 @@ impl DockerExecutionHostRunner {
                         .ok_or("retained container unconfirmed")?;
                     let fence =
                         retained::fence(&environment_authorization, &allocation.instance_id)?;
-                    retained::takeover(&physical, id, &fence)
+                    retained::takeover(&physical, id, &fence, || {
+                        output_consumption::recover_before_prepare(
+                            resident_store.as_ref(),
+                            &environment_authorization.payload.session_id,
+                            &agent_run_id,
+                            &fence,
+                            |request| retained::relay(&physical, id, request),
+                        )
+                    })
                 },
             )?;
             instance_id = allocation.instance_id.clone();
@@ -687,6 +703,7 @@ impl DockerExecutionHostRunner {
             )?,
             recovery_snapshot: Mutex::new(None),
             snapshot_capture_cache: Mutex::new(None),
+            output_consumption: Mutex::new(output_consumption::OutputConsumption::default()),
             pre_dispatch_loss: AtomicBool::new(false),
             deferred_extension_dispatch: AtomicBool::new(false),
             container_name,
@@ -709,7 +726,6 @@ impl DockerExecutionHostRunner {
                 .connect_timeout(Duration::from_secs(3))
                 .build()
                 .map_err(|error| format!("build Docker sandbox API client failed: {error}"))?,
-            input_lock: Mutex::new(()),
             materialized_inputs: Mutex::new(BTreeMap::new()),
             resident_store: Some(resident_store),
             resident_lease: Some(centaeris_core::session::RuntimeJobLeaseFence {
@@ -938,7 +954,7 @@ impl DockerExecutionHostRunner {
         fence: &centaeris_core::session::RuntimeJobLeaseFence,
     ) -> Result<(), String> {
         #[cfg(test)]
-        if crate::native_consumption_tests::owns_run(agent_run_id) {
+        if crate::environment_runtime_tests::owns_run(agent_run_id) {
             return Ok(());
         }
         crate::observations::timed("sandboxTeardown", || {
@@ -1273,7 +1289,7 @@ impl DockerExecutionHostRunner {
                 &lease.job_id,
             )? {
                 SnapshotCaptureResult::Snapshot(artifact) => artifact,
-                SnapshotCaptureResult::Unchanged => {
+                SnapshotCaptureResult::Unchanged(_) => {
                     self.require_workspace_capacity(
                         frozen.expanded_size_bytes,
                         input_upper_bound_bytes,
@@ -1429,7 +1445,13 @@ impl DockerExecutionHostRunner {
         if self.container_name.starts_with("native-consume-test:") {
             return self.capture_prepared_recovery_workspace_with_observer(
                 |_| Ok(0),
-                |_| Ok(PreparedRecoveryContent::Unchanged(previous.clone())),
+                |_| {
+                    Ok(PreparedRecoveryContent::Unchanged {
+                        snapshot: previous.clone(),
+                        checkpoint_id: checkpoint_id.into(),
+                        output_consumers: Vec::new(),
+                    })
+                },
             );
         }
         self.capture_prepared_recovery_workspace_with_observer(
@@ -1446,12 +1468,16 @@ impl DockerExecutionHostRunner {
                     })?;
                 let artifact = match capture_result {
                     SnapshotCaptureResult::Snapshot(artifact) => artifact,
-                    SnapshotCaptureResult::Unchanged => {
+                    SnapshotCaptureResult::Unchanged(output_consumers) => {
                         self.require_workspace_capacity(
                             previous.expanded_size_bytes,
                             input_upper_bound_bytes,
                         )?;
-                        return Ok(PreparedRecoveryContent::Unchanged(previous.clone()));
+                        return Ok(PreparedRecoveryContent::Unchanged {
+                            snapshot: previous.clone(),
+                            checkpoint_id: checkpoint_id.into(),
+                            output_consumers,
+                        });
                     }
                 };
                 self.require_workspace_capacity(
@@ -1465,7 +1491,11 @@ impl DockerExecutionHostRunner {
                     artifact
                         .observation
                         .count(ProtectionMetric::UploadedBytes, 0, true);
-                    return Ok(PreparedRecoveryContent::Unchanged(previous.clone()));
+                    return Ok(PreparedRecoveryContent::Unchanged {
+                        snapshot: previous.clone(),
+                        checkpoint_id: checkpoint_id.into(),
+                        output_consumers: artifact.output_consumers,
+                    });
                 }
                 Ok(PreparedRecoveryContent::Upload {
                     artifact,
@@ -1625,16 +1655,27 @@ impl DockerExecutionHostRunner {
         &self,
         prepared: PreparedRecoveryWorkspace,
     ) -> Result<RecoveryWorkspaceSnapshotV1, String> {
-        let PreparedRecoveryContent::Upload {
-            mut artifact,
-            lease,
-            checkpoint_id,
-        } = prepared.content
-        else {
-            let PreparedRecoveryContent::Unchanged(snapshot) = prepared.content else {
-                unreachable!()
-            };
-            return Ok(snapshot);
+        let (mut artifact, lease, checkpoint_id) = match prepared.content {
+            PreparedRecoveryContent::Upload {
+                artifact,
+                lease,
+                checkpoint_id,
+            } => (artifact, lease, checkpoint_id),
+            PreparedRecoveryContent::Unchanged {
+                snapshot,
+                checkpoint_id,
+                output_consumers,
+            } => {
+                // The baseline already has a durable source. This association
+                // grants no consumption until this new Core checkpoint commits.
+                if self
+                    .record_reused_snapshot_outputs(&checkpoint_id, &snapshot, &output_consumers)
+                    .is_err()
+                {
+                    eprintln!("execution_output_reclamation_pending");
+                }
+                return Ok(snapshot);
+            }
         };
         self.workspace_file_access(&lease, Some(&checkpoint_id))
             .upload_missing(&mut artifact)?;
@@ -1736,6 +1777,18 @@ impl DockerExecutionHostRunner {
                     return Err("execution workspace stage response binding mismatch".to_string());
                 }
                 result.validate()?;
+                // Consumer metadata cannot change an already successful API
+                // publication into a failed tool or authorize another execution.
+                if self
+                    .record_published_snapshot_outputs(
+                        &checkpoint_id,
+                        &result,
+                        &artifact.output_consumers,
+                    )
+                    .is_err()
+                {
+                    eprintln!("execution_output_reclamation_pending");
+                }
                 Ok(result)
             })
         })
@@ -1862,6 +1915,7 @@ impl DockerExecutionHostRunner {
         expanded_size_bytes: u64,
         input_upper_bound_bytes: u64,
     ) -> Result<(), String> {
+        let input_upper_bound_bytes = input_upper_bound_bytes.max(self.materialized_input_bytes()?);
         require_workspace_capacity_for_limit(
             expanded_size_bytes,
             input_upper_bound_bytes,
@@ -2003,8 +2057,21 @@ impl DockerExecutionHostRunner {
     fn refresh_materialized_inputs(
         &self,
     ) -> Result<Vec<ExecutionInputStateChange>, ExecutionError> {
+        if self
+            .materialized_inputs
+            .lock()
+            .map_err(|_| self.unavailable("sandbox input registry lock poisoned"))?
+            .is_empty()
+        {
+            return Ok(Vec::new());
+        }
+        let _activity = self
+            .recovery_activity
+            .begin_dispatch_activity()
+            .map_err(|error| self.unavailable(error))?;
         let _guard = self
-            .input_lock
+            .recovery_activity
+            .input_operations()
             .lock()
             .map_err(|_| self.unavailable("sandbox input operation lock poisoned"))?;
         self.refresh_materialized_inputs_locked()
@@ -2013,6 +2080,8 @@ impl DockerExecutionHostRunner {
     fn refresh_materialized_inputs_locked(
         &self,
     ) -> Result<Vec<ExecutionInputStateChange>, ExecutionError> {
+        self.reload_input_inventory()
+            .map_err(|error| self.unavailable(error))?;
         let active = self
             .materialized_inputs
             .lock()
@@ -2084,14 +2153,29 @@ impl DockerExecutionHostRunner {
         input: &SandboxMaterializedInput,
         state: ExecutionInputState,
     ) -> Result<(), ExecutionError> {
+        self.revoke_input_for_consumer(input, state, None)
+    }
+
+    fn revoke_input_for_consumer(
+        &self,
+        input: &SandboxMaterializedInput,
+        state: ExecutionInputState,
+        consumer: Option<&str>,
+    ) -> Result<(), ExecutionError> {
         let body = serde_json::to_vec(&SandboxInputRevokeRequest {
             input_ref: input.input_ref.clone(),
             virtual_path: input.virtual_path.clone(),
             state,
         })
         .map_err(|error| self.unavailable(format!("encode input revocation failed: {error}")))?;
-        self.helper("revoke-input", None, body.as_slice(), HELPER_JSON_LIMIT)
-            .map_err(|error| self.unavailable(error))?;
+        self.helper_for_consumer(
+            "revoke-input",
+            None,
+            body.as_slice(),
+            HELPER_JSON_LIMIT,
+            consumer,
+        )
+        .map_err(|error| self.unavailable(error))?;
         let mut registry = self
             .materialized_inputs
             .lock()
@@ -2133,6 +2217,17 @@ impl DockerExecutionHostRunner {
         input: &[u8],
         output_limit: usize,
     ) -> Result<Vec<u8>, String> {
+        self.helper_for_consumer(mode, user, input, output_limit, None)
+    }
+
+    fn helper_for_consumer(
+        &self,
+        mode: &str,
+        user: Option<&str>,
+        input: &[u8],
+        output_limit: usize,
+        consumer_id: Option<&str>,
+    ) -> Result<Vec<u8>, String> {
         if user.is_some_and(|user| {
             user != AGENT_USER
                 && self
@@ -2158,7 +2253,7 @@ impl DockerExecutionHostRunner {
             "quiesce-agent-processes" => TrustedHelperKind::QuiesceAgentProcesses,
             _ => return Err("environment_helper_kind_rejected".into()),
         };
-        self.supervised_helper(kind, input, output_limit)
+        self.supervised_helper_for_consumer(kind, input, output_limit, consumer_id)
     }
 
     fn protected_input_error(
@@ -2290,6 +2385,14 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         &self,
         request: ExecutionFileSystemRequest,
     ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
+        self.run_file_system_operation_for_consumer(request, None)
+    }
+
+    fn run_file_system_operation_for_consumer(
+        &self,
+        request: ExecutionFileSystemRequest,
+        consumer_id: Option<&str>,
+    ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
         #[cfg(test)]
         if self.container_name.starts_with("native-consume-test:") {
             return Err(ExecutionFileSystemError::new(
@@ -2387,7 +2490,9 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         hosted_execution::protocol::write_filesystem_request(&mut body, request)
             .map_err(filesystem_unavailable)?;
         let output = self
-            .helper("filesystem-once", None, &body, output_limit)
+            .with_helper_dispatch("filesystem-once", || {
+                self.helper_for_consumer("filesystem-once", None, &body, output_limit, consumer_id)
+            })
             .map_err(filesystem_unavailable)?;
         let mut result =
             hosted_execution::protocol::read_filesystem_result(&mut Cursor::new(output))
@@ -2431,6 +2536,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         cancellation_probe: Option<&ExecutionCancellationProbe>,
     ) -> Result<ExecutionHostCommandRecovery, ExecutionError> {
         self.validate_policy(&request.policy)?;
+        self.refresh_materialized_inputs()?;
         let fence = self
             .environment_task_fence()
             .map_err(|error| self.unavailable(error))?;
@@ -2445,19 +2551,38 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         .map(|output| ExecutionHostCommandRecovery::Completed(Box::new(output)))
     }
 
+    fn consume_execution_outputs(&self, consumer_id: &str, receipt_id: &str) {
+        self.consume_output_group(consumer_id, receipt_id);
+    }
+
     fn run_host_command(
         &self,
         operation_id: Option<&str>,
         request: ExecutionCommandRequest,
         cancellation_probe: Option<&ExecutionCancellationProbe>,
     ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+        self.run_host_command_for_consumer(None, operation_id, request, cancellation_probe)
+    }
+
+    fn run_host_command_for_consumer(
+        &self,
+        consumer_id: Option<&str>,
+        operation_id: Option<&str>,
+        request: ExecutionCommandRequest,
+        cancellation_probe: Option<&ExecutionCancellationProbe>,
+    ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
         self.validate_policy(&request.policy)?;
+        self.refresh_materialized_inputs()?;
         let operation_id = operation_id
             .filter(|id| !id.is_empty())
             .ok_or_else(|| self.unavailable("retained command operation identity required"))?;
         let fence = self
             .environment_task_fence()
             .map_err(|error| self.unavailable(error))?;
+        let _ = self.flush_consumed_outputs();
+        let start_id = retained_commands::operation(&fence, operation_id, "start");
+        self.record_output_consumer(&fence, &start_id, consumer_id)
+            .map_err(|reason| self.unavailable(reason))?;
         retained_commands::run_command(
             &fence,
             operation_id,
@@ -3345,6 +3470,7 @@ struct WorkspaceSnapshotDescriptor {
 struct ImmutableWorkspaceSnapshot {
     file: fs::File,
     file_source: Option<Box<workspace_files::CapturedFiles>>,
+    output_consumers: Vec<String>,
     descriptor: WorkspaceSnapshotDescriptor,
     observation: WorkspaceProtection,
     manifest: Option<SandboxWorkspaceSnapshotManifest>,
@@ -3592,7 +3718,11 @@ impl PreparedRecoveryWorkspace {
 }
 
 enum PreparedRecoveryContent {
-    Unchanged(RecoveryWorkspaceSnapshotV1),
+    Unchanged {
+        snapshot: RecoveryWorkspaceSnapshotV1,
+        checkpoint_id: String,
+        output_consumers: Vec<String>,
+    },
     Upload {
         artifact: ImmutableWorkspaceSnapshot,
         lease: SessionWorkspaceLease,
@@ -3653,6 +3783,7 @@ fn capture_snapshot_artifact_observed(
     Ok(ImmutableWorkspaceSnapshot {
         file,
         file_source: None,
+        output_consumers: Vec::new(),
         descriptor,
         observation,
         manifest,
@@ -3983,6 +4114,11 @@ enum ProjectedInputState {
 }
 
 #[cfg(test)]
+pub(crate) fn material_delivery_test_host() -> DockerExecutionHostRunner {
+    tests::test_docker_execution_host_runner()
+}
+
+#[cfg(test)]
 mod tests {
     pub(super) fn retained_test_runner() -> DockerExecutionHostRunner {
         let mut runner = test_docker_execution_host_runner();
@@ -4053,7 +4189,7 @@ mod tests {
         let mut runner = retained_test_runner();
         let original: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
             serde_json::from_str(include_str!(
-                "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+                "../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
             ))
             .unwrap();
         runner.environment_profile = Some(original.environment_profile.clone());
@@ -4137,7 +4273,7 @@ mod tests {
         let mut runner = test_docker_execution_host_runner();
         let mut profile: EnvironmentProfile = serde_json::from_value(
             serde_json::from_str::<serde_json::Value>(include_str!(
-                "../../../tests/workspace/fixtures/agent_run_authorization/v1/custom.json"
+                "../../../tests/workspace/fixtures/agent_run_authorization/v2/custom.json"
             ))
             .unwrap()["environmentProfile"]
                 .clone(),
@@ -4349,7 +4485,6 @@ mod tests {
                         agent_run_id: run.into(),
                         execution_id: execution.into(),
                         user_id: "centaeris-recovery-test-user".into(),
-                        agent_id: "centaeris-recovery-test-agent".into(),
                         authorization_digest: digest.clone(),
                         environment_authorization:
                             crate::environment_authorization::EnvironmentAuthorization {
@@ -6039,7 +6174,8 @@ mod tests {
         );
         assert_ne!(
             mount,
-            memory_mount("user_1", "agent-banana", volume_name.clone()).expect("other Agent mount")
+            memory_mount("user_1", "workspace-banana", volume_name.clone())
+                .expect("other Workspace mount")
         );
         assert_ne!(
             mount,
@@ -6206,7 +6342,7 @@ mod tests {
         let mut runner = retained_test_runner();
         let original: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
             serde_json::from_str(include_str!(
-                "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+                "../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
             ))
             .unwrap();
         runner.resources = original.environment_profile.resources.sandbox_resources();
@@ -6263,7 +6399,7 @@ mod tests {
         let mut runner = retained_test_runner();
         let original: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
             serde_json::from_str(include_str!(
-                "../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+                "../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
             ))
             .unwrap();
         runner.resources = original.environment_profile.resources.sandbox_resources();
@@ -6782,6 +6918,7 @@ mod tests {
             ),
             recovery_snapshot: Mutex::new(None),
             snapshot_capture_cache: Mutex::new(None),
+            output_consumption: Mutex::new(output_consumption::OutputConsumption::default()),
             pre_dispatch_loss: AtomicBool::new(false),
             deferred_extension_dispatch: AtomicBool::new(false),
             container_name: "centaeris-agent-run-test".to_string(),
@@ -6813,7 +6950,6 @@ mod tests {
             api_url: "http://api:8000".to_string(),
             api_token: "token".to_string(),
             api_client: reqwest::blocking::Client::new(),
-            input_lock: Mutex::new(()),
             materialized_inputs: Mutex::new(BTreeMap::new()),
             resident_store: None,
             resident_lease: None,

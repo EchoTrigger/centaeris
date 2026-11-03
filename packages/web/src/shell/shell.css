@@ -33,6 +33,8 @@
   font-weight: 700;
 }
 .shWsAvatar { width: 20px; height: 20px; border-radius: 4px; }
+.shWsAvatar > img, .shHomeAvatar > img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+.shWsAvatar[data-has-avatar="true"], .shHomeAvatar[data-has-avatar="true"] { background: transparent; }
 .shWsName, .shAccountMail { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shWsMenuPopover { position: absolute; z-index: 65; top: 38px; left: 0; width: min(280px, calc(100vw - 16px)); padding: 6px; border: 1px solid var(--outline-variant); border-radius: 9px; background: var(--surface-color); box-shadow: 0 12px 36px rgba(0, 0, 0, .16); }
 .shWsMenuPopover a, .shWsMenuPopover > button { display: flex; width: 100%; min-height: 30px; align-items: center; gap: 9px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--on-surface); font: inherit; text-align: left; text-decoration: none; }
@@ -589,16 +591,28 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceAgentEmpty > div { display: flex; gap: 8px; }
 
 .shRow.isActive { background: color-mix(in srgb, var(--on-surface) 5.5%, transparent); }
-.shTrashPopover { position: fixed; z-index: 80; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: 10px; background: var(--surface-color); box-shadow: 0 14px 40px rgba(0, 0, 0, .16); color: var(--on-surface); font-size: 12px; }
-.shTrashPopover > header { display: flex; height: 46px; flex: none; align-items: center; padding: 0 14px; border-bottom: 1px solid var(--outline-variant); }
-.shTrashTools { display: grid; flex: none; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--outline-variant); }
-.shTrashTools > input { width: 100%; height: 32px; border: 1px solid var(--outline-variant); border-radius: 6px; outline: 0; background: color-mix(in srgb, var(--surface-color) 55%, transparent); color: var(--on-surface); padding: 0 10px; }
-.shTrashTools > input:focus { border-color: rgba(35, 131, 226, .55); background: var(--surface-color); box-shadow: 0 0 0 1px rgba(35, 131, 226, .14); }
-.shTrashFilters { display: flex; flex-wrap: wrap; gap: 6px; }
-.shTrashFilters select { max-width: 150px; height: 28px; border: 1px solid var(--outline-variant); border-radius: 6px; background: var(--surface-color); color: var(--on-surface); padding: 0 7px; font: inherit; }
-.shTrashPopoverBody { min-height: 120px; overflow-y: auto; padding: 6px; }
-.shTrashPopover > footer { flex: none; padding: 9px 13px; border-top: 1px solid var(--outline-variant); color: var(--process-text); font-size: 11px; }
-.shTrashLoading { display: flex; min-height: 120px; align-items: center; justify-content: center; gap: 7px; color: var(--process-text); }
+.shTrashPopover { position: fixed; z-index: 80; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: 12px; background: var(--surface-color); box-shadow: 0 10px 32px rgba(0, 0, 0, .12); color: var(--on-surface); font-size: 12px; }
+.shTrashPopover > header { display: flex; min-height: 42px; flex: none; align-items: center; justify-content: space-between; padding: 6px 10px 2px 14px; }
+.shTrashPopover > header > span { display: flex; align-items: center; gap: 8px; }
+.shTrashPopover > header strong { font-size: 12px; font-weight: 600; }
+.shTrashPopover > header svg { width: 15px; height: 15px; color: var(--process-text); }
+.shTrashPopover > header button { display: grid; width: 26px; height: 26px; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; cursor: pointer; }
+.shTrashPopover > header button:hover { background: var(--surface-variant); }
+.shTrashTools { display: grid; flex: none; gap: 12px; padding: 8px 12px 12px; border-bottom: 1px solid var(--outline-variant); }
+.shTrashSearch { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 0 9px; border: 1px solid transparent; border-radius: 7px; background: var(--surface-variant); }
+.shTrashSearch > svg { width: 14px; height: 14px; flex: none; color: var(--process-text); }
+.shTrashSearch > input { min-width: 0; width: 100%; height: 32px; border: 0; outline: 0; background: transparent; color: var(--on-surface); padding: 0; font: inherit; }
+.shTrashSearch:focus-within { border-color: var(--outline-variant); background: var(--surface-color); }
+.shTrashFilters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 9px 10px; }
+.shTrashFilters > label { display: grid; position: relative; min-width: 0; gap: 4px; }
+.shTrashFilters > label > span { padding-left: 1px; color: var(--process-text); font-size: 10px; }
+.shTrashFilters select { appearance: none; width: 100%; min-width: 0; height: 29px; border: 1px solid transparent; border-radius: 6px; background: var(--surface-variant); color: var(--process-text); padding: 0 23px 0 8px; font: inherit; font-size: 11px; text-overflow: ellipsis; cursor: pointer; }
+.shTrashFilters > label > svg { position: absolute; right: 7px; bottom: 8px; width: 12px; height: 12px; pointer-events: none; color: var(--process-text); }
+.shTrashFilters > label[data-active="true"] select { border-color: var(--outline-variant); background: var(--surface-color); color: var(--on-surface); }
+.shTrashFilters select:focus-visible, .shTrashPopover > header button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+.shTrashPopoverBody { min-height: 0; overflow-y: auto; padding: 6px; }
+.shTrashPopover > footer { flex: none; padding: 7px 13px 10px; color: var(--process-text); font-size: 10px; line-height: 1.5; }
+.shTrashLoading { display: flex; min-height: 96px; align-items: center; justify-content: center; gap: 7px; color: var(--process-text); }
 .shTrashLoading svg { width: 14px; }
 .shTrashSection { margin: 0; }
 .shTrashSectionBody { display: grid; }
@@ -609,7 +623,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shTrashOpenRow > span, .shTrashFolderToggle > span { display: grid; min-width: 0; }
 .shTrashOpenRow strong, .shTrashFolderToggle strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shTrashOpenRow small, .shTrashFolderToggle small { color: var(--process-text); }
-.shTrashActions { display: flex; flex: none; padding-right: 5px; opacity: 0; }
+.shTrashActions { display: flex; flex: none; padding-right: 5px; opacity: .6; }
 .shTrashRow:hover .shTrashActions, .shTrashActions:focus-within { opacity: 1; }
 .shTrashActions button, .shTrashChild > button { display: grid; width: 27px; height: 27px; place-items: center; border: 0; border-radius: 5px; background: transparent; color: var(--process-text); }
 .shTrashActions button:hover, .shTrashChild > button:hover { background: color-mix(in srgb, var(--on-surface) 7%, transparent); color: var(--on-surface); }
@@ -624,7 +638,9 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shTrashRetry, .shTrashSentinel button { justify-self: start; border: 0; background: transparent; color: var(--primary-color); padding: 12px 4px; }
 .shTrashSentinel { display: flex; min-height: 28px; align-items: center; justify-content: center; }
 .shTrashSentinel svg { width: 13px; }
-.shTrashAllEmpty { display: grid; min-height: 160px; place-content: center; justify-items: center; gap: 6px; color: var(--process-text); }
+.shTrashAllEmpty { display: grid; min-height: 96px; place-content: center; justify-items: center; gap: 8px; padding: 16px 12px; color: var(--process-text); }
+.shTrashAllEmpty > svg { width: 22px; height: 22px; opacity: .65; }
+.shTrashAllEmpty > p { margin: 0; font-size: 12px; }
 .shDeletedTopbar a { display: inline-flex; align-items: center; gap: 5px; color: var(--on-surface); text-decoration: none; }
 .shTrashHistory { height: calc(100vh - 98px); }
 .shTrashHistory .workspaceAgentRunList { height: 100%; }

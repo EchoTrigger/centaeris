@@ -8,7 +8,7 @@ from django.db import connection
 
 from app_core.assets import MAX_DIRECT_INPUT_BYTES, safe_filename
 from app_core.app_delegations import require_delegated_session
-from app_core.models import Agent, AgentRun, HostedOperationReceipt, Session
+from app_core.models import AgentRun, HostedOperationReceipt, Session
 
 
 OPERATION_ID_PATTERN = r"^[A-Za-z0-9_.:-]{1,128}$"
@@ -21,9 +21,11 @@ class HostedOperationError(Exception):
         self.code = code
 
 
-def request_digest(payload, *, session_id=None, uploads=()):
+def request_digest(payload, *, session_id=None, uploads=(), target=None):
     """Hash normalized caller input, never a model default or allocated resource ID."""
     value = payload.model_dump(by_alias=True, exclude={"operation_id"})
+    if target is not None:
+        value["target"] = target
     if session_id is not None:
         value["sessionId"] = session_id
         value["text"] = value["text"].strip()
@@ -54,7 +56,7 @@ def request_digest(payload, *, session_id=None, uploads=()):
 
 
 def lock_operation_identity(user, workspace_id, command, operation_id):
-    """Serialize the exact receipt unique domain, before taking Agent/Session locks.
+    """Serialize the exact receipt unique domain, before taking Session locks.
 
     Public submitters hold Workspace SHARE. Other receipt writers retain Workspace
     UPDATE and therefore already exclude them; those paths do not acquire this
@@ -77,16 +79,10 @@ def replay_operation(user, workspace_id, command, operation_id, digest=None, *, 
     ).first()
     if receipt is None:
         return None
-    # Match the existing deletion lock order: Workspace, Agent, then Session.
-    binding = Session.objects.filter(id=receipt.sessionId).values("agent_id").first()
-    if binding is None:
-        raise HostedOperationError(410, "operation_resource_unavailable")
-    agent = Agent.objects.select_for_update().filter(id=binding["agent_id"]).first()
     session = Session.objects.select_for_update().filter(id=receipt.sessionId).first()
     if session is None:
         raise HostedOperationError(410, "operation_resource_unavailable")
-    if (session.workspace_id != workspace_id or session.owner_id != user.id
-            or agent is None or agent.owner_id != user.id or agent.workspace_id != workspace_id):
+    if session.workspace_id != workspace_id or session.owner_id != user.id:
         raise HostedOperationError(404, "operation_not_found")
     if app_delegation is not None:
         require_delegated_session(app_delegation, session.id, require_active=False)

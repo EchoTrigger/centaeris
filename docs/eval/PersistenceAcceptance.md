@@ -22,8 +22,10 @@ Runtime creates the current SQLite schema in one transaction. Opening a database
 validates its schema version, history, tables, and indexes before using it.
 Unsupported or malformed stores fail without modifying stored facts.
 
-The user configuration reader accepts the current schema and validates model
-identities and reasoning preferences. Reading configuration does not rewrite it.
+The user configuration reader validates the current schema and preserves saved
+model selections and reasoning preferences without matching them to the current
+catalog. Model selection and request dispatch validate the selected capabilities.
+Reading configuration does not rewrite it.
 
 Session logs and observation content are authoritative. Transcript projections
 are derived from those records and can be rebuilt into a replacement generation.

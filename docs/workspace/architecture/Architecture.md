@@ -38,406 +38,56 @@ JSON Schema's `integer` also accepts integral floats, and a `uint32` format labe
 alone does not enforce its upper bound; those transport guards remain explicit.
 Avoid maintaining a second field/type registry in Python after schema validation.
 
-Product response serializers retain computed role/access fields, published
-definition overrides, failure redaction and explicit timestamp formatting.
+Product response serializers retain computed role/access fields, failure
+redaction and explicit timestamp formatting.
 Replacing these with ORM attribute serialization requires equal wire output and
 query counts, including the current `+00:00` timestamp spelling. Framework use
 should remove maintenance work rather than move it into additional resolvers.
 
-Workspace owns Agent Memory behavior and storage. Public Core receives generic
+Workspace owns private Memory behavior and storage. Public Core receives generic
 execution file operations and mutation facts; it does not interpret the private
 memory namespace.
 
 This is a private Markdown directory protocol, not a background model maintaining
 memory. The active model uses ordinary read/edit/write tools through
 `plastic-memories://self/`, with MEMORY.md as an index and topics/*.md as detail.
-Storage is scoped by user and Agent, across Sessions. The existing filesystem
-lock and guarded write coordinate concurrent execution instances of that scope.
+Storage is scoped by user and Workspace, across that user's Sessions in the
+Workspace. The existing filesystem lock and guarded write coordinate concurrent execution instances of that scope.
 The helper consumes `WriteFile.observedFileHash` as its expected current version;
 ordinary workspace files do not enforce this observation. The internal protocol
 rename requires coordinated Core and Workspace updates, with no old-field alias.
 
-## Private Agent messages
+## Workspace and Session identity
 
-The API binds one private, user-owned Agent instance to one newly created
-coordination Session through `AgentCoordinationSession`. This is independent of
-shared Agent definitions. Authenticated creation locks the existing Agent and
-membership boundary, commits the new Session and unique binding together, and
-returns the same binding on retry. It cannot select or convert an existing work
-Session. Coordination Sessions are excluded from the ordinary workspace Session
-list, including its Agent filter; ordinary transcript, browser rendering, live
-stream and Final behavior remain unchanged.
+Session is the user-owned work object within a Workspace. Its transcript,
+files, environment binding, active Run and durable operation receipts retain
+the Session identity. The browser opens ordinary conversations at
+`/w/{workspaceId}/sessions/{sessionId}`; `/w/{workspaceId}/app` starts a new
+conversation. Workspace layout owns the browser title and favicon: the title
+uses the Workspace name and the icon uses its avatar, or its name's first
+character when no avatar is set, across Session and settings navigation.
+Initial HTML restores a matching Workspace identity from tab-scoped session
+storage before application loading; authenticated Workspace data remains
+authoritative. Logout clears this presentation cache.
 
-Only Runs in that bound Session receive the hosted `coordinationSessionId`,
-which Rust requires to equal the signed authorization's Session identity.
-Runtime then registers the first-party `workspace.agent_messages` provider and
-its `send_message` contract. Ordinary Runs do not receive this tool. The model
-supplies a complete body and opaque resource associations, with no recipient
-field. The recipient is always the executing private Agent's own history.
-Empty Plugin activation works; no extension or credential inheritance is needed.
+Each message submission explicitly selects a currently available
+Workspace model through `modelConfigRef` and an optional `thinkingMode`.
+The browser can retain the user's model preference, but does not choose the
+first catalog entry as a default.
 
-Each dispatch calls the API with the trusted Run, authorization digest and call
-identity. The API verifies the signed binding, original current membership,
-active user/Agent/Session, managed definition availability and current delegated
-authority when present. Session associations use existing current read policies.
-File associations must be SessionAssetLink inputs in this Run's signed asset
-authorization and pass the existing current source ACL, generation, captured
-identity and storage checks. Owning a Library file or adding an attachment after
-Run acceptance does not add it to that authorization. Associations grant no new
-access; later resource reads still require their existing current policies.
+The former Agent configuration, definition, private message, coordination,
+dispatch/return and business-branch application surfaces are retired. Agent
+configuration and Agent-only history are not promoted into Session configuration
+or ordinary Session history. Ordinary Sessions keep their own transcript and
+file identities. The technical AgentRun name continues to identify one Core
+execution in a Session; it is not a separate user-facing Agent object.
 
-Successful validation authorizes only that in-flight message call. Revocation
-committed after validation does not retrospectively retract that call's
-authorization; it may finish persistence. Validation does not bypass cancellation,
-the current lifecycle lease fence or storage failures. A new call after revocation
-must pass current authorization again and is rejected when authority is absent.
-Every history read independently checks current source authority. Reading an
-associated Session or file separately checks that resource's current authority;
-retained messages, opaque refs and old Run authorization confer no continuing
-access. The history may retain an association whose resource is no longer readable.
-
-Validation performs no message write. The provider's validation response and
-Core's internal receipt are not delivery facts. Delivery takes effect only when
-the existing fenced Session append commits the successful tool result. The API
-rebuilds messages from active committed SessionEvents: the result and preceding
-call must have the same Session, Run, turn and call identity, with the first-party
-provider and exact contract digest. The full body and refs come from the call's
-normalized input, never a summary or validation response. The committed result's
-stable event ID identifies the message; lost-ack replay and reopened storage do
-not duplicate it. Failed, rolled-back, stale-fence, foreign or tombstoned records
-do not produce messages. `ContinueTurn` preserves the call/result pair for later
-model requests. The Run still ends with its existing single Final, which does
-not create another Agent message.
-
-The first-release initial schema includes the unique coordination relation.
-Initialization creates no Agents, Sessions, Runs, messages or grants. Recovery
-must retain matching bindings and histories; it must not infer bindings from
-titles or fabricate message facts.
-There is no second message fact table, Inbox, wake mechanism or Agent UI here.
-
-## Private work admission from committed requests
-
-The API-only work materializer consumes an explicitly identified, active committed
-`dispatch_work` call/success pair in a bound coordination Session. Its first-party
-provider identity and exact consumer contract digest must match. The source Run,
-turn and tool call identify one business request, independently of duplicate
-successful events or the later admission receipt. A provider cannot materialize
-work in its source append transaction. The native coordination Runtime registers
-the tool contract and notifies the materializer after committed success. The
-existing worker source scan repairs missed admission notifications. These paths
-admit child work; coordinator wake remains outside this boundary.
-
-Current original membership, signed Run identity and coordination authority are
-checked again at admission. This consumer supports native private Agents only;
-managed definitions and app-delegated sources are rejected. It creates one fresh
-ordinary work Session and queued Run for the same user, Workspace and private
-Agent. Session, Run, new authorization, independent hosted acceptance receipt and
-`AgentWorkSession` origin relation commit together. The objective remains complete.
-Only explicitly selected, currently authorized Library/SourceObject inputs get
-new links; parent input sets, workspace snapshots and credentials are not copied.
-The new input retains the validated source generation and digest; changes after
-validation cannot upgrade its signed identity and still fail current input reads.
-Artifact inputs are rejected because existing access binds them to their source
-Session. Session refs remain source associations, confer no grant and are not
-inserted into the child's model context by this consumer.
-
-Replay checks current source and accepted work resource authority, then returns
-the original receipt even after child execution failure or model unavailability.
-It does not start another Run or repeat scheduling. A lost relation index can be
-rebuilt from the original committed source and receipt, preserving the first
-successful source event identity. Missing/tombstoned source facts do not authorize
-reconstruction; an unavailable accepted work resource is not replaced. The
-receipt digests bind the original success identity so a later duplicate cannot
-replace an erased origin. New admissions retain current model selection rules;
-receipt replay does not repeat model availability or queue admission.
-Existing lifecycle scheduling begins only after admission commit; its existing pending
-reconciliation handles scheduling failure. Accepted does not mean processed.
-Different source call identities may admit separate work Sessions for one Agent.
-No new consumption retry, progress policy, stop cascade or cross-Session waiter
-behavior is introduced.
-
-The first-release initial schema includes this relation and index. Initialization
-infers no work origin from text. Recovery must retain matching source history,
-relations and receipts; do not replace accepted resources or infer origins from
-Session titles.
-
-## Delivered private work returns
-
-The API additionally owns immutable delivered work-return facts in
-`AgentWorkReturn`, keyed to the retained original work binding and child Run.
-Canonical Core terminal records, Runtime's validated pre-admission cancellation
-receipt and lifecycle operational failures remain distinct sources. Job success
-does not classify work success. A lifecycle fault notice survives a later genuine
-Session terminal, which has its own identity. Delivery retains original signed
-identities as audit facts; read-only query rechecks current coordination and work
-authority, including the original membership references. Rejoining cannot revive
-those references. Child output is an untrusted Session reference, never an elevated
-instruction. Source rewrite does not reverse an already committed admission.
-
-The terminal projection's best-effort delivery attempt follows its transaction.
-An independent worker discovers read-only, frozen pages of retained work bindings
-without Runtime HTTP, then attempts individual deliveries within a soft budget.
-Errors and lost responses advance attempted sources; the unattempted tail keeps
-the same upper bound, and later passes retry earlier failures. This repairs the
-terminal-commit-to-notice gap even after Job outbox publication. The
-existing lifecycle lease, Core ledger and Session active-Run lock retain execution
-ownership. The delivery scan neither admits coordinator Runs nor consumes notices.
-First automatic admission is a separate notice-ledger pass in the same worker
-control thread, with its own budget and cursor. Handling still requires explicit
-committed confirmation; ordinary Final, ACK and admission are insufficient. Future
-Agent Read requires actual loop input access and its timestamp, distinct from handling.
-
-The first-release initial schema includes the delivery relation. Initialization
-creates no delivered facts. Recovery must retain matching work, return facts,
-signed authorizations and accepted receipts.
-
-Explicit first consumption uses one immutable `AgentWorkConsumeAttempt` per notice,
-with one-to-one links to its coordinator Run and existing hosted operation receipt.
-Its input binding records the accepted Core native input and Run/Turn/Session/
-authorization identities. The API holds the ordinary Session admission lock,
-rechecks native ownership and original membership/current read authority, and
-commits attempt, Run, authorization and receipt atomically. A busy coordinator
-spends no first opportunity. Profile/input creation and lifecycle scheduling run
-outside the acceptance transaction. Existing record-reference lifecycle jobs and
-reconciliation retain scheduling ownership; no second scheduler or signing
-scheme is introduced. Runtime checks the persisted binding before writing a
-canonical `host_event_input`, and replay preserves Core's input origin. A later
-notice admits only itself and does not carry an older failed attempt.
-
-The first-release initial schema includes this relation and permits
-`consumeWorkReturn` in the receipt result constraint. Every accepted attempt has
-a non-null delivery sequence; the queue retains its explicit initial host owner.
-Initialization infers no attempts or input ownership.
-
-Automatic first admission scans committed `AgentWorkReturn` rows without a first
-attempt. A pass freezes its upper notice ID, advances each attempted row even on
-busy, denied or lost responses, and retains the unattempted tail for the next
-round. A later full pass or restart revisits notices still lacking an attempt.
-The API derives the stable operation ID; the worker forwards it to the existing
-consumer, which rechecks authority and coordinator busy state under its original
-locks. One coordination Session per Agent retains serial admission, while child
-work Sessions retain independent execution. A persisted attempt excludes its
-notice regardless of queued, running, failed, cancelled or completed Run state.
-New notices do not retry old attempts, and scheduling failures use the same Run's
-existing lifecycle reconciliation. There is no new table, queue, job kind or
-handling state. Explicit retries, Read and handled confirmation remain unimplemented;
-this boundary certifies first admission, not the complete handling lifecycle.
-
-## Hosted Agent input preparation
-
-`AgentInput` is one immutable API-owned fact carrier shared by pending delivery
-and retained input history. Each scoped stable ID retains exact body text,
-server ordering/time, the Session ledger waterline at acceptance and the original
-membership identity. The API does not add
-delivery, Read or handled tables. Existing Runtime supplement batches remain
-the delivery mechanism to adapt after Core freezes its input uptake contract.
-Runtime queue acknowledgement cannot erase the only retained body or establish
-Read; Read must be derived from actual successful main model-request uptake.
-
-The prepared acceptance/history endpoints do not yet dispatch to Runtime. Their
-wire `read` remains null. Idle, busy and Final-race handling must eventually use
-the same serialized Agent coordination chain. Inputs arriving while an already
-generated `send_message` is being committed remain eligible for the next legal
-safe point; they do not invalidate that generated output or create a parallel
-coordinator. Ordinary text cannot release special waits.
-
-Active work-return input additionally requires multiple immutable attempts to
-refer to one coordinator Run. The current OneToOne relation and initial-input
-rehydration must change together: selecting any attempt with `.first()` cannot
-determine whether a HostEvent was initial or taken up while the Run was active.
-The FK migration must preserve every notice, authorization, receipt and binding
-byte. It must not be applied before that identity boundary is implemented and
-tested. Handled confirmation remains
-deferred until those tests establish the correct current input ownership.
-
-The unified history is a projection over this carrier and verified Session
-output facts, read in one SQL snapshot. Input acceptance and Runtime event
-append both lock the same Session row; the saved waterline and input sequence
-give an immutable order between output commits. The cursor carries the full
-position and Session scope. Display timestamps and the two independent source
-sequences cannot replace this ordering. No synthetic Core fact or duplicate
-history table is introduced.
-
-The owner chooses one existing ModelConfig and effective thinking mode in Agent
-settings. Default/new Agents have no implicit selection. The setting governs
-future coordinator Runs through their existing authorization snapshots; active
-Runs retain their original selection even if settings change or are cleared.
-Idle native work-return admission snapshots this policy after revalidating the
-source proof and again after external profile resolution. Source and child
-authorization/membership evidence remains independent. Accepted coordinator
-rehydration verifies its own signed model/effort snapshot and does not compare it
-with a later Agent setting. Generic messages cannot target the dedicated
-coordination binding; checks under the Workspace creation/admission lock prevent
-a binding race from opening another model or coordinator path. Ordinary work
-Sessions retain their existing model behavior. This prepared wiring is untested;
-ordinary typed and active native input still await the Core adapter.
-
-## Shared Agent definitions
-
-The API owns Workspace-scoped `AgentDefinition` drafts and immutable published
-`AgentDefinitionVersion` records. Workspace owners and admins manage draft name,
-description, instructions, avatar and `pluginNames`, publish complete versions, and select
-availability `none`, `workspace` or `members`. The default is `none`; only active,
-published, currently available definitions can create instances or new Runs.
-Member grants reference current WorkspaceMembership identities, so leaving and
-rejoining does not restore a previous grant.
-
-Each user retains a private Agent, Sessions and Memory. A nullable, immutable
-Agent definition reference and a unique `(workspace, owner, definition)` binding
-provide one personal instance per definition. First use resolves this instance
-transactionally. Sharing a definition grants administrators no access to another
-user's Agent, Session, Run, files, transcript or Memory. Existing private Agents
-retain null definition references and their current behavior.
-
-Each new managed Run rechecks definition availability and resolves the current
-published version in its acceptance transaction. It stores that version foreign
-key together with the existing `agent_instructions` snapshot. A new publication
-affects subsequent Runs, including those in an existing Session, without changing
-the Session or Agent identity. Accepted Runs and receipt retries retain their
-original version and instructions. Disabling a definition or removing availability
-blocks new acceptance and subsequent managed MCP dispatch. It does not cancel an
-accepted Run or reinterpret its history; ordinary ownership and membership checks
-continue to apply.
-
-Draft `pluginNames` select complete packages from Workspace-enabled Plugins. A
-published version freezes the exact `pluginActivation`, including Skills, CLI,
-MCP and Hook contributions and their digests. New Runs require that frozen
-activation to remain available in the Workspace. Runtime uses it for actual
-Skill sources, plugin mounts, CLI paths, tools and Hooks, not just tool visibility.
-An empty selection remains valid; first-party built-in tools and authorized
-materials remain available. Neither publication nor migration grants access to
-global MCP credentials.
-
-`McpBearerCredential` remains the encrypted credential store.
-`AgentConnectorCredentialApproval` references an existing record and source
-version; it does not copy the secret. The source record's `created_by` identifies
-its custodian in the current data model. An approving superuser must also be that
-creator. Each approval fixes Workspace, definition, plugin, server, declaration
-resource path and resource digest. The file digest also binds the declared
-endpoint URL. `AgentConnectorBinding` selects an approval for that exact scope.
-Workspace administrators see only scoped approved references and cannot enumerate
-or bind arbitrary global secrets. Different definitions may bind different
-credentials for the same plugin. Missing, revoked or mismatched bindings never
-fall back to another definition or the global store.
-
-Source rotation invalidates approvals of the old source version and cached
-connections. Using the new version requires a new explicit approval and binding.
-Approval revocation is permanent. Approval foreign keys protect source records
-from deletion; the management API returns a controlled 409 for a protected source,
-including one referenced by a revoked approval. A shared service account gives
-approved users the configured business capability; it does not assert their
-individual downstream ACLs.
-
-Every external MCP provider, including bearer HTTP, unauthenticated HTTP and
-stdio, has a Runtime guard. Before each call the API checks current membership
-identity, Run/Session/Agent state and ownership, managed definition availability,
-Workspace plugin enablement, frozen resource identity, current approval, binding
-and source version. Lazy connect fixes a binding fingerprint before receiving a
-token. The connector returns a guarded real provider, so every dispatch checks
-the fingerprint and current authority after initialization and connection-queue
-waiting, including calls using the cached provider. Changed authority,
-fingerprints or API failures reject the call
-without executing or reconnecting the inner provider. Ordinary configuration
-stays frozen while security revocation remains current. Delegated Runs also require
-their current user-app grant at this dispatch boundary. SSE checks are separate
-from provider invocation; neither check cancels all accepted execution.
-The authorization decision precedes the actual provider invocation; it cannot
-atomically fence a remote effect against revocation committed after that decision
-or withdraw an external call already dispatched.
-
-The private credential path requires persistent `Agent.definition_id = null` and
-`AgentRun.definition_version_id = null`. A managed Agent missing its version is
-rejected. The old bearer resolver is restricted to that private state; the new
-adapter always uses strict connector authorization. Models and external tool
-arguments cannot choose secret references. Public responses expose neither downstream
-tokens nor internal authorization signatures. The management contracts support a scoped approval
-picker and binding controls; a new real-secret management UI is not implemented.
-
-## Delegated business applications
-
-The API registers `BusinessApplication` records and user-owned `UserAppDelegation`
-grants. Registration is platform-admin-only and defaults to pending. The existing
-Settings layout lets a signed-in user explicitly select an active application,
-Workspace, available definition or their own native Agent, operation scopes and
-either a finite expiry or a grant without automatic expiry, then revoke the
-grant later. The acting identity remains that user, with the application recorded
-as the actor; applications cannot supply a different user identity or manage
-definitions, Plugins, connector approvals or credentials.
-
-A grant issues a random opaque bearer token once, with a no-store response. Only
-its SHA-256 digest is persisted. The server fixes issuer and audience, validates
-expiry and revocation, and intersects the scopes with the user's current membership
-identity, target availability and resource ownership. Leaving and rejoining a
-Workspace does not revive an old grant. Browser cookies keep their existing CSRF
-checks; requests combining cookie identity and an Authorization header fail.
-
-Definition-delegated requests use the existing Session, upload, transcript, citation,
-artifact-download and cancellation routes. A delegated Run and hosted operation
-receipt retain their server-assigned application and grant origin. Browser and
-application submissions share the user-owned operation identity and digest, so
-retries recover the same receipt and changed input still returns 409. Acceptance
-and revocation serialize under the Workspace lock; current grants are checked
-again before acceptance commits. Migration leaves old Run and receipt origins
-null and does not invent applications, grants or credentials.
-
-An open Session stream checks current user, membership, definition, ownership and,
-when delegated, grant authority before each item and every five seconds while
-waiting for an item. Authority checks have a five-second timeout and fail closed;
-the stream ends within fifteen seconds of committed revocation. Its existing
-`session.stream.item.v1` snapshots, revisions and committed cursors are unchanged.
-No check promises to withdraw an external effect already dispatched.
-
-Credentials have a version independent of the grant's immutable policy and Agent
-identity. Owner-only rotation atomically replaces the token digest and increments
-the version, appending audit metadata without secrets. Current requests and open
-streams retain and recheck their authenticated version. A replaced credential
-cannot pass delayed admission or later stream reads. Already accepted delegated
-Runs retain their grant identity and are unaffected by credential rotation;
-grant revocation continues to control their connector dispatch.
-
-Native business application access targets an owner-maintained root Agent. A
-trusted application backend authenticates external business users and supplies
-their stable identities to the branch resolution endpoint. `BusinessAgentBranch`
-uniquely maps application, root and exact business identity to a permanent private
-Agent and its coordination Session. The tree is root configuration → isolated
-business user Agent → coordination and real work Sessions → their histories,
-snapshots, inputs and artifacts. Private memory is shared across Sessions only
-within the branch, using the existing `(userId, agentId)` physical namespace.
-No root or sibling history, memory or workspace snapshot is cloned.
-
-Subsequent application requests carry the resolved branch identity in one exact
-header. Authentication freezes the branch and credential version; admission and
-resource reads revalidate both. All Agent/Session/file guards bind to the exact
-private branch, never all descendants of the root. Model-side message/work
-Session references also enforce this boundary, rather than treating the common
-platform owner as sufficient authority. Signed material authorization and
-explicit attachment links remain required; the tree confers no implicit global
-Library access or automatic cross-Session file mounting.
-
-The root is the single maintenance point for instructions and model policy.
-New coordinator Runs snapshot its current configuration; existing Runs and child
-work retain their accepted instruction snapshot. The owner can inspect a read-only
-branch tree in settings, while ordinary Agent lists retain only maintained roots.
-Native grants do not authorize ordinary Session submissions or configuration
-writes. Each accepted input retains its application, grant and credential version
-as immutable source facts. Coordinator Runs remain owner execution. The existing
-input intake, actual Read evidence, native work dispatch, result return and
-recovery contracts remain authoritative.
-Revoking application access stops new requests; it does not discard accepted
-owner tasks. Owner, membership and current source permissions still govern those
-tasks. Closing a browser or rotating a credential does not replace the Agent or
-its coordination Session. Configuration remains in the owner's maintenance UI.
-
-The forward `0002_persistent_app_delegations` migration retains existing finite
-deadlines and definition targets. It adds credential version 1 without inventing
-audit operations or application origins for existing inputs. Only explicit new
-consent creates a persistent or native-target grant. The forward browser credential
-migration transfers old signed records with their original deadlines into one
-nullable-deadline authority. The business branch migration creates an empty
-identity mapping; it does not infer branches from old histories or copy customer
-data. Explicit new resolution creates each branch. Browser login, application
-grant lifetime, branch identity and Run execution lifetime are separate facts;
-elapsed time or credential rotation does not discard an Agent tree.
+The old application grants and `/api/v1/chats` transport are also retired.
+Existing browser Session endpoints remain governed by user ownership and
+Workspace membership. This change does not supply a replacement delegated
+Session API, external-user identity mapping, embedded browser entry point, or
+implicit access to an entire Library. See [business application access](../reference/BusinessAPI.md)
+for the retained registration boundary.
 
 ## Request flow
 
@@ -809,11 +459,11 @@ supplied by a caller without computing it from the strict authorization payload.
 The two implementations retain shared signature vectors and rejection cases.
 
 Within one verification, canonical payload hashing is reused for signature
-verification. API consumers share the six-field run binding (run, workspace,
-session, user, agent and model configuration), while keeping endpoint errors and
+verification. API consumers share the five-field run binding (run, workspace,
+session, user and model configuration), while keeping endpoint errors and
 resource-specific checks. The existing endpoint scopes are:
 
-| API consumer | Digest | Signature | Six-field binding | Additional checks retained |
+| API consumer | Digest | Signature | Five-field binding | Additional checks retained |
 | --- | --- | --- | --- | --- |
 | Runtime scheduling/start payload | Yes | Receiver verifies | Yes | Current membership, thinking mode |
 | Deferred input | Yes | Yes | Yes | Current membership, declared input, live owner/generation/hash and blob availability |
@@ -961,8 +611,7 @@ An unknown legacy baseline blocks this retained-owner pass.
 Runtime selects recovery roots through `runtime.workspace_snapshot.roots.v1`.
 The API requests this manifest outside owner locks. Runtime and API use the same
 packaged SQL witness to compare Session high-water and a SHA256 fingerprint of
-authoritative relational state. The API then locks Agent before Session, pins
-canonical Job ownership, checks the witness again, and recomputes current API
+authoritative relational state. The API then locks the Session, pins canonical Job ownership, checks the witness again, and recomputes current API
 roots and publication ownership. A changed witness aborts that plan. The API
 does not reproduce Core's checkpoint-selection policy. Historical recovery
 downloads likewise require a currently selected root and a current witness.
@@ -1033,5 +682,5 @@ change Core's tool result or cause tool replay. Publication can lag the event;
 an early content request may need to be retried. Captures retain the existing
 per-request authorization and do not create public object URLs. Session deletion
 purges chunks transactionally and retains tombstones; trash expiration repairs
-cleanup of already-purged Sessions and expired Agents. No ordinary read performs
+cleanup of already-purged Sessions. No ordinary read performs
 cleanup and no time-based eviction of accessible history is introduced.

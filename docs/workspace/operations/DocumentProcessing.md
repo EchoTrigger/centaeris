@@ -11,8 +11,12 @@ registration fails closed until a platform specification is available.
 
 Specification checks and document containers use a read-only root, no network,
 dropped capabilities, a non-root user, and fixed limits of 4 CPUs, 4 GiB memory,
-and 64 processes. Both CPU and GPU modes use the same CPU quota; the Docker
+and 512 processes/threads. Both CPU and GPU modes use the same CPU quota; the Docker
 host must provide at least 4 CPUs.
+`MATERIAL_PROCESSOR_RUNTIME` selects the processor runtime independently of
+Session execution's `OCI_RUNTIME`; both default to `runsc` and accept an explicit
+`runc` deployment setting. The process budget covers LibreOffice conversion and
+PaddleOCR model initialization, which can fail under a 64-process gVisor limit.
 Each document receives fresh anonymous input/output volumes. Processing is owned
 by a durable platform task, not by a user's run or a Rust scheduling job.
 

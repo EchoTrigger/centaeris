@@ -39,15 +39,20 @@ The script exercises the real helper protocol, including:
 - Writing a synthetic topic before its index.
 - Reading both files from fresh containers sharing only the Memory subpath.
 - Updating with the read observation hash and rejecting a stale hash.
-- Separate synthetic user/Agent subpaths returning NotFound.
+- Separate synthetic user/Workspace subpaths returning NotFound.
 - Removing the preference and index contents and reading back empty files.
 - Denying DeleteFile without changing the stored content; rejecting malformed URIs.
 
-The Runtime scope test independently verifies that the actual user+Agent binding
-is stable and distinct for a different user or Agent, and that its writable Docker
+The Runtime scope test independently verifies that the actual user+Workspace binding
+is stable and distinct for a different user or Workspace, and that its writable Docker
 subpath mount is exact. Session ID is not part of this binding. The script uses
 synthetic subpaths; it does not claim to have created real authenticated Sessions
 or exercised the full deployed API/Runtime/Docker stack.
+
+Current mounts use the `workspace_memory_scope_v2` hash domain. Existing
+`agent_memory_scope_v1` directories are neither copied into the new scope nor
+deleted by the database migration. The recorded acceptance below concerns its
+stated historical revision and does not validate this scope change.
 
 Forgetting a fact means editing/removing its topic content and index entry. Empty
 files may remain. File deletion is unsupported by the current Memory protocol;
@@ -90,15 +95,15 @@ reported. Full release CI and performance experiments were not run.
 Proposed model: the repository catalog's `openai.default / gpt-5.6-luna`, low
 thinking. Confirm its availability and applicable provider pricing when arranging
 the run; no external service or credential was accessed for this acceptance.
-Use fresh synthetic identities U1/U2 and Agents A1/A2; never demo Memory.
+Use fresh synthetic identities U1/U2 and Workspaces W1/W2; never demo Memory.
 
-1. U1/A1, Session 1: explicitly remember “For this test I prefer green headings.”
-2. U1/A1, new Session 2: ask which heading color was remembered, without supplying it.
-3. U1/A1, Session 2: explicitly change the preference to blue.
-4. U1/A1, new Session 3: explicitly forget the test heading preference.
-5. U1/A1, new Session 4: verify that no saved heading preference remains.
-6. U1/A2, new Session: ask for the saved preference; no U1/A1 content may appear.
-7. U2/A1, new Session: ask for the saved preference; no U1/A1 content may appear.
+1. U1/W1, Session 1: explicitly remember “For this test I prefer green headings.”
+2. U1/W1, new Session 2: ask which heading color was remembered, without supplying it.
+3. U1/W1, Session 2: explicitly change the preference to blue.
+4. U1/W1, new Session 3: explicitly forget the test heading preference.
+5. U1/W1, new Session 4: verify that no saved heading preference remains.
+6. U1/W2, new Session: ask for the saved preference; no U1/W1 content may appear.
+7. U2/W1, new Session: ask for the saved preference; no U1/W1 content may appear.
 
 Limits: at most 7 AgentRuns and 35 provider requests total, with retries counted;
 at most 8,192 input and 1,024 output tokens per request; hard total spend ceiling

@@ -86,7 +86,7 @@ def require_current_revision(note):
 
 
 def create_note(owner, *, save_id, display_name, markdown, parent_folder_id=""):
-    from .http.library import _library_parent, _require_library_name_available
+    from .http.library import _available_numbered_library_name, _library_parent
     display_name, body = validate_save(save_id, display_name, markdown)
     digest = request_digest("create", "", {"displayName": display_name, "markdown": markdown,
                                            "parentFolderId": parent_folder_id})
@@ -96,7 +96,7 @@ def create_note(owner, *, save_id, display_name, markdown, parent_folder_id=""):
         if replay is not None:
             return replay
         parent = _library_parent(owner, parent_folder_id)
-        _require_library_name_available(owner, parent, display_name)
+        display_name = _available_numbered_library_name(owner, parent, display_name)
         note = UserLibraryObject.objects.create(owner=owner, displayName=display_name, objectKind="note",
                                                contentType="text/markdown", status="ready", parentFolder=parent)
         _revision(note, display_name, markdown, body, owner, 1)

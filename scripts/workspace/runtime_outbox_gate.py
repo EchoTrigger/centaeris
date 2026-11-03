@@ -17,6 +17,26 @@ def database_settings():
                 ('password', 'PASSWORD', 'centaeris'))}
 
 
+def build_test_executable(root, env):
+    result = subprocess.run(
+        ['cargo', 'test', '--locked', '-p', 'runtime_server', '--bin', 'runtime_server',
+         '--no-run', '--message-format=json-render-diagnostics'], cwd=root, env=env,
+        stdout=subprocess.PIPE, text=True,
+    )
+    executables = []
+    for line in result.stdout.splitlines():
+        message = json.loads(line)
+        if (message['reason'] == 'compiler-artifact'
+                and message['target']['name'] == 'runtime_server'
+                and message['target']['kind'] == ['bin']
+                and message['profile']['test'] and message['executable'] is not None):
+            executables.append(message['executable'])
+    result.check_returncode()
+    if len(executables) != 1:
+        raise RuntimeError(f'Runtime test build produced {len(executables)} test executables')
+    return executables[0]
+
+
 def discovered_tests(output):
     names = [line.removesuffix(': test') for line in output.splitlines() if line.endswith(': test')]
     if not names or len(names) != len(set(names)):
@@ -71,42 +91,37 @@ def main(argv=()):
            'CENTAERIS_TEST_POSTGRES_OWNERSHIP_TOKEN': ownership_token,
            'CENTAERIS_TEST_POSTGRES_URL': url, 'INTERNAL_API_TOKEN': uuid.uuid4().hex,
            'CARGO_BUILD_JOBS': '1', 'EXECUTION_GLOBAL_LIMIT': '8',
+           'NO_PROXY': '127.0.0.1,localhost,' + os.environ.get('NO_PROXY', ''),
            'CENTAERIS_CAPTURE_BOUNDARY_DATABASE': url,
            'CENTAERIS_PROJECTION_BOUNDARY_DATABASE': url}
-    commands = [['cargo', 'test', '--locked', '-p', 'runtime_server',
+    executable = args.test_executable or build_test_executable(root, env)
+    commands = [[executable,
                  'transcript_capture::tests::transcript_capture_second_run_requires_committed_session_sequence',
-                 '--', '--exact'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server',
+                 '--exact'],
+                [executable,
                  'postgres_store::transcript::tests::postgres_transcript_head_recovery_read_interleaves_with_next_commit',
-                 '--', '--exact'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server', 'postgres_outbox', '--'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server', 'postgres_wait_handoff', '--'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server', 'postgres_current_schema', '--'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server', 'postgres_completion_delivery_upgrade', '--'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server',
+                 '--exact'],
+                [executable, 'postgres_outbox'],
+                [executable, 'postgres_wait_handoff'],
+                [executable, 'postgres_current_schema'],
+                [executable, 'postgres_completion_delivery_upgrade'],
+                [executable,
                  'postgres_store::resource_commit::tests::critical_resource_transaction_overrides_asynchronous_session_without_changing_default',
-                 '--', '--exact'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server',
-                 'postgres_store::integration_tests::residency_tests', '--'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server',
-                 'postgres_store::integration_tests::execution_capacity_tests', '--'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server',
-                 'postgres_store::integration_tests::execution_instance_tests', '--'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server',
-                 'postgres_store::integration_tests::retained_instance_tests', '--'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server',
-                 'postgres_store::integration_tests::host_retirement_tests', '--'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server',
-                 'postgres_store::integration_tests::cleanup_migration_tests', '--'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server',
-                 'postgres_store::integration_tests::maintenance_completion_schema_tests', '--'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server',
-                 'postgres_store::integration_tests::maintenance_authority_tests', '--'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server',
-                 'postgres_store::integration_tests::environment_owner_schema_tests', '--'],
-                ['cargo', 'test', '--locked', '-p', 'runtime_server',
-                 'postgres_store::integration_tests::provision_authority_tests', '--']]
+                 '--exact'],
+                [executable, 'postgres_store::integration_tests::residency_tests'],
+                [executable, 'postgres_store::integration_tests::execution_capacity_tests'],
+                [executable, 'postgres_store::integration_tests::execution_instance_tests'],
+                [executable, 'postgres_store::integration_tests::retained_instance_tests'],
+                [executable, 'postgres_store::integration_tests::host_retirement_tests'],
+                [executable, 'postgres_store::integration_tests::cleanup_migration_tests'],
+                [executable, 'postgres_store::integration_tests::maintenance_completion_schema_tests'],
+                [executable, 'postgres_store::integration_tests::maintenance_authority_tests'],
+                [executable, 'postgres_store::integration_tests::environment_owner_schema_tests'],
+                [executable, 'postgres_store::integration_tests::provision_authority_tests']]
     exact_tests = [
+        'question_response_tests::postgres_question_response_receipt_replays_after_consumption_and_preserves_yield_wake',
+        'question_wait_notifications::postgres_question_wait_presentation_changes_are_atomic_and_idempotent',
+        'wait_handoff_tests::postgres_question_wait_handoff_preserves_bound_snapshot_and_rejects_schema_relabeling',
         'checkpoint_requests::postgres_direct_store_validates_checkpoint_requests_before_transactions',
         'snapshot_cas_tests::postgres_snapshot_cas_rejects_stale_writers_and_preserves_concurrent_results',
         'postgres_transcript_concurrent_duplicate_commit_is_idempotent',
@@ -144,7 +159,7 @@ def main(argv=()):
         'postgres_runtime_job_wait_is_notified_and_closes_lost_wakeups',
         'postgres_session_terminal_append_fences_reclaimed_lease_owner',
         'postgres_peer_observation_reuses_one_observer_and_detects_live_clients',
-        'postgres_fenced_rewrite_tombstones_completed_dispatch_request',
+        'postgres_fenced_rewrite_tombstones_completed_tool_request',
         'postgres_pre_admission_cancellation_is_durable_fenced_and_history_free',
         'recovery_orchestration_releases_capacity_before_followup_store_work',
         'postgres_new_user_turn_after_unpaired_tool_call_fails_admission',
@@ -158,28 +173,25 @@ def main(argv=()):
         if name.startswith('postgres_store::integration_tests::resource_lifecycle_tests::')
     )
     commands.extend([
-        ['cargo', 'test', '--locked', '-p', 'runtime_server',
-         f'postgres_store::integration_tests::{name}', '--', '--exact']
+        [executable, f'postgres_store::integration_tests::{name}', '--exact']
         for name in exact_tests
     ])
-    commands.append(['cargo', 'test', '--locked', '-p', 'runtime_server',
-                     'postgres_store::integration_tests::environment_observation_tests',
-                     '--'])
+    commands.append([executable, 'postgres_store::integration_tests::environment_observation_tests'])
     commands.extend([
-        ['cargo', 'test', '--locked', '-p', 'runtime_server',
-         'postgres_store::integration_tests::' + group, '--']
+        [executable, 'postgres_store::integration_tests::' + group]
         for group in ('runsc_rotation_tests', 'shared_admission_tests')
     ])
     if args.test_filter is not None:
-        commands = [['cargo', 'test', '--locked', '-p', 'runtime_server', args.test_filter, '--']]
-    if args.test_executable is not None:
-        commands = [[args.test_executable, command[5], *command[7:]] for command in commands]
+        commands = [[executable, args.test_filter]]
     names = []
     for command in commands:
         discovered = subprocess.run([*command, '--ignored', '--list'], cwd=root,
                                     env=env,
                                     capture_output=True, text=True, check=True)
-        names.extend(discovered_tests(discovered.stdout))
+        try:
+            names.extend(discovered_tests(discovered.stdout))
+        except RuntimeError as error:
+            raise RuntimeError(f'Runtime PostgreSQL discovery failed for {command!r}: {error}') from error
     if len(names) != len(set(names)):
         raise RuntimeError('Runtime PostgreSQL test discovery contains duplicates')
     validate_required_tests(names, args.test_filter)

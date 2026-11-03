@@ -1,6 +1,8 @@
 import { validateTranscriptPatchPage, type TranscriptPage } from './transcriptContract.ts';
 import type { TranscriptViewStore } from './transcriptViewStore.ts';
-import { validatePresentationFrame, PresentationProtocolError, type PresentationIdentity, type PresentationEntry, type PresentationCheckpoint, type PresentationSession, type PresentationOperation, type PresentationViewRevision } from './workspacePresentationProtocol.ts';
+import { validatePresentationFrame, PresentationProtocolError, type PresentationIdentity, type PresentationEntry, type PresentationCheckpoint, type PresentationSession, type PresentationOperation, type PresentationViewRevision, type PresentationActivity, type PresentationQuestion } from './workspacePresentationProtocol.ts';
+
+export type { PresentationActivity } from './workspacePresentationProtocol.ts';
 
 type Options = PresentationIdentity & Readonly<{
   store: TranscriptViewStore;
@@ -11,6 +13,8 @@ type Options = PresentationIdentity & Readonly<{
   onSnapshot?(page: TranscriptPage, epoch: number): void;
   onNavigation?(sessions: readonly PresentationSession[]): void;
   onOperation?(detail: PresentationOperation): void;
+  onActivity?(activity: PresentationActivity): void;
+  onQuestion?(question: PresentationQuestion): void;
   onCheckpoint?(checkpoint: PresentationCheckpoint): void;
   onApplied?(checkpoint: PresentationCheckpoint): void;
   onReset?(reason: 'cursorInvalid' | 'projectionInvalidated'): void;
@@ -31,9 +35,9 @@ export class WorkspacePresentationController {
   private applying = false;
   private viewRevision: PresentationViewRevision | null = null;
   constructor(options: Options) {
-    if (!options.workspaceId || !options.agentId) throw new Error('presentation identity is required');
+    if (!options.workspaceId) throw new Error('presentation identity is required');
     this.options = options;
-    this.identity = { workspaceId: options.workspaceId, agentId: options.agentId, sessionId: options.sessionId };
+    this.identity = { workspaceId: options.workspaceId, sessionId: options.sessionId };
     this.store = options.store;
     this.signal = options.signal ?? new AbortController().signal;
     this.viewEpoch = options.store.getListSnapshot().viewEpoch;
@@ -77,6 +81,8 @@ export class WorkspacePresentationController {
           break;
         }
         case 'operation': this.options.onOperation?.(item.detail); break;
+        case 'activity': this.options.onActivity?.(item); break;
+        case 'question': this.options.onQuestion?.(item); break;
         case 'reset': this.lastCursor = null; this.options.onReset?.(item.reason); break;
         case 'snapshot': {
           const epoch = await this.store.withPresentationSnapshot(item.page, () => this.options.applySnapshot

@@ -127,6 +127,17 @@ pub(crate) fn info() -> Result<Value, String> {
 /// Download only the authorized subtree of an immutable container into an
 /// anonymous bounded spool. An empty or failed HTTP response is never a snapshot.
 pub(crate) fn download_archive(id: &str, path: &str, limit: u64) -> Result<std::fs::File, String> {
+    download_archive_if_present(id, path, limit)?
+        .ok_or_else(|| "Docker archive download failed".to_string())
+}
+
+/// Only an initial Docker 404 denotes an absent path. Partial streams and all
+/// other transport failures retain their error outcome.
+pub(crate) fn download_archive_if_present(
+    id: &str,
+    path: &str,
+    limit: u64,
+) -> Result<Option<std::fs::File>, String> {
     if id.len() != 64
         || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
         || limit == 0
@@ -144,14 +155,33 @@ pub(crate) fn download_archive(id: &str, path: &str, limit: u64) -> Result<std::
     }
     let engine = shared()?;
     engine.run(Duration::from_secs(60), async {
-        use futures::StreamExt;
         let stream = engine
             .docker
-            .download_from_container(id, Some(DownloadFromContainerOptions { path: path.into() }))
-            .map(|chunk| chunk.map_err(|_| "Docker archive download failed".to_string()));
+            .download_from_container(id, Some(DownloadFromContainerOptions { path: path.into() }));
         futures::pin_mut!(stream);
-        spool_archive_stream(stream, limit).await
+        spool_archive_if_present(stream, limit).await
     })
+}
+
+async fn spool_archive_if_present(
+    mut stream: impl futures::Stream<Item = Result<bytes::Bytes, Error>> + Unpin,
+    limit: u64,
+) -> Result<Option<std::fs::File>, String> {
+    use futures::StreamExt;
+    match stream.next().await {
+        Some(Err(Error::DockerResponseServerError {
+            status_code: 404, ..
+        })) => Ok(None),
+        Some(Ok(first)) => {
+            let remaining =
+                stream.map(|chunk| chunk.map_err(|_| "Docker archive download failed".to_string()));
+            spool_archive_stream(futures::stream::iter([Ok(first)]).chain(remaining), limit)
+                .await
+                .map(Some)
+        }
+        Some(Err(_)) => Err("Docker archive download failed".into()),
+        None => Err("Docker archive response was empty".into()),
+    }
 }
 
 async fn spool_archive_stream(
@@ -497,6 +527,29 @@ pub(crate) fn remove_stopped(id: &str) -> Result<(), String> {
     crate::observations::timed("dockerRemove", || remove_inner(id, false, false))
 }
 
+/// Stop an authorized original while retaining its writable layer for preservation.
+pub(crate) fn stop(id: &str) -> Result<(), String> {
+    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Docker stop requires an immutable container ID".into());
+    }
+    let engine = shared()?;
+    crate::observations::timed("dockerStop", || {
+        engine.run(MUTATION_TIMEOUT, async {
+            engine
+                .docker
+                .stop_container(
+                    id,
+                    Some(StopContainerOptions {
+                        t: Some(0),
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .map_err(|error| error.to_string())
+        })
+    })
+}
+
 fn remove_inner(id: &str, volumes: bool, force: bool) -> Result<(), String> {
     // Callers verify ownership and pass the immutable ID, never a mutable name.
     if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -736,6 +789,39 @@ mod archive_tests {
             assert!(download_archive(id, path, limit).is_err());
         }
     }
+    #[test]
+    fn only_an_initial_engine_404_means_missing_archive() {
+        let absent = futures::stream::iter([Err(Error::DockerResponseServerError {
+            status_code: 404,
+            message: "missing path".into(),
+        })]);
+        assert!(
+            futures::executor::block_on(spool_archive_if_present(absent, 1024))
+                .unwrap()
+                .is_none()
+        );
+        for status_code in [403, 500, 503] {
+            let failed = futures::stream::iter([Err(Error::DockerResponseServerError {
+                status_code,
+                message: "missing path".into(),
+            })]);
+            assert!(futures::executor::block_on(spool_archive_if_present(failed, 1024)).is_err());
+        }
+        let partial = futures::stream::iter([
+            Ok(bytes::Bytes::from_static(b"partial")),
+            Err(Error::DockerResponseServerError {
+                status_code: 404,
+                message: "missing path".into(),
+            }),
+        ]);
+        assert!(futures::executor::block_on(spool_archive_if_present(partial, 1024)).is_err());
+        assert!(futures::executor::block_on(spool_archive_if_present(
+            futures::stream::empty(),
+            1024
+        ))
+        .is_err());
+    }
+
     #[test]
     fn archive_stream_spools_exact_bytes_and_rejects_late_errors_empty_and_over_budget() {
         let chunks = vec![

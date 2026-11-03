@@ -24,13 +24,12 @@ fn locked(
         )
         .map_err(|_| "provision_store_unavailable")?
         .ok_or("provision_workspace_missing")?;
-    let session=tx.query_opt("SELECT workspace_id,current_environment_id,owner_id::text,agent_id,\"deletedAt\" IS NULL FROM public.app_core_session WHERE id=$1 FOR SHARE",&[&b.session_id]).map_err(|_|"provision_store_unavailable")?.ok_or("provision_session_missing")?;
+    let session=tx.query_opt("SELECT workspace_id,current_environment_id,owner_id::text,\"deletedAt\" IS NULL FROM public.app_core_session WHERE id=$1 FOR SHARE",&[&b.session_id]).map_err(|_|"provision_store_unavailable")?.ok_or("provision_session_missing")?;
     if ws.get::<_, String>(0) != "active"
         || session.get::<_, String>(0) != b.workspace_id
         || session.get::<_, Option<String>>(1).as_deref() != Some(&b.environment_id)
         || session.get::<_, String>(2) != b.user_id
-        || session.get::<_, String>(3) != b.agent_id
-        || !session.get::<_, bool>(4)
+        || !session.get::<_, bool>(3)
     {
         return Err("provision_session_rejected".into());
     }

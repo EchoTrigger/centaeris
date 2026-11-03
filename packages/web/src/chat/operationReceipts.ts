@@ -2,7 +2,7 @@ import { ApiError, apiJson } from "../api.ts";
 import type { ActiveTranscriptAgentRun, createWorkspaceTranscriptTransport } from "./transcriptTransport.ts";
 import type { TranscriptViewStore } from "./transcriptViewStore.ts";
 
-type Command = "createSession" | "submitMessage";
+type Command = "createSession" | "submitMessage" | "respondQuestion";
 type Scope = { userId: string; workspaceId: string; command: Command };
 export type OperationReceipt = { operationId: string; command: Command; status: "accepted"; sessionId: string; agentRunId: string | null; turnId: string | null };
 type Receipt = OperationReceipt;
@@ -195,9 +195,9 @@ export async function loadAcceptedConversation(sessionId: string, options: {
   return envelope.agentRun ? { identity, viewEpoch, cursor: envelope.agentRun.streamCursor, agentRunId: envelope.agentRun.agentRunId } : null;
 }
 
-export function acceptedConversationReviewLink(workspaceId: string, session: { id: string; agentId: string }) {
+export function acceptedConversationReviewLink(workspaceId: string, session: { id: string }) {
   return {
-    href: `/w/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(session.agentId)}?sessionId=${encodeURIComponent(session.id)}`,
+    href: `/w/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(session.id)}`,
     target: "_blank",
     rel: "noopener",
   };
@@ -205,13 +205,13 @@ export function acceptedConversationReviewLink(workspaceId: string, session: { i
 
 /** Called by the user's new-tab link click. It only consumes the confirmed
  * operation metadata; the source page's draft and files remain in memory. */
-export async function consumeReviewedOperation(client: OperationClient, operationId: string, readSession: (id: string) => Promise<{ id: string; agentId: string }>) {
+export async function consumeReviewedOperation(client: OperationClient, operationId: string, readSession: (id: string) => Promise<{ id: string }>) {
   const expected = client.pending();
   if (!expected || expected.operationId !== operationId) throw new Error("operation_result_stale");
   const accepted = await client.recover();
   if (!accepted || accepted.operationId !== operationId) throw new Error("operation_result_stale");
   const session = await readSession(accepted.sessionId);
-  if (session?.id !== accepted.sessionId || typeof session.agentId !== "string" || !session.agentId) throw new Error("session_response_invalid");
+  if (session?.id !== accepted.sessionId) throw new Error("session_response_invalid");
   if (!samePendingVersion(client.pending(), expected)) throw new Error("operation_result_stale");
   client.complete(operationId);
 }

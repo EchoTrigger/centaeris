@@ -4,7 +4,7 @@ Lock order is Workspace → original membership → Session → Environment → 
 original grant → lifecycle job. Read-only Workspace/membership authorization uses
 FOR SHARE; mutable controller bindings remain exclusive. Every lock uses NOWAIT
 so contention rolls back the complete transaction before returning retryable busy.
-Snapshot preservation additionally locks Agent before Session to fence parent GC.
+Snapshot preservation takes the Session owner lock to fence concurrent GC.
 The job lock only pins existing authority; this module never creates a lease.
 Callers must not enter with partial locks acquired in a different order.
 Public authority operations require an outermost transaction: they return only
@@ -15,7 +15,7 @@ import hashlib
 from django.conf import settings
 from django.db import DatabaseError, connection, transaction
 
-from .models import Agent, AgentRun, AgentRunAuthorization, AgentRunEnvironmentRelease, Session, SessionEnvironment, Workspace, WorkspaceMembership
+from .models import AgentRun, AgentRunAuthorization, AgentRunEnvironmentRelease, Session, SessionEnvironment, Workspace, WorkspaceMembership
 from .runtime_contract import agent_run_binding_matches, authorization_digest, verify_agent_run_authorization_signature
 from .resource_commit import require_durable_commit
 
@@ -57,13 +57,9 @@ def _locked_binding(run_id, lease_owner, *, acquiring, lease_purpose=None, prote
         "SELECT * FROM app_core_workspacemembership WHERE id=%s AND workspace_id=%s "
         "AND user_id=%s AND role IN ('owner','admin','member') FOR SHARE NOWAIT",
         [initial.membership_ref, initial.workspace_id, initial.user_id])), None)
-    if protect_session_owner:
-        # Snapshot publication and permanent-owner GC serialize parent before child.
-        agent_id = Session.objects.values_list("agent_id", flat=True).get(pk=initial.session_id)
-        Agent.objects.select_for_update(nowait=True).get(pk=agent_id)
     session = Session.objects.select_for_update(of=("self",), nowait=True).get(pk=initial.session_id)
     environment = SessionEnvironment.objects.select_for_update(nowait=True).get(pk=initial.environment_id)
-    run = AgentRun.objects.select_for_update(of=("self",), nowait=True).select_related("session__agent").get(pk=run_id)
+    run = AgentRun.objects.select_for_update(of=("self",), nowait=True).select_related("session").get(pk=run_id)
     grant = AgentRunAuthorization.objects.select_for_update(nowait=True).get(agent_run_id=run_id)
     if (run.session_id != session.pk or run.environment_id != environment.pk
             or environment.session_id != session.pk or run.workspace_id != workspace.pk):
@@ -190,6 +186,9 @@ def release_environment_controller(run_id, controller_epoch, lease_owner):
         receipt = AgentRunEnvironmentRelease.objects.create(agent_run=run, environment=environment,
             authorization_digest=run.authorization.digest, controller_epoch=controller_epoch,
             controller_lease_digest=controller_lease_digest(lease_owner))
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT public.workspace_presentation_bump_v1(%s)",
+                [f"session:{run.session_id}:state"])
         return _release_result(receipt)
     return _translate_contention(release)
 

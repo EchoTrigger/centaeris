@@ -101,6 +101,7 @@ function PreviewDocument({ src, title, onError }) {
     </nav> : null}
     <div className="officePreviewViewport" ref={viewportRef} aria-busy={!paintedPages.size && !error}>
       {error ? <div className="officePreviewState" role="alert">{t(error)}</div> : <>
+        {!paintedPages.size ? <div className="officePreviewState" role="status">{t("officePreview.loading")}</div> : null}
         {document ? <div className="officePreviewDocument">
           {Array.from({ length: document.numPages }, (_, index) => <PreviewPage
             key={index + 1}

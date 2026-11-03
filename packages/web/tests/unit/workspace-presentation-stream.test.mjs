@@ -7,7 +7,7 @@ import { streamWorkspacePresentation } from '../../src/chat/workspacePresentatio
 import { createTranscriptViewStore } from '../../src/chat/transcriptViewStore.ts';
 import { ApiError } from '../../src/api.ts';
 
-const identity = { workspaceId: 'workspace', agentId: 'agent', sessionId: 'session' };
+const identity = { workspaceId: 'workspace', sessionId: 'session' };
 const envelope = (kind, extra = {}) => ({ schema: 'workspace.presentation.v1', ...identity, kind, ...extra });
 const entry = (kind, extra = {}, cursor = null) => ({ cursor, item: envelope(kind, extra) });
 const page = (blocks = [], water = '0', generation = 'generation') => ({
@@ -42,7 +42,7 @@ function fixture(options = {}) {
 
 test('presentation protocol rejects unknown fields, mismatched binding and non-checkpoint cursors', () => {
   assert.deepEqual(readPresentationSseBlock(wire([entry('navigation', { snapshotId: 'navigation', offset: 0, hasMore: false, sessions: [] })]), identity).item, envelope('navigation', { snapshotId: 'navigation', offset: 0, hasMore: false, sessions: [] }));
-  for (const value of [entry('navigation', { snapshotId: 'navigation', offset: 0, hasMore: false, sessions: [], unexpected: true }), { ...entry('navigation', { snapshotId: 'navigation', offset: 0, hasMore: false, sessions: [] }), item: { ...envelope('navigation', { snapshotId: 'navigation', offset: 0, hasMore: false, sessions: [] }), agentId: 'other' } }, entry('navigation', { snapshotId: 'navigation', offset: 0, hasMore: false, sessions: [] }, 'received')]) {
+  for (const value of [entry('navigation', { snapshotId: 'navigation', offset: 0, hasMore: false, sessions: [], unexpected: true }), { ...entry('navigation', { snapshotId: 'navigation', offset: 0, hasMore: false, sessions: [] }), item: { ...envelope('navigation', { snapshotId: 'navigation', offset: 0, hasMore: false, sessions: [] }), workspaceId: 'other' } }, entry('navigation', { snapshotId: 'navigation', offset: 0, hasMore: false, sessions: [] }, 'received')]) {
     assert.throws(() => readPresentationSseBlock(wire([value]), identity));
   }
   assert.equal(readPresentationSseBlock(': heartbeat\n\n', identity), null);
@@ -136,7 +136,7 @@ test('clean EOF reconnects from the applied cursor and does not mark a running t
     }, wait: async ms => { delays.push(ms); },
   }).catch(error => { assert.equal(error.name, 'AbortError'); });
   assert.equal(paths.length, 2);
-  assert.equal(paths[0], '/api/workspaces/workspace/presentation/events?agentId=agent&sessionId=session');
+  assert.equal(paths[0], '/api/workspaces/workspace/presentation/events?sessionId=session');
   assert.deepEqual(cursors, [undefined, 'applied:0']);
   assert.equal(delays.length, 1);
 });
@@ -277,8 +277,8 @@ test('comment heartbeats keep a silent model connected without inventing task pr
 });
 
 
-const navigationRow = id => ({ id, workspaceId: 'workspace', agentId: 'agent', projectId: null, currentEnvironmentId: null,
-  executionMode: 'local', title: id, origin: 'user', initialInputOrigin: null, status: 'active', deletedAt: null,
+const navigationRow = id => ({ id, workspaceId: 'workspace', projectId: null, currentEnvironmentId: null,
+  executionMode: 'local', title: id, origin: 'user',  status: 'active', deletedAt: null,
   isPinned: false, isUnread: false, hasActiveAgentRun: false, updatedAt: '2026-10-23T10:00:00Z',
   latestAttentionSequence: '0', readThroughSequence: '0', attentionRevision: '0', isManuallyUnread: false });
 
@@ -425,12 +425,87 @@ test('invalid derived notification state fails at the actual SSE boundary before
 });
 
 
-test('workspace navigation retains Sessions from retired and other Agents without weakening frame identity', () => {
+test('workspace navigation retains distinct Sessions without weakening workspace identity', () => {
   const value = entry('navigation', { snapshotId: 'workspace-sessions', offset: 0, hasMore: false,
-    sessions: [navigationRow('current'), { ...navigationRow('retired-history'), agentId: 'retired-agent' }] });
+    sessions: [navigationRow('current'), navigationRow('retained-history')] });
   const parsed = readPresentationSseBlock(wire([value]), identity);
-  assert.deepEqual(parsed.item.sessions.map(session => session.agentId), ['agent', 'retired-agent']);
-  assert.throws(() => readPresentationSseBlock(wire([{ ...value, item: { ...value.item, agentId: 'different-subscription' } }]), identity));
+  assert.deepEqual(parsed.item.sessions.map(session => session.id), ['current', 'retained-history']);
+  assert.throws(() => readPresentationSseBlock(wire([{ ...value, item: { ...value.item, workspaceId: 'different-subscription' } }]), identity));
   assert.throws(() => readPresentationSseBlock(wire([entry('navigation', { snapshotId: 'foreign', offset: 0, hasMore: false,
     sessions: [{ ...navigationRow('foreign-history'), workspaceId: 'foreign' }] })]), identity));
+});
+
+
+test('activity frames deliver bound status without advancing applied water or checkpoint cursor', async () => {
+  const activities = [];
+  const { store, controller } = fixture({ onActivity: activity => activities.push(activity) });
+  await controller.acceptWithBackpressure(entry('checkpoint', checkpoint(), 'applied:0'));
+  for (const activity of ['thinking', 'working', 'waitingInput', 'retrying', 'preserving', null]) {
+    const frame = entry('activity', { agentRunId: 'run', sourceHighWater: '17', activity });
+    await controller.acceptWithBackpressure(readPresentationSseBlock(wire([frame]), identity));
+    assert.deepEqual(activities.at(-1), frame.item);
+    assert.equal(controller.lastCursor, 'applied:0');
+    assert.equal(store.getListSnapshot().appliedSourceHighWater, '0');
+  }
+  assert.equal(activities.length, 6);
+});
+
+test('activity rejects invalid phases, fields, water, run and scope bindings and any cursor', async () => {
+  const valid = { agentRunId: 'run', sourceHighWater: '17', activity: 'working' };
+  const activities = [];
+  const { controller } = fixture({ onActivity: activity => activities.push(activity) });
+  const invalid = [
+    { activity: 'executing' }, { activity: ['working'] }, { unexpected: true },
+    { sourceHighWater: 17 }, { sourceHighWater: '01' }, { sourceHighWater: '-1' },
+    { sourceHighWater: '18446744073709551616' }, { agentRunId: '' },
+    { sessionId: 'other' }, { workspaceId: 'other' },
+  ].map(changes => entry('activity', { ...valid, ...changes }));
+  const missing = entry('activity', valid);
+  delete missing.item.activity;
+  invalid.push(missing, entry('activity', valid, 'must-not-ack'));
+  for (const frame of invalid) {
+    assert.throws(() => readPresentationSseBlock(wire([frame]), identity));
+    await assert.rejects(controller.acceptWithBackpressure(frame));
+  }
+  assert.deepEqual(activities, []);
+  assert.equal(controller.lastCursor, null);
+});
+
+test('disposed or superseded presentation subscriptions cannot apply activity', async () => {
+  for (const stop of ['dispose', 'scope']) {
+    let current = true;
+    const activities = [];
+    const { controller } = fixture({ isCurrent: () => current, onActivity: activity => activities.push(activity) });
+    if (stop === 'dispose') controller.dispose();
+    else current = false;
+    await controller.acceptWithBackpressure(entry('activity', { agentRunId: 'run', sourceHighWater: '17', activity: 'thinking' }));
+    assert.deepEqual(activities, []);
+    assert.equal(controller.lastCursor, null);
+  }
+});
+
+
+test('pending questions restore and clear from authoritative delivery without advancing a cursor', async () => {
+  const received = [];
+  const { controller } = fixture({ onQuestion: frame => received.push(frame) });
+  const question = { questionId: 'question', continuationId: 'continuation', turnId: 'turn', question: 'Choose a delivery format', options: ['Summary', 'Task list'] };
+  const frame = entry('question', { agentRunId: 'run', sourceHighWater: '17', question });
+  await controller.acceptWithBackpressure(readPresentationSseBlock(wire([frame]), identity));
+  assert.deepEqual(received.at(-1), frame.item);
+  await controller.acceptWithBackpressure(entry('question', { agentRunId: 'run', sourceHighWater: '18', question: null }));
+  assert.equal(received.at(-1).question, null);
+  assert.equal(controller.lastCursor, null);
+  const invalid = [
+    { question: { ...question, unexpected: true } }, { question: { ...question, continuationId: '' } },
+    { question: { ...question, question: '' } }, { question: { ...question, options: [1] } },
+    { question: { ...question, options: [''] } }, { sourceHighWater: '01' }, { sessionId: 'other' }, { agentRunId: '' },
+  ].map(changes => entry('question', { ...frame.item, ...changes }));
+  invalid.push({ ...frame, cursor: 'must-not-ack' });
+  for (const value of invalid) {
+    assert.throws(() => readPresentationSseBlock(wire([value]), identity));
+    await assert.rejects(controller.acceptWithBackpressure(value));
+  }
+  controller.dispose();
+  await controller.acceptWithBackpressure(frame);
+  assert.equal(received.length, 2);
 });

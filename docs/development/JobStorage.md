@@ -1,6 +1,8 @@
 # Local Subagent Job storage
 
-Core owns Job, lease, WorkPacket, cancellation and result rules. SQLite owns
+Core owns Job, lease, WorkPacket, cancellation and result rules.
+Workspace Agent coordination and `agent_work.return` publication are retired;
+Core child execution roles and `subagent.run` Jobs remain supported. SQLite owns
 transactions and confirmation. tokio-rusqlite 0.6.0 owns the connection thread and
 queue, using existing rusqlite 0.32.1 / bundled libsqlite3-sys 0.30.1. No driver
 upgrade, license change or persistent schema migration is required.
@@ -33,7 +35,7 @@ receiver admission and drains actual accepted work.
 | Job list/get and cancellation | Native capability; operation/outcome retained in host diagnostics |
 | Session deletion | Close Session admission, cancel parent-owned Job for a direct child, drain complete host sequences/native work, then existing Actor deletion |
 | Provider / dead-letter maintenance | Existing Actor/direct Store retained; not every Job kind is migrated |
-| PostgreSQL | Actor/direct PostgreSQL remain for agent_run.lifecycle, worker.noop, agent_work.return and provider.poll; pool migration separate |
+| PostgreSQL | Actor/direct PostgreSQL remain for agent_run.lifecycle, worker.noop, subagent.run and provider.poll; pool migration separate |
 | Snapshot/checkpoint/transcript/event/receipt | Existing synchronous ports and SQL retained |
 
 The two SQLite owners do not share FIFO. Confirm creation before its host handoff;

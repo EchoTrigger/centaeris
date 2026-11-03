@@ -6,6 +6,36 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="referrer" content="no-referrer" />
     <title>Centaeris</title>
+    <script>
+      /* Restore this tab's confirmed identity before app loading or network requests. */
+      (() => {
+        const match = /^\/w\/([^/]+)(?:\/|$)/.exec(location.pathname);
+        if (!match) return;
+        const icon = document.head.querySelector('link[rel~="icon"]');
+        if (!icon) return;
+        icon.setAttribute("data-workspace-identity", "");
+        document.title = "";
+        icon.href = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E";
+        icon.type = "image/svg+xml";
+        try {
+          const id = decodeURIComponent(match[1]);
+          const saved = JSON.parse(sessionStorage.getItem("centaeris:workspace-identity:v1"));
+          if (!saved || saved.schema !== "workspace.identity.v1" || saved.workspaceId !== id
+            || typeof saved.name !== "string" || !saved.name.trim() || saved.name.length > 160
+            || (saved.avatarUrl !== null && (typeof saved.avatarUrl !== "string"
+              || !saved.avatarUrl.startsWith(`/api/workspaces/${encodeURIComponent(id)}/avatar/`)
+              || !/^[a-f0-9]{64}$/.test(saved.avatarUrl.slice(`/api/workspaces/${encodeURIComponent(id)}/avatar/`.length))))) return;
+          document.title = saved.name;
+          if (saved.avatarUrl) {
+            icon.href = saved.avatarUrl;
+            icon.type = "image/png";
+          } else {
+            const initial = (Array.from(saved.name)[0] || "").replace(/[<>&"']/g, value => `&#${value.codePointAt(0)};`);
+            icon.href = `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#eceef0"/><text x="16" y="22" text-anchor="middle" font-family="sans-serif" font-size="22" fill="#292b30">${initial}</text></svg>`)}`;
+          }
+        } catch { /* Missing storage never blocks startup or grants access. */ }
+      })();
+    </script>
     <script src="/theme-init.js"></script>
   </head>
   <body>

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { ApiError, apiResponse, configureApi } from '../../src/api.ts';
 import { streamWorkspacePresentation } from '../../src/chat/workspacePresentationTransport.ts';
 
-const identity = { workspaceId: 'workspace', agentId: 'agent', sessionId: null };
+const identity = { workspaceId: 'workspace', sessionId: null };
 const encoder = new TextEncoder();
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const navigation = () => `data: ${JSON.stringify({ schema: 'workspace.presentation.v1', ...identity, kind: 'navigation', snapshotId: 'same', offset: 0, hasMore: false, sessions: [] })}\n\n`;

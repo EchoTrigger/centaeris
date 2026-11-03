@@ -11,7 +11,7 @@ from unittest.mock import Mock,patch
 
 class SeedModeTests(unittest.TestCase):
  def execute(self,folder,mode,shared=True,recovery=False):
-  managers={name:Mock() for name in ('Agent','ModelConfig','ModelProvider','ProviderCredential','Workspace','WorkspaceMembership')}
+  managers={name:Mock() for name in ('ModelConfig','ModelProvider','ProviderCredential','Workspace','WorkspaceMembership')}
   for name,manager in managers.items():manager.create.return_value=types.SimpleNamespace(id='fixture-'+name)
   managers['Workspace'].exists.return_value=False
   models=types.SimpleNamespace(**{name:types.SimpleNamespace(objects=manager) for name,manager in managers.items()})

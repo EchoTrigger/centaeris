@@ -180,8 +180,11 @@ pub(super) fn migrate_index(root: &Path, instance: &str) -> Result<(), String> {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| "task_index_invalid")?;
-    if version == 2 {
+    if version == 3 {
         return Ok(());
+    }
+    if version == 2 {
+        return migrate_output_consumptions(&mut connection);
     }
     store::validate_version(&connection, 1)?;
     let value: Option<String> = connection
@@ -392,5 +395,12 @@ pub(super) fn migrate_index(root: &Path, instance: &str) -> Result<(), String> {
     tx.execute("INSERT INTO metadata VALUES('journal',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [serde_json::to_string(&journal).map_err(|_| "task_encoding_failed")?]).map_err(|_| "task_journal_write_failed")?;
     tx.execute_batch("DROP TABLE closed_runs; PRAGMA user_version=2;")
         .map_err(|_| "task_journal_write_failed")?;
-    tx.commit().map_err(|_| "task_journal_commit_failed".into())
+    tx.commit().map_err(|_| "task_journal_commit_failed")?;
+    migrate_output_consumptions(&mut connection)
+}
+
+fn migrate_output_consumptions(connection: &mut Connection) -> Result<(), String> {
+    store::validate_version(connection, 2)?;
+    connection.execute_batch("PRAGMA synchronous=FULL; BEGIN; CREATE TABLE output_consumptions(id TEXT PRIMARY KEY,receipt TEXT NOT NULL,reclaimed INTEGER NOT NULL CHECK(reclaimed IN (0,1))) WITHOUT ROWID; PRAGMA user_version=3; COMMIT;")
+        .map_err(|_| "task_index_migration_failed".into())
 }

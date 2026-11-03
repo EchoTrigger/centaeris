@@ -75,7 +75,7 @@ def container_options(runtime, device):
         raise ValueError("material_processor_device_invalid")
     options = dict(user="10001:10001", network_mode="none", read_only=True,
                    tmpfs={"/tmp": "rw,nosuid,nodev,mode=1777"}, mem_limit=4294967296,
-                   nano_cpus=4_000_000_000, pids_limit=64, cap_drop=["ALL"],
+                   nano_cpus=4_000_000_000, pids_limit=512, cap_drop=["ALL"],
                    security_opt=["no-new-privileges"], runtime=runtime,
                    log_config=docker.types.LogConfig(type="json-file", config={"max-size": "1m", "max-file": "1"}))
     if device == "gpu:0":
@@ -90,7 +90,7 @@ class MaterialWorker:
         if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", self.namespace):
             raise ValueError("material_processor_namespace_invalid")
         self.owner = "material-worker:" + uuid.uuid4().hex
-        self.options = container_options(os.environ.get("OCI_RUNTIME", "runsc"), os.environ.get("MATERIAL_PROCESSOR_DEVICE", "cpu"))
+        self.options = container_options(os.environ.get("MATERIAL_PROCESSOR_RUNTIME", "runsc"), os.environ.get("MATERIAL_PROCESSOR_DEVICE", "cpu"))
         self.image = self.client.images.get(os.environ["MATERIAL_PROCESSOR_IMAGE"]).id
         self.cleanup_specifications()
         self.spec = self.load_specification()

@@ -1,7 +1,7 @@
 import { t } from "../i18n";
 import { useTranslation } from "../i18n";
 import { Grid2X2, Search, Sparkles, Table2 } from "lucide-react";
-import { AgentMark } from "./AgentMark";
+import { WorkspaceAvatar } from "../components/WorkspaceAvatar";
 
 const QUICK_ACTIONS = () => ([
   { label: t("homePlane.createSlides"), icon: Grid2X2, prompt: t("homePlane.helpMeCreateASlideDeckFirstConfirmThe") },
@@ -10,12 +10,12 @@ const QUICK_ACTIONS = () => ([
   { label: t("homePlane.visualize"), icon: Sparkles, prompt: t("homePlane.visualizeThisInformationFirstConfirmTheMostImportantRelationships") },
 ]);
 
-export function HomePlane({ agent }) {
+export function HomePlane({ workspace }) {
   const { t } = useTranslation();
   return (
     <div className="shHome" aria-label={t("homePlane.home")}>
-      <AgentMark className="shHomeAvatar" agent={agent || { avatarKind: "centaeris" }} />
-      <h1>{agent?.name || "Centaeris"}</h1>
+      <WorkspaceAvatar className="shHomeAvatar" workspace={workspace} />
+      <h1>{workspace.name}</h1>
     </div>
   );
 }

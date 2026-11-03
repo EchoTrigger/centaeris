@@ -25,7 +25,7 @@ fn cancellation_unknown(reason: impl Into<String>) -> ExecutionError {
     }
 }
 
-fn operation(fence: &EnvironmentTaskFence, id: &str, action: &str) -> String {
+pub(super) fn operation(fence: &EnvironmentTaskFence, id: &str, action: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(b"centaeris:retained-command:v3\0");
     hash.update(

@@ -28,7 +28,7 @@ pub(super) fn run_scoped(
     profile: EnvironmentProfile,
 ) -> fixture::Run {
     let mut original: WorkspaceAgentRunAuthorization = serde_json::from_str(include_str!(
-        "../../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+        "../../../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
     ))
     .unwrap();
     original.agent_run_id = id.into();
@@ -40,8 +40,8 @@ pub(super) fn run_scoped(
     let profile_json = serde_json::to_string(&original.environment_profile).unwrap();
     let owner = format!("owner-{id}");
     db.execute(
-        "INSERT INTO public.app_core_session(id,workspace_id,owner_id,agent_id,current_environment_id,\"deletedAt\") VALUES($1,$2,$3,$4,$5,NULL)",
-        &[&session_id,&original.workspace_id,&original.user_id,&original.agent_id,&environment_id],
+        "INSERT INTO public.app_core_session(id,workspace_id,owner_id,current_environment_id,\"deletedAt\") VALUES($1,$2,$3,$4,NULL)",
+        &[&session_id,&original.workspace_id,&original.user_id,&environment_id],
     ).unwrap();
     db.execute(
         "INSERT INTO public.app_core_sessionenvironment(id,session_id,controller_run_id,controller_epoch,controller_lease_owner,controller_purpose,controller_released,environment_profile,environment_profile_digest) VALUES($1,$2,$3,1,$4,'execute',false,$5::text::jsonb,$6)",
@@ -105,7 +105,7 @@ pub(super) fn run_scoped(
 
 fn profile() -> EnvironmentProfile {
     let mut authorization: WorkspaceAgentRunAuthorization = serde_json::from_str(include_str!(
-        "../../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+        "../../../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
     ))
     .unwrap();
     authorization.environment_profile.resources.memory_bytes = 4 * GIB;

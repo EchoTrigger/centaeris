@@ -49,7 +49,7 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Run full release gate
+      - name: Run headless release gate
         shell: pwsh
         run: .\scripts\ci.ps1
 

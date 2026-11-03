@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_model_is_rejected_without_rewriting_config() {
+    fn saved_model_and_effort_are_read_without_catalog_validation_or_rewriting() {
         let root = temp_root("unsupported-model");
         let path = root.join("config.toml");
         let mut config = UserConfigDocument::default();
@@ -397,10 +397,19 @@ mod tests {
                     ),
                     (
                         "model_thinking_mode".to_string(),
-                        toml::Value::String("high".to_string()),
+                        toml::Value::String("saved-effort".to_string()),
                     ),
                 ])),
             );
+        value["runtime"].as_table_mut().unwrap().insert(
+            "thinking_mode_preferences".into(),
+            toml::Value::try_from(vec![serde_json::json!({
+                "provider_id": "deepseek.default",
+                "model": "deepseek-v4-flash",
+                "mode": "saved-effort",
+            })])
+            .unwrap(),
+        );
         fs::write(
             &path,
             toml::to_string_pretty(&value).expect("encode old config"),
@@ -408,9 +417,17 @@ mod tests {
         .expect("write old config");
 
         let original = fs::read(&path).unwrap();
-        assert!(load_at(&path)
-            .expect_err("unsupported model")
-            .contains(USER_CONFIG_UNSUPPORTED));
+        let restored = load_at(&path).expect("read saved model settings");
+        let runtime = serde_json::to_value(restored.runtime).unwrap();
+        assert_eq!(runtime["active_model"]["model"], "deepseek-v4-flash");
+        assert_eq!(
+            runtime["active_model"]["model_thinking_mode"],
+            "saved-effort"
+        );
+        assert_eq!(
+            runtime["thinking_mode_preferences"][0]["mode"],
+            "saved-effort"
+        );
         assert_eq!(fs::read(&path).unwrap(), original);
         let _ = fs::remove_dir_all(root);
     }
@@ -437,7 +454,7 @@ mod tests {
                     ),
                     (
                         "model".to_string(),
-                        toml::Value::String("gemini-3.1-pro-preview".to_string()),
+                        toml::Value::String("gemini-4-argon".to_string()),
                     ),
                     (
                         "model_thinking_mode".to_string(),
@@ -454,12 +471,15 @@ mod tests {
         let original = fs::read(&path).unwrap();
         let restored = load_at(&path).expect("read current config");
         assert_eq!(fs::read(&path).unwrap(), original);
-        assert_eq!(restored.schema_version, 2);
+        assert_eq!(restored.schema_version, USER_CONFIG_SCHEMA_VERSION);
         assert_eq!(restored.plugins.disabled, ["plugin-a"]);
         let saved: toml::Value =
             toml::from_str(&fs::read_to_string(&path).expect("read current config"))
                 .expect("parse current config");
-        assert_eq!(saved["schema_version"].as_integer(), Some(2));
+        assert_eq!(
+            saved["schema_version"].as_integer(),
+            Some(i64::from(USER_CONFIG_SCHEMA_VERSION))
+        );
         assert_eq!(
             saved["runtime"]["active_model"]["model_thinking_mode"].as_str(),
             Some("low")

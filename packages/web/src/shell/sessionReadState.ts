@@ -3,7 +3,7 @@ export type { SessionAttention } from "../sessionAttentionContract.ts";
 
 export function mergeSessionAttention<T extends SessionAttention>(current: T, incoming: T): T {
   validate(current); validate(incoming);
-  if (current.id !== incoming.id || current.workspaceId !== incoming.workspaceId || current.agentId !== incoming.agentId) {
+  if (current.id !== incoming.id || current.workspaceId !== incoming.workspaceId) {
     throw new Error("session attention identity mismatch");
   }
   if (incoming.attentionRevision === current.attentionRevision
@@ -88,7 +88,7 @@ export class SessionReadController {
     return { record, through };
   }
 
-  private key(record: SessionAttention) { return JSON.stringify([record.workspaceId, record.agentId, record.id]); }
+  private key(record: SessionAttention) { return JSON.stringify([record.workspaceId, record.id]); }
 
   private scheduleFlush() {
     // observe() owns the spawned promise. Even an observer callback failure is
@@ -107,7 +107,7 @@ export class SessionReadController {
       if (this.disposed) return;
       validate(result);
       if (result.id !== target.record.id || result.workspaceId !== target.record.workspaceId
-        || result.agentId !== target.record.agentId || sequence(result.readThroughSequence) < target.through) {
+        || sequence(result.readThroughSequence) < target.through) {
         throw new Error("session read acknowledgement identity invalid");
       }
       mergeSessionAttention(target.record, result);

@@ -30,24 +30,24 @@ export function setup() {
   const tools = configuredTarget('tools');
   const long = configuredTarget('long');
   const { store, csrf } = login();
-  return { store, csrf, workspaceId: short.workspaceId, agentId: short.agentId,
+  return { store, csrf, workspaceId: short.workspaceId,
     models: { short: short.modelId, tools: tools.modelId, long: long.modelId } };
 }
 
 export function admitShortRun(data) {
   try {
-    startRun(data.store, data.csrf, data.workspaceId, data.agentId, data.models.short);
+    startRun(data.store, data.csrf, data.workspaceId, data.models.short);
   } catch (_) { /* 浸泡期错误由计数与 DB 终态统计呈现 */ }
 }
 
 export function admitToolRun(data) {
   try {
-    startRun(data.store, data.csrf, data.workspaceId, data.agentId, data.models.tools);
+    startRun(data.store, data.csrf, data.workspaceId, data.models.tools);
   } catch (_) { /* 同上 */ }
 }
 
 export function admitLongRun(data) {
   try {
-    startRun(data.store, data.csrf, data.workspaceId, data.agentId, data.models.long);
+    startRun(data.store, data.csrf, data.workspaceId, data.models.long);
   } catch (_) { /* 同上 */ }
 }

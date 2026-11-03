@@ -50,4 +50,4 @@ matrix and its acceptance tests.
 
 ## Hosted components
 
-Hosted Rust, Web and Python gates are separately selected by `python scripts/workspace/ci.py --stage Rust`, `--stage Web` and `--stage Python`. See [shared source boundaries](SourceUnification.md). Local builds use the root Cargo default members; full hosted validation additionally uses a disposable PostgreSQL endpoint.
+Hosted gates are selected by `python scripts/workspace/ci.py --stage Rust`, `--stage Web`, `--stage Contracts`, `--stage RuntimePostgres`, `--stage ApiPostgres` and `--stage Support`. See [shared source boundaries](SourceUnification.md). Local builds use the root Cargo default members; full hosted validation additionally uses a disposable PostgreSQL endpoint.

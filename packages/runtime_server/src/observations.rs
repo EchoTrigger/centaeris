@@ -459,6 +459,10 @@ pub fn operation_timing(
         "phase":phase, "elapsedMs":elapsed.as_secs_f64()*1000.0, "outcome":outcome,
         "runId":run_id, "jobId":job_id, "operationId":operation_id, "taskId":task_id,
     });
+    emit_operation(record);
+}
+
+fn emit_operation(record: serde_json::Value) {
     #[cfg(test)]
     if OPERATION_RECORDS.with(|records| {
         if let Some(records) = records.borrow_mut().as_mut() {
@@ -471,6 +475,60 @@ pub fn operation_timing(
         return;
     }
     emit_explicit(record);
+}
+
+/// Emit entry before a potentially blocking boundary, without changing its result.
+pub fn execution_boundary<T, E>(
+    boundary: &'static str,
+    run_id: &str,
+    operation: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    if !operation_timing_enabled() || !run_timings::safe_id(run_id) {
+        return operation();
+    }
+    static NEXT_BOUNDARY: AtomicU64 = AtomicU64::new(1);
+    let mut span = ExecutionBoundary {
+        boundary,
+        run_id,
+        operation_id: format!(
+            "boundary-{}-{}",
+            std::process::id(),
+            NEXT_BOUNDARY.fetch_add(1, Ordering::Relaxed)
+        ),
+        started: Instant::now(),
+        outcome: "interrupted",
+    };
+    span.emit("started");
+    let result = operation();
+    span.outcome = if result.is_ok() { "ok" } else { "error" };
+    result
+}
+
+struct ExecutionBoundary<'a> {
+    boundary: &'static str,
+    run_id: &'a str,
+    operation_id: String,
+    started: Instant,
+    outcome: &'static str,
+}
+
+impl ExecutionBoundary<'_> {
+    fn emit(&self, outcome: &'static str) {
+        emit_operation(serde_json::json!({
+            "phase": "executionBoundary", "boundary": self.boundary,
+            "runId": self.run_id, "jobId": format!("agent_run.lifecycle:{}", self.run_id),
+            "operationId": self.operation_id, "processId": std::process::id(),
+            "threadId": format!("{:?}", std::thread::current().id()),
+            "elapsedMs": self.started.elapsed().as_secs_f64() * 1000.0,
+            "outcome": outcome,
+        }));
+    }
+}
+
+impl Drop for ExecutionBoundary<'_> {
+    fn drop(&mut self) {
+        self.emit(self.outcome);
+    }
 }
 
 thread_local! { static JOB: RefCell<Option<String>> = const { RefCell::new(None) }; }
@@ -640,6 +698,86 @@ impl Drop for Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_boundaries_record_entry_before_work_and_preserve_results() {
+        let (_, records) = capture_operation_records(|| {
+            let result: Result<u32, &str> = execution_boundary("probe", "run-1", || {
+                OPERATION_RECORDS.with(|records| {
+                    assert_eq!(records.borrow().as_ref().unwrap()[0]["outcome"], "started");
+                });
+                Ok(7)
+            });
+            assert_eq!(result, Ok(7));
+            let result: Result<(), &str> =
+                execution_boundary("commit", "run-1", || Err("private operation error"));
+            assert_eq!(result, Err("private operation error"));
+        });
+        assert_eq!(records.len(), 4);
+        for pair in records.chunks_exact(2) {
+            assert_eq!(pair[0]["outcome"], "started");
+            assert_eq!(pair[0]["operationId"], pair[1]["operationId"]);
+            assert_eq!(pair[0]["runId"], "run-1");
+            assert_eq!(pair[0]["jobId"], "agent_run.lifecycle:run-1");
+            assert_eq!(pair[0]["boundary"], pair[1]["boundary"]);
+            assert_eq!(pair[0]["phase"], "executionBoundary");
+        }
+        assert_ne!(records[0]["operationId"], records[2]["operationId"]);
+        assert_eq!(records[1]["outcome"], "ok");
+        assert_eq!(records[3]["outcome"], "error");
+        assert!(!serde_json::to_string(&records).unwrap().contains("private"));
+    }
+
+    #[test]
+    fn execution_boundaries_make_a_blocked_operation_visible() {
+        let (entered, entry) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            capture_operation_records(|| {
+                execution_boundary("recoveryUploadFence", "run-1", || {
+                    let records =
+                        OPERATION_RECORDS.with(|records| records.borrow().clone().unwrap());
+                    entered.send(records).unwrap();
+                    released.recv().unwrap();
+                    Ok::<_, String>(7)
+                })
+            })
+        });
+        let pending_records = entry
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let blocked = !worker.is_finished();
+        release.send(()).unwrap();
+        let (result, records) = worker.join().unwrap();
+        assert!(blocked);
+        assert_eq!(pending_records.len(), 1);
+        assert_eq!(pending_records[0]["outcome"], "started");
+        assert_eq!(pending_records[0]["boundary"], "recoveryUploadFence");
+        assert_eq!(result, Ok(7));
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["operationId"], records[1]["operationId"]);
+        assert_eq!(records[1]["outcome"], "ok");
+    }
+
+    #[test]
+    fn execution_boundaries_distinguish_unwinding_and_reject_unsafe_identities() {
+        let (_, records) = capture_operation_records(|| {
+            let panicked = std::panic::catch_unwind(|| {
+                execution_boundary("probe", "run-1", || -> Result<(), String> {
+                    panic!("private panic payload")
+                })
+            });
+            assert!(panicked.is_err());
+            assert_eq!(
+                execution_boundary("probe", "private\nbody", || Ok::<_, String>(9)),
+                Ok(9)
+            );
+        });
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["outcome"], "started");
+        assert_eq!(records[1]["outcome"], "interrupted");
+        assert!(!serde_json::to_string(&records).unwrap().contains("private"));
+    }
 
     #[test]
     fn protection_context_attributes_runtime_and_helper_records_without_payloads() {

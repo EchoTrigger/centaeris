@@ -104,7 +104,7 @@ test("admin plugin upload uses workspace package endpoint and shared credential 
 });
 
 const harnessUrl = new URL("./componentHarness.mjs", import.meta.url).href;
-const routeStubs = ["ModelSettings", "GlobalPluginSettings", "PluginSettings", "WorkspaceGroupsRoute", "WorkspaceMembersRoute", "AppDelegations", "AgentSettings", "EnvironmentSettings"].map(name => [`./${name}`, module(`export default function ${name}(){return null}`)]);
+const routeStubs = ["ModelSettings", "GlobalPluginSettings", "PluginSettings", "WorkspaceGroupsRoute", "WorkspaceMembersRoute", "EnvironmentSettings", "WorkspaceProfileSettings"].map(name => [`./${name}`, module(`export default function ${name}(){return null}`)]);
 const routeLoad = subjectLoader({ extraOverrides: [
   ...routeStubs,
   ["react-router", module(`import {context} from ${JSON.stringify(harnessUrl)};export const Link=()=>null;export const Navigate=()=>null;export const useRouteLoaderData=id=>id==="authenticated"?{user:context.user}:context.workspace?{workspace:context.workspace}:null;export const useLoaderData=()=>({workspace:context.workspace});export const useLocation=()=>context.location;export const useNavigate=()=>context.navigate;export const useOutletContext=()=>({});`)],

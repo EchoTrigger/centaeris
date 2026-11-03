@@ -13,7 +13,6 @@ from .transcript_output import purge_session_outputs
 from .storage_gc_retry import clean_storage_key, cleanup_attempt_limit, next_cleanup_time
 from .resource_commit import require_durable_commit
 from .models import (
-    Agent,
     Artifact,
     DerivedRepresentation,
     DerivedResource,
@@ -44,16 +43,12 @@ class OrphanedLibraryGcReport:
 
 @dataclass(frozen=True)
 class TrashExpirationReport:
-    agents: int
     sessions: int
     sources: int
     library_objects: int
 
 
 def expire_trash(cutoff, dry_run: bool) -> TrashExpirationReport:
-    agent_ids = list(Agent.objects.filter(
-        status="deleted", purgedAt__isnull=True, deletedAt__lte=cutoff,
-    ).values_list("id", flat=True))
     session_ids = list(Session.objects.filter(
         status="deleted", purgedAt__isnull=True, deletedAt__lte=cutoff,
     ).values_list("id", flat=True))
@@ -69,7 +64,6 @@ def expire_trash(cutoff, dry_run: bool) -> TrashExpirationReport:
     ).distinct())
     source_ids = [source.id for source in sources if source.purgedAt is None]
     report = TrashExpirationReport(
-        agents=len(agent_ids),
         sessions=len(session_ids),
         sources=len(source_ids),
         library_objects=len(library_ids),
@@ -77,8 +71,6 @@ def expire_trash(cutoff, dry_run: bool) -> TrashExpirationReport:
     if dry_run:
         return report
     now = timezone.now()
-    Agent.objects.filter(id__in=agent_ids, purgedAt__isnull=True).update(
-        purgedAt=now, avatar_image=None, avatar_digest="")
     Session.objects.filter(id__in=session_ids, purgedAt__isnull=True).update(purgedAt=now)
     # Includes already-purged owners, so an interrupted GC pass is repairable.
     owners = Session.objects.filter(
@@ -341,3 +333,60 @@ def _delete_stale_representation_if_fully_cleaned(resource: DerivedResource) -> 
         ownerId=resource.ownerId,
         ownerContentGeneration=resource.ownerContentGeneration,
     ).delete()
+
+
+@dataclass(frozen=True)
+class RetiredSessionGcReport:
+    planned: list[str]
+    cleaned: list[str]
+    blocked: list[str]
+    failures: list[str]
+
+
+def retired_storage_key_is_referenced(key):
+    """Exact current owners protect shared bytes; never scan an unknown prefix."""
+    from .models import (DerivedRepresentation, SessionWorkspacePreservation,
+                         WorkspaceSnapshotObject)
+    if any(model.objects.filter(storageKey=key).exists()
+           for model in (SourceObject, UserLibraryObject, Artifact, WorkspaceSnapshotObject)):
+        return True
+    if Session.objects.filter(workspaceStorageKey=key).exists():
+        return True
+    if SessionWorkspacePreservation.objects.filter(storage_key=key).exists():
+        return True
+    if DerivedResource.objects.filter(resourceKey=key).exclude(state="cleaned").exists():
+        return True
+    return DerivedRepresentation.objects.filter(
+        models.Q(canonicalTextKey=key) | models.Q(previewPdfKey=key) | models.Q(workbookPreviewKey=key)
+    ).exists()
+
+
+def collect_retired_session_gc(dry_run, *, limit=256):
+    """Drain the existing exact-key retry ledger after coordinator retirement."""
+    from .models import StorageCleanupRetry
+    now = timezone.now()
+    due = StorageCleanupRetry.objects.filter(collector="retiredSession", state__in=("pending", "failed", "cleaning"))
+    due = due.filter(models.Q(nextCleanupAt__isnull=True) | models.Q(nextCleanupAt__lte=now))
+    report = RetiredSessionGcReport([], [], [], [])
+    for retry in due.order_by("createdAt", "keyDigest")[:limit]:
+        key = retry.storageKey
+        if retired_storage_key_is_referenced(key):
+            report.blocked.append(key)
+            continue
+        if dry_run:
+            report.planned.append(key)
+            continue
+        def remove(candidate):
+            # A publication may have acquired the key after the due-list read.
+            # The same authority query still protects it at physical deletion.
+            if retired_storage_key_is_referenced(candidate):
+                raise ValueError("retired Session storage is currently referenced")
+            delete_stored_object_for_gc(candidate)
+        result = clean_storage_key(key, "retiredSession", remove)
+        if result.state == "cleaned":
+            report.cleaned.append(key)
+        elif result.state == "blocked":
+            report.blocked.append(key)
+        else:
+            report.failures.append(key)
+    return report

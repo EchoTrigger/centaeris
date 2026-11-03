@@ -9,9 +9,9 @@ from django.db import DatabaseError, close_old_connections, connection, transact
 from django.test import Client, TransactionTestCase
 
 from .agent_run_authorization_factory import create_agent_run_authorization
-from .models import Agent, AgentCoordinationSession, AgentRun, HostedOperationReceipt, Session, Workspace, WorkspaceMembership
+from .models import AgentRun, AgentRunAuthorization, AgentRunEnvironmentRelease, HostedOperationReceipt, Session, Workspace, WorkspaceMembership
 from .test_hosted_operations import OperationFixture
-from .testing import create_session, create_shared_agent
+from .testing import create_session
 
 
 class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
@@ -22,9 +22,9 @@ class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
         client.force_login(self.user)
         return client
 
-    def submit(self, client, *, operation='public-submit', agent=None, session='new', text='hello'):
+    def submit(self, client, *, operation='public-submit', session='new', text='hello'):
         return client.post(self.create_url + '/' + session + '/messages', content_type='application/json',
-            data=json.dumps({'operationId': operation, 'agentId': (agent or self.agent).pk,
+            data=json.dumps({'operationId': operation,
                 'modelConfigRef': self.model.pk, 'text': text}))
 
     @staticmethod
@@ -83,13 +83,12 @@ class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
         return response
 
     def test_runtime_shared_authorization_allows_another_session_public_submission(self):
-        original = create_session(workspace=self.workspace, owner=self.user, agent=self.agent)
+        original = create_session(workspace=self.workspace, owner=self.user)
         run = AgentRun.objects.create(workspace=self.workspace, user=self.user, session=original,
             modelConfig=self.model, prompt='physical operation', status='running',
-            definition_version=self.agent.definition.published_version,
-            agent_instructions=self.agent.definition.published_version.instructions)
+            agent_instructions="")
         create_agent_run_authorization(run, image_digest='sha256:' + 'a' * 64)
-        target = create_session(workspace=self.workspace, owner=self.user, agent=self.agent)
+        target = create_session(workspace=self.workspace, owner=self.user)
         client = self.client_for_user()
         locks = [('SELECT id FROM app_core_workspace WHERE id=%s FOR SHARE', [self.workspace.pk]),
             ('SELECT id FROM app_core_workspacemembership WHERE id=%s FOR SHARE', [run.membership_ref]),
@@ -108,14 +107,13 @@ class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
         self.assertEqual(AgentRun.objects.filter(session=target).count(), 1)
         self.assertEqual(self.schedule.call_count, 2)
 
-    def test_same_operation_with_different_agent_payloads_has_one_receipt_and_exact_conflict(self):
-        other = create_shared_agent(workspace=self.workspace, owner=self.user, name='Other target', model_config=self.model)
+    def test_same_operation_with_different_inputs_has_one_receipt_and_exact_conflict(self):
         first_client, second_client = self.client_for_user(), self.client_for_user()
         locked, release = Event(), Event()
         first_identity, second_identity = {'started': Event()}, {'started': Event()}
         def pause_authorization(run, *args, **kwargs):
             result = create_agent_run_authorization(run, *args, **kwargs)
-            if run.session.agent_id == self.agent.pk:
+            if run.prompt == "hello":
                 locked.set()
                 if not release.wait(10):
                     raise AssertionError('test did not release first submission')
@@ -127,7 +125,7 @@ class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
                 try:
                     self.assertTrue(locked.wait(5))
                     second = pool.submit(self.independently,
-                        lambda: self.observed(lambda: self.submit(second_client, operation='same-operation', agent=other), second_identity))
+                        lambda: self.observed(lambda: self.submit(second_client, operation='same-operation', text='different input'), second_identity))
                     self.wait_for_blocker(second, second_identity, first_identity['pid'])
                 finally:
                     release.set()
@@ -156,8 +154,7 @@ class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
         self.schedule.assert_called_once()
 
     def test_waiting_for_one_session_does_not_hold_the_global_admission_lock(self):
-        target = create_session(workspace=self.workspace, owner=self.user, agent=self.agent)
-        other = create_shared_agent(workspace=self.workspace, owner=self.user, name='Independent agent', model_config=self.model)
+        target = create_session(workspace=self.workspace, owner=self.user)
         first_client, second_client = self.client_for_user(), self.client_for_user()
         identity = {'started': Event()}
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -169,7 +166,7 @@ class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
                     lambda: self.submit(first_client, session=target.pk, operation='session-wait'), identity))
                 self.wait_for_blocker(first, identity, holder_pid)
                 second = pool.submit(self.independently,
-                    lambda: self.submit(second_client, agent=other, operation='independent-agent'))
+                    lambda: self.submit(second_client, operation='independent-session'))
                 try:
                     response = second.result(timeout=2)
                 except FutureTimeout:
@@ -181,7 +178,7 @@ class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
 
     def test_same_session_parallel_operations_cannot_create_two_active_runs(self):
         from threading import Barrier
-        target = create_session(workspace=self.workspace, owner=self.user, agent=self.agent)
+        target = create_session(workspace=self.workspace, owner=self.user)
         clients = [self.client_for_user(), self.client_for_user()]
         barrier = Barrier(2)
         self.profile.side_effect = lambda: (barrier.wait(5), {'schema': 'runtime.execution_profile.v1',
@@ -197,29 +194,60 @@ class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
         self.assertEqual(HostedOperationReceipt.objects.count(), 1)
         self.schedule.assert_called_once()
 
-    def test_coordination_binding_committed_during_profile_is_rejected_before_run_or_receipt(self):
-        from .test_hosted_operations import PROFILE
-        from .workspace_access import locked_workspace_membership_for
-        target = create_session(workspace=self.workspace, owner=self.user, agent=self.agent)
-        def bind():
-            with transaction.atomic():
-                self.assertIsNotNone(locked_workspace_membership_for(self.user, self.workspace.pk))
-                agent = Agent.objects.select_for_update().get(pk=self.agent.pk)
-                session = Session.objects.select_for_update().get(pk=target.pk)
-                AgentCoordinationSession.objects.create(agent=agent, session=session)
-        def profile():
-            self.assertFalse(connection.in_atomic_block, 'profile RPC cannot retain submission locks')
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                pool.submit(self.independently, bind).result(timeout=5)
-            return PROFILE
-        self.profile.side_effect = profile
-        response = self.submit(self.client, session=target.pk, operation='became-coordination')
-        self.assertEqual(response.status_code, 409, response.content)
-        self.assertEqual(response.json(), {'error': 'coordination_session_requires_agent_input'})
-        self.assertFalse(AgentRun.objects.exists())
-        self.assertFalse(HostedOperationReceipt.objects.exists())
-        self.assertEqual(AgentCoordinationSession.objects.count(), 1)
-        self.schedule.assert_not_called()
+    def test_terminal_workspace_handoff_blocks_submission_until_release_and_freezes_committed_baseline(self):
+        from django.conf import settings
+        from .runtime_contract import verify_agent_run_authorization_signature
+
+        for status in ('completed', 'failed', 'cancelled'):
+            with self.subTest(status=status):
+                target = create_session(workspace=self.workspace, owner=self.user)
+                run = AgentRun.objects.create(workspace=self.workspace, user=self.user, session=target,
+                    modelConfig=self.model, prompt='original', status=status, agent_instructions='')
+                create_agent_run_authorization(run, image_digest='sha256:' + 'a' * 64)
+                client = self.client_for_user()
+                operation = 'handoff-' + status
+                counts = (AgentRun.objects.count(), AgentRunAuthorization.objects.count(),
+                    HostedOperationReceipt.objects.count())
+                response = self.submit(client, session=target.pk, operation=operation)
+                self.assertEqual((response.status_code, response.json()),
+                    (409, {'error': 'session_workspace_preservation_pending'}))
+                self.assertEqual((AgentRun.objects.count(), AgentRunAuthorization.objects.count(),
+                    HostedOperationReceipt.objects.count()), counts)
+
+                identity = {'started': Event()}
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    with transaction.atomic(), connection.cursor() as cursor:
+                        cursor.execute('SELECT pg_backend_pid()')
+                        holder_pid = cursor.fetchone()[0]
+                        Session.objects.select_for_update().get(pk=target.pk)
+                        # Final empty snapshot publication and cleanup release
+                        # both pin this Session before a successor can freeze it.
+                        Session.objects.filter(pk=target.pk).update(workspaceGeneration=1,
+                            workspaceLastAdvancedAgentRun=run)
+                        AgentRunEnvironmentRelease.objects.create(agent_run=run, environment=run.environment,
+                            authorization_digest=run.authorization.digest, controller_epoch=1,
+                            controller_lease_digest='sha256:' + 'b' * 64)
+                        future = pool.submit(self.independently, lambda: self.observed(
+                            lambda: self.submit(client, session=target.pk, operation=operation), identity))
+                        self.wait_for_blocker(future, identity, holder_pid)
+                    response = future.result(timeout=10)
+                self.assertEqual(response.status_code, 202, response.content)
+                successor = AgentRun.objects.get(pk=response.json()['agentRunId'])
+                self.assertEqual(successor.authorization.payload['sessionWorkspace'], {
+                    'generation': 1, 'snapshotSha256': '', 'snapshotSizeBytes': 0,
+                    'expandedSizeBytes': 0, 'fileCount': 0})
+                verify_agent_run_authorization_signature(successor.authorization.payload,
+                    settings.AGENT_RUN_AUTHORIZATION_SIGNING_KEY, successor.authorization.signature)
+
+    def test_terminal_handoff_does_not_block_another_session(self):
+        original = create_session(workspace=self.workspace, owner=self.user)
+        run = AgentRun.objects.create(workspace=self.workspace, user=self.user, session=original,
+            modelConfig=self.model, prompt='cleanup pending', status='failed', agent_instructions='')
+        create_agent_run_authorization(run, image_digest='sha256:' + 'a' * 64)
+        target = create_session(workspace=self.workspace, owner=self.user)
+        response = self.submit(self.client_for_user(), session=target.pk)
+        self.assertEqual(response.status_code, 202, response.content)
+
 
     def test_authorization_pin_blocks_non_key_workspace_status_and_member_role_writes(self):
         locked, release = Event(), Event()

@@ -402,7 +402,7 @@ class WorkerContractTests(unittest.TestCase):
                 "limit": 1,
             },
         )
-        for forbidden in ("provider.poll", "subagent.run", "banana"):
+        for forbidden in ("provider.poll", "subagent.run", "agent_work.return", "banana"):
             with self.assertRaisesRegex(RuntimeError, "worker_job_kind_invalid"):
                 worker.claim_job(forbidden, "worker:test-owner")
 
@@ -416,27 +416,88 @@ class WorkerContractTests(unittest.TestCase):
         self.assertNotEqual(request.call_args.args[1]["workerId"], job["leaseOwner"])
         execute.assert_called_once_with(job, job["leaseOwner"])
 
-    def test_job_wait_uses_strict_v1_contract_and_longer_http_timeout(self):
-        with patch.object(
-            worker,
-            "json_request",
-            return_value={
-                "schema": "runtime.job.wait.result.v1",
-                "disposition": "timeout",
-                "nextRunAtMs": None,
-            },
-        ) as request:
-            self.assertEqual(worker.wait_for_jobs(), "timeout")
+    def test_each_slot_rotates_both_supported_kinds_before_waiting(self):
+        kinds = ("agent_run.lifecycle", "worker.noop")
+        for slot in range(8):
+            expected = [kinds[slot % 2], kinds[(slot + 1) % 2]]
+            for available in (False, True):
+                with self.subTest(slot=slot, available=available):
+                    job = {"jobId": "job_second", "jobKind": expected[1],
+                           "status": "leased", "leaseOwner": "runtime-lease-owner-123"}
+                    responses = [{"jobs": []}, {"jobs": [job] if available else []}]
+                    with patch.object(worker, "runtime_request", side_effect=responses) as request, \
+                            patch.object(worker, "execute_claimed_job") as execute:
+                        self.assertEqual(worker.execute_next_job(slot), available)
+                    self.assertEqual([call.args[1]["jobKind"] for call in request.call_args_list], expected)
+                    owners = [call.args[1]["workerId"] for call in request.call_args_list]
+                    self.assertEqual(owners[0], owners[1])
+                    if available:
+                        execute.assert_called_once_with(job, job["leaseOwner"])
+                    else:
+                        execute.assert_not_called()
 
-        self.assertEqual(
-            request.call_args.args[1],
-            {
-                "schema": "runtime.job.wait.v1",
-                "jobKinds": list(worker.WORKER_JOB_KINDS),
-                "waitMs": 20_000,
-            },
-        )
-        self.assertEqual(request.call_args.kwargs["timeout"], 25)
+    def test_service_starts_and_stops_lifecycle_control_and_job_threads(self):
+        stopped = Mock()
+        threads = []
+        def create_thread(**kwargs):
+            thread = Mock()
+            threads.append((kwargs, thread))
+            return thread
+
+        with patch.object(worker.threading, "Event", return_value=stopped), \
+                patch.object(worker.threading, "Thread", side_effect=create_thread), \
+                patch.object(worker.signal, "signal", side_effect=["term-handler", "int-handler", None, None]) as signals, \
+                patch.object(worker, "WORKER_SLOT_COUNT", 8):
+            worker.run_worker_service()
+
+        loops = [(config, thread) for config, thread in threads if config["target"] is worker.run_loop]
+        self.assertEqual(len(loops), 2)
+        self.assertIsInstance(loops[0][0]["args"][0], worker.TerminalDispatcher)
+        self.assertIsInstance(loops[1][0]["args"][0], worker.LifecycleReconciler)
+        self.assertEqual([config["args"][1] for config, _ in loops],
+                         [worker.OUTBOX_POLL_INTERVAL_SECONDS, worker.RECONCILE_INTERVAL_SECONDS])
+        jobs = [(config, thread) for config, thread in threads if config["target"] is worker.run_job_loop]
+        self.assertEqual([config["args"] for config, _ in jobs], [(slot, stopped) for slot in range(8)])
+        controls = [(config, thread) for config, thread in threads if config["target"] is worker.run_control_loop]
+        self.assertEqual([config["args"] for config, _ in controls],
+                         [(stage, slot, stopped) for stage in ("advance", "cleanup") for slot in range(2)])
+        self.assertEqual(len(threads), len(loops) + len(jobs) + len(controls))
+        for config, thread in threads:
+            thread.start.assert_called_once_with()
+            self.assertIs(config["args"][-1], stopped)
+        for _, thread in loops:
+            thread.join.assert_called_once_with()
+        for config, thread in jobs + controls:
+            self.assertTrue(config["daemon"])
+            thread.join.assert_not_called()
+        stopped.wait.assert_called_once_with()
+        stopped.set.assert_called_once_with()
+        self.assertEqual([(call.args[0], call.args[1]) for call in signals.call_args_list[2:]],
+                         [(worker.signal.SIGTERM, "term-handler"), (worker.signal.SIGINT, "int-handler")])
+        signals.call_args_list[0].args[1](worker.signal.SIGTERM, None)
+        self.assertEqual(stopped.set.call_count, 2)
+
+    def test_job_wait_uses_strict_v1_contract_and_longer_http_timeout(self):
+        for disposition, next_run_at_ms in (("timeout", None), ("ready", 1234)):
+            with self.subTest(disposition=disposition), patch.object(
+                worker,
+                "json_request",
+                return_value={
+                    "schema": "runtime.job.wait.result.v1",
+                    "disposition": disposition,
+                    "nextRunAtMs": next_run_at_ms,
+                },
+            ) as request:
+                self.assertEqual(worker.wait_for_jobs(), disposition)
+                self.assertEqual(
+                    request.call_args.args[1],
+                    {
+                        "schema": "runtime.job.wait.v1",
+                        "jobKinds": ["agent_run.lifecycle", "worker.noop"],
+                        "waitMs": 20_000,
+                    },
+                )
+                self.assertEqual(request.call_args.kwargs["timeout"], 25)
         self.assertGreater(
             worker.JOB_WAIT_HTTP_TIMEOUT_SECONDS,
             worker.JOB_WAIT_MS / 1000,
@@ -504,8 +565,7 @@ class WorkerContractTests(unittest.TestCase):
         new_total_http = new_wait_requests + new_claim_http
 
         self.assertEqual((old_scan_cycles, new_wait_requests), (120, 6))
-        self.assertEqual(worker.WORKER_JOB_KINDS, ("agent_run.lifecycle", "worker.noop", "agent_work.return"))
-        self.assertEqual((old_claim_http, new_claim_http, new_total_http), (360, 18, 24))
+        self.assertEqual((old_claim_http, new_claim_http, new_total_http), (240, 12, 18))
         print(
             "worker_idle_per_min "
             f"scan_cycles={old_scan_cycles}->{new_wait_requests} "

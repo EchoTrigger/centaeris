@@ -27,7 +27,7 @@ class SharedCoordinatorTests(unittest.TestCase):
         class Driver:
             def __init__(self, fixture, result, *, expected_running_limit):
                 self.result = result; result.mkdir(); self.base = 'http://127.0.0.1:18083'
-                self.seed = {'email': 'fixture@example.invalid', 'password': 'private-fixture-password', 'workspaceId': 'workspace-a', 'agentId': 'agent-a', 'modelConfigRef': 'model-a'}
+                self.seed = {'email': 'fixture@example.invalid', 'password': 'private-fixture-password', 'workspaceId': 'workspace-a', 'modelConfigRef': 'model-a'}
                 self.manifest = {'sharedWorkload': {'environmentCount': environments, 'modelWaitMs': model_wait_ms, 'workProfile': {'memoryMiB':memory_mib,'minimumHoldMs':minimum_hold_ms} if fixture_profile=='planned' else fixture_profile}, 'executionMode':effective_mode if fixture_mode=='planned' else fixture_mode,'sourceRevision': 'abc','resourceLimits':{'resourceLimitIdentity':'actual manifest projection'}}
                 self.private={'AGENT_RUN_EXECUTION_MODE':effective_mode}
                 self.docker = ['docker', '--host', 'unix:///owned/docker.sock']

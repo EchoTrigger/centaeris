@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { SessionReadController, mergeSessionAttention } from "../../src/shell/sessionReadState.ts";
 
-const session = (changes = {}) => ({ id: "session", workspaceId: "workspace", agentId: "agent", isUnread: true, isManuallyUnread: false, latestAttentionSequence: "10", readThroughSequence: "0", attentionRevision: "1", ...changes });
+const session = (changes = {}) => ({ id: "session", workspaceId: "workspace",  isUnread: true, isManuallyUnread: false, latestAttentionSequence: "10", readThroughSequence: "0", attentionRevision: "1", ...changes });
 const observation = (changes = {}) => ({ session: session(), visible: true, readingLatest: true, appliedSourceHighWater: "10", ...changes });
 const flush = () => new Promise(resolve => setImmediate(resolve));
 

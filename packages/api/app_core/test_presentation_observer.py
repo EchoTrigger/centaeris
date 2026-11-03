@@ -30,7 +30,7 @@ class PresentationObserverTests(SimpleTestCase):
         reader = AsyncMock(side_effect=lambda scope:dict(versions))
         loader = SimpleNamespace(navigation=AsyncMock(return_value=[]),state=AsyncMock(return_value={'agentRun':None,'sourceHighWater':'0'}),authorized=AsyncMock(return_value=True))
         hub = PresentationObserverHub(reader,hints,lambda scope:{'agent:agent:navigation','session:session:state'})
-        scope = PresentationScope('workspace','agent','session')
+        scope = PresentationScope('workspace','session')
         try:
             async with hub.observe(('owner',scope),scope,loader) as first, hub.observe(('owner',scope),scope,loader) as second:
                 self.assertEqual(await first.navigation(),await second.navigation())
@@ -171,7 +171,7 @@ class PresentationObserverTests(SimpleTestCase):
         loader = SimpleNamespace(state=AsyncMock(return_value={"sourceHighWater": "0", "agentRun": {"agentRunId": "A", "status": "running"}}),
             live_signal_tail=tail, wait_live_signal=wait)
         hub = PresentationObserverHub(AsyncMock(side_effect=lambda scope: dict(versions)), hints, lambda scope: {"state"})
-        scope = PresentationScope("workspace", "agent", "session")
+        scope = PresentationScope("workspace", "session")
         try:
             async with hub.observe(("owner",), scope, loader) as first, hub.observe(("owner",), scope, loader) as second:
                 await first.state()
@@ -223,7 +223,7 @@ class PresentationObserverTests(SimpleTestCase):
             live_signal_tail=tail, wait_live_signal=wait, live=AsyncMock(side_effect=live))
         hub = PresentationObserverHub(AsyncMock(side_effect=lambda scope: dict(versions)), hints, lambda scope: {"state"})
         try:
-            async with hub.observe(("owner",), PresentationScope("workspace", "agent", "session"), loader) as observed:
+            async with hub.observe(("owner",), PresentationScope("workspace", "session"), loader) as observed:
                 await observed.state()
                 await asyncio.sleep(0)
                 old = asyncio.create_task(observed.live("A"))

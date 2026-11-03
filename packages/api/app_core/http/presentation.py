@@ -12,12 +12,11 @@ from django.db.models import QuerySet
 from django.http import JsonResponse, QueryDict
 from ninja import Router
 
-from app_core.agent_identity import validate_agent_id
-from app_core.agent_definitions import available_agent_definitions
 from app_core.agent_run_stream import _load_live_text_state_async, _capture_signal_tail, _redis_stream_client, agent_run_signal_key
 from app_core.app_delegations import session_authority_is_current
-from app_core.models import Agent, AgentRun, Session, SessionEvent
+from app_core.models import AgentRun, Session, SessionEvent
 from app_core.operation_presentation import operation_records, operation_detail
+from app_core.presentation_activity import presentation_activity, presentation_question
 from app_core.presentation_stream import PresentationScope, PROJECTION_VERSION, stream_presentation
 from app_core.presentation_service import create_presentation_hub
 from app_core.runtime_client import request_transcript_page, request_transcript_patches, request_transcript_content
@@ -47,47 +46,27 @@ def _database_deadline(*, consistent=False):
 
 class PresentationLoader:
     def __init__(self, request, scope):
-        # Preserve the existing list authorization and delegated branch boundary.
+        # Preserve the existing Session list authorization.
         self.request = copy.copy(request)
         self.request.GET = QueryDict(mutable=True)
-        if getattr(request, "app_delegation", None) is not None:
-            self.request.GET["agentId"] = scope.agent_id
         self.scope = scope
         self.user_id = request.user.id
-        delegation = getattr(request, "app_delegation", None)
-        self.delegation_id = delegation.id if delegation is not None else None
-        self.credential_version = getattr(request, "app_delegation_credential_version", None)
-        self.business_branch_id = getattr(request, "business_branch_id", None)
         session_key = getattr(getattr(request, "session", None), "session_key", None) or ""
-        self.observation_key = (self.user_id, scope, self.delegation_id, self.credential_version,
-                                self.business_branch_id, hashlib.sha256(session_key.encode()).hexdigest())
+        self.observation_key = (self.user_id, scope, hashlib.sha256(session_key.encode()).hexdigest())
 
     @stream_database_call
     def authorized(self):
         with _database_deadline():
             if self.scope.session_id is not None:
-                if not Session.objects.filter(id=self.scope.session_id, workspace_id=self.scope.workspace_id,
-                                               agent_id=self.scope.agent_id).exists():
+                if not Session.objects.filter(id=self.scope.session_id, workspace_id=self.scope.workspace_id).exists():
                     return False
-                # The established helper already checks active user, owner,
-                # Agent, membership, definition visibility and delegation.
-                return session_authority_is_current(self.user_id, self.scope.session_id,
-                    delegation_id=self.delegation_id, scope="sessions:read",
-                    credential_version=self.credential_version, business_branch_id=self.business_branch_id)
+                return session_authority_is_current(self.user_id, self.scope.session_id)
             user = get_user_model().objects.filter(id=self.user_id, is_active=True).first()
             if user is None:
                 return False
             membership = workspace_membership_for(user, self.scope.workspace_id)
             if membership is None:
                 return False
-            agent = Agent.objects.filter(id=self.scope.agent_id, workspace_id=self.scope.workspace_id,
-                                         owner_id=self.user_id, status="active").first()
-            if agent is None:
-                return False
-            if agent.definition_id and not available_agent_definitions(membership).filter(id=agent.definition_id).exists():
-                return False
-            # Recheck the exact list scope, including credential rotation and
-            # delegated branch restrictions, without materializing its rows.
             scoped = prepare_workspace_session_list(self.request, self.scope.workspace_id)
             return isinstance(scoped, QuerySet)
 
@@ -105,12 +84,13 @@ class PresentationLoader:
         # terminal observation must not be attached to an older delivered H.
         with _database_deadline(consistent=True):
             water = SessionEvent.objects.filter(session_id=self.scope.session_id).order_by("-sequence").values_list("sequence", flat=True).first() or 0
-            run = AgentRun.objects.filter(session_id=self.scope.session_id, user_id=self.user_id).order_by("-createdAt", "-id").first()
+            run = AgentRun.objects.select_related("authorization", "session").filter(session_id=self.scope.session_id, user_id=self.user_id).order_by("-createdAt", "-id").first()
             if run is not None and run.status in {"queued", "running"}:
                 terminal = committed_session_terminal_state(run)
                 if terminal is not None:
                     run = project_committed_agent_run(run, terminal)
-            return {"sourceHighWater": str(water), "agentRun": None if run is None else {
+            question, response_accepted = presentation_question(run)
+            return {"sourceHighWater": str(water), "activity": presentation_activity(run, water, question=question, response_accepted=response_accepted), "question": question, "agentRun": None if run is None else {
                 "agentRunId": run.id, "status": run.status,
                 "startedAt": run.startedAt.isoformat() if run.startedAt else None,
                 "completedAt": run.completedAt.isoformat() if run.completedAt else None,
@@ -168,17 +148,12 @@ class PresentationLoader:
         "content": {"text/event-stream": {"schema": {"type": "string"}}},
     }}})
 async def presentation_events(request, workspace_id: str):
-    if not valid_query_fields(request.GET, {"agentId", "sessionId"}, required={"agentId"}):
+    if not valid_query_fields(request.GET, {"sessionId"}):
         return JsonResponse({"error": "presentation_query_invalid"}, status=400)
-    agent_id = request.GET["agentId"]
-    try:
-        validate_agent_id(agent_id)
-    except ValueError:
-        return JsonResponse({"error": "agent_id_invalid"}, status=400)
     session_id = request.GET.get("sessionId")
     if session_id is not None and (not session_id or len(session_id) > 64):
         return JsonResponse({"error": "presentation_query_invalid"}, status=400)
-    scope = PresentationScope(workspace_id, agent_id, session_id)
+    scope = PresentationScope(workspace_id, session_id)
     loader = PresentationLoader(request, scope)
     try:
         permitted = await asyncio.wait_for(loader.authorized(), READ_TIMEOUT_SECONDS)
@@ -213,15 +188,11 @@ def _operation_download(request, session_id, event_id):
         session = Session.objects.filter(id=session_id, owner_id=request.user.id, status="active").first()
         if session is None:
             return None
-        scope = PresentationScope(session.workspace_id, session.agent_id, session.id)
+        scope = PresentationScope(session.workspace_id, session.id)
         loader = PresentationLoader(request, scope)
         # Use the synchronous authorization implementation on this ORM thread,
-        # retaining the existing delegated-session and membership checks.
-        delegation = getattr(request, "app_delegation", None)
-        if not session_authority_is_current(request.user.id, session_id,
-                delegation_id=delegation.id if delegation is not None else None, scope="sessions:read",
-                credential_version=getattr(request, "app_delegation_credential_version", None),
-                business_branch_id=getattr(request, "business_branch_id", None)):
+        # retaining the existing Session ownership and membership checks.
+        if not session_authority_is_current(request.user.id, session_id):
             return None
         record = operation_records(SessionEvent.objects.filter(session_id=session_id,
             eventId=event_id, payload__type__in=("tool_call", "tool_result"))).first()

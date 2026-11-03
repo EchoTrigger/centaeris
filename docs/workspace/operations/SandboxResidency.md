@@ -5,13 +5,21 @@ memory and workspaces after releasing those leases. Resident admission separatel
 charges every managed sandbox, including lawful waits, against finite global,
 Workspace and Docker-host limits for count, memory, CPU, process count and tmpfs
 workspace space. Native subagents sharing an execution host do not reserve a
-second container. Independent `dispatch_work` Runs may wait until earlier Runs
-finish and release their containers.
+second container. Independent Session Runs may wait until earlier owners
+release capacity. Workspace `dispatch_work` coordination is retired.
+
+Run authorization uses
+`workspace.agent_run_authorization.v2`; independent provision uses
+`workspace.environment_provision_authorization.v2` with user/Workspace memory
+ownership. Environment authority still binds the exact Session, controller,
+lease, profile and physical incarnation. Retired Agent identity is not a current
+authority source.
 
 Capacity is reserved durably before physical creation. Unknown creation outcomes
 remain charged until inventory reconciliation establishes their state. Restarting
 the service or switching Docker daemons does not erase tenant/global holdings.
-Only confirmed physical absence releases the corresponding reservation. An
+Only confirmed physical absence, or authoritative proof that creation was never
+dispatched, releases the corresponding reservation. An
 unavailable or untrusted inventory blocks admission rather than assuming zero
 occupancy. The Docker request applies the declared memory, CPU, PID and tmpfs
 limits; admission does not replace those actual enforcement limits.

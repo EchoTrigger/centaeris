@@ -72,7 +72,7 @@ test('live assistant text and committed pushed content share visual streaming co
   expect(await screen.findByRole('list', {}, { timeout: 10000 })).toBeTruthy();
   view.unmount();
   const store = createTranscriptViewStore();
-  const common = { schema: 'workspace.presentation.v1', workspaceId: 'workspace', agentId: 'agent', sessionId: 'session' } as const;
+  const common = { schema: 'workspace.presentation.v1', workspaceId: 'workspace', sessionId: 'session' } as const;
   const byteLength = String(new TextEncoder().encode(source).length);
   const reference = { refId: 'session-event:answer', revision: '1', byteLength };
   const controller = new WorkspacePresentationController({ ...common, store });

@@ -98,7 +98,7 @@ pub fn run_memory_file_system_operation(
     run_memory_file_system_operation_at(std::path::Path::new(MEMORY_CONTAINER_ROOT), request)
 }
 
-/// The host selects this root from the authenticated user and Agent scope.
+/// The host selects this root from the authenticated user and Workspace scope.
 pub fn run_memory_file_system_operation_at(
     root: &std::path::Path,
     request: SandboxFileSystemRequest,

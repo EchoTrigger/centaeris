@@ -25,57 +25,6 @@ use super::{
     PostgresRuntimeStore,
 };
 
-pub(crate) fn validate_hosted_native_input(
-    tx: &mut impl GenericClient,
-    start: &crate::contract::AgentRunStart,
-    input: &centaeris_core::session::host_event_input::HostEventInput,
-) -> Result<(), String> {
-    input.validate(&start.authorization.session_id)?;
-    let row = tx.query_opt("SELECT a.notice_id,a.input_binding::text,n.payload::text,o.command,o.\"agentRunId\",o.\"turnId\",o.\"sessionId\",o.user_id::text,o.workspace_id,s.prompt FROM app_core_agentworkconsumeattempt a JOIN app_core_agentrun r ON r.id=a.coordinator_run_id JOIN auth_user u ON u.id=r.user_id JOIN app_core_workspace ws ON ws.id=r.workspace_id JOIN app_core_session coord ON coord.id=r.session_id JOIN app_core_agent ag ON ag.id=coord.agent_id JOIN app_core_agentworkreturn n ON n.id=a.notice_id JOIN app_core_agentworksession w ON w.session_id=n.work_id JOIN app_core_agentrun s ON s.id=w.source_run_id JOIN app_core_agentrun c ON c.id=n.child_run_id JOIN app_core_session child ON child.id=c.session_id JOIN app_core_agent child_agent ON child_agent.id=child.agent_id JOIN app_core_agentrunauthorization z ON z.agent_run_id=r.id JOIN app_core_hostedoperationreceipt o ON o.id=a.operation_id WHERE a.id=$1 AND r.id=$2 AND r.session_id=$3 AND r.turn_id=$5 AND z.digest=$4 AND r.user_id::text=$7 AND r.workspace_id=$8 AND u.is_active AND ws.status='active' AND coord.status='active' AND ag.status='active' AND ag.id=$6 AND coord.owner_id=r.user_id AND ag.owner_id=r.user_id AND coord.workspace_id=r.workspace_id AND ag.workspace_id=r.workspace_id AND (NOT ag.is_business_instance OR (ag.definition_id IS NULL AND r.definition_version_id IS NULL)) AND r.acting_app_id IS NULL AND r.app_delegation_id IS NULL AND EXISTS(SELECT 1 FROM app_core_agentcoordinationsession b WHERE b.agent_id=ag.id AND b.session_id=coord.id) AND w.coordination_session_id=r.session_id AND s.workspace_id=r.workspace_id AND c.workspace_id=r.workspace_id AND s.user_id=r.user_id AND c.user_id=r.user_id AND s.membership_ref=r.membership_ref AND c.membership_ref=r.membership_ref AND child.owner_id=r.user_id AND child.workspace_id=r.workspace_id AND child.status='active' AND child_agent.status='active' AND child_agent.id=$6 AND c.session_id=w.session_id AND s.session_id=w.coordination_session_id AND EXISTS(SELECT 1 FROM app_core_workspacemembership m WHERE m.id=r.membership_ref AND m.workspace_id=r.workspace_id AND m.user_id=r.user_id AND m.role IN('owner','admin','member'))",
-        &[&input.input_id,&start.agent_run_id,&start.authorization.session_id,&start.authorization_digest,&start.turn_id,&start.authorization.agent_id,&start.authorization.user_id,&start.authorization.workspace_id]).map_err(|e| e.to_string())?.ok_or("host_event_admission_missing")?;
-    let binding: serde_json::Value =
-        serde_json::from_str(&row.get::<_, String>(1)).map_err(|e| e.to_string())?;
-    let notice: serde_json::Value =
-        serde_json::from_str(&row.get::<_, String>(2)).map_err(|e| e.to_string())?;
-    if let crate::contract::AgentRunStartInitialInput::HostEvent {
-        input: initial,
-        notice_id,
-        ..
-    } = &start.initial_input
-    {
-        if initial.input_id == input.input_id
-            && (*notice_id != row.get::<_, String>(0) || start.prompt != row.get::<_, String>(9))
-        {
-            return Err("host_event_admission_binding_mismatch".into());
-        }
-    }
-    let expected = serde_json::json!({"schema":"workspace.agent_work.consume_binding.v1",
-        "agentRunId":start.agent_run_id,"turnId":start.turn_id,"sessionId":start.authorization.session_id,
-        "authorizationDigest":start.authorization_digest,"initialInput":{"type":"hostEvent","attemptId":input.input_id,
-        "noticeId":row.get::<_,String>(0),"input":input}});
-    let operation_run: Option<String> = row.get(4);
-    let operation_turn: Option<String> = row.get(5);
-    if binding != expected
-        || serde_json::from_str::<serde_json::Value>(&input.content).map_err(|e| e.to_string())?
-            != notice
-        || notice["source"].as_str() != Some(input.source.as_str())
-        || row.get::<_, String>(3) != "consumeWorkReturn"
-        || operation_run
-            .as_deref()
-            .is_some_and(|run| run != start.agent_run_id)
-        || operation_turn
-            .as_deref()
-            .is_some_and(|turn| turn != start.turn_id)
-        || operation_run.is_some() != operation_turn.is_some()
-        || row.get::<_, String>(6) != start.authorization.session_id
-        || row.get::<_, String>(7) != start.authorization.user_id
-        || row.get::<_, String>(8) != start.authorization.workspace_id
-    {
-        return Err("host_event_admission_binding_mismatch".into());
-    }
-    Ok(())
-}
-
 // Lock by identity first, then evaluate time after any lock wait. A WHERE
 // predicate evaluated before waiting cannot authorize a later commit.
 fn lock_current_append_lease(
@@ -106,153 +55,6 @@ fn lock_current_append_lease(
 
 const AGENT_RUN_CANCEL_REQUESTED_EVENT_SCHEMA: &str = "runtime.agent_run.cancel_requested.v1";
 
-fn is_successful_work_confirmation(event: &centaeris_core::session::SessionLogRecord) -> bool {
-    event.event_type == SessionRecordType::ToolResult
-        && event.payload["toolName"] == "confirm_work_return"
-        && event.payload["resultState"] == "successWithOutput"
-}
-
-fn confirmation_receipt(
-    event: &centaeris_core::session::SessionLogRecord,
-) -> Result<crate::agent_work::WorkConfirmationRecord, String> {
-    serde_json::from_str(
-        event.payload["modelContent"]
-            .as_str()
-            .ok_or("work_confirmation_receipt_missing")?,
-    )
-    .map_err(|_| "work_confirmation_receipt_invalid".into())
-}
-
-fn lock_work_confirmation_scope(
-    tx: &mut Transaction<'_>,
-    start: &crate::contract::AgentRunStart,
-    events: &[SequencedSessionRecord],
-) -> Result<(), String> {
-    // Only a successful confirm result enters this branch. Take the existing
-    // Workspace -> membership -> Agent -> Session -> job order before the
-    // ordinary append locks; never add upstream locks after Session/job.
-    let workspace = tx
-        .query_opt(
-            "SELECT id FROM app_core_workspace WHERE id=$1 AND status='active' FOR UPDATE",
-            &[&start.authorization.workspace_id],
-        )
-        .map_err(|e| e.to_string())?;
-    if workspace.is_none() {
-        return Err("work_confirmation_authority_rejected".into());
-    }
-    let member = tx.query_opt("SELECT m.id FROM app_core_workspacemembership m JOIN app_core_agentrun r ON r.membership_ref=m.id WHERE r.id=$1 AND m.workspace_id=r.workspace_id AND m.user_id=r.user_id AND m.role IN('owner','admin','member') FOR UPDATE OF m", &[&start.agent_run_id]).map_err(|e| e.to_string())?;
-    if member.is_none() {
-        return Err("work_confirmation_authority_rejected".into());
-    }
-    let agent = tx.query_opt("SELECT id FROM app_core_agent WHERE id=$1 AND workspace_id=$2 AND owner_id::text=$3 AND status='active' AND (NOT is_business_instance OR definition_id IS NULL) FOR UPDATE", &[&start.authorization.agent_id, &start.authorization.workspace_id, &start.authorization.user_id]).map_err(|e| e.to_string())?;
-    if agent.is_none() {
-        return Err("work_confirmation_authority_rejected".into());
-    }
-    let user = tx
-        .query_opt(
-            "SELECT id FROM auth_user WHERE id::text=$1 AND is_active FOR SHARE",
-            &[&start.authorization.user_id],
-        )
-        .map_err(|e| e.to_string())?;
-    if user.is_none() {
-        return Err("work_confirmation_authority_rejected".into());
-    }
-    let mut children = BTreeSet::new();
-    for item in events
-        .iter()
-        .filter(|item| is_successful_work_confirmation(&item.event))
-    {
-        let receipt = confirmation_receipt(&item.event)?;
-        let child = tx.query_opt("SELECT c.session_id FROM app_core_agentworkconsumeattempt a JOIN app_core_agentworkreturn n ON n.id=a.notice_id JOIN app_core_agentrun c ON c.id=n.child_run_id WHERE a.id=$1 AND a.notice_id=$2 AND a.coordinator_run_id=$3", &[&receipt.attempt_id, &receipt.notice_id, &start.agent_run_id]).map_err(|e| e.to_string())?.ok_or("work_confirmation_owner_rejected")?;
-        children.insert(child.get::<_, String>(0));
-    }
-    for child in children {
-        if tx.query_opt("SELECT id FROM app_core_session WHERE id=$1 AND status='active' AND \"purgedAt\" IS NULL FOR SHARE", &[&child]).map_err(|e| e.to_string())?.is_none() {
-            return Err("work_confirmation_child_read_rejected".into());
-        }
-    }
-    Ok(())
-}
-
-fn validate_work_confirmation_commit(
-    tx: &mut impl GenericClient,
-    start: &crate::contract::AgentRunStart,
-    events: &[SequencedSessionRecord],
-    index: usize,
-) -> Result<(), String> {
-    let event = &events[index].event;
-    let call_id = event.payload["callId"]
-        .as_str()
-        .filter(|id| !id.trim().is_empty())
-        .ok_or("work_confirmation_call_missing")?;
-    let turn = event
-        .turn_id
-        .as_deref()
-        .ok_or("work_confirmation_turn_missing")?;
-    let staged_call = events[..index].iter().rev().find(|item| {
-        item.event.event_type == SessionRecordType::ToolCall
-            && item.event.turn_id.as_deref() == Some(turn)
-            && item.event.payload["callId"].as_str() == Some(call_id)
-    });
-    let call = if let Some(item) = staged_call {
-        item.event.payload.clone()
-    } else {
-        let row = tx.query_opt("SELECT (payload->'payload')::text FROM app_core_sessionevent WHERE session_id=$1 AND agent_run_id=$2 AND NOT session_level AND projects_to_agent_run_stream AND payload->>'type'='tool_call' AND payload->>'turnId'=$3 AND payload->'payload'->>'callId'=$4 ORDER BY sequence DESC LIMIT 1", &[&start.authorization.session_id, &start.agent_run_id, &turn, &call_id]).map_err(|e| e.to_string())?.ok_or("work_confirmation_call_missing")?;
-        serde_json::from_str(&row.get::<_, String>(0)).map_err(|e| e.to_string())?
-    };
-    let args: crate::agent_work::WorkConfirmationArgs =
-        serde_json::from_value(call["normalizedInput"].clone())
-            .map_err(|_| "work_confirmation_input_invalid")?;
-    args.validate()?;
-    let contract = centaeris_core::tool::DynamicToolRegistry::from_contracts(vec![
-        crate::agent_work::work_confirmation_tool_contract(),
-    ])?
-    .find_contract("confirm_work_return")
-    .ok_or("work_confirmation_contract_missing")?;
-    if call["toolName"] != "confirm_work_return"
-        || call["providerId"] != crate::agent_work::PROVIDER_ID
-        || call["toolContractDigest"].as_str() != Some(contract.contract_digest()?.as_str())
-    {
-        return Err("work_confirmation_call_identity_rejected".into());
-    }
-    let row = tx.query_opt("SELECT a.input_binding::text,n.payload::text,n.fact_kind,n.fact_ref,jsonb_build_object('agentId',ag.id,'coordinationSessionId',r.session_id,'userId',r.user_id,'workspaceId',r.workspace_id,'sourceAgentRunId',s.id,'sourceTurnId',w.source_turn_id,'sourceToolCallId',w.source_call_id,'sourceEventId',w.source_event_id,'operationId',wo.\"operationId\",'workSessionId',c.session_id,'workAgentRunId',c.id)::text FROM app_core_agentworkconsumeattempt a JOIN app_core_agentworkreturn n ON n.id=a.notice_id JOIN app_core_agentworksession w ON w.session_id=n.work_id JOIN app_core_agentrun s ON s.id=w.source_run_id JOIN app_core_agentrun c ON c.id=n.child_run_id JOIN app_core_hostedoperationreceipt wo ON wo.id=w.operation_id JOIN app_core_agentrun r ON r.id=a.coordinator_run_id JOIN app_core_session coord ON coord.id=r.session_id JOIN app_core_agent ag ON ag.id=coord.agent_id WHERE a.id=$1 AND a.notice_id=$2 AND r.id=$3 AND r.status IN('queued','running') AND s.session_id=r.session_id AND c.session_id=w.session_id AND s.membership_ref=r.membership_ref AND c.membership_ref=r.membership_ref AND (NOT ag.is_business_instance OR (s.definition_version_id IS NULL AND c.definition_version_id IS NULL)) AND s.acting_app_id IS NULL AND c.acting_app_id IS NULL AND s.app_delegation_id IS NULL AND c.app_delegation_id IS NULL AND wo.command='submitMessage' AND wo.\"agentRunId\"=c.id AND wo.\"sessionId\"=c.session_id AND wo.\"turnId\"=c.turn_id AND wo.user_id=r.user_id AND wo.workspace_id=r.workspace_id FOR SHARE OF a,n,w,wo", &[&args.attempt_id,&args.notice_id,&start.agent_run_id]).map_err(|e| e.to_string())?.ok_or("work_confirmation_owner_rejected")?;
-    let binding: serde_json::Value =
-        serde_json::from_str(&row.get::<_, String>(0)).map_err(|e| e.to_string())?;
-    let notice: serde_json::Value =
-        serde_json::from_str(&row.get::<_, String>(1)).map_err(|e| e.to_string())?;
-    let input = serde_json::from_value(binding["initialInput"]["input"].clone())
-        .map_err(|e| e.to_string())?;
-    validate_hosted_native_input(tx, start, &input)?;
-    let mut identity: serde_json::Value =
-        serde_json::from_str(&row.get::<_, String>(4)).map_err(|e| e.to_string())?;
-    identity["factKind"] = serde_json::json!(row.get::<_, String>(2));
-    identity["factRef"] = serde_json::json!(row.get::<_, String>(3));
-    let mut hash = Sha256::new();
-    hash.update(b"workspace.agent_work.return_fact.v1\0");
-    hash.update(serde_json::to_vec(&notice["terminal"]).map_err(|e| e.to_string())?);
-    identity["factDigest"] = serde_json::json!(format!("sha256:{:x}", hash.finalize()));
-    if notice["identity"] != identity
-        || notice["terminal"]["kind"] != identity["factKind"]
-        || notice["terminal"]["factRef"] != identity["factRef"]
-    {
-        return Err("work_confirmation_source_identity_rejected".into());
-    }
-    let receipt = confirmation_receipt(event)?;
-    if receipt.schema != "workspace.agent_work.return_confirm.validated.v1"
-        || receipt.agent_id != start.authorization.agent_id
-        || receipt.session_id != start.authorization.session_id
-        || receipt.agent_run_id != start.agent_run_id
-        || receipt.tool_call_id != call_id
-        || receipt.authorization_digest != start.authorization_digest
-        || receipt.input_digest != args.digest()?
-        || receipt.notice_id != args.notice_id
-        || receipt.attempt_id != args.attempt_id
-        || receipt.notice_identity != identity
-    {
-        return Err("work_confirmation_receipt_identity_rejected".into());
-    }
-    Ok(())
-}
 const MODEL_OBSERVATION_CONTENT_DIGEST_DOMAIN: &[u8] = b"centaeris.model_observation_content.v1\0";
 const MODEL_OBSERVATION_MANIFEST_DIGEST_DOMAIN: &[u8] =
     b"centaeris.model_observation_manifest.v1\0";
@@ -1892,38 +1694,7 @@ impl PostgresSessionLog {
         start: &crate::contract::AgentRunStart,
     ) -> Result<Self, String> {
         self.accepted_start = Some(start.clone());
-        self.connections
-            .with_client(|client| self.validate_input_binding(client, &start.agent_run_id))?;
         Ok(self)
-    }
-
-    fn validate_input_binding(
-        &self,
-        tx: &mut impl GenericClient,
-        run_id: &str,
-    ) -> Result<(), String> {
-        let Some(start) = &self.accepted_start else {
-            return Ok(());
-        };
-        let initial: Option<String> = tx
-            .query_opt(
-                "SELECT initial_host_id FROM app_core_agentinputqueue WHERE agent_run_id=$1",
-                &[&run_id],
-            )
-            .map_err(|e| e.to_string())?
-            .and_then(|row| row.get(0));
-        match &start.initial_input {
-            crate::contract::AgentRunStartInitialInput::HostEvent {
-                attempt_id, input, ..
-            } => {
-                if initial.as_deref() != Some(attempt_id.as_str()) {
-                    return Err("host_event_admission_binding_mismatch".into());
-                }
-                validate_hosted_native_input(tx, start, input)
-            }
-            _ if initial.is_some() => Err("host_event_admission_kind_mismatch".into()),
-            _ => Ok(()),
-        }
     }
 }
 
@@ -2104,19 +1875,6 @@ impl PostgresSessionLog {
             {
                 super::resource_commit::require_durable_resource_commit(&mut tx)?;
             }
-            if events
-                .iter()
-                .any(|item| is_successful_work_confirmation(&item.event))
-            {
-                if fence.is_none() {
-                    return Err("work_confirmation_lease_required".into());
-                }
-                let start = self
-                    .accepted_start
-                    .as_ref()
-                    .ok_or("work_confirmation_admission_missing")?;
-                lock_work_confirmation_scope(&mut tx, start, events)?;
-            }
             let session = tx
                 .query_opt(
                     "SELECT workspace_id FROM app_core_session WHERE id=$1 FOR UPDATE",
@@ -2130,7 +1888,6 @@ impl PostgresSessionLog {
                 return Err("chat session workspace binding mismatch".to_string());
             }
             super::pre_admission_failure::reject_history_after_failure(&mut tx, agent_run_id)?;
-            self.validate_input_binding(&mut tx, agent_run_id)?;
             if let Some(fence) = fence {
                 // An unlocked precheck avoids cold work for an already stale
                 // owner. Only the post-preparation locked check authorizes commit.
@@ -2283,15 +2040,6 @@ impl PostgresSessionLog {
             finalize_authority(&mut tx)?;
             if let Some(handoff) = handoff {
                 validate_wait_handoff_source(&mut tx, agent_run_id, handoff)?;
-            }
-            for (index, item) in records_to_append.iter().enumerate() {
-                if is_successful_work_confirmation(&item.event) {
-                    let start = self
-                        .accepted_start
-                        .as_ref()
-                        .ok_or("work_confirmation_admission_missing")?;
-                    validate_work_confirmation_commit(&mut tx, start, &records_to_append, index)?;
-                }
             }
             self.insert_session_append(&mut tx, &prepared)?;
             consume_waits_for_terminal_batch(&mut tx, &self.session_id, agent_run_id, events)?;
@@ -2555,14 +2303,7 @@ impl PostgresSessionLog {
             open_tool_call_ids: HashMap::new(),
             agent_run_started_count: 0,
             user_message_count: 0,
-            initial_host_input_id: self.accepted_start.as_ref().and_then(|start| {
-                match &start.initial_input {
-                    crate::contract::AgentRunStartInitialInput::HostEvent { input, .. } => {
-                        Some(input.input_id.clone())
-                    }
-                    _ => None,
-                }
-            }),
+            initial_host_input_id: None,
             assistant_message_count: 0,
             last_assistant_status: None,
             terminal_seen: false,
@@ -2619,7 +2360,7 @@ impl PostgresSessionLog {
 
     fn prepare_session_append(
         &self,
-        tx: &mut impl GenericClient,
+        _tx: &mut impl GenericClient,
         agent_run_id: &str,
         events: &[SequencedSessionRecord],
         mut next_session_sequence: i32,
@@ -2650,14 +2391,6 @@ impl PostgresSessionLog {
                 return Err("agent_run_started objective does not match prompt".to_string());
             }
             if event.event_type == SessionRecordType::UserMessage {
-                if self.accepted_start.as_ref().is_some_and(|start| {
-                    matches!(
-                        start.initial_input,
-                        crate::contract::AgentRunStartInitialInput::HostEvent { .. }
-                    )
-                }) {
-                    return Err("host_event_admission_kind_mismatch".into());
-                }
                 let expected_message_id = format!("message:{turn_id}:user");
                 if self
                     .accepted_start
@@ -2676,15 +2409,6 @@ impl PostgresSessionLog {
                 {
                     return Err("user message does not match accepted prompt".to_string());
                 }
-            }
-            if event.event_type == SessionRecordType::HostEventInput {
-                let start = self
-                    .accepted_start
-                    .as_ref()
-                    .ok_or("host_event_admission_missing")?;
-                let input =
-                    serde_json::from_value(event.payload.clone()).map_err(|e| e.to_string())?;
-                validate_hosted_native_input(tx, start, &input)?;
             }
             if event.event_type == SessionRecordType::AssistantMessage {
                 let expected_message_id = format!("message:{turn_id}:assistant");
@@ -3147,7 +2871,6 @@ impl PostgresSessionLog {
                 return Err("new user turn admission rejected after cancellation".into());
             }
             super::pre_admission_failure::reject_history_after_failure(&mut tx, new_agent_run_id)?;
-            self.validate_input_binding(&mut tx, new_agent_run_id)?;
             let mut entries = Vec::with_capacity(closure_events.len() + new_run_events.len());
             for closure_event in closure_events {
                 entries.push(AdmissionEntry {

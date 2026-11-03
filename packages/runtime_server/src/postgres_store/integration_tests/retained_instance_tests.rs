@@ -78,7 +78,7 @@ pub(in crate::postgres_store) fn setup() -> (String, PostgresRuntimeStore, Clien
         ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS environment_id text, ADD COLUMN IF NOT EXISTS workspace_id text, ADD COLUMN IF NOT EXISTS user_id text, ADD COLUMN IF NOT EXISTS membership_ref text, ADD COLUMN IF NOT EXISTS status text, ADD COLUMN IF NOT EXISTS \"modelConfig_id\" text, ADD COLUMN IF NOT EXISTS \"thinkingMode\" text;
         CREATE TABLE public.app_core_workspace(id text PRIMARY KEY,status text); INSERT INTO public.app_core_workspace VALUES('ws_1','active');
         CREATE TABLE public.app_core_workspacemembership(id text PRIMARY KEY,workspace_id text,user_id text,role text); INSERT INTO public.app_core_workspacemembership VALUES('member','ws_1','user_1','member');
-        CREATE TABLE public.app_core_session(id text PRIMARY KEY,workspace_id text,owner_id text,agent_id text,current_environment_id text,\"deletedAt\" timestamptz); INSERT INTO public.app_core_session VALUES('sess_1','ws_1','user_1','centaeris','environment',NULL);
+        CREATE TABLE public.app_core_session(id text PRIMARY KEY,workspace_id text,owner_id text,current_environment_id text,\"deletedAt\" timestamptz); INSERT INTO public.app_core_session VALUES('sess_1','ws_1','user_1','environment',NULL);
         CREATE TABLE public.app_core_sessionenvironment(id text PRIMARY KEY,session_id text,controller_run_id text,controller_epoch bigint,controller_lease_owner text,controller_purpose text,controller_released boolean,environment_profile jsonb,environment_profile_digest text); INSERT INTO public.app_core_sessionenvironment VALUES('environment','sess_1',NULL,0,'','',true,NULL,NULL);
         CREATE TABLE public.app_core_agentrunauthorization(agent_run_id text PRIMARY KEY,digest text,payload jsonb,signature text);
         CREATE TABLE public.app_core_sessionevent(workspace_id text,session_id text,agent_run_id text,session_level boolean,payload jsonb);").unwrap();
@@ -87,7 +87,7 @@ pub(in crate::postgres_store) fn setup() -> (String, PostgresRuntimeStore, Clien
 }
 pub(super) fn run(store: &PostgresRuntimeStore, db: &mut Client, id: &str, epoch: i64) -> Run {
     let mut original: WorkspaceAgentRunAuthorization = serde_json::from_str(include_str!(
-        "../../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+        "../../../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
     ))
     .unwrap();
     original.agent_run_id = id.into();

@@ -125,6 +125,14 @@ impl Drop for HelperCapture {
         }
     }
 }
+/// Ownership follows both open result files until streaming has finished.
+pub(crate) struct HelperOutputFiles {
+    pub(crate) task: EnvironmentTaskSnapshot,
+    pub(crate) stdout: File,
+    pub(crate) stderr: File,
+    _lease: Arc<()>,
+}
+
 impl HelperCapture {
     fn open(root: &Path, id: &str, limit: u64, existing: bool) -> Result<Self, String> {
         let mut charged = 0u64;
@@ -393,12 +401,28 @@ impl NativeManager {
             .map_err(|_| "host_helper_input_incomplete")?;
         let task_id = task_identity(&request.fence, &request.operation_id)?;
         let existing = {
-            let manager = self.manager.lock().map_err(|_| "task_service_failed")?;
+            let mut manager = self.manager.lock().map_err(|_| "task_service_failed")?;
             manager.journal.check(&request.fence)?;
             manager.journal.check_execution(&request.fence)?;
+            manager.collect_closed_history()?;
+            manager.collect_consumed_output()?;
             manager.journal.tasks.contains_key(&task_id)
                 || store::task(&self.control, &task_id)?.is_some()
         };
+        if existing {
+            let mut manager = self.manager.lock().map_err(|_| "task_service_failed")?;
+            if store::output_consumption(&self.control, &task_id)?.is_some() {
+                let digest = task_start_digest(
+                    &self.helper_start_request(request),
+                    Some(helper_identity(request, &binary.digest)?),
+                )?;
+                manager
+                    .journal
+                    .existing(&task_id, &digest)?
+                    .ok_or("task_not_found")?;
+                return manager.query(&task_id, 0, ENVIRONMENT_TASK_READ_BYTES);
+            }
+        }
         let capture = Arc::new(Mutex::new(HelperCapture::open(
             &self.helper_root,
             &task_id,
@@ -422,7 +446,7 @@ impl NativeManager {
         &self,
         request: &HostHelperRequest,
         task_id: &str,
-    ) -> Result<(EnvironmentTaskSnapshot, File, File), String> {
+    ) -> Result<HelperOutputFiles, String> {
         request.validate()?;
         if task_id.is_empty()
             || !task_id
@@ -431,8 +455,8 @@ impl NativeManager {
         {
             return Err("task_invalid_id".into());
         }
+        let mut manager = self.manager.lock().map_err(|_| "task_service_failed")?;
         let task = {
-            let manager = self.manager.lock().map_err(|_| "task_service_failed")?;
             manager.journal.check(&request.fence)?;
             let record = manager
                 .journal
@@ -458,6 +482,9 @@ impl NativeManager {
             {
                 return Err("host_helper_output_identity_mismatch".into());
             }
+            if store::output_consumption(&self.control, task_id)?.is_some() {
+                return Err("task_output_consumed".into());
+            }
             if record.snapshot.state != EnvironmentTaskState::Exited
                 || !record.snapshot.output_complete
                 || !record.snapshot.cleanup_complete
@@ -473,7 +500,25 @@ impl NativeManager {
                 .open(self.helper_root.join(format!("{task_id}.{suffix}")))
                 .map_err(|_| "host_helper_output_unavailable".to_owned())
         };
-        Ok((task, open("stdout")?, open("stderr")?))
+        let stdout = open("stdout")?;
+        let stderr = open("stderr")?;
+        let lease = manager
+            .output_readers
+            .get(task_id)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| {
+                let lease = Arc::new(());
+                manager
+                    .output_readers
+                    .insert(task_id.into(), Arc::downgrade(&lease));
+                lease
+            });
+        Ok(HelperOutputFiles {
+            task,
+            stdout,
+            stderr,
+            _lease: lease,
+        })
     }
 }
 

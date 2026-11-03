@@ -353,12 +353,11 @@ class Experiment:
         })
         model_id = (model_body.get("model") or model_body)["id"]
         workspace = self.client.call("GET", "/api/workspaces")["workspaces"][0]
-        agent = self.client.call("GET", f"/api/workspaces/{workspace['id']}/agents")["agents"][0]
         text = text or ("restart-matrix parent waiting" if self.state == "waiting" else
                         f"restart matrix {self.state} {self.fault}: call your tool once, then finish")
         body = self.client.call("POST", f"/api/workspaces/{workspace['id']}/sessions/new/messages", {
             "operationId": uuid.uuid4().hex,
-            "agentId": agent["id"], "text": text, "attachmentRefs": [], "modelConfigRef": model_id,
+            "text": text, "attachmentRefs": [], "modelConfigRef": model_id,
         })
         run_id = body["agentRunId"]
         self.owned_run_ids.add(run_id)

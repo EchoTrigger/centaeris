@@ -51,6 +51,30 @@ class RuntimeHttpClientTests(SimpleTestCase):
         self.server.reply_status = status
         self.server.reply_body = value if isinstance(value, bytes) else json.dumps(value).encode()
 
+    def test_question_response_preserves_original_binding_and_rejects_wrong_receipts(self):
+        run = SimpleNamespace(id="run", pk="run", session_id="session")
+        result = {"schema": "runtime.agent_run.question_response.result.v1", "agentRunId": "run",
+            "continuationId": "continuation", "operationId": "operation", "disposition": "accepted"}
+        arguments = dict(operation_id="operation", continuation_id="continuation", question_id="question", action="answer", answer="1")
+        with patch.object(runtime_client, "build_agent_run_control", return_value={"original": "signed"}):
+            self.reply(200, result)
+            self.assertEqual(runtime_client.request_agent_run_question_response(run, **arguments), result)
+            method, path, _headers, body = self.server.requests[-1]
+            self.assertEqual((method, path), ("POST", "/internal/agent-runs/question-response"))
+            self.assertEqual(json.loads(body), {"schema": "runtime.agent_run.question_response.v1", "agentRunControl": {"original": "signed"},
+                "jobId": "agent_run.lifecycle:run", "operationId": "operation", "continuationId": "continuation",
+                "questionId": "question", "action": "answer", "answer": "1"})
+            self.reply(200, {**result, "disposition": "existing"})
+            runtime_client.request_agent_run_question_response(run, **{**arguments, "action": "skip", "answer": None})
+            self.assertNotIn("answer", json.loads(self.server.requests[-1][3]))
+            for invalid in ({"agentRunId": "foreign"}, {"operationId": "foreign"}, {"continuationId": "foreign"}, {"extra": True}):
+                self.reply(200, {**result, **invalid})
+                with self.assertRaisesRegex(RuntimeError, "agent_run_question_response_invalid"):
+                    runtime_client.request_agent_run_question_response(run, **arguments)
+            self.reply(409, {"error": "question_response_conflict"})
+            with self.assertRaisesRegex(ValueError, "question_response_conflict"):
+                runtime_client.request_agent_run_question_response(run, **arguments)
+
     def test_get_and_post_preserve_wire_and_timeout(self):
         self.reply(200, {"job": {"jobId": "job_1"}})
         with patch("urllib.request.urlopen", wraps=urllib.request.urlopen) as opened:

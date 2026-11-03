@@ -43,6 +43,32 @@ async function seedRecovery(f, document, baseGeneration = 1) {
   return record;
 }
 
+test("new templates exclude their active local draft and display the assigned creation name", async () => {
+  const f = fixture();
+  f.env.noteId = "new";
+  f.env.location = { pathname: "/w/workspace/library/new", search: "?draft=new-template", state: { noteDraft: { name: "Task list", markdown: "# Task list\n\n- [ ] First task" } } };
+  f.env.request = async (path, options) => {
+    f.calls.push([path, options]);
+    assert.equal(path, "/api/library/notes");
+    const payload = JSON.parse(options.body);
+    return { saveId: payload.saveId, appliedGeneration: 1,
+      object: { ...f.item, id: "created-template", displayName: "Task list(1)", contentGeneration: 1 } };
+  };
+  await settled(f.subject);
+  assert.equal(button(f.subject.tree, "libraryObjectRoute.recoverDraft"), undefined);
+  button(f.subject.tree, "libraryObjectRoute.saveNow").props.onClick();
+  await settled(f.subject);
+  const title = nodes(f.subject.tree, node => node.type === "input" && node.props["aria-label"] === "libraryObjectRoute.noteTitle")[0];
+  assert.equal(title.props.value, "Task list(1)");
+  assert.equal(editor(f.subject).props.value, "# Task list\n\n- [ ] First task");
+  assert.equal(saveStatus(f.subject), "libraryObjectRoute.saveState.saved");
+  assert.ok(f.env.navigations.includes("/w/workspace/library/created-template"));
+  button(f.subject.tree, "libraryObjectRoute.saveNow").props.onClick();
+  await settled(f.subject);
+  assert.equal(f.calls.length, 1);
+  f.subject.unmount();
+});
+
 test("title is independent and opening preserves the entire Markdown body", async () => {
   const f = fixture();
   await settled(f.subject);
@@ -60,6 +86,8 @@ test("failed save retry sends the draft again and never reloads it over local ed
   else [...f.timers.values()].find(value => value.delay === 600).fn();
   await settled(f.subject);
   const getCount = f.calls.filter(([, options]) => !options?.method).length;
+  const failure = nodes(f.subject.tree, node => node.props.role === "alert")[0];
+  assert.equal(failure.props.children[0], "libraryObjectRoute.saveFailedHelp");
   button(f.subject.tree, "libraryObjectRoute.retry").props.onClick();
   await settled(f.subject);
   assert.equal(f.calls.filter(([, options]) => !options?.method).length, getCount);

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import { useSyncExternalStore } from 'react';
@@ -51,9 +51,11 @@ test('live answer can occupy the persistent response area while reasoning keeps 
 });
 
 
-test('live text hands off once to referenced committed content even when its checkpoint is lost', async () => {
+for (const replacement of ['answer', 'tool-call commentary', 'batched tool-call commentaries']) test(`live text hands off once to ${replacement} even when its checkpoint is lost`, async () => {
+  const processSummary = replacement !== 'answer';
+  const multiple = replacement === 'batched tool-call commentaries';
   const store = createTranscriptViewStore();
-  const identity = { workspaceId: 'workspace', agentId: 'agent', sessionId: 'session' };
+  const identity = { workspaceId: 'workspace', sessionId: 'session' };
   const controller = new WorkspacePresentationController({ ...identity, store });
   const common = { schema: 'workspace.presentation.v1', ...identity } as const;
   const page = { schema: 'transcript.page.v1', sessionId: 'session', projectionVersion: 'transcript.projection.v1', projectionGeneration: 'generation',
@@ -61,9 +63,10 @@ test('live text hands off once to referenced committed content even when its che
   await controller.acceptWithBackpressure({ cursor: null, item: { ...common, kind: 'snapshot', page } });
   await controller.acceptWithBackpressure({ cursor: null, item: { ...common, kind: 'live', agentRunId: 'run',
     live: { messageId: 'answer', turnId: 'turn', afterSequence: 0, revision: 1, text: 'abcdef', reasoning: null } } });
+  const blockId = processSummary ? 'notice:process-summary' : 'answer';
   function View() {
     const current = useSyncExternalStore(store.subscribeLive, store.getLiveSnapshot, store.getLiveSnapshot);
-    return <><TranscriptBlockRow store={store} blockId="answer" />{current ? <TranscriptLiveTail live={current} mode="text" /> : null}</>;
+    return <><TranscriptBlockRow store={store} blockId={blockId} /><TranscriptBlockRow store={store} blockId="notice:later-summary" />{current ? <TranscriptLiveTail live={current} mode="text" /> : null}</>;
   }
   render(<View />);
   const once = () => {
@@ -71,13 +74,18 @@ test('live text hands off once to referenced committed content even when its che
   };
   once();
   const reference = { refId: 'session-event:answer', revision: '1', byteLength: '6' };
-  const block = { blockId: 'answer', blockRevision: '1', orderKey: { sourceSequence: '1', ordinal: 0 },
-    body: { kind: 'assistantText', content: { inlineContent: null, sourceRef: reference }, status: 'completed' } };
+  const block = { blockId, blockRevision: '1', orderKey: { sourceSequence: '1', ordinal: 0 },
+    body: { kind: processSummary ? 'notice' : 'assistantText', ...(processSummary ? { noticeType: 'model_process_summary' } : {}),
+      content: { inlineContent: null, sourceRef: reference }, status: processSummary ? 'running' : 'completed' } };
+  const laterReference = { refId: 'session-event:later-summary', revision: '1', byteLength: '5' };
+  const later = { blockId: 'notice:later-summary', blockRevision: '1', orderKey: { sourceSequence: '2', ordinal: 0 },
+    body: { kind: 'notice', noticeType: 'model_process_summary', content: { inlineContent: null, sourceRef: laterReference }, status: 'running' } };
+  const water = multiple ? '2' : '1';
   await act(async () => controller.acceptWithBackpressure({ cursor: null, item: { ...common, kind: 'patches', page: {
     schema: 'transcript.patch.page.v1', sessionId: 'session', projectionVersion: 'transcript.projection.v1', projectionGeneration: 'generation',
-    throughSourceHighWater: '1', nextSourceHighWater: '1', hasMore: false, patches: [{ schema: 'transcript.patch.v1', sessionId: 'session',
-      projectionVersion: 'transcript.projection.v1', projectionGeneration: 'generation', sourceHighWater: '1', streamId: 'workspace-transcript.v1',
-      appliedCursor: '1', upserts: [block], removals: [] }],
+    throughSourceHighWater: water, nextSourceHighWater: water, hasMore: false, patches: [{ schema: 'transcript.patch.v1', sessionId: 'session',
+      projectionVersion: 'transcript.projection.v1', projectionGeneration: 'generation', sourceHighWater: water, streamId: 'workspace-transcript.v1',
+      appliedCursor: water, upserts: multiple ? [later, block] : [block], removals: [] }],
   } } }));
   once();
   const content = (startOffset: string, endOffset: string, text: string, hasMore: boolean) => ({ cursor: null, item: { ...common, kind: 'content' as const,
@@ -88,6 +96,16 @@ test('live text hands off once to referenced committed content even when its che
   await act(async () => controller.acceptWithBackpressure(content('3', '6', 'def', false)));
   once();
   expect(controller.lastCursor).toBeNull();
+  await act(async () => controller.acceptWithBackpressure({ cursor: null, item: { ...common, kind: 'live', agentRunId: 'run',
+    live: { messageId: 'answer', turnId: 'turn', afterSequence: 0, revision: 2, text: 'abcdef', reasoning: null } } }));
+  once();
+  if (multiple) await act(async () => controller.acceptWithBackpressure({ cursor: null, item: { ...common, kind: 'content', range: {
+    schema: 'transcript.content.range.v1', sessionId: 'session', projectionVersion: 'transcript.projection.v1', projectionGeneration: 'generation',
+    ...laterReference, startOffset: '0', endOffset: '5', content: 'later', hasMore: false,
+  } } }));
+  await act(async () => controller.acceptWithBackpressure({ cursor: null, item: { ...common, kind: 'live', agentRunId: 'run',
+    live: { messageId: 'next-answer', turnId: 'next-turn', afterSequence: Number(water), revision: 1, text: 'abcdef', reasoning: null } } }));
+  expect(screen.getAllByTestId('markdown-body').map(element => element.textContent)).toEqual(multiple ? ['abcdef', 'later', 'abcdef'] : ['abcdef', 'abcdef']);
 });
 
 
@@ -113,4 +131,37 @@ test('only explicitly truncated tool detail gains an authorized complete-downloa
   vi.mocked(registry.getSnapshot).mockReturnValue({ version: 2, records: new Map([['call', { ...record, previewTruncated: false }]]) });
   view.rerender(<TranscriptToolGroupCard store={store} blockIds={['tool']} toolOperations={registry} />);
   expect(screen.queryByRole('link', { name: 'libraryObjectRoute.downloadFile' })).toBeNull();
+});
+
+
+test('each tool opens directly to its command and output while failures stay visible', async () => {
+  const user = userEvent.setup();
+  const store = createTranscriptViewStore();
+  store.openTail({ schema: 'transcript.page.v1', sessionId: 'session', projectionVersion: 'transcript.projection.v1', projectionGeneration: 'generation',
+    sourceHighWater: '2', olderCursor: null, hasOlder: false, resumeCursors: [{ streamId: 'workspace-transcript.v1', cursor: '2' }],
+    blocks: ['first', 'second'].map((id, index) => ({ blockId: id, blockRevision: '1', orderKey: { sourceSequence: String(index + 1), ordinal: 0 }, body: {
+      kind: 'tool', callId: id, toolName: 'bash', status: index ? 'failed' : 'completed', summary: id, summaryRef: null, outputRef: null,
+    } })),
+  });
+  const registry = new TranscriptToolOperationRegistry();
+  const records = ['first', 'second'].map((id, index) => [id, { callId: id, call: { toolName: 'bash', normalizedInput: { command: `echo ${id}` } },
+    result: null, status: index ? 'failed' as const : 'completed' as const,
+    operations: [{ callId: id, toolName: 'bash', kind: 'command', outputPreview: `${id} output`, ...(index ? { error: 'Permission denied' } : {}) }],
+  }] as const);
+  vi.spyOn(registry, 'getSnapshot').mockReturnValue({ version: 1, records: new Map(records) });
+  render(<TranscriptToolGroupCard store={store} blockIds={['first', 'second']} toolOperations={registry} />);
+  expect(screen.getAllByRole('button')).toHaveLength(2);
+  expect(screen.getByText('transcriptTool.status.failed')).toBeTruthy();
+  expect(screen.queryByText('first output')).toBeNull();
+  await user.click(screen.getByRole('button', { name: /echo first/ }));
+  expect(within(screen.getByRole('region', { name: 'transcriptTool.command' })).getByText('$ echo first')).toBeTruthy();
+  expect(within(screen.getByRole('region', { name: 'transcriptTool.output' })).getByText('first output')).toBeTruthy();
+  expect(screen.queryByText('second output')).toBeNull();
+  await user.click(screen.getByRole('button', { name: /echo second/ }));
+  expect(screen.getByText('first output')).toBeTruthy();
+  expect(screen.getByText('second output')).toBeTruthy();
+  expect(screen.getByRole('alert').textContent).toBe('Permission denied');
+  await user.click(screen.getByRole('button', { name: /echo first/ }));
+  expect(screen.queryByText('first output')).toBeNull();
+  expect(screen.getByText('second output')).toBeTruthy();
 });

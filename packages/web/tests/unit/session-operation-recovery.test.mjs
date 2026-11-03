@@ -7,13 +7,13 @@ const stub = code => `data:text/javascript;base64,${Buffer.from(code).toString("
 const loader = subjectLoader({ extraOverrides: [
   ["../api.ts", stub(`import {context,ApiError} from ${JSON.stringify(harness)}; export {ApiError}; export const apiJson=(...args)=>context.request(...args); export const apiResponse=(...args)=>context.response(...args);`)],
   ["../i18n", stub("export const t=key=>key; export const i18n={language:'en'}; export const useTranslation=()=>({t});")],
-  ["react-router", stub(`export const matchPath=()=>null; import {context} from ${JSON.stringify(harness)}; export const Link=()=>null; export const useRouteLoaderData=id=>id==='authenticated'?{user:context.user}:{workspace:context.workspace,agents:context.agents}; export const useNavigate=()=>context.navigate;`)],
+  ["react-router", stub(`export const matchPath=()=>null; import {context} from ${JSON.stringify(harness)}; export const Link=()=>null; export const useRouteLoaderData=id=>id==='authenticated'?{user:context.user}:{workspace:context.workspace}; export const useNavigate=()=>context.navigate;`)],
   ["react", stub(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useLayoutEffect} from ${JSON.stringify(harness)}; export const useEffectEvent=callback=>callback; export const useSyncExternalStore=(_subscribe,snapshot)=>snapshot();`)],
 
   ["../preferences", stub("export const useEnterStartsNewLine=()=>false; export const readModelThinkingMode=()=>''; export const readPreferredModelIdentity=()=>''; export const writeModelThinkingMode=()=>{}; export const writePreferredModelIdentity=()=>{};")],
   ["../chat/transcriptTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const createWorkspaceTranscriptTransport=()=>({loadTail:async id=>context.tail(id),loadPatches:async()=>{},loadActiveAgentRun:async()=>({agentRun:context.activeRun??null})});`)],
   ["../chat/workspacePresentationTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const streamWorkspacePresentation=options=>context.stream(options);`)],
-  ...["../components/WorkspaceContextPanel", "../components/DocumentPreview", "../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../agent-chat/SessionAgentBreadcrumb", "../shell/ShellSidebar"].map(s => [s, stub(`export const ${s.split("/").at(-1)}=()=>null;`)]),
+  ...["../components/WorkspaceContextPanel", "../components/DocumentPreview", "../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../shell/ShellSidebar"].map(s => [s, stub(`export const ${s.split("/").at(-1)}=()=>null;`)]),
   ["../shell/HomePlane", stub("export const HomePlane=()=>null; export const HomeQuickActions=()=>null;")],
 ] });
 const { AppPageContent } = await import(await loader(fileURLToPath(new URL("../../src/routes/AppRoute.jsx", import.meta.url))));
@@ -27,7 +27,7 @@ function fixture(context, request) {
   const data=new Map(); globalThis.sessionStorage={getItem:k=>data.get(k)??null,setItem:(k,v)=>data.set(k,v),removeItem:k=>data.delete(k)};
   const calls=[];
   globalThis.document={hidden:false,addEventListener(){},removeEventListener(){}};
-  const session={id:"work",workspaceId:"workspace",agentId:"agent",projectId:null,currentEnvironmentId:null,executionMode:"perRun",title:"work",origin:"user",initialInputOrigin:null,status:"active",deletedAt:null,isPinned:false,isUnread:false,hasActiveAgentRun:false,updatedAt:"2026-10-23T00:00:00Z",latestAttentionSequence:"0",readThroughSequence:"0",attentionRevision:"0",isManuallyUnread:false};
+  const session={id:"work",workspaceId:"workspace",projectId:null,currentEnvironmentId:null,executionMode:"perRun",title:"work",origin:"user",status:"active",deletedAt:null,isPinned:false,isUnread:false,hasActiveAgentRun:false,updatedAt:"2026-10-23T00:00:00Z",latestAttentionSequence:"0",readThroughSequence:"0",attentionRevision:"0",isManuallyUnread:false};
   globalThis.window={location:{pathname:"/w/workspace/app"},addEventListener(){},removeEventListener(){}};
   const env=environment({tail:async()=>({schema:"transcript.page.v1",sessionId:"work",projectionVersion:"transcript.projection.v1",projectionGeneration:"generation",sourceHighWater:"1",blocks:[],olderCursor:null,hasOlder:false,resumeCursors:[{streamId:"workspace-transcript.v1",cursor:"1"}]}),request:async(path,options)=>{
     calls.push([path,options]); let value;
@@ -42,17 +42,17 @@ function fixture(context, request) {
   env.stream=async options=>{
     if(options.sessionId){
       const page=await env.tail(options.sessionId);
-      const send=(kind,body,cursor=null)=>options.controller.acceptWithBackpressure({cursor,item:{schema:"workspace.presentation.v1",workspaceId:"workspace",agentId:"agent",sessionId:options.sessionId,kind,...body}});
+      const send=(kind,body,cursor=null)=>options.controller.acceptWithBackpressure({cursor,item:{schema:"workspace.presentation.v1",workspaceId:"workspace",sessionId:options.sessionId,kind,...body}});
       await send("snapshot",{page});
       await send("checkpoint",{projectionGeneration:page.projectionGeneration,sourceHighWater:page.sourceHighWater,agentRun:null},`applied:${page.sourceHighWater}`);
     }
     return new Promise(resolve=>options.signal.addEventListener("abort",resolve,{once:true}));
   };
   env.response=async(...args)=>{const value=await env.request(...args);return {...value,json:async()=>value};};
-  const props={agentId:"agent",workspaceDraft:true,location:{search:"",state:null},modelsVersion:0,onSessionAccepted:()=>{}};
-  return {data,calls,props,subject:renderer(AppPageContent,props,env)};
+  const props={workspaceDraft:true,location:{search:"",state:null},modelsVersion:0,onSessionAccepted:()=>{}};
+  return {data,calls,props,session,subject:renderer(AppPageContent,props,env)};
 }
-async function send(subject,text) {composer(subject).onDraftChange(text);await subject.settle();await composer(subject).onSubmit({preventDefault(){}});await new Promise(resolve=>setTimeout(resolve,20));await subject.settle();}
+async function send(subject,text) {if (!composer(subject).modelId) { composer(subject).onModelIdChange("model"); await subject.settle(); } composer(subject).onDraftChange(text);await subject.settle();await composer(subject).onSubmit({preventDefault(){}});await new Promise(resolve=>setTimeout(resolve,20));await subject.settle();}
 for(const change of ["text","model","attachment"]) test(`ordinary submit corrects unaccepted ${change} with the original operation identity`,async context=>{
   let posts=0;const f=fixture(context,async(path,options)=>{
     if(!options) throw new ApiError("operation_not_found",404);
@@ -84,7 +84,7 @@ test("modified submit with an already accepted receipt restores review while kee
 
 test("accepted original in the current Session restores history without consuming the edited draft",async context=>{
  const f=fixture(context,async(_path,options)=>{assert.equal(options,undefined);return receipt("old");});
- f.props.workspaceDraft=false;f.props.location={search:"?sessionId=work",state:null};
+ f.props.workspaceDraft=false;f.props.initialSession=f.session;
  try{await f.subject.settle();f.data.set(pendingKey,JSON.stringify({operationId:"old",fingerprint:"a".repeat(64),assetIds:[],inputChanged:false,receipt:receipt("old")}));await send(f.subject,"edited");assert.equal(composer(f.subject).draft,"edited");assert.equal(f.calls.filter(([,o])=>o?.method==="POST").length,0);assert.equal(nodes(f.subject.tree,n=>n.props.role==="alert")[0].props.children[0],"operations.inputUnconfirmed");assert.equal(f.data.has(pendingKey),false);}
  finally{f.subject.unmount();}
 });

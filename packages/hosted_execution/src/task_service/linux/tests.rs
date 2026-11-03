@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod capacity_history_tests;
 mod idle_pause_gate_tests;
+mod output_consumption_tests;
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[test]

@@ -892,29 +892,40 @@ pub(super) fn build_openai_compatible_thinking(
                 false,
             )),
         },
-        ModelProviderKind::Kimi if matches!(model, "kimi-k3" | "k3") => match mode.as_deref() {
+        ModelProviderKind::Kimi
+            if matches!(
+                model,
+                "kimi-k3"
+                    | "kimi-k3.1-pro"
+                    | "kimi-k3.1-pro-highspeed"
+                    | "k3"
+                    | "k3-256k"
+                    | "k3.1-pro"
+                    | "k3.1-pro-highspeed"
+                    | "kimi-for-coding"
+            ) => match mode.as_deref() {
             None => Ok((None, None)),
             Some(effort @ ("low" | "high" | "max")) => {
                 Ok((None, Some(effort.to_string())))
             }
             Some(mode) => Err(ModelClientError::new(
                 ModelClientErrorKind::InvalidRequest,
-                format!("unsupported Kimi K3 thinkingMode={mode}; expected low, high, or max"),
+                format!("unsupported Kimi thinkingMode={mode} for {model}; expected low, high, or max"),
                 false,
             )),
         },
-        ModelProviderKind::Kimi if model == "kimi-for-coding" => match mode.as_deref() {
-            None | Some("preserved") => Ok((
+        ModelProviderKind::Kimi if model == "kimi-for-coding-highspeed" => match mode.as_deref() {
+            None => Ok((
                 Some(OpenAiCompatibleThinkingRequest {
                     thinking_type: "enabled".to_string(),
-                    keep: Some("all".to_string()),
+                    keep: None,
                 }),
                 None,
             )),
             Some(mode) => Err(ModelClientError::new(
                 ModelClientErrorKind::InvalidRequest,
                 format!(
-                    "unsupported Kimi K2.7 Code thinkingMode={mode}; preserved thinking is required"
+                    "unsupported Kimi K2.7 Code Highspeed thinkingMode={mode}; effort control is not supported"
                 ),
                 false,
             )),

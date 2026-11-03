@@ -50,7 +50,7 @@ def seed(identity_path, input_stream):
     from django.contrib.auth import get_user_model
     from django.db import connection, transaction
     from app_core.credentials import encrypt_credential_secret
-    from app_core.models import (Agent, AgentRun, ModelConfig, ModelProvider, ProviderCredential,
+    from app_core.models import (AgentRun, ModelConfig, ModelProvider, ProviderCredential,
                                  Session, Workspace, WorkspaceMembership)
 
     identity_path = Path(identity_path)
@@ -88,7 +88,7 @@ def seed(identity_path, input_stream):
     email = 'benchmark-' + secrets.token_hex(12) + '@fixture.invalid'
     password = secrets.token_urlsafe(40)
     with transaction.atomic():
-        if any(model.objects.exists() for model in (user_model, Workspace, Agent, ModelProvider,
+        if any(model.objects.exists() for model in (user_model, Workspace, ModelProvider,
                 ModelConfig, ProviderCredential, Session, AgentRun)):
             raise ValueError('benchmark_seed_database_not_empty')
         user = user_model.objects.create_user(username=email, email=email, password=password)
@@ -102,8 +102,6 @@ def seed(identity_path, input_stream):
             modelName=model_descriptor['id'], contextTokens=model_descriptor['contextTokens'],
             maxOutputTokens=model_descriptor['outputTokens'], thinkingMode=model_descriptor['thinking'] or '',
             thinkingModes=[model_descriptor['thinking']] if model_descriptor['thinking'] is not None else [])
-        agent = Agent.objects.create(workspace=workspace, owner=user, name='Terminal benchmark',
-            instructions='', model_config=model)
         output.parent.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         # Publish credentials before the DB commit. If commit acknowledgement is
@@ -111,12 +109,12 @@ def seed(identity_path, input_stream):
         with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
             json.dump({'schema': 'centaeris.workspaceBenchmarkSeed.v1', 'fixtureId': identity['fixtureId'],
                 'sourceRevision': identity['sourceRevision'], 'email': email, 'password': password,
-                'workspaceId': workspace.id, 'agentId': agent.id, 'modelConfigRef': model.id,
+                'workspaceId': workspace.id, 'modelConfigRef': model.id,
                 'model': model_descriptor, 'modelSha256': canonical_digest(model_descriptor)}, handle)
             handle.flush()
             os.fsync(handle.fileno())
     print(json.dumps({'status': 'benchmark-business-inputs-created', 'fixtureId': identity['fixtureId'],
-        'workspaceId': workspace.id, 'agentId': agent.id, 'modelConfigRef': model.id}))
+        'workspaceId': workspace.id, 'modelConfigRef': model.id}))
 
 
 def main():

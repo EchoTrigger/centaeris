@@ -196,7 +196,7 @@ impl<
         session_id: &str,
         turn_id: &str,
         agent_run_identity: Option<&RuntimeAgentRunIdentityV1>,
-        _tool_safe_point: Option<&ToolSafePointDispatcher<'_>>,
+        tool_safe_point: Option<&ToolSafePointDispatcher<'_>>,
     ) -> Result<TurnStepResult, String> {
         let session = self.session_manager.load_or_create_session(session_id)?;
         let checkpoint = self
@@ -215,6 +215,7 @@ impl<
                         checkpoint,
                         agent_run_identity,
                         session,
+                        tool_safe_point,
                     )
                 }
                 Some(other) => return Err(format!("unsupported_runtime_wait_done_reason:{other}")),
@@ -362,63 +363,15 @@ impl<
         checkpoint: CheckpointRecord,
         agent_run_identity: Option<&RuntimeAgentRunIdentityV1>,
         session: SessionStateSnapshot,
+        tool_safe_point: Option<&ToolSafePointDispatcher<'_>>,
     ) -> Result<TurnStepResult, String> {
-        let wait = serde_json::from_str::<
-            crate::runtime::contracts::RuntimeAwaitQuestionCheckpointV1,
-        >(checkpoint.payload_json.as_str())
-        .map_err(|error| format!("decode question wait checkpoint failed: {error}"))?;
-        wait.validate()?;
-        let agent_run_identity = agent_run_identity
-            .ok_or_else(|| "question_wait_resume_requires_agent_run_identity".to_string())?;
-        agent_run_identity.validate()?;
-        if wait.agent_run_id != agent_run_identity.agent_run_id
-            || wait.authorization_digest != agent_run_identity.authorization_digest
-            || wait.turn_id != checkpoint.turn_id
-        {
-            return Err("question wait resume identity mismatch".to_string());
-        }
-        let changed = RuntimeWaitChangedV1 {
-            schema: crate::runtime::contracts::RUNTIME_WAIT_CHANGED_SCHEMA_V1.to_string(),
-            continuation_id: wait.continuation_id.clone(),
-            agent_run_id: wait.agent_run_id,
-            status: RuntimeWaitStatusV1::Resumed,
-            transition_reason: "question_answered".to_string(),
-            at_ms: now_ms(),
-        };
-        changed.validate()?;
-        let event = RuntimeEvent {
-            event_id: format!("runtime_wait:{}:resumed", wait.continuation_id),
-            session_id: checkpoint.session_id.clone(),
-            task_id: Some(checkpoint.turn_id.clone()),
-            event_type: crate::runtime::contracts::RUNTIME_WAIT_CHANGED_SCHEMA_V1.to_string(),
-            at_ms: changed.at_ms,
-            visibility: EventVisibility::User,
-            payload_json: serde_json::to_string(&changed)
-                .map_err(|error| format!("serialize question wait outcome failed: {error}"))?,
-        };
-        self.runtime_store.consume_wait_checkpoint(
-            crate::session::store::ConsumeWaitCheckpointRequest {
-                checkpoint: checkpoint.clone(),
-                events: vec![event],
-            },
-        )?;
-        Ok(TurnStepResult {
-            current_assistant_reply: None,
-            turn_id: checkpoint.turn_id.clone(),
-            continuation: QueryContinuation::ExecuteTools,
-            checkpoint: None,
-            provider_tool_calls: Vec::new(),
-            tool_results: Vec::new(),
-            tool_use_summary: None,
-            tool_operations_json: None,
-            agent_run_resource_usage: AgentRunResourceUsageV1::default(),
-            runtime_events: vec![build_runtime_event_runtime_wait_changed(
-                checkpoint.session_id.as_str(),
-                checkpoint.turn_id.as_str(),
-                &changed,
-            )?],
-            session_snapshot: session,
-        })
+        self.finish_question_wait(
+            checkpoint,
+            agent_run_identity,
+            session,
+            None,
+            tool_safe_point,
+        )
     }
 
     fn restore_pending_runtime_job_wait_if_needed(
@@ -536,11 +489,13 @@ impl<
         &self,
         session_id: &str,
         turn_id: &str,
+        tool_safe_point: Option<&ToolSafePointDispatcher<'_>>,
     ) -> Result<TurnStepResult, String> {
         self.resume_question_wait_abandoned_async(
             session_id,
             turn_id,
             "question_cancelled_by_answer_now",
+            tool_safe_point,
         )
         .await
     }
@@ -550,6 +505,7 @@ impl<
         session_id: &str,
         turn_id: &str,
         transition_reason: &str,
+        tool_safe_point: Option<&ToolSafePointDispatcher<'_>>,
     ) -> Result<TurnStepResult, String> {
         let checkpoint = self
             .checkpoint_store
@@ -559,52 +515,14 @@ impl<
         if checkpoint.done_reason.as_deref() != Some("question") {
             return Err("answer_now_question_checkpoint_required".to_string());
         }
-        let wait = serde_json::from_str::<
-            crate::runtime::contracts::RuntimeAwaitQuestionCheckpointV1,
-        >(checkpoint.payload_json.as_str())
-        .map_err(|error| format!("decode question checkpoint failed: {error}"))?;
-        wait.validate()?;
-        let changed = RuntimeWaitChangedV1 {
-            schema: crate::runtime::contracts::RUNTIME_WAIT_CHANGED_SCHEMA_V1.to_string(),
-            continuation_id: wait.continuation_id.clone(),
-            agent_run_id: wait.agent_run_id,
-            status: RuntimeWaitStatusV1::Abandoned,
-            transition_reason: transition_reason.to_string(),
-            at_ms: now_ms(),
-        };
-        changed.validate()?;
-        let event = RuntimeEvent {
-            event_id: format!("runtime_wait:{}:abandoned", wait.continuation_id),
-            session_id: session_id.to_string(),
-            task_id: Some(turn_id.to_string()),
-            event_type: crate::runtime::contracts::RUNTIME_WAIT_CHANGED_SCHEMA_V1.to_string(),
-            at_ms: changed.at_ms,
-            visibility: EventVisibility::User,
-            payload_json: serde_json::to_string(&changed)
-                .map_err(|error| format!("serialize question abandonment failed: {error}"))?,
-        };
-        self.runtime_store.consume_wait_checkpoint(
-            crate::session::store::ConsumeWaitCheckpointRequest {
-                checkpoint,
-                events: vec![event],
-            },
-        )?;
         let session = self.session_manager.load_or_create_session(session_id)?;
-        Ok(TurnStepResult {
-            current_assistant_reply: None,
-            turn_id: turn_id.to_string(),
-            continuation: QueryContinuation::ExecuteTools,
-            checkpoint: None,
-            provider_tool_calls: Vec::new(),
-            tool_results: Vec::new(),
-            tool_use_summary: None,
-            tool_operations_json: None,
-            agent_run_resource_usage: AgentRunResourceUsageV1::default(),
-            runtime_events: vec![build_runtime_event_runtime_wait_changed(
-                session_id, turn_id, &changed,
-            )?],
-            session_snapshot: session,
-        })
+        self.finish_question_wait(
+            checkpoint,
+            None,
+            session,
+            Some(transition_reason),
+            tool_safe_point,
+        )
     }
 
     async fn abandon_wait_for_agent_run_cancellation_async(
@@ -613,6 +531,7 @@ impl<
         session_id: &str,
         turn_id: &str,
         agent_run_identity: Option<&RuntimeAgentRunIdentityV1>,
+        tool_safe_point: Option<&ToolSafePointDispatcher<'_>>,
     ) -> Result<TurnStepResult, String> {
         match continuation {
             QueryContinuation::AwaitRuntimeJob => {
@@ -629,6 +548,7 @@ impl<
                     session_id,
                     turn_id,
                     "agent_run_cancelled",
+                    tool_safe_point,
                 )
                 .await
             }
@@ -1199,7 +1119,7 @@ impl<
         Ok(vec![object])
     }
 
-    fn repair_tool_batch_transcript(
+    pub(super) fn repair_tool_batch_transcript(
         &self,
         session: &mut SessionStateSnapshot,
         generate_result: &GenerateResult,
@@ -1861,10 +1781,55 @@ impl<
         let pending_runtime_wait_turn_id =
             pending_runtime_tool_batch(&resume_session)?.map(|pending| pending.turn_id);
 
+        let pending_question_turn_id = if self.config.question_input
+            == question::QuestionInputCapability::PersistentResponses
+        {
+            self.runtime_store
+                .load_latest_checkpoint(&session_id)
+                .map_err(|error| error.to_string())?
+                .filter(|checkpoint| checkpoint.done_reason.as_deref() == Some("question"))
+                .map(|checkpoint| {
+                    let wait: question::QuestionCheckpoint =
+                        serde_json::from_str(&checkpoint.payload_json)
+                            .map_err(|error| format!("invalid question v2 checkpoint: {error}"))?;
+                    wait.validate()?;
+                    let identity = agent_run_identity
+                        .as_ref()
+                        .ok_or("question_wait_requires_run_identity")?;
+                    if wait.agent_run_id != identity.agent_run_id
+                        || wait.authorization_digest != identity.authorization_digest
+                        || wait.turn_id != checkpoint.turn_id
+                    {
+                        return Err("question wait resume identity mismatch".to_string());
+                    }
+                    Ok(checkpoint.turn_id)
+                })
+                .transpose()?
+        } else {
+            None
+        };
+
         let mut recovered_prepared_tools = false;
-        if initial_cancellation_reason.is_none()
+        if self.config.question_input == question::QuestionInputCapability::PersistentResponses
+            && pending_question_turn_id.is_none()
+            && pending_runtime_wait_turn_id.is_none()
+        {
+            if let Some(identity) = agent_run_identity.as_ref() {
+                if let Some(restored) =
+                    self.repair_closed_question_wait(identity, resume_session.clone())?
+                {
+                    resume_session = restored.session_snapshot.clone();
+                    responses.push(restored);
+                    next_turn_id = new_turn_id();
+                    recovered_prepared_tools = true;
+                }
+            }
+        }
+        if !recovered_prepared_tools
+            && initial_cancellation_reason.is_none()
             && resume_from_turn_id.is_none()
             && pending_runtime_wait_turn_id.is_none()
+            && pending_question_turn_id.is_none()
             && turn_control.is_some_and(TurnControl::uses_durable_inputs)
         {
             if let Some(identity) = agent_run_identity.as_ref() {
@@ -1932,6 +1897,8 @@ impl<
             Some(resume_turn_id)
         } else if pending_runtime_wait_turn_id.is_some() {
             pending_runtime_wait_turn_id
+        } else if pending_question_turn_id.is_some() {
+            pending_question_turn_id
         } else {
             self.checkpoint_store
                 .load_checkpoint_by_turn_async(session_id.as_str(), initial_turn_id.as_str())
@@ -1969,6 +1936,7 @@ impl<
                                 session_id.as_str(),
                                 resume_turn_id,
                                 agent_run_identity.as_ref(),
+                                tool_safe_point,
                             )
                             .await?;
                         if !resumed.tool_results.is_empty() {
@@ -2000,6 +1968,7 @@ impl<
                     self.resume_question_wait_for_answer_now_async(
                         session_id.as_str(),
                         resume_turn_id,
+                        tool_safe_point,
                     )
                     .await?
                 }
@@ -2619,6 +2588,7 @@ impl<
                                     session_id.as_str(),
                                     wait_checkpoint.turn_id.as_str(),
                                     agent_run_identity.as_ref(),
+                                    tool_safe_point,
                                 )
                                 .await?;
                             if !resumed.tool_results.is_empty() {
@@ -2669,6 +2639,7 @@ impl<
                                 self.resume_question_wait_for_answer_now_async(
                                     session_id.as_str(),
                                     wait_checkpoint.turn_id.as_str(),
+                                    tool_safe_point,
                                 )
                                 .await?
                             }

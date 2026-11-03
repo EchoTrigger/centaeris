@@ -1,5 +1,20 @@
 use super::*;
 
+#[test]
+fn input_writers_share_execution_serialization_and_exclude_snapshot_capture() {
+    let execution = format!("input-writers-{}", std::process::id());
+    let first = ExecutionActivityWitness::for_execution(201, &execution).unwrap();
+    let second = ExecutionActivityWitness::for_execution(202, &execution).unwrap();
+    let dispatch = first.begin_dispatch_activity().unwrap();
+    let writer = first.input_operations().lock().unwrap();
+    assert!(second.input_operations().try_lock().is_err());
+    assert!(second.try_snapshot_activity().unwrap().is_none());
+    drop(writer);
+    assert!(second.input_operations().try_lock().is_ok());
+    drop(dispatch);
+    assert!(second.try_snapshot_activity().unwrap().is_some());
+}
+
 fn eligible() -> RecoveryEvidence {
     RecoveryEvidence {
         failure: HostFailureEvidence::PreDispatchProcessNotStarted,

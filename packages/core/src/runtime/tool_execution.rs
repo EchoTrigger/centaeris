@@ -1196,6 +1196,10 @@ impl<
                 ));
             }
             let result = existing.decode_result()?;
+            self.tools_port.consume_tool_execution_outputs(
+                &effective_call.id,
+                &tool_execution_receipt_event_id(session_id, turn_id, &effective_call.id),
+            );
             notify_tool_safe_point(tool_safe_point, intent, effective_call, &result)?;
             return Ok(result);
         }
@@ -1223,6 +1227,12 @@ impl<
             )?)
             .map_err(|error| error.to_string())?;
         facts.receipts.insert(receipt.tool_call_id.clone(), receipt);
+        // This receipt is the recovery authority. Reclaim before a following safe
+        // point needs another helper, while keeping its protected workspace capture.
+        self.tools_port.consume_tool_execution_outputs(
+            &effective_call.id,
+            &tool_execution_receipt_event_id(session_id, turn_id, &effective_call.id),
+        );
         notify_tool_safe_point(tool_safe_point, intent, effective_call, &result)?;
         Ok(result)
     }
@@ -1585,6 +1595,10 @@ impl<
                     lifecycle_hook_contexts.extend(receipt.pre_hook_contexts.clone());
                     pre_hook_contexts_by_id
                         .insert(call.id.clone(), receipt.pre_hook_contexts.clone());
+                    self.tools_port.consume_tool_execution_outputs(
+                        &effective_call.id,
+                        &tool_execution_receipt_event_id(session_id, turn_id, &effective_call.id),
+                    );
                     notify_tool_safe_point(tool_safe_point, &intent, &effective_call, &result)?;
                     if receipt.run_post_hook {
                         lifecycle_hook_calls_by_id.insert(call.id.clone(), effective_call);
@@ -1952,6 +1966,10 @@ impl<
                     call.name
                 ));
             }
+            if call.name == question::TOOL_NAME {
+                question::question_from_result(generate_result)?;
+                continue;
+            }
             if self.tools_port.tool_turn_behavior(call.name.as_str())?
                 == ToolTurnBehavior::CompleteTurnOnSuccess
             {
@@ -1999,12 +2017,7 @@ impl<
         tool_name: &str,
     ) -> Result<bool, String> {
         let canonical = canonicalize_tool_name(tool_name).unwrap_or(tool_name);
-        let (definitions, _) = build_generate_tool_projection(
-            session,
-            self.tools_port.dynamic_tool_registry(),
-            self.config.allowed_tools.as_deref(),
-            self.tools_port.execution_host_kind(),
-        )?;
+        let (definitions, _) = self.build_generate_tool_projection(session)?;
         Ok(definitions
             .iter()
             .any(|definition| definition.name == canonical))

@@ -316,6 +316,32 @@ class Handler(BaseHTTPRequestHandler):
         if model.endswith("waiting") and waiting_role is None:
             self.send_error(422, "waiting profile role marker missing")
             return
+        terminal_action = None
+        if model in {"perf-terminal-workspace", "perf-terminal-retained"}:
+            try:
+                sample = _fixed_workload.terminal_sample(self.latest_user_text(request), model)
+                current_input = request.get('input', [])
+                last_user = max((index for index, item in enumerate(current_input)
+                                 if isinstance(item, dict) and item.get('role') == 'user'), default=-1)
+                rounds = sum(1 for item in current_input[last_user + 1:]
+                             if isinstance(item, dict) and item.get('type') == 'function_call_output')
+                terminal_action = _fixed_workload.terminal_action(sample, rounds)
+            except (ValueError, KeyError, TypeError):
+                self.send_error(422, 'invalid terminal workspace fixture')
+                return
+            if terminal_action[0] == 'fail':
+                self.send_error(422, 'synthetic terminal workspace model failure')
+                return
+            if terminal_action[0] == 'hold':
+                # The public cancel closes this model request. Bound an abandoned
+                # fixture without emitting a completion or issuing another tool.
+                self.connection.settimeout(120)
+                try:
+                    self.connection.recv(1)
+                except (OSError, TimeoutError):
+                    pass
+                self.close_connection = True
+                return
         if not self.streams(request):
             if waiting_role != "child":
                 self.send_error(422, "non-stream mock request requires waiting child")
@@ -356,7 +382,12 @@ class Handler(BaseHTTPRequestHandler):
         waiting_parent = waiting_role == "parent"
         waiting_child = waiting_role == "child"
         waiting_phase, waiting_ref = self.waiting_phase(request) if waiting_parent else (None, None)
-        if model == "perf-light-experience":
+        if terminal_action is not None:
+            if terminal_action[0] == 'final':
+                items, usage = self.emit_final(response_id, 'perf-instant')
+            else:
+                items, usage = self.emit_named_function_call(*terminal_action)
+        elif model == "perf-light-experience":
             latest_user_index = max((index for index, item in enumerate(request.get("input", []))
                                      if isinstance(item, dict) and item.get("role") == "user"
                                      and item.get("type") in (None, "message")), default=-1)

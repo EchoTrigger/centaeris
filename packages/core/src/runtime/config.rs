@@ -16,6 +16,7 @@ pub struct AgentRuntimeConfig {
     pub enable_system_prompt_template: bool,
     pub enable_tool_use_summary: bool,
     pub auto_continue_after_resume_wait: bool,
+    pub question_input: question::QuestionInputCapability,
     pub allowed_tools: Option<Vec<String>>,
     /// A user-input run may require a committed successful call before Final.
     /// Hosts configure the tool; Core owns enforcement and durable recovery.
@@ -44,6 +45,7 @@ impl Default for AgentRuntimeConfig {
             enable_system_prompt_template: true,
             enable_tool_use_summary: true,
             auto_continue_after_resume_wait: false,
+            question_input: question::QuestionInputCapability::Disabled,
             allowed_tools: None,
             required_completion_tool: None,
             plugin_activation_digest: None,

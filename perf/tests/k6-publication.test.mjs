@@ -43,7 +43,7 @@ for (const toolFailed of [false, true]) test(`real K6 ${toolFailed ? 'rejects fa
       if (request.url === '/api/csrf') { response.end(JSON.stringify({ csrfToken: 'synthetic-csrf' })); return; }
       if (request.url === '/api/login') { response.setHeader('Set-Cookie', 'sessionid=synthetic; Path=/'); response.end(JSON.stringify({ user: { id: 1 } })); return; }
       if (request.url === '/api/workspaces/workspace-owned/sessions/new/messages') {
-        const submitted = JSON.parse(body); assert.equal(submitted.agentId, 'agent-owned'); assert.equal(submitted.modelConfigRef, 'model-owned');
+        const submitted = JSON.parse(body); assert.equal(submitted.modelConfigRef, 'model-owned');
         response.writeHead(202); response.end(JSON.stringify({ agentRunId: 'run-owned', sessionId: 'session-owned' })); return;
       }
       response.writeHead(404); response.end('{}');
@@ -57,7 +57,7 @@ for (const toolFailed of [false, true]) test(`real K6 ${toolFailed ? 'rejects fa
   const result = await new Promise((resolve, reject) => {
     const child = spawn(binary, ['run', '--summary-export', path.join(temporary, 'summary.json'), script], {
       env: { ...process.env, API_BASE: `http://127.0.0.1:${server.address().port}`, PERF_ADMIN_PASSWORD: 'synthetic-only',
-        PERF_WORKSPACE_ID: 'workspace-owned', PERF_AGENT_ID: 'agent-owned', PERF_MODEL_REFS: JSON.stringify({ short: 'model-owned' }),
+        PERF_WORKSPACE_ID: 'workspace-owned', PERF_MODEL_REFS: JSON.stringify({ short: 'model-owned' }),
         PERF_ARTIFACT_EXPECTATION: JSON.stringify(expected), K6_NO_USAGE_REPORT: 'true' },
     });
     let output = ''; child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });

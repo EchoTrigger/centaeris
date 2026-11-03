@@ -45,6 +45,7 @@ impl MessageHandler {
         self.push_message(session, MessageRole::System, content, metadata)
     }
 
+    #[cfg(test)]
     pub fn push_assistant_message(
         &self,
         session: &mut SessionStateSnapshot,

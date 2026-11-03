@@ -24,7 +24,7 @@ export function DocumentPreview({ src, title, contentType = "", className = "", 
     });
     return () => abort.abort();
   }, [src, text, onError]);
-  if (office) return <Suspense fallback={null}><OfficePreview src={src} title={title} className={className} onError={onError} /></Suspense>;
+  if (office) return <Suspense fallback={<div className="officePreviewState" role="status">{t("officePreview.loading")}</div>}><OfficePreview src={src} title={title} className={className} onError={onError} /></Suspense>;
   if (!text) return <iframe className={className} src={src} title={title} />;
   if (state.src !== src) return null;
   if (state.error) return <div role="alert">{t("appRoute.unableToLoadThisFile")}</div>;

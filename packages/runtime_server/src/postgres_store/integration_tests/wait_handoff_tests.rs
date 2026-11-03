@@ -21,6 +21,76 @@ const RUN: &str = "agent_run_wait_handoff";
 const SESSION: &str = "session_wait_handoff";
 const TURN: &str = "turn_pg_fenced_terminal";
 
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_question_wait_handoff_preserves_bound_snapshot_and_rejects_schema_relabeling() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let fixture = fixture();
+    let mut recovery: RuntimeRecoveryCheckpointV1 =
+        serde_json::from_str(&fixture.checkpoint.payload_json).unwrap();
+    let snapshot: SessionStateSnapshot =
+        serde_json::from_str(&fixture.handoff.snapshot_json).unwrap();
+    let result = centaeris_core::model::GenerateResult {
+        content: "Question".into(),
+        tool_calls: vec![centaeris_core::model::ToolCallEnvelope {
+            id: "question-handoff-call".into(),
+            name: "request_user_input".into(),
+            args_json: serde_json::json!({"question":"Which?","options":["One","Two"]}).to_string(),
+        }],
+        reasoning_content: None,
+        continuation_reasoning_content: None,
+        input_tokens: None,
+        total_tokens: None,
+        prompt_cache_hit_tokens: None,
+        prompt_cache_miss_tokens: None,
+    };
+    let question = centaeris_core::runtime::question::QuestionCheckpoint::new(
+        &RuntimeAgentRunIdentityV1 {
+            agent_run_id: recovery.agent_run_id.clone(),
+            execution_id: recovery.execution_id.clone(),
+            authorization_digest: recovery.authorization_digest.clone(),
+        },
+        TURN,
+        &result,
+    )
+    .unwrap();
+    let mut wait = fixture.handoff.wait_checkpoint.clone();
+    wait.status = "paused_question".into();
+    wait.done_reason = Some("question".into());
+    wait.payload_json = serde_json::to_string(&question).unwrap();
+    wait.checkpoint_id = format!("checkpoint:{}", question.continuation_id);
+    let handoff = WaitHandoff::new(&recovery, wait.clone(), &snapshot).unwrap();
+    recovery.checkpoint_id = handoff.checkpoint_id().unwrap();
+    handoff.validate(&recovery).unwrap();
+    handoff
+        .validate_replay(&fixture.store, &wait, &snapshot)
+        .unwrap();
+    let mut wrong = handoff.clone();
+    wrong.schema = "workspace.runtime_job_wait_handoff.v1".into();
+    assert!(wrong.validate(&recovery).is_err());
+    let mut wrong = handoff;
+    wrong.wait_checkpoint.payload_json = serde_json::to_string(
+        &RuntimeAwaitJobCheckpointV1::new(
+            &RuntimeAgentRunIdentityV1 {
+                agent_run_id: recovery.agent_run_id.clone(),
+                execution_id: recovery.execution_id.clone(),
+                authorization_digest: recovery.authorization_digest.clone(),
+            },
+            TURN,
+            vec![RuntimeJobWaitV1 {
+                tool_call_id: "other".into(),
+                source_tool_name: "read".into(),
+                tool_definition_digest: recovery.authorization_digest.clone(),
+                job_id: "job".into(),
+                job_kind: "provider.poll".into(),
+            }],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(wrong.validate(&recovery).is_err());
+}
+
 fn fixture() -> Fixture {
     fixture_with_model_request(false)
 }

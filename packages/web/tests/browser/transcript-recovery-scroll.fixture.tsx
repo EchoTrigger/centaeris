@@ -62,7 +62,7 @@ function Session() {
       <TranscriptBlockList store={store} sessionId="synthetic-recovery" loadingHistory={false} loadingOlderHistory={false} onLoadOlderHistory={async () => { throw new Error("Recovery fixture already loaded its bounded older range"); }} />
       <WorkspaceComposer fileInputRef={input} isHome={false} onSubmit={event => event.preventDefault()}
         pendingAttachments={[]} pendingUploadFiles={[]} draft={text} onDraftChange={setText} enterStartsNewLine={false}
-        activeAgentName="Synthetic Agent" workspaceAvailable sending={false} loadingHistory={false} hasActiveAgentRun={false}
+        workspaceName="Synthetic workspace" workspaceAvailable sending={false} loadingHistory={false} hasActiveAgentRun={false}
         uploadingAttachment={false} onUploadAttachment={noop} sessionId={null} currentModel={null} thinkingMode=""
         onThinkingModeChange={noop} modelGroups={[]} modelId="" onModelIdChange={noop} onCancelActiveAgentRun={noop} />
     </div></section>

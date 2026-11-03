@@ -20,7 +20,7 @@ fn ownership_matches(
         && marker == format!("centaeris-test-owner:{token}")
 }
 
-pub(super) fn require_owned_database(db: &mut Client) {
+pub(crate) fn require_owned_database(db: &mut Client) {
     assert_eq!(
         std::env::var("CENTAERIS_ALLOW_POSTGRES_TEST_RESET").as_deref(),
         Ok("1")

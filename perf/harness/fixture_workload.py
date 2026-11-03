@@ -61,10 +61,10 @@ def read_fixture(path, *, environments, iterations):
     if os.name == 'posix' and path.stat().st_mode & 0o077:
         raise ValueError('fixture credentials file must be mode 0600')
     value = json.loads(path.read_text(encoding='utf-8'))
-    fields = {'schema', 'nativeManifest', 'apiBase', 'workspaceId', 'agentId', 'modelRefs', 'account', 'samples'}
+    fields = {'schema', 'nativeManifest', 'apiBase', 'workspaceId', 'modelRefs', 'account', 'samples'}
     identity = lambda item: isinstance(item, str) and re.fullmatch('[A-Za-z0-9_.:-]{1,160}', item)
     if (not isinstance(value, dict) or set(value) != fields or value['schema'] != 'workspace.perf.fixture.v1'
-            or not identity(value['workspaceId']) or not identity(value['agentId'])
+            or not identity(value['workspaceId'])
             or not isinstance(value['modelRefs'], dict) or 'tools' not in value['modelRefs']
             or set(value['modelRefs']) - {'short', 'tools', 'long'}
             or any(not identity(item) for item in value['modelRefs'].values())
@@ -105,7 +105,7 @@ def k6_command(fixture, output, binary, *, environments, iterations, between_run
     allowed = {'PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA'}
     environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
     environment.update(API_BASE=fixture['apiBase'], PERF_WORKSPACE_ID=fixture['workspaceId'],
-                       PERF_AGENT_ID=fixture['agentId'], PERF_MODEL_REFS=json.dumps(fixture['modelRefs']),
+                       PERF_MODEL_REFS=json.dumps(fixture['modelRefs']),
                        PERF_ADMIN_EMAIL=fixture['account']['email'], PERF_ADMIN_PASSWORD=fixture['account']['password'],
                        PERF_SAMPLES_PATH=str(Path(output) / 'samples.json'), PERF_ENVIRONMENT_COUNT=str(environments),
                        PERF_K6_BUDGET=json.dumps(budget['k6']), PERF_RUNS_PER_ENVIRONMENT=str(iterations), PERF_BETWEEN_RUN_MS=str(between_run_ms), PERF_INITIAL_STAGGER_MS=str(initial_stagger_ms), PERF_RUN_TERMINAL_TIMEOUT_SECONDS=str(run_terminal_timeout_seconds), K6_NO_USAGE_REPORT='true')
@@ -191,7 +191,7 @@ def run(fixture_path, output, binary, *, environments=4, iterations=3, timeout=N
     output.mkdir(mode=0o700, parents=False, exist_ok=False)
     samples = prepared_samples(fixture)
     (output / 'samples.json').write_text(json.dumps(samples, indent=2), encoding='utf-8')
-    manifest = {key: fixture[key] for key in ('apiBase', 'workspaceId', 'agentId', 'modelRefs')}
+    manifest = {key: fixture[key] for key in ('apiBase', 'workspaceId', 'modelRefs')}
     manifest.update(schema='workspace.perf.workload.v1', budgets=budget, environments=environments, iterations=iterations,
                     sourceRevision=fixture['native']['sourceRevision'], project=fixture['native']['project'], executionMode=execution_mode, betweenRunMs=between_run_ms,
                     initialStaggerMs=initial_stagger_ms, runTerminalTimeoutSeconds=run_terminal_timeout_seconds, modelWaitMs=fixture['native'].get('modelWaitMs', 0))

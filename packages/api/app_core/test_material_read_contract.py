@@ -134,3 +134,10 @@ class MaterialReadContractTests(SimpleTestCase):
         self.assertEqual(result["evidenceSha256"], material_contract.sha256_bytes(result["content"].encode()))
         self.assertEqual(result["ownerRef"], "source_1")
         self.assertEqual(segment.locator["endByte"], 12_010)
+        self.bound.resolved["citationAllowed"] = False
+        full = material_evidence.search_evidence(segment, self.bound, representation, 3, full_window=True)
+        self.assertFalse(full["citationAllowed"])
+        self.assertEqual(full["content"], segment.boundedText)
+        self.assertEqual(full["locator"], segment.locator)
+        self.assertEqual(full["evidenceSha256"], material_contract.sha256_bytes(segment.boundedText.encode()))
+        self.assertEqual(full["ownerRef"], "source_1")

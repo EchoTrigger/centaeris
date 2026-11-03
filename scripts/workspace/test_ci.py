@@ -14,13 +14,13 @@ spec.loader.exec_module(ci)
 
 
 class PortableCITests(unittest.TestCase):
-    def test_workspace_harbor_runs_with_pinned_dependency_early_in_python_stage(self):
+    def test_workspace_harbor_runs_with_pinned_dependency_early_in_support_stage(self):
         harbor = ["uv", "run", "--no-project", "--with", "harbor==0.21.0", "python", "-B",
                   "-m", "unittest", "discover", "-s", "scripts/harbor", "-p", "test_workspace*.py"]
         config = {"services": {"document-processor": {}, "workspace-general": {},
                   "runtime": {"depends_on": {"workspace-general": {"condition": "service_completed_successfully"}}},
                   "material-worker": {"depends_on": {"document-processor": {"condition": "service_completed_successfully"}}}}}
-        for stage in ("Python", "All", "Rust", "Web"):
+        for stage in ci.STAGES:
             with self.subTest(stage=stage):
                 calls = []
                 def record(label, args, **kwargs):
@@ -28,26 +28,26 @@ class PortableCITests(unittest.TestCase):
                     return json.dumps(config)
                 with patch.object(ci, "run", record):
                     ci.main(stage=stage)
-                self.assertEqual(calls.count(harbor), 1 if stage in ("Python", "All") else 0)
-                if stage in ("Python", "All"):
+                self.assertEqual(calls.count(harbor), 1 if stage in ("Support", "All") else 0)
+                if stage in ("Support", "All"):
                     adapter = calls.index(harbor)
-                    for script in ("scripts/workspace/runtime_outbox_gate.py", "scripts/workspace/python_test_gate.py"):
-                        self.assertLess(adapter, next(i for i, command in enumerate(calls) if script in command))
+                    self.assertLess(adapter, next(i for i, command in enumerate(calls)
+                                                  if "scripts/workspace/python_test_gate.py" in command))
 
-    def test_workspace_harbor_failure_stops_before_database_and_api_gates(self):
+    def test_support_failure_reports_failure_after_other_independent_checks(self):
         calls = []
         def fail_adapter(label, args, **kwargs):
             calls.append(args)
             if "harbor==0.21.0" in args:
-                raise RuntimeError("adapter regression")
+                raise subprocess.CalledProcessError(1, args)
             return json.dumps({"services": {"document-processor": {}, "workspace-general": {},
                 "runtime": {"depends_on": {"workspace-general": {"condition": "service_completed_successfully"}}},
                 "material-worker": {"depends_on": {"document-processor": {"condition": "service_completed_successfully"}}}}})
         with patch.object(ci, "run", fail_adapter):
-            with self.assertRaisesRegex(RuntimeError, "adapter regression"):
-                ci.main(stage="Python")
-        self.assertFalse(any("scripts/workspace/runtime_outbox_gate.py" in command
-                             or "scripts/workspace/python_test_gate.py" in command for command in calls))
+            with self.assertRaisesRegex(RuntimeError, "Workspace Harbor adapter regressions"):
+                ci.main(stage="Support")
+        self.assertTrue(any("scripts/workspace/python_test_gate.py" in command for command in calls))
+        self.assertFalse(any("scripts/workspace/runtime_outbox_gate.py" in command for command in calls))
 
     def test_compose_structure_chooses_isolated_capacity_inputs_without_changing_host_environment(self):
         host_environment = {key: value for key, value in os.environ.items()
@@ -89,6 +89,21 @@ class PortableCITests(unittest.TestCase):
 
     def test_loading_the_gate_preserves_the_hosted_test_discovery_path(self):
         self.assertEqual(sys.path, original_search_path)
+
+    def test_backend_matrix_partitions_every_backend_check_exactly_once(self):
+        selected = {}
+        enabled = {"condition": "service_completed_successfully"}
+        config = {"services": {"document-processor": {}, "workspace-general": {},
+                  "runtime": {"depends_on": {"workspace-general": enabled}},
+                  "material-worker": {"depends_on": {"document-processor": enabled}}}}
+        for stage in ci.STAGES:
+            calls = []
+            with patch.object(ci, "run", side_effect=lambda label, args, **kw: calls.append(label) or json.dumps(config)):
+                ci.main(True, stage)
+            selected[stage] = set(calls)
+        backend = set().union(*(selected[stage] for stage in ci.BACKEND_STAGES))
+        self.assertEqual(backend, selected["All"] - selected["Rust"] - selected["Web"])
+        self.assertEqual(sum(len(selected[stage]) for stage in ci.BACKEND_STAGES), len(backend))
 
     def test_web_checks_shared_types_and_component_interactions(self):
         config = {"services": {"document-processor": {}, "workspace-general": {},

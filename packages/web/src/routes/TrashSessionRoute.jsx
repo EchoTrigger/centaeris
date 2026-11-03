@@ -12,7 +12,6 @@ import { ShellPage } from "../shell/ShellPage";
 function requireSessionEnvelope(value, sessionId, workspaceId) {
   const session = value?.session;
   if (!session || session.id !== sessionId || session.workspaceId !== workspaceId
-    || typeof session.agentId !== "string"
     || !["active", "deleted"].includes(session.status)) {
     throw new Error("session_response_invalid");
   }
@@ -22,7 +21,7 @@ function requireSessionEnvelope(value, sessionId, workspaceId) {
 export default function TrashSessionRoute() {
   const { t } = useTranslation();
   const { sessionId = "" } = useParams();
-  const { workspace, agents } = useRouteLoaderData("workspace");
+  const { workspace } = useRouteLoaderData("workspace");
   const base = `/w/${encodeURIComponent(workspace.id)}`;
   const navigate = useNavigate();
   const revalidator = useRevalidator();
@@ -62,9 +61,8 @@ export default function TrashSessionRoute() {
         sessionId,
         workspace.id,
       );
-      if (loadedSession.status === "active"
-        && agents.some((agent) => agent.id === loadedSession.agentId)) {
-        navigate(`${base}/agents/${encodeURIComponent(loadedSession.agentId)}?sessionId=${encodeURIComponent(sessionId)}`, { replace: true });
+      if (loadedSession.status === "active") {
+        navigate(`${base}/sessions/${encodeURIComponent(sessionId)}`, { replace: true });
         return;
       }
       setSession(loadedSession);
@@ -82,7 +80,7 @@ export default function TrashSessionRoute() {
       olderRequestRef.current = null;
       store.clear();
     };
-  }, [agents, base, navigate, sessionId, store, transport, workspace.id, t]);
+  }, [base, navigate, sessionId, store, transport, workspace.id, t]);
 
   async function loadOlder() {
     const current = store.getListSnapshot();
@@ -125,11 +123,10 @@ export default function TrashSessionRoute() {
     try {
       await apiJson(`/api/sessions/${encodeURIComponent(session.id)}/restore`, { method: "POST" });
       await revalidator.revalidate();
-      navigate(`${base}/agents/${encodeURIComponent(session.agentId)}?sessionId=${encodeURIComponent(session.id)}`);
+      navigate(`${base}/sessions/${encodeURIComponent(session.id)}`);
     } catch (requestError) {
       if (requestError.status === 404 || requestError.status === 410) navigate(`${base}/app`, { replace: true });
-      else if (requestError.message === "agent_deleted") setError(t("trashSessionRoute.restoreThisConversationSAgentFirst"));
-      else if (requestError.message === "session_not_deleted") navigate(`${base}/agents/${encodeURIComponent(session.agentId)}?sessionId=${encodeURIComponent(session.id)}`, { replace: true });
+      else if (requestError.message === "session_not_deleted") navigate(`${base}/sessions/${encodeURIComponent(session.id)}`, { replace: true });
       else setError(t("trashSessionRoute.unableToRestoreValue", { value1: requestError.message }));
     } finally {
       setRestoring(false);
@@ -152,15 +149,14 @@ export default function TrashSessionRoute() {
     }
   }
 
-  const parentActive = session && agents.some((agent) => agent.id === session.agentId);
   const remainingDays = session?.deletedAt ? Math.max(1, Math.ceil((new Date(session.deletedAt).valueOf() + 30 * 86400000 - Date.now()) / 86400000)) : null;
 
   return (
     <ShellPage>
       <div className="shDeletedTopbar"><Link to={`${base}/app`}><ArrowLeft aria-hidden="true" />{t("trashSessionRoute.back")}</Link><span>{session?.title || t("trashSessionRoute.deletedConversation")}</span></div>
       <div className="shDeletedBanner">
-        <span>{parentActive ? remainingDays ? t("trash.remaining", { count: remainingDays }) : t("trash.inTrash") : t("trashSessionRoute.thisConversationIsHiddenWithItsDeletedAgentRestore")}</span>
-        {session?.status === "deleted" && parentActive ? <button type="button" disabled={restoring} onClick={restore}>{restoring ? <LoaderCircle className="statusIcon" aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}{t("trashSessionRoute.restoreConversation")}</button> : null}
+        <span>{remainingDays ? t("trash.remaining", { count: remainingDays }) : t("trash.inTrash")}</span>
+        {session?.status === "deleted" ? <button type="button" disabled={restoring} onClick={restore}>{restoring ? <LoaderCircle className="statusIcon" aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}{t("trashSessionRoute.restoreConversation")}</button> : null}
         {session?.status === "deleted" ? <button type="button" disabled={purging} onClick={() => setPurgeOpen(true)}><Trash2 aria-hidden="true" />{t("trashSessionRoute.deletePermanently")}</button> : null}
       </div>
       {error ? <div className="errorBanner" role="alert">{error}</div> : null}

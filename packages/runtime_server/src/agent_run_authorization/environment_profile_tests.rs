@@ -2,7 +2,7 @@ use super::*;
 
 fn wire() -> Value {
     let mut value: Value = serde_json::from_str(include_str!(
-        "../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+        "../../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
     ))
     .unwrap();
     let profile = serde_json::json!({"schema":"runtime.environment_profile.v1", "imageDigest":format!("sha256:{}", "a".repeat(64)), "workspaceRoot":"/mnt/data", "user":"10001:10001", "network":"disabled", "resources":{"memoryBytes":1073741824,"cpuMilli":1000,"pidsLimit":128,"workspaceBytes":1073741824,"storageBytes":1073741824}});

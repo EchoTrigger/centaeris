@@ -12,7 +12,7 @@ fn setup() -> (
     let (_, store, mut db) = retained_instance_tests::setup();
     let auth: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
         serde_json::from_str(include_str!(
-            "../../../../../tests/workspace/fixtures/agent_run_authorization/v1/valid.json"
+            "../../../../../tests/workspace/fixtures/agent_run_authorization/v2/valid.json"
         ))
         .unwrap();
     db.batch_execute("ALTER TABLE public.app_core_sessionenvironment ADD COLUMN IF NOT EXISTS controller_maintenance_operation_id text").unwrap();
@@ -125,7 +125,7 @@ fn postgres_environment_observation_rejects_foreign_session_and_changed_profile_
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (store, mut db, profile) = setup();
     let called = AtomicBool::new(false);
-    db.batch_execute("INSERT INTO public.app_core_session VALUES('foreign','ws_1','user_1','centaeris','environment',NULL)").unwrap();
+    db.batch_execute("INSERT INTO public.app_core_session(id,workspace_id,owner_id,current_environment_id) VALUES('foreign','ws_1','user_1','environment')").unwrap();
     assert!(store
         .with_environment_observation("foreign", "environment", |_| {
             called.store(true, Ordering::SeqCst);

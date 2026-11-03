@@ -31,7 +31,7 @@ async function fixture(send?: (operation: NoteSaveOperation) => Promise<NoteSave
     send: async (operation: NoteSaveOperation) => {
       calls.push(structuredClone(operation));
       return send ? send(operation) : { saveId: operation.saveId, appliedGeneration: operation.baseGeneration + 1,
-        object: { id: operation.noteId || "created", contentGeneration: operation.baseGeneration + 1 } };
+        object: { id: operation.noteId || "created", contentGeneration: operation.baseGeneration + 1, displayName: operation.document.displayName } };
     },
   };
   return { store, calls, statuses, timer, options, controller: new NoteSaveController(options) };
@@ -73,7 +73,7 @@ test("unknown create outcome survives reload and retries exact ID before latest 
   const calls: NoteSaveOperation[] = [];
   const restored = new NoteSaveController({ ...f.options, recovered, editInstanceId: crypto.randomUUID(),
     send: async op => { calls.push(op); return { saveId: op.saveId, appliedGeneration: op.noteId ? 2 : 1,
-      object: { id: "created", contentGeneration: op.noteId ? 2 : 1 } }; },
+      object: { id: "created", contentGeneration: op.noteId ? 2 : 1, displayName: op.document.displayName } }; },
   });
   await restored.flush();
   await restored.flush();
@@ -84,6 +84,43 @@ test("unknown create outcome survives reload and retries exact ID before latest 
   assert.deepEqual(await f.store.list("user", "draft"), []);
   restored.dispose();
 });
+
+test("creation adopts the assigned title without sending a redundant rename", async () => {
+  const f = await fixture(async operation => ({ saveId: operation.saveId, appliedGeneration: 1,
+    object: { id: "created", contentGeneration: 1, displayName: "title(1)" } }), null);
+  await f.controller.flush();
+  assert.equal(f.controller.state.status, "saved");
+  assert.equal(f.controller.state.draft.document.displayName, "title(1)");
+  await f.controller.flush();
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(await f.store.list("user", "draft"), []);
+  f.controller.dispose();
+});
+
+for (const renameDuringSave of [false, true]) {
+  test(`assigned creation title preserves newer ${renameDuringSave ? "title and body" : "body"} edits`, async () => {
+    const first = deferred<NoteSaveResult>();
+    let count = 0;
+    const f = await fixture(async operation => ++count === 1 ? first.promise : {
+      saveId: operation.saveId, appliedGeneration: 2,
+      object: { id: "created", contentGeneration: 2, displayName: operation.document.displayName },
+    }, null);
+    const saving = f.controller.flush();
+    while (!f.calls.length) await new Promise(resolve => setImmediate(resolve));
+    f.controller.edit({ displayName: renameDuringSave ? "My chosen name" : "title", markdown: "newer body" });
+    first.resolve({ saveId: f.calls[0].saveId, appliedGeneration: 1,
+      object: { id: "created", contentGeneration: 1, displayName: "title(1)" } });
+    await saving;
+    const title = renameDuringSave ? "My chosen name" : "title(1)";
+    assert.deepEqual(f.controller.state.draft.document, { displayName: title, markdown: "newer body" });
+    assert.notEqual(f.controller.state.status, "saved");
+    await f.controller.flush();
+    assert.equal(f.calls[1].noteId, "created");
+    assert.deepEqual(f.calls[1].document, { displayName: title, markdown: "newer body" });
+    assert.equal(f.controller.state.status, "saved");
+    f.controller.dispose();
+  });
+}
 
 test("same acknowledged document is skipped and idle never loops", async () => {
   const f = await fixture();

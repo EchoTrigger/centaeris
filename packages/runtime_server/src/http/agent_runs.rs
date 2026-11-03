@@ -3,6 +3,46 @@ mod control;
 pub(crate) mod retained_cleanup;
 pub(super) use control::advance as advance_control;
 
+pub(super) fn question_response(
+    state: HttpServerState,
+    request: Request<Bytes>,
+) -> Result<Response<Body>, String> {
+    let request = match serde_json::from_slice::<crate::contract::AgentRunQuestionResponseRequest>(
+        request.body(),
+    )
+    .map_err(|error| error.to_string())
+    .and_then(|value| {
+        let key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
+            .map_err(|_| "AGENT_RUN_AUTHORIZATION_SIGNING_KEY is required".to_string())?;
+        value.validate(key.as_bytes())
+    }) {
+        Ok(value) => value,
+        Err(error) => return json_error_response(400, &error),
+    };
+    let response = request.response();
+    match state.job_store.respond_to_question(
+        &request.agent_run_control.authorization.session_id,
+        &request.job_id,
+        &response,
+        now_ms()?,
+    ) {
+        Ok(disposition) => Ok(http_response(
+            200,
+            "application/json",
+            serde_json::to_vec(&json!({
+                "schema":"runtime.agent_run.question_response.result.v1",
+                "agentRunId":response.agent_run_id,"continuationId":response.continuation_id,
+                "operationId":response.operation_id,"disposition":disposition,
+            }))
+            .map_err(|error| error.to_string())?,
+        )),
+        Err(error) => {
+            eprintln!("question response rejected: {error}");
+            json_error_response(409, "question_response_rejected")
+        }
+    }
+}
+
 pub(super) fn cleanup_receipt(
     state: HttpServerState,
     request: Request<Bytes>,
@@ -268,8 +308,8 @@ fn teardown_owned_tasks(
     }
     let host_context = || {
         #[cfg(test)]
-        if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
-            return crate::native_consumption_tests::owned_host_context();
+        if crate::environment_runtime_tests::owns_run(&cleanup.agent_run_id) {
+            return crate::environment_runtime_tests::owned_host_context();
         }
         crate::docker_execution_host::resident_host_context()
     };
@@ -292,17 +332,17 @@ fn teardown_owned_tasks(
     };
     let inventory = |preparing: &[crate::resident_capacity::PreparingResidentSandbox]| {
         #[cfg(test)]
-        if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
-            return crate::native_consumption_tests::owned_inventory();
+        if crate::environment_runtime_tests::owns_run(&cleanup.agent_run_id) {
+            return crate::environment_runtime_tests::owned_inventory();
         }
         crate::docker_execution_host::observed_resident_sandboxes_excluding(preparing)
     };
     #[cfg(test)]
-    let native_fixture = crate::native_consumption_tests::owns_run(&cleanup.agent_run_id);
+    let owned_fixture = crate::environment_runtime_tests::owns_run(&cleanup.agent_run_id);
     #[cfg(not(test))]
-    let native_fixture = false;
+    let owned_fixture = false;
     let recovered = if cleanup.environment_authorization.payload.execution_mode == "perRun"
-        && !native_fixture
+        && !owned_fixture
         && crate::docker_execution_host::OciRuntime::from_environment()?
             == crate::docker_execution_host::OciRuntime::Runsc
     {
@@ -382,9 +422,10 @@ fn teardown_owned_tasks(
                     };
                     let per_run =
                         cleanup.environment_authorization.payload.execution_mode == "perRun";
+
                     #[cfg(test)]
-                    if crate::native_consumption_tests::owns_run(&cleanup.agent_run_id) {
-                        return crate::native_consumption_tests::cleanup_owned_physical_execution(
+                    if crate::environment_runtime_tests::owns_run(&cleanup.agent_run_id) {
+                        return crate::environment_runtime_tests::cleanup_owned_physical_execution(
                             allocation, *resources, &fence, per_run,
                         );
                     }

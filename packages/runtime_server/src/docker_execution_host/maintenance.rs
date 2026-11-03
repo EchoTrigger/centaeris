@@ -124,7 +124,7 @@ pub(crate) fn provision_environment(
     let mounts = plugin_mounts(&binding.plugin_activation)?;
     let memory = memory_mount(
         &binding.user_id,
-        &binding.agent_id,
+        &binding.workspace_id,
         docker_volume_name_from_environment(AGENT_MEMORY_VOLUME_NAME_ENV)?,
     )?;
     prepare_memory_scope(&memory)?;
@@ -158,7 +158,7 @@ pub(crate) fn provision_environment(
         return Err("provision_physical_identity_rejected".into());
     }
     let fence = binding.fence(&allocation.instance_id)?;
-    retained::takeover(&expected, &facts.id, &fence)?;
+    retained::takeover(&expected, &facts.id, &fence, || Ok(()))?;
     Ok(facts.id)
 }
 

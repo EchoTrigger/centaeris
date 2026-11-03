@@ -61,7 +61,7 @@ export function login() {
 export function configuredTarget(profile) {
   const identity = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value);
   if (typeof __ENV.API_BASE !== 'string' || !/^https?:\/\/[^/?#\s]+$/.test(__ENV.API_BASE)
-      || !identity(__ENV.PERF_WORKSPACE_ID) || !identity(__ENV.PERF_AGENT_ID)) {
+      || !identity(__ENV.PERF_WORKSPACE_ID)) {
     throw new Error('invalid explicit workload target');
   }
   let models;
@@ -73,11 +73,11 @@ export function configuredTarget(profile) {
       || !identity(models[profile])) {
     throw new Error('invalid explicit workload target: model references');
   }
-  return { workspaceId: __ENV.PERF_WORKSPACE_ID, agentId: __ENV.PERF_AGENT_ID, modelId: models[profile] };
+  return { workspaceId: __ENV.PERF_WORKSPACE_ID, modelId: models[profile] };
 }
 
 // 发消息（sessionId=new 即创建会话并启动 run），返回 {sessionId, agentRunId}
-export function startRun(store, csrf, workspaceId, agentId, modelId, text, options = {}) {
+export function startRun(store, csrf, workspaceId, modelId, text, options = {}) {
   const operationId = options.operationId === undefined ? Array.from(new Uint8Array(crypto.randomBytes(16)),
     (byte) => byte.toString(16).padStart(2, '0')).join('') : options.operationId;
   const sessionId = options.sessionId === undefined ? 'new' : options.sessionId;
@@ -85,7 +85,7 @@ export function startRun(store, csrf, workspaceId, agentId, modelId, text, optio
   if (!validId(operationId) || !validId(sessionId)) throw new Error('explicit Run operation/session invalid');
   const res = request('POST',
     `/api/workspaces/${workspaceId}/sessions/${encodeURIComponent(sessionId)}/messages`, store,
-    { operationId, agentId,
+    { operationId,
       text: text || 'Perf load.', attachmentRefs: [], modelConfigRef: modelId },
     csrf, { type: 'post_message' });
   if (res.status !== 202) throw new Error(`message failed: ${res.status}`);

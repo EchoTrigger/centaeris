@@ -2,15 +2,8 @@ use super::*;
 use std::cell::{Cell, RefCell};
 
 #[test]
-fn exact_capacity_wait_reuses_the_original_start_and_succeeds_after_more_than_two_attempts() {
-    for reason in [
-        "task_capacity",
-        "task_history_capacity",
-        "task_thread_capacity",
-        "task_output_capacity",
-        "task_journal_capacity",
-        "task_input_receipt_capacity",
-    ] {
+fn execution_slot_wait_reuses_the_original_start_and_succeeds_after_more_than_two_attempts() {
+    for reason in ["environment_host_busy", "task_capacity"] {
         let attempts = Cell::new(0);
         let pinned = Cell::new(false);
         let waits = RefCell::new(Vec::new());
@@ -50,6 +43,30 @@ fn exact_capacity_wait_reuses_the_original_start_and_succeeds_after_more_than_tw
         assert_eq!(attempts.get(), 4);
         assert!(!waits.borrow().is_empty());
         assert!(seen.borrow().iter().all(|request| request == &original));
+    }
+}
+
+#[test]
+fn retained_capacity_rejection_is_returned_without_waiting() {
+    for reason in [
+        "task_history_capacity",
+        "task_thread_capacity",
+        "task_output_capacity",
+        "task_journal_capacity",
+        "task_input_receipt_capacity",
+    ] {
+        assert!(centaeris_core::execution::environment_task_capacity_rejection(reason));
+        let attempts = Cell::new(0);
+        let result = start::<()>(
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(reason.into())
+            },
+            || panic!("retained capacity is not an execution-slot wait"),
+            |_| panic!("retained capacity must return to the caller"),
+        );
+        assert_eq!(result.unwrap_err(), reason);
+        assert_eq!(attempts.get(), 1);
     }
 }
 

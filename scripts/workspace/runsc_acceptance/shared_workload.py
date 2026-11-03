@@ -252,7 +252,7 @@ def run(fixture, result, k6binary, *, environments=4, iterations=3, work_units=2
     if profile['memoryMiB']:
         for sample in samples: sample.update(profile)
     private = {'schema': 'workspace.perf.fixture.v1', 'nativeManifest': str((fixture / 'manifest.json').resolve()),
-               'apiBase': driver.base, 'workspaceId': driver.seed['workspaceId'], 'agentId': driver.seed['agentId'],
+               'apiBase': driver.base, 'workspaceId': driver.seed['workspaceId'],
                'modelRefs': {'tools': driver.seed['modelConfigRef']},
                'account': {key: driver.seed[key] for key in ('email', 'password')}, 'samples': samples}
     private_path = fixture / 'perf-fixture.json'
