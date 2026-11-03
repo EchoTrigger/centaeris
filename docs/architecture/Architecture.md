@@ -29,12 +29,28 @@ exclusion. Hosts own `ToolConcurrencyRegistry` instances and inject resolved
 coordinators into `AgentRuntime::new`. Equal scope strings share a budget only
 within the same registry.
 
-| Object | Owner and sharing | Lifetime |
-| --- | --- | --- |
-| Local registry | `RuntimeServerClientHub`, shared by connections and background work | Runtime service |
-| Hosted registry | `HttpServerState`, shared by request-state clones | Runtime Server service |
-| Scope coordinator | Local main Run, compaction and child Agents use the parent Session scope; hosted executors and provider-poll contexts use their source Session scope | Last executor/context holding its coordinator |
-| Tool permit | One admitted tool invocation | Released on completion, cancellation or task drop |
+| Resource | Held by | Shared callers | Release boundary |
+| --- | --- | --- | --- |
+| Local registry | `RuntimeServerClientHub`, created by `run_server_with_business_owners` | Connections and background workers from that service | Last service handle, including its background `EventWriter` handles |
+| Hosted registry | `HttpServerState`, created in Runtime Server `main` | Clones of that service's request state and dispatched execution steps | Last service/request/step handle |
+| Local scope coordinator | Main/compaction `AgentRuntime` and subagent observer/worker runtimes | Same service and parent Session, including resumed Runs | Last runtime holding the coordinator |
+| Hosted scope coordinator | `AgentRuntime`, retained `HostedRuntimeContext`, and its worker clones | Same service and source Session, including resumed execution steps and child Agents | Last executor/context clone; confirmed teardown removes the matching Run's retained context |
+| Tool permit | One admitted tool invocation | One invocation, including its result safe point | Completion, cancellation or task drop releases the permit |
+
+The local `EventWriter::tool_concurrency_for_session` resolves the budget from
+its service. Main Runs and manual compaction supply their Session ID. Subagent
+workers supply `parent_session_id`, checked against the persisted child binding;
+the child's own Session ID does not select a new budget. New and resumed local
+Runs both enter `run_session_agent_run` and use this same lookup.
+
+Hosted `step` dispatch passes the service registry to `execute_agent_run`, which
+uses the signed authorization's Session ID. It retains one coordinator clone in
+`HostedRuntimeContext` and transfers another to `AgentRuntime`. Subagent runners
+clone the retained coordinator instead of looking up a child Session budget.
+When a later step replaces a retained context, its lookup happens first, so the
+old context keeps the shared budget alive across replacement. Confirmed teardown
+removes a retained context only when its Run identity matches; worker clones
+already in flight keep their own references until they finish.
 
 Registry entries are weak references. Expired entries are swept on the next
 lookup; a live scope rejects conflicting normalized capacities. Disconnecting

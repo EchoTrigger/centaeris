@@ -53,6 +53,42 @@ fn service_tool_budgets_survive_request_state_drop_and_isolate_server_instances(
     });
 }
 
+#[test]
+fn retained_hosted_context_preserves_tool_budget_across_execution_steps() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let registry = centaeris_core::runtime::ToolConcurrencyRegistry::default();
+        let first_executor = registry.for_scope("session:parent", 1).unwrap();
+        let mut context = crate::tests::hosted_context();
+        context.tool_concurrency = first_executor.clone();
+        let mut contexts = HashMap::from([("parent", context)]);
+        drop(first_executor);
+
+        // A resumed step finds the budget retained after the previous executor ended.
+        let resumed = registry.for_scope("session:parent", 1).unwrap();
+        let worker = contexts.get("parent").unwrap().clone();
+        let permit = worker.tool_concurrency.acquire_async().await;
+        {
+            let waiting = resumed.acquire_async();
+            tokio::pin!(waiting);
+            assert!(futures::poll!(&mut waiting).is_pending());
+
+            // Replacing/retiring the retained context does not end an in-flight clone.
+            contexts.remove("parent");
+            assert!(registry.for_scope("session:parent", 2).is_err());
+            assert!(futures::poll!(&mut waiting).is_pending());
+            drop(permit);
+            drop(waiting.await);
+        }
+        drop(worker);
+        drop(resumed);
+
+        // Once all execution/context owners finish, the scope may be configured anew.
+        let replacement = registry.for_scope("session:parent", 2).unwrap();
+        assert_eq!(replacement.capacity(), 2);
+    });
+}
+
 /// Storage regressions exercise the production Router with their owned database.
 pub(crate) fn stored_request(
     store: PostgresRuntimeStore,
