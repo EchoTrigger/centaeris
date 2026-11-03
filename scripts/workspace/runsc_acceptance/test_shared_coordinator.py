@@ -779,7 +779,11 @@ class PreparationTimingCaptureTests(unittest.TestCase):
             if os_name_is_posix():
                 self.assertTrue(descendant_pid.exists(), 'plugin must have started before timeout')
                 state = Path('/proc') / descendant_pid.read_text() / 'stat'
-                self.assertTrue(not state.exists() or state.read_text().split(') ', 1)[1].startswith('Z '),
+                try:
+                    stat_text = state.read_text()
+                except FileNotFoundError:
+                    stat_text = None
+                self.assertTrue(stat_text is None or stat_text.split(') ', 1)[1].startswith('Z '),
                     'collector plugin retaining the pipe must also stop')
 
     def test_nonzero_log_process_exit_discards_partial_records(self):

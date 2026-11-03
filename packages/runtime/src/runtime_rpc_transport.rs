@@ -6,6 +6,7 @@ use crate::runtime_server::{
     ActiveAgentRun, AgentRunLease, AgentRunRegistry, RuntimeClientKind, StartAgentRunError,
 };
 use centaeris_core::runtime::TurnControl;
+use centaeris_core::runtime::{ToolConcurrencyCoordinator, ToolConcurrencyRegistry};
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -105,6 +106,7 @@ pub(crate) struct RuntimeServerClientHub {
     activity_generation: AtomicU64,
     active_actions: AtomicU64,
     agent_runs: AgentRunRegistry,
+    tool_concurrency_registry: ToolConcurrencyRegistry,
     draining: AtomicBool,
     service_shutdown: Notify,
     outbound_bytes: Arc<Semaphore>,
@@ -121,6 +123,7 @@ impl Default for RuntimeServerClientHub {
             activity_generation: AtomicU64::new(0),
             active_actions: AtomicU64::new(0),
             agent_runs: AgentRunRegistry::default(),
+            tool_concurrency_registry: ToolConcurrencyRegistry::default(),
             draining: AtomicBool::new(false),
             service_shutdown: Notify::new(),
             outbound_bytes: Arc::new(Semaphore::new(RPC_GLOBAL_OUTBOUND_BYTES)),
@@ -592,6 +595,18 @@ pub(crate) struct EventWriter {
 }
 
 impl EventWriter {
+    /// All connections and background runs use their owning service's budgets.
+    /// Subagents pass the parent Session here to share its tool capacity.
+    pub(crate) fn tool_concurrency_for_session(
+        &self,
+        session_id: &str,
+        capacity: usize,
+    ) -> Result<ToolConcurrencyCoordinator, String> {
+        self.hub
+            .tool_concurrency_registry
+            .for_scope(format!("session:{session_id}"), capacity)
+    }
+
     pub(crate) fn model_http_client(&self) -> Result<reqwest::Client, String> {
         self.hub.model_http_client()
     }
@@ -956,6 +971,34 @@ mod tests {
         hub.connect()
             .expect("connect")
             .expect("runtime server accepts client")
+    }
+
+    #[tokio::test]
+    async fn service_tool_budgets_are_shared_by_connections_and_background_work() {
+        let hub = Arc::new(RuntimeServerClientHub::default());
+        let (connection, _outbound) = connect(&hub);
+        let background = hub.process_scheduler();
+        let parent = connection
+            .tool_concurrency_for_session("parent", 1)
+            .unwrap();
+        let child = background
+            .tool_concurrency_for_session("parent", 1)
+            .unwrap();
+        let independent = Arc::new(RuntimeServerClientHub::default());
+        let other = independent
+            .broadcaster()
+            .tool_concurrency_for_session("parent", 1)
+            .unwrap();
+
+        let permit = parent.acquire_async().await;
+        let waiting = child.acquire_async();
+        tokio::pin!(waiting);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        assert!(futures::poll!(std::pin::pin!(other.acquire_async())).is_ready());
+        hub.disconnect(&connection).unwrap();
+        assert!(futures::poll!(&mut waiting).is_pending());
+        drop(permit);
+        let _child_permit = waiting.await;
     }
 
     fn start_agent_run(

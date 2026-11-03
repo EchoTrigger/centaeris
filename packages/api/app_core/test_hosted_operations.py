@@ -211,11 +211,6 @@ class HostedOperationConcurrencyTests(OperationFixture, TransactionTestCase):
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(submit, range(2)))
         self.profile.side_effect = None
-        for index, (status, body) in enumerate(results):
-            if status == 503:
-                self.assertEqual(body, {"error": "execution_admission_busy"})
-                self.assertFalse(AgentRun.objects.filter(session_id=work_sessions[index]).exists())
-                results[index] = submit(index)
         self.assertEqual([status for status, _ in results], [202, 202], results)
         self.assertEqual({body["sessionId"] for _, body in results}, set(work_sessions))
         self.assertEqual(len({body["agentRunId"] for _, body in results}), 2)

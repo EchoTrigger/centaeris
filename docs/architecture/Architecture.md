@@ -22,6 +22,45 @@ An adapter may translate identities, transport, storage, or process behavior. It
 must not define a second prompt, tool loop, continuation state machine, or
 Session truth.
 
+## Tool concurrency ownership
+
+Core's `ToolConcurrencyCoordinator` enforces tool capacity and serial-tool
+exclusion. Hosts own `ToolConcurrencyRegistry` instances and inject resolved
+coordinators into `AgentRuntime::new`. Equal scope strings share a budget only
+within the same registry.
+
+| Resource | Held by | Shared callers | Release boundary |
+| --- | --- | --- | --- |
+| Local registry | `RuntimeServerClientHub`, created by `run_server_with_business_owners` | Connections and background workers from that service | Last service handle, including its background `EventWriter` handles |
+| Hosted registry | `HttpServerState`, created in Runtime Server `main` | Clones of that service's request state and dispatched execution steps | Last service/request/step handle |
+| Local scope coordinator | Main/compaction `AgentRuntime` and subagent observer/worker runtimes | Same service and parent Session, including resumed Runs | Last runtime holding the coordinator |
+| Hosted scope coordinator | `AgentRuntime`, retained `HostedRuntimeContext`, and its worker clones | Same service and source Session, including resumed execution steps and child Agents | Last executor/context clone; confirmed teardown removes the matching Run's retained context |
+| Parallel tool permit | Spawned tool task | One parallel invocation | Released when the spawned task exits. The parent applies the result sink after joining that task. |
+| Serial tool permit | Executor running the serial invocation | One serial invocation, including its result sink when present | Released when the serial invocation scope exits, after the result sink returns or as its error propagates. |
+
+The local `EventWriter::tool_concurrency_for_session` resolves the budget from
+its service. Main Runs and manual compaction supply their Session ID. Subagent
+workers supply `parent_session_id`, checked against the persisted child binding;
+the child's own Session ID does not select a new budget. New and resumed local
+Runs both enter `run_session_agent_run` and use this same lookup.
+
+Hosted `step` dispatch passes the service registry to `execute_agent_run`, which
+uses the signed authorization's Session ID. It retains one coordinator clone in
+`HostedRuntimeContext` and transfers another to `AgentRuntime`. Subagent runners
+clone the retained coordinator instead of looking up a child Session budget.
+When a later step replaces a retained context, its lookup happens first, so the
+old context keeps the shared budget alive across replacement. Confirmed teardown
+removes a retained context only when its Run identity matches; worker clones
+already in flight keep their own references until they finish.
+
+Registry entries are weak references. Expired entries are swept on the next
+lookup; a live scope rejects conflicting normalized capacities. Disconnecting
+a client or dropping a request does not terminate budgets held by executors.
+Budgets are process-local transient coordination, with no persistent capacity
+reservation to restore after restart. Core's `global_for_scope` constructor is
+replaced by `registry.for_scope`; callers must hold a registry at their service
+boundary and pass the returned coordinator explicitly.
+
 ## Request flow
 
 1. A Host opens or creates a Session through the Local Runtime protocol.

@@ -176,8 +176,8 @@ use crate::session::{
     SessionRecordType,
 };
 pub use crate::tool::concurrency::{
-    normalize_tool_parallelism, ToolConcurrencyCoordinator, DEFAULT_TOOL_PARALLELISM,
-    MAX_TOOL_PARALLELISM,
+    normalize_tool_parallelism, ToolConcurrencyCoordinator, ToolConcurrencyRegistry,
+    DEFAULT_TOOL_PARALLELISM, MAX_TOOL_PARALLELISM,
 };
 use crate::tool::layer::{
     extract_dynamic_tool_pending_poll, DynamicToolPendingPoll, ToolExecutionFact,

@@ -516,6 +516,7 @@ pub(super) fn step(
         store,
         job_store,
         tool_layers,
+        tool_concurrency_registry,
         ..
     } = state;
     let agent_run_step = match serde_json::from_slice::<AgentRunStepRequest>(body.as_ref())
@@ -560,6 +561,7 @@ pub(super) fn step(
             agent_run_step.job_id,
             agent_run_step.lease_owner,
             tool_layers.clone(),
+            tool_concurrency_registry,
         )
     });
     if let Ok(Err(error)) = &execution {

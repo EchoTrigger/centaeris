@@ -3,6 +3,7 @@ use super::*;
 pub(super) async fn route_after_generate_with_retry<S>(
     checkpoint_store: &TurnCheckpointStore<S>,
     mut req: RouteGenerateResultRequest,
+    question: Option<question::ValidatedQuestionCall>,
     stage: &str,
     max_recovery_attempts: u32,
     recovery_policy_trace_json: &mut Vec<String>,
@@ -19,7 +20,7 @@ where
         );
 
         match checkpoint_store
-            .route_after_generate_async(req.clone())
+            .route_validated_generate_async(req.clone(), question.clone())
             .await
         {
             Ok(response) => return Ok(response),
@@ -62,6 +63,7 @@ where
 pub(super) async fn persist_query_state_with_retry<S>(
     checkpoint_store: &TurnCheckpointStore<S>,
     mut req: PersistQueryStateRequest,
+    question: question::ValidatedQuestionCall,
     stage: &str,
     max_recovery_attempts: u32,
     recovery_policy_trace_json: &mut Vec<String>,
@@ -78,7 +80,7 @@ where
         );
 
         match checkpoint_store
-            .persist_query_state_async(req.clone())
+            .persist_validated_question_async(req.clone(), question.clone())
             .await
         {
             Ok(response) => return Ok(response),

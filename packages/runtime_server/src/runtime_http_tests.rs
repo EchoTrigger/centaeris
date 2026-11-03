@@ -11,12 +11,82 @@ fn http_state(runtime: Arc<tokio::runtime::Runtime>) -> HttpServerState {
         store: Arc::new(RuntimeStoreActor::start(job_store.clone()).unwrap()),
         job_store: Arc::new(job_store),
         tool_layers: Default::default(),
+        tool_concurrency_registry: Default::default(),
         execution_profile: Arc::new(RuntimeExecutionProfile {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
             image_digest: "sha256:synthetic-http-fixture".into(),
         }),
         request_capacity: request_capacity::RequestCapacity::for_http_tests(Duration::from_secs(2)),
     }
+}
+
+#[test]
+fn service_tool_budgets_survive_request_state_drop_and_isolate_server_instances() {
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    let (server, independent) = {
+        let _guard = runtime.enter();
+        (http_state(runtime.clone()), http_state(runtime.clone()))
+    };
+    let request = server.clone();
+    let parent = server
+        .tool_concurrency_registry
+        .for_scope("session:parent", 1)
+        .unwrap();
+    let child = request
+        .tool_concurrency_registry
+        .for_scope("session:parent", 1)
+        .unwrap();
+    let other = independent
+        .tool_concurrency_registry
+        .for_scope("session:parent", 1)
+        .unwrap();
+    drop(request);
+
+    runtime.block_on(async {
+        let permit = parent.acquire_async().await;
+        let waiting = child.acquire_async();
+        tokio::pin!(waiting);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        assert!(futures::poll!(std::pin::pin!(other.acquire_async())).is_ready());
+        drop(permit);
+        let _child_permit = waiting.await;
+    });
+}
+
+#[test]
+fn retained_hosted_context_preserves_tool_budget_across_execution_steps() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let registry = centaeris_core::runtime::ToolConcurrencyRegistry::default();
+        let first_executor = registry.for_scope("session:parent", 1).unwrap();
+        let mut context = crate::tests::hosted_context();
+        context.tool_concurrency = first_executor.clone();
+        let mut contexts = HashMap::from([("parent", context)]);
+        drop(first_executor);
+
+        // A resumed step finds the budget retained after the previous executor ended.
+        let resumed = registry.for_scope("session:parent", 1).unwrap();
+        let worker = contexts.get("parent").unwrap().clone();
+        let permit = worker.tool_concurrency.acquire_async().await;
+        {
+            let waiting = resumed.acquire_async();
+            tokio::pin!(waiting);
+            assert!(futures::poll!(&mut waiting).is_pending());
+
+            // Replacing/retiring the retained context does not end an in-flight clone.
+            contexts.remove("parent");
+            assert!(registry.for_scope("session:parent", 2).is_err());
+            assert!(futures::poll!(&mut waiting).is_pending());
+            drop(permit);
+            drop(waiting.await);
+        }
+        drop(worker);
+        drop(resumed);
+
+        // Once all execution/context owners finish, the scope may be configured anew.
+        let replacement = registry.for_scope("session:parent", 2).unwrap();
+        assert_eq!(replacement.capacity(), 2);
+    });
 }
 
 /// Storage regressions exercise the production Router with their owned database.

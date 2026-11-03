@@ -71,9 +71,17 @@ impl QuestionCheckpoint {
         turn_id: &str,
         result: &GenerateResult,
     ) -> Result<Self, String> {
-        let question = question_from_result(result)?
+        let question = ValidatedQuestionCall::from_result(result)?
             .ok_or_else(|| "question_tool_call_required".to_string())?;
-        let call = &result.tool_calls[0];
+        Self::from_validated(identity, turn_id, &question)
+    }
+
+    pub(super) fn from_validated(
+        identity: &RuntimeAgentRunIdentityV1,
+        turn_id: &str,
+        validated: &ValidatedQuestionCall,
+    ) -> Result<Self, String> {
+        let call = &validated.call;
         let identity = RuntimeAwaitQuestionCheckpointV1::new(identity, turn_id, &call.id)?;
         Ok(Self {
             schema: QUESTION_SCHEMA.into(),
@@ -82,7 +90,7 @@ impl QuestionCheckpoint {
             authorization_digest: identity.authorization_digest,
             turn_id: identity.turn_id,
             question_id: identity.question_id,
-            question,
+            question: validated.question.clone(),
             tool_call: QuestionToolCall {
                 id: call.id.clone(),
                 name: call.name.clone(),
@@ -196,17 +204,36 @@ pub fn response_event_id(continuation_id: &str) -> String {
     format!("runtime_question_response:{continuation_id}")
 }
 
-pub fn question_from_result(result: &GenerateResult) -> Result<Option<Question>, String> {
-    let Some(call) = result.tool_calls.iter().find(|call| call.name == TOOL_NAME) else {
-        return Ok(None);
-    };
-    if result.tool_calls.len() != 1 {
-        return Err("request_user_input_must_be_the_only_tool_call".into());
+#[derive(Debug, Clone)]
+pub(super) struct ValidatedQuestionCall {
+    question: Question,
+    call: ToolCallEnvelope,
+}
+
+impl ValidatedQuestionCall {
+    pub(super) fn from_result(result: &GenerateResult) -> Result<Option<Self>, String> {
+        let Some(call) = result.tool_calls.iter().find(|call| call.name == TOOL_NAME) else {
+            return Ok(None);
+        };
+        if result.tool_calls.len() != 1 {
+            return Err("request_user_input_must_be_the_only_tool_call".into());
+        }
+        let question: Question = serde_json::from_str(&call.args_json)
+            .map_err(|error| format!("invalid question tool arguments: {error}"))?;
+        question.validate()?;
+        Ok(Some(Self {
+            question,
+            call: call.clone(),
+        }))
     }
-    let question: Question = serde_json::from_str(&call.args_json)
-        .map_err(|error| format!("invalid question tool arguments: {error}"))?;
-    question.validate()?;
-    Ok(Some(question))
+
+    pub(super) fn question(&self) -> &Question {
+        &self.question
+    }
+}
+
+pub fn question_from_result(result: &GenerateResult) -> Result<Option<Question>, String> {
+    Ok(ValidatedQuestionCall::from_result(result)?.map(|validated| validated.question))
 }
 
 pub fn tool_definition() -> ModelToolDefinition {

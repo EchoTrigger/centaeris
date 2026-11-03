@@ -4144,9 +4144,7 @@ fn postgres_new_user_turn_after_unpaired_tool_call_fails_admission() {
         .save_session(&snapshot)
         .expect("materialize Core session snapshot");
 
-    let tool_concurrency =
-        ToolConcurrencyCoordinator::global_for_scope(format!("test:{session_id}"), 4)
-            .expect("tool concurrency");
+    let tool_concurrency = ToolConcurrencyCoordinator::new(4);
     let agent_runtime = AgentRuntime::new(
         std::sync::Arc::new(runtime.block_on(async {
             centaeris_core::session::store::RuntimeStoreActor::start(store.clone())

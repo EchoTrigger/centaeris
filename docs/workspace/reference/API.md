@@ -183,8 +183,8 @@ serializes with acceptance. A transaction-scoped operation mutex covers exactly
 the receipt identity above; neither the payload digest nor target Session creates a separate mutex for a
 conflicting reuse of that identity. Existing Session locks are acquired before
 the global queue-admission decision.
-Queue contention remains HTTP 503 `execution_admission_busy` with `Retry-After: 5`;
-it commits no Run or receipt, and a retry retains the same operation identity.
+Queue admission waits for the cross-replica transaction lock, then checks the
+committed queue counts. The lock is released when that transaction ends.
 
 The browser retains pending identity and input digests in tab-scoped storage,
 without persisting prompts or file bytes. Uncertain retries keep the same ID,
@@ -424,8 +424,8 @@ authenticated caller and return no-store responses.
 Hosted message submission atomically enforces the Workspace initial-queue budget
 and the global initial-queue budget. A full Workspace returns HTTP 429 with
 `workspace_execution_queue_full`; global saturation returns HTTP 503 with
-`execution_queue_full`. Contention on the cross-replica admission transaction
-returns HTTP 503 with `execution_admission_busy`. These responses carry
+`execution_queue_full`. Concurrent admissions wait for the transaction holding
+the admission lock, then check the remaining capacity. Queue-full responses carry
 `Retry-After: 5`; a rejected request creates no Session, AgentRun or authorization.
 An initially queued run that expires records `execution_queue_expired` and follows
 Runtime's normal cancellation protocol; logical waits do not expire this way.
