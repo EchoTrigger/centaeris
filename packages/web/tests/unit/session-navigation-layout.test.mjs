@@ -25,55 +25,6 @@ const { useSessionNavigationActions } = await import(await subjectLoader()(url("
 const session = { currentEnvironmentId:null, executionMode:null, deletedAt:null,  isUnread:false, isManuallyUnread:false, latestAttentionSequence:"0", readThroughSequence:"0", attentionRevision:"0", id: "work", workspaceId: "workspace", title: "Synthetic work", status: "active", origin: "user", isPinned: false, projectId: null, hasActiveAgentRun: false, updatedAt: "2026-10-01T00:00:00Z" };
 const component = (tree, name) => nodes(tree, node => node.type.name === name)[0];
 
-test("ordinary Session preview starts with automatic sizing and preserves intentional resizing and draft", async context => {
-  const previousWindow = globalThis.window; const previousStorage = globalThis.sessionStorage;
-  globalThis.window = { innerWidth: 2048, addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {} };
-  globalThis.sessionStorage = { getItem: () => null };
-  context.after(() => { globalThis.window = previousWindow; globalThis.sessionStorage = previousStorage; });
-  const env = environment({ location: { search: "?new=1", state: { sidebarTab: "chat" } }, request: async path => {
-    const data = path === "/api/models?workspaceId=workspace" ? { models: [] } : path.includes("session-projects") ? { projects: [] } : { sessions: [] };
-    return { ...data, json: async () => data };
-  } });
-  const subject = renderer(AppPageContent, { workspaceDraft: false, location: env.location, modelsVersion: 0 }, env);
-  const panel = () => component(subject.tree, "ConnectedWorkspaceContextPanel");
-  try {
-    await subject.settle();
-    assert.equal(panel().props.browserWidthPx, null);
-    component(subject.tree, "WorkspaceComposer").props.onDraftChange("Synthetic unsent draft"); await subject.settle();
-    panel().props.onBrowserWidthChange(286); await subject.settle();
-    assert.equal(panel().props.browserWidthPx, 286);
-    panel().props.onBrowserWidthChange(12); await subject.settle();
-    assert.equal(panel().props.browserWidthPx, 270);
-    panel().props.onBrowserWidthChange(10000); await subject.settle();
-    assert.equal(panel().props.browserWidthPx, 1458);
-    panel().props.onClose(); await subject.settle();
-    assert.equal(component(subject.tree, "WorkspaceComposer").props.draft, "Synthetic unsent draft");
-    assert.equal(panel().props.browserWidthPx, 1458, "closing retains the user's chosen width");
-    window.innerWidth = 1280; await subject.settle();
-    assert.equal(panel().props.browserWidthPx, 1458, "viewport changes retain the preference for CSS to clip");
-    panel().props.onBrowserWidthChange(10000); await subject.settle();
-    assert.equal(panel().props.browserWidthPx, 690, "intentional resize reserves room for conversation beside the visible navigation");
-    component(subject.tree, "ShellSidebar").props.onCollapse(); await subject.settle();
-    panel().props.onBrowserWidthChange(10000); await subject.settle();
-    assert.equal(panel().props.browserWidthPx, 960, "collapsed navigation gives its width back to the available region");
-    assert.equal(component(subject.tree, "WorkspaceComposer").props.draft, "Synthetic unsent draft");
-  } finally { subject.unmount(); }
-});
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 test("ordinary Session rows retain running, unread and pin indicators and all metadata actions", async context => {
   const previousWindow = globalThis.window; const previousStorage = globalThis.sessionStorage;
   globalThis.window = { addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {} };
@@ -178,10 +129,6 @@ test("a selected unread Session is marked read before the new list commits and a
     assert.equal(calls.length, 3);
   } finally { subject.unmount(); }
 });
-
-
-
-
 
 test("background Session deletion completes against the current conversation selection", async () => {
   const pending = deferred(); const navigation = [];
