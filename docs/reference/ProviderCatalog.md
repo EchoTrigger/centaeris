@@ -7,8 +7,8 @@ Logo licenses and attribution live beside the assets.
 
 Desktop displays providers by catalog tier and obtains models from Runtime.
 Credentials determine availability. Each model's selected reasoning mode is
-persisted independently and must belong to its supported modes. Configured
-provider and model identities are validated exactly when loaded.
+persisted independently. Saved selections and preferences are read as stored;
+model availability and supported modes are checked when selected or used.
 
 Core protocol adapters own provider request and response semantics. Anthropic
 continuations preserve content blocks and thinking signatures. Gemini's

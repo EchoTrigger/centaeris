@@ -1136,51 +1136,9 @@ fn load_state() -> Result<PersistedRuntimeConfigState, String> {
     Ok(user_config::load()?.runtime)
 }
 
-fn thinking_mode_supported_for_model(
-    state: &PersistedRuntimeConfigState,
-    provider_id: &str,
-    model: &str,
-    mode: &str,
-) -> bool {
-    if let Some(profile) = built_in_model_profile(provider_id, model) {
-        return profile.thinking_modes.iter().any(|item| item == mode)
-            || (profile.thinking_modes.is_empty()
-                && profile.thinking_mode.as_deref() == Some(mode));
-    }
-    validate_model_ready(state, provider_id, model).is_ok()
-        && matches!(mode, "none" | "low" | "medium" | "high" | "xhigh" | "max")
-}
-
 pub(crate) fn validate_persisted_model_state(
     state: &PersistedRuntimeConfigState,
 ) -> Result<(), String> {
-    let mut preferred_models = HashSet::new();
-    for item in &state.thinking_mode_preferences {
-        if item.provider_id.trim() != item.provider_id
-            || item.model.trim() != item.model
-            || item.provider_id.is_empty()
-            || item.model.is_empty()
-        {
-            return Err("thinking preference model identity is empty or non-canonical".to_string());
-        }
-        if !preferred_models.insert((item.provider_id.as_str(), item.model.as_str())) {
-            return Err(format!(
-                "duplicate thinking preference: providerId={} model={}",
-                item.provider_id, item.model
-            ));
-        }
-        if !thinking_mode_supported_for_model(
-            state,
-            item.provider_id.as_str(),
-            item.model.as_str(),
-            item.mode.as_str(),
-        ) {
-            return Err(format!(
-                "unsupported thinking preference: providerId={} model={} mode={}",
-                item.provider_id, item.model, item.mode
-            ));
-        }
-    }
     let mut custom_provider_ids = Vec::new();
     for provider in &state.custom_model_providers {
         let canonical = canonical_custom_model_provider_id(provider.provider_id.as_str())?;
@@ -1253,42 +1211,6 @@ pub(crate) fn validate_persisted_model_state(
         ));
     }
 
-    if let Some(active) = state.active_model.as_ref() {
-        if active.provider_id.trim() != active.provider_id
-            || active.model.trim() != active.model
-            || active.provider_id.is_empty()
-            || active.model.is_empty()
-        {
-            return Err("active model identity is empty or non-canonical".to_string());
-        }
-        validate_model_ready(state, active.provider_id.as_str(), active.model.as_str()).map_err(
-            |_| {
-                format!(
-                    "active model is not selectable: providerId={} model={}",
-                    active.provider_id, active.model
-                )
-            },
-        )?;
-        if let Some(mode) = active.model_thinking_mode.as_deref() {
-            if let Some(profile) =
-                built_in_model_profile(active.provider_id.as_str(), active.model.as_str())
-            {
-                let valid = profile.thinking_modes.iter().any(|item| item == mode)
-                    || (profile.thinking_modes.is_empty()
-                        && profile.thinking_mode.as_deref() == Some(mode));
-                if !valid {
-                    return Err(format!(
-                        "unsupported persisted modelThinkingMode={mode} for providerId={} model={}",
-                        active.provider_id, active.model
-                    ));
-                }
-            } else if !matches!(mode, "none" | "low" | "medium" | "high" | "xhigh" | "max") {
-                return Err(format!(
-                    "unsupported persisted modelThinkingMode={mode}; expected none, low, medium, high, xhigh, or max"
-                ));
-            }
-        }
-    }
     Ok(())
 }
 
@@ -1943,20 +1865,6 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_catalog_effort_preference_is_rejected() {
-        let state = PersistedRuntimeConfigState {
-            thinking_mode_preferences: vec![ModelThinkingPreference {
-                provider_id: "google.default".to_string(),
-                model: "gemini-3.1-pro-preview".to_string(),
-                mode: "max".to_string(),
-            }],
-            ..PersistedRuntimeConfigState::default()
-        };
-        assert!(validate_persisted_model_state(&state).is_err());
-        assert_eq!(state.thinking_mode_preferences[0].mode, "max");
-    }
-
-    #[test]
     fn catalog_models_resolve_concrete_effort_without_provider_default() {
         for profile in built_in_model_profiles()
             .into_iter()
@@ -1996,44 +1904,6 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_builtin_selection_is_rejected() {
-        let state = PersistedRuntimeConfigState {
-            default_tool_parallelism: Some(3),
-            active_model: Some(ActiveModelRef {
-                provider_id: DEEPSEEK_PROVIDER_ID.to_string(),
-                model: "deepseek-v4-flash".to_string(),
-                model_thinking_mode: Some("high".to_string()),
-            }),
-            ..PersistedRuntimeConfigState::default()
-        };
-        assert!(validate_persisted_model_state(&state).is_err());
-        assert_eq!(
-            state.active_model.as_ref().unwrap().model,
-            "deepseek-v4-flash"
-        );
-        assert_eq!(state.default_tool_parallelism, Some(3));
-    }
-
-    #[test]
-    fn unsupported_opencode_go_selection_is_rejected() {
-        let state = PersistedRuntimeConfigState {
-            default_bash_path: Some("C:/tools/bash.exe".to_string()),
-            active_model: Some(ActiveModelRef {
-                provider_id: "opencode-go.default".to_string(),
-                model: "kimi-k3".to_string(),
-                model_thinking_mode: Some("max".to_string()),
-            }),
-            ..PersistedRuntimeConfigState::default()
-        };
-        assert!(validate_persisted_model_state(&state).is_err());
-        assert_eq!(state.active_model.as_ref().unwrap().model, "kimi-k3");
-        assert_eq!(
-            state.default_bash_path.as_deref(),
-            Some("C:/tools/bash.exe")
-        );
-    }
-
-    #[test]
     fn builtin_models_require_a_credential_and_disappear_when_it_is_cleared() {
         let mut state = PersistedRuntimeConfigState::default();
         let mut secrets = PersistedRuntimeSecretState::default();
@@ -2053,30 +1923,6 @@ mod tests {
         assert!(response.model_provider_id.is_none());
         assert!(response.model.is_none());
         assert!(response.selectable_models.is_empty());
-    }
-
-    #[test]
-    fn persisted_active_model_rejects_unknown_thinking_mode() {
-        let mut state = PersistedRuntimeConfigState::default();
-        let mut secrets = PersistedRuntimeSecretState::default();
-        persist_model_api_key(&mut secrets, DEEPSEEK_PROVIDER_ID, "secret".to_string());
-        apply_model_request(
-            &mut state,
-            &secrets,
-            &AgentRuntimeConfigSetRequest {
-                model_provider_id: Some(DEEPSEEK_PROVIDER_ID.to_string()),
-                model: Some("deepseek-flash".to_string()),
-                ..AgentRuntimeConfigSetRequest::default()
-            },
-        )
-        .expect("select model");
-        state
-            .active_model
-            .as_mut()
-            .expect("active model")
-            .model_thinking_mode = Some("banana".to_string());
-
-        assert!(validate_persisted_model_state(&state).is_err());
     }
 
     #[test]
