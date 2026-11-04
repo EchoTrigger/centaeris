@@ -1941,13 +1941,18 @@ impl DockerExecutionHostRunner {
                 .file
                 .rewind()
                 .map_err(|_| "snapshot_restore_spool_unavailable")?;
-            let (_, _, exit) = self.supervised_helper_file(
+            let (_, stderr, exit) = self.supervised_helper_file(
                 hosted_execution::host_supervisor::TrustedHelperKind::SnapshotRestore,
                 &mut artifact.file,
                 artifact.descriptor.size_bytes,
                 &artifact.descriptor.sha256,
             )?;
             if exit != Some(0) {
+                crate::failure_diagnostics::report_snapshot_restore_failure(
+                    &self.agent_run_id,
+                    exit,
+                    &stderr,
+                );
                 return Err("snapshot_restore_failed".into());
             }
             Ok(())
@@ -2450,7 +2455,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         }
         if !read_only_path && !memory_path {
             self.refresh_materialized_inputs()
-                .map_err(|error| filesystem_unavailable(error.to_string()))?;
+                .map_err(filesystem_input_unavailable)?;
         }
         if !read_only_path && !memory_path {
             if let Some(error) =
@@ -3364,6 +3369,21 @@ fn filesystem_unavailable(message: impl Into<String>) -> ExecutionFileSystemErro
     ExecutionFileSystemError::new(ExecutionFileSystemErrorKind::HostUnavailable, message)
 }
 
+fn filesystem_input_unavailable(error: ExecutionError) -> ExecutionFileSystemError {
+    // Keep canonical admission reasons through input-registry refresh. Display
+    // text intentionally hides private host details, but also hides these codes.
+    let reason = match &error {
+        ExecutionError::PolicyUnavailable { reason }
+        | ExecutionError::HostUnavailable { reason }
+            if centaeris_core::execution::environment_task_capacity_rejection(reason) =>
+        {
+            reason.clone()
+        }
+        _ => error.to_string(),
+    };
+    filesystem_unavailable(reason)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionWorkspaceLeaseRequest<'a> {
@@ -4120,6 +4140,27 @@ pub(crate) fn material_delivery_test_host() -> DockerExecutionHostRunner {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn input_refresh_keeps_capacity_codes_without_exposing_private_host_reasons() {
+        for error in [
+            ExecutionError::PolicyUnavailable {
+                reason: "task_output_capacity".into(),
+            },
+            ExecutionError::HostUnavailable {
+                reason: "task_output_capacity".into(),
+            },
+        ] {
+            let failure = filesystem_input_unavailable(error);
+            assert_eq!(failure.kind, ExecutionFileSystemErrorKind::HostUnavailable);
+            assert_eq!(failure.message, "task_output_capacity");
+        }
+        let failure = filesystem_input_unavailable(ExecutionError::PolicyUnavailable {
+            reason: "task_output_capacity: PRIVATE_TOKEN /private/path".into(),
+        });
+        assert_eq!(failure.message, "Execution policy cannot be enforced");
+        assert!(!failure.to_string().contains("PRIVATE_TOKEN"));
+    }
+
     pub(super) fn retained_test_runner() -> DockerExecutionHostRunner {
         let mut runner = test_docker_execution_host_runner();
         let origin_execution = "execution-origin";

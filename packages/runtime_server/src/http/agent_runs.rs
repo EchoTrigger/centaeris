@@ -393,7 +393,8 @@ fn teardown_owned_tasks(
                 };
                 return crate::docker_execution_host::runsc_power::remove_stopped_after_preservation(
                 allocation, &origin_authorization.environment_profile, || match &recovery.evidence {
-                    crate::postgres_store::cleanup_preservation::CleanupRecoveryEvidence::Preserved { .. } => Ok(()),
+                    crate::postgres_store::cleanup_preservation::CleanupRecoveryEvidence::Preserved { .. }
+                    | crate::postgres_store::cleanup_preservation::CleanupRecoveryEvidence::PreAdmissionFailed => Ok(()),
                     crate::postgres_store::cleanup_preservation::CleanupRecoveryEvidence::Absent => Err("stopped_workspace_preservation_required".into()),
                 },
             );
@@ -408,6 +409,7 @@ fn teardown_owned_tasks(
                     allocation,
                     resources,
                     origin_authorization,
+                    ..
                 } => {
                     let fence = EnvironmentTaskFence {
                         environment_instance_id: allocation.instance_id.clone(),

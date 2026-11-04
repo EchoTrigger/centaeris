@@ -16,6 +16,7 @@ pub(crate) enum CleanupRecoveryEvidence {
         workspace: SessionWorkspace,
     },
     Absent,
+    PreAdmissionFailed,
 }
 
 fn same_allocation(left: &RetainedInstanceAllocation, right: &RetainedInstanceAllocation) -> bool {
@@ -71,7 +72,12 @@ pub(super) fn verify_recovery(
     target: &CleanupTarget,
     recovery: &CleanupRecovery,
 ) -> Result<(), String> {
-    let CleanupTarget::Instance { allocation, .. } = target else {
+    let CleanupTarget::Instance {
+        allocation,
+        workspace_protection,
+        ..
+    } = target
+    else {
         return Err("cleanup_recovery_target_rejected".into());
     };
     if request
@@ -83,6 +89,26 @@ pub(super) fn verify_recovery(
         || !same_allocation(allocation, &recovery.expected_allocation)
     {
         return Err("cleanup_recovery_target_rejected".into());
+    }
+    if matches!(
+        recovery.evidence,
+        CleanupRecoveryEvidence::PreAdmissionFailed
+    ) {
+        return if matches!(
+            workspace_protection,
+            super::cleanup_receipts::CleanupWorkspaceProtection::PreAdmissionFailed
+        ) {
+            Ok(())
+        } else {
+            Err("cleanup_unadmitted_workspace_proof_rejected".into())
+        };
+    }
+    if matches!(
+        workspace_protection,
+        super::cleanup_receipts::CleanupWorkspaceProtection::PreAdmissionFailed
+    ) && matches!(recovery.evidence, CleanupRecoveryEvidence::Preserved { .. })
+    {
+        return Err("cleanup_unadmitted_workspace_publication_rejected".into());
     }
     let CleanupRecoveryEvidence::Preserved {
         receipt_id,
