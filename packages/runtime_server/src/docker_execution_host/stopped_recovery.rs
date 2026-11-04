@@ -1,7 +1,7 @@
 //! Stop, capture and publish a per-Run original workspace before its cleanup.
 use super::*;
 use crate::postgres_store::cleanup_preservation::{CleanupRecovery, CleanupRecoveryEvidence};
-use crate::postgres_store::cleanup_receipts::CleanupTarget;
+use crate::postgres_store::cleanup_receipts::{CleanupTarget, CleanupWorkspaceProtection};
 use crate::postgres_store::execution_instances::RetainedInstanceAllocation;
 use centaeris_core::session::RuntimeJobLeaseFence;
 
@@ -10,6 +10,7 @@ const ARCHIVE_METADATA_BUDGET: u64 = 32 * 1024 * 1024;
 enum RecoveryContent {
     Captured(ImmutableWorkspaceSnapshot),
     Absent,
+    PreAdmissionFailed,
 }
 
 pub(crate) struct PreparedStoppedRecovery {
@@ -22,6 +23,7 @@ pub(crate) fn prepare(target: &CleanupTarget) -> Result<Option<PreparedStoppedRe
     let CleanupTarget::Instance {
         allocation,
         origin_authorization,
+        workspace_protection,
         ..
     } = target
     else {
@@ -30,6 +32,7 @@ pub(crate) fn prepare(target: &CleanupTarget) -> Result<Option<PreparedStoppedRe
     prepare_instance_with(
         allocation,
         &origin_authorization.environment_profile,
+        workspace_protection,
         runsc_power::stop_for_preservation,
         stopped_workspace::capture_stopped_workspace,
     )
@@ -38,6 +41,7 @@ pub(crate) fn prepare(target: &CleanupTarget) -> Result<Option<PreparedStoppedRe
 fn prepare_instance_with(
     allocation: &RetainedInstanceAllocation,
     profile: &EnvironmentProfile,
+    workspace_protection: &CleanupWorkspaceProtection,
     observe: impl FnOnce(
         &RetainedInstanceAllocation,
         &EnvironmentProfile,
@@ -54,6 +58,15 @@ fn prepare_instance_with(
             | runsc_power::RunscPowerObservation::Paused,
         ) => return Err("cleanup_stop_unconfirmed".into()),
         Some(runsc_power::RunscPowerObservation::Stopped) => {
+            if matches!(
+                workspace_protection,
+                CleanupWorkspaceProtection::PreAdmissionFailed
+            ) {
+                return Ok(Some(PreparedStoppedRecovery {
+                    allocation: allocation.clone(),
+                    content: RecoveryContent::PreAdmissionFailed,
+                }));
+            }
             let limit = profile
                 .resources
                 .workspace_bytes
@@ -95,6 +108,7 @@ impl PreparedStoppedRecovery {
                 }
             }
             RecoveryContent::Absent => CleanupRecoveryEvidence::Absent,
+            RecoveryContent::PreAdmissionFailed => CleanupRecoveryEvidence::PreAdmissionFailed,
         };
         Ok(CleanupRecovery {
             expected_allocation: self.allocation,
@@ -106,6 +120,32 @@ impl PreparedStoppedRecovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_admission_stops_without_capturing_a_partial_restore() {
+        let (allocation, profile) = fixture();
+        let prepared = prepare_instance_with(
+            &allocation,
+            &profile,
+            &CleanupWorkspaceProtection::PreAdmissionFailed,
+            |_, _| Ok(Some(runsc_power::RunscPowerObservation::Stopped)),
+            |_, _, _| panic!("a partial restore must never become a published workspace"),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            prepared.content,
+            RecoveryContent::PreAdmissionFailed
+        ));
+        assert!(prepare_instance_with(
+            &allocation,
+            &profile,
+            &CleanupWorkspaceProtection::PreAdmissionFailed,
+            |_, _| Err("stop outcome unknown".into()),
+            |_, _, _| panic!("failed admission still requires a confirmed stop"),
+        )
+        .is_err());
+    }
     use centaeris_core::execution::EnvironmentTaskOwner;
 
     fn fixture() -> (RetainedInstanceAllocation, EnvironmentProfile) {
@@ -140,6 +180,7 @@ mod tests {
         let result = prepare_instance_with(
             &allocation,
             &profile,
+            &CleanupWorkspaceProtection::Required,
             |_, _| Ok(Some(runsc_power::RunscPowerObservation::Stopped)),
             |_, _, _| Err("stopped_workspace_backing_unproven".into()),
         );
@@ -157,6 +198,7 @@ mod tests {
             let result = prepare_instance_with(
                 &allocation,
                 &profile,
+                &CleanupWorkspaceProtection::Required,
                 |_, _| Ok(Some(runsc_power::RunscPowerObservation::Stopped)),
                 |_, _, _| Err(reason.into()),
             );
@@ -174,6 +216,7 @@ mod tests {
             assert!(prepare_instance_with(
                 &allocation,
                 &profile,
+                &CleanupWorkspaceProtection::Required,
                 |_, _| Ok(Some(state)),
                 |_, _, _| panic!("live or paused target must not be archived")
             )
@@ -182,6 +225,7 @@ mod tests {
         let absent = prepare_instance_with(
             &allocation,
             &profile,
+            &CleanupWorkspaceProtection::Required,
             |_, _| Ok(None),
             |_, _, _| panic!("absence is not an empty archive"),
         )
@@ -191,6 +235,7 @@ mod tests {
         let captured = prepare_instance_with(
             &allocation,
             &profile,
+            &CleanupWorkspaceProtection::Required,
             |_, _| Ok(Some(runsc_power::RunscPowerObservation::Stopped)),
             |_, _, _| capture_snapshot_artifact(&mut Cursor::new(Vec::new()), 1),
         )

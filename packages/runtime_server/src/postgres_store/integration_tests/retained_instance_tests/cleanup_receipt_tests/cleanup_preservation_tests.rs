@@ -1,4 +1,119 @@
 use super::*;
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL cleanup database"]
+fn postgres_failed_admission_discards_partial_workspace_only_with_original_failure_proof() {
+    use crate::postgres_store::cleanup_receipts::CleanupWorkspaceProtection;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for failed_admission in [false, true] {
+        let (_, store, mut db) = setup();
+        let mut run = per_run(&store, &mut db, "restore-failure-cleanup");
+        let physical = Arc::new(Mutex::new(vec![]));
+        let mut allocation =
+            prepare(&store, &run, "restore-failure-allocation", &physical).unwrap();
+        canonical_container(&mut db, &physical, &mut allocation);
+        if failed_admission {
+            store
+                .session_log("ws_1".into(), "sess_1".into(), "probe".into())
+                .commit_pre_admission_failure(
+                    &run.original.agent_run_id,
+                    &run.original.digest().unwrap(),
+                    &run.fence,
+                )
+                .unwrap();
+        }
+        let mut binding = run.grant.payload.clone();
+        binding.controller.as_mut().unwrap().controller_purpose = "cleanup".into();
+        run.grant = sign(binding);
+        db.execute(
+            "UPDATE public.app_core_sessionenvironment SET controller_purpose='cleanup'",
+            &[],
+        )
+        .unwrap();
+        let cleanup = AgentRunCleanup {
+            schema: "workspace.agent_run.cleanup.v1".into(),
+            agent_run_id: run.original.agent_run_id.clone(),
+            authorization_digest: run.original.digest().unwrap(),
+            authorization_signature: run.original.signature(KEY).unwrap(),
+            authorization: run.original.clone(),
+            environment_authorization: run.grant.clone(),
+        };
+        let request = CleanupAuthorityRequest {
+            cleanup: &cleanup,
+            signing_key: KEY,
+            lease: &run.fence,
+            host_id: "host",
+        };
+        if !failed_admission {
+            // Give the control plane a real terminal fact, without a failed
+            // admission receipt that could authorize discarding the workspace.
+            db.execute("INSERT INTO public.app_core_sessionevent VALUES('ws_1','sess_1',$1,false,'{\"type\":\"agent_run_failed\"}')", &[&run.original.agent_run_id]).unwrap();
+        }
+        let before: String = db
+            .query_one(
+                "SELECT row_to_json(s)::text FROM public.app_core_session s",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        store
+            .with_cleanup_target(
+                &request,
+                || Ok(physical.lock().unwrap().clone()),
+                |target, _| {
+                    let CleanupTarget::Instance {
+                        workspace_protection,
+                        ..
+                    } = target
+                    else {
+                        panic!("exact instance required")
+                    };
+                    assert_eq!(
+                        matches!(
+                            workspace_protection,
+                            CleanupWorkspaceProtection::PreAdmissionFailed
+                        ),
+                        failed_admission
+                    );
+                    Ok(())
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let recovery = CleanupRecovery {
+            expected_allocation: allocation.clone(),
+            evidence: CleanupRecoveryEvidence::PreAdmissionFailed,
+        };
+        let result = store.with_recovery_cleanup_authority(
+            &request,
+            || Ok(physical.lock().unwrap().clone()),
+            &recovery,
+            |_, _| {
+                assert!(
+                    failed_admission,
+                    "missing admission must not be treated as discard authority"
+                );
+                physical.lock().unwrap().clear();
+                Ok(CleanupPhysicalResult::Removed {
+                    instance_id: allocation.instance_id.clone(),
+                    container_id: allocation.container_id.clone().unwrap(),
+                })
+            },
+        );
+        assert_eq!(result.is_ok(), failed_admission);
+        let after: String = db
+            .query_one(
+                "SELECT row_to_json(s)::text FROM public.app_core_session s",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            before, after,
+            "cleanup must not advance the authoritative workspace"
+        );
+    }
+}
 use crate::agent_run_authorization::SessionWorkspace;
 use crate::postgres_store::cleanup_preservation::{CleanupRecovery, CleanupRecoveryEvidence};
 use crate::postgres_store::cleanup_receipts::CleanupPhysicalResult;

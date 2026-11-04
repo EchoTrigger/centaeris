@@ -34,6 +34,12 @@ impl From<()> for CleanupPhysicalResult {
 }
 
 #[derive(Debug)]
+pub(crate) enum CleanupWorkspaceProtection {
+    Required,
+    PreAdmissionFailed,
+}
+
+#[derive(Debug)]
 pub(crate) enum CleanupTarget {
     Unmaterialized {
         instance_id: String,
@@ -45,6 +51,7 @@ pub(crate) enum CleanupTarget {
         allocation: Box<RetainedInstanceAllocation>,
         resources: ResidentResourceUsage,
         origin_authorization: Box<super::allocation_origin::AllocationOrigin>,
+        workspace_protection: CleanupWorkspaceProtection,
     },
     NeverAllocated,
 }
@@ -667,10 +674,27 @@ fn resolve_target(
     {
         return Ok(CleanupTarget::NeverAllocated);
     }
+    // A failed admission may leave a partially restored directory, but it has
+    // never contained agent work. It must not replace the Session's baseline.
+    let workspace_protection = match allocation.allocation_agent_run_id.as_deref() {
+        Some(run_id)
+            if super::pre_admission_failure::has_pre_admission_failure(
+                db,
+                &origin_authorization.workspace_id,
+                &origin_authorization.session_id,
+                run_id,
+                &allocation.authorization_digest,
+            )? =>
+        {
+            CleanupWorkspaceProtection::PreAdmissionFailed
+        }
+        _ => CleanupWorkspaceProtection::Required,
+    };
     Ok(CleanupTarget::Instance {
         allocation: Box::new(allocation),
         resources,
         origin_authorization: Box::new(origin_authorization),
+        workspace_protection,
     })
 }
 
