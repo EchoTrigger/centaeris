@@ -904,40 +904,57 @@ impl ToolLayer {
                 ExecutionModelInputImageError::SourceUnavailable(error.to_string())
             })?)
         );
-        let output = binding
-            .run_file_system_operation_for_consumer(
-                reference.path.as_str(),
-                ExecutionFileSystemOperation::ReadFile {
-                    max_bytes: MODEL_INPUT_IMAGE_MAX_BYTES,
-                },
-                Some(&consumer_id),
-            )
-            .map_err(ExecutionModelInputImageError::FileSystem)?;
+        let output = match binding.run_file_system_operation_for_consumer(
+            reference.path.as_str(),
+            ExecutionFileSystemOperation::ReadFile {
+                max_bytes: MODEL_INPUT_IMAGE_MAX_BYTES,
+            },
+            Some(&consumer_id),
+        ) {
+            Ok(output) => output,
+            Err(error) => {
+                if !matches!(
+                    error.kind,
+                    ExecutionFileSystemErrorKind::HostUnavailable
+                        | ExecutionFileSystemErrorKind::Io
+                ) {
+                    // A definite source rejection has been evaluated, even
+                    // though it cannot supply the historical image pixels.
+                    binding.consume_execution_outputs(&consumer_id, &consumer_id);
+                }
+                return Err(ExecutionModelInputImageError::FileSystem(error));
+            }
+        };
         let ExecutionFileSystemOutput::ReadFile(output) = output else {
             return Err(ExecutionModelInputImageError::SourceUnavailable(
                 "resolve execution model input image returned an unexpected result".to_string(),
             ));
         };
-        if output.file_hash != reference.sha256 {
-            return Err(ExecutionModelInputImageError::SourceUnavailable(
-                "execution_model_input_image_hash_mismatch".to_string(),
-            ));
-        }
-        let (content_type, width_px, height_px) = inspect_model_input_image(&output.bytes)
-            .map_err(ExecutionModelInputImageError::SourceUnavailable)?;
-        if content_type != reference.content_type
-            || output.bytes.len() as u64 != reference.byte_length
-            || width_px != reference.width_px
-            || height_px != reference.height_px
-        {
-            return Err(ExecutionModelInputImageError::SourceUnavailable(
-                "execution_model_input_image_metadata_mismatch".to_string(),
-            ));
-        }
-        // The durable image reference defines reconstruction: read the same source
-        // and validate its original hash, or retain the existing unavailable result.
+        let validated = (|| {
+            if output.file_hash != reference.sha256 {
+                return Err(ExecutionModelInputImageError::SourceUnavailable(
+                    "execution_model_input_image_hash_mismatch".to_string(),
+                ));
+            }
+            let (content_type, width_px, height_px) = inspect_model_input_image(&output.bytes)
+                .map_err(ExecutionModelInputImageError::SourceUnavailable)?;
+            if content_type != reference.content_type
+                || output.bytes.len() as u64 != reference.byte_length
+                || width_px != reference.width_px
+                || height_px != reference.height_px
+            {
+                return Err(ExecutionModelInputImageError::SourceUnavailable(
+                    "execution_model_input_image_metadata_mismatch".to_string(),
+                ));
+            }
+            Ok(())
+        })();
+        // The source reference reconstructs either the verified pixels or an
+        // unavailable observation. Neither decision needs this helper's output
+        // body again. Consumption certifies evaluation, not valid pixels, and
+        // keeps the same receipt if the source later returns to its old version.
         binding.consume_execution_outputs(&consumer_id, &consumer_id);
-        Ok(output.bytes)
+        validated.map(|()| output.bytes)
     }
 
     pub(crate) fn consume_tool_execution_outputs(&self, call_id: &str, receipt_id: &str) {

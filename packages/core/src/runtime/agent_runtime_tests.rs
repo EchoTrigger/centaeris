@@ -12438,7 +12438,7 @@ struct OutputConsumptionTestHost {
     consumptions: Mutex<Vec<(String, String)>>,
     image_consumers: Mutex<Vec<String>>,
     tool_reads: AtomicUsize,
-    image_unavailable: AtomicBool,
+    image_failure: Mutex<Option<crate::execution::ExecutionFileSystemErrorKind>>,
 }
 impl OutputConsumptionTestHost {
     fn new(store: AgentRuntimeTestStore) -> Arc<Self> {
@@ -12447,7 +12447,7 @@ impl OutputConsumptionTestHost {
             consumptions: Mutex::new(Vec::new()),
             image_consumers: Mutex::new(Vec::new()),
             tool_reads: AtomicUsize::new(0),
-            image_unavailable: AtomicBool::new(false),
+            image_failure: Mutex::new(None),
         })
     }
     fn tools(self: &Arc<Self>, root: &Path) -> ToolLayer {
@@ -12494,11 +12494,13 @@ impl crate::execution::ExecutionHostRunner for OutputConsumptionTestHost {
         {
             self.tool_reads.fetch_add(1, Ordering::SeqCst);
         }
-        if request.model_path == "page.png" && self.image_unavailable.load(Ordering::SeqCst) {
-            return Err(crate::execution::ExecutionFileSystemError::new(
-                crate::execution::ExecutionFileSystemErrorKind::HostUnavailable,
-                "task_output_capacity",
-            ));
+        if request.model_path == "page.png" {
+            if let Some(kind) = *self.image_failure.lock().unwrap() {
+                return Err(crate::execution::ExecutionFileSystemError::new(
+                    kind,
+                    "task_output_capacity",
+                ));
+            }
         }
         crate::execution::run_policy_scoped_execution_file_system_operation(request)
     }
@@ -12673,7 +12675,7 @@ fn consumption_image_reference(
 }
 
 #[test]
-fn image_output_consumption_requires_matching_hash_size_type_and_dimensions() {
+fn image_output_validation_rejects_mismatches_and_releases_evaluated_reads() {
     let root = temp_dir_path("verified_image_consumption");
     std::fs::create_dir_all(&root).unwrap();
     let (bytes, reference) = consumption_image_reference(&root);
@@ -12695,11 +12697,13 @@ fn image_output_consumption_requires_matching_hash_size_type_and_dimensions() {
     let mut height = reference.clone();
     height.height_px += 1;
     invalid.push(height);
-    for mismatch in invalid {
+    for (index, mismatch) in invalid.into_iter().enumerate() {
         assert!(tools
             .resolve_execution_model_input_image(&mismatch)
             .is_err());
-        assert!(host.consumptions.lock().unwrap().is_empty());
+        let consumed = host.consumptions.lock().unwrap();
+        assert_eq!(consumed.len(), index + 1);
+        assert_eq!(consumed[index].1, consumed[index].0);
     }
     assert_eq!(
         tools
@@ -12709,10 +12713,10 @@ fn image_output_consumption_requires_matching_hash_size_type_and_dimensions() {
     );
     let consumers = host.image_consumers.lock().unwrap();
     let consumed = host.consumptions.lock().unwrap();
-    assert_eq!(consumed.len(), 1);
-    assert_eq!(consumed[0].0, consumers.last().unwrap().as_str());
-    assert_eq!(consumed[0].0, consumed[0].1);
-    assert!(consumed[0].0.starts_with("image:"));
+    assert_eq!(consumed.len(), 6);
+    assert_eq!(consumed[5].0, consumers.last().unwrap().as_str());
+    assert_eq!(consumed[5].0, consumed[5].1);
+    assert!(consumed[5].0.starts_with("image:"));
     drop(consumed);
     drop(consumers);
     // Hosts without retained-output support keep their existing no-op behavior.
@@ -12727,7 +12731,7 @@ fn image_output_consumption_requires_matching_hash_size_type_and_dimensions() {
 }
 
 #[test]
-fn missing_changed_or_unavailable_image_source_cannot_acknowledge_consumption() {
+fn image_source_rejections_release_outputs_but_host_failures_do_not() {
     let root = temp_dir_path("unavailable_image_consumption");
     std::fs::create_dir_all(&root).unwrap();
     let (_, reference) = consumption_image_reference(&root);
@@ -12743,7 +12747,8 @@ fn missing_changed_or_unavailable_image_source_cannot_acknowledge_consumption() 
     assert!(tools
         .resolve_execution_model_input_image(&reference)
         .is_err());
-    host.image_unavailable.store(true, Ordering::SeqCst);
+    *host.image_failure.lock().unwrap() =
+        Some(crate::execution::ExecutionFileSystemErrorKind::HostUnavailable);
     let error = tools
         .resolve_execution_model_input_image(&reference)
         .unwrap_err();
@@ -12751,6 +12756,57 @@ fn missing_changed_or_unavailable_image_source_cannot_acknowledge_consumption() 
         matches!(error, crate::tool::layer::ExecutionModelInputImageError::FileSystem(ref failure)
         if failure.kind == crate::execution::ExecutionFileSystemErrorKind::HostUnavailable)
     );
-    assert!(host.consumptions.lock().unwrap().is_empty());
+    *host.image_failure.lock().unwrap() = Some(crate::execution::ExecutionFileSystemErrorKind::Io);
+    assert!(tools
+        .resolve_execution_model_input_image(&reference)
+        .is_err());
+    let consumed = host.consumptions.lock().unwrap();
+    assert_eq!(consumed.len(), 2);
+    assert!(consumed
+        .iter()
+        .all(|(consumer, receipt)| receipt == consumer));
+    drop(consumed);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn repeated_historical_image_rejections_release_each_read_without_returning_changed_pixels() {
+    let root = temp_dir_path("repeated_historical_image_consumption");
+    std::fs::create_dir_all(&root).unwrap();
+    let (original, reference) = consumption_image_reference(&root);
+    let host = OutputConsumptionTestHost::new(AgentRuntimeTestStore::new());
+    let tools = host.tools(&root);
+    image::DynamicImage::new_rgb8(4, 5)
+        .save_with_format(root.join("page.png"), image::ImageFormat::Png)
+        .unwrap();
+    for _ in 0..100 {
+        assert!(tools
+            .resolve_execution_model_input_image(&reference)
+            .is_err());
+    }
+    std::fs::remove_file(root.join("page.png")).unwrap();
+    for _ in 0..100 {
+        assert!(tools
+            .resolve_execution_model_input_image(&reference)
+            .is_err());
+    }
+    std::fs::write(root.join("page.png"), &original).unwrap();
+    assert_eq!(
+        tools
+            .resolve_execution_model_input_image(&reference)
+            .unwrap(),
+        original
+    );
+    assert_eq!(host.image_consumers.lock().unwrap().len(), 201);
+    let consumed = host.consumptions.lock().unwrap();
+    assert_eq!(
+        consumed.len(),
+        201,
+        "every evaluated historical read must release its output"
+    );
+    assert!(consumed
+        .iter()
+        .all(|(consumer, receipt)| receipt == consumer));
+    drop(consumed);
     std::fs::remove_dir_all(root).unwrap();
 }

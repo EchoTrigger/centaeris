@@ -51,6 +51,14 @@ Failed snapshot helpers emit a `snapshot_restore_helper` diagnostic with a close
 reason category, exit code, error byte count and digest. Raw helper errors and
 paths are not copied into the diagnostic.
 
+Historical execution-image reads release their retained helper output after
+either validating the original pixels or deciding that the source is unavailable
+(for example, a rendered page was replaced or deleted). A source-evaluation
+receipt does not certify valid pixels; the model keeps the unavailable-image
+observation. Host/transport uncertainty and unexpected protocol results do not
+authorize consumption. Raising the output budget does not repair a missing
+consumption decision for repeated historical reads.
+
 Configure the finite ceilings and optional dynamic host headroom using
 [Configuration](../reference/Configuration.md). Use consistent global/tenant
 values on replicas sharing the database. Size the host and sandbox profiles for
