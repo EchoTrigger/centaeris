@@ -1941,13 +1941,18 @@ impl DockerExecutionHostRunner {
                 .file
                 .rewind()
                 .map_err(|_| "snapshot_restore_spool_unavailable")?;
-            let (_, _, exit) = self.supervised_helper_file(
+            let (_, stderr, exit) = self.supervised_helper_file(
                 hosted_execution::host_supervisor::TrustedHelperKind::SnapshotRestore,
                 &mut artifact.file,
                 artifact.descriptor.size_bytes,
                 &artifact.descriptor.sha256,
             )?;
             if exit != Some(0) {
+                crate::failure_diagnostics::report_snapshot_restore_failure(
+                    &self.agent_run_id,
+                    exit,
+                    &stderr,
+                );
                 return Err("snapshot_restore_failed".into());
             }
             Ok(())

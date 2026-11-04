@@ -68,6 +68,48 @@ pub(crate) fn report(agent_run_id: &str, stage: &'static str, error: &str) {
     eprintln!("{}", record(agent_run_id, stage, error));
 }
 
+fn snapshot_restore_record(
+    agent_run_id: &str,
+    exit_code: Option<i32>,
+    stderr: &[u8],
+) -> serde_json::Value {
+    let reason = match std::str::from_utf8(stderr).map(str::trim) {
+        Ok("execution_agent failed: snapshot restore target already exists") => {
+            "snapshot_restore_target_exists"
+        }
+        Ok("execution_agent failed: snapshot restore parent contains an unsupported node") => {
+            "snapshot_restore_parent_unsupported"
+        }
+        Ok("execution_agent failed: snapshot path conflicts with a materialized input") => {
+            "snapshot_restore_input_conflict"
+        }
+        Ok("execution_agent failed: snapshot restore file integrity mismatch") => {
+            "snapshot_restore_integrity_mismatch"
+        }
+        Ok("execution_agent failed: snapshot restore parent final ownership is invalid") => {
+            "snapshot_restore_directory_ownership_invalid"
+        }
+        _ => "snapshot_restore_failed",
+    };
+    serde_json::json!({
+        "event": "agent_run_internal_failure", "agentRunId": agent_run_id,
+        "stage": "snapshot_restore_helper", "reason": reason, "exitCode": exit_code,
+        "errorDigest": format!("sha256:{:x}", Sha256::digest(stderr)),
+        "errorBytes": stderr.len(),
+    })
+}
+
+pub(crate) fn report_snapshot_restore_failure(
+    agent_run_id: &str,
+    exit_code: Option<i32>,
+    stderr: &[u8],
+) {
+    eprintln!(
+        "{}",
+        snapshot_restore_record(agent_run_id, exit_code, stderr)
+    );
+}
+
 pub(crate) fn cleanup_record(
     agent_run_id: &str,
     stage: &'static str,
@@ -111,6 +153,30 @@ pub(crate) fn observe<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_restore_diagnostics_retain_only_closed_reasons_and_error_identity() {
+        for (error, reason) in [
+            ("execution_agent failed: snapshot restore target already exists\n", "snapshot_restore_target_exists"),
+            ("execution_agent failed: snapshot restore parent contains an unsupported node", "snapshot_restore_parent_unsupported"),
+            ("execution_agent failed: snapshot path conflicts with a materialized input", "snapshot_restore_input_conflict"),
+            ("execution_agent failed: snapshot restore file integrity mismatch", "snapshot_restore_integrity_mismatch"),
+            ("execution_agent failed: snapshot restore parent final ownership is invalid", "snapshot_restore_directory_ownership_invalid"),
+            ("execution_agent failed: snapshot restore target already exists: PRIVATE_TOKEN /private/path", "snapshot_restore_failed"),
+            ("write snapshot restore target failed: PRIVATE_TOKEN /private/path", "snapshot_restore_failed"),
+        ] {
+            let value = snapshot_restore_record("run", Some(1), error.as_bytes());
+            assert_eq!(value["reason"], reason);
+            assert_eq!(value["exitCode"], 1);
+            assert_eq!(value["errorBytes"], error.len());
+            assert!(!value.to_string().contains("PRIVATE_TOKEN"));
+            assert!(!value.to_string().contains("/private/path"));
+        }
+        let invalid = snapshot_restore_record("run", None, &[0xff]);
+        assert_eq!(invalid["reason"], "snapshot_restore_failed");
+        assert_eq!(invalid["errorBytes"], 1);
+        assert_eq!(invalid["exitCode"], serde_json::Value::Null);
+    }
 
     #[test]
     fn cleanup_diagnostics_classify_only_exact_known_waits_at_each_boundary() {

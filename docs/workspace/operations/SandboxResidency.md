@@ -40,6 +40,17 @@ entry cannot remove or refund the sandbox. A failed or uncertain physical remova
 retains its charge. This transaction boundary does not certify absolute external
 mutation fencing during a database/network partition or actual power-loss safety.
 
+When the original allocation's Run has a validated pre-admission failure receipt,
+its workspace may contain an incomplete restore. Per-Run teardown confirms the
+exact container is stopped and removes it without capturing or publishing that
+workspace; the Session's existing snapshot remains authoritative. A missing
+admission record alone does not authorize this discard. Admitted original Runs
+still require the normal durable preservation proof.
+
+Failed snapshot helpers emit a `snapshot_restore_helper` diagnostic with a closed
+reason category, exit code, error byte count and digest. Raw helper errors and
+paths are not copied into the diagnostic.
+
 Configure the finite ceilings and optional dynamic host headroom using
 [Configuration](../reference/Configuration.md). Use consistent global/tenant
 values on replicas sharing the database. Size the host and sandbox profiles for
