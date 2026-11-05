@@ -625,12 +625,6 @@ def is_environment_host_busy(error):
 
 
 def environment_cleanup_wait_reason(error):
-    if (isinstance(error, DependencyUnavailable)
-            and type(getattr(error, "http_status", None)) is int
-            and error.http_status == 503
-            and getattr(error, "http_error_code", None) == "runtime_busy"
-            and getattr(error, "route", None) == "/agent-runs/teardown"):
-        return "execution_host_admission_wait"
     if is_environment_controller_wait(error):
         return "environment_controller_wait"
     if is_environment_host_busy(error):
@@ -712,7 +706,7 @@ def _execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
         yielded_at_ms = now_ms()
         if result["transitionReason"] in AGENT_RUN_SCHEDULED_WAIT_REASONS:
             # Runtime derives this deadline from its recovery boundary.
-            # Waiting releases the slot; retries never sleep inside a worker.
+            # Waiting releases the Job lease; retries never sleep inside a worker.
             next_run_at_ms = max(yielded_at_ms, result["retryAtMs"])
         elif result["transitionReason"] == "execution_host_admission_wait":
             next_run_at_ms = yielded_at_ms + ENVIRONMENT_CONTROLLER_RECHECK_MS

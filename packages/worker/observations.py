@@ -8,8 +8,7 @@ import time
 
 ENABLED = os.environ.get("WORKSPACE_PERF_OBSERVATIONS") == "1"
 _context = threading.local()
-_REASONS = {"runtime_busy", "execution_claim_busy"}
-_HTTP_ERROR_CODES = _REASONS | {
+_HTTP_ERROR_CODES = {
     "environment_host_busy", "execution_resident_capacity_wait",
     "retained_cleanup_unconfirmed", "retained_cleanup_unavailable",
     "agent_run_supplement_cleanup_failed", "terminal_subagent_cleanup_unavailable",
@@ -34,12 +33,11 @@ def _error_code(error):
     if hasattr(error, "http_error_code"):
         code = error.http_error_code
         return code if isinstance(code, str) and code in _HTTP_ERROR_CODES else "other"
-    reason = str(error)
-    return reason if reason in _REASONS else "other"
+    return "other"
 
 
 def diagnostic(event, error, *, job_id=None, control_stage=None, lane=None,
-               transition_reason=None, slot_index=None):
+               transition_reason=None):
     """Always record confirmed waits/failures using only bounded public categories."""
     status = getattr(error, "http_status", None)
     route = getattr(error, "route", None)
@@ -49,7 +47,7 @@ def diagnostic(event, error, *, job_id=None, control_stage=None, lane=None,
             "httpStatus": status if type(status) is int and 100 <= status <= 599 else None,
             "route": route if isinstance(route, str) and route in _DIAGNOSTIC_ROUTES else None}
     fields = {"jobId": job_id, "controlStage": control_stage, "lane": lane,
-              "transitionReason": transition_reason, "slotIndex": slot_index,
+              "transitionReason": transition_reason,
               "causeType": getattr(error, "cause_type", None)}
     fact.update({key: value for key, value in fields.items() if value is not None})
     try:

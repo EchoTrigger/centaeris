@@ -62,9 +62,8 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     stack = Stack()
     stack.preflight()
-    stack.verify_slots(2)
     write(output / 'manifest.json', stack.manifest())
-    write(output / 'design.json', dict(rate=30, seconds=90, slots=2,
+    write(output / 'design.json', dict(rate=30, seconds=90,
           fixtureRows=[0, 3641, 36410, 0],
           historyMode='controlled synthetic outbox; continuous real run history',
           window='database snapshots bracket workload setup, injection and drain'))

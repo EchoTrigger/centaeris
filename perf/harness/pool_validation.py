@@ -112,7 +112,6 @@ def stage(stack, output, size):
     verify_api_replacement(before, after)
     write(output / 'replacement.json', {'before': before, 'after': after})
     stack.preflight()
-    stack.verify_slots(2)
     write(output / 'manifest.json', stack.manifest())
     start = datetime.datetime.now(datetime.timezone.utc).isoformat()
     process = None

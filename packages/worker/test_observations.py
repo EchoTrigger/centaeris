@@ -12,7 +12,7 @@ class ObservationTests(unittest.TestCase):
         error = RuntimeError("private body and token")
         with patch.object(observations, "ENABLED", True), patch("sys.stderr", output):
             with self.assertRaises(RuntimeError) as raised:
-                with observations.context(slotIndex=3, jobId="job_1"):
+                with observations.context(jobId="job_1"):
                     with observations.measure("rpc", route="/agent-runs/step"):
                         raise error
         self.assertIs(raised.exception, error)
@@ -40,17 +40,17 @@ class ObservationTests(unittest.TestCase):
         self.assertNotIn("test-internal-token", output.getvalue())
         error.route, error.http_error_code = "/internal/jobs/private-lease?token=private", "private-response"
         with patch("sys.stderr", new_callable=io.StringIO) as output:
-            observations.diagnostic("slotFailed", error, slot_index=2, lane="execution")
+            observations.diagnostic("dispatchFailed", error, job_id="job_1", lane="execution")
         event = json.loads(output.getvalue())
         self.assertIsNone(event["route"])
         self.assertEqual(event["errorCode"], "other")
         self.assertNotIn("private", output.getvalue())
 
-    def test_slot_failure_logs_safe_http_route_without_performance_opt_in(self):
+    def test_dispatch_failure_logs_safe_http_route_without_performance_opt_in(self):
         import test_worker
         import worker
         error = worker.DependencyUnavailable("private transport body", http_status=503)
-        error.http_error_code, error.route = "execution_claim_busy", "/internal/jobs/claim"
+        error.http_error_code, error.route = None, "/internal/jobs/claim"
         from unittest.mock import Mock
         stopped = Mock()
         stopped.is_set.side_effect = [False, True]
@@ -60,13 +60,13 @@ class ObservationTests(unittest.TestCase):
         event = json.loads(output.getvalue())
         self.assertEqual(event["event"], "dispatchFailed")
         self.assertEqual((event["route"], event["httpStatus"], event["errorCode"]),
-            ("/internal/jobs/claim", 503, "execution_claim_busy"))
+            ("/internal/jobs/claim", 503, "other"))
         self.assertNotIn("private", output.getvalue())
 
 
     def test_disabled_is_silent_and_context_does_not_leak(self):
         with patch.object(observations, "ENABLED", False), patch("sys.stderr", new_callable=io.StringIO) as output:
-            with observations.context(jobId="job_1"), observations.measure("slotHeld"):
+            with observations.context(jobId="job_1"), observations.measure("jobActive"):
                 pass
             self.assertEqual(output.getvalue(), "")
         self.assertEqual(getattr(observations._context, "fields", {}), {})
