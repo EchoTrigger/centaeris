@@ -121,7 +121,7 @@ impl PostgresRuntimeStore {
             return Err("control stage invalid".into());
         }
         self.with_execution_control_client(|client| {
-            client.query_one(&format!("SELECT (SELECT count(*) FROM runtime_jobs WHERE job_kind='agent_run.lifecycle' AND status IN('leased','running') AND lease_purpose='control' AND lease_control_stage=$3)<2 AND EXISTS(SELECT 1 FROM runtime_jobs j WHERE {} )",control_candidates(stage)),&[&None::<String>,&(stage=="cleanup"),&stage]).map(|row|row.get(0)).map_err(|e|e.to_string())
+            client.query_one(&format!("SELECT EXISTS(SELECT 1 FROM runtime_jobs j WHERE {} )",control_candidates(stage)),&[&None::<String>,&(stage=="cleanup")]).map(|row|row.get(0)).map_err(|e|e.to_string())
         })
     }
     pub(crate) fn claim_control_jobs(
@@ -137,11 +137,7 @@ impl PostgresRuntimeStore {
         self.with_execution_control_client(|client| {
             let mut tx=client.transaction().map_err(|e|e.to_string())?;
             super::resource_commit::require_durable_resource_commit(&mut tx)?;
-            if !tx.query_one("SELECT pg_try_advisory_xact_lock(731946,2)",&[]).map_err(|e|e.to_string())?.get::<_,bool>(0) { return Err("execution claim busy".into()); }
-            let used=tx.query_one("SELECT count(*) FROM runtime_jobs WHERE job_kind='agent_run.lifecycle' AND status IN('leased','running') AND lease_purpose='control' AND lease_control_stage=$1", &[&stage]).map_err(|e|e.to_string())?.get::<_,i64>(0);
-            let available=(2i64-used).max(0).min(req.limit as i64);
-            if available==0 { return Ok(vec![]); }
-            let rows=tx.query(&format!("SELECT j.job_id,j.status FROM runtime_jobs j WHERE {} ORDER BY j.run_at_ms,j.created_at_ms,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT $3",control_candidates(stage)), &[&req.job_id,&(stage=="cleanup"),&available]).map_err(|e|e.to_string())?;
+            let rows=tx.query(&format!("SELECT j.job_id,j.status FROM runtime_jobs j WHERE {} ORDER BY j.run_at_ms,j.created_at_ms,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT $3",control_candidates(stage)), &[&req.job_id,&(stage=="cleanup"),&(req.limit as i64)]).map_err(|e|e.to_string())?;
             let now=tx.query_one("SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",&[]).map_err(|e|e.to_string())?.get::<_,i64>(0);
             let until=now.saturating_add(i64::try_from(req.lease_ms).map_err(|_|"lease overflow")?);
             let mut jobs=vec![];

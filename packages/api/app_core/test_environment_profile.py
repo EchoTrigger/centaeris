@@ -84,9 +84,6 @@ class EnvironmentProfileHttpTests(OperationFixture, TransactionTestCase):
                 lock = patch(target, side_effect=lambda: nullcontext())
                 lock.start()
                 self.addCleanup(lock.stop)
-            admission = patch('app_core.http.workspaces.queued_admission_error', return_value=None)
-            admission.start()
-            self.addCleanup(admission.stop)
         self.session_id = self.create().json()['sessionId']
         self.session = Session.objects.get(pk=self.session_id)
         self.environment = self.session.current_environment

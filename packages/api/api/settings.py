@@ -29,8 +29,6 @@ def positive_capacity_env(name, default):
     return int(value)
 
 
-EXECUTION_GLOBAL_QUEUE_LIMIT = positive_capacity_env("EXECUTION_GLOBAL_QUEUE_LIMIT", 128)
-EXECUTION_TENANT_QUEUE_LIMIT = positive_capacity_env("EXECUTION_TENANT_QUEUE_LIMIT", 32)
 EXECUTION_QUEUE_WAIT_SECONDS = positive_capacity_env("EXECUTION_QUEUE_WAIT_SECONDS", 300)
 RUNTIME_CONTROL_TIMEOUT_SECONDS = positive_capacity_env("RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS", 5)
 WORK_RETURN_AUDIT_INTERVAL_SECONDS = positive_capacity_env(

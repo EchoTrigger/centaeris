@@ -73,8 +73,7 @@ class HostedOperationTests(OperationFixture, TestCase):
         for status in ("completed", "failed", "cancelled"):
             with self.subTest(status=status):
                 AgentRun.objects.filter(id=first.json()["agentRunId"]).update(status=status)
-                with patch("app_core.http.workspaces.queued_admission_error", return_value=(429, "queue_full")):
-                    second = self.post()
+                second = self.post()
                 self.assertEqual(second.status_code, 202, second.content)
                 self.assertEqual(second.json(), first.json())
         self.assertEqual(first.json()["status"], "accepted")

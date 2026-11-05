@@ -163,86 +163,36 @@ class WorkerContractTests(unittest.TestCase):
         self.assertIsNone(bodies[2]["activeAfter"])
         self.assertIsNone(bodies[2]["deadLetterAfter"])
 
-    def test_slot_configuration_at_startup(self):
-        for value, expected in ((None, 8), ("1", 1), ("4", 4), ("16", 16)):
-            with self.subTest(value=value):
-                env = dict(os.environ)
-                env.pop("WORKER_SLOT_COUNT", None)
-                if value is not None:
-                    env["WORKER_SLOT_COUNT"] = value
-                result = subprocess.run(
-                    [sys.executable, "-c", "import worker; print(worker.WORKER_SLOT_COUNT)"],
-                    cwd=os.path.dirname(worker.__file__), env=env,
-                    capture_output=True, text=True, timeout=10,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout.strip(), str(expected))
-        for value in ("", "0", "-1", "17", "1.5", "abc"):
-            with self.subTest(value=value):
-                result = subprocess.run(
-                    [sys.executable, "-c", "import worker"],
-                    cwd=os.path.dirname(worker.__file__),
-                    env={**os.environ, "WORKER_SLOT_COUNT": value},
-                    capture_output=True, text=True, timeout=10,
-                )
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("WORKER_SLOT_COUNT must be an integer between 1 and 16", result.stderr)
 
-    def test_service_bounds_concurrency_and_reuses_slots_after_success_and_failure(self):
-        for slots in (1, 4, 16):
-            with self.subTest(slots=slots):
-                barrier = threading.Barrier(slots)
-                lock = threading.Lock()
-                calls = {}
-                active = peak = completed = 0
-                stop = None
+    def test_service_dispatches_all_claimed_jobs_while_other_jobs_are_active(self):
+        count=12
+        barrier=threading.Barrier(count)
+        lock=threading.Lock()
+        completed=[]
+        stop=None
+        jobs=iter({'jobId':f'job-{index}','leaseOwner':f'opaque-owner-{index}'} for index in range(count))
+        def install_handler(_number,handler):
+            nonlocal stop
+            if callable(handler): stop=handler
+        def execute(job,owner):
+            self.assertEqual(owner,job['leaseOwner'])
+            barrier.wait(timeout=5)
+            with lock:
+                completed.append(job['jobId'])
+                if len(completed)==count: stop(None,None)
+        with patch.object(worker.signal,'signal',side_effect=install_handler), \
+                patch.object(worker,'run_loop'), patch.object(worker,'run_control_dispatcher'), \
+                patch.object(worker,'claim_next_job',side_effect=lambda _sequence:next(jobs,None)), \
+                patch.object(worker,'wait_for_jobs',return_value='timeout'), \
+                patch.object(worker,'execute_claimed_job',side_effect=execute):
+            watchdog=threading.Timer(8,lambda:stop(None,None));watchdog.start()
+            try: worker.run_worker_service()
+            finally:
+                watchdog.cancel()
+                for thread in threading.enumerate():
+                    if thread.name.startswith('workspace-active-job-'): thread.join(timeout=2)
+        self.assertEqual(len(set(completed)),count)
 
-                def install_handler(_number, handler):
-                    nonlocal stop
-                    if callable(handler):
-                        stop = handler
-
-                def execute(slot):
-                    nonlocal active, peak, completed
-                    with lock:
-                        calls[slot] = calls.get(slot, 0) + 1
-                        attempt = calls[slot]
-                        active += 1
-                        peak = max(peak, active)
-                    try:
-                        barrier.wait(timeout=5)
-                        if attempt == 1:
-                            raise RuntimeError("observed job failure")
-                        return True
-                    finally:
-                        with lock:
-                            active -= 1
-                            completed += 1
-                            if completed == slots * 3:
-                                stop(None, None)
-                        barrier.wait(timeout=5)
-
-                with (
-                    patch.object(worker, "WORKER_SLOT_COUNT", slots),
-                    patch.object(worker, "JOB_WAIT_FAILURE_BACKOFF_SECONDS", 0),
-                    patch.object(worker.signal, "signal", side_effect=install_handler),
-                    patch.object(worker, "run_loop"),
-                    patch.object(worker, "execute_next_job", side_effect=execute),
-                ):
-                    # A timeout also terminates the service if its configured slots cannot progress.
-                    watchdog = threading.Timer(10, lambda: stop(None, None))
-                    watchdog.start()
-                    try:
-                        worker.run_worker_service()
-                    finally:
-                        watchdog.cancel()
-                    for thread in threading.enumerate():
-                        if thread.name.startswith("workspace-job-slot-"):
-                            thread.join(timeout=6)
-                            self.assertFalse(thread.is_alive())
-                self.assertEqual(peak, slots)
-                self.assertEqual(calls, {slot: 3 for slot in range(slots)})
-                self.assertEqual(active, 0)
 
     def test_remote_disconnect_is_dependency_unavailable(self):
         with patch("urllib.request.urlopen", side_effect=http.client.RemoteDisconnected()):
@@ -406,76 +356,31 @@ class WorkerContractTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "worker_job_kind_invalid"):
                 worker.claim_job(forbidden, "worker:test-owner")
 
-    def test_claimed_job_uses_returned_lease_identity(self):
-        job = {"jobId": "worker.noop:claim-owner", "jobKind": "worker.noop",
-               "status": "leased", "leaseOwner": "opaque-claim-identity-123"}
-        with patch.object(worker, "WORKER_JOB_KINDS", ("worker.noop",)), \
-                patch.object(worker, "runtime_request", return_value={"jobs": [job]}) as request, \
-                patch.object(worker, "execute_claimed_job") as execute:
-            self.assertTrue(worker.execute_next_job(0))
-        self.assertNotEqual(request.call_args.args[1]["workerId"], job["leaseOwner"])
-        execute.assert_called_once_with(job, job["leaseOwner"])
+    def test_claimed_job_preserves_returned_lease_identity(self):
+        job={'jobId':'worker.noop:claim-owner','jobKind':'worker.noop','status':'leased','leaseOwner':'opaque-claim-identity-123'}
+        with patch.object(worker,'WORKER_JOB_KINDS',('worker.noop',)), \
+                patch.object(worker,'runtime_request',return_value={'jobs':[job]}) as request:
+            self.assertEqual(worker.claim_next_job(0),job)
+        self.assertNotEqual(request.call_args.args[1]['workerId'],job['leaseOwner'])
+        with patch.object(worker,'execute_claimed_job') as execute:
+            worker.run_claimed_job(job)
+        execute.assert_called_once_with(job,job['leaseOwner'])
 
-    def test_each_slot_rotates_both_supported_kinds_before_waiting(self):
-        kinds = ("agent_run.lifecycle", "worker.noop")
-        for slot in range(8):
-            expected = [kinds[slot % 2], kinds[(slot + 1) % 2]]
-            for available in (False, True):
-                with self.subTest(slot=slot, available=available):
-                    job = {"jobId": "job_second", "jobKind": expected[1],
-                           "status": "leased", "leaseOwner": "runtime-lease-owner-123"}
-                    responses = [{"jobs": []}, {"jobs": [job] if available else []}]
-                    with patch.object(worker, "runtime_request", side_effect=responses) as request, \
-                            patch.object(worker, "execute_claimed_job") as execute:
-                        self.assertEqual(worker.execute_next_job(slot), available)
-                    self.assertEqual([call.args[1]["jobKind"] for call in request.call_args_list], expected)
-                    owners = [call.args[1]["workerId"] for call in request.call_args_list]
-                    self.assertEqual(owners[0], owners[1])
-                    if available:
-                        execute.assert_called_once_with(job, job["leaseOwner"])
-                    else:
-                        execute.assert_not_called()
 
-    def test_service_starts_and_stops_lifecycle_control_and_job_threads(self):
-        stopped = Mock()
-        threads = []
-        def create_thread(**kwargs):
-            thread = Mock()
-            threads.append((kwargs, thread))
-            return thread
+    def test_dispatcher_rotates_supported_job_kinds_before_waiting(self):
+        kinds=('agent_run.lifecycle','worker.noop')
+        for sequence in range(8):
+            expected=[kinds[sequence%2],kinds[(sequence+1)%2]]
+            for available in (False,True):
+                job={'jobId':'job_second','jobKind':expected[1],'status':'leased','leaseOwner':'runtime-lease-owner-123'}
+                responses=[{'jobs':[]},{'jobs':[job] if available else []}]
+                with patch.object(worker,'runtime_request',side_effect=responses) as request:
+                    self.assertEqual(worker.claim_next_job(sequence),job if available else None)
+                self.assertEqual([c.args[1]['jobKind'] for c in request.call_args_list],expected)
+                owners=[c.args[1]['workerId'] for c in request.call_args_list]
+                self.assertEqual(owners[0],owners[1])
 
-        with patch.object(worker.threading, "Event", return_value=stopped), \
-                patch.object(worker.threading, "Thread", side_effect=create_thread), \
-                patch.object(worker.signal, "signal", side_effect=["term-handler", "int-handler", None, None]) as signals, \
-                patch.object(worker, "WORKER_SLOT_COUNT", 8):
-            worker.run_worker_service()
 
-        loops = [(config, thread) for config, thread in threads if config["target"] is worker.run_loop]
-        self.assertEqual(len(loops), 2)
-        self.assertIsInstance(loops[0][0]["args"][0], worker.TerminalDispatcher)
-        self.assertIsInstance(loops[1][0]["args"][0], worker.LifecycleReconciler)
-        self.assertEqual([config["args"][1] for config, _ in loops],
-                         [worker.OUTBOX_POLL_INTERVAL_SECONDS, worker.RECONCILE_INTERVAL_SECONDS])
-        jobs = [(config, thread) for config, thread in threads if config["target"] is worker.run_job_loop]
-        self.assertEqual([config["args"] for config, _ in jobs], [(slot, stopped) for slot in range(8)])
-        controls = [(config, thread) for config, thread in threads if config["target"] is worker.run_control_loop]
-        self.assertEqual([config["args"] for config, _ in controls],
-                         [(stage, slot, stopped) for stage in ("advance", "cleanup") for slot in range(2)])
-        self.assertEqual(len(threads), len(loops) + len(jobs) + len(controls))
-        for config, thread in threads:
-            thread.start.assert_called_once_with()
-            self.assertIs(config["args"][-1], stopped)
-        for _, thread in loops:
-            thread.join.assert_called_once_with()
-        for config, thread in jobs + controls:
-            self.assertTrue(config["daemon"])
-            thread.join.assert_not_called()
-        stopped.wait.assert_called_once_with()
-        stopped.set.assert_called_once_with()
-        self.assertEqual([(call.args[0], call.args[1]) for call in signals.call_args_list[2:]],
-                         [(worker.signal.SIGTERM, "term-handler"), (worker.signal.SIGINT, "int-handler")])
-        signals.call_args_list[0].args[1](worker.signal.SIGTERM, None)
-        self.assertEqual(stopped.set.call_count, 2)
 
     def test_job_wait_uses_strict_v1_contract_and_longer_http_timeout(self):
         for disposition, next_run_at_ms in (("timeout", None), ("ready", 1234)):
@@ -516,45 +421,24 @@ class WorkerContractTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "runtime_job_wait_response_invalid"):
                 worker.wait_for_jobs()
 
-    def test_notification_path_rescans_without_fixed_sleep_and_is_quantified(self):
-        stopped = Mock()
-        stopped.is_set.side_effect = [False, False, True]
-        fixture_clock_ms = [0]
-        events = []
-
-        def execute_next_job(_slot_index):
-            events.append(("scan", fixture_clock_ms[0]))
-            return len(events) == 3
-
-        def wait_for_jobs():
-            fixture_clock_ms[0] += 7
-            events.append(("notified", fixture_clock_ms[0]))
-            return "ready"
-
-        with (
-            patch.object(worker, "execute_next_job", side_effect=execute_next_job),
-            patch.object(worker, "wait_for_jobs", side_effect=wait_for_jobs),
-        ):
-            worker.run_job_loop(0, stopped)
-
-        self.assertEqual(events, [("scan", 0), ("notified", 7), ("scan", 7)])
+    def test_notification_wakes_idle_dispatcher_without_fixed_sleep(self):
+        stopped=Mock();stopped.is_set.side_effect=[False,False,True]
+        trace=[]
+        def claim(sequence): trace.append(('claim',sequence));return None
+        with patch.object(worker,'claim_next_job',side_effect=claim), \
+                patch.object(worker,'wait_for_jobs',side_effect=lambda:trace.append(('notified',None))):
+            worker.run_job_dispatcher(stopped)
+        self.assertEqual(trace,[('claim',0),('notified',None),('claim',1),('notified',None)])
         stopped.wait.assert_not_called()
-        print("worker_notification_pickup_fixture_ms before<=1000 after=7")
 
-    def test_wait_failure_uses_bounded_polling_fallback(self):
-        stopped = Mock()
-        stopped.is_set.side_effect = [False, True]
-        with (
-            patch.object(worker, "execute_next_job", return_value=False),
-            patch.object(
-                worker,
-                "wait_for_jobs",
-                side_effect=worker.DependencyUnavailable("disconnected"),
-            ),
-        ):
-            worker.run_job_loop(0, stopped)
 
+    def test_wait_failure_uses_existing_transport_backoff(self):
+        stopped=Mock();stopped.is_set.side_effect=[False,True]
+        with patch.object(worker,'claim_next_job',return_value=None), \
+                patch.object(worker,'wait_for_jobs',side_effect=worker.DependencyUnavailable('disconnected')):
+            worker.run_job_dispatcher(stopped)
         stopped.wait.assert_called_once_with(worker.JOB_WAIT_FAILURE_BACKOFF_SECONDS)
+
 
     def test_idle_polling_amplification_is_quantified(self):
         baseline_slots = 2

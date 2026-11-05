@@ -45,9 +45,7 @@ def initialize(root, oci_runtime=None):
                   POSTGRES_TEST_HOST_PORT='55433', REDIS_TEST_HOST_PORT='16379',
                   BOOTSTRAP_SUPERADMIN_EMAIL='perf-admin@localhost.invalid',
                   DJANGO_DEBUG='0', PASSWORD_RESET_ENABLED='0', PASSWORD_RESET_MAIL_SENDER='0',
-                  WORKER_SLOT_COUNT='2',
-                  # Explicit synthetic inputs for this isolated two-slot fixture.
-                  # Two overlapping spool copies per 1 MiB upload fit two slots.
+                  # Two overlapping spool copies per 1 MiB upload fit the temporary budget.
                   UPLOAD_BODY_MAX_BYTES='1048576', UPLOAD_TEMP_MAX_BYTES='4194304',
                   UPLOAD_MAX_CONCURRENT='2',
                   ENVIRONMENT_EXECUTION_HELPER=EXECUTION_HELPER,
@@ -59,7 +57,7 @@ def initialize(root, oci_runtime=None):
     return path
 
 
-def compose_command(root, env_file, args, slots=None):
+def compose_command(root, env_file, args):
     # An allowlist prevents shell variables from overriding the explicit test env.
     allowed = {'PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'HOME', 'USERPROFILE',
                'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)',
@@ -69,10 +67,6 @@ def compose_command(root, env_file, args, slots=None):
     env['CENTAERIS_SOURCE_REVISION'] = subprocess.check_output(
         ['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True, encoding='utf-8'
     ).strip()
-    if slots is not None:
-        if type(slots) is not int or not 1 <= slots <= 16:
-            raise ValueError('slots must be between 1 and 16')
-        env['WORKER_SLOT_COUNT'] = str(slots)
     return ['docker', 'compose', '--project-name', PROJECT, '--project-directory', root.as_posix(),
             '--env-file', env_file.as_posix(), '-f', (root / 'docker-compose.yml').as_posix(),
             '-f', (root / 'perf/compose.perf.yml').as_posix(), *args], env
@@ -147,16 +141,6 @@ def parse_stats(text, expected):
     return rows
 
 
-def switch_slots(stack, slots):
-    if type(slots) is not int or not 1 <= slots <= 16:
-        raise ValueError('slots must be between 1 and 16')
-    if not stack.quiet():
-        raise RuntimeError('stack has active runs; refusing to replace worker')
-    before = stack.identities()
-    stack.compose(['up', '-d', '--no-deps', '--force-recreate', 'worker'], slots=slots)
-    stack.verify_slots(slots)
-    if stack.identities() != before:
-        raise RuntimeError('a non-worker container changed identity')
 
 
 def account_runs(accepted, rows, accepted_count=None):
@@ -284,8 +268,8 @@ class Stack:
             raise ValueError('test env must identify the performance project')
         validate_config(json.loads(self.compose(['config', '--format', 'json'])), ROOT)
 
-    def compose(self, args, slots=None, timeout=120, **kwargs):
-        command, env = compose_command(ROOT, self.env_file, args, slots)
+    def compose(self, args, timeout=120, **kwargs):
+        command, env = compose_command(ROOT, self.env_file, args)
         return run(command, env=env, cwd=ROOT, timeout=timeout, **kwargs)
 
     def container(self, service):
@@ -310,10 +294,6 @@ class Stack:
     def quiet(self):
         return self.sql("SELECT count(*) FROM app_core_agentrun WHERE status IN ('queued','running')").strip() == '0'
 
-    def verify_slots(self, expected):
-        result = self.compose(['exec', '-T', 'worker', 'python', '-c', 'import worker; print(worker.WORKER_SLOT_COUNT)'])
-        if result.strip() != str(expected):
-            raise RuntimeError('worker slot setting did not take effect')
 
     def preflight(self):
         for service in SERVICES:
@@ -334,7 +314,6 @@ class Stack:
     def manifest(self):
         revision = run(['git', 'rev-parse', 'HEAD'], cwd=ROOT).strip()
         return {'project': PROJECT, 'workspaceSha': revision,
-                'workerSlots': int(self.compose(['exec', '-T', 'worker', 'python', '-c', 'import worker; print(worker.WORKER_SLOT_COUNT)']).strip()),
                 'coreSha': revision,
                 'dirtyFiles': run(['git', 'status', '--porcelain'], cwd=ROOT).splitlines(),
                 'workspaceDiffSha256': hashlib.sha256(run(['git', 'diff', 'HEAD'], cwd=ROOT).encode()).hexdigest(),
@@ -345,7 +324,7 @@ class Stack:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['init', 'check', 'build', 'up', 'slots', 'smoke', 'sample', 'load', 'stop', 'workload'])
+    parser.add_argument('action', choices=['init', 'check', 'build', 'up', 'smoke', 'sample', 'load', 'stop', 'workload'])
     parser.add_argument('--fixture', type=Path, help='Prepared owned native perf fixture outside source; workload mode only')
     parser.add_argument('--output', type=Path, help='New external workload result directory')
     parser.add_argument('--k6-binary', type=Path, help='Existing pinned Linux K6 binary')
@@ -355,7 +334,6 @@ def main():
     parser.add_argument('--between-run-ms', type=int, default=0)
     parser.add_argument('--initial-stagger-ms', type=int, default=0)
     parser.add_argument('--run-terminal-timeout-seconds', type=int, default=120)
-    parser.add_argument('--slots', type=int)
     parser.add_argument('--experiment-id')
     parser.add_argument('--seconds', type=int, default=1)
     parser.add_argument('--rate', type=int, default=60)
@@ -386,9 +364,6 @@ def main():
     elif args.action == 'up':
         stack.compose(['up', '-d', 'worker'], timeout=600)
         stack.sql('CREATE EXTENSION IF NOT EXISTS pg_stat_statements;')
-        stack.preflight()
-    elif args.action == 'slots':
-        switch_slots(stack, args.slots)
         stack.preflight()
     elif args.action == 'stop':
         if not stack.quiet():

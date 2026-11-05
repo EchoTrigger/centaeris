@@ -195,7 +195,7 @@ def main():
 
         "WORKSPACE_GENERAL_IMAGE": project + "-general:fixed", "PLUGIN_VOLUME_NAME": project + "_plugins", "AGENT_MEMORY_VOLUME_NAME": project + "_memory",
 
-        "AGENT_RUN_EXECUTION_MODE": "retained", "WORKER_SLOT_COUNT": "1", "EXECUTION_GLOBAL_LIMIT": "1",
+        "AGENT_RUN_EXECUTION_MODE": "retained",
 
         "RESIDENT_GLOBAL_COUNT": "2", "RESIDENT_TENANT_COUNT": "2", "API_POSTGRES_POOL_MAX_SIZE": "0", "CENTAERIS_SOURCE_REVISION": sha,
 
@@ -206,8 +206,8 @@ def main():
             'POSTGRES_DB': project, 'POSTGRES_USER': project,
             'CENTAERIS_BENCHMARK_FIXTURE_ID': project,
             'SANDBOX_PIDS_LIMIT': '4096', 'RESIDENT_GLOBAL_PIDS': '8192', 'RESIDENT_TENANT_PIDS': '8192',
-            'WORKER_SLOT_COUNT': '2', 'EXECUTION_GLOBAL_LIMIT': '2',
-            'EXECUTION_GLOBAL_QUEUE_LIMIT': '2', 'EXECUTION_TENANT_QUEUE_LIMIT': '2',
+
+
             'RESIDENT_GLOBAL_MEMORY_BYTES': str(12 * 1024**3), 'RESIDENT_TENANT_MEMORY_BYTES': str(12 * 1024**3),
             'RESIDENT_GLOBAL_CPU_MILLI': '6000', 'RESIDENT_TENANT_CPU_MILLI': '6000',
             'BENCHMARK_EXECUTION_HELPER': benchmark_helper['path'],

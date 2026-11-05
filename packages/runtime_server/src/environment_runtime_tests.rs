@@ -66,7 +66,7 @@ fn environment_runtime_server() {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
             image_digest: format!("sha256:{}", "a".repeat(64)),
         }),
-        request_capacity: request_capacity::RequestCapacity::from_env().unwrap(),
+        request_policy: request_policy::RequestPolicy::from_env().unwrap(),
     };
     let server = runtime.spawn(serve_http(listener, state));
     let mut physical_pin = None;

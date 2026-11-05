@@ -327,16 +327,12 @@ sys.stdout.write(re.sub(pattern,replace,text))
                     self.assertEqual(environment["SANDBOX_CPU_MILLI"], "2000")
                     self.assertEqual(environment["SANDBOX_MEMORY_BYTES"], "4294967296")
 
-    def test_worker_slot_configuration_reaches_container(self):
-        self.assertEqual(compose_config()["services"]["worker"]["environment"]["WORKER_SLOT_COUNT"], "8")
-        self.assertEqual(compose_config(WORKER_SLOT_COUNT="4")["services"]["worker"]["environment"]["WORKER_SLOT_COUNT"], "4")
 
     def test_runtime_postgres_connection_budgets_reach_runtime(self):
         environment = compose_config()["services"]["runtime"]["environment"]
         self.assertEqual(environment["RUNTIME_POSTGRES_POOL_SIZE"], "10")
         self.assertEqual(environment["RUNTIME_POSTGRES_CONTROL_POOL_SIZE"], "2")
         self.assertEqual(environment["RUNTIME_POSTGRES_CLEANUP_POOL_SIZE"], "2")
-        self.assertEqual(environment["RUNTIME_HTTP_CLEANUP_LIMIT"], "2")
         self.assertEqual(environment["RUNTIME_POSTGRES_LISTENER_LIMIT"], "8")
         self.assertEqual(environment["RUNTIME_POSTGRES_CHECKOUT_TIMEOUT_MS"], "5000")
         self.assertEqual(environment["RUNTIME_POSTGRES_CONNECT_TIMEOUT_MS"], "3000")

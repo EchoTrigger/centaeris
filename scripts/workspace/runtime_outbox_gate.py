@@ -90,7 +90,7 @@ def main(argv=()):
            'CENTAERIS_TEST_POSTGRES_DATABASE': database,
            'CENTAERIS_TEST_POSTGRES_OWNERSHIP_TOKEN': ownership_token,
            'CENTAERIS_TEST_POSTGRES_URL': url, 'INTERNAL_API_TOKEN': uuid.uuid4().hex,
-           'CARGO_BUILD_JOBS': '1', 'EXECUTION_GLOBAL_LIMIT': '8',
+           'CARGO_BUILD_JOBS': '1',
            'NO_PROXY': '127.0.0.1,localhost,' + os.environ.get('NO_PROXY', ''),
            'CENTAERIS_CAPTURE_BOUNDARY_DATABASE': url,
            'CENTAERIS_PROJECTION_BOUNDARY_DATABASE': url}
@@ -134,7 +134,6 @@ def main(argv=()):
         'postgres_hosted_worker_reclaim_changes_claim_identity',
         'postgres_runtime_job_yield_requeues_same_job_without_queued_outbox_and_fences_old_owner',
         'postgres_subagent_projection_uses_core_durable_job_binding',
-        'hosted_execution_capacity_is_shared_across_replicas_and_released_on_yield',
         'postgres_runtime_store_validates_waiter_owner_index_on_reopen',
         'postgres_runtime_store_clones_reuse_one_short_lived_connection',
         'postgres_runtime_store_pool_can_drop_inside_tokio_runtime',

@@ -26,8 +26,9 @@ do not remain as background services.
 ## Execution defaults
 
 The deployment template uses `perRun`, Docker/runsc and measured shared admission
-(`RUNTIME_NATIVE_SHARED_ADMISSION=1`). Worker slots and execute leases are both 8;
-global and Workspace environment counts are 8, memory budgets are 12 GiB, and
+(`RUNTIME_NATIVE_SHARED_ADMISSION=1`). Run dispatch and HTTP handlers have no
+local concurrency quota. Global and Workspace environment counts are 8,
+memory budgets are 12 GiB, and
 workspace byte budgets are 32 GiB. Each environment retains its 2-CPU/4-GiB
 ceiling. Host-derived memory headroom and conservative unknown-allocation charges
 remain active, so eight concurrent environments are not guaranteed on every host.

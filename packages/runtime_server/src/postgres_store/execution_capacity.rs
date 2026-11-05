@@ -6,15 +6,6 @@ use centaeris_core::session::reliability::{
 
 use super::reliability::{insert_job, load_job, load_job_by_key};
 use super::PostgresRuntimeStore;
-use crate::execution_capacity::ExecutionCapacity;
-
-// Only active execution leases participate. Historical terminal jobs never
-// enter the aggregation. An expired lease occupies capacity until reconciled.
-pub(super) const ACTIVE_EXECUTIONS: &str = "WITH active AS MATERIALIZED (
-    SELECT t.workspace_id FROM runtime_jobs j
-    LEFT JOIN execution_job_tenants t ON t.job_id=j.job_id
-    WHERE j.job_kind='agent_run.lifecycle' AND j.status IN ('leased','running') AND j.lease_purpose='execute'
-)";
 
 impl PostgresRuntimeStore {
     pub(crate) fn schedule_worker_job(
@@ -78,19 +69,8 @@ impl PostgresRuntimeStore {
         if req.job_kind.as_deref() != Some(AGENT_RUN_LIFECYCLE_JOB_KIND) {
             return self.claim_due_runtime_jobs(req);
         }
-        let limits = ExecutionCapacity::from_env()?;
         self.with_client(|client| {
             let mut tx = client.transaction().map_err(|error| error.to_string())?;
-            // All hosted lifecycle claims share this transaction lock across
-            // replicas. Contention yields immediately rather than queuing SQL.
-            if !tx.query_one("SELECT pg_try_advisory_xact_lock(731946,2)", &[])
-                .map_err(|error| error.to_string())?.get::<_, bool>(0) {
-                return Err("execution claim busy".to_string());
-            }
-            let used = usize::try_from(tx.query_one(&format!("{ACTIVE_EXECUTIONS} SELECT COUNT(*) FROM active"), &[])
-                .map_err(|error| error.to_string())?.get::<_, i64>(0)).map_err(|error| error.to_string())?;
-            let available = limits.global.saturating_sub(used).min(req.limit);
-            if available == 0 { return Ok(Vec::new()); }
             let now = tx.query_one("SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint", &[])
                 .map_err(|error| error.to_string())?.get::<_, i64>(0);
             let due=super::capacity_wait::DUE_AT;
@@ -101,7 +81,7 @@ impl PostgresRuntimeStore {
                 AND ($2::text IS NULL OR j.job_id=$2) AND ($3::text IS NULL OR j.session_id=$3)
                 AND NOT({})
                 ORDER BY {due},j.created_at_ms,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT $4", super::lifecycle_control::PENDING),
-                &[&now, &req.job_id, &req.session_id, &(available as i64)])
+                &[&now, &req.job_id, &req.session_id, &(req.limit as i64)])
                 .map_err(|error| error.to_string())?;
             let until = now.checked_add(i64::try_from(req.lease_ms).map_err(|error| error.to_string())?)
                 .ok_or("execution lease deadline overflow")?;

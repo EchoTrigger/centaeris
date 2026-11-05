@@ -41,9 +41,6 @@ class EnvironmentNetworkTests(OperationFixture, TestCase):
             context = patch(target, side_effect=lambda *a, **k: nullcontext())
             context.start()
             self.addCleanup(context.stop)
-        context = patch("app_core.http.workspaces.queued_admission_error", return_value=None)
-        context.start()
-        self.addCleanup(context.stop)
         self.url = f"/api/workspaces/{self.workspace.pk}/environment-settings"
         WorkspaceMembership.objects.filter(workspace=self.workspace, user=self.user).update(role="owner")
 

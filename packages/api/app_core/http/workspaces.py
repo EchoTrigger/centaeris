@@ -14,7 +14,6 @@ from pydantic import Field, ValidationError, field_validator, model_validator
 
 from app_core.assets import captured_input_fields
 from app_core.app_delegations import require_delegated_session, require_request_delegation
-from app_core.execution_admission import queued_admission_error
 from app_core.hosted_operations import (
     OPERATION_ID_PATTERN,
     HostedOperationError,
@@ -1234,11 +1233,6 @@ def create_session_message(
                 session = Session.objects.select_for_update(of=("self",)).filter(
                     id=session_id, workspace=workspace, owner=request.user, status="active",
                 ).first()
-            # Retain the previous quota-error precedence over the business
-            # existence/status checks below; no resource has been created yet.
-            admission_error = queued_admission_error(workspace.id)
-            if admission_error is not None:
-                raise AgentSessionCreationError(*admission_error)
             if session_id == "new":
                 project = None
                 if payload.project_id is not None:

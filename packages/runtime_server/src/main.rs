@@ -12,7 +12,6 @@ mod environment_authorization;
 mod environment_runtime_tests;
 mod environment_stdio;
 mod environment_supervisor;
-mod execution_capacity;
 mod execution_recovery_coordinator;
 mod execution_recovery_policy;
 mod execution_recovery_schedule;
@@ -29,7 +28,7 @@ mod platform_materials;
 mod postgres_store;
 mod recovery_read;
 mod recovery_upload;
-mod request_capacity;
+mod request_policy;
 mod resident_capacity;
 mod retained_tasks;
 mod runsc_rotation;
@@ -145,11 +144,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::Semaphore;
 
 const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
 const MAX_FILESYSTEM_BODY_BYTES: usize = 32 * 1024 * 1024 + 64 * 1024 + 4;
-const MAX_HTTP_CONNECTIONS: usize = 128;
 const HTTP_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -439,7 +436,6 @@ fn main() -> Result<(), String> {
     let tool_layers = Arc::new(Mutex::new(HashMap::<String, HostedRuntimeContext>::new()));
     activate_hosted_workers(
         || {
-            execution_capacity::ExecutionCapacity::from_env()?;
             docker_engine::create_limit_from_env()?;
             if shared_resident_admission::enabled()? {
                 let host = docker_execution_host::resident_host_context()?.0;
@@ -489,7 +485,7 @@ fn main() -> Result<(), String> {
             centaeris_core::runtime::ToolConcurrencyRegistry::default(),
         ),
         execution_profile,
-        request_capacity: request_capacity::RequestCapacity::from_env()?,
+        request_policy: request_policy::RequestPolicy::from_env()?,
     };
     runtime.block_on(serve_http(listener, state))
 }
@@ -1117,7 +1113,7 @@ struct HttpServerState {
     tool_layers: ToolLayerRegistry,
     tool_concurrency_registry: Arc<centaeris_core::runtime::ToolConcurrencyRegistry>,
     execution_profile: Arc<RuntimeExecutionProfile>,
-    request_capacity: request_capacity::RequestCapacity,
+    request_policy: request_policy::RequestPolicy,
 }
 
 const RUNTIME_EXECUTION_PROFILE_SCHEMA: &str = "runtime.execution_profile.v1";
@@ -1186,13 +1182,7 @@ async fn accept_http_connections(
     listener: tokio::net::TcpListener,
     router: axum::Router,
 ) -> Result<(), String> {
-    let connection_slots = Arc::new(Semaphore::new(MAX_HTTP_CONNECTIONS));
     loop {
-        let connection_slot = connection_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| "runtime HTTP connection limiter closed".to_string())?;
         let (stream, _) = listener
             .accept()
             .await
@@ -1204,7 +1194,6 @@ async fn accept_http_connections(
             if let Err(error) = builder.serve_connection(io, service).await {
                 eprintln!("runtime HTTP connection failed: {error}");
             }
-            drop(connection_slot);
         });
     }
 }

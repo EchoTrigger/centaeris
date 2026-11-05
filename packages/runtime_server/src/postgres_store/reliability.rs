@@ -91,17 +91,16 @@ fn next_runtime_job(
     client: &mut Client,
     job_kinds: &[String],
 ) -> Result<(i64, Option<i64>), String> {
-    let limits = crate::execution_capacity::ExecutionCapacity::from_env()?;
     let due = super::capacity_wait::DUE_AT;
     let row = client
         .query_one(
-            &format!("{} SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,MIN(GREATEST({due},COALESCE(j.lease_reclaim_not_before_ms,{due})))
+            &format!("SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,MIN(GREATEST({due},COALESCE(j.lease_reclaim_not_before_ms,{due})))
                 FROM runtime_jobs j LEFT JOIN execution_job_tenants t ON t.job_id=j.job_id
                 WHERE j.status='queued' AND j.job_kind=ANY($1)
                 AND (j.job_kind<>'agent_run.lifecycle' OR
-                    (t.job_id IS NOT NULL AND (SELECT COUNT(*) FROM active)<$2 AND NOT({})))",
-                super::execution_capacity::ACTIVE_EXECUTIONS, super::lifecycle_control::PENDING),
-            &[&job_kinds, &(limits.global as i64)],
+                    (t.job_id IS NOT NULL AND NOT({})))",
+                super::lifecycle_control::PENDING),
+            &[&job_kinds],
         )
         .map_err(|error| format!("query next Postgres runtime job failed: {error}"))?;
     Ok((row.get(0), row.get(1)))

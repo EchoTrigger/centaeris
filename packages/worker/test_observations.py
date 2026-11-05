@@ -55,10 +55,10 @@ class ObservationTests(unittest.TestCase):
         stopped = Mock()
         stopped.is_set.side_effect = [False, True]
         with patch.object(observations, "ENABLED", False), patch("sys.stderr", new_callable=io.StringIO) as output, \
-                patch.object(worker, "execute_next_job", side_effect=error):
-            worker._run_job_loop(2, stopped)
+                patch.object(worker, "claim_next_job", side_effect=error):
+            worker.run_job_dispatcher(stopped)
         event = json.loads(output.getvalue())
-        self.assertEqual((event["event"], event["slotIndex"]), ("slotFailed", 2))
+        self.assertEqual(event["event"], "dispatchFailed")
         self.assertEqual((event["route"], event["httpStatus"], event["errorCode"]),
             ("/internal/jobs/claim", 503, "execution_claim_busy"))
         self.assertNotIn("private", output.getvalue())

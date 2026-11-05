@@ -44,9 +44,7 @@ fn schedule_run(
     id
 }
 
-fn cancellation_at_capacity(multiple_workspaces: bool) {
-    let limits = crate::execution_capacity::ExecutionCapacity::from_env().unwrap();
-    assert_eq!(limits.global, 8);
+fn cancellation_with_active_runs(multiple_workspaces: bool) {
     let url = test_url();
     reset_store(&url);
     let store = PostgresRuntimeStore::new(&url).unwrap();
@@ -64,7 +62,7 @@ fn cancellation_at_capacity(multiple_workspaces: bool) {
         )
         .unwrap()
         .get(0);
-    let count = limits.global;
+    let count = 8;
     let mut blockers = Vec::new();
     for index in 0..count {
         let workspace = if !multiple_workspaces || index % 2 == 0 {
@@ -83,14 +81,13 @@ fn cancellation_at_capacity(multiple_workspaces: bool) {
             .unwrap();
         blockers.push((id, lease.lease_owner));
     }
-    // Both a single Workspace and multiple Workspaces share the global cap.
+    // Cancellation stays separate from ordinary claims while other Runs are active.
     let workspace = if multiple_workspaces {
         "workspace-c"
     } else {
         "workspace-a"
     };
     let target = schedule_run(&store, &mut db, "cancel-target", workspace);
-    assert!(claim(&store, &target, now).is_empty());
     assert!(store
         .request_agent_run_cancellation("cancel-target", "session-cancel-target", "digest", now)
         .unwrap());
@@ -108,7 +105,7 @@ fn cancellation_at_capacity(multiple_workspaces: bool) {
         .unwrap();
     assert!(
         !ready.ready,
-        "ordinary readiness remains capacity constrained"
+        "cancellation keeps this Run out of ordinary execution"
     );
     assert!(claim(&store, &target, now).is_empty());
     let (status, body) = crate::runtime_http_tests::stored_request(
@@ -194,16 +191,16 @@ fn cancellation_at_capacity(multiple_workspaces: bool) {
 
 #[test]
 #[ignore = "requires owned disposable PostgreSQL and default execution limits"]
-fn postgres_queued_cancellation_is_claimable_when_one_workspace_fills_global_execution_capacity() {
+fn postgres_queued_cancellation_is_claimable_with_active_runs_in_one_workspace() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    cancellation_at_capacity(false);
+    cancellation_with_active_runs(false);
 }
 
 #[test]
 #[ignore = "requires owned disposable PostgreSQL and default execution limits"]
-fn postgres_queued_cancellation_is_claimable_when_global_execution_capacity_is_full() {
+fn postgres_queued_cancellation_is_claimable_with_active_runs_across_workspaces() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    cancellation_at_capacity(true);
+    cancellation_with_active_runs(true);
 }
 
 #[test]
@@ -790,7 +787,7 @@ fn postgres_control_cancellation_completes_without_taking_foreign_environment() 
 
 #[test]
 #[ignore = "requires owned disposable PostgreSQL"]
-fn postgres_control_leases_require_intent_bound_capacity_and_survive_reclaim_exhaustion() {
+fn postgres_control_leases_require_intent_and_survive_reclaim_exhaustion() {
     use super::retained_instance_tests as fixture;
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_url, store, mut db) = fixture::setup();
@@ -849,10 +846,15 @@ fn postgres_control_leases_require_intent_bound_capacity_and_survive_reclaim_exh
     assert!(store.control_ready("advance").unwrap());
     let short = claim("advance");
     assert_eq!(short.len(), 2);
+    assert!(store.control_ready("advance").unwrap());
+    assert_eq!(claim("advance").len(), 1);
     assert!(!store.control_ready("advance").unwrap());
     assert!(claim("advance").is_empty());
     assert!(store.control_ready("cleanup").unwrap());
     assert_eq!(claim("cleanup").len(), 2);
+    assert!(store.control_ready("cleanup").unwrap());
+    assert_eq!(claim("cleanup").len(), 1);
+    assert!(!store.control_ready("cleanup").unwrap());
     assert!(db.execute("UPDATE runtime.runtime_jobs SET lease_purpose='execute',lease_control_stage=NULL WHERE job_id=$1",&[&short[0].job_id]).is_err(),"an active lease cannot change its purpose");
     let owner = short[0].lease_owner.as_ref().unwrap();
     assert!(store

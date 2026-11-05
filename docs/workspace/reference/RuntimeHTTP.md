@@ -19,7 +19,7 @@ An `/internal` prefix alone does not identify which service owns an endpoint.
 | AgentRun HTTP operations | [agent_runs.rs](../../../packages/runtime_server/src/http/agent_runs.rs) |
 | Catalog, package inspection and host-input HTTP operations | [catalogs.rs](../../../packages/runtime_server/src/http/catalogs.rs) |
 | HTTP transport characterization | [runtime_http_tests.rs](../../../packages/runtime_server/src/runtime_http_tests.rs) |
-| Request capacity and deadlines | [request_capacity.rs](../../../packages/runtime_server/src/request_capacity.rs) |
+| Request lifetimes and deadlines | [request_policy.rs](../../../packages/runtime_server/src/request_policy.rs) |
 | Job and outbox operations, wire types and validation | [job_protocol.rs](../../../packages/runtime_server/src/job_protocol.rs) |
 | Transcript reads and projection checks | [transcript_protocol.rs](../../../packages/runtime_server/src/transcript_protocol.rs) and [wire.rs](../../../packages/runtime_server/src/transcript_protocol/wire.rs) |
 | AgentRun request types and signed-start validation | [contract.rs](../../../packages/runtime_server/src/contract.rs) and [agent_run_authorization.rs](../../../packages/runtime_server/src/agent_run_authorization.rs) |
@@ -66,7 +66,7 @@ the worker kinds accepted by these operations.
 | Method | Path | Responsibility | Success |
 | --- | --- | --- | --- |
 | POST | `/internal/jobs/schedule` | Schedule or replay an allowed worker job with its durable identity, payload reference and applicable tenant binding | 200 |
-| POST | `/internal/jobs/claim` | Claim due allowed worker jobs under leases and shared execution capacity | 200 |
+| POST | `/internal/jobs/claim` | Claim due allowed worker jobs under exclusive Job row leases | 200 |
 | POST | `/internal/jobs/wait` | Wait for eligible worker jobs or the bounded wait deadline; return readiness and the next due time | 200 |
 | POST | `/internal/jobs/start` | Start a claimed job under its lease owner | 200 |
 | POST | `/internal/jobs/heartbeat` | Renew a job lease under its owner | 200 |
@@ -128,30 +128,26 @@ The host-input request uses `HostEventInputRequest` in `contract.rs`.
 
 ### Admission, deadlines and connection ownership
 
-Capacity is per Runtime process. Deployment inputs and defaults remain owned by
+Request lifetimes are per operation. Deployment inputs and defaults remain owned by
 [Configuration.md](Configuration.md); the route distinctions are:
 
-| Requests | Capacity lane | Handler response deadline |
+| Requests | Request class | Handler response deadline |
 | --- | --- | --- |
-| POST cancel, POST heartbeat, every GET path beginning `/internal/jobs/` | Reserved control | Configured control deadline; permit acquisition uses the same absolute deadline |
-| POST `/internal/jobs/wait` | Separate listener | 25 seconds; the validated job wait itself is at most 20 seconds |
+| POST cancel, POST heartbeat, every GET path beginning `/internal/jobs/` | Control | Configured control deadline |
+| POST `/internal/jobs/wait` | Listener | 25 seconds; the validated job wait itself is at most 20 seconds |
 | POST `/agent-runs/step` | Ordinary | No short handler deadline; execution uses its lease and cancellation protocol |
 | Other requests, including unknown paths | Ordinary | Configured ordinary deadline |
 
-Ordinary and listener requests acquire permits without waiting; saturation
-returns 503 `runtime_busy`. Control requests may wait within their deadline.
-The handler deadline begins before permit acquisition and body reading, not
-when the business function starts. Body reading additionally has a 30-second
-timeout and a 1 MiB limit, including for GET and unknown routes.
+Runtime HTTP requests have no application concurrency quota. The handler deadline
+begins before body reading, not after it. Short requests retain their body and
+response deadlines; long execution and teardown retain the lease/cancellation
+lifetime. Request-body and header-size limits remain part of input validation.
 
-The blocking closure owns the request permit, observation lifetime and
-PostgreSQL request deadline. An HTTP timeout or dropped connection does not
-cancel already-started blocking work, refund its capacity, or prove rollback.
-Control requests also use `execution_control_view()` so the reserved database
-path extends through cancellation preflight reads. A blanket Tower timeout or
-concurrency layer does not replace these ownership rules.
+The blocking closure owns its observation lifetime and database request context
+until it exits. A response timeout or client disconnect does not cancel accepted
+blocking work or prove that an uncertain write rolled back.
 
-The custom Hyper connection loop bounds connections at 128, limits headers to
+The custom Hyper connection loop admits connections independently and limits headers to
 64 and the header buffer to 64 KiB, applies a 10-second header-read timeout and
 a 30-second stalled-write timeout, and disables keep-alive. Preserve these
 controls alongside explicit axum routes; changing the serving helper is
@@ -159,7 +155,7 @@ a separate transport change.
 
 ### Request rejection and authentication order
 
-- Routing preserves complete-target rejection, while capacity and observation
+- Routing preserves complete-target rejection, while deadlines and observation
   labels use `uri().path()`. Adding a query string to an otherwise supported
   fixed path prevents dispatch. A job GET query becomes part of its suffix and
   fails identity validation. axum normally matches only the path; do not
@@ -225,7 +221,7 @@ cleanup; provider quota admission belongs to the model gateway.
 | Owned method/path/header copies | axum `Request<Bytes>` and `HeaderMap` | Implemented: retain native request parts and the bounded body; validate headers without cloning names and values into another map |
 | Custom response structure and conversion | axum `Response` and `IntoResponse` | Implemented: construct the framework response once with the existing headers; error JSON uses the infallible serialization of an already constructed `serde_json::Value` |
 | Repeated internal-token checks | Shared admission boundary | Implemented: one token comparison retains prefix coverage, rejection order and current configuration-error distinctions |
-| Repeated lane predicates and observation lane selection | Route-local policy plus the existing admission function | Give supported routes their lane policy once; keep unknown-route admission and actual blocking-task permit ownership explicit |
+| Repeated lane predicates and observation lane selection | Route-local policy plus the existing admission function | Give supported routes their lane policy once; keep unknown-route policy and actual blocking-task ownership explicit |
 | Hand-maintained route labels | axum `MatchedPath`, if equivalent | Reuse only when mapped to the existing bounded labels and tested observation contract; no observability redesign is required for routing cleanup |
 
 Catalogs, transcript reads, jobs/outbox and AgentRun lifecycle operations share
@@ -257,7 +253,7 @@ The Router characterization reads all 29 method/path entries from this document
 and exercises the production Router with configured, missing and empty server
 tokens in isolated processes. It covers method/query/fallback rejection and
 prohibits database checkout for rejected requests. A controllably blocked
-operation verifies that timeout and disconnect retain capacity until completion.
+operation verifies that timeout and disconnect preserve already-started operations until completion.
 These tests ran green before and after replacing dispatch. PostgreSQL outbox
 and transcript HTTP fixtures also use the production Router;
 their durable effects still require the dedicated PostgreSQL gate. Router
@@ -277,7 +273,7 @@ Before a transport refactor, add the smallest missing observable coverage:
 3. Saturated execution and listener work while cancellation/heartbeat/job reads
    remain available through their reserved HTTP and database paths. With a
    controllably blocked operation, prove timeout and disconnect retain its
-   capacity until the operation actually exits and do not assert rollback.
+   operation ownership until it actually exits and do not assert rollback.
 4. Existing real store/provider tests for signed Run binding, lease reclaim,
    equivalent replay, terminal teardown, supplement admission, projection
    invalidation and outbox/waiter recovery. Do not replace durable-effect tests

@@ -233,7 +233,7 @@ impl PostgresRuntimeStore {
                     limits.connect_timeout,
                     "centaeris-runtime-cleanup",
                 )?,
-                crate::request_capacity::capacity("RUNTIME_POSTGRES_CLEANUP_POOL_SIZE", 2)?,
+                crate::request_policy::capacity("RUNTIME_POSTGRES_CLEANUP_POOL_SIZE", 2)?,
                 limits.checkout_timeout,
             )),
             listener_connections: Arc::new(PostgresConnectionPool::new(

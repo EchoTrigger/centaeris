@@ -115,27 +115,20 @@ resubmitting the same command identity after an uncertain response.
 
 ## Worker concurrency
 
-`WORKER_SLOT_COUNT` sets concurrent jobs per worker process. It defaults to `8`
-and accepts integers from `1` through `16`; invalid values fail at startup.
-Compose forwards the setting from the deployment environment. Recreate the
-worker container after changing it.
+Worker dispatches each claimed Job independently. Runtime Job leases establish
+ownership and fencing, not a fixed concurrency quota. Advance and cleanup have
+independent dispatchers so long model calls do not occupy their execution threads.
+Terminal publication and reconciliation remain separate control loops.
 
-Slots are shared by lifecycle, knowledge-processing, and no-op jobs. This is
-neither a per-tenant quota nor a fairness guarantee. Replicas multiply the total
-slot budget; terminal dispatch and reconciliation remain separate control loops.
-Size concurrency against sandbox memory, host CPU, and database capacity. The
-configuration ceiling is not a claim that a host can sustain sixteen jobs.
+Model request concurrency and rate limits belong to the configured upstream
+gateway or provider. Docker environments retain their explicit CPU, memory and
+workspace budgets and the host's physical resource admission.
 
-The example deployment sets each execution sandbox's resource ceilings to
-2 CPU cores (`SANDBOX_CPU_MILLI=2000`) and 4 GiB of memory
-(`SANDBOX_MEMORY_BYTES=4294967296`). These are per-environment hard limits.
-Resident admission has its own resource policy; changing the example does not
-resize an existing environment or replace a private deployment setting.
-
-For capacity comparisons, hold the revision, workload, replica count, and
-historical-data baseline fixed while varying slots. Compare completed throughput,
-queue age/depth, failures, and host/database resources; fast submission alone
-does not establish sustainable capacity.
+The example deployment gives each environment 2 CPU cores and 4 GiB of memory.
+Existing signed environment profiles retain their original resource declarations.
+For comparisons, hold the source revision, workload, replica count, physical
+resource budgets and historical-data baseline fixed. Measure completion,
+waiting, failures and host/database resource use together.
 
 ## Durable and live truth
 
