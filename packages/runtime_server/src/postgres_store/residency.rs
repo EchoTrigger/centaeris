@@ -50,8 +50,9 @@ impl Drop for ResidentHostLock<'_> {
     }
 }
 
-/// One environment's complete physical preparation, across committed SQL phases.
-/// This session gate is acquired before global admission and never waits for it.
+/// One environment's physical operation, across committed SQL phases.
+/// New Run preparation tries global admission without waiting; cleanup waits
+/// for its inventory turn after releasing its preflight authority pins.
 pub(super) struct EnvironmentPreparationLock<'a> {
     pub(super) client: &'a mut Client,
     environment_id: String,
@@ -137,6 +138,22 @@ fn lock_host<'a>(client: &'a mut Client, host_id: &str) -> Result<ResidentHostLo
     if !try_lock_host(client)? {
         return Err(RESIDENT_CAPACITY_WAIT.into());
     }
+    Ok(ResidentHostLock(
+        client,
+        host_id.into(),
+        Some(crate::observations::Span::new("globalHold")),
+    ))
+}
+
+// Cleanup must take its turn behind the current inventory owner. A try-lock
+// would yield and compete with newly awakened preparations on every retry.
+fn lock_host_for_cleanup<'a>(
+    client: &'a mut Client,
+    host_id: &str,
+) -> Result<ResidentHostLock<'a>, String> {
+    client
+        .query_one("SELECT pg_advisory_lock(731946,3)", &[])
+        .map_err(|error| format!("cleanup host inventory lock failed: {error}"))?;
     Ok(ResidentHostLock(
         client,
         host_id.into(),
@@ -286,7 +303,7 @@ pub(super) fn with_environment_inventory<T>(
     inventory: impl ResidentInventorySource<Vec<ObservedResidentSandbox>>,
     operation: impl FnOnce(&mut Client, &[ObservedResidentSandbox]) -> Result<T, String>,
 ) -> Result<T, String> {
-    let lock = lock_host(environment.client, &environment.host_id)?;
+    let lock = lock_host_for_cleanup(environment.client, &environment.host_id)?;
     environment.acquired_global = true;
     let snapshot = ResidentInventorySnapshot::freeze(
         lock.0,
