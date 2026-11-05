@@ -2,7 +2,7 @@
   "postgres_store::integration_tests::resource_lifecycle_tests::postgres_queued_cancellation_is_claimable_with_active_runs_in_one_workspace",
   "postgres_store::integration_tests::resource_lifecycle_tests::postgres_queued_cancellation_is_claimable_with_active_runs_across_workspaces",
   "postgres_store::integration_tests::resource_lifecycle_tests::postgres_control_cancellation_completes_without_taking_foreign_environment",
-  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_control_leases_require_intent_bound_capacity_and_survive_reclaim_exhaustion",
+  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_control_leases_require_intent_and_survive_reclaim_exhaustion",
   "postgres_store::integration_tests::resource_lifecycle_tests::postgres_control_lease_forward_migration_preserves_active_execution_authority",
   "postgres_store::integration_tests::resource_lifecycle_tests::postgres_failed_before_create_releases_the_committed_reservation",
   "postgres_store::integration_tests::resource_lifecycle_tests::postgres_reused_resident_preparation_failure_keeps_original_allocation",
