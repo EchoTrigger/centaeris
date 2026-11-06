@@ -68,3 +68,41 @@ empty, remain masked, and are discarded when switching workspaces. Saving a
 replacement requires a newly supplied key. Secret decryption remains
 inside the existing authorized execution/connector path, separate from resource
 management. Audit records describe the action without secret values.
+
+## Upgrade from shared platform configuration
+
+Migration `0046_workspace_owned_resources` preserves provider/model rows for
+historical references, disables the shared models and providers, revokes one-shot
+credentials bound to those models, and deletes shared provider and MCP secrets.
+Workspace-local configuration and credentials remain scoped to their workspace.
+Preserving a historical identity does not preserve permission to execute with a
+retired secret. Configure replacement workspace credentials explicitly.
+
+Existing workspace plugin enablements without a workspace installation are
+converted to installation metadata from `PLUGIN_CATALOG_ROOT`. Existing
+installations are kept. This migration does not copy the legacy package bytes
+into content-addressed storage: legacy directories must remain mounted and
+unchanged while historical snapshots resolve through them. Do not remove the old
+plugin volume merely because the installation metadata has moved.
+
+Before upgrading, preserve a database backup and the matching plugin storage,
+check that every existing enabled plugin is present in the mounted legacy
+catalog, and arrange replacement workspace model and connector credentials.
+Missing package data aborts conversion; it must not be repaired by substituting
+an unrelated package with the same name.
+
+The migration is explicitly irreversible. Deleted secrets cannot be recovered by
+a reverse migration. Rolling deployment code back alone does not restore the
+previous platform configuration; recovery requires a coordinated restoration of
+the pre-upgrade database and matching storage. Settle in-flight external work
+before a planned credential retirement, since the retired key cannot query or
+cancel its former one-shot operations. Emergency revocation still takes priority.
+
+The release gate must use a database at migration `0045` with a historical Run,
+legacy plugin binding and both shared and workspace-local credentials, migrate
+forward, then exercise authorized history reads, current selection and secret
+isolation. Directly invoking the migration function on today's model registry
+does not establish historical-state migration compatibility.
+See [one-shot upgrade acceptance](../eval/OneShotUpgradeAcceptance.md) for the
+historical PostgreSQL fixture, executable commands, and the separately recorded
+completed and pending checks.

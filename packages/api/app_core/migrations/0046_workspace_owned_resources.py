@@ -57,4 +57,4 @@ def retire_platform_configuration(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [("app_core", "0045_one_shot_cleanup")]
-    operations = [migrations.RunPython(retire_platform_configuration, migrations.RunPython.noop)]
+    operations = [migrations.RunPython(retire_platform_configuration)]

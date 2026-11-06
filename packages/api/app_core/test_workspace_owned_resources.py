@@ -5,7 +5,9 @@ from unittest.mock import patch
 from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.db import connection
-from django.test import TestCase
+from django.db.migrations.exceptions import IrreversibleError
+from django.db.migrations.state import ProjectState
+from django.test import SimpleTestCase, TestCase
 
 from .models import (
     McpBearerCredential,
@@ -18,6 +20,19 @@ from .models import (
     WorkspacePluginInstallation,
 )
 from .workspace_resources import models_for_workspace
+
+
+class WorkspaceResourceRetirementMigrationTests(SimpleTestCase):
+    def test_retirement_refuses_rollback_before_database_access(self):
+        migration = import_module(
+            "app_core.migrations.0046_workspace_owned_resources"
+        ).Migration("0046_workspace_owned_resources", "app_core")
+        schema_editor = SimpleNamespace(
+            atomic_migration=True,
+            connection=SimpleNamespace(alias="default"),
+        )
+        with self.assertRaises(IrreversibleError):
+            migration.unapply(ProjectState(), schema_editor)
 
 
 class WorkspaceOwnedResourceTests(TestCase):
