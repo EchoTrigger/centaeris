@@ -860,6 +860,7 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .developerSettings :is(.primary, .secondary) { min-height: 34px; border-radius: 7px; padding: 5px 12px; font-size: 12px; }
 .developerCopy { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .developerCopy > span { color: var(--process-text); font-size: 12px; }
+.themeConfirmDialog.developerCredentialConfirm { border: 0; }
 .developerEndpoint { display: flex; align-items: baseline; gap: 10px; padding: 12px; border-radius: 7px; background: var(--surface-color); overflow-wrap: anywhere; }
 .developerMethod { color: var(--primary-color); font-weight: 700; }
 .developerArticle pre, .developerSection pre { margin: 0; padding: 13px; border-radius: 7px; overflow-x: auto; background: var(--surface-variant); line-height: 1.6; }

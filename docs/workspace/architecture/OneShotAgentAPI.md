@@ -33,7 +33,7 @@ environment does not require temporary, unrecoverable business results.
 
 | Stage | Required behavior |
 | --- | --- |
-| Create a credential | Ask for a name and available Workspace model. Plugins and materials default to empty scopes. Display the new secret at creation and let the caller copy it from the list until leaving the console. |
+| Create a credential | Ask for a name and available Workspace model. Plugins and materials default to empty scopes. Display the new secret at creation and let its issuer copy it again from the list. |
 | Submit a task | Provide one runnable backend example. Save endpoint, credential reference/fingerprint, operation ID, and exact request body before sending. Require no optional material or plugin setup. |
 | Receive results | Save the receipt and Run ID immediately. Persist text as received; publish files only after integrity checks. Confirm both Run and delivery outcomes. |
 | Handle uncertainty | Query the original operation using the same credential. If deliberately resubmitting, preserve the original ID and body. Never manufacture a new identity merely because a response was lost. |
@@ -51,10 +51,9 @@ The prepared correction adds that early return in
 Selected nonempty scopes still undergo the existing current-availability checks;
 this review does not claim to eliminate all catalog coupling for selected plugins.
 
-Credential creation has its own uncertain-response case. Listing credentials
-can establish that creation happened, but cannot recover a lost secret. Revoke
-the unusable credential before creating a replacement. A credential display
-name is a label, not an idempotency identity.
+If credential creation times out, the issuer can check the list and copy the
+secret from the resulting row. A credential display name can be shared by
+multiple credentials.
 
 The local console, guide, generated-reference, and sample-client corrections
 preserve the HTTP wire contract. The sample now distinguishes a receipt from

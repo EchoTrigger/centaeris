@@ -1456,12 +1456,12 @@ class OneShotCredential(models.Model):
     pluginNames = models.JSONField(default=list)
     sourceObjectRefs = models.JSONField(default=list)
     secretDigest = models.CharField(max_length=64)
-    revokedAt = models.DateTimeField(null=True, blank=True)
+    encryptedSecret = models.TextField(blank=True, default="")
     createdAt = models.DateTimeField(auto_now_add=True)
 
 
 class OneShotOperation(models.Model):
-    credential = models.ForeignKey(OneShotCredential, on_delete=models.PROTECT)
+    credential = models.ForeignKey(OneShotCredential, on_delete=models.SET_NULL, null=True)
     operationId = models.CharField(max_length=128)
     requestDigest = models.CharField(max_length=64)
     # Keep acceptance independent of temporary execution records and their erasure.

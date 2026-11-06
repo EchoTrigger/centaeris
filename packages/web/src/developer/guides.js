@@ -2,7 +2,7 @@ export const developerGuides = {
   en: {
     quickstart: `
 1. In **Settings → Developer → Console**, enter a credential name and choose a model. Plugins and materials are optional; leave them empty for this first call.
-2. Save the Workspace API credential in your secret store and set \`CENTAERIS_RUN_KEY\` in the environment where you run the example. You can copy it from the credential list until you leave the console.
+2. Save the Workspace API credential in your secret store and set \`CENTAERIS_RUN_KEY\` in the environment where you run the example. The issuer can copy it again after refreshing or reopening the console.
 3. Choose **cURL** to run in Bash with curl and Python 3 installed, or **Node.js** to save the example as an \`.mjs\` file and run it with Node.js 22 or later. Both save the operation ID, request body, endpoint, credential fingerprint, response headers and raw response in \`./centaeris-first-call\`. The status example uses the fingerprint to detect a changed credential before making a request.
 
 The example refuses to reuse an existing directory, so copying it again cannot accidentally start another run. Keep the directory after a timeout and use the status example below. Choose a different directory only for an intentional new call.
@@ -28,15 +28,15 @@ Set the \`Authorization: Bearer <secret>\` header on submit, status and cancel r
 
 ### Choose the scope when issuing a credential
 
-Only active Workspace owners and administrators can create, list and revoke credentials. Each credential binds to its issuer's membership, one Workspace, and one enabled model configuration. The API returns the secret at creation. The console can copy it again from the list while it stays open.
+Only active Workspace owners and administrators can create, list and delete credentials. Each credential binds to its issuer's membership, one Workspace, and one enabled model configuration. The issuer can copy the secret again from the list. Credentials created before copy was supported can still be used with their original secret.
 
-If credential creation times out, refresh the list to reconcile whether it was created. Refreshing cannot reveal the secret. Revoke an unusable credential whose secret was lost, then create a replacement.
+If credential creation times out, refresh the list to check whether it was created, then copy it from the row.
 
 Choose the plugins and Workspace material files the caller needs. A run can use only the selected plugins while they remain available. To attach material, include its ID in \`sourceObjectRefs\`, sorted and without duplicates. The material must remain ready and readable by the issuer. An empty scope grants no plugins or material. Personal-library access is disabled.
 
-Revoking the credential, losing the issuing membership or admin role, or losing access to its model invalidates the credential. The service stops delivery and requests cancellation of active runs when it detects lost credential authority. To change scope, issue a new credential and revoke the old one.
+Deleting the credential, losing the issuing membership or admin role, or losing access to its model invalidates the credential. The service stops delivery and requests cancellation of active runs when it detects lost credential authority. To change scope, issue a new credential and delete the old one.
 
-Invalidation also blocks status and cancel requests. A replacement credential cannot query or cancel operations owned by the old credential, even in the same Workspace. For routine rotation, settle and save the old credential's results first. Revoke a compromised credential immediately; revocation does not undo side effects already sent to external services.
+Invalidation also blocks status and cancel requests. A replacement credential cannot query or cancel operations owned by the old credential, even in the same Workspace. For routine rotation, settle and save the old credential's results first. Delete a compromised credential immediately. Effects already sent to external services still apply.
 `,
     lifecycle: `
 ### One request starts one run
@@ -111,7 +111,7 @@ Submission exits \`0\` only for complete successful delivery, \`2\` for a receip
 | --- | --- |
 | \`400\` invalid request | Check the JSON, exact field names, prompt, material IDs and operation ID format. For \`authentication_mixed\`, remove the Workspace login cookie and use the Bearer credential. |
 | \`401\` invalid or missing credential | Check the Bearer header and use a valid Workspace API credential. |
-| \`403\` credential authority lost | Ask a Workspace owner or administrator to verify the issuer's role, model access and revocation state. Treat an earlier timed-out request as uncertain. |
+| \`403\` credential authority lost | Ask a Workspace owner or administrator to verify the issuer's role and model access. Treat an earlier timed-out request as uncertain. |
 | \`404\` source, operation or run unavailable | Check the scope and identifiers. After a timed-out submit, status lookup may precede acceptance. If retrying, use the original credential, key and input. |
 | \`409 operation_conflict\` | Check the original operation. Use a fresh key only for a deliberately different run. |
 | \`410 operation_expired\` | The key can no longer submit or recover the operation. Verify external side effects before deciding whether to start a new run. |
@@ -135,7 +135,7 @@ Example of a request rejected because its operation ID is invalid.
   "zh-CN": {
     quickstart: `
 1. 在 **设置 → 开发者 → 控制台** 中填写凭证名称并选择模型。插件和资料都是可选项，首次调用可以留空。
-2. 保存 Workspace API 凭证，在运行示例的环境中设置 \`CENTAERIS_RUN_KEY\`。离开控制台前，可从凭证列表再次复制。
+2. 保存 Workspace API 凭证，在运行示例的环境中设置 \`CENTAERIS_RUN_KEY\`。签发人刷新或重新打开页面后仍可从列表复制密钥。
 3. 选择 **cURL** 时，在装有 curl 和 Python 3 的 Bash 中运行。选择 **Node.js** 时，将示例保存为 \`.mjs\` 文件，用 Node.js 22 或更高版本运行。两种示例都会把操作 ID、请求正文、地址、凭证指纹、响应头和原始响应保存到 \`./centaeris-first-call\`。如果凭证发生变化，查询示例会在发出请求前提示使用原凭证。
 
 示例拒绝使用已存在的目录，避免重复复制整段命令时误建另一个运行。超时后保留目录，使用下方的查询示例。只有明确要发起新调用时，才换一个目录名。
@@ -161,15 +161,15 @@ Example of a request rejected because its operation ID is invalid.
 
 ### 签发时确定授权范围
 
-只有当前 Workspace 的所有者和管理员可以创建、列出和撤销凭证。每个凭证绑定签发人的成员身份、一个 Workspace 和一项已启用的模型配置。API 在创建时返回密钥。控制台保持打开时，可从凭证列表再次复制。
+只有当前 Workspace 的所有者和管理员可以创建、列出和删除凭证。每个凭证绑定签发人的成员身份、一个 Workspace 和一项已启用的模型配置。签发人可从凭证列表再次复制密钥。功能上线前签发的凭证仍可使用原密钥调用。
 
-创建凭证超时后，先刷新列表核对是否已创建。刷新无法再次显示密钥；如果某个凭证已经创建但密钥丢失，应撤销这条无法使用的凭证，再创建新凭证。
+创建凭证超时后，刷新列表核对是否已创建，再从对应行复制密钥。
 
 只选择调用方需要的插件和 Workspace 资料文件。运行只能使用已选且仍可用的插件。要附带资料，将文件 ID 按升序排列并去重后填入 \`sourceObjectRefs\`。资料必须处于就绪状态，且签发人仍有读取权限。空范围不授予插件或资料权限。一次性运行关闭个人资料库访问。
 
-撤销凭证、签发人失去成员身份或管理角色，或凭证绑定的模型变得不可用时，凭证会失效。服务发现凭证权限失效后会结束交付，并请求取消仍在执行的运行。要变更授权范围，可以签发新凭证并撤销旧凭证。
+删除凭证、签发人失去成员身份或管理角色，或凭证绑定的模型变得不可用时，凭证会失效。服务发现凭证权限失效后会结束交付，并请求取消仍在执行的运行。要变更授权范围，可以签发新凭证并删除旧凭证。
 
-失效后，状态查询和取消接口同样拒绝该凭证。即使属于同一个 Workspace，新凭证也不能查询或取消旧凭证名下的操作。常规轮换应先等旧运行结束并保存结果；凭证泄露时应立即撤销。撤销不会回滚已经发送到外部服务的副作用。
+失效后，状态查询和取消接口同样拒绝该凭证。即使属于同一个 Workspace，新凭证也不能查询或取消旧凭证名下的操作。常规轮换应先等旧运行结束并保存结果；凭证泄露时应立即删除。已经发送到外部服务的操作仍然生效。
 `,
     lifecycle: `
 ### 一次请求启动一次运行
@@ -244,7 +244,7 @@ python3 scripts/workspace/one_shot_client.py \\
 | --- | --- |
 | \`400\` 请求无效 | 检查 JSON、字段名、提示词、资料 ID 和操作 ID 格式。收到 \`authentication_mixed\` 时，去掉 Workspace 登录 Cookie，使用 Bearer 凭证。 |
 | \`401\` 凭证缺失或无效 | 检查 Bearer 请求头并使用有效的 Workspace API 凭证。 |
-| \`403\` 凭证授权已失效 | 请 Workspace 所有者或管理员核对签发人角色、模型权限和凭证撤销状态。此前超时请求的接受结果仍需核实。 |
+| \`403\` 凭证授权已失效 | 请 Workspace 所有者或管理员核对签发人角色、模型权限。此前超时请求的接受结果仍需核实。 |
 | \`404\` 资料、操作或运行不可用 | 检查授权范围和 ID。提交超时后的查询可能早于服务接受请求。如需重试，沿用原凭证、原键和原输入。 |
 | \`409 operation_conflict\` | 核对原操作。只有确定要启动另一个运行时才生成新键。 |
 | \`410 operation_expired\` | 该键已无法用于提交或核对。决定是否启动新运行前，先确认外部副作用。 |

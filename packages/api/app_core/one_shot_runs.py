@@ -42,8 +42,8 @@ def _locked_credential(credential):
     membership = shared_submission_membership_for(credential.user, credential.workspace_id)
     current = OneShotCredential.objects.select_for_update(of=("self",)).select_related(
         "workspace", "user", "modelConfig",
-    ).get(pk=credential.pk)
-    if membership is None or not authority_is_current(current):
+    ).filter(pk=credential.pk).first()
+    if membership is None or current is None or not authority_is_current(current):
         raise HostedOperationError(403, "credential_revoked")
     return current
 

@@ -3,11 +3,12 @@ from django.conf import settings
 from django.db import transaction
 from django.http import JsonResponse
 from django.utils import timezone
-from ninja import Router
+from ninja import Router, Status
 from ninja.security import HttpBearer
 from pydantic import Field
 
 from app_core.app_delegations import DelegationRejected
+from app_core.credentials import CredentialDecryptionError, decrypt_credential_secret
 from app_core.hosted_operations import HostedOperationError
 from app_core.material_contract import KnowledgeError
 from app_core.models import AgentRun, OneShotCredential, OneShotOperation
@@ -57,7 +58,7 @@ class CredentialResponse(StrictSchema):
     plugin_names: list[str]
     source_object_refs: list[str]
     created_at: DateTimeText
-    revoked_at: DateTimeText | None
+    can_copy: bool
 
 
 class CredentialListResponse(StrictSchema):
@@ -69,6 +70,10 @@ class CredentialEnvelope(StrictSchema):
 
 
 class CreatedCredentialResponse(CredentialEnvelope):
+    secret: str
+
+
+class CredentialSecretResponse(StrictSchema):
     secret: str
 
 
@@ -102,7 +107,7 @@ def _json(value, status=200):
     return response
 
 
-def _credential_value(credential):
+def _credential_value(credential, user):
     return {
         "id": credential.pk,
         "name": credential.name,
@@ -111,7 +116,7 @@ def _credential_value(credential):
         "pluginNames": credential.pluginNames,
         "sourceObjectRefs": credential.sourceObjectRefs,
         "createdAt": credential.createdAt.isoformat(),
-        "revokedAt": credential.revokedAt.isoformat() if credential.revokedAt else None,
+        "canCopy": bool(credential.user_id == user.pk and credential.encryptedSecret),
     }
 
 
@@ -130,7 +135,7 @@ def list_api_credentials(request, workspace_id: str):
     with transaction.atomic():
         _admin(request.user, workspace_id)
         credentials = OneShotCredential.objects.filter(workspace_id=workspace_id).order_by("createdAt", "id")
-        return _json({"credentials": [_credential_value(item) for item in credentials]})
+        return _json({"credentials": [_credential_value(item, request.user) for item in credentials]})
 
 
 @router.post(
@@ -145,18 +150,38 @@ def create_api_credential(request, workspace_id: str, payload: CreateCredentialR
             source_object_refs=payload.source_object_refs,
             name=payload.name,
         )
-        return _json({"credential": _credential_value(credential), "secret": token}, 201)
+        return _json({"credential": _credential_value(credential, request.user), "secret": token}, 201)
     except CredentialRejected as error:
         return _json({"error": error.code}, error.status)
     except ValueError as error:
         return _json({"error": str(error)}, 400)
 
 
+@router.get(
+    "/workspaces/{workspace_id}/api-credentials/{credential_id}/secret", auth=session_auth,
+    response={200: CredentialSecretResponse} | COMMON_ERROR_RESPONSES,
+)
+def read_api_credential_secret(request, workspace_id: str, credential_id: str):
+    with transaction.atomic():
+        _admin(request.user, workspace_id)
+        credential = OneShotCredential.objects.select_for_update().filter(
+            pk=credential_id, workspace_id=workspace_id, user=request.user,
+        ).first()
+        if credential is None or not credential.encryptedSecret:
+            return _json({"error": "credential_secret_not_found"}, 404)
+        if not authority_is_current(credential):
+            return _json({"error": "api_credential_revoked"}, 403)
+        try:
+            return _json({"secret": decrypt_credential_secret(credential.encryptedSecret)})
+        except CredentialDecryptionError:
+            return _json({"error": "credential_secret_unavailable"}, 503)
+
+
 @router.delete(
     "/workspaces/{workspace_id}/api-credentials/{credential_id}", auth=session_auth,
-    response={200: CredentialEnvelope} | COMMON_ERROR_RESPONSES,
+    response={204: None} | COMMON_ERROR_RESPONSES,
 )
-def revoke_api_credential(request, workspace_id: str, credential_id: str):
+def delete_api_credential(request, workspace_id: str, credential_id: str):
     with transaction.atomic():
         _admin(request.user, workspace_id)
         credential = OneShotCredential.objects.select_for_update().filter(
@@ -164,11 +189,10 @@ def revoke_api_credential(request, workspace_id: str, credential_id: str):
         ).first()
         if credential is None:
             return _json({"error": "credential_not_found"}, 404)
-        if credential.revokedAt is None:
-            credential.revokedAt = timezone.now()
-            credential.save(update_fields=["revokedAt"])
-    # Reconciliation also observes revocation when a live control request is unavailable.
-    return _json({"credential": _credential_value(credential)})
+        OneShotOperation.objects.filter(credential=credential, cleanupStatus="completed").delete()
+        # Unfinished operations stay detached until the existing cancellation and cleanup reconcile.
+        credential.delete()
+    return Status(204, None)
 
 
 @router.post(

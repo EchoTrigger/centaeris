@@ -14,7 +14,7 @@ from django.test import Client, TransactionTestCase
 from django.utils import timezone
 
 from .http.one_shot import CreateRunRequest
-from .models import AgentRun, OneShotOperation, Session, Workspace, WorkspaceMembership, ModelConfig
+from .models import AgentRun, OneShotCredential, OneShotOperation, Session, Workspace, WorkspaceMembership, ModelConfig
 from .one_shot_credentials import create_credential
 from .one_shot_runs import accept_run
 from .one_shot_stream import operation_receipt
@@ -129,31 +129,54 @@ class OneShotApiTests(TransactionTestCase):
         self.client.force_login(self.user)
         self.assertEqual(self.post().status_code, 400)
 
-    def test_management_is_admin_scoped_and_secret_displayed_once(self):
+    def test_management_lists_metadata_and_only_the_issuer_can_copy(self):
         url = f"/api/workspaces/{self.workspace.pk}/api-credentials"
         self.client.force_login(self.user)
         response = self.client.post(url, json.dumps({"name": "Another", "modelConfigRef": self.model.pk}), content_type="application/json")
         self.assertEqual(response.status_code, 201, response.content)
         self.assertIn("secret", response.json())
         listed = self.client.get(url)
-        self.assertNotIn(response.json()["secret"], listed.content.decode())
+        created = response.json()
+        secret_url = f"{url}/{created['credential']['id']}/secret"
+        self.assertNotIn(created["secret"], listed.content.decode())
+        self.assertTrue(created["credential"]["canCopy"])
+        stored = OneShotCredential.objects.get(pk=created["credential"]["id"])
+        self.assertNotIn(created["secret"], stored.encryptedSecret)
+        copy = self.client.get(secret_url)
+        self.assertEqual(copy.json(), {"secret": created["secret"]})
+        self.assertEqual(copy.headers["Cache-Control"], "no-store")
+        OneShotCredential.objects.filter(pk=stored.pk).update(encryptedSecret="")
+        self.assertEqual(self.client.get(secret_url).status_code, 404)
+
+        other = User.objects.create_user(username="another-admin")
+        WorkspaceMembership.objects.create(workspace=self.workspace, user=other, role="admin")
+        self.client.force_login(other)
+        self.assertFalse(self.client.get(url).json()["credentials"][0]["canCopy"])
+        self.assertEqual(self.client.get(f"{url}/{self.credential.pk}/secret").status_code, 404)
+        self.client.force_login(self.user)
         member = WorkspaceMembership.objects.get(user=self.user, workspace=self.workspace)
         member.role = "member"
         member.save(update_fields=["role"])
         self.assertEqual(self.client.get(url).status_code, 403)
         self.assertEqual(self.client.post(url, json.dumps({"name": "No", "modelConfigRef": self.model.pk}), content_type="application/json").status_code, 403)
 
-    def test_cancel_and_revoke_use_original_run(self):
+    def test_delete_erases_credential_and_detaches_incomplete_cleanup(self):
         operation, run = accept_run(self.credential, self.operation_id, CreateRunRequest(**self.body))
         with patch("app_core.http.one_shot.request_agent_run_cancellation", return_value={"disposition": "requested", "terminalState": None}) as cancel:
             response = self.client.post(f"/api/v1/agent-runs/{run.pk}/cancel", data=b"", content_type="application/json", **self.auth)
         self.assertEqual(response.status_code, 202, response.content)
         self.assertEqual(cancel.call_args.args[0].pk, run.pk)
         self.client.force_login(self.user)
-        self.assertEqual(self.client.delete(f"/api/workspaces/{self.workspace.pk}/api-credentials/{self.credential.pk}").status_code, 200)
+        path = f"/api/workspaces/{self.workspace.pk}/api-credentials"
+        self.assertEqual(self.client.delete(f"{path}/{self.credential.pk}").status_code, 204)
+        self.assertEqual(self.client.get(path).json(), {"credentials": []})
+        self.assertEqual(self.client.get(f"{path}/{self.credential.pk}/secret").status_code, 404)
+        self.assertFalse(OneShotCredential.objects.filter(pk=self.credential.pk).exists())
+        operation.refresh_from_db()
+        self.assertIsNone(operation.credential_id)
         self.client.logout()
-        self.assertEqual(self.query().status_code, 403)
-        self.assertEqual(self.post().status_code, 403)
+        self.assertEqual(self.query().status_code, 401)
+        self.assertEqual(self.post().status_code, 401)
         self.assertEqual(AgentRun.objects.count(), 1)
 
     def test_concurrent_identity_accepts_one_run(self):

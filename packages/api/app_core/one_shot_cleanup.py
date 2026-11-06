@@ -225,5 +225,7 @@ def collect_one_shot_cleanup(dry_run=False, *, limit=64):
             report.failures.append(operation.agentRunId)
             logger.exception("One-shot cleanup failed", extra={"agentRunId": operation.agentRunId, "exceptionType": type(error).__name__})
     if not dry_run:
-        models.OneShotOperation.objects.filter(cleanupStatus="completed", expiresAt__lte=timezone.now()).delete()
+        models.OneShotOperation.objects.filter(cleanupStatus="completed").filter(
+            Q(credential__isnull=True) | Q(expiresAt__lte=timezone.now()),
+        ).delete()
     return report

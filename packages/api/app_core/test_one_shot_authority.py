@@ -107,7 +107,7 @@ class OneShotCredentialAuthorityTests(TransactionTestCase):
             expiresAt=now + timedelta(hours=24))
         return run
 
-    def test_secret_is_write_only_and_revocation_applies_to_current_runs(self):
+    def test_list_excludes_secrets_and_deletion_invalidates_current_runs(self):
         credential, token = self.credential()
         self.assertEqual(credential.secretDigest, hashlib.sha256(token.encode()).hexdigest())
         self.assertEqual(authenticate_credential(token).pk, credential.pk)
@@ -118,11 +118,11 @@ class OneShotCredentialAuthorityTests(TransactionTestCase):
         self.assertEqual(listed.status_code, 200, listed.content)
         self.assertNotIn(token, listed.content.decode())
         self.assertNotIn("secretDigest", listed.content.decode())
-        revoked = self.client.delete(f"/api/workspaces/{self.workspace.pk}/api-credentials/{credential.pk}")
-        self.assertEqual(revoked.status_code, 200, revoked.content)
+        deleted = self.client.delete(f"/api/workspaces/{self.workspace.pk}/api-credentials/{credential.pk}")
+        self.assertEqual(deleted.status_code, 204, deleted.content)
         self.assertFalse(authority_is_current(credential))
         self.assertFalse(agent_run_membership_is_current(run))
-        with self.assertRaisesRegex(CredentialRejected, "api_credential_revoked"):
+        with self.assertRaisesRegex(CredentialRejected, "api_credential_invalid"):
             authenticate_credential(token)
         with self.assertRaisesRegex(CredentialRejected, "api_credential_invalid"):
             authenticate_credential(token + "invalid")

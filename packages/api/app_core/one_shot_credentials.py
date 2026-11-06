@@ -6,6 +6,7 @@ import secrets
 from django.db import transaction
 from django.db.models import Q
 
+from .credentials import encrypt_credential_secret
 from .models import OneShotCredential, OneShotOperation, SourceObject, WorkspaceMembership
 from .plugin_catalog import (
     activation_digest,
@@ -37,7 +38,6 @@ def authority_is_current(credential) -> bool:
     """Re-read credential, sponsor, workspace and model at an authority boundary."""
     return OneShotCredential.objects.filter(
         pk=credential.pk,
-        revokedAt__isnull=True,
         workspace__status="active",
         user__is_active=True,
         membership_ref__in=WorkspaceMembership.objects.filter(
@@ -134,6 +134,7 @@ def create_credential(
             raise CredentialRejected("api_credential_source_not_found", 404)
         token = f"{credential.pk}.{secrets.token_urlsafe(32)}"
         credential.secretDigest = hashlib.sha256(token.encode()).hexdigest()
+        credential.encryptedSecret = encrypt_credential_secret(token)
         credential.save()
     return credential, token
 

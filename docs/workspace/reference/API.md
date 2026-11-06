@@ -2,25 +2,24 @@
 
 ## One-shot Agent API
 
-Workspace owners and administrators manage API credentials through authenticated,
-CSRF-protected `GET` and `POST /api/workspaces/{workspaceId}/api-credentials` and
-`DELETE /api/workspaces/{workspaceId}/api-credentials/{credentialId}`. Creation
-requires `name` and `modelConfigRef`; `pluginNames` and `sourceObjectRefs` are
-optional and default to empty scopes. The secret appears once in the creation
-response. Lists expose credential metadata. Each
-credential binds its issuing membership, one Workspace, one model configuration,
-and explicit plugin and material scopes. Sponsor removal, role loss, model access
-loss, and revocation invalidate current execution authority. Product access uses
-its existing authentication contract.
+Workspace owners and administrators manage API credentials through
+session-authenticated `GET` and `POST /api/workspaces/{workspaceId}/api-credentials`
+and `DELETE /api/workspaces/{workspaceId}/api-credentials/{credentialId}`.
+Creation requires `name` and `modelConfigRef`. `pluginNames` and `sourceObjectRefs`
+are optional and default to empty scopes. Each credential binds the issuing
+membership, Workspace, model configuration and explicit plugin and material scopes.
 
-Credential creation can itself have an uncertain outcome. Reconcile the list
-after a timeout; the list cannot recover the secret. Revoke a credential whose
-secret was lost before creating a replacement. Revocation and model retirement
-also block external status/cancel requests. A replacement credential cannot read
-the old credential's operations, even in the same Workspace. Routine rotation
-therefore settles and saves old results before revocation; a compromised key
-should be revoked immediately. No administrator recovery endpoint is promised by
-this transport.
+Lists return metadata and `canCopy`. The issuer can retrieve the secret through
+`GET /api/workspaces/{workspaceId}/api-credentials/{credentialId}/secret` when
+the credential still authorizes execution. The response uses `Cache-Control: no-store`.
+Secrets issued before this feature are available only to callers who saved them.
+If creation times out, check the list before trying again.
+
+Deletion returns `204`, permanently removes the credential and invalidates its
+secret. Active runs are cancelled through the lifecycle reconciler. Internal
+operations needed for cleanup are erased once cleanup completes. Routine
+rotation settles and saves results before deletion. Delete a compromised
+credential immediately.
 
 External callers use the new credential in `Authorization: Bearer <secret>`.
 `POST /api/v1/agent-runs` accepts a required `prompt` and optional sorted, unique

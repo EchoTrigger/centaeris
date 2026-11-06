@@ -32,13 +32,13 @@ async function openDeveloper(role: "owner" | "member", query = "") {
   return router;
 }
 
-test("owners can create scoped credentials, copy the secret after dismissing its notice, and confirm revocation", async () => {
+test("owners can create scoped credentials, copy the secret after returning to settings, and delete the credential", async () => {
   const user = userEvent.setup();
   const writeText = vi.spyOn(navigator.clipboard, "writeText");
   const secret = "credential_1.test_secret";
   const credential = {
     id: "credential_1", workspaceId: "research", name: "Document worker", modelConfigRef: "model_1",
-    pluginNames: ["documents"], sourceObjectRefs: ["file_1"], createdAt: "2026-11-06T12:00:00Z", revokedAt: null,
+    pluginNames: ["documents"], sourceObjectRefs: ["file_1"], createdAt: "2026-11-06T12:00:00Z", canCopy: true,
   };
   const credentialPath = "/api/workspaces/research/api-credentials";
   const writes: Array<{ path: string; method: string; csrf: string | null; body: unknown }> = [];
@@ -58,8 +58,10 @@ test("owners can create scoped credentials, copy the secret after dismissing its
     }
     if (path === credentialPath) return Response.json({ credentials: hasCredential ? [credential] : [] });
     if (path === credentialPath + "/credential_1" && options.method === "DELETE") {
-      return Response.json({ credential: { ...credential, revokedAt: "2026-11-06T12:03:00Z" } });
+      hasCredential = false;
+      return new Response(null, { status: 204 });
     }
+    if (path === credentialPath + "/credential_1/secret" && hasCredential) return Response.json({ secret });
     if (path === "/api/models") return Response.json({ models: [{ id: "model_1", displayName: "Document model" }] });
     if (path.endsWith("/plugins")) return Response.json({ plugins: [
       { name: "documents", displayName: "Documents", enabled: true },
@@ -95,16 +97,19 @@ test("owners can create scoped credentials, copy the secret after dismissing its
   expect(screen.queryByDisplayValue(secret)).toBeNull();
   writeText.mockClear();
   await user.click(screen.getByRole("button", { name: "Copy secret for Document worker" }));
-  expect(writeText).toHaveBeenCalledWith(secret);
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(secret));
   await user.click(screen.getByText("Granted permissions"));
   expect(screen.getByText("file_1")).toBeTruthy();
   await user.click(screen.getByRole("link", { name: "Docs" }));
   await user.click(await screen.findByRole("link", { name: "Back to settings" }));
-  await user.click(await screen.findByRole("button", { name: "Revoke Document worker" }));
+  writeText.mockClear();
+  await user.click(await screen.findByRole("button", { name: "Copy secret for Document worker" }));
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(secret));
+  await user.click(await screen.findByRole("button", { name: "Delete Document worker" }));
   expect(screen.queryByDisplayValue(secret)).toBeNull();
   expect(writes).toHaveLength(1);
-  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Revoke" }));
-  expect(await screen.findByText("Revoked")).toBeTruthy();
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }));
+  await waitFor(() => expect(screen.queryByText("Document worker")).toBeNull());
   expect(writes).toEqual([
     { path: credentialPath, method: "POST", csrf: "session-csrf", body: {
       name: credential.name, modelConfigRef: credential.modelConfigRef, pluginNames: credential.pluginNames,
@@ -120,7 +125,7 @@ test("a basic credential loads only models and can be created without optional c
   const writes: unknown[] = [];
   const credential = {
     id: "basic", name: "Basic worker", workspaceId: "research", modelConfigRef: "model_1",
-    pluginNames: [], sourceObjectRefs: [], revokedAt: null,
+    pluginNames: [], sourceObjectRefs: [], canCopy: true,
   };
   vi.stubGlobal("fetch", async (url: string, options: RequestInit) => {
     const { pathname: path } = new URL(url);

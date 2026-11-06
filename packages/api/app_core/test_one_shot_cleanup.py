@@ -104,6 +104,13 @@ class OneShotCleanupTests(TransactionTestCase):
         expected = f"workspace-agent:agent-run:{{{self.run.pk}}}"
         self.redis.return_value.delete.assert_called_once_with(f"{expected}:signals", f"{expected}:live:text", f"{expected}:live:meta")
 
+    def test_deleted_credential_leaves_no_receipt_after_cleanup(self):
+        self.operation.credential.delete()
+        self.operation.refresh_from_db()
+        self.settle(no_allocation=True)
+        self.assertEqual(collect_one_shot_cleanup().cleaned, [self.run.pk])
+        self.assertFalse(models.OneShotOperation.objects.filter(pk=self.operation.pk).exists())
+
     def test_open_delivery_blocks_and_expired_delivery_reclaims_cancelled_no_allocation(self):
         self.settle(no_allocation=True)
         self.operation.deliveryClosedAt = None

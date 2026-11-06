@@ -158,7 +158,7 @@ function CredentialForm({ workspaceId, workspacePath, busy, onCreate, onClose })
 function credentialErrorKey(error, action) {
   if (error instanceof ApiError && error.message === "csrf_failed") return "developer.csrfFailed";
   if (error instanceof ApiError && error.status === 403) return "developer.permissionChanged";
-  if (action === "revoke") return "developer.revokeFailed";
+  if (action === "delete") return "developer.deleteFailed";
   if (error instanceof ApiError) {
     if (error.message === "model_not_found") return "developer.modelUnavailable";
     if (error.message === "api_credential_plugin_unavailable") return "developer.pluginUnavailable";
@@ -177,8 +177,8 @@ export function DeveloperCredentials({ workspaceId }) {
   const [revision, setRevision] = useState(0);
   const [creating, setCreating] = useState(false);
   const [issued, setIssued] = useState(null);
-  const [issuedSecrets, setIssuedSecrets] = useState({});
-  const [pendingRevoke, setPendingRevoke] = useState(null);
+  const [copiedId, setCopiedId] = useState(null);
+  const [pendingDelete, setPendingDelete] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -203,8 +203,7 @@ export function DeveloperCredentials({ workspaceId }) {
     try {
       const result = await apiJson(path, jsonOptions("POST", payload));
       setCredentials(values => [...values, result.credential]);
-      setIssued(result.credential);
-      setIssuedSecrets(values => ({ ...values, [result.credential.id]: result.secret }));
+      setIssued({ ...result.credential, secret: result.secret });
       setCreating(false);
     } catch (error) {
       setError(credentialErrorKey(error, "create"));
@@ -213,21 +212,37 @@ export function DeveloperCredentials({ workspaceId }) {
     }
   }
 
-  async function revoke() {
+  async function remove() {
     setError("");
     setBusy(true);
     try {
-      const { credential } = await apiJson(path + "/" + encodeURIComponent(pendingRevoke.id), { method: "DELETE" });
-      setCredentials(values => values.map(item => item.id === credential.id ? credential : item));
-      setIssuedSecrets(values => {
-        const remaining = { ...values };
-        delete remaining[credential.id];
-        return remaining;
-      });
-      setPendingRevoke(null);
+      const id = pendingDelete.id;
+      await apiJson(path + "/" + encodeURIComponent(id), { method: "DELETE" });
+      setCredentials(values => values.filter(item => item.id !== id));
+      setPendingDelete(null);
     } catch (error) {
-      setError(credentialErrorKey(error, "revoke"));
-      setPendingRevoke(null);
+      setError(credentialErrorKey(error, "delete"));
+      setPendingDelete(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyCredential(item) {
+    setError("");
+    setCopiedId(null);
+    setBusy(true);
+    try {
+      const { secret } = await apiJson(path + "/" + encodeURIComponent(item.id) + "/secret");
+      try {
+        await navigator.clipboard.writeText(secret);
+        setCopiedId(item.id);
+      } catch {
+        setIssued({ ...item, secret, revealed: true });
+      }
+    } catch (copyError) {
+      setError(copyError instanceof ApiError && copyError.status === 403
+        ? "developer.permissionChanged" : "developer.copyCredentialFailed");
     } finally {
       setBusy(false);
     }
@@ -243,17 +258,17 @@ export function DeveloperCredentials({ workspaceId }) {
         onClick={() => { setError(""); setCreating(true); }}>{t("developer.createCredential")}</button> : null}
     </div>
     {error ? <p role="alert">{t(error)}{" "}
-      {error === "developer.createFailed" || error === "developer.revokeFailed" ? <button type="button" className="secondary"
+      {error === "developer.createFailed" || error === "developer.deleteFailed" ? <button type="button" className="secondary"
         onClick={() => { setCreating(false); setError(""); reload(); }}>{t("developer.refreshCredentials")}</button> : null}
     </p> : null}
     {issued ? <section className="developerIssued" aria-labelledby="developer-issued-heading">
-      <h3 id="developer-issued-heading">{t("developer.credentialCreated", { name: issued.name })}</h3>
+      <h3 id="developer-issued-heading">{t(issued.revealed ? "developer.credentialRevealed" : "developer.credentialCreated", { name: issued.name })}</h3>
       <p>{t("developer.secretCopyHint")}</p>
       <label className="field">{t("developer.secret")}
-        <input ref={focusNewInput} type="text" readOnly autoComplete="off" spellCheck={false} value={issuedSecrets[issued.id]} onFocus={event => event.currentTarget.select()} />
+        <input ref={focusNewInput} type="text" readOnly autoComplete="off" spellCheck={false} value={issued.secret} onFocus={event => event.currentTarget.select()} />
       </label>
       <div className="developerActions">
-        <CopyButton value={issuedSecrets[issued.id]} label={t("developer.copySecret")} />
+        <CopyButton value={issued.secret} label={t("developer.copySecret")} />
         <button type="button" className="primary" onClick={() => setIssued(null)}>{t("developer.done")}</button>
       </div>
     </section> : null}
@@ -274,15 +289,16 @@ export function DeveloperCredentials({ workspaceId }) {
             {item.sourceObjectRefs.length ? <p>{t("developer.fileReferences")}{" "}<code>{item.sourceObjectRefs.join(", ")}</code></p> : null}
           </details> : null}
         </div>
-        {item.revokedAt ? <span>{t("developer.revoked")}</span> : <div className="developerActions">
-          {!issued && issuedSecrets[item.id] ? <CopyButton value={issuedSecrets[item.id]} label={t("developer.copySecret")}
-            accessibleLabel={t("developer.copySecretNamed", { name: item.name })} /> : null}
+        <div className="developerActions">
+          {copiedId === item.id ? <small role="status">{t("developer.copied")}</small> : null}
+          {item.canCopy ? <button className="secondary" type="button" disabled={busy || creating || Boolean(issued)}
+            aria-label={t("developer.copySecretNamed", { name: item.name })} onClick={() => void copyCredential(item)}>{t("developer.copySecret")}</button> : null}
           <button className="secondary" type="button" disabled={busy || creating || Boolean(issued)}
-            aria-label={t("developer.revokeNamed", { name: item.name })} onClick={() => setPendingRevoke(item)}>{t("developer.revoke")}</button>
-        </div>}
+            aria-label={t("developer.deleteNamed", { name: item.name })} onClick={() => setPendingDelete(item)}>{t("developer.delete")}</button>
+        </div>
       </li>)}</ul>}
-    <ConfirmDialog open={Boolean(pendingRevoke)} title={t("developer.revokeNamed", { name: pendingRevoke?.name })}
-      message={t("developer.revokeHint")} confirmLabel={t("developer.revoke")} busy={busy}
-      onCancel={() => setPendingRevoke(null)} onConfirm={() => void revoke()} />
+    <ConfirmDialog popupClassName="developerCredentialConfirm" open={Boolean(pendingDelete)} title={t("developer.deleteNamed", { name: pendingDelete?.name })}
+      message={t("developer.deleteHint")} confirmLabel={t("developer.delete")} busy={busy}
+      onCancel={() => setPendingDelete(null)} onConfirm={() => void remove()} />
   </section>;
 }
