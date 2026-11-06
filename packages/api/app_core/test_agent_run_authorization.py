@@ -95,22 +95,22 @@ class AgentRunAuthorizationContractTests(SimpleTestCase):
         with self.assertRaisesRegex(ValueError, "signature mismatch"):
             verify_agent_run_authorization_signature(payload, KEY, signature)
 
-    def test_one_shot_policy_is_required_signed_and_schema_specific(self):
+    def test_agent_run_api_policy_is_required_signed_and_schema_specific(self):
         payload = fixture()
         payload["schema"] = "workspace.agent_run_authorization.v3"
         with self.assertRaises(ValueError):
             authorization_signature(payload, KEY)
-        payload["executionPolicy"] = {"purpose": "oneShot", "deadlineAtMs": 1_800_000_000_000}
+        payload["executionPolicy"] = {"purpose": "agentRunApi", "deadlineAtMs": 1_800_000_000_000}
         signature = authorization_signature(payload, KEY)
         verify_agent_run_authorization_signature(payload, KEY, signature)
         payload["executionPolicy"]["deadlineAtMs"] += 1
         with self.assertRaisesRegex(ValueError, "signature mismatch"):
             verify_agent_run_authorization_signature(payload, KEY, signature)
         for policy in ({"purpose": "interactive", "deadlineAtMs": 1},
-                       {"purpose": "oneShot", "deadlineAtMs": 0},
-                       {"purpose": "oneShot", "deadlineAtMs": True},
-                       {"purpose": "oneShot", "deadlineAtMs": 2**63},
-                       {"purpose": "oneShot", "deadlineAtMs": 1, "unknown": True}):
+                       {"purpose": "agentRunApi", "deadlineAtMs": 0},
+                       {"purpose": "agentRunApi", "deadlineAtMs": True},
+                       {"purpose": "agentRunApi", "deadlineAtMs": 2**63},
+                       {"purpose": "agentRunApi", "deadlineAtMs": 1, "unknown": True}):
             payload["executionPolicy"] = policy
             with self.subTest(policy=policy), self.assertRaises(ValueError):
                 authorization_signature(payload, KEY)

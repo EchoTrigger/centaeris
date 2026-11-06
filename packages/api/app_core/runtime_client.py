@@ -114,7 +114,7 @@ def build_agent_run_start(agent_run, *, controller_authority, execution_mode="pe
     if not isinstance(controller_authority, dict) or controller_authority.get("controllerPurpose") != "execute":
         raise ValueError("agent_run_start_controller_purpose_invalid")
     authorization = _validate_agent_run_binding(agent_run)
-    if authorization.payload.get("executionPolicy", {}).get("purpose") == "oneShot":
+    if authorization.payload.get("executionPolicy", {}).get("purpose") == "agentRunApi":
         execution_mode = "perRun"
     start = {
         "schema": AGENT_RUN_START_SCHEMA,
@@ -151,7 +151,7 @@ def build_agent_run_cleanup(agent_run, controller_authority, *, execution_mode="
             or not agent_run_binding_matches(authorization.payload, agent_run)
             or controller_authority.get("controllerPurpose") != "cleanup"):
         raise ValueError("agent_run_cleanup_binding_invalid")
-    if authorization.payload.get("executionPolicy", {}).get("purpose") == "oneShot":
+    if authorization.payload.get("executionPolicy", {}).get("purpose") == "agentRunApi":
         execution_mode = "perRun"
     return {"schema": "workspace.agent_run.cleanup.v1", "agentRunId": agent_run.pk,
         "authorizationDigest": authorization.digest, "authorizationSignature": authorization.signature,

@@ -2,7 +2,7 @@ import { MarkdownContent } from "../chat/MarkdownContent";
 import { useTranslation } from "../i18n";
 import { DeveloperExample, DeveloperStatusExample } from "./DeveloperExample";
 import { developerGuides } from "./guides";
-import reference from "./oneShotReference.json";
+import reference from "./agentRunApiReference.json";
 
 function describeType(schema) {
   if (schema.const !== undefined) return JSON.stringify(schema.const);

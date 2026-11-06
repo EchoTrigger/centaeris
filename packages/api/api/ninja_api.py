@@ -66,5 +66,5 @@ api.add_router("/internal", internal_assistant_connectors_router)
 from app_core.http.workspace_resources import router as workspace_resources_router
 api.add_router("/api", workspace_resources_router)
 
-from app_core.http.one_shot import router as one_shot_router
-api.add_router("/api", one_shot_router)
+from app_core.http.agent_run_api import router as agent_run_api_router
+api.add_router("/api", agent_run_api_router)

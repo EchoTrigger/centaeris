@@ -77,6 +77,7 @@ impl Default for PostgresConnectionLimits {
     }
 }
 
+pub(crate) mod agent_run_api_purge;
 pub(crate) mod allocation_origin;
 mod capacity_wait;
 pub(crate) mod cleanup_preservation;
@@ -92,7 +93,6 @@ mod host_retirement;
 pub(crate) mod lease_renewal;
 pub(crate) mod lifecycle_control;
 pub(crate) mod maintenance;
-pub(crate) mod one_shot_purge;
 pub(crate) mod pre_admission_failure;
 pub(crate) mod provision;
 mod question;

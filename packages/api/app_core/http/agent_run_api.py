@@ -11,14 +11,14 @@ from app_core.app_delegations import DelegationRejected
 from app_core.credentials import CredentialDecryptionError, decrypt_credential_secret
 from app_core.hosted_operations import HostedOperationError
 from app_core.material_contract import KnowledgeError
-from app_core.models import AgentRun, OneShotCredential, OneShotOperation
-from app_core.one_shot_credentials import (
+from app_core.models import AgentRun, AgentRunApiCredential, AgentRunApiOperation
+from app_core.agent_run_api_credentials import (
     CredentialRejected,
     authenticate_credential,
     authority_is_current,
     create_credential,
 )
-from app_core.one_shot_protocol import (
+from app_core.agent_run_api_protocol import (
     CANCEL_RUN_PATH,
     CREATE_RUN_PATH,
     GET_OPERATION_PATH,
@@ -28,8 +28,8 @@ from app_core.one_shot_protocol import (
     DateTimeText,
     OperationReceipt,
 )
-from app_core.one_shot_runs import accept_run, operation_expiry, refresh_operation
-from app_core.one_shot_stream import operation_receipt, stream_one_shot
+from app_core.agent_run_api_runs import accept_run, operation_expiry, refresh_operation
+from app_core.agent_run_api_stream import operation_receipt, stream_agent_run_api
 from app_core.runtime_client import request_agent_run_cancellation
 from app_core.session_model_settings import SessionModelSettingsError
 from app_core.workspace_access import WORKSPACE_ADMIN_ROLES, locked_workspace_membership_for
@@ -40,7 +40,7 @@ from .security import session_auth
 from .stream_response import OwnedAsyncStreamingHttpResponse, stream_database_call
 
 
-router = Router(tags=["one-shot-runs"], by_alias=True)
+router = Router(tags=["agent-runs"], by_alias=True)
 
 
 class CreateCredentialRequest(StrictSchema):
@@ -77,9 +77,9 @@ class CredentialSecretResponse(StrictSchema):
     secret: str
 
 
-class OneShotAuth(HttpBearer):
+class AgentRunApiAuth(HttpBearer):
     openapi_description = (
-        "Use the complete one-shot credential as Authorization: Bearer <credential>. "
+        "Use the complete Agent Run API credential as Authorization: Bearer <credential>. "
         "The credential fixes the workspace and allowed execution scope. Use the same credential "
         "for submission, status lookup and cancellation. Browser session cookies or an authenticated "
         "product session cannot be combined with this credential. Revoked credentials cannot read "
@@ -98,7 +98,7 @@ class OneShotAuth(HttpBearer):
             raise DelegationRejected(error.code, error.status) from error
 
 
-external_auth = OneShotAuth()
+external_auth = AgentRunApiAuth()
 
 
 def _json(value, status=200):
@@ -134,7 +134,7 @@ def _admin(user, workspace_id):
 def list_api_credentials(request, workspace_id: str):
     with transaction.atomic():
         _admin(request.user, workspace_id)
-        credentials = OneShotCredential.objects.filter(workspace_id=workspace_id).order_by("createdAt", "id")
+        credentials = AgentRunApiCredential.objects.filter(workspace_id=workspace_id).order_by("createdAt", "id")
         return _json({"credentials": [_credential_value(item, request.user) for item in credentials]})
 
 
@@ -164,7 +164,7 @@ def create_api_credential(request, workspace_id: str, payload: CreateCredentialR
 def read_api_credential_secret(request, workspace_id: str, credential_id: str):
     with transaction.atomic():
         _admin(request.user, workspace_id)
-        credential = OneShotCredential.objects.select_for_update().filter(
+        credential = AgentRunApiCredential.objects.select_for_update().filter(
             pk=credential_id, workspace_id=workspace_id, user=request.user,
         ).first()
         if credential is None or not credential.encryptedSecret:
@@ -184,12 +184,12 @@ def read_api_credential_secret(request, workspace_id: str, credential_id: str):
 def delete_api_credential(request, workspace_id: str, credential_id: str):
     with transaction.atomic():
         _admin(request.user, workspace_id)
-        credential = OneShotCredential.objects.select_for_update().filter(
+        credential = AgentRunApiCredential.objects.select_for_update().filter(
             pk=credential_id, workspace_id=workspace_id,
         ).first()
         if credential is None:
             return _json({"error": "credential_not_found"}, 404)
-        OneShotOperation.objects.filter(credential=credential, cleanupStatus="completed").delete()
+        AgentRunApiOperation.objects.filter(credential=credential, cleanupStatus="completed").delete()
         # Unfinished operations stay detached until the existing cancellation and cleanup reconcile.
         credential.delete()
     return Status(204, None)
@@ -227,7 +227,7 @@ def delete_api_credential(request, workspace_id: str, credential_id: str):
         }},
     },
 )
-async def create_one_shot_run(request, payload: CreateRunRequest):
+async def create_agent_run_api_run(request, payload: CreateRunRequest):
     if request.GET:
         return _json({"error": "request_invalid"}, 400)
     operation_id = request.headers.get(IDEMPOTENCY_HEADER, "")
@@ -249,7 +249,7 @@ async def create_one_shot_run(request, payload: CreateRunRequest):
         return await stream_database_call(authority_is_current)(request.auth)
 
     response = OwnedAsyncStreamingHttpResponse(
-        stream_one_shot(operation, run, authority_check), content_type="text/event-stream",
+        stream_agent_run_api(operation, run, authority_check), content_type="text/event-stream",
     )
     response["Cache-Control"] = "no-store"
     response["X-Accel-Buffering"] = "no"
@@ -268,14 +268,14 @@ async def create_one_shot_run(request, payload: CreateRunRequest):
         "description": "Operation status receipt only; no results or replay.",
     }}},
 )
-def get_one_shot_operation(request, operation_id: str):
+def get_agent_run_api_operation(request, operation_id: str):
     if request.GET:
         return _json({"error": "request_invalid"}, 400)
     try:
         operation_expiry(operation_id)
     except HostedOperationError as error:
         return _json({"error": error.code}, error.status)
-    operation = OneShotOperation.objects.filter(credential=request.auth, operationId=operation_id).first()
+    operation = AgentRunApiOperation.objects.filter(credential=request.auth, operationId=operation_id).first()
     if operation is None:
         return _json({"error": "operation_not_found"}, 404)
     return _json(operation_receipt(refresh_operation(operation)))
@@ -299,10 +299,10 @@ def get_one_shot_operation(request, operation_id: str):
         },
     }},
 )
-def cancel_one_shot_run(request, run_id: str):
+def cancel_agent_run_api_run(request, run_id: str):
     if request.META.get("CONTENT_LENGTH", "0") not in ("", "0") or request.GET:
         return _json({"error": "request_invalid"}, 400)
-    operation = OneShotOperation.objects.filter(credential=request.auth, agentRunId=run_id).first()
+    operation = AgentRunApiOperation.objects.filter(credential=request.auth, agentRunId=run_id).first()
     if operation is None:
         return _json({"error": "agent_run_not_found"}, 404)
     if operation.expiresAt <= timezone.now():

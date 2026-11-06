@@ -21,8 +21,8 @@ def create_agent_run_authorization(
     execution_policy: dict | None = None,
 ) -> AgentRunAuthorization:
     with plugin_lifecycle_lock():
-        if agent_run.session.purpose == "oneShot" and personal_library:
-            raise ValueError("one_shot_personal_library_forbidden")
+        if agent_run.session.purpose == "agentRunApi" and personal_library:
+            raise ValueError("agent_run_api_personal_library_forbidden")
         if not agent_run_membership_is_current(agent_run):
             raise ValueError("AgentRun WorkspaceMembership is no longer current")
         if not agent_run_environment_matches(agent_run):

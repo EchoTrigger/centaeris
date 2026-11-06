@@ -1,4 +1,4 @@
-"""Generate the public one-shot API reference bundled by Workspace Web."""
+"""Generate the public Agent Run API reference bundled by Workspace Web."""
 
 import argparse
 import json
@@ -10,7 +10,7 @@ from pydantic import TypeAdapter
 from pydantic.alias_generators import to_camel
 
 
-OUTPUT = Path(__file__).resolve().parents[2] / "packages/web/src/developer/oneShotReference.json"
+OUTPUT = Path(__file__).resolve().parents[2] / "packages/web/src/developer/agentRunApiReference.json"
 
 
 def _public_path(path):
@@ -20,7 +20,7 @@ def _public_path(path):
 def _reference():
     # The wire types only need Ninja's default configuration, without a deployment or database.
     settings.configure()
-    from app_core import one_shot_protocol as wire
+    from app_core import agent_run_api_protocol as wire
 
     receipt = {"status": 200, "contentType": "application/json", "schema": wire.OperationReceipt.__name__}
     authorization = {"name": "Authorization", "required": True, "schema": {"type": "string"}}
@@ -61,7 +61,7 @@ def main():
     generated = json.dumps(_reference(), ensure_ascii=False, indent=2) + "\n"
     if args.check:
         if not OUTPUT.is_file() or OUTPUT.read_text(encoding="utf-8") != generated:
-            raise SystemExit(f"{OUTPUT.name} is stale; run python scripts/workspace/one-shot-reference.py")
+            raise SystemExit(f"{OUTPUT.name} is stale; run python scripts/workspace/agent-run-api-reference.py")
     else:
         OUTPUT.parent.mkdir(parents=True, exist_ok=True)
         OUTPUT.write_text(generated, encoding="utf-8", newline="\n")

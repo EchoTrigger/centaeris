@@ -9,10 +9,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from one_shot_client import main, receive
+from agent_run_client import main, receive
 
 
-class OneShotClientTests(unittest.TestCase):
+class AgentRunApiClientTests(unittest.TestCase):
     def artifact(self, content=b"verified bytes", *, expected=None, artifact_id="artifact-1", filename="result.docx"):
         digest = "sha256:" + hashlib.sha256(content if expected is None else expected).hexdigest()
         metadata = {"artifactId": artifact_id, "filename": filename, "contentType": "application/octet-stream",
@@ -100,7 +100,7 @@ class OneShotClientTests(unittest.TestCase):
                     self.assertEqual(list(output.iterdir()), [])
 
 
-class OneShotCommandTests(unittest.TestCase):
+class AgentRunApiCommandTests(unittest.TestCase):
     operation_id = "1793950000.07baf8fa-3024-4992-a2dd-5dc3e12afdb6"
 
     def response(self, value, content_type="application/json"):
@@ -115,7 +115,7 @@ class OneShotCommandTests(unittest.TestCase):
 
     def invoke(self, args, response):
         with patch.dict(os.environ, {"CENTAERIS_RUN_KEY": "fixture-run-key"}), \
-                patch("sys.argv", ["one_shot_client.py", *args]), \
+                patch("sys.argv", ["agent_run_client.py", *args]), \
                 patch("sys.stdout", new_callable=io.StringIO) as stdout, \
                 patch("sys.stderr", new_callable=io.StringIO) as stderr, \
                 patch("urllib.request.urlopen", return_value=response) as urlopen:
@@ -166,13 +166,13 @@ class OneShotCommandTests(unittest.TestCase):
 
             args = ["--url", "https://workspace.example", "--prompt", "Reply OK", "--output", directory]
             with patch("urllib.request.urlopen", side_effect=request_response):
-                with patch("sys.argv", ["one_shot_client.py", *args]):
+                with patch("sys.argv", ["agent_run_client.py", *args]):
                     self.assertEqual(main(), 1)
                 self.assertEqual(len(requests), 1)
                 operation_id = requests[0].get_header("Idempotency-key")
                 self.assertIn(f"--operation-id {operation_id}", stderr.getvalue())
                 self.assertIn("--status", stderr.getvalue())
-                with patch("sys.argv", ["one_shot_client.py", *args, "--operation-id", operation_id]):
+                with patch("sys.argv", ["agent_run_client.py", *args, "--operation-id", operation_id]):
                     self.assertEqual(main(), 2)
             self.assertEqual(len(requests), 2)
             self.assertEqual(requests[0].get_header("Idempotency-key"), requests[1].get_header("Idempotency-key"))

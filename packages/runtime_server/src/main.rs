@@ -7270,16 +7270,17 @@ mod tests {
     }
 
     #[test]
-    fn one_shot_runtime_disables_persistent_questions() {
+    fn agent_run_api_runtime_disables_persistent_questions() {
         use centaeris_core::runtime::question::QuestionInputCapability;
         let mut start = agent_run_start();
         assert_eq!(
             hosted_agent_runtime_config(&start).question_input,
             QuestionInputCapability::PersistentResponses
         );
-        start.authorization.schema = agent_run_authorization::ONE_SHOT_AUTHORIZATION_SCHEMA.into();
+        start.authorization.schema =
+            agent_run_authorization::AGENT_RUN_API_AUTHORIZATION_SCHEMA.into();
         start.authorization.execution_policy =
-            Some(agent_run_authorization::ExecutionPolicy::OneShot { deadline_at_ms: 1 });
+            Some(agent_run_authorization::ExecutionPolicy::AgentRunApi { deadline_at_ms: 1 });
         assert_eq!(
             hosted_agent_runtime_config(&start).question_input,
             QuestionInputCapability::Disabled

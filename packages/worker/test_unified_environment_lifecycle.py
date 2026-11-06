@@ -33,9 +33,9 @@ class UnifiedEnvironmentLifecycleTests(unittest.TestCase):
                 self.assertEqual(runtime.call_args.args[0], {'schema': 'runtime.agent_run.step.v1',
                     'jobId': job['jobId'], 'leaseOwner': 'worker:fixture-owner', 'agentRunStart': start})
 
-    def test_one_shot_wait_wakes_at_its_signed_execution_deadline(self):
+    def test_agent_run_api_wait_wakes_at_its_signed_execution_deadline(self):
         job, start = self.start()
-        start['authorization']['executionPolicy'] = {'purpose': 'oneShot', 'deadlineAtMs': 1001}
+        start['authorization']['executionPolicy'] = {'purpose': 'agentRunApi', 'deadlineAtMs': 1001}
         resolved = {'schema': 'runtime.agent_run_lifecycle.resolved.v1', 'disposition': 'ready', 'agentRunStart': start}
         step = {'schema': 'runtime.agent_run.step.result.v1', 'agentRunId': start['agentRunId'],
             'disposition': 'waiting', 'terminalState': None, 'transitionReason': 'runtime_job_wait'}

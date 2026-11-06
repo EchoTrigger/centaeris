@@ -1,4 +1,4 @@
-"""Credential scope for one-shot execution and its mutable authority checks."""
+"""Credential scope for Agent Run API execution and its mutable authority checks."""
 
 import hashlib
 import secrets
@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import Q
 
 from .credentials import encrypt_credential_secret
-from .models import OneShotCredential, OneShotOperation, SourceObject, WorkspaceMembership
+from .models import AgentRunApiCredential, AgentRunApiOperation, SourceObject, WorkspaceMembership
 from .plugin_catalog import (
     activation_digest,
     plugin_activation_for_workspace,
@@ -37,7 +37,7 @@ def _enabled_models(workspace_id):
 
 def authority_is_current(credential) -> bool:
     """Re-read credential, sponsor, workspace and model at an authority boundary."""
-    return OneShotCredential.objects.filter(
+    return AgentRunApiCredential.objects.filter(
         pk=credential.pk,
         workspace__status="active",
         user__is_active=True,
@@ -52,9 +52,9 @@ def authority_is_current(credential) -> bool:
 
 
 def credential_for_run(run):
-    if run.session.purpose != "oneShot":
+    if run.session.purpose != "agentRunApi":
         return None
-    operation = OneShotOperation.objects.select_related("credential").filter(
+    operation = AgentRunApiOperation.objects.select_related("credential").filter(
         agentRunId=run.pk,
         sessionId=run.session_id,
         credential__workspace_id=run.workspace_id,
@@ -78,7 +78,7 @@ def source_object_allowed(credential, item) -> bool:
 
 
 def plugin_activation_for_run(run):
-    if run.session.purpose != "oneShot":
+    if run.session.purpose != "agentRunApi":
         return plugin_activation_for_workspace(run.workspace)
     credential = credential_for_run(run)
     if credential is None:
@@ -119,7 +119,7 @@ def create_credential(
             selected_plugin_activation(membership.workspace, plugin_names)
         except ValueError as error:
             raise CredentialRejected("api_credential_plugin_unavailable", 400) from error
-        credential = OneShotCredential(
+        credential = AgentRunApiCredential(
             user=user,
             workspace=membership.workspace,
             membership_ref=membership.pk,
@@ -145,7 +145,7 @@ def authenticate_credential(token, *, require_current=True):
     if not isinstance(token, str) or len(token) > 256:
         raise CredentialRejected("api_credential_invalid", 401)
     digest = hashlib.sha256(token.encode()).hexdigest()
-    credential = OneShotCredential.objects.select_related("workspace", "user", "modelConfig").filter(
+    credential = AgentRunApiCredential.objects.select_related("workspace", "user", "modelConfig").filter(
         secretDigest=digest,
     ).first()
     if credential is None:

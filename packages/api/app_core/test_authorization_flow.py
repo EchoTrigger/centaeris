@@ -73,10 +73,10 @@ class AuthorizationFlowTests(SimpleTestCase):
         # Input authority does not depend on the current reasoning selection.
         self.test_valid_authorization_reaches_resource_scope_check()
 
-    def test_one_shot_start_and_cleanup_force_per_run_environment(self):
+    def test_agent_run_api_start_and_cleanup_force_per_run_environment(self):
         from .runtime_client import build_agent_run_start, build_agent_run_cleanup
         self.run.pk = self.run.id
-        self.run.session.purpose = "oneShot"
+        self.run.session.purpose = "agentRunApi"
         self.run.turn_id = "turn-test"
         self.run.prompt = "Generate a document"
         self.run.agent_instructions = ""
@@ -84,7 +84,7 @@ class AuthorizationFlowTests(SimpleTestCase):
         self.run.modelConfig = SimpleNamespace(contextTokens=8192, maxOutputTokens=4096)
         payload = self.run.authorization.payload
         payload["schema"] = "workspace.agent_run_authorization.v3"
-        payload["executionPolicy"] = {"purpose": "oneShot", "deadlineAtMs": 1_800_000_000_000}
+        payload["executionPolicy"] = {"purpose": "agentRunApi", "deadlineAtMs": 1_800_000_000_000}
         self.run.authorization.digest = authorization_digest(payload)
         self.run.authorization.signature = authorization_signature(payload, KEY)
         authority = {"environmentId": self.run.environment_id, "controllerId": self.run.id,

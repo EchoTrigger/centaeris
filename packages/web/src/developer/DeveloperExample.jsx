@@ -2,7 +2,7 @@ import { useState } from "react";
 import { apiUrl } from "../api";
 import { useTranslation } from "../i18n";
 import { nodeRequestExample, nodeStatusExample } from "./nodeExamples";
-import reference from "./oneShotReference.json";
+import reference from "./agentRunApiReference.json";
 
 export const runPath = reference.operations.find(operation => operation.id === "createRun").path;
 

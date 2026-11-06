@@ -14,21 +14,21 @@ from django.db.migrations.executor import MigrationExecutor
 from django.test import Client, TransactionTestCase
 from django.utils import timezone
 
-from .http.one_shot import CreateRunRequest
+from .http.agent_run_api import CreateRunRequest
 from .migration_testing import isolated_migration_database
-from .models import AgentRun, OneShotCredential, OneShotOperation, Session, Workspace, WorkspaceMembership, ModelConfig
-from .one_shot_credentials import create_credential
-from .one_shot_runs import accept_run
-from .one_shot_stream import operation_receipt
+from .models import AgentRun, AgentRunApiCredential, AgentRunApiOperation, Session, Workspace, WorkspaceMembership, ModelConfig
+from .agent_run_api_credentials import create_credential
+from .agent_run_api_runs import accept_run
+from .agent_run_api_stream import operation_receipt
 
 
 PROFILE = {"schema": "runtime.execution_profile.v1", "imageDigest": "sha256:" + "a" * 64}
 
 
-class OneShotApiTests(TransactionTestCase):
+class AgentRunApiApiTests(TransactionTestCase):
     serialized_rollback = True
     def setUp(self):
-        self.user = User.objects.create_user(username="one-shot-owner")
+        self.user = User.objects.create_user(username="agent-run-api-owner")
         self.workspace = Workspace.objects.create(name="API", createdBy=self.user)
         WorkspaceMembership.objects.create(workspace=self.workspace, user=self.user, role="owner")
         self.model = ModelConfig.objects.create(displayName="Model")
@@ -38,7 +38,7 @@ class OneShotApiTests(TransactionTestCase):
         self.client = Client()
         self.auth = {"HTTP_AUTHORIZATION": f"Bearer {self.token}", "HTTP_IDEMPOTENCY_KEY": self.operation_id}
         for name, result in (("request_execution_profile", PROFILE), ("schedule_agent_run_lifecycle", "inserted")):
-            mock = patch(f"app_core.one_shot_runs.{name}", return_value=result)
+            mock = patch(f"app_core.agent_run_api_runs.{name}", return_value=result)
             setattr(self, name, mock.start())
             self.addCleanup(mock.stop)
 
@@ -51,11 +51,11 @@ class OneShotApiTests(TransactionTestCase):
 
     def test_acceptance_has_signed_private_runtime_and_receipt(self):
         operation, run = accept_run(self.credential, self.operation_id, CreateRunRequest(**self.body))
-        self.assertEqual(run.session.purpose, "oneShot")
+        self.assertEqual(run.session.purpose, "agentRunApi")
         self.assertFalse(run.runmaterialscope.personal_library)
         self.assertEqual(run.authorization.payload["schema"], "workspace.agent_run_authorization.v3")
         self.assertEqual(run.authorization.payload["executionPolicy"],
-            {"purpose": "oneShot", "deadlineAtMs": int(operation.deadlineAt.timestamp() * 1000)})
+            {"purpose": "agentRunApi", "deadlineAtMs": int(operation.deadlineAt.timestamp() * 1000)})
         self.assertEqual(run.authorization.payload["pluginActivation"]["packages"], [])
         self.assertEqual(self.query().json(), operation_receipt(operation))
         self.assertNotIn("sessionId", self.query().json())
@@ -80,7 +80,7 @@ class OneShotApiTests(TransactionTestCase):
         asyncio.run(response.aclose())
         self.assertEqual(self.query().status_code, 200)
         self.assertEqual(self.post().status_code, 200)
-        self.assertEqual(OneShotOperation.objects.count(), 1)
+        self.assertEqual(AgentRunApiOperation.objects.count(), 1)
         self.assertEqual(AgentRun.objects.count(), 1)
 
     def test_rejected_request_never_accepts_or_schedules(self):
@@ -97,23 +97,23 @@ class OneShotApiTests(TransactionTestCase):
                               (f"{int(time.time()) + 600}.{uuid.uuid4()}", 400), ("missing", 400)):
             response = self.post(HTTP_IDEMPOTENCY_KEY=key)
             self.assertEqual(response.status_code, expected, response.content)
-        self.assertFalse(OneShotOperation.objects.exists())
+        self.assertFalse(AgentRunApiOperation.objects.exists())
 
     def test_transaction_rollback_does_not_occupy_identity(self):
-        with patch("app_core.one_shot_runs.create_agent_run_authorization", side_effect=RuntimeError("unavailable")):
+        with patch("app_core.agent_run_api_runs.create_agent_run_authorization", side_effect=RuntimeError("unavailable")):
             response = self.post()
         self.assertEqual(response.status_code, 503)
         self.assertFalse(AgentRun.objects.exists())
         self.assertFalse(Session.objects.exists())
-        self.assertFalse(OneShotOperation.objects.exists())
+        self.assertFalse(AgentRunApiOperation.objects.exists())
 
     def test_expiry_is_checked_again_at_atomic_acceptance(self):
-        with patch("app_core.one_shot_runs.operation_expiry", return_value=timezone.now() - timedelta(seconds=1)):
+        with patch("app_core.agent_run_api_runs.operation_expiry", return_value=timezone.now() - timedelta(seconds=1)):
             response = self.post()
         self.assertEqual(response.status_code, 410, response.content)
         self.assertFalse(AgentRun.objects.exists())
         self.assertFalse(Session.objects.exists())
-        self.assertFalse(OneShotOperation.objects.exists())
+        self.assertFalse(AgentRunApiOperation.objects.exists())
         self.schedule_agent_run_lifecycle.assert_not_called()
 
     def test_schedule_failure_preserves_receipt_and_original_run(self):
@@ -142,12 +142,12 @@ class OneShotApiTests(TransactionTestCase):
         secret_url = f"{url}/{created['credential']['id']}/secret"
         self.assertNotIn(created["secret"], listed.content.decode())
         self.assertTrue(created["credential"]["canCopy"])
-        stored = OneShotCredential.objects.get(pk=created["credential"]["id"])
+        stored = AgentRunApiCredential.objects.get(pk=created["credential"]["id"])
         self.assertNotIn(created["secret"], stored.encryptedSecret)
         copy = self.client.get(secret_url)
         self.assertEqual(copy.json(), {"secret": created["secret"]})
         self.assertEqual(copy.headers["Cache-Control"], "no-store")
-        OneShotCredential.objects.filter(pk=stored.pk).update(encryptedSecret="")
+        AgentRunApiCredential.objects.filter(pk=stored.pk).update(encryptedSecret="")
         self.assertEqual(self.client.get(secret_url).status_code, 404)
 
         other = User.objects.create_user(username="another-admin")
@@ -164,7 +164,7 @@ class OneShotApiTests(TransactionTestCase):
 
     def test_delete_erases_credential_and_detaches_incomplete_cleanup(self):
         operation, run = accept_run(self.credential, self.operation_id, CreateRunRequest(**self.body))
-        with patch("app_core.http.one_shot.request_agent_run_cancellation", return_value={"disposition": "requested", "terminalState": None}) as cancel:
+        with patch("app_core.http.agent_run_api.request_agent_run_cancellation", return_value={"disposition": "requested", "terminalState": None}) as cancel:
             response = self.client.post(f"/api/v1/agent-runs/{run.pk}/cancel", data=b"", content_type="application/json", **self.auth)
         self.assertEqual(response.status_code, 202, response.content)
         self.assertEqual(cancel.call_args.args[0].pk, run.pk)
@@ -173,7 +173,7 @@ class OneShotApiTests(TransactionTestCase):
         self.assertEqual(self.client.delete(f"{path}/{self.credential.pk}").status_code, 204)
         self.assertEqual(self.client.get(path).json(), {"credentials": []})
         self.assertEqual(self.client.get(f"{path}/{self.credential.pk}/secret").status_code, 404)
-        self.assertFalse(OneShotCredential.objects.filter(pk=self.credential.pk).exists())
+        self.assertFalse(AgentRunApiCredential.objects.filter(pk=self.credential.pk).exists())
         operation.refresh_from_db()
         self.assertIsNone(operation.credential_id)
         self.client.logout()
@@ -195,7 +195,7 @@ class OneShotApiTests(TransactionTestCase):
         self.schedule_agent_run_lifecycle.assert_called_once()
 
     def test_stream_retains_known_terminal_reason_in_receipt(self):
-        from .one_shot_stream import _run_state
+        from .agent_run_api_stream import _run_state
         operation, run = accept_run(self.credential, self.operation_id, CreateRunRequest(**self.body))
         AgentRun.objects.filter(pk=run.pk).update(status="failed", transitionReason="model_connection_error", completedAt=timezone.now())
         result = async_to_sync(_run_state)(operation.pk)
@@ -203,7 +203,7 @@ class OneShotApiTests(TransactionTestCase):
         self.assertEqual(self.query().json()["runStatus"], "failed")
 
     def test_worker_cleanup_reconciliation_runs_one_bounded_data_collection(self):
-        with patch("app_core.one_shot_cleanup.collect_one_shot_cleanup") as collect:
+        with patch("app_core.agent_run_api_cleanup.collect_agent_run_api_cleanup") as collect:
             response = self.client.post(
                 "/internal/agent-run-lifecycle/cleanup-reconcile",
                 json.dumps({"schema": "runtime.agent_run_cleanup.reconcile.v1", "limit": 1, "after": None}),
@@ -213,7 +213,7 @@ class OneShotApiTests(TransactionTestCase):
         collect.assert_called_once_with(limit=1)
 
 
-class OneShotCredentialUpgradeTests(TransactionTestCase):
+class AgentRunApiCredentialUpgradeTests(TransactionTestCase):
     serialized_rollback = True
 
     def test_revoked_credentials_are_removed_while_pending_cleanup_survives(self):

@@ -53,7 +53,7 @@ The receipt keeps operation and run IDs, acceptance, deadline and expiry times, 
 
 These are separate limits: the client's wait, the Run's execution deadline, the original stream's delivery lease, and the operation's lookup/duplicate-prevention window. \`expiresAt\` is not a result-download deadline. Generate the key immediately before the first submit; a nearly expired unused key can be accepted with little lookup time left.
 
-The reset policy for resumable interactive sessions is separate from one-shot run cleanup.
+The reset policy for resumable interactive sessions is separate from Agent Run API cleanup.
 `,
     events: `
 ### Submit and read the first response
@@ -89,7 +89,7 @@ On \`artifactFailed\`, an incomplete stream or a verification error, discard the
 From the Centaeris source checkout, set \`CENTAERIS_RUN_KEY\` and set \`CENTAERIS_WORKSPACE_URL\` to the Workspace base URL without \`/api/v1/agent-runs\`. This Python 3 client verifies files and writes them to \`./received\`.
 
 \`\`\`sh
-python3 scripts/workspace/one_shot_client.py \\
+python3 scripts/workspace/agent_run_client.py \\
   --url "$CENTAERIS_WORKSPACE_URL" \\
   --prompt 'Generate an editable Word project brief and publish the final docx.' \\
   --output ./received
@@ -98,7 +98,7 @@ python3 scripts/workspace/one_shot_client.py \\
 Save the operation ID printed before submission. To inspect it without starting a run:
 
 \`\`\`sh
-python3 scripts/workspace/one_shot_client.py \\
+python3 scripts/workspace/agent_run_client.py \\
   --url "$CENTAERIS_WORKSPACE_URL" --status --operation-id '<original-operation-id>'
 \`\`\`
 
@@ -222,7 +222,7 @@ Example of a request rejected because its operation ID is invalid.
 在 Centaeris 源码目录运行下面的 Python 3 示例。设置 \`CENTAERIS_RUN_KEY\`，并将 \`CENTAERIS_WORKSPACE_URL\` 设为 Workspace 基础地址，不包含 \`/api/v1/agent-runs\`。脚本会校验文件并写入 \`./received\`。
 
 \`\`\`sh
-python3 scripts/workspace/one_shot_client.py \\
+python3 scripts/workspace/agent_run_client.py \\
   --url "$CENTAERIS_WORKSPACE_URL" \\
   --prompt '生成一份可编辑的 Word 项目简报并发布最终的 docx 文件。' \\
   --output ./received
@@ -231,7 +231,7 @@ python3 scripts/workspace/one_shot_client.py \\
 保存提交前打印的操作 ID。以下命令只查询，不创建运行：
 
 \`\`\`sh
-python3 scripts/workspace/one_shot_client.py \\
+python3 scripts/workspace/agent_run_client.py \\
   --url "$CENTAERIS_WORKSPACE_URL" --status --operation-id '<原操作ID>'
 \`\`\`
 

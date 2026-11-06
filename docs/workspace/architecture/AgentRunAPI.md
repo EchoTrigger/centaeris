@@ -1,4 +1,4 @@
-# One-shot Agent API: design and review boundaries
+# Agent Run API: design and review boundaries
 
 Review date: **2026-11-06**. Baseline: Draft PR
 [#55](https://github.com/EchoTrigger/centaeris/pull/55), commit
@@ -7,12 +7,12 @@ Review date: **2026-11-06**. Baseline: Draft PR
 This document distinguishes observed v1, prepared corrections, and proposed
 changes for subsequent commits on the same PR.
 **The proposed result API is not implemented.** Existing callers must follow
-the [v1 transport reference](../reference/API.md#one-shot-agent-api).
+the [v1 transport reference](../reference/API.md#agent-run-api).
 Acceptance criteria do not claim that deployment or migration gates have passed.
 
 ## Decision and intended use
 
-One-shot execution accepts one bounded task under an explicitly scoped
+Agent Run API execution accepts one bounded task under an explicitly scoped
 credential. It creates a private temporary Session and runs the existing
 Core/Runtime lifecycle. It does not introduce a second execution engine,
 external Session management, or an interactive human-approval workflow.
@@ -47,7 +47,7 @@ Workspaces must discard stale selections and late responses.
 This isolation also applies on the server. An empty plugin scope must produce
 an empty activation without reading or validating unrelated Workspace plugins.
 The prepared correction adds that early return in
-[`plugin_activation_for_run`](../../../packages/api/app_core/one_shot_credentials.py).
+[`plugin_activation_for_run`](../../../packages/api/app_core/agent_run_api_credentials.py).
 Selected nonempty scopes still undergo the existing current-availability checks;
 this review does not claim to eliminate all catalog coupling for selected plugins.
 
@@ -72,7 +72,7 @@ event. Local integrity or sequence errors terminate consumption.
 | Cleanup collector | Erases temporary execution content after terminal execution, physical release evidence, Runtime purge, and delivery closure/expiry permit it. |
 | Caller | Persists its request identity and received results; distinguishes unknown observations from terminal execution facts. |
 
-One-shot authorization uses the v3 execution policy and `perRun` allocation.
+Agent Run API authorization uses the v3 execution policy and `perRun` allocation.
 Personal-library access and human questions are disabled. Material IDs must be
 ready, granted files from the credential's own Workspace and explicit allowlist.
 A call may select a subset of that list; an empty request list grants nothing
@@ -107,9 +107,9 @@ and retention design. Neither is an existing v1 capability.
 ## V1 acceptance and recovery contract
 
 The implementation anchors are
-[`one_shot_runs.py`](../../../packages/api/app_core/one_shot_runs.py),
-[`http/one_shot.py`](../../../packages/api/app_core/http/one_shot.py), and
-[`one_shot_protocol.py`](../../../packages/api/app_core/one_shot_protocol.py).
+[`agent_run_api_runs.py`](../../../packages/api/app_core/agent_run_api_runs.py),
+[`http/agent_run_api.py`](../../../packages/api/app_core/http/agent_run_api.py), and
+[`agent_run_api_protocol.py`](../../../packages/api/app_core/agent_run_api_protocol.py).
 
 ### Response selection
 
@@ -336,7 +336,7 @@ an explicit expiry and revocation policy; a checksum does not grant access.
 [`0046_workspace_owned_resources`](../../../packages/api/app_core/migrations/0046_workspace_owned_resources.py)
 preserves provider/model identities for historical references while retiring
 shared configuration. It disables shared current models/providers, revokes
-one-shot credentials bound to those models, deletes shared provider credentials
+Agent Run API credentials bound to those models, deletes shared provider credentials
 and MCP keys, and preserves Workspace-local configuration. Historical identity
 preservation must not authorize new execution with a retired secret.
 
@@ -361,7 +361,7 @@ plugin resolution, and credential isolation. Calling the migration function
 with today's model registry, or a unit test of irreversible reversal, does not
 prove historical-schema compatibility. This document makes no database-gate
 pass claim.
-The separate [PostgreSQL upgrade acceptance checklist](../eval/OneShotUpgradeAcceptance.md)
+The separate [PostgreSQL upgrade acceptance checklist](../eval/AgentRunAPIUpgradeAcceptance.md)
 records the historical-state test results and remaining deployment checks.
 
 ## Documentation ownership and migration costs
@@ -418,7 +418,7 @@ With the locked Python 3.12.10, Node 22.21.0 and pnpm 12.10.1 dependencies:
 | Executed check | Result |
 | --- | --- |
 | Sample client: receipt-only exit, lookup, identity reuse, media types and artifact verification | 10 tests passed |
-| One-shot delivery and artifact budgets | 8 tests passed |
+| Agent Run API delivery and artifact budgets | 8 tests passed |
 | Actual Ninja OpenAPI vs bundled reference: response media/payloads, request bodies/headers and Bearer security | 3 tests passed, without a database |
 | Empty plugin scope and irreversible migration guard | 5 tests passed; regressions failed on the baseline |
 | Credential component: lazy requests, isolated retries and Workspace switching | 5 tests passed |

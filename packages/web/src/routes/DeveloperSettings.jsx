@@ -33,7 +33,7 @@ export function DeveloperSettings({ workspaceId, canManage, topic, lastTopic, na
     </nav>
     {topic ? <DeveloperDocumentation topic={topic} exampleLanguage={exampleLanguage} onExampleLanguageChange={setExampleLanguage} /> : <>
       <header className="settingsPageHeading">
-        <h1>{t("developer.oneShotApi")}</h1>
+        <h1>{t("developer.agentRunApi")}</h1>
         <p>{t("developer.consoleDescription")}</p>
       </header>
       <section className="settingsPanel developerSection" aria-labelledby="developer-api-heading">

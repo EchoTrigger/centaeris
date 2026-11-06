@@ -64,8 +64,8 @@ pub(super) fn router(state: HttpServerState) -> Router {
             on_blocking(MethodFilter::POST, agent_runs::cleanup_receipt),
         )
         .route(
-            "/internal/agent-runs/one-shot-purge",
-            on_blocking(MethodFilter::POST, agent_runs::one_shot_purge),
+            "/internal/agent-runs/api-run-purge",
+            on_blocking(MethodFilter::POST, agent_runs::agent_run_api_purge),
         )
         .route(
             "/internal/model-catalog",

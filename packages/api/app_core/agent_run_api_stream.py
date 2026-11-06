@@ -11,8 +11,8 @@ from django.utils import timezone
 from .agent_run_stream import _committed_item, _load_postgres_page, _load_terminal_sequence, POSTGRES_BATCH_SIZE
 from .http.storage_stream import open_storage_stream
 from .http.stream_response import stream_database_call
-from .models import AgentRun, Artifact, OneShotOperation
-from .one_shot_protocol import (
+from .models import AgentRun, Artifact, AgentRunApiOperation
+from .agent_run_api_protocol import (
     ARTIFACT_CHUNK,
     ARTIFACT_COMPLETED,
     ARTIFACT_FAILED,
@@ -52,7 +52,7 @@ def operation_receipt(operation) -> OperationReceipt:
 
 @stream_database_call
 def _run_state(operation_id):
-    operation = OneShotOperation.objects.get(pk=operation_id)
+    operation = AgentRunApiOperation.objects.get(pk=operation_id)
     run = AgentRun.objects.get(pk=operation.agentRunId)
     reason = run.transitionReason if run.status in {"failed", "cancelled"} else ""
     if run.status != operation.runStatus or reason != operation.reasonCode:
@@ -76,7 +76,7 @@ def _artifacts(agent_run_id):
 
 @stream_database_call
 def _close_delivery(operation_id):
-    OneShotOperation.objects.filter(pk=operation_id, deliveryClosedAt__isnull=True).update(
+    AgentRunApiOperation.objects.filter(pk=operation_id, deliveryClosedAt__isnull=True).update(
         deliveryClosedAt=timezone.now(), deliveryLeaseUntil=None,
     )
 
@@ -143,7 +143,7 @@ async def _produce(operation, agent_run):
                 # Tool output, reasoning, source references and internal IDs stay private.
                 text = event["payload"]["modelMarkdown"]
                 if not isinstance(text, str):
-                    raise RuntimeError("one_shot_assistant_text_invalid")
+                    raise RuntimeError("agent_run_api_assistant_text_invalid")
                 final_text = text
         operation = await _run_state(operation.pk)
         if operation.runStatus in TERMINAL_STATUSES and len(records) < POSTGRES_BATCH_SIZE:
@@ -177,7 +177,7 @@ async def _produce(operation, agent_run):
     yield RUN_FINISHED.frame(finished)
 
 
-async def stream_one_shot(operation, agent_run, authority_check):
+async def stream_agent_run_api(operation, agent_run, authority_check):
     """Disconnect closes delivery only. The lifecycle Job retains execution ownership."""
     producer = _produce(operation, agent_run)
     pending = None

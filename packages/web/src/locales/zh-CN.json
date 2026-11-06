@@ -423,7 +423,7 @@
   "developer.docs": "文档",
   "developer.guides": "接入指南",
   "developer.reference": "接口参考",
-  "developer.oneShotApi": "一次性 Agent API",
+  "developer.agentRunApi": "Agent 运行 API",
   "developer.consoleDescription": "从脚本或后端服务发起一次 Agent 运行，在同一次响应中接收结果。",
   "developer.apiAddress": "API 地址",
   "developer.copyAddress": "复制地址",

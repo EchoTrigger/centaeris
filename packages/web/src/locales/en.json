@@ -423,7 +423,7 @@
   "developer.docs": "Docs",
   "developer.guides": "Integration guides",
   "developer.reference": "API reference",
-  "developer.oneShotApi": "One-time Agent API",
+  "developer.agentRunApi": "Agent Run API",
   "developer.consoleDescription": "Start one Agent run from a script or a backend service and receive its output in the same response.",
   "developer.apiAddress": "API address",
   "developer.copyAddress": "Copy address",

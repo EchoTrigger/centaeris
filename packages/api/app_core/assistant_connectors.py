@@ -54,8 +54,8 @@ def authorize_connector(authorization, body):
         membership = locked_workspace_membership_for(run.user, run.workspace_id)
         if membership is None or membership.id != run.membership_ref:
             raise ConnectorRejected("mcp_connector_membership_revoked", 403)
-        if run.session.purpose == "oneShot":
-            from .one_shot_credentials import authority_is_current, credential_for_run
+        if run.session.purpose == "agentRunApi":
+            from .agent_run_api_credentials import authority_is_current, credential_for_run
             credential = credential_for_run(run)
             if credential is None or not authority_is_current(credential):
                 raise ConnectorRejected("api_credential_revoked", 403)

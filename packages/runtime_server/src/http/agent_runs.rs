@@ -52,13 +52,13 @@ pub(super) fn cleanup_receipt(
     })
 }
 
-pub(super) fn one_shot_purge(
+pub(super) fn agent_run_api_purge(
     state: HttpServerState,
     request: Request<Bytes>,
 ) -> Result<Response<Body>, String> {
-    let parsed = serde_json::from_slice::<crate::postgres_store::one_shot_purge::OneShotPurgeRequest>(
-        request.body(),
-    );
+    let parsed = serde_json::from_slice::<
+        crate::postgres_store::agent_run_api_purge::AgentRunApiPurgeRequest,
+    >(request.body());
     let query = match parsed.and_then(|query| {
         let key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
             .map_err(|_| serde::de::Error::custom("signing key unavailable"))?;
@@ -68,23 +68,23 @@ pub(super) fn one_shot_purge(
         Ok(query)
     }) {
         Ok(query) => query,
-        Err(_) => return json_error_response(400, "one_shot_purge_request_invalid"),
+        Err(_) => return json_error_response(400, "agent_run_api_purge_request_invalid"),
     };
     match state
         .job_store
-        .purge_one_shot_session(&query.agent_run_control)
+        .purge_agent_run_api_session(&query.agent_run_control)
     {
         Ok(()) => {
             state
                 .tool_layers
                 .lock()
-                .map_err(|_| "one-shot runtime context lock poisoned")?
+                .map_err(|_| "Agent Run API runtime context lock poisoned")?
                 .remove(&query.agent_run_control.authorization.session_id);
             Ok(http_response(
                 200,
                 "application/json",
                 serde_json::to_vec(&json!({
-                    "schema":"runtime.agent_run.one_shot_purged.v1",
+                    "schema":"runtime.agent_run.api_purged.v1",
                     "agentRunId":query.agent_run_control.agent_run_id,
                     "sessionId":query.agent_run_control.authorization.session_id,
                     "purged":true,
@@ -93,8 +93,8 @@ pub(super) fn one_shot_purge(
             ))
         }
         Err(error) => {
-            eprintln!("one-shot content purge pending: {error}");
-            json_error_response(409, "one_shot_purge_pending")
+            eprintln!("Agent Run API content purge pending: {error}");
+            json_error_response(409, "agent_run_api_purge_pending")
         }
     }
 }

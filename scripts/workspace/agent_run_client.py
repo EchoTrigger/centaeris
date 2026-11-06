@@ -1,4 +1,4 @@
-"""Call the one-shot API and verify its SSE output, or inspect an operation receipt."""
+"""Call the Agent Run API and verify its SSE output, or inspect an operation receipt."""
 import argparse
 import base64
 import hashlib
@@ -110,7 +110,7 @@ def receive(response, output):
 def show_status_hint(url, operation_id):
     print("Check the original operation with the same CENTAERIS_RUN_KEY (status only; results are not replayed):",
           file=sys.stderr)
-    print(shlex.join(["python", "scripts/workspace/one_shot_client.py", "--url", url,
+    print(shlex.join(["python", "scripts/workspace/agent_run_client.py", "--url", url,
                       "--status", "--operation-id", operation_id]), file=sys.stderr)
 
 

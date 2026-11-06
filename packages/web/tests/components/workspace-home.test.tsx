@@ -257,7 +257,7 @@ test("workspace settings replace the work navigation and return to the same draf
   await user.click(within(docs).getByRole("link", { name: "developer.doc.artifacts.title" }));
   expect(router.state.location.search).toBe("?view=docs&topic=artifacts");
   await user.click(backToSettings);
-  await screen.findByRole("heading", { name: "developer.oneShotApi" });
+  await screen.findByRole("heading", { name: "developer.agentRunApi" });
   expect(screen.getByRole("navigation", { name: "shellSidebar.settings" })).toBeTruthy();
   await user.click(screen.getByRole("link", { name: "settingsRoute.backToApp" }));
 

@@ -17,7 +17,7 @@ boundaries, and release verification.
   proposed fixed-content contract and isolated RustFS validation.
 - [Pre-admission cancellation](architecture/PreAdmissionCancellation.md): durable
   cancellation receipts without fabricated Session history.
-- [One-shot Agent API](architecture/OneShotAgentAPI.md): first-call workflow,
+- [Agent Run API](architecture/AgentRunAPI.md): first-call workflow,
   credential and timeout boundaries, bounded result-recovery proposal and migration
   requirements for PR #55.
 - [Generated transcript contract](../../packages/api/app_core/generated/README.md):
@@ -57,7 +57,7 @@ boundaries, and release verification.
   and Plugin risk.
 - [Memory acceptance](eval/MemoryAcceptance.md): offline discovery and private
   persistence checks, plus bounded real-model follow-up.
-- [One-shot upgrade acceptance](eval/OneShotUpgradeAcceptance.md): separate
+- [Agent Run API upgrade acceptance](eval/AgentRunAPIUpgradeAcceptance.md): separate
   PostgreSQL 0045-to-0046 regression coverage and the remaining deployment checks.
 - [Release gate](eval/ReleaseGate.md): required source and deployment checks.
 - [Performance evaluation](eval/PerformanceEvaluation.md): reproducible measurement

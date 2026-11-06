@@ -1,4 +1,4 @@
-"""One-shot credentials bound execution authority and exclude product sessions."""
+"""Agent Run API credentials bound execution authority and exclude product sessions."""
 
 import hashlib
 import json
@@ -15,15 +15,15 @@ from .models import (
     Artifact,
     ModelConfig,
     ModelProvider,
-    OneShotCredential,
-    OneShotOperation,
+    AgentRunApiCredential,
+    AgentRunApiOperation,
     Session,
     Source,
     SourceObject,
     Workspace,
     WorkspaceMembership,
 )
-from .one_shot_credentials import (
+from .agent_run_api_credentials import (
     CredentialRejected,
     authenticate_credential,
     authority_is_current,
@@ -35,15 +35,15 @@ from .plugin_catalog import PLUGIN_ACTIVATION_SCHEMA, activation_digest
 from .workspace_access import agent_run_membership_is_current
 
 
-class OneShotPluginScopeTests(SimpleTestCase):
+class AgentRunApiPluginScopeTests(SimpleTestCase):
     def setUp(self):
-        self.run = SimpleNamespace(workspace=object(), session=SimpleNamespace(purpose="oneShot"))
+        self.run = SimpleNamespace(workspace=object(), session=SimpleNamespace(purpose="agentRunApi"))
         self.credential = self.enterContext(patch(
-            "app_core.one_shot_credentials.credential_for_run",
+            "app_core.agent_run_api_credentials.credential_for_run",
             return_value=SimpleNamespace(pluginNames=[]),
         ))
         self.catalog = self.enterContext(patch(
-            "app_core.one_shot_credentials.plugin_activation_for_workspace",
+            "app_core.agent_run_api_credentials.plugin_activation_for_workspace",
             side_effect=ValueError("plugin_package_missing:unrelated"),
         ))
 
@@ -83,7 +83,7 @@ class OneShotPluginScopeTests(SimpleTestCase):
         self.credential.assert_not_called()
 
 
-class OneShotCredentialAuthorityTests(TransactionTestCase):
+class AgentRunApiCredentialAuthorityTests(TransactionTestCase):
     serialized_rollback = True
 
     def setUp(self):
@@ -98,11 +98,11 @@ class OneShotCredentialAuthorityTests(TransactionTestCase):
         return create_credential(self.user, self.workspace.pk, self.model.pk, name="Backend", **kwargs)
 
     def create_run(self, credential):
-        session = Session.objects.create(workspace=self.workspace, owner=self.user, purpose="oneShot")
+        session = Session.objects.create(workspace=self.workspace, owner=self.user, purpose="agentRunApi")
         run = AgentRun.objects.create(workspace=self.workspace, session=session, user=self.user,
             modelConfig=self.model, prompt="Create a document")
         now = timezone.now()
-        OneShotOperation.objects.create(credential=credential, operationId="one-shot-authority", requestDigest="a" * 64,
+        AgentRunApiOperation.objects.create(credential=credential, operationId="agent-run-api-authority", requestDigest="a" * 64,
             agentRunId=run.pk, sessionId=session.pk, deadlineAt=now + timedelta(minutes=10),
             expiresAt=now + timedelta(hours=24))
         return run
@@ -131,7 +131,7 @@ class OneShotCredentialAuthorityTests(TransactionTestCase):
     def test_previously_issued_long_key_still_authenticates(self):
         credential, _ = self.credential()
         token = f"{credential.pk}.{'a' * 43}"
-        OneShotCredential.objects.filter(pk=credential.pk).update(
+        AgentRunApiCredential.objects.filter(pk=credential.pk).update(
             secretDigest=hashlib.sha256(token.encode()).hexdigest(),
             encryptedSecret="",
         )
@@ -161,7 +161,7 @@ class OneShotCredentialAuthorityTests(TransactionTestCase):
         model = ModelConfig.objects.create(provider=provider)
         with self.assertRaisesRegex(CredentialRejected, "model_not_found"):
             create_credential(self.user, self.workspace.pk, model.pk, name="Denied")
-        self.assertFalse(OneShotCredential.objects.exists())
+        self.assertFalse(AgentRunApiCredential.objects.exists())
 
     def test_sources_and_plugin_activation_are_limited_to_credential_scope(self):
         source = Source.objects.create(workspace=self.workspace, sourceType="fileTree", name="Files",
@@ -175,9 +175,9 @@ class OneShotCredentialAuthorityTests(TransactionTestCase):
         source.status = "deleted"
         self.assertFalse(source_object_allowed(credential, item))
         run = self.create_run(credential)
-        OneShotCredential.objects.filter(pk=credential.pk).update(pluginNames=["allowed"])
+        AgentRunApiCredential.objects.filter(pk=credential.pk).update(pluginNames=["allowed"])
         available = {"schema": "plugin.activation.v1", "packages": [{"name": "allowed"}, {"name": "private"}]}
-        with patch("app_core.one_shot_credentials.plugin_activation_for_workspace", return_value=available):
+        with patch("app_core.agent_run_api_credentials.plugin_activation_for_workspace", return_value=available):
             self.assertEqual(plugin_activation_for_run(run)["packages"], [{"name": "allowed"}])
 
     def test_temporary_session_and_artifact_are_hidden_from_product_entry_points(self):

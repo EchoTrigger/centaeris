@@ -78,7 +78,7 @@ class UnifiedEnvironmentAuthorizationTests(SimpleTestCase):
                 environment_profile=value["environmentProfile"], environment_profile_digest=value["environmentProfileDigest"],
                 network="disabled", benchmark_profile=None))
         with patch("app_core.runtime_contract.session_workspace_for_session", return_value=value["sessionWorkspace"]), \
-                patch("app_core.one_shot_credentials.plugin_activation_for_workspace", return_value=value["pluginActivation"]), \
+                patch("app_core.agent_run_api_credentials.plugin_activation_for_workspace", return_value=value["pluginActivation"]), \
                 patch("app_core.library_materials.personal_library_allowed", return_value=False):
             built = build_agent_run_authorization_payload(run, value["id"], image_digest="sha256:" + "b" * 64,
                 declared_inputs=value["assetRefs"], message_asset_refs=value["messageAssetRefs"])

@@ -10,8 +10,8 @@ from django.utils import timezone
 from .agent_run_authorization_factory import create_agent_run_authorization
 from .assets import captured_input_fields
 from .hosted_operations import HostedOperationError, lock_operation_identity, request_digest
-from .models import AgentRun, OneShotCredential, OneShotOperation, Session, SessionAssetLink, SourceObject
-from .one_shot_credentials import authority_is_current, source_object_allowed
+from .models import AgentRun, AgentRunApiCredential, AgentRunApiOperation, Session, SessionAssetLink, SourceObject
+from .agent_run_api_credentials import authority_is_current, source_object_allowed
 from .runtime_client import request_execution_profile, schedule_agent_run_lifecycle
 from .session_model_settings import selected_session_model
 from .workspace_access import shared_submission_membership_for
@@ -40,7 +40,7 @@ def operation_expiry(operation_id):
 
 def _locked_credential(credential):
     membership = shared_submission_membership_for(credential.user, credential.workspace_id)
-    current = OneShotCredential.objects.select_for_update(of=("self",)).select_related(
+    current = AgentRunApiCredential.objects.select_for_update(of=("self",)).select_related(
         "workspace", "user", "modelConfig",
     ).filter(pk=credential.pk).first()
     if membership is None or current is None or not authority_is_current(current):
@@ -49,8 +49,8 @@ def _locked_credential(credential):
 
 
 def _replay(credential, operation_id, digest):
-    lock_operation_identity(credential.user, credential.workspace_id, "oneShotRun", f"{credential.pk}:{operation_id}")
-    operation = OneShotOperation.objects.filter(credential=credential, operationId=operation_id).first()
+    lock_operation_identity(credential.user, credential.workspace_id, "agentRunApi", f"{credential.pk}:{operation_id}")
+    operation = AgentRunApiOperation.objects.filter(credential=credential, operationId=operation_id).first()
     if operation is not None and operation.requestDigest != digest:
         raise HostedOperationError(409, "operation_conflict")
     return operation
@@ -80,7 +80,7 @@ def accept_run(credential, operation_id, payload):
         sources = list(SourceObject.objects.select_related("source").filter(id__in=refs))
         if len(sources) != len(refs) or any(not source_object_allowed(current, item) for item in sources):
             raise HostedOperationError(404, "source_object_not_found")
-        session = Session.objects.create(workspace=current.workspace, owner=current.user, purpose="oneShot")
+        session = Session.objects.create(workspace=current.workspace, owner=current.user, purpose="agentRunApi")
         asset_refs = []
         for item in sources:
             link = SessionAssetLink.objects.create(
@@ -96,7 +96,7 @@ def accept_run(credential, operation_id, payload):
             modelConfig=model, thinkingMode=thinking_mode, prompt=payload.prompt,
         )
         deadline = timezone.now() + RUN_LIFETIME
-        operation = OneShotOperation.objects.create(
+        operation = AgentRunApiOperation.objects.create(
             credential=current, operationId=operation_id, requestDigest=digest,
             agentRunId=run.pk, sessionId=session.pk,
             deadlineAt=deadline, expiresAt=expires_at,
@@ -105,7 +105,7 @@ def accept_run(credential, operation_id, payload):
         create_agent_run_authorization(
             run, message_asset_refs=sorted(asset_refs), image_digest=profile["imageDigest"],
             personal_library=False,
-            execution_policy={"purpose": "oneShot", "deadlineAtMs": int(deadline.timestamp() * 1000)},
+            execution_policy={"purpose": "agentRunApi", "deadlineAtMs": int(deadline.timestamp() * 1000)},
         )
         from .material_files import check_original_budget
         check_original_budget(run)
@@ -115,7 +115,7 @@ def accept_run(credential, operation_id, payload):
     try:
         schedule_agent_run_lifecycle(run)
     except Exception:
-        logger.exception("One-shot lifecycle scheduling awaits reconciliation", extra={"agentRunId": run.pk})
+        logger.exception("Agent Run API lifecycle scheduling awaits reconciliation", extra={"agentRunId": run.pk})
         AgentRun.objects.filter(pk=run.pk, status="queued").update(transitionReason="agent_run_lifecycle_schedule_pending")
     return operation, run
 

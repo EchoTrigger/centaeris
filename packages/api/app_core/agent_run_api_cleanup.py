@@ -1,4 +1,4 @@
-"""Reclaim one-shot payloads after execution, physical cleanup and delivery settle."""
+"""Reclaim Agent Run API payloads after execution, physical cleanup and delivery settle."""
 
 from dataclasses import dataclass
 import logging
@@ -25,7 +25,7 @@ TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
 
 @dataclass
-class OneShotCleanupReport:
+class AgentRunApiCleanupReport:
     planned: list[str]
     cleaned: list[str]
     blocked: list[str]
@@ -39,15 +39,15 @@ def _delivery_closed(operation):
 
 
 def _purge_runtime(run):
-    result = request_json("/internal/agent-runs/one-shot-purge", {
-        "schema": "runtime.agent_run.one_shot_purge.v1",
+    result = request_json("/internal/agent-runs/api-run-purge", {
+        "schema": "runtime.agent_run.api_purge.v1",
         "agentRunControl": build_agent_run_control(run, require_current_authority=False),
     }, timeout=settings.RUNTIME_CONTROL_TIMEOUT_SECONDS)
     if result != {
-        "schema": "runtime.agent_run.one_shot_purged.v1",
+        "schema": "runtime.agent_run.api_purged.v1",
         "agentRunId": run.pk, "sessionId": run.session_id, "purged": True,
     }:
-        raise ValueError("one_shot_runtime_purge_receipt_invalid")
+        raise ValueError("agent_run_api_runtime_purge_receipt_invalid")
 
 
 def _owned_rows(session):
@@ -66,11 +66,11 @@ def _owned_rows(session):
                 rows = model.objects.filter(**{field.attname + "__in": doomed[target]})
                 if any(item.name == "session" for item in model._meta.fields):
                     if rows.exclude(session_id=session.pk).exists():
-                        raise ValueError("one_shot_cross_session_reference")
+                        raise ValueError("agent_run_api_cross_session_reference")
                 if model is models.Session and rows.exclude(pk=session.pk).exists():
-                    raise ValueError("one_shot_cross_session_reference")
+                    raise ValueError("agent_run_api_cross_session_reference")
                 if model is models.WorkspaceSnapshotFileReference and rows.exclude(snapshot__session=session).exists():
-                    raise ValueError("one_shot_cross_session_file_reference")
+                    raise ValueError("agent_run_api_cross_session_file_reference")
                 identities.update(rows.values_list("pk", flat=True))
             if identities != doomed.get(model, set()):
                 doomed[model] = identities
@@ -90,13 +90,13 @@ def _storage_keys(session, artifact_ids):
         keys.update((row.canonicalTextKey, row.previewPdfKey, row.workbookPreviewKey))
     root = _local_storage_root()
     if root is None:
-        raise ValueError("one_shot_workspace_storage_enumeration_unavailable")
+        raise ValueError("agent_run_api_workspace_storage_enumeration_unavailable")
     report = WorkspaceSnapshotGcReport([], [], [], [])
     for key in _snapshot_keys(root, _session_prefix(session), session.pk, report):
         _checked_path(root, key, directory=False)
         keys.add(key)
     if report.failures or report.blocked:
-        raise ValueError("one_shot_workspace_storage_unsettled")
+        raise ValueError("agent_run_api_workspace_storage_unsettled")
     return keys - {""}
 
 
@@ -158,11 +158,11 @@ def _purge_payloads(operation, session):
 
 
 def _collect_operation(operation_id, dry_run):
-    operation = models.OneShotOperation.objects.get(pk=operation_id)
+    operation = models.AgentRunApiOperation.objects.get(pk=operation_id)
     if operation.cleanupStatus == "completed" or not _delivery_closed(operation):
         return "blocked"
     run = models.AgentRun.objects.select_related("session", "authorization", "workspace", "modelConfig").get(
-        pk=operation.agentRunId, session_id=operation.sessionId, session__purpose="oneShot",
+        pk=operation.agentRunId, session_id=operation.sessionId, session__purpose="agentRunApi",
     )
     if run.status not in TERMINAL_STATUSES:
         return "blocked"
@@ -178,16 +178,16 @@ def _collect_operation(operation_id, dry_run):
     except urllib.error.HTTPError as error:
         status = error.code
         error.close()
-        if models.OneShotOperation.objects.filter(pk=operation_id, cleanupStatus="completed").exists():
+        if models.AgentRunApiOperation.objects.filter(pk=operation_id, cleanupStatus="completed").exists():
             return "cleaned"
         if status == 409:
             return "blocked"
         raise
     with transaction.atomic():
-        operation = models.OneShotOperation.objects.select_for_update(skip_locked=True).filter(pk=operation_id).first()
+        operation = models.AgentRunApiOperation.objects.select_for_update(skip_locked=True).filter(pk=operation_id).first()
         if operation is None or operation.cleanupStatus == "completed" or not _delivery_closed(operation):
             return "blocked"
-        session = models.Session.objects.select_for_update().get(pk=operation.sessionId, purpose="oneShot")
+        session = models.Session.objects.select_for_update().get(pk=operation.sessionId, purpose="agentRunApi")
         run = models.AgentRun.objects.select_related("session", "authorization", "workspace", "modelConfig").get(
             pk=operation.agentRunId, session=session,
         )
@@ -211,9 +211,9 @@ def _collect_operation(operation_id, dry_run):
         return "cleaned"
 
 
-def collect_one_shot_cleanup(dry_run=False, *, limit=64):
-    report = OneShotCleanupReport([], [], [], [])
-    due = models.OneShotOperation.objects.exclude(cleanupStatus="completed").filter(
+def collect_agent_run_api_cleanup(dry_run=False, *, limit=64):
+    report = AgentRunApiCleanupReport([], [], [], [])
+    due = models.AgentRunApiOperation.objects.exclude(cleanupStatus="completed").filter(
         agentRunId__in=models.AgentRun.objects.filter(status__in=TERMINAL_STATUSES).values("pk"),
     ).filter(Q(deliveryClosedAt__isnull=False) | Q(deliveryLeaseUntil__lte=timezone.now())).order_by("acceptedAt")
     for operation in due[:limit]:
@@ -221,11 +221,11 @@ def collect_one_shot_cleanup(dry_run=False, *, limit=64):
             state = _collect_operation(operation.pk, dry_run)
             getattr(report, state).append(operation.agentRunId)
         except Exception as error:
-            models.OneShotOperation.objects.filter(pk=operation.pk).exclude(cleanupStatus="completed").update(cleanupStatus="failed")
+            models.AgentRunApiOperation.objects.filter(pk=operation.pk).exclude(cleanupStatus="completed").update(cleanupStatus="failed")
             report.failures.append(operation.agentRunId)
-            logger.exception("One-shot cleanup failed", extra={"agentRunId": operation.agentRunId, "exceptionType": type(error).__name__})
+            logger.exception("Agent Run API cleanup failed", extra={"agentRunId": operation.agentRunId, "exceptionType": type(error).__name__})
     if not dry_run:
-        models.OneShotOperation.objects.filter(cleanupStatus="completed").filter(
+        models.AgentRunApiOperation.objects.filter(cleanupStatus="completed").filter(
             Q(credential__isnull=True) | Q(expiresAt__lte=timezone.now()),
         ).delete()
     return report

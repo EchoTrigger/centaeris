@@ -1,6 +1,6 @@
 # Workspace API
 
-## One-shot Agent API
+## Agent Run API
 
 Workspace owners and administrators manage API credentials through
 session-authenticated `GET` and `POST /api/workspaces/{workspaceId}/api-credentials`
@@ -91,9 +91,9 @@ separate boundaries. `expiresAt` is not a result-download deadline. Generate a
 key immediately before its first use: a nearly expired unused key can currently
 be accepted even when its lookup window ends before the Run's deadline. Proposed
 changes to this and to recoverable results are recorded separately in the
-[one-shot design boundary](../architecture/OneShotAgentAPI.md).
+[Agent Run API design](../architecture/AgentRunAPI.md).
 
-One-shot execution uses a private temporary Session, a signed v3 execution policy,
+Agent Run API execution uses a private temporary Session, a signed v3 execution policy,
 `perRun` allocation, disabled human questions, and explicit credential scopes.
 Personal-library access is disabled. Artifact publication verifies the existing
 publication identity and bytes into temporary Run-owned storage. After terminal
@@ -108,7 +108,7 @@ Save the operation identity printed before network access. The example verifies
 artifact bytes and atomically creates each destination file.
 
 ```sh
-python scripts/workspace/one_shot_client.py \
+python scripts/workspace/agent_run_client.py \
   --url https://workspace.example \
   --prompt 'Generate an editable Word project brief and publish the final docx.' \
   --output ./received
@@ -117,7 +117,7 @@ python scripts/workspace/one_shot_client.py \
 Inspect an uncertain call without submitting another Run:
 
 ```sh
-python scripts/workspace/one_shot_client.py \
+python scripts/workspace/agent_run_client.py \
   --url https://workspace.example \
   --status --operation-id '<original-operation-id>'
 ```
@@ -139,7 +139,7 @@ The artifacts guide owns the Word example and file-verification instructions.
 Link directly to a page using its URL, for example
 `/w/{workspaceId}/settings/developer?view=docs&topic=events`.
 After changing the public wire definitions, regenerate the reference with
-`uv run --frozen --package api python scripts/workspace/one-shot-reference.py`.
+`uv run --frozen --package api python scripts/workspace/agent-run-api-reference.py`.
 The generated reference includes required headers, response media types and the
 condition for each success response. Human guides explain recovery policy; they
 must not present a receipt as output or invent a result-replay endpoint.

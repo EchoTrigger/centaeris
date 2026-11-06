@@ -100,8 +100,8 @@ def _current_input(agent_run, input_ref: str, expected_authorization_digest: str
         )
     except SessionAssetLink.DoesNotExist as error:
         raise DeferredInputResolutionError("asset_unavailable") from error
-    if agent_run.session.purpose == "oneShot":
-        from .one_shot_credentials import credential_for_run
+    if agent_run.session.purpose == "agentRunApi":
+        from .agent_run_api_credentials import credential_for_run
         credential = credential_for_run(agent_run)
         if credential is None or link.sourceObject_id not in credential.sourceObjectRefs:
             raise DeferredInputResolutionError("access_revoked")

@@ -15,33 +15,33 @@ from django.utils import timezone
 
 from . import models
 from .artifact_publish import publish_artifact
-from .http.one_shot import CreateRunRequest
-from .one_shot_cleanup import collect_one_shot_cleanup
-from .one_shot_credentials import create_credential
-from .one_shot_runs import accept_run
+from .http.agent_run_api import CreateRunRequest
+from .agent_run_api_cleanup import collect_agent_run_api_cleanup
+from .agent_run_api_credentials import create_credential
+from .agent_run_api_runs import accept_run
 
 
-class OneShotCleanupTests(TransactionTestCase):
+class AgentRunApiCleanupTests(TransactionTestCase):
     serialized_rollback = True
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory(prefix="one-shot-cleanup-")
+        self.directory = tempfile.TemporaryDirectory(prefix="agent-run-api-cleanup-")
         self.addCleanup(self.directory.cleanup)
         settings = override_settings(MEDIA_ROOT=self.directory.name)
         settings.enable()
         self.addCleanup(settings.disable)
-        user = User.objects.create_user(username="one-shot-cleanup-owner")
+        user = User.objects.create_user(username="agent-run-api-cleanup-owner")
         workspace = models.Workspace.objects.create(name="API", createdBy=user)
         models.WorkspaceMembership.objects.create(workspace=workspace, user=user, role="owner")
         model = models.ModelConfig.objects.create(displayName="Model")
         credential, _ = create_credential(user, workspace.pk, model.pk, name="Backend")
-        with patch("app_core.one_shot_runs.request_execution_profile", return_value={
+        with patch("app_core.agent_run_api_runs.request_execution_profile", return_value={
             "schema": "runtime.execution_profile.v1", "imageDigest": "sha256:" + "a" * 64,
-        }), patch("app_core.one_shot_runs.schedule_agent_run_lifecycle", return_value="inserted"):
+        }), patch("app_core.agent_run_api_runs.schedule_agent_run_lifecycle", return_value="inserted"):
             self.operation, self.run = accept_run(credential, f"{int(time.time())}.{uuid.uuid4()}",
                 CreateRunRequest(prompt="private input"))
-        self.runtime = patch("app_core.one_shot_cleanup._purge_runtime", side_effect=self.purge_runtime).start()
+        self.runtime = patch("app_core.agent_run_api_cleanup._purge_runtime", side_effect=self.purge_runtime).start()
         self.addCleanup(patch.stopall)
-        self.redis = patch("app_core.one_shot_cleanup.redis.Redis.from_url").start()
+        self.redis = patch("app_core.agent_run_api_cleanup.redis.Redis.from_url").start()
 
     def purge_runtime(self, run):
         self.assertFalse(connection.in_atomic_block, "Runtime must acquire the same Session on its own connection")
@@ -86,7 +86,7 @@ class OneShotCleanupTests(TransactionTestCase):
         prefix = f"workspaces/{self.run.workspace_id}/sessions/{self.run.session_id}"
         orphan = default_storage.save(f"{prefix}/snapshots/1/.centaeris-immutable-abcd1234.tmp", ContentFile(b"partial"))
         self.settle()
-        report = collect_one_shot_cleanup()
+        report = collect_agent_run_api_cleanup()
         self.assertEqual(report.failures, [])
         self.assertEqual(report.cleaned, [self.run.pk])
         self.assertFalse(models.Session.objects.filter(pk=self.run.session_id).exists())
@@ -99,7 +99,7 @@ class OneShotCleanupTests(TransactionTestCase):
         self.assertTrue(models.UserLibraryObject.objects.filter(pk=library.pk).exists())
         self.operation.refresh_from_db()
         self.assertEqual(self.operation.cleanupStatus, "completed")
-        self.assertEqual(collect_one_shot_cleanup().cleaned, [])
+        self.assertEqual(collect_agent_run_api_cleanup().cleaned, [])
         self.runtime.assert_called_once()
         expected = f"workspace-agent:agent-run:{{{self.run.pk}}}"
         self.redis.return_value.delete.assert_called_once_with(f"{expected}:signals", f"{expected}:live:text", f"{expected}:live:meta")
@@ -108,17 +108,17 @@ class OneShotCleanupTests(TransactionTestCase):
         self.operation.credential.delete()
         self.operation.refresh_from_db()
         self.settle(no_allocation=True)
-        self.assertEqual(collect_one_shot_cleanup().cleaned, [self.run.pk])
-        self.assertFalse(models.OneShotOperation.objects.filter(pk=self.operation.pk).exists())
+        self.assertEqual(collect_agent_run_api_cleanup().cleaned, [self.run.pk])
+        self.assertFalse(models.AgentRunApiOperation.objects.filter(pk=self.operation.pk).exists())
 
     def test_open_delivery_blocks_and_expired_delivery_reclaims_cancelled_no_allocation(self):
         self.settle(no_allocation=True)
         self.operation.deliveryClosedAt = None
         self.operation.save(update_fields=["deliveryClosedAt"])
-        self.assertEqual(collect_one_shot_cleanup().cleaned, [])
+        self.assertEqual(collect_agent_run_api_cleanup().cleaned, [])
         self.runtime.assert_not_called()
-        models.OneShotOperation.objects.filter(pk=self.operation.pk).update(deliveryLeaseUntil=timezone.now() - timedelta(seconds=1))
-        report = collect_one_shot_cleanup()
+        models.AgentRunApiOperation.objects.filter(pk=self.operation.pk).update(deliveryLeaseUntil=timezone.now() - timedelta(seconds=1))
+        report = collect_agent_run_api_cleanup()
         self.assertEqual(report.failures, [])
         self.assertEqual(report.cleaned, [self.run.pk])
         self.operation.refresh_from_db()
@@ -128,16 +128,16 @@ class OneShotCleanupTests(TransactionTestCase):
     def test_failed_storage_delete_retains_owner_for_retry(self):
         artifact = self.publish("result.docx", b"bytes")
         self.settle()
-        with patch("app_core.one_shot_cleanup.delete_stored_object_for_gc", side_effect=OSError("unavailable")):
-            self.assertEqual(collect_one_shot_cleanup().failures, [self.run.pk])
+        with patch("app_core.agent_run_api_cleanup.delete_stored_object_for_gc", side_effect=OSError("unavailable")):
+            self.assertEqual(collect_agent_run_api_cleanup().failures, [self.run.pk])
         self.assertTrue(models.Session.objects.filter(pk=self.run.session_id).exists())
         self.assertTrue(default_storage.exists(artifact.storageKey))
-        self.assertEqual(collect_one_shot_cleanup().cleaned, [self.run.pk])
+        self.assertEqual(collect_agent_run_api_cleanup().cleaned, [self.run.pk])
 
     def test_interactive_environment_and_release_remain_immutable(self):
         self.settle()
         models.Session.objects.filter(pk=self.run.session_id).update(purpose="interactive")
-        models.OneShotOperation.objects.filter(pk=self.operation.pk).update(cleanupStatus="cleaning")
+        models.AgentRunApiOperation.objects.filter(pk=self.operation.pk).update(cleanupStatus="cleaning")
         for model, key, reason in (
             (models.SessionEnvironment, self.run.environment_id, "environment_profile_binding_immutable"),
             (models.AgentRunEnvironmentRelease, models.AgentRunEnvironmentRelease.objects.get(agent_run=self.run).pk,
@@ -148,7 +148,7 @@ class OneShotCleanupTests(TransactionTestCase):
 
     def test_receipt_expiry_after_cleanup_does_not_restore_execution_identity(self):
         self.settle(no_allocation=True)
-        self.assertEqual(collect_one_shot_cleanup().cleaned, [self.run.pk])
-        models.OneShotOperation.objects.filter(pk=self.operation.pk).update(expiresAt=timezone.now() - timedelta(seconds=1))
-        collect_one_shot_cleanup()
-        self.assertFalse(models.OneShotOperation.objects.filter(pk=self.operation.pk).exists())
+        self.assertEqual(collect_agent_run_api_cleanup().cleaned, [self.run.pk])
+        models.AgentRunApiOperation.objects.filter(pk=self.operation.pk).update(expiresAt=timezone.now() - timedelta(seconds=1))
+        collect_agent_run_api_cleanup()
+        self.assertFalse(models.AgentRunApiOperation.objects.filter(pk=self.operation.pk).exists())

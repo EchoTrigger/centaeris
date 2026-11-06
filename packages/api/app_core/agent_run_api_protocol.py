@@ -1,4 +1,4 @@
-"""Wire shapes for the external one-shot Run API and its bundled reference."""
+"""Wire shapes for the external Agent Run API and its bundled reference."""
 
 import json
 from dataclasses import dataclass

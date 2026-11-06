@@ -10,7 +10,7 @@ from .plugin_catalog import validate_plugin_activation
 
 
 AGENT_RUN_AUTHORIZATION_SCHEMA = "workspace.agent_run_authorization.v2"
-ONE_SHOT_AUTHORIZATION_SCHEMA = "workspace.agent_run_authorization.v3"
+AGENT_RUN_API_AUTHORIZATION_SCHEMA = "workspace.agent_run_authorization.v3"
 RESOLVED_INPUT_SCHEMA = "runtime.resolved_input.v1"
 DECLARED_INPUT_SCHEMA = "runtime.declared_input.v1"
 AGENT_RUN_START_SCHEMA = "workspace.agent_run.start.v1"
@@ -92,13 +92,13 @@ def build_agent_run_authorization_payload(
     from .library_materials import personal_library_allowed, remap_library_attachments
     if personal_library_allowed(agent_run):
         asset_refs, normalized_message_asset_refs = remap_library_attachments(agent_run, asset_refs, normalized_message_asset_refs)
-    from .one_shot_credentials import plugin_activation_for_run
+    from .agent_run_api_credentials import plugin_activation_for_run
 
-    one_shot = agent_run.session.purpose == "oneShot"
-    if one_shot != (execution_policy is not None):
+    agent_run_api = agent_run.session.purpose == "agentRunApi"
+    if agent_run_api != (execution_policy is not None):
         raise ValueError("agent_run_execution_policy_binding_invalid")
     payload = {
-        "schema": ONE_SHOT_AUTHORIZATION_SCHEMA if one_shot else AGENT_RUN_AUTHORIZATION_SCHEMA,
+        "schema": AGENT_RUN_API_AUTHORIZATION_SCHEMA if agent_run_api else AGENT_RUN_AUTHORIZATION_SCHEMA,
         "id": authorization_id,
         "organizationId": "default_org",
         "workspaceId": agent_run.workspace_id,
@@ -153,7 +153,7 @@ def authorization_signature(payload: dict, signing_key: str) -> str:
 def _authorization_signature_for_digest(digest: str, signing_key: str, *, schema=AGENT_RUN_AUTHORIZATION_SCHEMA) -> str:
     domains = {
         AGENT_RUN_AUTHORIZATION_SCHEMA: "workspace:agent-run-authorization:v2\0",
-        ONE_SHOT_AUTHORIZATION_SCHEMA: "workspace:agent-run-authorization:v3\0",
+        AGENT_RUN_API_AUTHORIZATION_SCHEMA: "workspace:agent-run-authorization:v3\0",
     }
     if schema not in domains:
         raise ValueError("agent_run_authorization_schema_mismatch")
@@ -190,7 +190,7 @@ def agent_run_binding_matches(payload: dict, agent_run, *, session=None) -> bool
         return False
     if authorization_network(payload) != environment.network:
         return False
-    if (payload["schema"] == ONE_SHOT_AUTHORIZATION_SCHEMA) != (agent_run.session.purpose == "oneShot"):
+    if (payload["schema"] == AGENT_RUN_API_AUTHORIZATION_SCHEMA) != (agent_run.session.purpose == "agentRunApi"):
         return False
     return (
         payload["agentRunId"] == agent_run.id
@@ -206,16 +206,16 @@ def validate_agent_run_authorization_payload(payload: dict) -> None:
     if not isinstance(payload, dict):
         raise ValueError("agent_run_authorization_schema_mismatch")
     schema = payload.get("schema")
-    if schema not in {AGENT_RUN_AUTHORIZATION_SCHEMA, ONE_SHOT_AUTHORIZATION_SCHEMA}:
+    if schema not in {AGENT_RUN_AUTHORIZATION_SCHEMA, AGENT_RUN_API_AUTHORIZATION_SCHEMA}:
         raise ValueError("agent_run_authorization_schema_mismatch")
     fields = AGENT_RUN_AUTHORIZATION_FIELDS
-    if schema == ONE_SHOT_AUTHORIZATION_SCHEMA:
+    if schema == AGENT_RUN_API_AUTHORIZATION_SCHEMA:
         fields = fields | {"executionPolicy"}
     require_exact_fields(payload, fields, "AgentRun authorization")
-    if schema == ONE_SHOT_AUTHORIZATION_SCHEMA:
+    if schema == AGENT_RUN_API_AUTHORIZATION_SCHEMA:
         policy = payload["executionPolicy"]
         require_exact_fields(policy, {"purpose", "deadlineAtMs"}, "execution policy")
-        if (policy["purpose"] != "oneShot" or type(policy["deadlineAtMs"]) is not int
+        if (policy["purpose"] != "agentRunApi" or type(policy["deadlineAtMs"]) is not int
                 or not 1 <= policy["deadlineAtMs"] <= 2**63 - 1):
             raise ValueError("agent_run_execution_policy_invalid")
     for name in [

@@ -6,16 +6,16 @@ from pathlib import Path
 from django.test import SimpleTestCase
 from pydantic.alias_generators import to_camel
 
-from . import one_shot_protocol as wire
+from . import agent_run_api_protocol as wire
 
 
-class OneShotOpenApiTests(SimpleTestCase):
+class AgentRunApiOpenApiTests(SimpleTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
         from api.ninja_api import api
         cls.schema = api.get_openapi_schema()
-        reference_path = Path(__file__).resolve().parents[3] / "packages/web/src/developer/oneShotReference.json"
+        reference_path = Path(__file__).resolve().parents[3] / "packages/web/src/developer/agentRunApiReference.json"
         cls.reference = json.loads(reference_path.read_text(encoding="utf-8"))
         cls.routes = {
             "createRun": ("post", "/api" + wire.CREATE_RUN_PATH),
@@ -76,7 +76,7 @@ class OneShotOpenApiTests(SimpleTestCase):
                     self.assertNotIn("requestBody", operation)
                 self.assertTrue(operation["description"])
 
-    def test_all_external_operations_require_only_the_one_shot_bearer(self):
+    def test_all_external_operations_require_only_the_agent_run_api_bearer(self):
         for operation in self.operations.values():
             self.assertEqual(len(operation["security"]), 1)
             requirement = operation["security"][0]

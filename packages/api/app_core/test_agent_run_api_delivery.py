@@ -13,13 +13,13 @@ from django.core.files.storage import default_storage
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
-from . import one_shot_stream as stream
-from .artifact_publish import ArtifactPublishError, _require_one_shot_artifact_budget
+from . import agent_run_api_stream as stream
+from .artifact_publish import ArtifactPublishError, _require_agent_run_api_artifact_budget
 
 
-class OneShotStreamTests(SimpleTestCase):
+class AgentRunApiStreamTests(SimpleTestCase):
     def setUp(self):
-        directory = tempfile.TemporaryDirectory(prefix="one-shot-delivery-")
+        directory = tempfile.TemporaryDirectory(prefix="agent-run-api-delivery-")
         self.addCleanup(directory.cleanup)
         settings = override_settings(MEDIA_ROOT=directory.name)
         settings.enable()
@@ -74,7 +74,7 @@ class OneShotStreamTests(SimpleTestCase):
             self.record(3, "assistant_message", {"modelMarkdown": "文档已生成", "artifactRefs": ["artifact:private"]}),
             self.record(4, "agent_run_completed", {}),
         ], 4)
-        raw = [frame async for frame in stream.stream_one_shot(self.operation, self.run, self.check)]
+        raw = [frame async for frame in stream.stream_agent_run_api(self.operation, self.run, self.check)]
         frames = self.frames(raw)
         self.assertEqual(frames[0][0], "runAccepted")
         self.assertEqual([body["text"] for event, body in frames if event == "outputText"], ["文档已生成"])
@@ -94,7 +94,7 @@ class OneShotStreamTests(SimpleTestCase):
             id="artifact", safeFilename="report.bin", contentType="application/octet-stream",
             sizeBytes=5, sha256="sha256:" + "0" * 64, storageKey=key,
         )]
-        frames = self.frames([frame async for frame in stream.stream_one_shot(self.operation, self.run, self.check)])
+        frames = self.frames([frame async for frame in stream.stream_agent_run_api(self.operation, self.run, self.check)])
         self.assertEqual([event for event, _ in frames].count("artifactFailed"), 1)
         self.assertNotIn("artifactCompleted", [event for event, _ in frames])
         self.assertEqual(frames[-1][1], {"runId": "run", "runStatus": "completed", "deliveryStatus": "failed"})
@@ -107,18 +107,18 @@ class OneShotStreamTests(SimpleTestCase):
         ]
         stream._load_terminal_sequence.return_value = 2
         with patch.object(stream.asyncio, "sleep", AsyncMock()):
-            frames = self.frames([frame async for frame in stream.stream_one_shot(self.operation, self.run, self.check)])
+            frames = self.frames([frame async for frame in stream.stream_agent_run_api(self.operation, self.run, self.check)])
         self.assertEqual([body["text"] for event, body in frames if event == "outputText"], ["committed answer"])
 
     async def test_revocation_stops_before_loading_results_and_closes_delivery(self):
         self.check.return_value = False
-        frames = [frame async for frame in stream.stream_one_shot(self.operation, self.run, self.check)]
+        frames = [frame async for frame in stream.stream_agent_run_api(self.operation, self.run, self.check)]
         self.assertEqual(frames, [])
         stream._load_postgres_page.assert_not_awaited()
         stream._close_delivery.assert_awaited_once_with(1)
 
     async def test_disconnect_closes_read_lease_without_cancelling_run(self):
-        response = stream.stream_one_shot(self.operation, self.run, self.check)
+        response = stream.stream_agent_run_api(self.operation, self.run, self.check)
         self.assertTrue((await anext(response)).startswith("event: runAccepted"))
         await response.aclose()
         stream._close_delivery.assert_awaited_once_with(1)
@@ -126,11 +126,11 @@ class OneShotStreamTests(SimpleTestCase):
 
     async def test_expired_delivery_does_not_read_or_emit_results(self):
         self.operation.deliveryLeaseUntil = self.now - timedelta(seconds=1)
-        self.assertEqual([frame async for frame in stream.stream_one_shot(self.operation, self.run, self.check)], [])
+        self.assertEqual([frame async for frame in stream.stream_agent_run_api(self.operation, self.run, self.check)], [])
         stream._load_postgres_page.assert_not_awaited()
 
 
-class OneShotArtifactBudgetTests(SimpleTestCase):
+class AgentRunApiArtifactBudgetTests(SimpleTestCase):
     def test_per_file_total_and_count_limits_include_reserved_uploads(self):
         for reserved, size, code in (
             ([], 8 * 1024 * 1024 + 1, "artifact_size_limit_exceeded"),
@@ -140,9 +140,9 @@ class OneShotArtifactBudgetTests(SimpleTestCase):
             with self.subTest(code=code), patch("app_core.artifact_publish.Artifact.objects") as artifacts:
                 artifacts.filter.return_value.values_list.return_value = reserved
                 with self.assertRaisesRegex(ArtifactPublishError, code):
-                    _require_one_shot_artifact_budget(SimpleNamespace(), size)
+                    _require_agent_run_api_artifact_budget(SimpleNamespace(), size)
 
     def test_exact_limits_are_accepted(self):
         with patch("app_core.artifact_publish.Artifact.objects") as artifacts:
             artifacts.filter.return_value.values_list.return_value = [8 * 1024 * 1024]
-            _require_one_shot_artifact_budget(SimpleNamespace(), 8 * 1024 * 1024)
+            _require_agent_run_api_artifact_budget(SimpleNamespace(), 8 * 1024 * 1024)

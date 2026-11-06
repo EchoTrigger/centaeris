@@ -270,7 +270,7 @@ test("a workspace member can open a direct docs link without loading credential 
   await openDeveloper("member", "?view=docs&topic=artifacts");
   expect(await screen.findByRole("heading", { name: "Artifacts", level: 1 })).toBeTruthy();
   await userEvent.click(screen.getByRole("link", { name: "Back to settings" }));
-  expect(await screen.findByRole("heading", { name: "One-time Agent API" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Agent Run API" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Create credential" })).toBeNull();
   expect(fetch).not.toHaveBeenCalled();
 });
