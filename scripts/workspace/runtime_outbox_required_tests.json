@@ -118,7 +118,7 @@
   "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_confirmed_release_wakes_future_capacity_wait_after_reopen",
   "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_release_before_capacity_yield_is_not_lost",
   "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_unconfirmed_removal_does_not_wake_capacity_wait",
-  "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_capacity_signal_preserves_execution_limits_and_reclaim_embargo",
+  "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_capacity_signal_preserves_lease_reclaim_embargo",
   "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_rolled_back_release_does_not_advance_capacity_wait",
   "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_capacity_wait_migration_preserves_existing_resource_and_authorization_facts",
   "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_capacity_wait_reopen_rejects_signal_and_binding_drift",
