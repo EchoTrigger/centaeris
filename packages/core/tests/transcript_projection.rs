@@ -703,7 +703,7 @@ fn terminal_run_boundaries_retain_failure_and_interruption_messages() {
     for (kind, payload) in [
         (
             "agent_run_failed",
-            json!({"reasonType":"provider_error","message":"Provider unavailable"}),
+            json!({"reasonType":"provider_rate_limited","message":"exceeded retry limit, last status: 429 Too Many Requests"}),
         ),
         (
             "agent_run_interrupted",
@@ -724,6 +724,7 @@ fn terminal_run_boundaries_retain_failure_and_interruption_messages() {
             payload["message"]
         );
         assert_eq!(block["presentation"]["sourceType"], kind);
+        assert_eq!(block["presentation"]["reasonType"], payload["reasonType"]);
     }
 }
 

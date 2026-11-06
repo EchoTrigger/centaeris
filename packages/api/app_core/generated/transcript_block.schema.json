@@ -223,6 +223,12 @@
           "type": "integer"
         },
         "operation": true,
+        "reasonType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "sourceType": {
           "type": "string"
         }

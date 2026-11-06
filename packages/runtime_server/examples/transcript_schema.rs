@@ -54,6 +54,7 @@ fn main() {
             display_target: None,
             duration_ms: None,
             operation: None,
+            reason_type: None,
         }),
         order_key: TranscriptOrderKeyV1 {
             source_sequence: "1".into(),

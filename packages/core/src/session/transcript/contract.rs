@@ -200,6 +200,8 @@ pub struct TranscriptPresentationV1 {
     pub display_target: Option<String>,
     pub duration_ms: Option<u64>,
     pub operation: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_type: Option<String>,
 }
 
 #[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
@@ -230,6 +232,9 @@ impl TranscriptBlockV1 {
             )?;
             if let Some(id) = &presentation.agent_run_id {
                 require_identifier(id, "transcript presentation agentRunId")?;
+            }
+            if let Some(reason_type) = &presentation.reason_type {
+                require_identifier(reason_type, "transcript presentation reasonType")?;
             }
             if presentation.observed_at_ms < 0
                 || presentation
