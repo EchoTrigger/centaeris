@@ -859,6 +859,14 @@ fn legacy_retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, Strin
             assert_eq!(evidence, "[]", "migration must not invent {table} evidence");
         }
     }
+    if let Some(deployment) = rows.remove("runtime.sandbox_deployment") {
+        let deployment: Vec<serde_json::Value> = serde_json::from_str(&deployment).unwrap();
+        assert_eq!(deployment.len(), 1);
+        assert_eq!(deployment[0]["singleton"], true);
+        assert!(deployment[0]["deployment_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
+    }
     let jobs = rows.get_mut("runtime.runtime_jobs").unwrap();
     let mut values: Vec<serde_json::Value> = serde_json::from_str(jobs).unwrap();
     for value in &mut values {
@@ -871,6 +879,9 @@ fn legacy_retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, Strin
         }
         if let Some(stage) = value.remove("lease_control_stage") {
             assert!(stage.is_null());
+        }
+        if let Some(host) = value.remove("lease_host_id") {
+            assert!(host.is_null(), "migration must not invent a lease host");
         }
         if let Some(count) = value.remove("lease_reclaim_count") {
             assert_eq!(count, 0);
