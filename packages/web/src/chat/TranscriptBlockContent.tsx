@@ -48,6 +48,13 @@ const TOOL_GROUP_ICONS: Record<ToolGroupCategory, LucideIcon> = {
   taskOutput: ListChecks,
 };
 
+export function TranscriptFailureNotice({ blockId, message }: Readonly<{ blockId?: string; message: string }>) {
+  return <div className="workspaceTranscriptBlock workspaceRunError" data-block-id={blockId} role="status">
+    <span className="workspaceRunErrorIcon" aria-hidden="true"><CircleAlert /></span>
+    <div className="workspaceRunErrorText">{message}</div>
+  </div>;
+}
+
 function useTranscriptIdentity(store: TranscriptViewStore) {
   const subscribe = useCallback((listener: () => void) => store.subscribeList(listener), [store]);
   const snapshot = useCallback(() => store.getListSnapshot(), [store]);
@@ -429,15 +436,7 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   const failedRun = block.presentation?.sourceType === "agent_run_failed"
     || block.presentation?.sourceType === "agent_run_interrupted";
   if (kind === "notice" && body.noticeType === "run_boundary" && failedRun) {
-    return (
-      <div className="workspaceTranscriptBlock workspaceRunError" data-block-id={block.blockId} role="status">
-        <span className="workspaceRunErrorIcon" aria-hidden="true"><CircleAlert /></span>
-        <div className="workspaceRunErrorText">
-          {text !== null ? modelFailureDetail(text, t)
-            : reference ? <ReferencedContent store={store} reference={reference} mode="plain" /> : null}
-        </div>
-      </div>
-    );
+    return <TranscriptFailureNotice blockId={block.blockId} message={modelFailureDetail(text, t, block.presentation?.reasonType)} />;
   }
   if (kind === "userText") {
     return (

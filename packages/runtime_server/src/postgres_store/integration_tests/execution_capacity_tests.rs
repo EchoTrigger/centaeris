@@ -1,4 +1,5 @@
 //! Job row leases preserve ownership without imposing Run concurrency quotas.
+use super::retained_instance_tests as fixture;
 use super::*;
 
 const LIFECYCLE: &str = "agent_run.lifecycle";
@@ -34,6 +35,149 @@ fn claim(store: &PostgresRuntimeStore, worker: &str) -> Vec<RuntimeJobRecord> {
             lease_ms: 60_000,
         })
         .unwrap()
+}
+
+fn queued_run(
+    store: &PostgresRuntimeStore,
+    db: &mut Client,
+    run: &str,
+    environment: &str,
+) -> String {
+    db.execute(
+        "INSERT INTO public.app_core_agentrun(id,session_id,environment_id) VALUES($1,'sess_1',$2)",
+        &[&run, &environment],
+    )
+    .unwrap();
+    let id = format!("agent_run.lifecycle:{run}");
+    let mut record = job(&id, &format!("{id}:fixture"));
+    record.job_kind = LIFECYCLE.into();
+    record.session_id = Some("sess_1".into());
+    record.payload_ref = Some(format!("record:agent_run:{run}"));
+    store
+        .schedule_worker_job(ScheduleRuntimeJobRequest { job: record }, Some("ws_1"))
+        .unwrap();
+    id
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_dispatch_reserves_one_start_slot_and_another_host_claims_remaining_work() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let host = store
+        .clone()
+        .with_dispatch_host("first-host".into(), 1)
+        .unwrap();
+    let other = store
+        .clone()
+        .with_dispatch_host("second-host".into(), 1)
+        .unwrap();
+    let first = queued_run(&store, &mut db, "dispatch-a", "environment-a");
+    let second = queued_run(&store, &mut db, "dispatch-b", "environment-b");
+    let third = queued_run(&store, &mut db, "dispatch-c", "environment-c");
+    let ready = |s: &PostgresRuntimeStore| {
+        s.wait_for_runtime_jobs(&[LIFECYCLE.into()], Duration::ZERO)
+            .unwrap()
+            .ready
+    };
+    assert!(ready(&host));
+    let (one, two) = std::thread::scope(|scope| {
+        let one = scope.spawn(|| claim(&host, "first-worker"));
+        let two = claim(&host, "second-worker-on-same-host");
+        (one.join().unwrap(), two)
+    });
+    let mut claims = one.into_iter().chain(two).collect::<Vec<_>>();
+    assert_eq!(claims.len(), 1);
+    let claimed = claims.pop().unwrap();
+    assert_eq!(claimed.job_id, first);
+    assert!(!ready(&host));
+    assert!(ready(&other));
+    assert_eq!(claim(&other, "other-host-worker")[0].job_id, second);
+    assert!(!ready(&other));
+    let owner = claimed.lease_owner.unwrap();
+    host.require_execute_lease(&first, &owner).unwrap();
+    assert!(other.require_execute_lease(&first, &owner).is_err());
+    let now = db
+        .query_one(
+            "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+            &[],
+        )
+        .unwrap()
+        .get::<_, i64>(0);
+    host.yield_runtime_job(YieldRuntimeJobRequest {
+        job_id: first,
+        lease_owner: owner,
+        yielded_at_ms: now,
+        run_at_ms: now + 60_000,
+        transition_reason: "question_wait".into(),
+    })
+    .unwrap();
+    assert!(ready(&host));
+    assert_eq!(claim(&host, "first-host-worker")[0].job_id, third);
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_dispatch_pins_existing_residency_and_control_to_its_owning_host() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let prior = fixture::run(&store, &mut db, "resident-origin", 1);
+    fixture::prepare(
+        &store,
+        &prior,
+        "resident-execution",
+        &std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+    )
+    .unwrap();
+    let host = store.clone().with_dispatch_host("host".into(), 1).unwrap();
+    let other = store
+        .clone()
+        .with_dispatch_host("other-host".into(), 1)
+        .unwrap();
+    let job_id = queued_run(&store, &mut db, "resident-next", "environment");
+    assert!(claim(&other, "other-host-worker").is_empty());
+    let claimed = claim(&host, "owner-host-worker").pop().unwrap();
+    assert_eq!(claimed.job_id, job_id);
+    let now = db
+        .query_one(
+            "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+            &[],
+        )
+        .unwrap()
+        .get::<_, i64>(0);
+    store
+        .yield_runtime_job(YieldRuntimeJobRequest {
+            job_id: job_id.clone(),
+            lease_owner: claimed.lease_owner.unwrap(),
+            yielded_at_ms: now,
+            run_at_ms: now,
+            transition_reason: "question_wait".into(),
+        })
+        .unwrap();
+    super::super::lifecycle_control::mark_terminal_pending(&mut db, "resident-next").unwrap();
+    let control = |store: &PostgresRuntimeStore| {
+        store
+            .claim_control_jobs(
+                ClaimDueRuntimeJobsRequest {
+                    now_ms: now,
+                    worker_id: "control-worker".into(),
+                    job_id: Some(job_id.clone()),
+                    job_kind: Some(LIFECYCLE.into()),
+                    session_id: None,
+                    limit: 1,
+                    lease_ms: 60_000,
+                },
+                "advance",
+            )
+            .unwrap()
+    };
+    assert!(!other.control_ready("advance").unwrap());
+    assert!(control(&other).is_empty());
+    assert!(host.control_ready("advance").unwrap());
+    let control_job = control(&host).pop().unwrap();
+    let owner = control_job.lease_owner.unwrap();
+    assert!(other.start_control_job(&job_id, &owner).is_err());
+    host.start_control_job(&job_id, &owner).unwrap();
 }
 
 #[test]
@@ -95,12 +239,10 @@ fn postgres_execution_claims_are_unique_across_replicas_with_many_active_jobs() 
         "agent_run.lifecycle:independent-0",
     );
     conflicting.job_kind = LIFECYCLE.into();
-    assert!(
-        replicas[1]
-            .schedule_worker_job(
-                ScheduleRuntimeJobRequest { job: conflicting },
-                Some("foreign-workspace")
-            )
-            .is_err()
-    );
+    assert!(replicas[1]
+        .schedule_worker_job(
+            ScheduleRuntimeJobRequest { job: conflicting },
+            Some("foreign-workspace")
+        )
+        .is_err());
 }

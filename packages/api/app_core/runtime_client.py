@@ -95,8 +95,8 @@ def agent_run_lifecycle_job_id(agent_run_id: str) -> str:
     return f"agent_run.lifecycle:{agent_run_id}"
 
 
-def _validate_agent_run_binding(agent_run):
-    if not agent_run_membership_is_current(agent_run):
+def _validate_agent_run_binding(agent_run, *, require_current_authority=True):
+    if require_current_authority and not agent_run_membership_is_current(agent_run):
         raise RuntimeError("AgentRun WorkspaceMembership is no longer current")
     authorization = agent_run.authorization
     if authorization_digest(authorization.payload) != authorization.digest:
@@ -114,6 +114,8 @@ def build_agent_run_start(agent_run, *, controller_authority, execution_mode="pe
     if not isinstance(controller_authority, dict) or controller_authority.get("controllerPurpose") != "execute":
         raise ValueError("agent_run_start_controller_purpose_invalid")
     authorization = _validate_agent_run_binding(agent_run)
+    if authorization.payload.get("executionPolicy", {}).get("purpose") == "oneShot":
+        execution_mode = "perRun"
     start = {
         "schema": AGENT_RUN_START_SCHEMA,
         "agentRunId": agent_run.id,
@@ -149,6 +151,8 @@ def build_agent_run_cleanup(agent_run, controller_authority, *, execution_mode="
             or not agent_run_binding_matches(authorization.payload, agent_run)
             or controller_authority.get("controllerPurpose") != "cleanup"):
         raise ValueError("agent_run_cleanup_binding_invalid")
+    if authorization.payload.get("executionPolicy", {}).get("purpose") == "oneShot":
+        execution_mode = "perRun"
     return {"schema": "workspace.agent_run.cleanup.v1", "agentRunId": agent_run.pk,
         "authorizationDigest": authorization.digest, "authorizationSignature": authorization.signature,
         "authorization": authorization.payload,
@@ -210,8 +214,8 @@ def request_host_event_input(session_id, input_id, source, content):
     return result["input"]
 
 
-def schedule_agent_run_lifecycle(agent_run) -> str:
-    authorization = _validate_agent_run_binding(agent_run)
+def schedule_agent_run_lifecycle(agent_run, *, require_current_authority=True) -> str:
+    authorization = _validate_agent_run_binding(agent_run, require_current_authority=require_current_authority)
     job_id = agent_run_lifecycle_job_id(agent_run.id)
     body = {
         "schema": AGENT_RUN_LIFECYCLE_SCHEDULE_SCHEMA,
@@ -240,16 +244,16 @@ def schedule_agent_run_lifecycle(agent_run) -> str:
     return payload["disposition"]
 
 
-def build_agent_run_control(agent_run) -> dict:
-    authorization = _validate_agent_run_binding(agent_run)
+def build_agent_run_control(agent_run, *, require_current_authority=True) -> dict:
+    authorization = _validate_agent_run_binding(agent_run, require_current_authority=require_current_authority)
     return {'agentRunId': agent_run.pk, 'authorizationDigest': authorization.digest,
         'authorizationSignature': authorization.signature, 'authorization': authorization.payload}
 
 
-def request_agent_run_cancellation(agent_run) -> dict:
+def request_agent_run_cancellation(agent_run, *, require_current_authority=True) -> dict:
     body = {
         "schema": "runtime.agent_run.cancel.v1",
-        "agentRunControl": build_agent_run_control(agent_run),
+        "agentRunControl": build_agent_run_control(agent_run, require_current_authority=require_current_authority),
     }
     try:
         result = request_json(

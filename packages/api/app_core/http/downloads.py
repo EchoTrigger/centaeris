@@ -158,6 +158,7 @@ def _select_artifact_download(user_id: int, artifact_id: str):
             id=artifact_id,
             agent_run__user_id=user_id,
             session__owner_id=user_id,
+            session__purpose="interactive",
             status="published",
         )
     except Artifact.DoesNotExist:
@@ -239,6 +240,7 @@ def _select_citation_preview(user_id: int, citation_id: str):
         citation = SessionCitationProjection.objects.select_related("workspace", "session").get(
             citationId=citation_id,
             agent_run__user_id=user_id,
+            session__purpose="interactive",
         )
     except SessionCitationProjection.DoesNotExist:
         return JsonResponse({"error": "citation_not_found"}, status=404)

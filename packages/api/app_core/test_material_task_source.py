@@ -5,6 +5,7 @@ from unittest.mock import patch
 from django.contrib.auth.models import User
 from django.core.files.base import ContentFile
 from django.core.files.storage import FileSystemStorage
+from django.db import transaction
 from django.test import TestCase
 from django.utils import timezone
 
@@ -73,6 +74,21 @@ class PlatformTaskSourceTests(TestCase):
         self.assertEqual(again.pk, task.pk)
         self.assertEqual(again.leaseEpoch, 4)
         self.assertEqual(again.attemptCount, 2)
+
+    @patch.dict("os.environ", {"MATERIAL_BROKER_URL": "redis://broker:6379/0"})
+    @patch("app_core.material_dispatch._publish")
+    def test_admission_dispatches_once_after_commit_and_never_on_rollback(self, publish):
+        with self.captureOnCommitCallbacks(execute=True):
+            with self.assertRaisesRegex(RuntimeError, "rollback"):
+                with transaction.atomic():
+                    self.admit()
+                    raise RuntimeError("rollback")
+        publish.assert_not_called()
+        with self.captureOnCommitCallbacks(execute=True):
+            self.admit()
+            self.admit()
+            publish.assert_not_called()
+        publish.assert_called_once_with(self.rep)
 
     def test_existing_runtime_task_is_not_silently_transferred(self):
         MaterialProcessingTask.objects.create(representationId=self.rep, processingSpecification=self.spec, payload={}, executionBackend="runtime")

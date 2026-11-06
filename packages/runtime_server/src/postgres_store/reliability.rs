@@ -51,7 +51,12 @@ impl PostgresRuntimeStore {
                 .map_err(|error| format!("listen for Postgres runtime jobs failed: {error}"))?;
             let deadline = Instant::now() + max_wait;
             loop {
-                let (now_ms, next_run_at_ms) = next_runtime_job(client, job_kinds)?;
+                let (now_ms, next_run_at_ms) = next_runtime_job(
+                    client,
+                    job_kinds,
+                    self.dispatch_host_id(),
+                    self.dispatch_sandbox_limit(),
+                )?;
                 if next_run_at_ms.is_some_and(|run_at_ms| run_at_ms <= now_ms) {
                     return Ok(RuntimeJobWaitResult {
                         ready: true,
@@ -90,17 +95,31 @@ impl PostgresRuntimeStore {
 fn next_runtime_job(
     client: &mut Client,
     job_kinds: &[String],
+    host: Option<&str>,
+    sandbox_limit: Option<i64>,
 ) -> Result<(i64, Option<i64>), String> {
     let due = super::capacity_wait::DUE_AT;
+    let preparation = super::capacity_wait::preparation_candidate();
+    let affinity = super::execution_capacity::host_affinity("$2");
+    let local_resident = super::execution_capacity::local_resident("$2");
+    let host_slots = super::execution_capacity::host_start_slots(
+        "$2",
+        "$3",
+        "(EXTRACT(EPOCH FROM statement_timestamp())*1000)::bigint",
+    );
     let row = client
         .query_one(
-            &format!("SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,MIN(GREATEST({due},COALESCE(j.lease_reclaim_not_before_ms,{due})))
+            &format!("WITH preparation AS MATERIALIZED ({preparation}), host_slots AS MATERIALIZED ({host_slots})
+                SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,MIN(GREATEST({due},COALESCE(j.lease_reclaim_not_before_ms,{due})))
                 FROM runtime_jobs j LEFT JOIN execution_job_tenants t ON t.job_id=j.job_id
+                LEFT JOIN preparation p ON p.job_id=j.job_id
+                CROSS JOIN host_slots
                 WHERE j.status='queued' AND j.job_kind=ANY($1)
                 AND (j.job_kind<>'agent_run.lifecycle' OR
-                    (t.job_id IS NOT NULL AND NOT({})))",
+                    (t.job_id IS NOT NULL AND {affinity}
+                     AND ($2::text IS NULL OR host_slots.available>0 OR {local_resident}) AND NOT({})))",
                 super::lifecycle_control::PENDING),
-            &[&job_kinds],
+            &[&job_kinds, &host, &sandbox_limit],
         )
         .map_err(|error| format!("query next Postgres runtime job failed: {error}"))?;
     Ok((row.get(0), row.get(1)))

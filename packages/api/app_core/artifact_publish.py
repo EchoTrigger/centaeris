@@ -14,6 +14,7 @@ from .models import (
     ArtifactPublication,
     AgentRunAuthorization,
     AgentRun,
+    Session,
     UserLibraryLink,
     UserLibraryObject,
     new_artifact_id,
@@ -44,6 +45,9 @@ ARTIFACT_PUBLICATION_STATUS_FIELDS = {
 }
 MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 MAX_METADATA_BYTES = 64 * 1024
+ONE_SHOT_ARTIFACT_BYTES = 8 * 1024 * 1024
+ONE_SHOT_TOTAL_ARTIFACT_BYTES = 16 * 1024 * 1024
+ONE_SHOT_ARTIFACT_COUNT = 4
 
 
 class ArtifactPublishError(Exception):
@@ -153,7 +157,9 @@ def publish_artifact(request) -> tuple[ArtifactPublication, Artifact]:
         if publication.status != "staging":
             raise ArtifactPublishError("artifact_publication_state_conflict")
         if artifact.status == "staging":
-            _ingest_artifact_library_copy(artifact, agent_run.user)
+            _require_one_shot_authority(agent_run)
+            if agent_run.session.purpose != "oneShot":
+                _ingest_artifact_library_copy(artifact, agent_run.user)
             artifact.status = "published"
             artifact.publishedAt = timezone.now()
             artifact.failureReason = ""
@@ -313,14 +319,28 @@ def _bound_agent_run(body: dict) -> AgentRun:
         raise ArtifactPublishError("artifact_agent_run_authorization_invalid")
     if body["authorizationDigest"] != frozen.digest:
         raise ArtifactPublishError("artifact_scope_mismatch", 403)
+    _require_one_shot_authority(frozen.agent_run)
     return frozen.agent_run
+
+
+def _require_one_shot_authority(agent_run: AgentRun) -> None:
+    if agent_run.session.purpose == "oneShot":
+        from .one_shot_credentials import authority_is_current, credential_for_run
+
+        credential = credential_for_run(agent_run)
+        if credential is None or not authority_is_current(credential):
+            raise ArtifactPublishError("artifact_scope_mismatch", 403)
 
 
 def _prepare_publication(
     agent_run: AgentRun, metadata: dict
 ) -> tuple[ArtifactPublication, Artifact]:
     with transaction.atomic():
-        locked_agent_run = AgentRun.objects.select_for_update().get(id=agent_run.id)
+        if agent_run.session.purpose == "oneShot":
+            Session.objects.select_for_update().get(pk=agent_run.session_id)
+        locked_agent_run = AgentRun.objects.select_for_update(of=("self",)).select_related(
+            "session",
+        ).get(id=agent_run.id)
         publication = (
             ArtifactPublication.objects.select_for_update(of=("self",))
             .select_related("artifact")
@@ -332,6 +352,9 @@ def _prepare_publication(
             if publication.artifact is None:
                 raise ArtifactPublishError("artifact_publication_state_conflict")
             return publication, publication.artifact
+
+        if locked_agent_run.session.purpose == "oneShot" and locked_agent_run.status not in {"queued", "running"}:
+            raise ArtifactPublishError("artifact_run_terminal")
 
         filename_key = unicodedata.normalize("NFC", metadata["filename"]).casefold()
         artifact = next(
@@ -348,6 +371,8 @@ def _prepare_publication(
         if artifact is not None:
             _require_artifact_bytes(artifact, metadata, "artifact_filename_conflict")
         else:
+            if locked_agent_run.session.purpose == "oneShot":
+                _require_one_shot_artifact_budget(locked_agent_run, metadata["sizeBytes"])
             artifact_id = new_artifact_id()
             try:
                 stored_filename = safe_filename(metadata["filename"])
@@ -384,6 +409,19 @@ def _prepare_publication(
             publishedAt=timezone.now() if artifact.status == "published" else None,
         )
         return publication, artifact
+
+
+def _require_one_shot_artifact_budget(agent_run: AgentRun, size_bytes: int) -> None:
+    # The Run row lock serializes reservations, including unfinished uploads.
+    if size_bytes > ONE_SHOT_ARTIFACT_BYTES:
+        raise ArtifactPublishError("artifact_size_limit_exceeded", 413)
+    reserved = list(Artifact.objects.filter(
+        agent_run=agent_run, status__in={"staging", "published"},
+    ).values_list("sizeBytes", flat=True))
+    if len(reserved) >= ONE_SHOT_ARTIFACT_COUNT:
+        raise ArtifactPublishError("artifact_count_limit_exceeded", 413)
+    if sum(reserved) + size_bytes > ONE_SHOT_TOTAL_ARTIFACT_BYTES:
+        raise ArtifactPublishError("artifact_total_size_limit_exceeded", 413)
 
 
 def _require_idempotent_publication(

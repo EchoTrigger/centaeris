@@ -17,11 +17,6 @@ from app_core.http.material_inputs import router as material_inputs_router
 from app_core.http.internal_model import router as internal_model_router
 from app_core.http.jobs import router as jobs_router
 from app_core.http.library import router as library_router
-from app_core.http.mcp_credentials import (
-    router as mcp_credentials_router,
-)
-from app_core.http.model_management import router as model_management_router
-from app_core.http.plugin_lifecycle import router as plugin_lifecycle_router
 from app_core.http.sources import router as sources_router
 from app_core.http.streaming import router as streaming_router
 from app_core.http.presentation import router as presentation_router
@@ -55,9 +50,6 @@ api.add_router("/api", workspace_members_router)
 api.add_router("/api", citations_router)
 api.add_router("/api", sources_router)
 api.add_router("/api", library_router)
-api.add_router("/api", mcp_credentials_router)
-api.add_router("/api", model_management_router)
-api.add_router("/api", plugin_lifecycle_router)
 api.add_router("/api", artifacts_router)
 api.add_router("/api", downloads_router)
 api.add_router("/api", office_preview_router)
@@ -73,3 +65,6 @@ api.add_router("/internal", internal_assistant_connectors_router)
 
 from app_core.http.workspace_resources import router as workspace_resources_router
 api.add_router("/api", workspace_resources_router)
+
+from app_core.http.one_shot import router as one_shot_router
+api.add_router("/api", one_shot_router)

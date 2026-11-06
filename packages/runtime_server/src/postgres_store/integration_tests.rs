@@ -362,7 +362,7 @@ fn test_url() -> String {
 fn reset_store(url: &str) {
     let mut client = Client::connect(url, NoTls).expect("connect test Postgres");
     owned_database::require_owned_database(&mut client);
-    client.batch_execute("CREATE TABLE IF NOT EXISTS public.app_core_agentrun(id text PRIMARY KEY, session_id text NOT NULL, \"preAdmissionCancelledAt\" timestamptz); DELETE FROM public.app_core_agentrun;").expect("reset hosted run receipts");
+    client.batch_execute("CREATE TABLE IF NOT EXISTS public.app_core_agentrun(id text PRIMARY KEY, session_id text NOT NULL, \"preAdmissionCancelledAt\" timestamptz); ALTER TABLE public.app_core_agentrun ADD COLUMN IF NOT EXISTS environment_id text; DELETE FROM public.app_core_agentrun;").expect("reset hosted run receipts");
     client
         .batch_execute("DROP SCHEMA IF EXISTS runtime CASCADE")
         .expect("reset runtime schema");
@@ -687,8 +687,12 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
     runtime
         .block_on(log.append_session_records(run, &records))
         .expect("append source facts independently of transcript projection");
+    let generation = store
+        .load_or_initialize_current_transcript_generation("session_transcript")
+        .expect("initialize transcript generation")
+        .projection_generation;
     let first = store
-        .catch_up_transcript_projection("session_transcript", "generation-1", 1)
+        .catch_up_transcript_projection("session_transcript", &generation, 1)
         .expect("commit first projection event");
     assert_eq!(first.projected_high_water, 1);
     drop(log);
@@ -714,7 +718,7 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
         if status == 200 {
             let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(page["sourceHighWater"], "4");
-            assert_eq!(page["projectionGeneration"], "generation-1");
+            assert_eq!(page["projectionGeneration"], generation);
             assert_eq!(
                 page["resumeCursors"],
                 serde_json::json!([{
@@ -738,7 +742,7 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
         .load_transcript_page(TranscriptPageReadRequestV1 {
             session_id: "session_transcript".to_string(),
             projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
-            projection_generation: "generation-1".to_string(),
+            projection_generation: generation.clone(),
             source_high_water: "4".to_string(),
             older_cursor: None,
             policy: TranscriptPagePolicyV1::default(),
@@ -750,7 +754,7 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
     assert_eq!(page.page.blocks.len(), 4);
     let content_request = serde_json::json!({
         "schema":"transcript.content.range.read.v1", "sessionId":"session_transcript",
-        "projectionVersion":"transcript.projection.v1", "projectionGeneration":"generation-1",
+        "projectionVersion":"transcript.projection.v1", "projectionGeneration":generation,
         "refId":format!("session-event:{}:modelMarkdown", records[2].event.event_id),
         "revision":"1", "byteLength":"4", "offset":"0", "maxBytes":2
     });
@@ -784,7 +788,7 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
         .load_transcript_patches(TranscriptPatchReadRequestV1 {
             session_id: "session_transcript".to_string(),
             projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
-            projection_generation: "generation-1".to_string(),
+            projection_generation: generation.clone(),
             after_source_high_water: "2".to_string(),
             through_source_high_water: "4".to_string(),
         })
@@ -795,8 +799,8 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
     let mut storage = Client::connect(&url, NoTls).expect("inspect transcript storage");
     let recovery_count = storage
         .query_one(
-            "SELECT count(*) FROM runtime.transcript_projection_current_recoveries WHERE session_id='session_transcript' AND projection_generation='generation-1'",
-            &[],
+            "SELECT count(*) FROM runtime.transcript_projection_current_recoveries WHERE session_id='session_transcript' AND projection_generation=$1",
+            &[&generation],
         )
         .expect("count current transcript recoveries")
         .get::<_, i64>(0);
@@ -850,7 +854,7 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
         .expect("append new facts while transcript producer is active");
     for _ in 0..=2 {
         if store
-            .catch_up_transcript_projection("session_transcript", "generation-1", 6)
+            .catch_up_transcript_projection("session_transcript", &generation, 6)
             .expect("catch up the appended facts in bounded slices")
             .caught_up
         {
@@ -861,7 +865,7 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
         .load_transcript_patches(TranscriptPatchReadRequestV1 {
             session_id: "session_transcript".to_string(),
             projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
-            projection_generation: "generation-1".to_string(),
+            projection_generation: generation.clone(),
             after_source_high_water: "4".to_string(),
             through_source_high_water: "6".to_string(),
         })
@@ -873,7 +877,7 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
         .delete_session_data("session_transcript")
         .expect("delete session-derived transcript state");
     assert!(store
-        .load_transcript_projection_head("session_transcript", "generation-1")
+        .load_transcript_projection_head("session_transcript", &generation)
         .expect("load deleted transcript head")
         .is_none());
 
@@ -3833,7 +3837,6 @@ fn postgres_runtime_store_rejects_schema_drift() {
     assert!(error.contains("table definition mismatch"));
 }
 
-
 struct RecordingModelClient {
     calls: std::sync::atomic::AtomicUsize,
 }
@@ -4431,9 +4434,13 @@ fn postgres_new_user_turn_admission_commits_closure_and_run_atomically() {
 
     // The closure updates the original tool block in the session transcript,
     // keeping the block id and order key and advancing the revision.
+    let generation = store
+        .load_or_initialize_current_transcript_generation(session_id)
+        .expect("initialize transcript generation")
+        .projection_generation;
     for _ in 0..=7 {
         if store
-            .catch_up_transcript_projection(session_id, "generation-1", 7)
+            .catch_up_transcript_projection(session_id, &generation, 7)
             .expect("catch up transcript")
             .caught_up
         {
@@ -4485,13 +4492,13 @@ fn postgres_transcript_old_block_encoding_generation_is_invalidated_and_reinitia
     let mut setup = Client::connect(&url, NoTls).expect("connect setup");
     setup
         .execute(
-            "INSERT INTO runtime.transcript_projection_heads(session_id,projection_version,projection_generation,source_high_water,invalidation_reason) VALUES('session_old',$1,'generation-old',5,NULL)",
+            "INSERT INTO runtime.transcript_projection_heads(session_id,projection_version,projection_generation,source_high_water,invalidation_reason) VALUES('session_old',$1,'generation-1',5,NULL)",
             &[&TRANSCRIPT_PROJECTION_VERSION_V1],
         )
         .expect("seed old head");
     setup
         .execute(
-            "INSERT INTO runtime.transcript_projection_current_generations(session_id,projection_version,projection_generation,source_high_water) VALUES('session_old',$1,'generation-old',5)",
+            "INSERT INTO runtime.transcript_projection_current_generations(session_id,projection_version,projection_generation,source_high_water) VALUES('session_old',$1,'generation-1',5)",
             &[&TRANSCRIPT_PROJECTION_VERSION_V1],
         )
         .expect("seed old current generation");
@@ -4499,11 +4506,12 @@ fn postgres_transcript_old_block_encoding_generation_is_invalidated_and_reinitia
     let current = store
         .load_or_initialize_current_transcript_generation("session_old")
         .expect("load current generation");
-    assert_eq!(current.projection_generation, "generation-1");
+    assert_ne!(current.projection_generation, "generation-1");
+    assert_eq!(current.source_high_water, "0");
 
     let old_heads: i64 = setup
         .query_one(
-            "SELECT count(*) FROM runtime.transcript_projection_heads WHERE session_id='session_old' AND projection_generation='generation-old'",
+            "SELECT count(*) FROM runtime.transcript_projection_heads WHERE session_id='session_old' AND projection_generation='generation-1'",
             &[],
         )
         .expect("count old heads")
@@ -4511,8 +4519,8 @@ fn postgres_transcript_old_block_encoding_generation_is_invalidated_and_reinitia
     assert_eq!(old_heads, 0);
     let new_heads: i64 = setup
         .query_one(
-            "SELECT count(*) FROM runtime.transcript_projection_heads WHERE session_id='session_old' AND projection_generation='generation-1'",
-            &[],
+            "SELECT count(*) FROM runtime.transcript_projection_heads WHERE session_id='session_old' AND projection_generation=$1",
+            &[&current.projection_generation],
         )
         .expect("count new heads")
         .get(0);

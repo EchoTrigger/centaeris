@@ -1,5 +1,5 @@
 import { ApiError } from "../api.ts";
-import type { OperationClient, OperationReceipt, OperationSubmissionHooks } from "./operationReceipts.ts";
+import { isDefiniteSubmissionRejection, type OperationClient, type OperationReceipt, type OperationSubmissionHooks } from "./operationReceipts.ts";
 
 export type SubmissionTarget = { sessionId: string; agentRunId: string };
 type TerminalStatus = "completed" | "failed" | "cancelled";
@@ -155,8 +155,8 @@ export class SubmissionControl {
     }).catch(error => {
       if (owns() && this.snapshot.phase !== "terminal") {
         const undispatched = error?.message === "operation_dispatch_stopped" && !this.operations.pending();
-        const rejected = error instanceof ApiError && [400, 422, 429].includes(error.status) && !this.operations.pending();
-        if (undispatched || rejected) {
+        const rejected = !this.operations.pending() && isDefiniteSubmissionRejection(error);
+        if (undispatched || (rejected && !(error instanceof ApiError && [401, 403, 404].includes(error.status)))) {
           this.storage.removeItem(this.storageKey);
           this.publish({ phase: "idle", operationId: null, stopRequested: false, feedback: undispatched ? "stoppedBeforeDispatch" : null, error: rejected ? error : null });
         } else if (isExplicitRejection(error)) {

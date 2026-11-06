@@ -26,3 +26,5 @@ services:
     image: centaeris-platform-mcp-e2e-api:local
     environment:
       MATERIAL_PROCESSOR_IMAGE: centaeris-platform-mcp-e2e-processor:local
+  material-scheduler:
+    image: centaeris-platform-mcp-e2e-api:local

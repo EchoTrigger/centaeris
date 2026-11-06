@@ -1,5 +1,31 @@
 use sha2::{Digest, Sha256};
 
+#[derive(Debug)]
+pub(crate) enum InstancePreparationFailure {
+    Unknown(String),
+    Created { container_id: String, error: String },
+}
+
+impl InstancePreparationFailure {
+    pub(crate) fn into_error(self) -> String {
+        match self {
+            Self::Unknown(error) | Self::Created { error, .. } => error,
+        }
+    }
+}
+
+impl From<String> for InstancePreparationFailure {
+    fn from(error: String) -> Self {
+        Self::Unknown(error)
+    }
+}
+
+impl From<&str> for InstancePreparationFailure {
+    fn from(error: &str) -> Self {
+        Self::Unknown(error.into())
+    }
+}
+
 pub(crate) struct RetainedInstanceRequest<'a> {
     pub environment_authorization: &'a crate::environment_authorization::EnvironmentAuthorization,
     pub signing_key: &'a [u8],

@@ -168,8 +168,8 @@ function LibraryPreviewPageContent() {
         const local = await draftStore().list(String(user.id), note.id || clientDraftId);
         if (epoch === loadEpochRef.current) setDrafts(local.filter(record => record.key !== currentDraftKey));
       }
-    } catch (requestError) {
-      if (epoch === loadEpochRef.current) setError(t("libraryObjectRoute.unableToOpenFileValue", { value1: requestError.message }));
+    } catch {
+      if (epoch === loadEpochRef.current) setError(t("libraryObjectRoute.unableToOpenFile"));
     } finally {
       if (epoch === loadEpochRef.current) setLoading(false);
     }
@@ -220,11 +220,12 @@ function LibraryPreviewPageContent() {
     const epoch = loadEpochRef.current;
     const id = controllerRef.current?.state.draft.noteId;
     if (!id) return;
+    setError("");
     try {
       const remote = await api(`/api/library/${encodeURIComponent(id)}/note`);
       if (epoch === loadEpochRef.current) setComparison(remote);
-    } catch (requestError) {
-      if (epoch === loadEpochRef.current) setError(requestError.message);
+    } catch {
+      if (epoch === loadEpochRef.current) setError(t("libraryObjectRoute.compareFailed"));
     }
   }
 
@@ -246,11 +247,12 @@ function LibraryPreviewPageContent() {
   async function deleteItem() {
     if (!item || deleting) return;
     setDeleting(true);
+    setError("");
     try {
       await api(`/api/library/${item.id}`, { method: "DELETE" });
       backToLibrary();
-    } catch (requestError) {
-      setError(t("libraryObjectRoute.unableToMoveThisItemToTrashValue", { value1: requestError.message }));
+    } catch {
+      setError(t("libraryObjectRoute.unableToMoveThisItemToTrash"));
     } finally {
       setDeleting(false);
     }
@@ -288,19 +290,20 @@ function LibraryPreviewPageContent() {
         <small>{saveStatus}</small>
         <button type="button" disabled={loading || saveState?.status === "syncing" || saveState?.status === "conflict"} onClick={() => void controllerRef.current?.flush()}>{t("libraryObjectRoute.saveNow")}</button>
       </nav> : <nav aria-label={t("libraryObjectRoute.libraryPath")}><button type="button" onClick={backToLibrary}><ArrowLeft aria-hidden="true" />{t("libraryObjectRoute.library")}</button>{item && <><span>/</span><strong>{displayedTitle}</strong></>}</nav>}
-      {item && !isNote && <div className="libraryPreviewActions"><a href={apiUrl(`/api/library/${item.id}/download`)} aria-label={t("workspaceContextPanel.download")}><Download aria-hidden="true" /></a><button type="button" disabled={deleting} onClick={() => void deleteItem()} aria-label={t("agentRoute.moveToTrash")}><Trash2 aria-hidden="true" /></button></div>}
+      {item && !isNote && <div className="libraryPreviewActions">{error ? <small className="error" role="alert">{error}</small> : null}<a href={apiUrl(`/api/library/${item.id}/download`)} aria-label={t("workspaceContextPanel.download")}><Download aria-hidden="true" /></a><button type="button" disabled={deleting} onClick={() => void deleteItem()} aria-label={t("agentRoute.moveToTrash")}><Trash2 aria-hidden="true" /></button></div>}
     </header>
     <section className={`libraryPreviewBody${isNote ? " libraryNotePreview" : ""}${isMarkdown ? " isMarkdown" : ""}${isCode ? " isCode" : ""}`}>
-      {loading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryObjectRoute.openingFile")}</div> : <>{error && <div className="errorBanner libraryError" role="alert">{error}<button type="button" onClick={() => { if (controllerRef.current) void controllerRef.current.flush(); else void load(); }}>{t("libraryObjectRoute.retry")}</button></div>}{isNote ? <div className="libraryNoteEditor">
-        {drafts.length > 0 && <div className="libraryNoteNotice" role="status"><span>{t("libraryObjectRoute.draftsAvailable")}</span>{drafts.map(record => <button type="button" key={record.key} onClick={() => recoverDraft(record)}>{t("libraryObjectRoute.recoverDraft", { title: record.document.displayName, time: new Date(record.updatedAt).toLocaleString() })}</button>)}<button type="button" onClick={() => setDrafts([])}>{t("libraryObjectRoute.useServerVersion")}</button></div>}
-        {saveState?.status === "conflict" && <div className="errorBanner" role="alert"><span>{t("libraryObjectRoute.conflictHelp")}</span><button type="button" onClick={() => void compareRemote()}>{t("libraryObjectRoute.compare")}</button><button type="button" onClick={saveCopy}>{t("libraryObjectRoute.saveCopy")}</button>{comparison && <button type="button" onClick={resubmit}>{t("libraryObjectRoute.resubmit")}</button>}</div>}
+      {loading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryObjectRoute.openingFile")}</div> : !item ? error && <div className="libraryEmptyState" role="alert">{error}<button className="pluginEnableButton" type="button" onClick={() => void load()}>{t("libraryObjectRoute.retry")}</button></div> : <>{isNote ? <div className="libraryNoteEditor">
+        {drafts.length > 0 && <div className="libraryNoteActions"><span role="status">{t("libraryObjectRoute.draftsAvailable")}</span>{drafts.map(record => <button type="button" className="pluginEnableButton" key={record.key} onClick={() => recoverDraft(record)}>{t("libraryObjectRoute.recoverDraft", { title: record.document.displayName, time: new Date(record.updatedAt).toLocaleString() })}</button>)}<button type="button" className="pluginEnableButton" onClick={() => setDrafts([])}>{t("libraryObjectRoute.useServerVersion")}</button></div>}
+        {saveState?.status === "conflict" && <div className="libraryNoteActions"><span role="alert">{t("libraryObjectRoute.conflictHelp")}</span><button type="button" className="pluginEnableButton" onClick={() => void compareRemote()}>{t("libraryObjectRoute.compare")}</button><button type="button" className="pluginEnableButton" onClick={saveCopy}>{t("libraryObjectRoute.saveCopy")}</button>{comparison && <button type="button" className="pluginEnableButton" onClick={resubmit}>{t("libraryObjectRoute.resubmit")}</button>}</div>}
+        {error ? <div className="libraryNoteActions"><span className="error" role="alert">{error}</span>{saveState?.status !== "conflict" ? <button className="pluginEnableButton" type="button" onClick={() => void controllerRef.current?.flush()}>{t("libraryObjectRoute.retry")}</button> : null}</div> : null}
         {comparison && <section aria-label={t("libraryObjectRoute.compare")}><label>{t("libraryObjectRoute.localVersion")}<strong>{noteTitle}</strong><textarea readOnly value={markdown} /></label><label>{t("libraryObjectRoute.serverVersion")}<strong>{comparison.object.displayName}</strong><textarea readOnly value={comparison.markdown} /></label></section>}
-        <textarea value={markdown} onChange={(event) => updateNote(noteTitle, event.target.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void controllerRef.current?.flush(); } }} aria-label={t("libraryObjectRoute.noteContent")} placeholder={t("libraryObjectRoute.startWritingOrTypeForCommands")} /></div> : error ? null : isImage(item) ? <img className="libraryPreviewImage" src={apiUrl(`/api/library/${item.id}/preview`)} alt={item.displayName} /> : isSpreadsheet ? <SpreadsheetPreview className="libraryPreviewFrame" src={apiUrl(`/api/spreadsheet-preview/userLibraryObject/${item.id}`)} printSrc={officePreviewUrl("userLibraryObject", item.id)} title={item.displayName} /> : canEmbed(item) ? <DocumentPreview className={isMarkdown ? "libraryMarkdownPreview" : isCode ? "libraryCodePreview" : "libraryPreviewFrame"} src={officeFileType(item.displayName) ? officePreviewUrl("userLibraryObject", item.id) : apiUrl(`/api/library/${item.id}/preview`)} title={item.displayName} contentType={item.contentType} /> : <div className="libraryPreviewUnsupported"><FileText aria-hidden="true" /><strong>{item.displayName}</strong><span>{t("libraryObjectRoute.onlinePreviewIsUnavailableForThisFileType")}</span><a href={apiUrl(`/api/library/${item.id}/download`)}><Download aria-hidden="true" />{t("libraryObjectRoute.downloadFile")}</a></div>}</>}
+        <textarea value={markdown} onChange={(event) => updateNote(noteTitle, event.target.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void controllerRef.current?.flush(); } }} aria-label={t("libraryObjectRoute.noteContent")} placeholder={t("libraryObjectRoute.startWritingOrTypeForCommands")} /></div> : isImage(item) ? <img className="libraryPreviewImage" src={apiUrl(`/api/library/${item.id}/preview`)} alt={item.displayName} /> : isSpreadsheet ? <SpreadsheetPreview className="libraryPreviewFrame" src={apiUrl(`/api/spreadsheet-preview/userLibraryObject/${item.id}`)} printSrc={officePreviewUrl("userLibraryObject", item.id)} title={item.displayName} /> : canEmbed(item) ? <DocumentPreview className={isMarkdown ? "libraryMarkdownPreview" : isCode ? "libraryCodePreview" : "libraryPreviewFrame"} src={officeFileType(item.displayName) ? officePreviewUrl("userLibraryObject", item.id) : apiUrl(`/api/library/${item.id}/preview`)} title={item.displayName} contentType={item.contentType} /> : <div className="libraryPreviewUnsupported"><FileText aria-hidden="true" /><strong>{item.displayName}</strong><span>{t("libraryObjectRoute.onlinePreviewIsUnavailableForThisFileType")}</span><a href={apiUrl(`/api/library/${item.id}/download`)}><Download aria-hidden="true" />{t("libraryObjectRoute.downloadFile")}</a></div>}</>}
     </section>
   </div><ConfirmDialog open={blocker.state === "blocked"} title={t("libraryObjectRoute.leaveTitle")} message={t("libraryObjectRoute.leaveHelp")} confirmLabel={t("libraryObjectRoute.leaveWithoutDraft")} cancelLabel={t("libraryObjectRoute.stay")} onCancel={() => blocker.reset()} onConfirm={() => blocker.proceed()} /></>;
 }
 
-export default function LibraryPreviewPage() {
+export default function LibraryPreviewPage({ embedded = false } = {}) {
   useTranslation();
-  return <ShellPage><LibraryPreviewPageContent /></ShellPage>;
+  return embedded ? <LibraryPreviewPageContent /> : <ShellPage><LibraryPreviewPageContent /></ShellPage>;
 }

@@ -1,7 +1,7 @@
 //! Transport characterization independent of database, Docker and token configuration.
 use super::*;
 use crate::http::dispatch_http_operation;
-use axum::{Router, extract::State};
+use axum::{extract::State, Router};
 use std::convert::Infallible;
 
 fn http_state(runtime: Arc<tokio::runtime::Runtime>) -> HttpServerState {

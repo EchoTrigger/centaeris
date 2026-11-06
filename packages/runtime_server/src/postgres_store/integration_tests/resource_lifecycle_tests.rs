@@ -336,6 +336,99 @@ fn failed_creation_cleanup(
 
 #[test]
 #[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_failed_start_with_exact_container_identity_reaches_normal_cleanup() {
+    use super::retained_instance_tests as fixture;
+    use crate::postgres_store::cleanup_preservation::{CleanupRecovery, CleanupRecoveryEvidence};
+    use crate::postgres_store::cleanup_receipts::{
+        CleanupAuthorityRequest, CleanupPhysicalResult, CleanupTarget,
+    };
+    use crate::postgres_store::execution_instances::InstancePreparationFailure;
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let mut run = fixture::run(&store, &mut db, "failed-known-container", 1);
+    run.grant.payload.execution_mode = "perRun".into();
+    run.grant = fixture::sign(run.grant.payload);
+    let profile = run.original.environment_profile.digest().unwrap();
+    let container = "c".repeat(64);
+    let error = store
+        .prepare_retained_instance_then_initialize(
+            &run.request("failed-known-execution", &profile),
+            fixture::limits(&run),
+            || {
+                Ok(crate::resident_capacity::ResidentInventory::declarations(
+                    vec![],
+                ))
+            },
+            |_, _| Ok(()),
+            |_| {
+                Err(InstancePreparationFailure::Created {
+                    container_id: container.clone(),
+                    error: "start refused".into(),
+                })
+            },
+            |_| panic!("failed start cannot initialize workspace"),
+        )
+        .unwrap_err();
+    assert_eq!(error, "start refused");
+    let row = db.query_one("SELECT container_id,state FROM runtime.resident_sandboxes WHERE execution_id='failed-known-execution'", &[]).unwrap();
+    assert_eq!(row.get::<_, String>(0), container);
+    assert_eq!(row.get::<_, String>(1), "releasing");
+    assert_eq!(db.query_one("SELECT state FROM runtime.environment_creation_attempts WHERE allocation_execution_id='failed-known-execution'", &[]).unwrap().get::<_, String>(0), "dispatched");
+    let cleanup = failed_creation_cleanup(&mut db, &mut run);
+    let request = CleanupAuthorityRequest {
+        cleanup: &cleanup,
+        signing_key: fixture::KEY,
+        lease: &run.fence,
+        host_id: "host",
+    };
+    let recovery = store
+        .with_cleanup_target(
+            &request,
+            || Ok(vec![]),
+            |target, _| {
+                let CleanupTarget::Instance { allocation, .. } = target else {
+                    panic!("known original instance required")
+                };
+                assert_eq!(allocation.container_id.as_ref(), Some(&container));
+                Ok(CleanupRecovery {
+                    expected_allocation: allocation.as_ref().clone(),
+                    evidence: CleanupRecoveryEvidence::Absent,
+                })
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let receipt = store
+        .with_recovery_cleanup_authority(
+            &request,
+            || Ok(vec![]),
+            &recovery,
+            |target, _| {
+                let CleanupTarget::Instance { allocation, .. } = target else {
+                    panic!("known original instance required")
+                };
+                Ok(CleanupPhysicalResult::Removed {
+                    instance_id: allocation.instance_id.clone(),
+                    container_id: container.clone(),
+                })
+            },
+        )
+        .unwrap();
+    assert!(receipt.cleanup_complete);
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    let proof = db.query_one("SELECT physical_removed,removed_container_id FROM runtime.agent_run_cleanup_receipts WHERE agent_run_id=$1", &[&run.original.agent_run_id]).unwrap();
+    assert!(proof.get::<_, bool>(0));
+    assert_eq!(proof.get::<_, String>(1), container);
+    assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_jobs WHERE job_id LIKE 'environment.host_retire:%' AND status='queued'", &[]).unwrap().get::<_, i64>(0), 1);
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
 fn postgres_reused_resident_preparation_failure_keeps_original_allocation() {
     use super::retained_instance_tests as fixture;
     use crate::resident_capacity::ObservedResidentSandbox;

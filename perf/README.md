@@ -303,6 +303,12 @@ model-independent tool comparison. `single-tool` runs the first real Bash comman
 those iterations still create distinct physical instances after prior cleanup.
 Do not run a preparation command before the measured first tool.
 
+For a startup comparison, run `PERF_EXPERIENCE_TASK=single-tool` with
+`PERF_EXPERIENCE_ITERATIONS=1` and `PERF_EXPERIENCE_SAME_SESSION=false`. Run each
+Runtime variant with `PERF_EXPERIENCE_VUS=1` and then `PERF_EXPERIENCE_VUS=8`
+against the same model configuration. Each batch requires one verified tool
+result per admitted Run.
+
 Enable `WORKSPACE_PERF_OBSERVATIONS=1` on the Runtime and HostSupervisor before
 starting the isolated fixture. This adds no execution permission or persistent
 ready state. The Runtime emits `startupProfile`, model-attempt timings,
@@ -328,6 +334,15 @@ JSON logs. The reader bounds input bytes and selected record counts, filters to
 original admitted Jobs, and writes only approved scalar fields. Use the existing
 fixture-owned paths and credentials; this command does not load credentials,
 submit Runs, generate model requests, or collect arbitrary log prose.
+
+For startup comparisons, also enable `WORKSPACE_PERF_OBSERVATIONS=1` on the
+Worker and pass its log with `--worker-observations`. `startupMetrics` counts
+Worker RPCs, yield RPCs, and model HTTP attempts attributable to each Run. It
+reports the first request's safe point and its overlap with post-capture
+generation observation. Pass `--shared-wall-clock` only when the client, Worker,
+and Runtime use the same wall clock, as in a single WSL2 host. That enables
+submission-to-first-HTTP and the interval between the first and last observed
+claim before dispatch. Absent observations are reported as `null`.
 
 Interpret the measurements independently:
 

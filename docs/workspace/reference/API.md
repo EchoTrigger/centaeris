@@ -1,5 +1,89 @@
 # Workspace API
 
+## One-shot Agent API
+
+Workspace owners and administrators manage API credentials through authenticated,
+CSRF-protected `GET` and `POST /api/workspaces/{workspaceId}/api-credentials` and
+`DELETE /api/workspaces/{workspaceId}/api-credentials/{credentialId}`. Creation
+accepts `name`, `modelConfigRef`, `pluginNames`, and `sourceObjectRefs`. The secret
+appears once in the creation response. Lists expose credential metadata. Each
+credential binds its issuing membership, one Workspace, one model configuration,
+and explicit plugin and material scopes. Sponsor removal, role loss, model access
+loss, and revocation invalidate current execution authority. Product access uses
+its existing authentication contract.
+
+External callers use the new credential in `Authorization: Bearer <secret>`.
+`POST /api/v1/agent-runs` accepts a required `prompt` and optional sorted, unique
+`sourceObjectRefs` selected from the credential's current material scope. Its
+required `Idempotency-Key` has the form `<Unix-seconds>.<UUIDv4>`. The key is valid
+for 24 hours from its embedded timestamp, with at most five minutes of future clock
+skew. Unknown fields and query parameters are rejected. Acceptance atomically
+records the Run and receipt, then schedules the existing Runtime lifecycle.
+
+An accepted new call returns `text/event-stream` with the following sequence.
+
+1. `runAccepted` provides `operationId`, `runId`, `acceptedAt`, `deadlineAt`,
+   `expiresAt`, `runStatus`, and `cleanupStatus`.
+2. `runProgress` provides `runId` and a `stage` of `queued`, `running`, or
+   `delivering`. Comment frames keep idle connections active.
+3. `outputText` provides committed final assistant text in ordered `text` chunks.
+4. Each artifact starts with `artifactStarted`, followed by indexed
+   `artifactChunk` frames containing Base64 `data`, then `artifactCompleted` or
+   `artifactFailed`. Start and completion metadata include `artifactId`,
+   `filename`, `contentType`, `sizeBytes`, and `sha256`. Completion also includes
+   `chunkCount`. Artifact chunks are numbered from zero. Verify length and SHA-256
+   before publishing the received file locally.
+5. `runFinished` separately reports `runStatus` and `deliveryStatus`. The Run may
+   succeed while file delivery fails. A lost terminal frame leaves the caller's
+   observation uncertain.
+
+Each file is limited to 8 MiB, each Run to 16 MiB of raw artifact bytes and four
+artifacts. Execution has a ten-minute deadline from acceptance, including queue
+time. Terminal output delivery is bounded to 60 seconds. Connection loss closes
+delivery while the original Run continues. Explicit cancellation uses
+`POST /api/v1/agent-runs/{runId}/cancel` with an empty body. A `202` response records
+the request, while a `200` response reports an existing terminal state.
+
+The same key and input return the original minimal JSON receipt. Changed input
+returns `409 operation_conflict`. Callers can inspect the original identity with
+`GET /api/v1/agent-runs/operations/{operationId}`. This endpoint returns receipt and
+status fields, including a known terminal `reasonCode`. Text and files are
+delivered only through the original response. An expired key returns
+`410 operation_expired` even after its receipt has been erased. Timeouts, proxy
+failures, and response loss require checking or resubmitting the same identity.
+The Core tool-execution intent and receipt determine recovery of uncertain
+side effects.
+
+One-shot execution uses a private temporary Session, a signed v3 execution policy,
+`perRun` allocation, disabled human questions, and explicit credential scopes.
+Personal-library access is disabled. Artifact publication verifies the existing
+publication identity and bytes into temporary Run-owned storage. After terminal
+execution, settled physical cleanup and Host retirement, and closed or expired
+delivery, the collector erases execution content, temporary files, snapshots,
+authorization, and private Session records. The minimal receipt remains until
+its key expires. Immutable physical-cleanup provenance remains available to the
+Runtime's control contracts.
+
+Run the backend example with `CENTAERIS_RUN_KEY` set in the caller's environment.
+Save the printed operation identity and pass `--operation-id` when investigating
+an uncertain acceptance. The example verifies artifact bytes and atomically
+creates each destination file.
+
+```sh
+python scripts/workspace/one_shot_client.py \
+  --url https://workspace.example \
+  --prompt 'Generate an editable Word project brief and publish the final docx.' \
+  --output ./received
+```
+
+In Workspace Web, **Settings → Developer** provides the API address, credential
+management and a copyable curl example. The **Docs** tab bundles the integration
+guides and the generated request, response and event fields with that Web build.
+Link directly to a page using its URL, for example
+`/w/{workspaceId}/settings/developer?view=docs&topic=events`.
+After changing the public wire definitions, regenerate the reference with
+`uv run --frozen --package api python scripts/workspace/one-shot-reference.py`.
+
 This document owns only Workspace transports. Exact fields are enforced by the
 Django and Rust definitions in this repository.
 
@@ -232,12 +316,11 @@ HTTP request. On local POSIX storage an already opened authorized download can
 finish after the file name is reclaimed. The collector only considers permanently
 purged Sessions, so restorable trash retains its files.
 
-`GET /api/workspaces/{workspaceId}/trash` orders entries by deletion time
-descending, then kind and ID ascending. ID ordering and cursor comparisons use
-PostgreSQL `C` collation, matching the Python merge independently of the database
-default locale. IDs are tie-breakers, not timestamps. Each kind contributes at
-most 51 candidates and the response contains at most 50 entries. Permissions,
-filters, and cursor fields are unchanged by the choice of database locale.
+`GET /api/workspaces/{workspaceId}/trash` lists the caller’s deleted private
+library files, images, and saved artifacts. It orders entries by deletion time
+descending, then ID ascending using PostgreSQL `C` collation. Each response
+contains at most 50 entries. Session deletion marks the Session permanently
+deleted and makes its workspace file tree eligible for the existing collector.
 
 ## Transcript page and committed patch reads
 

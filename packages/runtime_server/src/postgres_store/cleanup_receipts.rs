@@ -118,6 +118,12 @@ impl PostgresRuntimeStore {
                     purpose: ControllerPurpose::Cleanup,
                 },
             )?;
+            if self
+                .dispatch_host_id()
+                .is_some_and(|host| verified.lease_host_id.as_deref() != Some(host))
+            {
+                return Err("retained cleanup lease host rejected".into());
+            }
             tx.commit().map_err(|error| error.to_string())?;
             Ok(verified)
         })

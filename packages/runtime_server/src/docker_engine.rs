@@ -5,13 +5,58 @@ use std::future::Future;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use bollard::{errors::Error, models::ContainerCreateBody, query_parameters::*, Docker};
+use bollard::{
+    errors::Error,
+    models::{ContainerCreateBody, ContainerSummary},
+    query_parameters::*,
+    Docker,
+};
 use serde_json::Value;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
 static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
 static IO_RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+static SANDBOX_DEPLOYMENT_ID: OnceLock<String> = OnceLock::new();
+const SANDBOX_DEPLOYMENT_LABEL: &str = "centaeris.deployment_id";
+
+pub(crate) fn bind_deployment(id: String) -> Result<(), String> {
+    if !is_deployment_id(&id) {
+        return Err("Postgres sandbox deployment identity invalid".into());
+    }
+    SANDBOX_DEPLOYMENT_ID
+        .set(id)
+        .map_err(|_| "Docker sandbox deployment is already bound".into())
+}
+
+fn is_deployment_id(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+        })
+}
+
+fn deployment_matches(expected: Option<&str>, actual: Option<&str>) -> Result<bool, String> {
+    match (expected, actual) {
+        (Some(_), Some(actual)) if !is_deployment_id(actual) => {
+            Err("managed sandbox deployment label invalid".into())
+        }
+        (Some(expected), Some(actual)) => Ok(expected == actual),
+        // Existing containers have immutable labels. Keep unlabeled containers
+        // in reconciliation so the existing ledger checks establish ownership.
+        _ => Ok(true),
+    }
+}
+
+pub(crate) fn sandbox_deployment_matches(
+    labels: &std::collections::HashMap<String, String>,
+) -> bool {
+    deployment_matches(
+        SANDBOX_DEPLOYMENT_ID.get().map(String::as_str),
+        labels.get(SANDBOX_DEPLOYMENT_LABEL).map(String::as_str),
+    ) == Ok(true)
+}
 
 fn parse_create_limit(value: Option<&str>) -> Result<usize, String> {
     let Some(value) = value else { return Ok(4) };
@@ -266,19 +311,31 @@ pub(crate) fn list_managed(agent_run_id: Option<&str>) -> Result<Vec<String>, St
             )])),
             ..Default::default()
         };
-        engine
+        let containers = engine
             .docker
             .list_containers(Some(options))
             .await
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|container| {
-                container
-                    .id
-                    .ok_or_else(|| "Docker list omitted container ID".to_string())
-            })
-            .collect()
+            .map_err(|e| e.to_string())?;
+        deployment_container_ids(containers, SANDBOX_DEPLOYMENT_ID.get().map(String::as_str))
     })
+}
+
+fn deployment_container_ids(
+    containers: Vec<ContainerSummary>,
+    deployment: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut ids = Vec::new();
+    for container in containers {
+        let label = container
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(SANDBOX_DEPLOYMENT_LABEL))
+            .map(String::as_str);
+        if deployment_matches(deployment, label)? {
+            ids.push(container.id.ok_or("Docker list omitted container ID")?);
+        }
+    }
+    Ok(ids)
 }
 
 /// Exact supplied fields must survive the daemon's normalized inspect response.
@@ -386,9 +443,18 @@ pub(crate) fn ensure_created(name: &str, request: Value) -> Result<String, Strin
     })
 }
 
-fn ensure_created_inner(name: &str, request: Value) -> Result<String, String> {
+fn ensure_created_inner(name: &str, mut request: Value) -> Result<String, String> {
     if let Some(facts) = inspect(name)? {
+        if !deployment_matches(
+            SANDBOX_DEPLOYMENT_ID.get().map(String::as_str),
+            facts["Config"]["Labels"][SANDBOX_DEPLOYMENT_LABEL].as_str(),
+        )? {
+            return Err("Docker sandbox belongs to another deployment; refusing adoption".into());
+        }
         return verify_created(&facts, &request);
+    }
+    if let Some(deployment) = SANDBOX_DEPLOYMENT_ID.get() {
+        request["Labels"][SANDBOX_DEPLOYMENT_LABEL] = Value::String(deployment.clone());
     }
     let engine = shared()?;
     let body: ContainerCreateBody =
@@ -849,4 +915,30 @@ mod archive_tests {
             .is_err());
         }
     }
+}
+#[test]
+fn inventory_keeps_local_and_legacy_sandboxes_and_excludes_another_deployment() {
+    let current = "238663e5-9419-4ee2-a7f7-28cafc97ac77";
+    let other = "959f57d9-cce1-4102-b467-7b4e83ceec63";
+    let sandbox = |id: &str, deployment: Option<&str>| ContainerSummary {
+        id: Some(id.into()),
+        labels: deployment.map(|value| [(SANDBOX_DEPLOYMENT_LABEL.into(), value.into())].into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        deployment_container_ids(
+            vec![
+                sandbox("other", Some(other)),
+                sandbox("current", Some(current)),
+                sandbox("legacy", None),
+            ],
+            Some(current),
+        )
+        .unwrap(),
+        ["current", "legacy"]
+    );
+    assert!(
+        deployment_container_ids(vec![sandbox("invalid", Some("malformed"))], Some(current))
+            .is_err()
+    );
 }

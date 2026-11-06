@@ -431,7 +431,11 @@ fn main() -> Result<(), String> {
         open_store()?
     };
     let store = Arc::new(store);
+    let (dispatch_host, dispatch_limits) = docker_execution_host::resident_host_context()?;
+    let job_store =
+        job_store.with_dispatch_host(dispatch_host, dispatch_limits.host.sandbox_count)?;
     let job_store = Arc::new(job_store);
+    docker_engine::bind_deployment(job_store.sandbox_deployment_id()?)?;
     DockerExecutionHostRunner::reconcile_residency(job_store.as_ref())?;
     let tool_layers = Arc::new(Mutex::new(HashMap::<String, HostedRuntimeContext>::new()));
     activate_hosted_workers(
@@ -1775,8 +1779,11 @@ fn terminalize_agent_run_failure(
 
 fn hosted_agent_runtime_config(start: &AgentRunStart) -> AgentRuntimeConfig {
     AgentRuntimeConfig {
-        question_input:
-            centaeris_core::runtime::question::QuestionInputCapability::PersistentResponses,
+        question_input: if start.authorization.execution_policy.is_some() {
+            centaeris_core::runtime::question::QuestionInputCapability::Disabled
+        } else {
+            centaeris_core::runtime::question::QuestionInputCapability::PersistentResponses
+        },
         tool_parallelism: centaeris_core::runtime::MAX_TOOL_PARALLELISM,
         agent_instructions: start.session_instructions.clone(),
         model_context_tokens: start.model_context_tokens,
@@ -1896,6 +1903,9 @@ fn execute_agent_run(
         .unwrap_or_else(|| initial_execution_id(&agent_run_start));
     let cancellation_job_store = job_store.clone();
     let cancellation_agent_run_id = agent_run_start.agent_run_id.clone();
+    let cancellation_session_id = agent_run_start.authorization.session_id.clone();
+    let cancellation_authorization_digest = agent_run_start.authorization_digest.clone();
+    let execution_deadline_at_ms = agent_run_start.authorization.deadline_at_ms();
     let cancellation_lifecycle_job_id = lifecycle_job_id.clone();
     let cancellation_lifecycle_lease_owner = lifecycle_lease_owner.clone();
     let cancellation_probe_cache = Arc::new(Mutex::new(None));
@@ -1916,6 +1926,18 @@ fn execute_agent_run(
                             now,
                         )
                         .map_err(|error| format!("run_execution_control_probe_failed:{error}"))?;
+                    if state.lifecycle_lease_current
+                        && !state.cancellation_requested
+                        && execution_deadline_at_ms.is_some_and(|deadline| now >= deadline)
+                    {
+                        cancellation_job_store.request_agent_run_cancellation(
+                            &cancellation_agent_run_id,
+                            &cancellation_session_id,
+                            &cancellation_authorization_digest,
+                            now,
+                        )?;
+                        return Ok(Some("agent_run_cancel_requested".to_string()));
+                    }
                     Ok(if state.cancellation_requested {
                         Some("agent_run_cancel_requested".to_string())
                     } else if !state.lifecycle_lease_current {
@@ -3042,8 +3064,14 @@ fn execute_agent_run(
             .unwrap_or_else(|| ExecutionWorkspaceGeneration::Unknown {
                 reason: "active execution has no recovery checkpoint generation".to_string(),
             })
-    } else {
+    } else if docker_execution.keeps_instance() {
         observed_workspace_generation(docker_execution.as_ref())
+    } else {
+        // A fresh per-Run host has no sealed snapshot witness. Its first
+        // checkpoint must capture the workspace regardless of this baseline.
+        ExecutionWorkspaceGeneration::Unknown {
+            reason: "fresh execution has not captured its recovery workspace".to_string(),
+        }
     };
     let recovery_boundary_committed = AtomicBool::new(false);
     let recovery_budget_exhausted = AtomicBool::new(false);
@@ -3149,16 +3177,16 @@ fn execute_agent_run(
                 let pending = pending_recovery_upload
                     .take()
                     .expect("completed upload binding");
-                let snapshot = upload_result?;
+                let uploaded = upload_result?;
                 let current_generation = observed_workspace_generation(docker_execution.as_ref());
-                let generation_stable = pending.generation.token().is_none()
-                    || workspace_generations_match(&pending.generation, &current_generation);
+                let generation_stable = uploaded.generation.token().is_none()
+                    || workspace_generations_match(&uploaded.generation, &current_generation);
                 if generation_stable
                     && docker_execution.accept_captured_recovery_workspace(pending.evidence)?
                 {
                     let (checkpoint, checkpoint_sequence) = uploaded_recovery_checkpoint(
                         &pending,
-                        &snapshot,
+                        &uploaded,
                         &agent_run_start,
                         &execution_id,
                         &committed_sequence,
@@ -3185,8 +3213,8 @@ fn execute_agent_run(
                         committed_sequence.clone();
                     // API publication and the Core checkpoint reference are both durable.
                     docker_execution.confirm_recovery_checkpoint_outputs(&checkpoint.checkpoint_id);
-                    recovery_workspace_snapshot = snapshot;
-                    recovery_workspace_generation = pending.generation;
+                    recovery_workspace_snapshot = uploaded.snapshot;
+                    recovery_workspace_generation = uploaded.generation;
                     previous_checkpoint_sequence = checkpoint_sequence;
                     recovery_suffix = execution_recovery_policy::RecoverySuffix::default();
                 }
@@ -3324,10 +3352,6 @@ fn execute_agent_run(
                             // checkpoint nor reset the tool suffix used by recovery policy.
                             break 'checkpoint events;
                         };
-                        let after_collect =
-                            observed_workspace_generation(docker_execution.as_ref());
-                        let generation =
-                            stable_workspace_generation(&current_generation, after_collect);
                         let evidence = prepared.evidence();
                         let upload_host = docker_execution.clone();
                         let upload_context = serde_json::to_vec(&serde_json::json!({
@@ -3339,11 +3363,26 @@ fn execute_agent_run(
                             checkpoint_id,
                             model_request_id: model_request_id.to_string(),
                             turn_id: turn_id.to_string(),
-                            generation,
                             evidence,
                             upload: recovery_upload::PendingRecoveryUpload::start(move || {
                                 let _context = observations::Context::enter(&upload_context);
-                                upload_host.upload_recovery_workspace(prepared)
+                                // The bytes are already frozen. Check their generation
+                                // while the model can run, then fence tool dispatch as usual.
+                                let generation_started = Instant::now();
+                                let after_collect =
+                                    observed_workspace_generation(upload_host.as_ref());
+                                observations::timing(
+                                    "recoveryPostCaptureGeneration",
+                                    generation_started,
+                                    "ok",
+                                );
+                                let generation =
+                                    stable_workspace_generation(&current_generation, after_collect);
+                                let snapshot = upload_host.upload_recovery_workspace(prepared)?;
+                                Ok(UploadedRecoveryWorkspace {
+                                    snapshot,
+                                    generation,
+                                })
                             }),
                         });
                         break 'checkpoint events;
@@ -6119,14 +6158,18 @@ struct PendingRecoveryCheckpoint {
     checkpoint_id: String,
     model_request_id: String,
     turn_id: String,
-    generation: ExecutionWorkspaceGeneration,
     evidence: execution_recovery_policy::WorkspaceReuseEvidence,
-    upload: recovery_upload::PendingRecoveryUpload<RecoveryWorkspaceSnapshotV1>,
+    upload: recovery_upload::PendingRecoveryUpload<UploadedRecoveryWorkspace>,
+}
+
+struct UploadedRecoveryWorkspace {
+    snapshot: RecoveryWorkspaceSnapshotV1,
+    generation: ExecutionWorkspaceGeneration,
 }
 
 fn uploaded_recovery_checkpoint(
     pending: &PendingRecoveryCheckpoint,
-    snapshot: &RecoveryWorkspaceSnapshotV1,
+    uploaded: &UploadedRecoveryWorkspace,
     start: &AgentRunStart,
     execution_id: &str,
     sequence: &AgentRunSessionState,
@@ -6148,8 +6191,8 @@ fn uploaded_recovery_checkpoint(
         authorization_digest: start.authorization_digest.clone(),
         session_sequence,
         model_request_id: pending.model_request_id.clone(),
-        workspace_snapshot: snapshot.clone(),
-        workspace_generation: pending.generation.clone(),
+        workspace_snapshot: uploaded.snapshot.clone(),
+        workspace_generation: uploaded.generation.clone(),
         created_at_ms: now,
     };
     payload.validate()?;
@@ -7226,6 +7269,23 @@ mod tests {
             .is_none());
     }
 
+    #[test]
+    fn one_shot_runtime_disables_persistent_questions() {
+        use centaeris_core::runtime::question::QuestionInputCapability;
+        let mut start = agent_run_start();
+        assert_eq!(
+            hosted_agent_runtime_config(&start).question_input,
+            QuestionInputCapability::PersistentResponses
+        );
+        start.authorization.schema = agent_run_authorization::ONE_SHOT_AUTHORIZATION_SCHEMA.into();
+        start.authorization.execution_policy =
+            Some(agent_run_authorization::ExecutionPolicy::OneShot { deadline_at_ms: 1 });
+        assert_eq!(
+            hosted_agent_runtime_config(&start).question_input,
+            QuestionInputCapability::Disabled
+        );
+    }
+
     pub(super) fn agent_run_start() -> AgentRunStart {
         let mut authorization: crate::agent_run_authorization::WorkspaceAgentRunAuthorization =
             serde_json::from_str(include_str!(
@@ -7302,7 +7362,12 @@ mod tests {
         let (release, wait) = std::sync::mpsc::channel();
         let mut upload = recovery_upload::PendingRecoveryUpload::start(move || {
             wait.recv().unwrap();
-            Ok(uploaded_snapshot)
+            Ok(UploadedRecoveryWorkspace {
+                snapshot: uploaded_snapshot,
+                generation: ExecutionWorkspaceGeneration::Unknown {
+                    reason: "watcher unavailable".into(),
+                },
+            })
         });
         assert!(upload.take(false).is_none());
         // Model reasoning is durable while its workspace upload remains pending.
@@ -7319,7 +7384,8 @@ mod tests {
                 .unwrap(),
         );
         release.send(()).unwrap();
-        assert_eq!(upload.take(true).unwrap().unwrap(), snapshot);
+        let uploaded = upload.take(true).unwrap().unwrap();
+        assert_eq!(uploaded.snapshot, snapshot);
         let activity = execution_recovery_policy::ExecutionActivityWitness::for_execution(
             1,
             "upload-replay-test",
@@ -7332,9 +7398,6 @@ mod tests {
             checkpoint_id: recovery_checkpoint_id("execution_1", "request_1"),
             model_request_id: "request_1".into(),
             turn_id: "turn_1".into(),
-            generation: ExecutionWorkspaceGeneration::Unknown {
-                reason: "watcher unavailable".into(),
-            },
             evidence,
             upload,
         };
@@ -7345,7 +7408,7 @@ mod tests {
         committed.set_committed_session_sequence(records.last().unwrap().sequence);
         state = committed;
         let (checkpoint, checkpoint_sequence) =
-            uploaded_recovery_checkpoint(&pending, &snapshot, &start, "execution_1", &state, 5)
+            uploaded_recovery_checkpoint(&pending, &uploaded, &start, "execution_1", &state, 5)
                 .unwrap();
         records.push(state.checkpoint_ref(&checkpoint).unwrap());
         let reference_sequence = records.last().unwrap().sequence;
@@ -7354,6 +7417,7 @@ mod tests {
             serde_json::from_str(&checkpoint.payload_json).unwrap();
         assert_eq!(payload.session_sequence, reference_sequence);
         assert_eq!(payload.model_request_id, "request_1");
+        assert_eq!(payload.workspace_generation, uploaded.generation);
         let replay_boundary = records.clone();
         let call = ToolCallEnvelope {
             id: "call_1".into(),
@@ -7378,7 +7442,7 @@ mod tests {
         assert!(records.last().unwrap().sequence > reference_sequence);
         assert!(!state.tool_ledger_is_checkpointed());
         assert!(
-            uploaded_recovery_checkpoint(&pending, &snapshot, &start, "execution_1", &state, 7)
+            uploaded_recovery_checkpoint(&pending, &uploaded, &start, "execution_1", &state, 7)
                 .is_err(),
             "publishing after a tool call cannot claim the frozen workspace frontier"
         );

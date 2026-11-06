@@ -123,7 +123,7 @@ try {
   render(reading(true));
   check("final answer preserves actively opened details", host.querySelector(".workProgressSummary")?.getAttribute("aria-expanded"), "true");
 
-  const preview = (open: boolean) => <div className={`workspaceWorkbench${open ? " withContextPanel withFilePreview" : ""}`}><div className="workspaceChatColumn" /><WorkspaceContextPanel
+  const preview = (open: boolean) => <div className="workspaceWorkbench withSidebar" style={{ "--workspace-preview-progress": open ? 1 : 0 } as React.CSSProperties}><div className="workspaceChatColumn" /><WorkspaceContextPanel
     panel={open ? { mode: "filePreview", status: "ready", displayName: "Evidence.txt", preview: { kind: "text", content: "Evidence", contentType: "text/plain" } } : { mode: "closed" }}
     browserWidthPx={480} onBrowserWidthChange={() => {}} onClose={() => {}} onReturn={() => {}} /></div>;
   render(preview(false));

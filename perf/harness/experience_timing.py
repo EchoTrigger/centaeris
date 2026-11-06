@@ -23,10 +23,11 @@ RUNTIME_PHASES = frozenset({
     "sandboxEnsure", "model_request_safe_point", "tool_call_safe_point",
     "tool_receipt_safe_point", "other_safe_point", "workspaceSnapshotInspect",
     "workspaceRecoverySnapshotHold", "workspaceFinalSnapshotHold",
-    "recoveryUploadFence", "modelHttp", "modelFirstEvent", "modelFirstText",
+    "recoveryUploadFence", "recoveryPostCaptureGeneration", "modelHttp", "modelFirstEvent", "modelFirstText",
     "toolService", "hostCommand",
 })
 HOST_PHASES = frozenset({"taskReady", "taskLeaderExited"})
+WORKER_PHASES = frozenset({"rpc", "claimResult"})
 STARTUP_DURATIONS = ("runtimePreludeMs", "sandboxEnsureMs", "mcpCredentialResolveMs",
                      "mcpDiscoveryMs", "workspaceRestoreMs", "sessionStartCommitMs", "startupTotalMs")
 STARTUP_COUNTS = ("serverCount", "credentialCount", "mcpConnectionCount")
@@ -62,7 +63,7 @@ def read_records(path):
                     raise ValueError("malformed timing observation") from None
                 continue
             if (isinstance(value, dict) and value.get("phase") in
-                    RUNTIME_PHASES | HOST_PHASES | {"startupProfile", "accepted", "verified", "toolTiming", "failed", "notSubmitted"}):
+                    RUNTIME_PHASES | HOST_PHASES | WORKER_PHASES | {"startupProfile", "accepted", "verified", "toolTiming", "failed", "notSubmitted"}):
                 result.append(value)
             if len(result) > MAX_RECORDS:
                 raise ValueError("timing record bound exceeded")
@@ -230,7 +231,46 @@ def _model_rows(intervals):
     return list(groups.values())
 
 
-def build_report(client_records, observations, *, execution_mode="perRun", model_kind="immediateMock"):
+def _startup_metrics(binding, intervals, worker, shared_wall_clock):
+    requests = [row for row in intervals if row["phase"] == "modelHttp"]
+    first = min(requests, key=lambda row: row["atUnixMs"] - row["elapsedMs"], default=None)
+    dispatch = first["atUnixMs"] - first["elapsedMs"] if first else None
+    submitted = binding["submittedAtMs"]
+    safe_point = max((row for row in intervals if row["phase"] == "model_request_safe_point"
+                      and row["outcome"] == "ok" and dispatch is not None
+                      and row["atUnixMs"] <= dispatch + 2),
+                     key=lambda row: row["atUnixMs"], default=None)
+    claims = sorted(row["atUnixMs"] for row in worker if row["phase"] == "claimResult"
+                    and row.get("outcome") == "claimed")
+    if shared_wall_clock and dispatch is not None:
+        claims = [timestamp for timestamp in claims if timestamp <= dispatch]
+    rpc = [row for row in worker if row["phase"] == "rpc"]
+    probes = [row for row in intervals if row["phase"] == "recoveryPostCaptureGeneration"
+              and row["outcome"] == "ok"]
+    overlap = None
+    if first and probes:
+        clipped = []
+        for row in probes:
+            start = max(dispatch, row["atUnixMs"] - row["elapsedMs"])
+            end = min(first["atUnixMs"], row["atUnixMs"])
+            if end > start:
+                clipped.append({"atUnixMs": end, "elapsedMs": end - start})
+        overlap = _covered(clipped)
+    return {
+        "firstModelHttpStartAtMs": dispatch,
+        "submitToFirstModelHttpMs": round(dispatch - submitted, 3)
+        if shared_wall_clock and dispatch is not None and submitted is not None and dispatch >= submitted else None,
+        "firstModelSafePointMs": safe_point["elapsedMs"] if safe_point else None,
+        "modelHttpRequests": len(requests) if requests else None,
+        "workerRpcCount": len(rpc) if rpc else None,
+        "workerYieldRpcCount": sum(row.get("route") == "/internal/jobs/yield" for row in rpc) if rpc else None,
+        "firstToLastObservedClaimMs": claims[-1] - claims[0] if shared_wall_clock and claims else None,
+        "postCaptureGenerationOverlapMs": overlap,
+    }
+
+
+def build_report(client_records, observations, *, execution_mode="perRun", model_kind="immediateMock",
+                 shared_wall_clock=False):
     """Project an experiment's timing facts without deciding product acceptance."""
     if execution_mode not in {"perRun", "retained"} or model_kind not in {"immediateMock", "real"}:
         raise ValueError("explicit supported timing plan required")
@@ -241,6 +281,14 @@ def build_report(client_records, observations, *, execution_mode="perRun", model
         raise ValueError("timing records must be objects")
     jobs = _bindings(records)
     runtime = [safe for record in observations if (safe := _runtime_record(record, jobs)) is not None]
+    worker = {}
+    for row in observations:
+        job = row.get("jobId")
+        if (row.get("schema") == SCHEMA and row.get("source") == "worker"
+                and row.get("phase") in WORKER_PHASES and isinstance(job, str) and job in jobs):
+            if not _time(row.get("atUnixMs")):
+                raise ValueError("invalid Worker observation end marker")
+            worker.setdefault(job, []).append(row)
     tasks = {}
     for row in runtime:
         if row["phase"] == "hostCommand":
@@ -274,6 +322,7 @@ def build_report(client_records, observations, *, execution_mode="perRun", model
                    ("toolServiceTiming", any(row["phase"] == "toolService" for row in intervals)),
                    ("hostCommandTiming", bool(commands)), ("clientToolTiming", bool(tools))] if not present]
         rows.append({**binding, "jobId": job, "client": client, "startupProfiles": startup,
+                     "startupMetrics": _startup_metrics(binding, intervals, worker.get(job, ()), shared_wall_clock),
                      "intervals": intervals, "runtimeCoveredMs": _covered(intervals) if intervals else None,
                      "criticalPath": "notObserved", "modelRequests": model, "tools": tools,
                      "hostCommands": commands,
@@ -283,6 +332,7 @@ def build_report(client_records, observations, *, execution_mode="perRun", model
             "executionMode": execution_mode, "executionModeEvidence": "callerDeclared", "modelKind": model_kind,
             "toolPerformanceVerdict": "notEvaluated", "physicalAcceptance": "notEvaluated",
             "intervalClock": "monotonicDurationWithWallClockEnd", "durationsAdditive": False,
+            "sharedWallClock": shared_wall_clock,
             "modelRequestIdentity": "requestAtHttpStart", "serverEventTime": "createdAtMsNotCommit",
             "runs": rows}
 
@@ -292,15 +342,20 @@ def main():
     parser.add_argument("--client-records", type=Path, required=True)
     parser.add_argument("--runtime-observations", type=Path, required=True)
     parser.add_argument("--host-observations", type=Path)
+    parser.add_argument("--worker-observations", type=Path)
+    parser.add_argument("--shared-wall-clock", action="store_true",
+                        help="Client, Worker and Runtime use the same host wall clock")
     parser.add_argument("--execution-mode", choices=("perRun", "retained"), required=True)
     parser.add_argument("--model-kind", choices=("immediateMock", "real"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     observations = read_records(args.runtime_observations)
-    if args.host_observations:
-        observations += read_records(args.host_observations)
+    for source in (args.host_observations, args.worker_observations):
+        if source:
+            observations += read_records(source)
     report = build_report(read_records(args.client_records), observations,
-                          execution_mode=args.execution_mode, model_kind=args.model_kind)
+                          execution_mode=args.execution_mode, model_kind=args.model_kind,
+                          shared_wall_clock=args.shared_wall_clock)
     with args.output.open("x", encoding="utf-8") as target:
         json.dump(report, target, indent=2, allow_nan=False)
         target.write("\n")

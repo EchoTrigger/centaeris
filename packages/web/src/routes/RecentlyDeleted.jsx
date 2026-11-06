@@ -1,9 +1,7 @@
 
 import { useTranslation } from "../i18n";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import { Link } from "react-router";
-import { ChevronDown, LoaderCircle, RotateCcw, Search, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, LoaderCircle, RotateCcw, Search, Trash2 } from "lucide-react";
 import { apiJson } from "../api";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
@@ -32,8 +30,8 @@ function useTrashFeed(path, field, enabled) {
       cursorRef.current = result.nextCursor;
       setHasMore(result.hasMore);
       setLoaded(true);
-    } catch (requestError) {
-      setError(requestError.message || "trash_load_failed");
+    } catch {
+      setError(true);
     } finally {
       loadingRef.current = false;
       setLoading(false);
@@ -109,33 +107,22 @@ function TrashSection({ feed, children }) {
   </section>;
 }
 
-function TrashItemRow({ item, base, busy, onClose, onRestore, onPurge }) {
-  useTranslation();
-  const content = <span><strong>{item.title}</strong><TrashMetadata item={item} /></span>;
+function TrashItemRow({ item, busy, error, onRestore, onPurge }) {
   return <div className="shTrashRow">
-    {item.kind === "session"
-      ? <Link className="shTrashOpenRow" to={`${base}/trash/sessions/${encodeURIComponent(item.id)}`} onClick={onClose}>{content}</Link>
-      : <div className="shTrashOpenRow">{content}</div>}
-    <RowActions label={item.title} busy={busy} onRestore={() => onRestore(item.kind, item)} onPurge={() => onPurge(item.kind, item)} />
+    <div className="shTrashOpenRow"><span><strong>{item.title}</strong><TrashMetadata item={item} />{error ? <small className="error" role="alert">{error}</small> : null}</span></div>
+    <RowActions label={item.title} busy={busy} onRestore={() => onRestore(item)} onPurge={() => onPurge(item)} />
   </div>;
 }
 
-export function TrashPopover({ open, workspace, anchorRef, onClose }) {
+export function RecentlyDeleted({ workspace }) {
   const { t } = useTranslation();
-  const panelRef = useRef(null);
-  const [position, setPosition] = useState(null);
   const [searchDraft, setSearchDraft] = useState("");
   const [search, setSearch] = useState("");
-  const [kind, setKind] = useState("");
-  const [scope, setScope] = useState("");
   const [location, setLocation] = useState("");
   const [deletedByUserId, setDeletedByUserId] = useState("");
-  const base = `/w/${encodeURIComponent(workspace.id)}`;
   const trashPath = useMemo(() => {
-    const params = new URLSearchParams();
+    const params = new URLSearchParams({ kind: "library" });
     if (search) params.set("query", search);
-    if (kind) params.set("kind", kind);
-    if (scope) params.set("scope", scope);
     if (location) {
       const [locationKind, locationId = ""] = location.split("|");
       params.set("locationKind", locationKind);
@@ -144,10 +131,10 @@ export function TrashPopover({ open, workspace, anchorRef, onClose }) {
     if (deletedByUserId) params.set("deletedByUserId", deletedByUserId);
     const query = params.toString();
     return `/api/workspaces/${encodeURIComponent(workspace.id)}/trash${query ? `?${query}` : ""}`;
-  }, [deletedByUserId, kind, location, scope, search, workspace.id]);
-  const trash = useTrashFeed(trashPath, "items", open);
+  }, [deletedByUserId, location, search, workspace.id]);
+  const trash = useTrashFeed(trashPath, "items", true);
   const [busyKey, setBusyKey] = useState("");
-  const [error, setError] = useState("");
+  const [actionError, setActionError] = useState(null);
   const [purgeTarget, setPurgeTarget] = useState(null);
 
   useEffect(() => {
@@ -155,65 +142,17 @@ export function TrashPopover({ open, workspace, anchorRef, onClose }) {
     return () => window.clearTimeout(timer);
   }, [searchDraft]);
 
-  useLayoutEffect(() => {
-    if (!open) {
-      setPosition(null);
-      return undefined;
-    }
-    const update = () => {
-      if (window.matchMedia("(max-width: 760px)").matches) {
-        setPosition({});
-        return;
-      }
-      const rect = anchorRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const left = rect.right + 8;
-      setPosition({
-        top: rect.top,
-        left,
-        bottom: "auto",
-        width: Math.min(360, window.innerWidth - left - 10),
-        maxHeight: Math.min(620, window.innerHeight - rect.top - 10),
-      });
-    };
-    update();
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
-    return () => {
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
-    };
-  }, [anchorRef, open]);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const dismiss = (event) => {
-      if (!panelRef.current?.contains(event.target) && !event.target.closest("[data-trash-trigger], .themeConfirmBackdrop")) onClose();
-    };
-    const escape = (event) => { if (event.key === "Escape") onClose(); };
-    window.addEventListener("pointerdown", dismiss);
-    window.addEventListener("keydown", escape);
-    return () => {
-      window.removeEventListener("pointerdown", dismiss);
-      window.removeEventListener("keydown", escape);
-    };
-  }, [onClose, open]);
-
-  async function restore(kind, item) {
+  async function restore(item) {
     if (busyKey) return;
-    setBusyKey(`${kind}:${item.id}`);
-    setError("");
+    const key = item.id;
+    setBusyKey(key);
+    setActionError(null);
     try {
-      const endpoint = {
-        session: `/api/sessions/${item.id}/restore`,
-        source: `/api/workspaces/${encodeURIComponent(workspace.id)}/sources/${encodeURIComponent(item.id)}/restore`,
-        library: `/api/library/${item.id}/restore`,
-      }[kind];
-      await apiJson(endpoint, { method: "POST" });
+      await apiJson("/api/library/" + encodeURIComponent(item.id) + "/restore", { method: "POST" });
       trash.remove(item.id);
     } catch (requestError) {
-      if (requestError.status === 404 || requestError.status === 410 || requestError.message.endsWith("_not_deleted") || requestError.message === "source_not_restorable") await trash.reload();
-      else setError(t("trashSessionRoute.unableToRestoreValue", { value1: requestError.message }));
+      if (requestError.status === 404 || requestError.status === 410 || requestError.message.endsWith("_not_deleted")) await trash.reload();
+      else setActionError({ key, message: t("trashSessionRoute.unableToRestore") });
     } finally {
       setBusyKey("");
     }
@@ -221,57 +160,33 @@ export function TrashPopover({ open, workspace, anchorRef, onClose }) {
 
   async function purge(target = purgeTarget) {
     if (!target || busyKey) return;
-    const { kind, item, feed } = target;
-    setBusyKey(`${kind}:${item.id}`);
-    setError("");
+    const key = target.id;
+    setBusyKey(key);
+    setActionError(null);
     try {
-      const endpoint = {
-        session: `/api/sessions/${item.id}/trash`,
-        source: `/api/workspaces/${encodeURIComponent(workspace.id)}/sources/${encodeURIComponent(item.id)}/trash`,
-        library: `/api/library/${item.id}/trash`,
-      }[kind];
-      await apiJson(endpoint, { method: "DELETE" });
-      (feed || trash).remove(item.id);
+      await apiJson("/api/library/" + encodeURIComponent(key) + "/trash", { method: "DELETE" });
+      trash.remove(key);
       setPurgeTarget(null);
     } catch (requestError) {
       if (requestError.status === 404 || requestError.status === 410 || requestError.message.endsWith("_not_deleted")) {
-        await (feed || trash).reload();
+        await trash.reload();
         setPurgeTarget(null);
-      } else setError(t("trashSessionRoute.unableToDeletePermanentlyValue", { value1: requestError.message }));
+      } else setActionError({ key, message: t("trashSessionRoute.unableToDeletePermanently") });
     } finally {
       setBusyKey("");
     }
   }
 
-  if (!open || position === null) return null;
   const allLoaded = trash.loaded || trash.error;
   const empty = allLoaded && !trash.items.length && !trash.error;
-  const purgeTitle = {
-    session: t("appRoute.deleteThisConversation"),
-    source: t("trashPopover.deleteThisSource"),
-    library: t("trashPopover.deleteThisMaterial"),
-  }[purgeTarget?.kind] || t("trashPopover.deleteThisProject");
-
-  return createPortal(<>
-    <section className="shTrashPopover" ref={panelRef} role="dialog" aria-label={t("shellSidebar.trash")} style={position}>
-      <header><span><Trash2 aria-hidden="true" /><strong>{t("shellSidebar.trash")}</strong></span><button type="button" aria-label={t("workspaceContextPanel.close")} onClick={onClose}><X aria-hidden="true" /></button></header>
+  return <section className="shTrashPage" aria-label={t("settingsRoute.recentlyDeleted")}>
       <div className="shTrashTools">
         <label className="shTrashSearch"><Search aria-hidden="true" /><input aria-label={t("trashPopover.searchTrash")} placeholder={t("trashPopover.searchInTrash")} value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} /></label>
         <div className="shTrashFilters">
-          <label data-active={Boolean(kind)}><span>{t("trashPopover.type")}</span><select aria-label={t("trashPopover.type")} value={kind} onChange={(event) => setKind(event.target.value)}>
-            <option value="">{t("libraryRoute.all")}</option>
-            <option value="session">{t("searchOverlay.conversations")}</option>
-            <option value="source">Source</option>
-            <option value="library">Library</option>
-          </select><ChevronDown aria-hidden="true" /></label>
-          <label data-active={Boolean(scope)}><span>{t("trashPopover.scope")}</span><select aria-label={t("trashPopover.scope")} value={scope} onChange={(event) => setScope(event.target.value)}>
-            <option value="">{t("libraryRoute.all")}</option>
-            <option value="privateLibrary">{t("trashPopover.privateLibrary")}</option>
-            <option value="workspace">{t("trashPopover.currentWorkspace")}</option>
-          </select><ChevronDown aria-hidden="true" /></label>
           <label data-active={Boolean(location)}><span>{t("trashPopover.originalLocation")}</span><select aria-label={t("trashPopover.originalLocation")} value={location} onChange={(event) => setLocation(event.target.value)}>
             <option value="">{t("libraryRoute.all")}</option>
-            {trash.filterOptions.locations.map((item) => <option key={`${item.kind}:${item.id || "root"}`} value={`${item.kind}|${item.id || ""}`}>{item.scope === "privateLibrary" ? t("agentRoute.private") : t("workspaceChooserRoute.workspace")} · {item.label}</option>)}
+            {trash.filterOptions.locations.filter(item => item.scope === "privateLibrary").map(item =>
+              <option key={item.id || item.kind} value={item.kind + "|" + (item.id || "")}>{item.label}</option>)}
           </select><ChevronDown aria-hidden="true" /></label>
           <label data-active={Boolean(deletedByUserId)}><span>{t("trashPopover.deletedBy")}</span><select aria-label={t("trashPopover.deletedBy")} value={deletedByUserId} onChange={(event) => setDeletedByUserId(event.target.value)}>
             <option value="">{t("libraryRoute.all")}</option>
@@ -280,13 +195,13 @@ export function TrashPopover({ open, workspace, anchorRef, onClose }) {
         </div>
       </div>
       <div className="shTrashPopoverBody">
-        {error ? <div className="errorBanner" role="alert">{error}</div> : null}
         {!allLoaded ? <div className="shTrashLoading"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("trashPopover.loading2")}</div> : null}
-        <TrashSection feed={trash}>{(item) => <TrashItemRow key={`${item.kind}:${item.id}`} item={item} base={base} busy={Boolean(busyKey)} onClose={onClose} onRestore={restore} onPurge={(kind, target) => setPurgeTarget({ kind, item: target })} />}</TrashSection>
-        {empty ? <div className="shTrashAllEmpty" role="status"><Trash2 aria-hidden="true" /><p>{t(search || kind || scope || location || deletedByUserId ? "trashPopover.noMatchingItems" : "trashPopover.trashIsEmpty")}</p></div> : null}
+        <TrashSection feed={trash}>{(item) => {
+          return <TrashItemRow key={item.id} item={item} busy={Boolean(busyKey)} error={!purgeTarget && actionError?.key === item.id ? actionError.message : ""} onRestore={restore} onPurge={target => { setActionError(null); setPurgeTarget(target); }} />;
+        }}</TrashSection>
+        {empty ? <div className="shTrashAllEmpty" role="status"><Trash2 aria-hidden="true" /><p>{t(search || location || deletedByUserId ? "trashPopover.noMatchingItems" : "trashPopover.trashIsEmpty")}</p></div> : null}
       </div>
       <footer>{t("trashPopover.itemsStayInTrashFor30DaysBeforeBeing")}</footer>
-    </section>
-    <ConfirmDialog open={Boolean(purgeTarget)} title={purgeTitle} busy={Boolean(busyKey)} onCancel={() => setPurgeTarget(null)} onConfirm={() => void purge()} />
-  </>, document.body);
+      <ConfirmDialog open={Boolean(purgeTarget)} title={t("trashPopover.deleteThisMaterial")} message={actionError?.message} busy={Boolean(busyKey)} onCancel={() => setPurgeTarget(null)} onConfirm={() => void purge()} />
+  </section>;
 }

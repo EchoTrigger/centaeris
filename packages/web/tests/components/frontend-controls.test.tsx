@@ -41,7 +41,7 @@ test("empty send remains reachable by mouse and keyboard while the draft stays e
       controlBusy onSubmit={event => { event.preventDefault(); submit(); }} />;
   }
   render(<Harness />);
-  const send = screen.getByRole("button", { name: "appRoute.input" });
+  const send = screen.getByRole("button", { name: "appRoute.send" });
   const draft = screen.getByRole("textbox", { name: "appRoute.message" }) as HTMLTextAreaElement;
   await user.click(send);
   send.focus(); await user.keyboard("{Enter}"); await user.keyboard(" ");

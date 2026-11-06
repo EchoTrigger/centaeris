@@ -115,7 +115,7 @@ for name in required_builds:
     assert pathlib.Path(config["services"][name]["build"]["context"]).resolve() == workspace
 for name in ("runtime", "workspace-general"):
     assert not config["services"][name]["build"].get("additional_contexts")
-expected_volumes = {"agent-memory", "plugin-data", "postgres-data", "runtime-data", "storage-data", "upload-temp"}
+expected_volumes = {"agent-memory", "material-broker-data", "plugin-data", "postgres-data", "runtime-data", "storage-data", "upload-temp"}
 assert set(config["volumes"]) == expected_volumes
 for key, value in config["volumes"].items():
     assert value["name"] == f"centaeris-workspace_{key}"
@@ -154,9 +154,9 @@ values = {"ENVIRONMENT_EXECUTION_HELPER": str(root / "execution_agent"),
 path.write_text("\n".join(f"{key}={values[key]}" if (key := line.partition("=")[0]) in values else line
                           for line in path.read_text().splitlines()) + "\n")
 PY
-"${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime worker material-worker web
+"${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime worker material-worker material-scheduler web
 
-for service in postgres redis api runtime worker material-worker web; do
+for service in postgres redis api runtime worker material-broker material-worker material-scheduler web; do
   "${compose[@]}" ps --status running --services | grep -Fx "$service" >/dev/null
 done
 

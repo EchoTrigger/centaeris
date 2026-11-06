@@ -19,7 +19,7 @@ function FilePreviewPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose
       const stacked = workbench && (getComputedStyle(workbench).display !== "grid" || getComputedStyle(panel).gridColumnStart !== "3");
       const available = stacked ? region.getBoundingClientRect().width - 32 : Math.min(window.innerWidth * 0.75, region ? region.getBoundingClientRect().width + panel.getBoundingClientRect().width - 320 : window.innerWidth * 0.75);
       const max = Math.max(0, Math.floor(available));
-      const min = Math.min(max, Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--workspace-sidebar-width")) || 270);
+      const min = Math.min(max, 270);
       const width = panel.getBoundingClientRect().width;
       setGeometry(previous => previous.width === width && previous.min === min && previous.max === max ? previous : { width, min, max });
     };

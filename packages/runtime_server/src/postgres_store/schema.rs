@@ -2,7 +2,15 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 17;
+const STORE_SCHEMA_VERSION: i64 = 19;
+const WORKER_DISPATCH_HOST_DDL: &str = "ALTER TABLE runtime.runtime_jobs
+    ADD COLUMN lease_host_id text CHECK (lease_host_id IS NULL OR btrim(lease_host_id)<>'');";
+const SANDBOX_DEPLOYMENT_DDL: &str = "
+CREATE TABLE runtime.sandbox_deployment (
+    singleton boolean PRIMARY KEY CHECK (singleton),
+    deployment_id uuid NOT NULL
+);
+INSERT INTO runtime.sandbox_deployment VALUES (true, gen_random_uuid());";
 const MAINTENANCE_COMPLETION_DDL: &str = r#"
 CREATE TABLE runtime.environment_maintenance_completions(
  operation_id text PRIMARY KEY,environment_id text NOT NULL,instance_id text NOT NULL,
@@ -20,6 +28,7 @@ const PREVIOUS_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text
 const CURRENT_OBSERVATION_KINDS: &str = "'system_prompt'::text, 'message'::text, 'input_image'::text, 'tool_catalog'::text, 'compaction_prompt'::text, 'input_uptake'::text, 'required_completion_delivery'::text";
 
 pub(super) const RUNTIME_TABLES: &[&str] = &[
+    "sandbox_deployment",
     "runsc_environment_power",
     "environment_creation_attempts",
     "environment_provision_completions",
@@ -79,6 +88,7 @@ const RUNTIME_INDEXES: &[&str] = &[
 ];
 
 const TABLE_SHAPES: &[(&str, &str)] = &[
+    ("sandbox_deployment", "singleton:boolean:NO,deployment_id:uuid:NO"),
     ("runsc_environment_power", super::runsc_rotation::COLUMNS),
     ("resident_capacity_clock", "singleton:boolean:NO,generation:bigint:NO,changed_at_ms:bigint:NO"),
     ("resident_capacity_waiters", "job_id:text:NO,lease_owner:text:NO,observed_generation:bigint:NO"),
@@ -270,16 +280,7 @@ const INDEX_SHAPES: &[(&str, &str)] = &[
 ];
 
 pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
-    let exists = client
-        .query_one(
-            "SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'runtime')",
-            &[],
-        )
-        .map_err(|error| format!("inspect Postgres runtime schema failed: {error}"))?
-        .get::<_, bool>(0);
-    if !exists {
-        create_schema(client)?;
-    } else {
+    if schema_exists(client)? {
         upgrade_completion_delivery_observations(client)?;
         upgrade_lease_reclaim_budget(client)?;
         upgrade_resident_budget(client)?;
@@ -293,9 +294,23 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         upgrade_control_leases(client)?;
         upgrade_capacity_waits(client)?;
         upgrade_runsc_rotation(client)?;
+        upgrade_sandbox_deployment(client)?;
+        upgrade_worker_dispatch_host(client)?;
+    } else {
+        create_schema(client)?;
     }
     validate_schema_version(client)?;
     validate_schema(client, CURRENT_OBSERVATION_KINDS)
+}
+
+fn schema_exists(client: &mut impl GenericClient) -> Result<bool, String> {
+    client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'runtime')",
+            &[],
+        )
+        .map(|row| row.get(0))
+        .map_err(|error| format!("inspect Postgres runtime schema failed: {error}"))
 }
 
 fn upgrade_completion_delivery_observations(client: &mut Client) -> Result<(), String> {
@@ -476,6 +491,37 @@ fn upgrade_environment_retirements(client: &mut Client) -> Result<(), String> {
     tx.execute(
         "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES(11,$1)",
         &[&now_ms()?],
+    )
+    .map_err(|e| e.to_string())?;
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn upgrade_worker_dispatch_host(client: &mut Client) -> Result<(), String> {
+    upgrade_dispatch_schema(client, 19, WORKER_DISPATCH_HOST_DDL)
+}
+
+fn upgrade_sandbox_deployment(client: &mut Client) -> Result<(), String> {
+    upgrade_dispatch_schema(client, 18, SANDBOX_DEPLOYMENT_DDL)
+}
+
+fn upgrade_dispatch_schema(client: &mut Client, version: i64, ddl: &str) -> Result<(), String> {
+    let previous = (1..version).collect::<Vec<_>>();
+    if schema_versions(client)? != previous {
+        return Ok(());
+    }
+    let mut tx = client.transaction().map_err(|e| e.to_string())?;
+    super::resource_commit::require_durable_resource_commit(&mut tx)?;
+    tx.batch_execute("LOCK TABLE runtime.schema_migrations IN ACCESS EXCLUSIVE MODE")
+        .map_err(|e| e.to_string())?;
+    if schema_versions(&mut tx)? != previous {
+        return Ok(());
+    }
+    validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
+    tx.batch_execute(ddl).map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO runtime.schema_migrations(version,applied_at_ms) VALUES($1,$2)",
+        &[&version, &now_ms()?],
     )
     .map_err(|e| e.to_string())?;
     validate_schema(&mut tx, CURRENT_OBSERVATION_KINDS)?;
@@ -697,6 +743,11 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
     let mut tx = client
         .transaction()
         .map_err(|error| format!("begin runtime schema creation failed: {error}"))?;
+    tx.query_one("SELECT pg_advisory_xact_lock(731946,102)", &[])
+        .map_err(|error| format!("lock runtime schema creation failed: {error}"))?;
+    if schema_exists(&mut tx)? {
+        return Ok(());
+    }
     tx.batch_execute(RUNTIME_DDL)
         .map_err(|error| format!("create Postgres runtime schema failed: {error:?}"))?;
     tx.batch_execute(TRANSCRIPT_DDL)
@@ -723,6 +774,10 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.batch_execute(super::runsc_rotation::DDL)
         .map_err(|e| e.to_string())?;
+    tx.batch_execute(SANDBOX_DEPLOYMENT_DDL)
+        .map_err(|e| e.to_string())?;
+    tx.batch_execute(WORKER_DISPATCH_HOST_DDL)
+        .map_err(|e| e.to_string())?;
     for version in 1..=STORE_SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES($1, $2)",
@@ -736,6 +791,32 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
 
 fn validate_schema(client: &mut impl GenericClient, kinds: &str) -> Result<(), String> {
     validate_schema_with_resource_budgets(client, kinds, true, true, true)
+}
+
+pub(super) fn sandbox_deployment_id(client: &mut impl GenericClient) -> Result<String, String> {
+    client
+        .query_one(
+            "SELECT deployment_id::text FROM runtime.sandbox_deployment WHERE singleton",
+            &[],
+        )
+        .map(|row| row.get(0))
+        .map_err(|error| format!("read Postgres sandbox deployment identity failed: {error}"))
+}
+
+#[cfg(test)]
+pub(super) fn restore_sandbox_deployment_fixture(client: &mut Client) {
+    super::integration_tests::require_owned_migration_fixture(client);
+    let mut tx = client
+        .transaction()
+        .expect("begin sandbox deployment fixture downgrade");
+    tx.batch_execute(
+        "DROP TABLE IF EXISTS runtime.sandbox_deployment;
+         ALTER TABLE runtime.runtime_jobs DROP COLUMN IF EXISTS lease_host_id;
+         DELETE FROM runtime.schema_migrations WHERE version>=18;",
+    )
+    .expect("restore sandbox deployment fixture");
+    tx.commit()
+        .expect("commit sandbox deployment fixture downgrade");
 }
 
 fn validate_schema_with_reclaim_budget(
@@ -761,13 +842,17 @@ fn validate_schema_with_resource_budgets(
     let creation_attempts = typed_owners && schema_versions(client)?.contains(&14);
     let control_leases = creation_attempts && schema_versions(client)?.contains(&15);
     let capacity_waits = control_leases && schema_versions(client)?.contains(&16);
-    let runsc_rotation = schema_versions(client)?.contains(&17);
+    let versions = schema_versions(client)?;
+    let runsc_rotation = versions.contains(&17);
+    let sandbox_deployment = versions.contains(&18);
+    let worker_dispatch_host = versions.contains(&19);
     let tables = object_names(client, "BASE TABLE")?;
     let expected_tables = RUNTIME_TABLES
         .iter()
         .copied()
         .filter(|table| {
-            (runsc_rotation || *table != "runsc_environment_power")
+            (sandbox_deployment || *table != "sandbox_deployment")
+                && (runsc_rotation || *table != "runsc_environment_power")
                 && (capacity_waits
                     || !matches!(
                         *table,
@@ -787,7 +872,8 @@ fn validate_schema_with_resource_budgets(
         return Err(format!("Postgres runtime table set mismatch: {tables:?}"));
     }
     for (table, expected) in TABLE_SHAPES {
-        if (*table == "runsc_environment_power" && !runsc_rotation)
+        if (*table == "sandbox_deployment" && !sandbox_deployment)
+            || (*table == "runsc_environment_power" && !runsc_rotation)
             || (!capacity_waits
                 && matches!(
                     *table,
@@ -828,6 +914,11 @@ fn validate_schema_with_resource_budgets(
             };
         let expected = if control_leases && *table == "runtime_jobs" {
             format!("{expected},lease_purpose:text:NO,lease_control_stage:text:YES")
+        } else {
+            expected
+        };
+        let expected = if worker_dispatch_host && *table == "runtime_jobs" {
+            format!("{expected},lease_host_id:text:YES")
         } else {
             expected
         };
@@ -1381,7 +1472,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 17);
+        assert_eq!(STORE_SCHEMA_VERSION, 19);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",

@@ -1,6 +1,6 @@
 use super::*;
 use crate::postgres_store::execution_instances::{
-    instance_id, RetainedInstanceAllocation, RetainedInstanceRequest,
+    instance_id, InstancePreparationFailure, RetainedInstanceAllocation, RetainedInstanceRequest,
 };
 
 fn verify_controller(
@@ -28,6 +28,13 @@ fn verify_controller(
             purpose: super::super::controller_authority::ControllerPurpose::Execute,
         },
     )?;
+    if verified
+        .lease_host_id
+        .as_deref()
+        .is_some_and(|host| host != r.host_id)
+    {
+        return Err("retained execution lease host rejected".into());
+    }
     if verified.authorization.environment_profile_digest != r.profile_digest
         || verified.authorization.environment_profile.image_digest != r.image_digest
         || crate::resident_capacity::declared_usage(
@@ -152,7 +159,7 @@ impl PostgresRuntimeStore {
             limits,
             inventory,
             before_create,
-            prepare,
+            |allocation| prepare(allocation).map_err(InstancePreparationFailure::from),
             |_| Ok(()),
         )
     }
@@ -163,7 +170,8 @@ impl PostgresRuntimeStore {
         inventory: impl ResidentInventorySource<crate::resident_capacity::ResidentInventory>,
         before_create: impl FnOnce(&mut Client, &RetainedInstanceAllocation) -> Result<(), String>
             + Send,
-        prepare: impl FnOnce(&RetainedInstanceAllocation) -> Result<String, String> + Send,
+        prepare: impl FnOnce(&RetainedInstanceAllocation) -> Result<String, InstancePreparationFailure>
+            + Send,
         initialize: impl FnOnce(&RetainedInstanceAllocation) -> Result<(), String> + Send,
     ) -> Result<RetainedInstanceAllocation, String> {
         crate::observations::timed("preparationAttempt", || {
@@ -268,7 +276,27 @@ impl PostgresRuntimeStore {
                 super::super::resource_commit::require_durable_resource_commit(&mut tx)?;
                 verify_controller(&mut tx,r)?;
             }
-            let container=crate::observations::timed("physicalConfirm", || prepare(&a))?;
+            let mut confirmation = crate::observations::Span::new("physicalConfirm");
+            let prepared = prepare(&a);
+            confirmation.finished(prepared.is_ok());
+            drop(confirmation);
+            let container = match prepared {
+                Ok(container) => container,
+                Err(InstancePreparationFailure::Created {container_id, error})
+                    if !a.reused && r.environment_authorization.payload.execution_mode == "perRun" => {
+                    if container_id.len() != 64 || !container_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                        return Err("failed preparation container identity rejected".into());
+                    }
+                    // Creation was dispatched and returned this exact ID. Keep
+                    // its debit while normal cleanup independently resolves
+                    // physical presence, file protection and Host retirement.
+                    let changed=tx.execute("UPDATE runtime.resident_sandboxes SET container_id=$3,state='releasing',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE host_id=$1 AND execution_id=$2 AND state='reserved' AND container_id IS NULL", &[&r.host_id,&a.allocation_execution_id,&container_id]).map_err(|e|e.to_string())?;
+                    if changed != 1 {return Err("failed preparation reservation changed".into());}
+                    tx.commit().map_err(|e|e.to_string())?;
+                    return Err(error);
+                }
+                Err(error) => return Err(error.into_error()),
+            };
             if container.trim().is_empty() || a.container_id.as_ref().is_some_and(|id|id!=&container) { return Err("retained physical instance reassignment rejected".into()); }
             let newly_confirmed=confirm_reserved_resident(&mut tx,r.host_id,&a.allocation_execution_id,&container)?;
             if !newly_confirmed {

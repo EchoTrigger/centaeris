@@ -10,7 +10,7 @@ const iterations = Number(__ENV.PERF_EXPERIENCE_ITERATIONS || 1);
 const sameSession = __ENV.PERF_EXPERIENCE_SAME_SESSION || 'true';
 const timeoutSeconds = Number(__ENV.PERF_RUN_TERMINAL_TIMEOUT_SECONDS || 120);
 const plannedModelTurns = { text: 1, 'single-tool': 2, 'multi-step': 3 }[task];
-if (!['text', 'single-tool', 'multi-step'].includes(task) || ![1, 4].includes(vus) || ![1, 3].includes(iterations)
+if (!['text', 'single-tool', 'multi-step'].includes(task) || ![1, 4, 8].includes(vus) || ![1, 3].includes(iterations)
     || !['true', 'false'].includes(sameSession) || !Number.isInteger(timeoutSeconds)
     || timeoutSeconds < 1 || timeoutSeconds > 120 || vus * iterations * plannedModelTurns > 30) {
   throw new Error('bounded supported experience plan required');

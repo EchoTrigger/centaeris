@@ -12,6 +12,7 @@ from django.http import HttpResponse, JsonResponse
 from ninja import Router
 
 from app_core.material_contract import KnowledgeError
+from app_core.material_dispatch import dispatch_after_commit
 from app_core.material_identity import processing_spec_digest, representation_id
 from app_core.material_task_source import resolve_task_source
 from app_core.models import (
@@ -49,6 +50,7 @@ def _owner(user_id, kind, object_id):
             pk=object_id,
             agent_run__user=user,
             session__owner=user,
+            session__purpose="interactive",
             status="published",
             deletedAt=None,
         ).first()
@@ -146,7 +148,7 @@ def _preview_selection(user_id, owner_kind, object_id, lang, *, expected_identit
         "sizeBytes": item.sizeBytes,
     }
     with transaction.atomic():
-        task, _ = MaterialProcessingTask.objects.get_or_create(
+        task, created = MaterialProcessingTask.objects.get_or_create(
             representationId=preview_id,
             defaults={
                 "executionBackend": "platform",
@@ -168,6 +170,8 @@ def _preview_selection(user_id, owner_kind, object_id, lang, *, expected_identit
             return _error("office_preview_result_missing", 503)
         if task.status not in {"pending", "running"}:
             return _error("office_preview_task_invalid", 503)
+        if created:
+            dispatch_after_commit(task)
     refresh_url = refresh_url or (
         f"/api/office-preview/{quote(owner_kind, safe='')}/"
         f"{quote(object_id, safe='')}?lang={lang}"

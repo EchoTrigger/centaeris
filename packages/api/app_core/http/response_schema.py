@@ -417,19 +417,19 @@ class TrashActorResponse(StrictSchema):
 
 
 class TrashLocationResponse(StrictSchema):
-    kind: Literal["workspace", "libraryRoot", "libraryFolder"]
+    kind: Literal["libraryRoot", "libraryFolder"]
     id: str | None
     label: str
-    scope: Literal["workspace", "privateLibrary"]
+    scope: Literal["privateLibrary"]
 
 
 class TrashItemResponse(StrictSchema):
     id: str
-    kind: Literal["session", "source", "library"]
+    kind: Literal["library"]
     title: str
     deleted_at: str
     expires_at: str
-    scope: Literal["workspace", "privateLibrary"]
+    scope: Literal["privateLibrary"]
     location: TrashLocationResponse
     deleted_by: TrashActorResponse | None
 

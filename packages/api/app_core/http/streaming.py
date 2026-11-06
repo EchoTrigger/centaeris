@@ -70,6 +70,7 @@ def _prepare_agent_run_stream(
             id=agent_run_id,
             session_id=session_id,
             user_id=user_id,
+            session__purpose="interactive",
         )
     except AgentRun.DoesNotExist:
         return JsonResponse({"error": "agent_run_not_found"}, status=404)

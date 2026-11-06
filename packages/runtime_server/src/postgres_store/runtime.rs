@@ -425,48 +425,54 @@ impl SessionDataStorePort for PostgresRuntimeStore {
             let mut tx = client
                 .transaction()
                 .map_err(|error| format!("begin Postgres delete session data failed: {error}"))?;
-            let object_ids = tx
-                .query(
-                    "SELECT DISTINCT object_id FROM external_context_links WHERE session_id=$1",
-                    &[&session_id],
-                )
-                .map_err(|error| format!("query Postgres session external object ids failed: {error}"))?
-                .into_iter()
-                .map(|row| row.get::<_, String>(0))
-                .collect::<Vec<_>>();
-            for table in [
-                "transcript_projection_heads",
-                "runtime_events",
-                "session_runtime_snapshots",
-                "checkpoints",
-                "dead_letters",
-                "resource_claims",
-                "runtime_jobs",
-                "external_context_links",
-                "model_observation_contents",
-                "model_observation_manifests",
-            ] {
-                tx.execute(
-                    format!("DELETE FROM {table} WHERE session_id=$1").as_str(),
-                    &[&session_id],
-                )
-                .map_err(|error| {
-                    format!("delete Postgres session data from {table} failed: {error}")
-                })?;
-            }
-            for object_id in object_ids {
-                tx.execute(
-                    "DELETE FROM external_context_objects WHERE object_id=$1 AND NOT EXISTS (SELECT 1 FROM external_context_links WHERE object_id=$1)",
-                    &[&object_id],
-                )
-                .map_err(|error| {
-                    format!("delete Postgres orphan external context object failed: {error}")
-                })?;
-            }
+            delete_session_records(&mut tx, session_id)?;
             tx.commit()
                 .map_err(|error| format!("commit Postgres delete session data failed: {error}"))
         })
     }
+}
+
+pub(super) fn delete_session_records(
+    tx: &mut impl GenericClient,
+    session_id: &str,
+) -> Result<(), String> {
+    let object_ids = tx
+        .query(
+            "SELECT DISTINCT object_id FROM external_context_links WHERE session_id=$1",
+            &[&session_id],
+        )
+        .map_err(|error| format!("query Postgres session external object ids failed: {error}"))?
+        .into_iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>();
+    for table in [
+        "transcript_projection_heads",
+        "runtime_events",
+        "session_runtime_snapshots",
+        "checkpoints",
+        "dead_letters",
+        "resource_claims",
+        "runtime_jobs",
+        "external_context_links",
+        "model_observation_contents",
+        "model_observation_manifests",
+    ] {
+        tx.execute(
+            format!("DELETE FROM {table} WHERE session_id=$1").as_str(),
+            &[&session_id],
+        )
+        .map_err(|error| format!("delete Postgres session data from {table} failed: {error}"))?;
+    }
+    for object_id in object_ids {
+        tx.execute(
+            "DELETE FROM external_context_objects WHERE object_id=$1 AND NOT EXISTS (SELECT 1 FROM external_context_links WHERE object_id=$1)",
+            &[&object_id],
+        )
+        .map_err(|error| {
+            format!("delete Postgres orphan external context object failed: {error}")
+        })?;
+    }
+    Ok(())
 }
 
 impl AgentRuntimeSnapshotStorePort for PostgresRuntimeStore {

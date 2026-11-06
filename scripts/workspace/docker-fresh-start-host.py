@@ -73,7 +73,8 @@ def run_host(supervisor, helper, configuration, *, parent=Path("/run"),
         root.chmod(0o700)
         for name, source in (("environment_host_supervisor", supervisor), ("execution_agent", helper)):
             shutil.copyfile(source, root / name)
-            (root / name).chmod(0o500)
+            # The helper is also mounted into guests running their signed user.
+            (root / name).chmod(0o555 if name == "execution_agent" else 0o500)
         socket_directory = root / "host"
         socket_directory.mkdir(mode=0o700)
         config = {**configuration, "schema": "environment.host.v1",

@@ -100,6 +100,11 @@ def _current_input(agent_run, input_ref: str, expected_authorization_digest: str
         )
     except SessionAssetLink.DoesNotExist as error:
         raise DeferredInputResolutionError("asset_unavailable") from error
+    if agent_run.session.purpose == "oneShot":
+        from .one_shot_credentials import credential_for_run
+        credential = credential_for_run(agent_run)
+        if credential is None or link.sourceObject_id not in credential.sourceObjectRefs:
+            raise DeferredInputResolutionError("access_revoked")
     virtual_path = allocated_virtual_paths(agent_run).get(input_ref)
     if virtual_path is None:
         from .assets import _virtual_filename

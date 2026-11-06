@@ -633,12 +633,12 @@ class SourcePermissionTests(TestCase):
         )
         self.assertEqual(invalid.status_code, 400)
         self.assertEqual(invalid.json(), {"error": "trash_cursor_invalid"})
-        cross_endpoint = self.client.get(
+        changed_kind = self.client.get(
             f"/api/workspaces/{self.workspace.id}/trash",
-            {"cursor": first["nextCursor"], "kind": "session"},
+            {"cursor": first["nextCursor"], "kind": "library"},
         )
-        self.assertEqual(cross_endpoint.status_code, 400)
-        self.assertEqual(cross_endpoint.json(), {"error": "trash_cursor_invalid"})
+        self.assertEqual(changed_kind.status_code, 400)
+        self.assertEqual(changed_kind.json(), {"error": "trash_cursor_invalid"})
 
     def test_lifecycle_requires_control_and_failed_mutation_rolls_back(self):
         self.grant(self.member_group, "write")

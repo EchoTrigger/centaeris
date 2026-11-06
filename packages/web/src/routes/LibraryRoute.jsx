@@ -5,12 +5,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useRouteLoaderData, useSearchParams } from "react-router";
 import {
   BookOpen, ChevronDown, ChevronRight, Download, FileText, Folder, FolderInput,
-  Image as ImageIcon, Layers, LoaderCircle, MessageSquarePlus, Minus,
+  Image as ImageIcon, LoaderCircle, MessageSquarePlus, Minus,
   Search, Trash2, Upload, X,
 } from "lucide-react";
 import { ApiError, apiJson as api, apiUrl, jsonOptions } from "../api";
 import { OperationClient } from "../chat/operationReceipts";
-import { MarkdownContent } from "../chat/MarkdownContent";
+import { LibraryTemplatesDialog } from "./LibraryTemplatesDialog";
 import { useModalDialog } from "../components/useModalDialog";
 import { ShellPage } from "../shell/ShellPage";
 import { MAX_UPLOAD_BATCH_FILES } from "../upload";
@@ -43,20 +43,13 @@ function statusLabel(item) {
   throw new Error(`unsupported library status: ${item.status}`);
 }
 
-const LIBRARY_VIEWS = new Set(["materials", "knowledge", "skills"]);
+const LIBRARY_VIEWS = new Set(["materials", "knowledge"]);
 const LIBRARY_TABS = () => ([
   ["materials", t("libraryRoute.materials"), Folder],
   ["knowledge", t("libraryRoute.knowledgeBases"), BookOpen],
-  ["skills", "Skills", Layers],
 ]);
 
-function SkillMarkdown({ content }) {
-  useTranslation();
-  const source = content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
-  return <MarkdownContent text={source} />;
-}
-
-function LibraryPageContent() {
+function LibraryPageContent({ embedded = false } = {}) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { workspace } = useRouteLoaderData("workspace");
@@ -76,17 +69,12 @@ function LibraryPageContent() {
   const libraryView = searchParams.get("view") || "materials";
   const folderId = searchParams.get("folder") || "";
   const [objects, setObjects] = useState([]);
-  const [skills, setSkills] = useState(null);
-  const [selectedSkillId, setSelectedSkillId] = useState("");
-  const [skillDetail, setSkillDetail] = useState(null);
-  const [skillDetailLoading, setSkillDetailLoading] = useState(false);
-  const [skillDetailError, setSkillDetailError] = useState("");
-  const [catalogError, setCatalogError] = useState("");
   const [folderPath, setFolderPath] = useState([]);
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [newMenuOpen, setNewMenuOpen] = useState(false);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadQueue, setUploadQueue] = useState([]);
   const [uploadDialogError, setUploadDialogError] = useState("");
@@ -101,6 +89,7 @@ function LibraryPageContent() {
   const [moveFolderName, setMoveFolderName] = useState("");
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState(false);
   const dialogRef = useModalDialog({ open: Boolean(dialog), busy: working || uploading, onClose: closeDialog });
 
   if (!LIBRARY_VIEWS.has(libraryView)) throw new Error(`unsupported library view: ${libraryView}`);
@@ -126,6 +115,7 @@ function LibraryPageContent() {
   async function loadLibrary() {
     setLoading(true);
     setError("");
+    setLoadError(false);
     try {
       const suffix = folderId ? `?parentFolderId=${encodeURIComponent(folderId)}` : "";
       const [library, path] = await Promise.all([
@@ -139,7 +129,7 @@ function LibraryPageContent() {
         navigate(`${base}/library`, { replace: true });
         return;
       }
-      setError(t("libraryRoute.unableToLoadLibraryValue", { value1: requestError.message }));
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -154,49 +144,7 @@ function LibraryPageContent() {
   useEffect(() => {
     setQuery("");
     setSelectedIds([]);
-    setCatalogError("");
-    setSelectedSkillId("");
-    setSkillDetail(null);
-    setSkillDetailError("");
   }, [libraryView]);
-
-  useEffect(() => {
-    if (libraryView !== "skills") return undefined;
-    let active = true;
-    setSkills(null);
-    api(`/api/workspaces/${workspace.id}/skills`)
-      .then((result) => {
-        if (active) setSkills(result.skills);
-      })
-      .catch((requestError) => {
-        if (active) setCatalogError(t("libraryRoute.unableToLoadSkillsValue", { value1: requestError.message }));
-      });
-    return () => { active = false; };
-  }, [libraryView, workspace.id, t]);
-
-  useEffect(() => {
-    if (!selectedSkillId) return undefined;
-    const closeOnEscape = (event) => {
-      if (event.key === "Escape") setSelectedSkillId("");
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [selectedSkillId]);
-
-  async function openSkill(skillId) {
-    setSelectedSkillId(skillId);
-    setSkillDetail(null);
-    setSkillDetailLoading(true);
-    setSkillDetailError("");
-    try {
-      const result = await api(`/api/workspaces/${workspace.id}/skills/${encodeURIComponent(skillId)}`);
-      setSkillDetail(result);
-    } catch (requestError) {
-      setSkillDetailError(t("libraryRoute.unableToOpenSkillValue", { value1: requestError.message }));
-    } finally {
-      setSkillDetailLoading(false);
-    }
-  }
 
   function uploadFileKey(file) {
     return [file.name, file.size, file.lastModified, file.type].join("\u0000");
@@ -248,7 +196,10 @@ function LibraryPageContent() {
 
   function closeDialog() {
     if (dialog === "upload") closeUploadDialog();
-    else if (!working) setDialog("");
+    else if (!working) {
+      setError("");
+      setDialog("");
+    }
   }
 
   function removeUploadFile(file) {
@@ -279,8 +230,8 @@ function LibraryPageContent() {
       setUploadQueue([]);
       setDialog("");
       await loadLibrary();
-    } catch (requestError) {
-      setUploadDialogError(t("libraryRoute.uploadFailedValue", { value1: requestError.message }));
+    } catch {
+      setUploadDialogError(t("libraryRoute.uploadFailed"));
     } finally {
       setUploading(false);
     }
@@ -289,33 +240,36 @@ function LibraryPageContent() {
   async function createFolder() {
     if (!dialogTitle.trim() || working) return;
     setWorking(true);
+    setError("");
     try {
       await api("/api/library/folders", jsonOptions("POST", { displayName: dialogTitle, parentFolderId: folderId || null }));
       setDialog("");
       await loadLibrary();
-    } catch (requestError) {
-      setError(t("libraryRoute.unableToCreateFolderValue", { value1: requestError.message }));
+    } catch {
+      setError(t("libraryRoute.unableToCreateFolder"));
     } finally {
       setWorking(false);
     }
   }
 
-  function createNote() {
+  function createNote(noteDraft = { name: "Untitled", markdown: "" }) {
     setNewMenuOpen(false);
+    setTemplatesOpen(false);
     navigate(`${base}/library/new?${new URLSearchParams({ draft: crypto.randomUUID().replaceAll("-", ""), ...(folderId ? { folder: folderId } : {}) })}`, {
-      state: { noteDraft: { name: "Untitled", markdown: "" } },
+      state: { noteDraft },
     });
   }
 
   async function loadMoveDirectory(nextFolderId = "") {
     setMoveLoading(true);
+    setError("");
     try {
       const suffix = nextFolderId ? `?parentFolderId=${encodeURIComponent(nextFolderId)}` : "";
       const result = await api(`/api/library${suffix}`);
       setMoveFolderId(nextFolderId);
       setMoveObjects(result.objects);
-    } catch (requestError) {
-      setError(t("libraryRoute.unableToLoadDestinationFolderValue", { value1: requestError.message }));
+    } catch {
+      setError(t("libraryRoute.unableToLoadDestinationFolder"));
     } finally {
       setMoveLoading(false);
     }
@@ -333,12 +287,13 @@ function LibraryPageContent() {
   async function moveSelected() {
     if (!selectedItems.length || working) return;
     setWorking(true);
+    setError("");
     try {
       await Promise.all(selectedItems.map((item) => api(`/api/library/${item.id}`, jsonOptions("PATCH", { parentFolderId: moveFolderId || null }))));
       setDialog("");
       await loadLibrary();
-    } catch (requestError) {
-      setError(t("libraryRoute.unableToMoveValue", { value1: requestError.message }));
+    } catch {
+      setError(t("libraryRoute.unableToMove"));
     } finally {
       setWorking(false);
     }
@@ -347,13 +302,14 @@ function LibraryPageContent() {
   async function createMoveFolder() {
     if (!moveFolderName.trim() || working) return;
     setWorking(true);
+    setError("");
     try {
       await api("/api/library/folders", jsonOptions("POST", { displayName: moveFolderName, parentFolderId: moveFolderId || null }));
       setMoveFolderName("");
       setCreatingMoveFolder(false);
       await loadMoveDirectory(moveFolderId);
-    } catch (requestError) {
-      setError(t("libraryRoute.unableToCreateFolderValue", { value1: requestError.message }));
+    } catch {
+      setError(t("libraryRoute.unableToCreateFolder"));
     } finally {
       setWorking(false);
     }
@@ -403,7 +359,7 @@ function LibraryPageContent() {
         setError(t("operations.unavailable"));
         return;
       }
-      setError(requestError?.message === "operation_pending_input_changed" ? t("operations.changedInput") : t("libraryRoute.unableToStartChatValue", { value1: requestError.message }));
+      setError(t(requestError?.message === "operation_pending_input_changed" ? "operations.changedInput" : "libraryRoute.unableToStartChat"));
     } finally {
       if (isCurrent()) setWorking(false);
     }
@@ -461,8 +417,6 @@ function LibraryPageContent() {
       return !normalizedQuery || item.displayName.toLocaleLowerCase().includes(normalizedQuery);
     });
   }, [filter, objects, query]);
-  const normalizedCatalogQuery = query.trim().toLocaleLowerCase();
-  const visibleSkills = (skills || []).filter((skill) => !normalizedCatalogQuery || `${skill.name} ${skill.description}`.toLocaleLowerCase().includes(normalizedCatalogQuery));
   const visibleObjectIds = visibleObjects.map((item) => item.id);
   const allVisibleSelected = visibleObjectIds.length > 0 && visibleObjectIds.every((itemId) => selectedIds.includes(itemId));
   const selectionContainsFolder = selectedItems.some(isFolder);
@@ -488,9 +442,9 @@ function LibraryPageContent() {
     });
   }
 
-  return (
-    <ShellPage>
-      <div className={`libraryWorkspace ${selectedSkillId ? "hasSkillPeek" : ""}`}>
+  const content = (
+    <>
+      <div className="libraryWorkspace">
         <section className="libraryMain shEmbeddedLibrary" aria-labelledby="library-title">
         <header className="libraryHeader">
           <h1 id="library-title">{t("workspaceContextPanel.library")}</h1>
@@ -499,8 +453,9 @@ function LibraryPageContent() {
               <button className="libraryNewButton" type="button" aria-expanded={newMenuOpen} aria-haspopup="menu" onClick={() => setNewMenuOpen((open) => !open)}>{t("libraryRoute.new")}<ChevronDown aria-hidden="true" /></button>
               {newMenuOpen && <div className="libraryNewMenuPanel" role="menu">
                 <button type="button" role="menuitem" disabled={uploading} onClick={openUploadDialog}><Upload aria-hidden="true" />{t("libraryRoute.uploadFiles")}</button>
-                <button type="button" role="menuitem" onClick={() => { setNewMenuOpen(false); setDialogTitle(""); setDialog("folder"); }}><Folder aria-hidden="true" />{t("libraryRoute.folder")}</button>
-                <button type="button" role="menuitem" onClick={createNote}><FileText aria-hidden="true" />{t("libraryRoute.note")}</button>
+                <button type="button" role="menuitem" onClick={() => { setNewMenuOpen(false); setDialogTitle(""); setError(""); setDialog("folder"); }}><Folder aria-hidden="true" />{t("libraryRoute.folder")}</button>
+                <button type="button" role="menuitem" onClick={() => createNote()}><FileText aria-hidden="true" />{t("libraryRoute.note")}</button>
+                <button type="button" role="menuitem" onClick={() => { setNewMenuOpen(false); setTemplatesOpen(true); }}><BookOpen aria-hidden="true" />{t("shellSidebar.templates")}</button>
               </div>}
             </div>
           </div> : null}
@@ -531,8 +486,9 @@ function LibraryPageContent() {
           </div>
 
           {libraryView === "materials" ? <>
+            {error && !dialog ? <p className="libraryOperationResult error" role="alert">{error} <button className="pluginEnableButton" type="button" disabled={working} onClick={() => operations.pending() ? void openPendingChat() : void loadLibrary()}>{t("libraryObjectRoute.retry")}</button></p> : null}
             {folderPath.length > 0 && <nav className="libraryBreadcrumb" aria-label={t("libraryRoute.currentFolder")}><button type="button" onClick={() => navigate(`${base}/library`)}>{t("libraryObjectRoute.library")}</button>{folderPath.map((folder) => <span key={folder.id}><ChevronRight aria-hidden="true" /><button type="button" onClick={() => navigate(libraryUrl(folder.id))}>{folder.displayName}</button></span>)}</nav>}
-            {error && <div className="errorBanner libraryError" role="alert">{error}<button type="button" disabled={working} onClick={() => operations.pending() ? void openPendingChat() : void loadLibrary()}>{t("libraryObjectRoute.retry")}</button></div>}
+            {loadError ? <div className="libraryEmptyState" role="alert">{t("libraryRoute.unableToLoadLibrary")}<button className="pluginEnableButton" type="button" onClick={() => void loadLibrary()}>{t("libraryObjectRoute.retry")}</button></div> : <>
             <div className={`libraryList ${selectedItems.length ? "hasSelection" : ""}`} role="table" aria-label={t("libraryRoute.personalLibraryFiles")}>
               <div className="libraryListHeader" role="row">
                 <button className="librarySelect librarySelectAll" type="button" role="checkbox" aria-checked={allVisibleSelected} aria-label={allVisibleSelected ? t("libraryRoute.deselectAll") : t("libraryRoute.selectAllListedItems")} onClick={toggleAllVisible}>{allVisibleSelected ? <Minus aria-hidden="true" /> : null}</button>
@@ -550,41 +506,13 @@ function LibraryPageContent() {
                 </div>;
               })}
             </div>
-          </> : libraryView === "knowledge" ? <div className="libraryCatalogEmpty"><BookOpen aria-hidden="true" /><strong>{t("libraryRoute.noKnowledgeBasesYet")}</strong><span>{t("libraryRoute.connectedSourcesWillAppearHere")}</span></div>
-            : <>
-                  {(["owner", "admin"].includes(workspace.role) || user.isSuperuser) ? <Link to={`${base}/settings/plugins`}>{t("workspaceResources.manageSkills")}</Link> : null}
-                  {catalogError ? <div className="errorBanner libraryError" role="alert">{catalogError}</div> : null}
-                  {skills === null && !catalogError ? <div className="libraryCatalogEmpty" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.loadingSkills")}</div> : null}
-                  {skills?.length === 0 && !catalogError ? <div className="libraryCatalogEmpty"><Layers aria-hidden="true" /><strong>{t("libraryRoute.noSkillsAvailableInThisWorkspace")}</strong><span>{t("libraryRoute.enableAPluginContainingSkillsToSeeThemHere")}</span></div> : null}
-                  {skills?.length ? <div className="librarySkillTable" role="table" aria-label="Skills">
-                    <div className="librarySkillRow isHead" role="row"><span>{t("libraryRoute.name")}</span><span>{t("libraryRoute.description")}</span><span>{t("libraryRoute.source")}</span><span>{t("libraryRoute.invocation")}</span></div>
-                    {visibleSkills.map((skill) => <button className={`librarySkillRow ${selectedSkillId === skill.skillId ? "isSelected" : ""}`} type="button" role="row" aria-label={t("attachmentCard.previewValue", { value1: skill.name })} onClick={() => void openSkill(skill.skillId)} key={skill.skillId}><span role="cell"><Layers aria-hidden="true" /><strong>{skill.name}</strong></span><span role="cell">{skill.description}</span><span role="cell">{skill.skillId.startsWith("system:") ? t("libraryRoute.system") : t("libraryRoute.plugins")}</span><span role="cell">{skill.allowImplicitInvocation ? t("appRoute.auto") : t("libraryRoute.explicit")}</span></button>)}
-                    {!visibleSkills.length && normalizedCatalogQuery ? <p className="libraryCatalogNoMatch">{t("libraryRoute.noMatchingSkills")}</p> : null}
-                  </div> : null}
-                </>}
+            </>}
+          </> : <div className="libraryCatalogEmpty"><BookOpen aria-hidden="true" /><strong>{t("libraryRoute.noKnowledgeBasesYet")}</strong><span>{t("libraryRoute.connectedSourcesWillAppearHere")}</span></div>}
         </div>
         </section>
-
-        <aside className={`librarySkillPeek ${selectedSkillId ? "isOpen" : ""}`} aria-label={t("libraryRoute.skillPreview")} aria-hidden={!selectedSkillId}>
-          <header><button className="quietCloseButton" type="button" aria-label={t("libraryRoute.closeSkillPreview")} onClick={() => setSelectedSkillId("")}><X aria-hidden="true" /></button><span>Skill</span></header>
-          {skillDetailLoading ? <div className="librarySkillPeekState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.openingSkill")}</div> : null}
-          {skillDetailError ? <div className="errorBanner libraryError" role="alert">{skillDetailError}</div> : null}
-          {skillDetail ? <div className="librarySkillPeekScroll">
-            <div className="librarySkillBanner"><Layers aria-hidden="true" />{t("libraryRoute.thisFileIsMountedAsASkillForThe")}</div>
-            <section className="librarySkillSummary">
-              <span className="librarySkillIcon"><Layers aria-hidden="true" /></span>
-              <h2>{skillDetail.skill.name}</h2>
-              <p>{skillDetail.skill.description}</p>
-              <dl>
-                <div><dt>{t("libraryRoute.source")}</dt><dd>{skillDetail.skill.skillId.startsWith("system:") ? t("libraryRoute.systemMount") : t("libraryRoute.pluginMount")}</dd></div>
-                <div><dt>{t("libraryRoute.invocation")}</dt><dd>{skillDetail.skill.allowImplicitInvocation ? t("libraryRoute.automaticOrExplicit") : t("libraryRoute.explicitOnly")}</dd></div>
-                <div><dt>{t("libraryRoute.allowedTools")}</dt><dd>{skillDetail.skill.allowedTools.length ? skillDetail.skill.allowedTools.join(" · ") : t("libraryRoute.unrestricted")}</dd></div>
-              </dl>
-            </section>
-            <article className="librarySkillDocument"><SkillMarkdown content={skillDetail.content} /></article>
-          </div> : null}
-        </aside>
       </div>
+      {templatesOpen ? <LibraryTemplatesDialog onClose={() => setTemplatesOpen(false)} onCreateNote={createNote}
+        onUpload={() => { setTemplatesOpen(false); openUploadDialog(); }} /> : null}
 
       {dialog && <div className="libraryDialogBackdrop" role="presentation" onMouseDown={closeDialog}>
         <section className={`libraryDialog ${dialog === "move" ? "libraryMoveDialog" : ""} ${dialog === "upload" ? "libraryUploadDialog" : ""}`} ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="library-dialog-title" tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
@@ -611,15 +539,15 @@ function LibraryPageContent() {
             {uploadQueue.length ? <div className="libraryUploadQueue" aria-label={t("libraryRoute.uploadQueue")}>{uploadQueue.map((file) => <div className="libraryUploadQueueItem" key={uploadFileKey(file)}><span><FileText aria-hidden="true" /></span><div><strong>{file.name}</strong><small>{formatBytes(file.size)}</small></div><button type="button" disabled={uploading} onClick={() => removeUploadFile(file)} aria-label={t("attachmentCard.removeValue", { value1: file.name })}><X aria-hidden="true" /></button></div>)}</div> : null}
             <div className="libraryDialogActions libraryUploadActions"><button type="button" disabled={uploading} onClick={closeUploadDialog}>{t("agentRunRow.cancel")}</button><button className="primary" type="button" disabled={uploading || !uploadQueue.length} aria-live="polite" onClick={uploadQueuedFiles}>{uploading ? <><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.uploading")}</> : t("libraryRoute.uploadValueFiles", { value1: uploadQueue.length })}</button></div>
           </>}
-          {dialog === "folder" && <><h2 id="library-dialog-title">{t("libraryRoute.newFolder")}</h2><input autoFocus value={dialogTitle} onChange={(event) => setDialogTitle(event.target.value)} placeholder={t("libraryRoute.folderName")} /><div className="libraryDialogActions"><button type="button" onClick={() => setDialog("")}>{t("agentRunRow.cancel")}</button><button className="primary" type="button" disabled={working || !dialogTitle.trim()} onClick={createFolder}>{t("libraryRoute.create")}</button></div></>}
-          {dialog === "move" && <><header className="libraryMoveHeader"><h2 id="library-dialog-title">{t("libraryRoute.moveTo")}</h2><button type="button" onClick={() => setDialog("")} aria-label={t("libraryRoute.closeMoveDialog")}><X aria-hidden="true" /></button></header><button className="libraryMoveRoot" type="button" onClick={() => loadMoveDirectory("")}>{t("workspaceContextPanel.library")}</button>{error && <div className="errorBanner" role="alert">{error}</div>}<div className="libraryMoveObjects">{moveLoading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.loadingFolders")}</div> : moveObjects.map((item) => { const ItemIcon = isFolder(item) ? Folder : isImage(item) ? ImageIcon : FileText; const disabled = !isFolder(item) || selectedIds.includes(item.id); return isFolder(item) ? <button className="libraryMoveObject folder" type="button" key={item.id} disabled={disabled} onClick={() => loadMoveDirectory(item.id)}><ItemIcon aria-hidden="true" /><span>{item.displayName}</span></button> : <div className="libraryMoveObject file" key={item.id}><ItemIcon aria-hidden="true" /><span>{item.displayName}</span></div>; })}</div><footer className="libraryMoveActions">{creatingMoveFolder ? <form className="libraryMoveCreate" onSubmit={(event) => { event.preventDefault(); createMoveFolder(); }}><input autoFocus value={moveFolderName} onChange={(event) => setMoveFolderName(event.target.value)} placeholder={t("libraryRoute.newFolderName")} /><button className="primary" type="submit" disabled={working || !moveFolderName.trim()}>{t("libraryRoute.create")}</button></form> : <button type="button" disabled={working} onClick={() => { setError(""); setCreatingMoveFolder(true); }}>{t("libraryRoute.newFolder")}</button>}<span /><button type="button" onClick={() => setDialog("")}>{t("agentRunRow.cancel")}</button><button className="primary" type="button" disabled={working || moveLoading} onClick={moveSelected}>{t("libraryRoute.moveHere")}</button></footer></>}
+          {dialog === "folder" && <><h2 id="library-dialog-title">{t("libraryRoute.newFolder")}</h2><input autoFocus value={dialogTitle} onChange={(event) => setDialogTitle(event.target.value)} placeholder={t("libraryRoute.folderName")} />{error ? <p className="error" role="alert">{error}</p> : null}<div className="libraryDialogActions"><button type="button" onClick={closeDialog}>{t("agentRunRow.cancel")}</button><button className="primary" type="button" disabled={working || !dialogTitle.trim()} onClick={createFolder}>{t("libraryRoute.create")}</button></div></>}
+          {dialog === "move" && <><header className="libraryMoveHeader"><h2 id="library-dialog-title">{t("libraryRoute.moveTo")}</h2><button type="button" onClick={() => setDialog("")} aria-label={t("libraryRoute.closeMoveDialog")}><X aria-hidden="true" /></button></header><button className="libraryMoveRoot" type="button" onClick={() => loadMoveDirectory("")}>{t("workspaceContextPanel.library")}</button>{error ? <p className="error" role="alert">{error}</p> : null}<div className="libraryMoveObjects">{moveLoading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.loadingFolders")}</div> : moveObjects.map((item) => { const ItemIcon = isFolder(item) ? Folder : isImage(item) ? ImageIcon : FileText; const disabled = !isFolder(item) || selectedIds.includes(item.id); return isFolder(item) ? <button className="libraryMoveObject folder" type="button" key={item.id} disabled={disabled} onClick={() => loadMoveDirectory(item.id)}><ItemIcon aria-hidden="true" /><span>{item.displayName}</span></button> : <div className="libraryMoveObject file" key={item.id}><ItemIcon aria-hidden="true" /><span>{item.displayName}</span></div>; })}</div><footer className="libraryMoveActions">{creatingMoveFolder ? <form className="libraryMoveCreate" onSubmit={(event) => { event.preventDefault(); createMoveFolder(); }}><input autoFocus value={moveFolderName} onChange={(event) => setMoveFolderName(event.target.value)} placeholder={t("libraryRoute.newFolderName")} /><button className="primary" type="submit" disabled={working || !moveFolderName.trim()}>{t("libraryRoute.create")}</button></form> : <button type="button" disabled={working} onClick={() => { setError(""); setCreatingMoveFolder(true); }}>{t("libraryRoute.newFolder")}</button>}<span /><button type="button" onClick={closeDialog}>{t("agentRunRow.cancel")}</button><button className="primary" type="button" disabled={working || moveLoading} onClick={moveSelected}>{t("libraryRoute.moveHere")}</button></footer></>}
         </section>
       </div>}
-    </ShellPage>
+    </>
   );
+  return embedded ? content : <ShellPage>{content}</ShellPage>;
 }
 
-export default function LibraryPage() {
-  useTranslation();
-  return <LibraryPageContent />;
+export default function LibraryPage({ embedded = false } = {}) {
+  return <LibraryPageContent embedded={embedded} />;
 }

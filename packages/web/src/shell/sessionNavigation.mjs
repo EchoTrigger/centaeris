@@ -34,3 +34,7 @@ export function sessionChatPath(workspaceId, sessionId) {
   if (![workspaceId, sessionId].every(value => typeof value === "string" && value && value.trim() === value)) throw new Error("session_identity_invalid");
   return `/w/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`;
 }
+
+export function isWorkspaceCatalogPath(base, pathname) {
+  return pathname === `${base}/library` || pathname.startsWith(`${base}/library/`) || pathname === `${base}/extensions`;
+}

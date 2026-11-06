@@ -47,9 +47,27 @@ with the containerd image store or `overlay2` with the classic image store. Chec
 docker info --format '{{.Driver}} {{.CgroupVersion}}'
 ```
 
+In a multi-host deployment, give the API a health-checked `RUNTIME_URL` backed
+by Runtime replicas with the same PostgreSQL store and execution profile. For
+example, release reads the durable cleanup receipt through this endpoint even
+when a different replica performed cleanup. Each execution Worker uses its
+host's Runtime in `RUNTIME_INTERNAL_URL` for host-local operations.
+
+Execution claimers on each Runtime use its Docker host identity. Jobs with
+existing sandbox holdings stay on that host for execution and cleanup. For
+new sandboxes, claiming a job reserves one available position within the
+host's `RESIDENT_HOST_COUNT` until the lease ends or the resident ledger holds the
+sandbox. CPU, memory, storage and running limits are enforced by the existing
+preparation path. Control claims need no new sandbox position. Configure all
+Runtime replicas on a host with the same host count and size the global count
+for the combined capacity of the deployment.
+
 For runsc, the registered Docker runtime must also contain exactly one explicit
 `--overlay2=none` argument in `runtimeArgs`. Keep its other required runtime
 arguments. Runtime rejects missing or conflicting overlay arguments at startup.
+Set the Docker `exec-root` to a root-owned directory whose path contains no
+symlinks. On systems where `/var/run` points to `/run`, use `/run/docker` so
+runsc reports a bundle path that HostSupervisor can trust.
 gVisor's default `--overlay2=root:self` keeps guest writes in a separate overlay;
 Docker's filesystem archive can then expose an empty or stale lower view instead
 of those writes. See [gVisor filesystem configuration](https://gvisor.dev/docs/user_guide/filesystem/).
@@ -93,7 +111,20 @@ chain through `0034_workspace_snapshot_publication`. Migration
 `0033_session_workspace_authority` distinguishes an unknown legacy file baseline
 from a committed empty workspace; `0034` fences snapshot publication and GC. Run
 the same migration chain against fresh and existing supported databases. Runtime performs its own
-published-schema upgrade to store version 17 when the matching service starts.
+published-schema upgrade to store version 19 when the matching service starts.
+Version 19 records the dispatch host on Worker leases. Drain existing Worker
+leases before the upgrade so the matching Runtime can issue host-bound leases.
+Version 18 creates a durable sandbox deployment identity in PostgreSQL. All
+Runtime replicas sharing that store use the same identity on newly created
+sandboxes. On a shared Docker daemon, containers labeled by a different store
+are excluded from the deployment's ownership reconciliation. They still use
+physical host capacity. Independent stores have independent reservations, so
+partition their host budgets accordingly.
+
+Existing unlabeled containers still reconcile against the durable ledger. An
+unlabeled container with no provable owner blocks reconciliation until an
+operator verifies and removes it. A restored database keeps its identity. Run
+independent copies of that database on separate daemons.
 
 Drain existing workers and complete their cleanup responsibilities before
 changing execution mode or replacing the HostSupervisor. Preserve database and

@@ -80,12 +80,14 @@ test('three iterations reuse the admitted Session with distinct operations, whil
   }
 });
 
-test('four concurrent users retain per-VU iteration scheduling and require all four proofs', () => {
-  const s = subject({ PERF_EXPERIENCE_VUS: '4' });
-  assert.equal(s.context.subjectOptions.scenarios.experience.executor, 'per-vu-iterations');
-  assert.equal(s.context.subjectOptions.scenarios.experience.vus, 4);
-  assert.equal(s.context.subjectOptions.scenarios.experience.iterations, 1);
-  assert.equal(s.context.subjectOptions.thresholds.experience_samples_verified[0], 'count==4');
+test('concurrent single-tool loads require a proof from each virtual user', () => {
+  for (const vus of [4, 8]) {
+    const s = subject({ PERF_EXPERIENCE_VUS: String(vus), PERF_EXPERIENCE_TASK: 'single-tool' });
+    assert.equal(s.context.subjectOptions.scenarios.experience.executor, 'per-vu-iterations');
+    assert.equal(s.context.subjectOptions.scenarios.experience.vus, vus);
+    assert.equal(s.context.subjectOptions.scenarios.experience.iterations, 1);
+    assert.equal(s.context.subjectOptions.thresholds.experience_samples_verified[0], `count==${vus}`);
+  }
 });
 
 test('unsupported plans fail before admission and failed samples stop the Session chain', () => {

@@ -104,7 +104,7 @@ class WorkspaceResourceAdminTests(TestCase):
         )
         self.assertEqual(response.status_code, 404, response.content)
 
-    def test_workspace_mcp_key_override_does_not_change_shared_key_or_other_workspace(
+    def test_workspace_mcp_key_does_not_fall_back_to_an_unowned_key(
         self,
     ):
         shared = McpBearerCredential.objects.create(
@@ -142,9 +142,8 @@ class WorkspaceResourceAdminTests(TestCase):
             credential_for_workspace(self.workspace.id, "banana", "api-key").id,
             local.id,
         )
-        self.assertEqual(
-            credential_for_workspace(self.foreign.id, "banana", "api-key").id, shared.id
-        )
+        with self.assertRaises(McpBearerCredential.DoesNotExist):
+            credential_for_workspace(self.foreign.id, "banana", "api-key")
         self.assertNotIn(b"local-secret", response.content)
         self.assertNotIn(b"shared-secret", response.content)
 
@@ -385,7 +384,7 @@ class WorkspaceSkillUploadTests(SimpleTestCase):
 
 
 class PlatformWorkspaceResourceTests(TestCase):
-    def test_operator_browses_only_workspace_resource_metadata_without_membership(self):
+    def test_operator_metadata_route_is_retired(self):
         owner = User.objects.create_user("operator-metadata-owner")
         admin = User.objects.create_user("operator-metadata-admin")
         operator = User.objects.create_superuser(
@@ -396,12 +395,7 @@ class PlatformWorkspaceResourceTests(TestCase):
         WorkspaceMembership.objects.create(workspace=first, user=admin, role="admin")
         self.client.force_login(operator)
         response = self.client.get("/api/admin/workspace-resources")
-        self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(
-            {x["id"] for x in response.json()["workspaces"]}, {first.id, other.id}
-        )
-        for item in response.json()["workspaces"]:
-            self.assertEqual(set(item), {"id", "name", "status"})
+        self.assertEqual(response.status_code, 404, response.content)
         self.assertFalse(WorkspaceMembership.objects.filter(user=operator).exists())
         self.assertEqual(self.client.get("/api/workspaces").json()["workspaces"], [])
         self.assertEqual(

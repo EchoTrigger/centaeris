@@ -12,7 +12,7 @@ from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 
 from app_core.credentials import decrypt_credential_secret
-from app_core.models import McpBearerCredential, Workspace, WorkspaceMembership, WorkspacePluginEnablement
+from app_core.models import McpBearerCredential, Workspace, WorkspaceMembership, WorkspacePluginEnablement, WorkspacePluginInstallation
 from app_core.plugin_catalog import (
     MAX_PLUGIN_METADATA_BYTES, activation_digest, load_plugin_bearer_credential_refs,
     load_plugin_catalog, load_plugin_interfaces, plugin_activation_for_workspace,
@@ -47,10 +47,9 @@ class PluginIsolationTests(TestCase):
                 "hooks": [{"path": "hooks.json", "digest": "sha256:" + "b" * 64}],
                 "mcpServers": [{"path": "mcp.json", "digest": f"sha256:{mcp_digest.hexdigest()}"}],
             })
-        self.write_catalog()
         self.enterContext(override_settings(PLUGIN_CATALOG_ROOT=self.root))
         # SQLite gate replaces only the PostgreSQL lock, not authorization or mutations.
-        for module in ("plugin_catalog", "http.workspaces", "http.mcp_credentials"):
+        for module in ("plugin_catalog", "http.workspaces"):
             self.enterContext(patch(f"app_core.{module}.plugin_lifecycle_lock", side_effect=nullcontext))
         self.mcp = self.enterContext(patch("app_core.http.workspaces.request_workspace_mcp_catalog"))
         self.hooks = self.enterContext(patch("app_core.http.workspaces.request_workspace_hook_catalog"))
@@ -60,14 +59,23 @@ class PluginIsolationTests(TestCase):
         self.user = User.objects.create_superuser(username="owner", email="owner@example.invalid", password="test-password")
         self.workspace = Workspace.objects.create(name="Isolation", createdBy=self.user)
         WorkspaceMembership.objects.create(workspace=self.workspace, user=self.user, role="owner")
+        self.write_catalog()
         self.client.force_login(self.user)
         self.url = f"/api/workspaces/{self.workspace.id}/plugins"
+        self.credentials_url = f"/api/workspaces/{self.workspace.id}/mcp-bearer-credentials"
 
     def write_catalog(self):
         (self.root / "catalog.snapshot.json").write_text(json.dumps({
             "schema": "plugin_activation_snapshot_v1",
             "digest": activation_digest(self.packages), "packages": self.packages,
         }), encoding="utf-8")
+        installations = WorkspacePluginInstallation.objects.filter(workspace=self.workspace)
+        installations.exclude(plugin_name__in=[package["name"] for package in self.packages]).delete()
+        for package in self.packages:
+            installations.update_or_create(
+                plugin_name=package["name"],
+                defaults={"workspace": self.workspace, "package": package, "updated_by": self.user},
+            )
 
     def projection(self, activation, field):
         self.assertEqual(len(activation["packages"]), 1)
@@ -77,16 +85,29 @@ class PluginIsolationTests(TestCase):
             raise RuntimeError("synthetic invalid declaration")
         return {"plugins": [{"pluginName": name, field: []}]}
 
-    def write_mcp(self, payload):
+    def write_mcp(self, payload, *, name="kiwi"):
         path = "mcp.json"
         content = json.dumps(payload).encode("utf-8")
-        (self.root / "kiwi" / path).write_bytes(content)
+        (self.root / name / path).write_bytes(content)
         digest = hashlib.sha256(b"centaeris.plugin.tree.v1\0")
         for data in (path.encode("utf-8"), content):
             digest.update(len(data).to_bytes(8, "big"))
             digest.update(data)
-        self.packages[1]["mcpServers"] = [{"path": path, "digest": f"sha256:{digest.hexdigest()}"}]
+        package = next(package for package in self.packages if package["name"] == name)
+        package["mcpServers"] = [{"path": path, "digest": f"sha256:{digest.hexdigest()}"}]
         self.write_catalog()
+
+    def declare_tokens(self, name, *refs):
+        self.write_mcp({
+            "schema": "mcp_servers_v1",
+            "servers": [
+                {"id": ref, "transport": {
+                    "type": "streamableHttp", "url": f"https://{name}.invalid/mcp",
+                    "bearerCredentialRef": ref,
+                }}
+                for ref in refs
+            ],
+        }, name=name)
 
     def test_credential_refs_do_not_depend_on_complete_tools_or_runtime(self):
         self.write_mcp({"schema": "mcp_servers_v1", "servers": [
@@ -162,15 +183,15 @@ class PluginIsolationTests(TestCase):
         self.mcp.assert_not_called()
         self.hooks.assert_not_called()
 
-    def test_oversized_catalog_fails_closed_before_parsing(self):
+    def test_oversized_legacy_catalog_is_ignored_by_workspace_inventory(self):
         (self.root / "catalog.snapshot.json").write_bytes(b"\xff" * (MAX_PLUGIN_METADATA_BYTES + 1))
         with patch("app_core.plugin_catalog.json.loads") as parse:
             with self.assertRaisesRegex(ValueError, "exceeds byte budget"):
                 load_plugin_catalog()
             parse.assert_not_called()
         response = self.client.get(self.url)
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["error"], "plugin_catalog_invalid")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["name"] for item in response.json()["plugins"]], ["banana", "kiwi"])
         self.mcp.assert_not_called()
         self.hooks.assert_not_called()
 
@@ -305,19 +326,17 @@ class PluginIsolationTests(TestCase):
         with self.assertRaisesRegex(ValueError, "plugin_package_missing:kiwi"):
             load_plugin_catalog()
 
-    def test_global_catalog_digest_corruption_still_fails_closed(self):
+    def test_workspace_plugins_are_independent_of_the_retired_shared_catalog(self):
         payload = json.loads((self.root / "catalog.snapshot.json").read_text())
         payload["digest"] = "sha256:" + "0" * 64
         (self.root / "catalog.snapshot.json").write_text(json.dumps(payload))
         for response in (self.client.get(self.url), self.client.get(f"{self.url}/banana"), self.toggle("banana", False)):
-            self.assertEqual(response.status_code, 503)
-            self.assertEqual(response.json()["error"], "plugin_catalog_invalid")
-        self.mcp.assert_not_called()
-        self.hooks.assert_not_called()
+            self.assertEqual(response.status_code, 200)
 
     def test_credentials_can_be_created_rotated_and_deleted_for_a_bad_plugin(self):
+        self.declare_tokens("kiwi", "kiwi-token")
         self.mcp.side_effect = self.hooks.side_effect = RuntimeError("Runtime offline")
-        url = "/api/admin/mcp-bearer-credentials"
+        url = self.credentials_url
         response = self.client.post(url, data=json.dumps({
             "pluginName": "kiwi", "credentialRef": "kiwi-token", "displayName": "Kiwi",
             "secret": "synthetic-first-secret",
@@ -335,6 +354,7 @@ class PluginIsolationTests(TestCase):
         self.hooks.assert_not_called()
 
     def test_valid_mcp_metadata_retains_exact_contract_without_exposing_secrets(self):
+        self.declare_tokens("banana", "banana-token")
         self.mcp.side_effect = None
         self.mcp.return_value = {"plugins": [{"pluginName": "banana", "servers": [{
             "id": "banana-source", "modelContractDigest": "sha256:" + "c" * 64,
@@ -345,7 +365,7 @@ class PluginIsolationTests(TestCase):
                        "inputSchema": {"type": "object"},
                        "concurrencySafe": True, "scopes": []}],
         }]}]}
-        self.client.post("/api/admin/mcp-bearer-credentials", data=json.dumps({
+        self.client.post(self.credentials_url, data=json.dumps({
             "pluginName": "banana", "credentialRef": "banana-token", "displayName": "Banana",
             "secret": "synthetic-private-token",
         }), content_type="application/json")
@@ -358,7 +378,8 @@ class PluginIsolationTests(TestCase):
         self.assertNotIn("synthetic-private-token", response.content.decode())
 
     def test_bare_and_prefixed_token_inputs_store_only_the_token_on_create_and_rotate(self):
-        url = "/api/admin/mcp-bearer-credentials"
+        self.declare_tokens("kiwi", "kiwi-token")
+        url = self.credentials_url
         for supplied in ("  synthetic-token  ", "  Bearer synthetic-token  ", "bearer synthetic-token"):
             with self.subTest(format="prefixed" if "bearer" in supplied.lower() else "bare"):
                 response = self.client.post(url, data=json.dumps({
@@ -377,7 +398,8 @@ class PluginIsolationTests(TestCase):
                 stored.delete()
 
     def test_invalid_token_inputs_cannot_create_or_overwrite_a_credential(self):
-        url = "/api/admin/mcp-bearer-credentials"
+        self.declare_tokens("kiwi", "kiwi-token", "other-token")
+        url = self.credentials_url
         body = {"pluginName": "kiwi", "credentialRef": "kiwi-token", "displayName": "Kiwi", "secret": "synthetic-original"}
         response = self.client.post(url, data=json.dumps(body), content_type="application/json")
         stored = McpBearerCredential.objects.get(id=response.json()["credential"]["id"])
@@ -405,7 +427,7 @@ class PluginIsolationTests(TestCase):
         WorkspaceMembership.objects.create(workspace=self.workspace, user=other, role="member")
         self.assertEqual(self.client.get(f"{self.url}/banana").status_code, 200)
         self.assertEqual(self.toggle("banana", True).status_code, 404)
-        self.assertEqual(self.client.get("/api/admin/mcp-bearer-credentials").status_code, 403)
+        self.assertEqual(self.client.get(self.credentials_url).status_code, 404)
 
     def test_empty_inventory_and_unknown_plugin(self):
         self.packages = []

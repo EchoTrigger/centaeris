@@ -58,7 +58,7 @@ class PresentationLoader:
     def authorized(self):
         with _database_deadline():
             if self.scope.session_id is not None:
-                if not Session.objects.filter(id=self.scope.session_id, workspace_id=self.scope.workspace_id).exists():
+                if not Session.objects.filter(id=self.scope.session_id, workspace_id=self.scope.workspace_id, purpose="interactive").exists():
                     return False
                 return session_authority_is_current(self.user_id, self.scope.session_id)
             user = get_user_model().objects.filter(id=self.user_id, is_active=True).first()
@@ -185,7 +185,7 @@ async def presentation_events(request, workspace_id: str):
 @stream_database_call
 def _operation_download(request, session_id, event_id):
     with _database_deadline():
-        session = Session.objects.filter(id=session_id, owner_id=request.user.id, status="active").first()
+        session = Session.objects.filter(id=session_id, owner_id=request.user.id, status="active", purpose="interactive").first()
         if session is None:
             return None
         scope = PresentationScope(session.workspace_id, session.id)

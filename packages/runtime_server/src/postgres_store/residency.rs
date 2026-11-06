@@ -145,15 +145,14 @@ fn lock_host<'a>(client: &'a mut Client, host_id: &str) -> Result<ResidentHostLo
     ))
 }
 
-// Cleanup must take its turn behind the current inventory owner. A try-lock
-// would yield and compete with newly awakened preparations on every retry.
-fn lock_host_for_cleanup<'a>(
+// Startup and cleanup take their turn behind the current inventory owner.
+fn wait_for_host_inventory<'a>(
     client: &'a mut Client,
     host_id: &str,
 ) -> Result<ResidentHostLock<'a>, String> {
     client
         .query_one("SELECT pg_advisory_lock(731946,3)", &[])
-        .map_err(|error| format!("cleanup host inventory lock failed: {error}"))?;
+        .map_err(|error| format!("wait for resident host inventory lock failed: {error}"))?;
     Ok(ResidentHostLock(
         client,
         host_id.into(),
@@ -303,7 +302,7 @@ pub(super) fn with_environment_inventory<T>(
     inventory: impl ResidentInventorySource<Vec<ObservedResidentSandbox>>,
     operation: impl FnOnce(&mut Client, &[ObservedResidentSandbox]) -> Result<T, String>,
 ) -> Result<T, String> {
-    let lock = lock_host_for_cleanup(environment.client, &environment.host_id)?;
+    let lock = wait_for_host_inventory(environment.client, &environment.host_id)?;
     environment.acquired_global = true;
     let snapshot = ResidentInventorySnapshot::freeze(
         lock.0,
@@ -335,7 +334,7 @@ impl PostgresRuntimeStore {
         inventory: impl ResidentInventorySource<Vec<ObservedResidentSandbox>>,
     ) -> Result<(), String> {
         self.with_client(|client| {
-            let lock = lock_host(client, host_id)?;
+            let lock = wait_for_host_inventory(client, host_id)?;
             let snapshot = ResidentInventorySnapshot::freeze(lock.0, host_id, None)?;
             reconcile(
                 lock.0,

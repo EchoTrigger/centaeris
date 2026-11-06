@@ -677,7 +677,6 @@ impl Request {
             started: Instant::now(),
         })
     }
-
 }
 impl Drop for Request {
     fn drop(&mut self) {

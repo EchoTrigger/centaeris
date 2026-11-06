@@ -52,6 +52,53 @@ pub(super) fn cleanup_receipt(
     })
 }
 
+pub(super) fn one_shot_purge(
+    state: HttpServerState,
+    request: Request<Bytes>,
+) -> Result<Response<Body>, String> {
+    let parsed = serde_json::from_slice::<crate::postgres_store::one_shot_purge::OneShotPurgeRequest>(
+        request.body(),
+    );
+    let query = match parsed.and_then(|query| {
+        let key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
+            .map_err(|_| serde::de::Error::custom("signing key unavailable"))?;
+        query
+            .validate(key.as_bytes())
+            .map_err(serde::de::Error::custom)?;
+        Ok(query)
+    }) {
+        Ok(query) => query,
+        Err(_) => return json_error_response(400, "one_shot_purge_request_invalid"),
+    };
+    match state
+        .job_store
+        .purge_one_shot_session(&query.agent_run_control)
+    {
+        Ok(()) => {
+            state
+                .tool_layers
+                .lock()
+                .map_err(|_| "one-shot runtime context lock poisoned")?
+                .remove(&query.agent_run_control.authorization.session_id);
+            Ok(http_response(
+                200,
+                "application/json",
+                serde_json::to_vec(&json!({
+                    "schema":"runtime.agent_run.one_shot_purged.v1",
+                    "agentRunId":query.agent_run_control.agent_run_id,
+                    "sessionId":query.agent_run_control.authorization.session_id,
+                    "purged":true,
+                }))
+                .map_err(|e| e.to_string())?,
+            ))
+        }
+        Err(error) => {
+            eprintln!("one-shot content purge pending: {error}");
+            json_error_response(409, "one_shot_purge_pending")
+        }
+    }
+}
+
 fn cleanup_receipt_response(
     body: &[u8],
     read: impl FnOnce(

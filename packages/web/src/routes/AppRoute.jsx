@@ -1,8 +1,9 @@
+import { animate } from "@centaeris/frontend-foundations/motion";
 import { useTranslation } from "../i18n";
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { matchPath, useNavigate, useRouteLoaderData } from "react-router";
 import { apiJson, apiResponse } from "../api";
-import { OperationClient, acceptedConversationReviewLink, consumeReviewedOperation } from "../chat/operationReceipts";
+import { OperationClient, acceptedConversationReviewLink, consumeReviewedOperation, isDefiniteSubmissionRejection, isWorkspacePreservationPending } from "../chat/operationReceipts";
 import { WorkspaceContextPanel } from "../components/WorkspaceContextPanel";
 import { DocumentPreview } from "../components/DocumentPreview";
 import { officeFileType } from "../chat/officeFormats.mjs";
@@ -10,6 +11,7 @@ import { officePreviewUrl } from "../chat/attachments.mjs";
 import { codePreviewCanRender } from "../chat/codePreviewFormats.mjs";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useModalDialog } from "../components/useModalDialog";
+import { dismissDetailsOnOutsideInteraction } from "../components/detailsDismissal";
 import { streamWorkspacePresentation } from "../chat/workspacePresentationTransport";
 import { createTranscriptViewStore } from "../chat/transcriptViewStore";
 import { compareTranscriptBlocks } from "../chat/transcriptContract";
@@ -42,14 +44,21 @@ import {
 } from "../preferences";
 import { HomePlane, HomeQuickActions } from "../shell/HomePlane";
 import { ShellSidebar } from "../shell/ShellSidebar";
-import { sessionChatPath, groupSessionNavigation, sortSessionNavigation as sortSessions } from "../shell/sessionNavigation.mjs";
+import { useWorkspaceSearch, WorkspaceSearch } from "../shell/WorkspaceSearch";
+import { isWorkspaceCatalogPath, sessionChatPath, groupSessionNavigation, sortSessionNavigation as sortSessions } from "../shell/sessionNavigation.mjs";
 import { SessionNavigationRow } from "../shell/SessionNavigationRow";
 import { useSessionNavigationActions } from "../shell/useSessionNavigationActions";
 import { SessionReadController, mergeSessionAttention, mergeSessionNavigation } from "../shell/sessionReadState";
 import {
+  Archive,
   Image as ImageIcon,
+  Ellipsis,
+  Pencil,
+  Pin,
+  PinOff,
   PanelLeft,
-  RefreshCw,
+  Search,
+  Trash2,
   X,
 } from "lucide-react";
 
@@ -66,10 +75,101 @@ const ARTIFACT_PREVIEW_CONTENT_TYPES = new Set([
   "image/webp",
 ]);
 
+function subscribeViewport(onResize) {
+  window.addEventListener("resize", onResize);
+  return () => window.removeEventListener("resize", onResize);
+}
+
+function isCompactViewport() {
+  return window.innerWidth <= 760;
+}
+
+function useWorkbenchProgress(ref, property, open, { initial, duration, immediate = false }) {
+  useLayoutEffect(() => {
+    const workbench = ref.current;
+    if (!workbench) return;
+    const from = Number(workbench.style.getPropertyValue(property) || initial);
+    const target = open ? 1 : 0;
+    if (from === target) return;
+    const write = value => workbench.style.setProperty(property, String(value));
+    const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (immediate || preference.matches) {
+      write(target);
+      return;
+    }
+    const playback = animate(from, target, {
+      duration,
+      ease: [0.16, 1, 0.3, 1],
+      onUpdate: write,
+    });
+    const settle = () => {
+      if (preference.matches) {
+        playback.complete();
+        write(target);
+      }
+    };
+    preference.addEventListener("change", settle);
+    return () => {
+      preference.removeEventListener("change", settle);
+      playback.stop();
+    };
+  }, [ref, property, open, initial, duration, immediate]);
+}
+
 function upsertBy(items, key, value) {
   const index = items.findIndex((item) => item[key] === value[key]);
   if (index < 0) return [...items, value];
   return items.map((item, itemIndex) => (itemIndex === index ? value : item));
+}
+
+function ConversationTitle({ session, actions, running }) {
+  const { t } = useTranslation();
+  const menuRef = useRef(null);
+  const titleRef = useRef(null);
+  const [renaming, setRenaming] = useState(false);
+  useEffect(() => {
+    if (!renaming) return dismissDetailsOnOutsideInteraction(menuRef.current);
+  }, [renaming]);
+
+  function closeMenu() {
+    menuRef.current.open = false;
+    titleRef.current?.focus();
+  }
+
+  function finishRename(value, returnFocus = false) {
+    setRenaming(false);
+    if (value !== undefined) void actions.renameSession(session, value);
+    if (returnFocus) window.requestAnimationFrame(() => titleRef.current?.focus());
+  }
+
+  if (renaming) return <form className="workspaceConversationRename" onSubmit={event => {
+    event.preventDefault();
+    finishRename(event.currentTarget.elements.title.value, true);
+  }}>
+    <input name="title" aria-label={t("appRoute.renameValue", { value1: session.title })} autoFocus maxLength={200}
+      defaultValue={session.title} onFocus={event => event.currentTarget.select()}
+      onBlur={event => finishRename(event.currentTarget.value)}
+      onKeyDown={event => {
+        if (event.nativeEvent.isComposing) return;
+        if (event.key === "Escape") {
+          event.preventDefault();
+          finishRename(undefined, true);
+        }
+      }} />
+  </form>;
+
+  return <div className="workspaceConversationHeading">
+    <h1 className="workspaceConversationTitle" title={session.title}>{session.title || t("searchOverlay.untitledConversation")}</h1>
+    <details className="workspaceConversationActions" ref={menuRef}>
+      <summary ref={titleRef} className="workspacePanelToggle" role="button" aria-label={t("appRoute.conversationActionsForValue", { value1: session.title })}><Ellipsis aria-hidden="true" /></summary>
+      <div className="workspaceSessionMenu">
+        <button type="button" disabled={Boolean(actions.savingSessionId)} onClick={() => { closeMenu(); setRenaming(true); }}><Pencil aria-hidden="true" />{t("appRoute.rename")}</button>
+        <button type="button" disabled={Boolean(actions.savingSessionId)} onClick={() => { closeMenu(); actions.onTogglePin(session); }}>{session.isPinned ? <PinOff aria-hidden="true" /> : <Pin aria-hidden="true" />}{t(session.isPinned ? "appRoute.unpin" : "appRoute.pin")}</button>
+        <button type="button" disabled={running || Boolean(actions.archivingSessionId)} onClick={() => { closeMenu(); void actions.onArchive(session); }}><Archive aria-hidden="true" />{t("archive.title")}</button>
+        <button type="button" className="isDanger" disabled={Boolean(actions.deletingSessionId)} onClick={() => { closeMenu(); actions.onRequestDelete(session); }}><Trash2 aria-hidden="true" />{t("appRoute.delete")}</button>
+      </div>
+    </details>
+  </div>;
 }
 
 function ConnectedWorkspaceContextPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose, onReturn }) {
@@ -85,7 +185,7 @@ function ConnectedWorkspaceContextPanel({ panel, browserWidthPx, onBrowserWidthC
   );
 }
 
-export function AppPageContent({ initialSession = null, workspaceDraft, location, modelsVersion, onSessionAccepted }) {
+export function AppPageContent({ initialSession = null, workspaceDraft, visible = true, location, navigationKey = location.key, catalogContent = null, modelsVersion, onSessionAccepted }) {
   const { t } = useTranslation();
   const { user } = useRouteLoaderData("authenticated");
   const { workspace } = useRouteLoaderData("workspace");
@@ -158,9 +258,11 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
   const presentationScopeRef = useRef(presentationScopeKey);
   presentationScopeRef.current = presentationScopeKey;
   const [assets, setAssets] = useState([]);
+  const [assetsUnavailable, setAssetsUnavailable] = useState(false);
   const [pendingAttachmentIds, setPendingAttachmentIds] = useState([]);
   const [pendingUploadFiles, setPendingUploadFiles] = useState([]);
   const [draft, setDraft] = useState("");
+  const [rejectedSubmissionScopes, setRejectedSubmissionScopes] = useState(() => new Set());
   const [pendingUserMessage, setPendingUserMessage] = useState(null);
   const pendingUserMessageRef = useRef(null);
   useEffect(() => { pendingUserMessageRef.current = pendingUserMessage; }, [pendingUserMessage]);
@@ -169,12 +271,15 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
   const [pendingQuestion, setPendingQuestion] = useState(null);
   const answeredQuestionIdsRef = useRef(new Set());
   const enterStartsNewLine = useEnterStartsNewLine(user.id);
-  const [error, setError] = useState("");
+  const [composerError, setComposerError] = useState("");
+  const [conversationError, setConversationError] = useState("");
+  const [navigationError, setNavigationError] = useState(false);
+  const [olderHistoryError, setOlderHistoryError] = useState(false);
   const [streamIssue, setStreamIssue] = useState(null);
   const [sending, setSending] = useState(false);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [attachmentPreview, setAttachmentPreview] = useState(null);
-  const sessionActions = useSessionNavigationActions({ scopeKey: JSON.stringify([workspace.id]), sessions, onChangeSessions: setSessions, onError: setError, onDeleted: onSessionDeleted });
+  const sessionActions = useSessionNavigationActions({ scopeKey: JSON.stringify([workspace.id]), sessions, onChangeSessions: setSessions, onDeleted: onSessionDeleted });
   const { deletingSessionId, deleteConfirmationSessionId, setDeleteConfirmationSessionId, setEditingSessionId, setOpenSessionMenuId, markSessionRead, deleteSession } = sessionActions;
   const [loadingHistory, setLoadingHistory] = useState(!workspaceDraft);
   const [loadingOlderHistory, setLoadingOlderHistory] = useState(false);
@@ -182,7 +287,24 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
   const [contextPanel, setContextPanel] = useState(CLOSED_CONTEXT_PANEL);
   const [browserPanelWidthPx, setBrowserPanelWidthPx] = useState(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const attachmentDialogRef = useModalDialog({ open: Boolean(attachmentPreview), onClose: () => setAttachmentPreview(null) });
+  const compactLayout = useSyncExternalStore(subscribeViewport, isCompactViewport);
+  const [drawerFor, setDrawerFor] = useState(null);
+  const workbenchRef = useRef(null);
+  const transcriptRef = useRef(null);
+  const sidebarRef = useRef(null);
+  const search = useWorkspaceSearch(navigationKey, visible || Boolean(catalogContent));
+  const drawerOpen = compactLayout && drawerFor === navigationKey && !search.open && (visible || Boolean(catalogContent));
+  useWorkbenchProgress(workbenchRef, "--workspace-sidebar-progress", isSidebarOpen,
+    { initial: 1, duration: 0.22, immediate: compactLayout });
+  useWorkbenchProgress(workbenchRef, "--workspace-preview-progress", visible && contextPanel.mode === "filePreview",
+    { initial: 0, duration: 0.24, immediate: !visible });
+  useLayoutEffect(() => {
+    if (!compactLayout) return;
+    const drawer = sidebarRef.current;
+    if (drawerOpen && !drawer.open) drawer.showModal();
+    else if (!drawerOpen && drawer.open) drawer.close();
+  }, [compactLayout, drawerOpen]);
+  const attachmentDialogRef = useModalDialog({ open: visible && Boolean(attachmentPreview), onClose: () => setAttachmentPreview(null) });
   const previewRequestIdRef = useRef(0);
   const activeSessionIdRef = useRef(sessionId);
   const activeTranscriptRunRef = useRef(activeTranscriptRun);
@@ -356,6 +478,10 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     previewRequestIdRef.current += 1;
     setContextPanel(CLOSED_CONTEXT_PANEL);
   }, []);
+  const closeFilePreview = useCallback(() => {
+    transcriptRef.current?.preserveReadingPosition();
+    clearContextPanel();
+  }, [clearContextPanel]);
   const clearConversationProjection = useCallback(() => {
     transcriptStore.clear();
     toolOperations.clear();
@@ -365,7 +491,10 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     setPendingQuestion(null);
     olderHistoryRequestRef.current?.controller.abort();
     olderHistoryRequestRef.current = null;
+    setOlderHistoryError(false);
+    setConversationError("");
     setAssets([]);
+    setAssetsUnavailable(false);
     setPendingAttachmentIds([]);
     setPendingUploadFiles([]);
   }, [transcriptStore, toolOperations, updateActiveTranscriptRun]);
@@ -373,7 +502,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     streamAbortRef.current?.abort();
     chatControllerRef.current?.dispose();
   }, []);
-  const reportLoadError = useEffectEvent((key) => setError(t(key)));
+  const reportModelLoadError = useEffectEvent(() => setComposerError(t("appRoute.unableToRefreshModelsPleaseTryAgain")));
   const markSelectedSessionRead = useEffectEvent(markSessionRead);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: The version is an explicit refresh signal from retained settings routes.
@@ -386,7 +515,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
           acceptModels(data.models);
         }
       } catch {
-        if (!controller.signal.aborted) reportLoadError("appRoute.unableToRefreshModelsPleaseTryAgain");
+        if (!controller.signal.aborted) reportModelLoadError();
       }
     }
     load();
@@ -399,13 +528,13 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
   }, [contextPanel]);
 
   useEffect(() => {
-    if (contextPanel.mode === "closed") return undefined;
+    if (!visible || search.open || contextPanel.mode === "closed") return undefined;
     const closeOnEscape = (event) => {
-      if (event.key === "Escape") clearContextPanel();
+      if (event.key === "Escape") closeFilePreview();
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [contextPanel.mode, clearContextPanel]);
+  }, [visible, search.open, contextPanel.mode, closeFilePreview]);
 
   useEffect(() => {
     requestScopeRef.current.active = true;
@@ -422,7 +551,8 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
       return undefined;
     }
     let active = true;
-    setError("");
+    setComposerError("");
+    setNavigationError(false);
     const navigationScopeKey = requestScopeKey;
     setLoadingHistory(!workspaceDraft);
     clearRunControl();
@@ -457,7 +587,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
       })
       .catch(() => {
         if (!active || !requestScopeRef.current.active || requestScopeRef.current.key !== navigationScopeKey) return;
-        reportLoadError("appRoute.unableToLoadConversationsRefreshThePageAndTry");
+        setNavigationError(true);
         setLoadingHistory(false);
       });
     return () => { active = false; };
@@ -497,37 +627,34 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     return () => { visibilityTarget.removeEventListener("visibilitychange", update); focusTarget.removeEventListener("focus", update); };
   }, []);
   useEffect(() => {
-    const visible = pageVisible && !loadingHistory;
-    if (activeSession && visible && readingLatest && BigInt(readableThrough) >= BigInt(activeSession.latestAttentionSequence)) {
+    const canObserve = visible && pageVisible && !loadingHistory;
+    if (activeSession && canObserve && readingLatest && BigInt(readableThrough) >= BigInt(activeSession.latestAttentionSequence)) {
       const entered = enteredReadRef.current;
       if (entered.sessionId === sessionId && !entered.handled) {
         entered.handled = true;
         if (activeSession.isManuallyUnread) markSelectedSessionRead(activeSession);
       }
     }
-    readController.observe({ session: activeSession ?? null, visible, readingLatest, appliedSourceHighWater: readableThrough });
-  }, [activeSession, loadingHistory, pageVisible, readingLatest, readableThrough, readController, sessionId]);
-
-  const showStreamError = useCallback((errorValue) => {
-    if (errorValue?.name === "AbortError") return;
-    setError(t("appRoute.theActionCouldNotBeCompletedPleaseTryAgain"));
-  }, [t]);
+    readController.observe({ session: activeSession ?? null, visible: canObserve, readingLatest, appliedSourceHighWater: readableThrough });
+  }, [activeSession, loadingHistory, pageVisible, readingLatest, readableThrough, readController, sessionId, visible]);
 
   const handlePresentationFailure = useCallback((errorValue, targetSessionId) => {
     if (errorValue?.name === "AbortError" || (targetSessionId || "") !== activeSessionIdRef.current) return;
-    if ([401, 403, 404, 410].includes(errorValue?.status)) {
+    const accessDenied = [401, 403].includes(errorValue?.status)
+      || (errorValue?.status === 404 && errorValue.message === "presentation_scope_not_found");
+    if (accessDenied) {
       requestScopeRef.current.active = false;
       stopActiveStream();
       readController.dispose();
       navigationSnapshotRef.current.sessions = [];
       setSessions([]); setProjects([]); setReadableThrough("0");
       clearConversationProjection(); clearRunControl(); setStreamIssue(null); setWorkTime(null); setLoadingHistory(false);
-      setError(t("appRoute.unableToLoadConversationHistoryRefreshThePageAnd"));
+      setConversationError("appRoute.unableToLoadConversationHistoryRefreshThePageAnd");
       return;
     }
     setLoadingHistory(false);
     setStreamIssue({ sessionId: targetSessionId || "", error: errorValue, reconnecting: false });
-  }, [clearConversationProjection, clearRunControl, stopActiveStream, readController, t]);
+  }, [clearConversationProjection, clearRunControl, stopActiveStream, readController]);
 
   const restorePresentationSnapshot = useCallback(async (tail, signal, isCurrent) => {
     const previous = transcriptStore.getListSnapshot();
@@ -579,15 +706,23 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     }
     setLoadingHistory(Boolean(selectedSessionId && current.sessionId !== selectedSessionId));
     if (selectedSessionId) {
-      Promise.all([
-        apiResponse(`/api/sessions/${encodeURIComponent(selectedSessionId)}/assets`, { signal: abortController.signal }).then(response => response.json()),
-        apiResponse(`/api/sessions/${encodeURIComponent(selectedSessionId)}`, { signal: abortController.signal }).then(response => response.json()),
-      ]).then(([assetData, sessionData]) => {
+      const url = `/api/sessions/${encodeURIComponent(selectedSessionId)}`;
+      const options = { signal: abortController.signal };
+      apiResponse(url, options).then(response => response.json()).then(sessionData => {
         if (!isCurrent()) return;
         if (sessionData.session?.id !== selectedSessionId || sessionData.session.workspaceId !== workspace.id) throw new Error("session_response_invalid");
         setSessions(items => sortSessions(upsertBy(items, "id", sessionData.session)));
+        setConversationError(value => value === "appRoute.sessionDetailsUnavailable" ? "" : value);
+      }).catch(errorValue => {
+        if (isCurrent() && errorValue?.name !== "AbortError") setConversationError("appRoute.sessionDetailsUnavailable");
+      });
+      apiResponse(`${url}/assets`, options).then(response => response.json()).then(assetData => {
+        if (!isCurrent()) return;
         setAssets(assetData.assets);
-      }).catch(errorValue => { if (isCurrent() && errorValue?.name !== "AbortError") showStreamError(errorValue); });
+        setAssetsUnavailable(false);
+      }).catch(errorValue => {
+        if (isCurrent() && errorValue?.name !== "AbortError") setAssetsUnavailable(true);
+      });
     }
     const controller = new WorkspacePresentationController({
       workspaceId: workspace.id, sessionId: selectedSessionId,
@@ -603,6 +738,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
         if (!isCurrent()) return;
         navigationSnapshotRef.current.sessions = next;
         setSessions(items => sortSessions(mergeSessionNavigation(items, next)));
+        setNavigationError(false);
         if (selectedSessionId === null && !workspaceDraft && !startFresh) {
           setSessionId(next.find(session => session.id === requestedSessionId)?.id || next[0]?.id || "");
         }
@@ -638,8 +774,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
         }
         updateActiveTranscriptRun(active ? run : null);
         if (!active) {
-          setWorkActivity(value => value?.sessionId === selectedSessionId && value.agentRunId === run?.agentRunId
-            && value.activity === "preserving" ? value : null);
+          setWorkActivity(null);
           setPendingQuestion(null);
         }
         if (active && run.startedAt) setWorkTime(value => ({ ...value, sessionId: selectedSessionId, startedAtMs: Date.parse(run.startedAt), completedAtMs: null }));
@@ -651,10 +786,8 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
           setWorkActivity(value => value?.agentRunId === activity.agentRunId ? null : value);
           return;
         }
-        if (activity.activity === "preserving" && (currentRunIdentityRef.current
-          || !terminalRunIdsRef.current.has(activity.agentRunId))) return;
-        if (activity.activity !== "preserving" && (currentRunIdentityRef.current !== activity.agentRunId
-          || terminalRunIdsRef.current.has(activity.agentRunId))) return;
+        if (activity.activity === "preserving" || currentRunIdentityRef.current !== activity.agentRunId
+          || terminalRunIdsRef.current.has(activity.agentRunId)) return;
         setWorkActivity({ sessionId: selectedSessionId, agentRunId: activity.agentRunId, activity: activity.activity });
       },
       onQuestion: frame => {
@@ -680,7 +813,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
       },
     }).catch(errorValue => { if (isCurrent()) handlePresentationFailure(errorValue, selectedSessionId); });
     return () => { active = false; abortController.abort(); controller.dispose(); };
-  }, [presentationScopeKey, presentationAttempt, sessionId, workspace.id, operations, transcriptStore, toolOperations, clearConversationProjection, stopActiveStream, updateActiveTranscriptRun, restorePresentationSnapshot, handlePresentationFailure, showStreamError, recordRunTerminal, workspaceDraft, startFresh, requestedSessionId]);
+  }, [presentationScopeKey, presentationAttempt, sessionId, workspace.id, operations, transcriptStore, toolOperations, clearConversationProjection, stopActiveStream, updateActiveTranscriptRun, restorePresentationSnapshot, handlePresentationFailure, recordRunTerminal, workspaceDraft, startFresh, requestedSessionId]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: Route ownership, Retry, and conflicting Run metadata each require a fresh authoritative read.
   useEffect(() => {
@@ -699,19 +832,24 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
         updateActiveTranscriptRun(currentRun);
         acceptedRunTargetRef.current = null;
         setAcceptedRunTarget(null);
-      }).catch(errorValue => {
-        if (isCurrentRead()) handlePresentationFailure(errorValue, sessionId);
+      }).catch(() => {
+        // The presentation stream still owns live delivery and access checks.
+        // A failed supplementary read cannot retire its current Run or scope.
       });
     return () => controller.abort();
-  }, [sessionId, requestScopeKey, presentationAttempt, runControlAttempt, transcriptTransport, updateActiveTranscriptRun, handlePresentationFailure]);
+  }, [sessionId, requestScopeKey, presentationAttempt, runControlAttempt, transcriptTransport, updateActiveTranscriptRun]);
 
   function retryTranscriptStream() {
     if (streamIssue?.reconnecting) return;
     setPresentationAttempt(value => value + 1);
   }
 
-  function startNewChat(projectId = "", sidebarTab = "chat") {
+  function startNewChat(projectId = "") {
     if (sending) return;
+    if (!visible && workspaceDraft && !sessionId && !projectId) {
+      navigate(location.pathname + location.search + (location.hash || ""));
+      return;
+    }
     clearRunControl();
     acceptedRouteSessionIdRef.current = "";
     stopActiveStream();
@@ -719,14 +857,15 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     setLoadingHistory(false);
     clearConversationProjection();
     setDraft("");
-    setError("");
+    setComposerError("");
     setEditingSessionId("");
     setOpenSessionMenuId("");
     clearContextPanel();
-    navigate(`${workspaceBase}/app${projectId ? `?${new URLSearchParams({ projectId })}` : ""}`, { state: { sidebarTab } });
+    navigate(`${workspaceBase}/app${projectId ? `?${new URLSearchParams({ projectId })}` : ""}`);
   }
 
-  function selectSession() {
+  function selectSession(target) {
+    if (target?.id === sessionId) return;
     acceptedRouteSessionIdRef.current = "";
     setPendingUploadFiles([]);
     setEditingSessionId("");
@@ -756,8 +895,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
       setDraft("");
       setLoadingHistory(true);
       const next = remainingSessions[0];
-      navigate(next ? sessionChatPath(workspace.id, next.id) : `/w/${encodeURIComponent(workspace.id)}/app`);
-      if (!next) setLoadingHistory(false);
+      if (visible) navigate(next ? sessionChatPath(workspace.id, next.id) : `${workspaceBase}/app`);
+      else setSessionId("");
+      if (!visible || !next) setLoadingHistory(false);
       clearContextPanel();
     }
   }
@@ -775,6 +915,16 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     catch { setPresentationAttempt(value => value + 1); }
   }
 
+  function setSubmissionRejected(rejected) {
+    setRejectedSubmissionScopes(scopes => {
+      if (scopes.has(requestScopeKey) === rejected) return scopes;
+      const next = new Set(scopes);
+      if (rejected) next.add(requestScopeKey);
+      else next.delete(requestScopeKey);
+      return next;
+    });
+  }
+
   async function sendMessage(event, replaceUnconfirmedInput = false) {
     event?.preventDefault();
     const submittedDraft = draft;
@@ -790,6 +940,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
       const currentSessionId = matchPath(`${workspaceBase}/sessions/:sessionId`, pathname)?.params.sessionId;
       const locationOwnsRequest = pathname === `${workspaceBase}/app`
         || currentSessionId === requestedSessionId
+        || isWorkspaceCatalogPath(workspaceBase, pathname)
         || pathname.startsWith(`${workspaceBase}/settings/`);
       return locationOwnsRequest && requestScope.active && requestScopeRef.current === requestScope
         && (!ownedSubmission || messageRequestRef.current === ownedSubmission);
@@ -797,11 +948,11 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     if (hasActiveAgentRun && !operations.pending()) {
       if (!sessionId || !activeAgentRunId) return;
       if (pendingAttachmentIds.length || pendingUploadFiles.length) {
-        setError(t("appRoute.supplementalInputDoesNotSupportAttachmentsYetRemoveThe"));
+        setComposerError(t("appRoute.supplementalInputDoesNotSupportAttachmentsYetRemoveThe"));
         return;
       }
       setSending(true);
-      setError("");
+      setComposerError("");
       const supplementId = crypto.randomUUID();
       auxiliaryRequestRef.current = supplementId;
       try {
@@ -826,8 +977,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
           throw new Error("AgentRun supplement response is invalid");
         }
         setDraft(value => value === submittedDraft ? "" : value);
+        setSubmissionRejected(false);
       } catch (requestError) {
-        if (isCurrentRequest()) setError(requestError?.message === "agent_run_supplement_unavailable" ? t("appRoute.unableToDeliverSupplementalInputRightNowPleaseTry") : t("appRoute.unableToSendSupplementalInput"));
+        if (isCurrentRequest()) setComposerError(requestError?.message === "agent_run_supplement_unavailable" ? t("appRoute.unableToDeliverSupplementalInputRightNowPleaseTry") : t("appRoute.unableToSendSupplementalInput"));
       } finally {
         if (auxiliaryRequestRef.current === supplementId) auxiliaryRequestRef.current = null;
         if (isCurrentRequest()) setSending(false);
@@ -847,7 +999,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     const targetSessionId = workspaceDraft || startFresh ? "new" : requestedSessionId || sessionId || "new";
     const attachmentRefs = [...pendingAttachmentIds].sort();
     const uploadFiles = pendingUploadFiles;
-    setError("");
+    setComposerError("");
     if (targetSessionId === "new") composerStartRectRef.current = composerRef.current?.getBoundingClientRect() || null;
     const startedAtMs = Date.now();
     setWorkTime({ startedAtMs, sessionId: targetSessionId });
@@ -866,6 +1018,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
       // Navigation invalidates only this UI result, never the server's accepted work.
       if (!isCurrentRequest()) return;
       if (targetSessionId !== "new" && messageData.sessionId !== targetSessionId) throw new Error("AgentRun acceptance identity is invalid");
+      setSubmissionRejected(false);
       acceptRunTarget(messageData);
       pendingBindingRef.current = { request: requestToken, sessionId: messageData.sessionId, agentRunId: messageData.agentRunId };
       const priorTerminal = terminalFactsRef.current.get(JSON.stringify([messageData.sessionId, messageData.agentRunId]));
@@ -898,7 +1051,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
         acceptedRouteSessionIdRef.current = resolvedSessionId;
         setSessionId(resolvedSessionId);
         setSending(false);
-        onSessionAccepted(sessionChatPath(workspace.id, resolvedSessionId));
+        onSessionAccepted(sessionChatPath(workspace.id, resolvedSessionId), acceptedSession);
       } else {
         operations.complete(messageData.operationId);
         if (streamIssue && !streamIssue.reconnecting) setPresentationAttempt(value => value + 1);
@@ -908,37 +1061,46 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
       if (errorValue?.message === "operation_result_stale") return;
       if (errorValue?.message === "operation_dispatch_stopped") {
         setPendingUserMessage(value => value === pendingMessage ? null : value);
-        setDraft(value => value || text);
+        setDraft(value => value || submittedDraft);
         setWorkTime(null);
         return;
       }
-      setDraft(value => value || text);
-      if (!accepted && !operations.pending()) setPendingUserMessage(value => value === pendingMessage ? null : value);
+      const rejected = !accepted && isDefiniteSubmissionRejection(errorValue) && !operations.pending();
+      if (!accepted) {
+        setDraft(value => value || submittedDraft);
+        setPendingUserMessage(value => value === pendingMessage ? null : value);
+        setWorkTime(null);
+        if (rejected) setSubmissionRejected(true);
+        if (isWorkspacePreservationPending(errorValue)) return;
+      }
       if (accepted) {
-        setError(t("operations.acceptedReadFailed"));
+        setConversationError("operations.acceptedReadFailed");
       } else if (errorValue?.message === "operation_pending_input_changed") {
-        setError(t("operations.changedInput"));
+        setComposerError(t("operations.deliveryUnconfirmed"));
         if (operations.pending()?.receipt) await checkPendingOperation(true);
       } else if (errorValue?.message === "operation_input_acceptance_unconfirmed") {
-        setError(t("operations.inputUnconfirmed"));
         await checkPendingOperation(true);
-      } else if (errorValue?.message === "session_workspace_preservation_pending") {
-        setError(t("appRoute.workspacePreservationPending"));
       } else if (errorValue?.message === "model_not_found") {
         try {
           const response = await apiResponse(`/api/models?workspaceId=${encodeURIComponent(workspace.id)}`);
           const data = await response.json();
           if (isCurrentRequest()) {
             acceptModels(data.models);
-            setError(t("appRoute.modelListChangedSelectModel"));
+            setComposerError(t("appRoute.modelListChangedSelectModel"));
           }
         } catch {
-          if (isCurrentRequest()) showStreamError(errorValue);
+          if (isCurrentRequest()) setComposerError(t("appRoute.unableToRefreshModelsPleaseTryAgain"));
         }
-      } else if (submissionControl.getSnapshot().phase === "unknown") {
-        setError(t("operations.inputUnconfirmed"));
-      } else {
-        showStreamError(errorValue);
+      } else if (submissionControl.getSnapshot().phase === "unknown" || operations.pending()?.receipt === null) {
+        setComposerError(t("operations.deliveryUnconfirmed"));
+      } else if (errorValue?.status === 413) {
+        setComposerError(t("appRoute.attachmentTooLarge"));
+      } else if (errorValue?.status === 429) {
+        setComposerError(t("appRoute.sendingTemporarilyUnavailable"));
+      } else if (errorValue?.status === 409 && errorValue.message === "session_has_active_agent_run") {
+        setComposerError(t("appRoute.conversationAlreadyRunning"));
+      } else if (!rejected && errorValue?.name !== "AbortError") {
+        setComposerError(t("appRoute.theActionCouldNotBeCompletedPleaseTryAgain"));
       }
     } finally {
       const current = isCurrentRequest();
@@ -969,6 +1131,10 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
       } else accepted = await operations.recover();
       if (accepted) {
         if (!isCurrent()) return;
+        if (accepted.sessionId === activeSessionIdRef.current
+          || (submissionOriginRef.current?.scope === scope && controlled.operationId === accepted.operationId)) {
+          setSubmissionRejected(false);
+        }
         if (accepted.sessionId === activeSessionIdRef.current) {
           acceptRunTarget(accepted);
           if (pendingBindingRef.current) pendingBindingRef.current = { ...pendingBindingRef.current, sessionId: accepted.sessionId, agentRunId: accepted.agentRunId };
@@ -979,21 +1145,26 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
         const { session } = await (await apiResponse(`/api/sessions/${encodeURIComponent(accepted.sessionId)}`)).json();
         if (!isCurrent()) return;
         if (session?.id !== accepted.sessionId || session.workspaceId !== workspace.id) throw new Error("session_response_invalid");
+        setConversationError(value => value === "operations.acceptedReadFailed" ? "" : value);
         if (session.id === activeSessionIdRef.current) {
           operations.complete(accepted.operationId);
-          setError(preserveChangedDraft ? t("operations.inputUnconfirmed") : "");
+          setComposerError(preserveChangedDraft ? t("operations.inputUnconfirmed") : "");
           setPresentationAttempt(value => value + 1);
         } else {
           setOperationReviewLink({ operationId: accepted.operationId, ...acceptedConversationReviewLink(workspace.id, session) });
-          setError(t("operations.inputUnconfirmed"));
+          setComposerError(t("operations.inputUnconfirmed"));
         }
       }
     } catch (requestError) {
       if (!isCurrent()) return;
       if (requestError?.message === "operation_resource_unavailable" && requestError.status === 410) {
         if (operationId) operations.complete(operationId);
-        setError(t("operations.unavailable"));
-      } else setError(t(requestError?.message === "operation_not_found" ? "operations.notFound" : "operations.checkFailed"));
+        setComposerError(t("operations.unavailable"));
+      } else if (operations.pending()?.receipt) {
+        setConversationError("operations.acceptedReadFailed");
+      } else {
+        setComposerError(t("operations.deliveryUnconfirmed"));
+      }
     } finally { if (auxiliaryRequestRef.current === auxiliaryToken) auxiliaryRequestRef.current = null; if (isCurrent()) setSending(false); }
   }
 
@@ -1003,8 +1174,8 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     setSending(true);
     try {
       await consumeReviewedOperation(operations, operationId, async (id) => (await (await apiResponse(`/api/sessions/${encodeURIComponent(id)}`)).json()).session);
-      if (isCurrent()) setError("");
-    } catch { if (isCurrent()) setError(t("operations.checkFailed")); }
+      if (isCurrent()) setComposerError("");
+    } catch { if (isCurrent()) setComposerError(t("operations.checkFailed")); }
     finally { if (isCurrent()) setSending(false); }
   }
 
@@ -1027,8 +1198,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
       if (activeSessionIdRef.current !== requestedForSessionId
         || olderHistoryRequestRef.current?.key !== requestKey) return;
       transcriptStore.prependPage(page, current.viewEpoch);
+      setOlderHistoryError(false);
     } catch {
-      if (!controller.signal.aborted) setError(t("appRoute.unableToLoadEarlierMessagesPleaseTryAgain"));
+      if (!controller.signal.aborted) setOlderHistoryError(true);
     } finally {
       if (olderHistoryRequestRef.current?.key === requestKey) {
         olderHistoryRequestRef.current = null;
@@ -1051,11 +1223,11 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     if (!files.length || uploadingAttachment) return;
     if (files.length + pendingUploadFiles.length > MAX_UPLOAD_BATCH_FILES) {
       input.value = "";
-      setError(t("appRoute.addUpToValueMaterialsAtATime", { value1: MAX_UPLOAD_BATCH_FILES }));
+      setComposerError(t("appRoute.addUpToValueMaterialsAtATime", { value1: MAX_UPLOAD_BATCH_FILES }));
       return;
     }
     if (!sessionId) {
-      setError("");
+      setComposerError("");
       setPendingUploadFiles((items) => [...items, ...files]);
       input.value = "";
       return;
@@ -1063,7 +1235,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     const uploadSessionId = sessionId;
     const body = new FormData();
     files.forEach((file) => body.append("files", file));
-    setError("");
+    setComposerError("");
     setUploadingAttachment(true);
     try {
       const response = await apiResponse(`/api/sessions/${sessionId}/uploads`, { method: "POST", body });
@@ -1093,8 +1265,10 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
       setPendingAttachmentIds((items) => [
         ...new Set([...items, ...uploaded.assets.map((asset) => asset.id)]),
       ]);
-    } catch {
-      setError(t("appRoute.attachmentUploadFailed"));
+    } catch (errorValue) {
+      if (activeSessionIdRef.current === uploadSessionId) {
+        setComposerError(t(errorValue?.status === 413 ? "appRoute.attachmentTooLarge" : "appRoute.attachmentUploadFailed"));
+      }
     } finally {
       input.value = "";
       setUploadingAttachment(false);
@@ -1113,17 +1287,16 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
   function returnFromFilePreview() {
     if (contextPanel.mode !== "filePreview") return;
     const { origin } = contextPanel;
-    previewRequestIdRef.current += 1;
-    setContextPanel(CLOSED_CONTEXT_PANEL);
+    closeFilePreview();
     window.requestAnimationFrame(() => {
       document.getElementById(origin.elementId)?.focus({ preventScroll: true });
     });
   }
 
   async function showCitation(citation, origin) {
+    transcriptRef.current?.preserveReadingPosition();
     const requestId = previewRequestIdRef.current + 1;
     previewRequestIdRef.current = requestId;
-    setError("");
     setContextPanel({
       mode: "filePreview",
       citationId: citation.citationId,
@@ -1189,6 +1362,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
   }
 
   async function showArtifact(artifact, origin) {
+    transcriptRef.current?.preserveReadingPosition();
     const requestId = previewRequestIdRef.current + 1;
     previewRequestIdRef.current = requestId;
     const panelIdentity = {
@@ -1198,7 +1372,6 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
       origin,
       originLabel: "Artifact",
     };
-    setError("");
     setContextPanel({
       mode: "filePreview",
       ...panelIdentity,
@@ -1252,11 +1425,17 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     }
   }
 
-  const hasContextPanel = contextPanel.mode !== "closed";
-  const contextPanelClass = hasContextPanel ? "withContextPanel withFilePreview" : "";
   const visiblePendingMessage = pendingUserMessage && (pendingUserMessage.sessionId === sessionId
     || (pendingUserMessage.sessionId === null && submissionOriginRef.current?.scope === requestScopeRef.current)) ? pendingUserMessage : null;
   const isHome = !requestedSessionId && !sessionId && transcriptList.blockIds.length === 0 && !visiblePendingMessage;
+  const streamPaused = streamIssue?.sessionId === sessionId && !streamIssue.reconnecting;
+  const readFeedbackInEmptyState = !isHome && transcriptList.blockIds.length === 0 && !visiblePendingMessage;
+  const acceptedReadFailed = conversationError === "operations.acceptedReadFailed";
+  const readFeedback = conversationError || streamPaused ? <>
+    <span>{t(conversationError || "appRoute.streamPaused")}</span>
+    {acceptedReadFailed ? <button type="button" disabled={sending} onClick={() => void checkPendingOperation()}>{t("agentChat.retry")}</button> : null}
+    {streamPaused ? <button type="button" onClick={() => void retryTranscriptStream()}>{t("appRoute.retryStream")}</button> : null}
+  </> : null;
   useLayoutEffect(() => {
     const startRect = composerStartRectRef.current;
     if (isHome || !startRect) return;
@@ -1276,13 +1455,21 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
     }
   }, [pendingUserMessage, sessionId, transcriptList.blockIds, transcriptStore]);
   const updateBrowserPanelWidth = useCallback((widthPx) => {
-    const sidebarWidth = isSidebarOpen && window.innerWidth > 760 ? 270 : 0;
+    transcriptRef.current?.preserveReadingPosition();
+    const sidebarWidth = isSidebarOpen && window.innerWidth > 760
+      ? Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--workspace-sidebar-width"))
+      : 0;
     const mainWidth = window.innerWidth - sidebarWidth;
     const wide = window.innerWidth >= (isSidebarOpen ? 1170 : 900);
     const maxWidthPx = Math.max(270, Math.floor(wide ? Math.min(window.innerWidth * 0.75, mainWidth - 320) : mainWidth - 32));
     setBrowserPanelWidthPx(Math.min(maxWidthPx, Math.max(270, Math.round(widthPx))));
   }, [isSidebarOpen]);
+  function setWorkbenchSidebar(open) {
+    transcriptRef.current?.preserveReadingPosition();
+    setIsSidebarOpen(open);
+  }
   const groupedSessions = useMemo(() => groupSessionNavigation(sessions, projects), [projects, sessions]);
+  const SidebarContainer = compactLayout ? "dialog" : "div";
   function handleQuickAction(prompt) {
     setDraft(prompt);
     window.requestAnimationFrame(() => {
@@ -1312,15 +1499,32 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
 
   return (
     <main
-      className={`workspaceWorkbench ${isSidebarOpen ? "withSidebar" : "withoutSidebar"} ${contextPanelClass}`}
+      ref={workbenchRef}
+      className={`workspaceWorkbench ${isSidebarOpen ? "withSidebar" : "withoutSidebar"}${catalogContent ? " isBrowsing" : ""}${search.open ? " isSearching" : ""}`}
       style={{ "--browser-panel-width": browserPanelWidthPx == null ? undefined : `${browserPanelWidthPx}px` }}
     >
-      <div className="workspaceSidebarSlot">
-        {isSidebarOpen ? <ShellSidebar
+      {!compactLayout ? <button
+        className="workspaceSidebarToggle shAvatarToggle"
+        type="button"
+        onClick={() => setWorkbenchSidebar(!isSidebarOpen)}
+        aria-label={t(isSidebarOpen ? "shellSidebar.hideSidebar" : "appRoute.showSidebar")}
+        aria-expanded={isSidebarOpen}
+        title={t(isSidebarOpen ? "shellSidebar.hideSidebar" : "appRoute.showSidebar")}
+        disabled={search.open}
+      ><PanelLeft aria-hidden="true" /></button> : null}
+
+      <SidebarContainer className={compactLayout ? "workspaceDrawer" : "workspaceSidebarSlot"} ref={sidebarRef}
+        inert={!compactLayout && !isSidebarOpen}
+        aria-label={compactLayout ? t("shellSidebar.conversationNavigation") : undefined}
+        onCancel={compactLayout ? () => setDrawerFor(null) : undefined}
+        onClick={compactLayout ? event => { if (event.target === event.currentTarget) setDrawerFor(null); } : undefined}>
+        <ShellSidebar
           workspace={workspace}
+          menuContainer={compactLayout ? sidebarRef : undefined}
+          search={compactLayout ? undefined : search}
+          onCollapse={compactLayout ? () => setDrawerFor(null) : undefined}
           onStartNewChat={startNewChat}
-          onCollapse={() => setIsSidebarOpen(false)}
-          initialTab={location.state?.sidebarTab || (workspaceDraft ? "home" : "chat")}
+          recentNavigation={navigationError ? { error: true } : undefined}
           sessionProps={{
             sessions,
             projects,
@@ -1328,43 +1532,32 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
             renderSessionRow,
             onCreateProject: createProject,
           }}
-        /> : null}
-      </div>
+        />
+      </SidebarContainer>
 
-      <header className={`workspaceTopbar ${isHome ? "isHome" : ""}`}>
+      <header className="workspaceTopbar" inert={search.open}>
         <div className="workspaceTopbarStart">
-          {!isSidebarOpen ? <button
+          {compactLayout ? <button
             className="workspacePanelToggle"
             type="button"
-            onClick={() => setIsSidebarOpen(true)}
+            onClick={() => setDrawerFor(navigationKey)}
             aria-label={t("appRoute.showSidebar")}
-            aria-expanded="false"
+            aria-expanded={drawerOpen}
             title={t("appRoute.showSidebar")}
           >
             <PanelLeft aria-hidden="true" />
           </button> : null}
-          {isSidebarOpen && activeSession ? <nav className="workspaceConversationBreadcrumb" aria-label={t("appRoute.currentConversation")}><span>{activeSession.title}</span></nav> : null}
+          {!catalogContent && activeSession ? <ConversationTitle key={activeSession.id} session={activeSession} actions={sessionActions} running={hasActiveAgentRun} />
+            : !catalogContent && requestedSessionId && loadingHistory ? <span className="workspaceConversationTitle" role="status">{t("agentChat.loading")}</span> : null}
+          {compactLayout ? <button className="workspacePanelToggle" ref={search.triggerRef} type="button" onClick={search.toggle}
+            aria-label={t("searchOverlay.searchConversationsAndNotes")} title={t("shellSidebar.searchCtrlK")}><Search aria-hidden="true" /></button> : null}
         </div>
-        {streamIssue?.sessionId === sessionId && !streamIssue.reconnecting ? <button
-          className="workspacePanelToggle"
-          type="button"
-          onClick={() => void retryTranscriptStream()}
-          aria-label={t("appRoute.retryStream")}
-          title={t("appRoute.streamPaused")}
-        ><RefreshCw aria-hidden="true" /></button> : null}
       </header>
 
-      <section className="workspaceChatColumn">
-        {error ? <div className="errorBanner" role="alert">{error}
-          {operations.pending() ? <button type="button" disabled={sending} onClick={() => void checkPendingOperation()}>{t("agentChat.retry")}</button> : null}
-          {operationReviewLink && operationReviewLink.operationId === operations.pending()?.operationId ? <a
-            href={operationReviewLink.href} target={operationReviewLink.target} rel={operationReviewLink.rel}
-            onClick={() => void consumeOperationReview(operationReviewLink.operationId)}
-          >{t("operations.reviewSeparate")}</a> : null}
-        </div> : null}
-
+      <section className="workspaceChatColumn" inert={search.open || Boolean(catalogContent)}>
         <div className={`workspaceConversationPlane ${isHome ? "isEmpty" : ""}`}>
           <TranscriptBlockList
+            ref={transcriptRef}
             store={transcriptStore}
           onReadingLatestChange={(targetSessionId, following) => { if (targetSessionId === activeSessionIdRef.current) setReadingLatest(following); }}
             toolOperations={toolOperations}
@@ -1372,20 +1565,27 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
             loadingHistory={loadingHistory}
             loadingOlderHistory={loadingOlderHistory}
             onLoadOlderHistory={loadOlderHistory}
-            emptyState={isHome ? <HomePlane workspace={workspace} /> : null}
+            olderHistoryError={olderHistoryError}
+            emptyState={isHome ? <HomePlane /> : readFeedbackInEmptyState && readFeedback ? <div className="workspaceEmptyState" role="status">
+              <div className="workspaceToolOutputStatus">{readFeedback}</div>
+            </div> : null}
             onShowCitation={showCitation}
             onShowArtifact={(artifact) => showArtifact(artifact, "conversation")}
             pendingUserMessage={visiblePendingMessage}
+            submissionRejected={rejectedSubmissionScopes.has(requestScopeKey)}
             historyMemoryPressure={transcriptManagedBytes >= TRANSCRIPT_MEMORY_WARNING_BYTES}
             onReleaseLoadedHistory={releaseLoadedTranscriptHistory}
-            running={hasActiveAgentRun || (sending && !["failed", "cancelled", "completed"].includes(pendingUserMessage?.status))}
+            running={hasActiveAgentRun || Boolean(sending && visiblePendingMessage && !["failed", "cancelled", "completed"].includes(visiblePendingMessage.status))}
             activity={controlApplies && controlSnapshot.stopRequested && controlPending ? "stopping" : workActivity?.sessionId === sessionId
-              && (workActivity.activity === "preserving" || workActivity.agentRunId === activeAgentRunId) ? workActivity.activity : undefined}
+              && workActivity.agentRunId === activeAgentRunId ? workActivity.activity : undefined}
             startedAtMs={workTime?.sessionId === sessionId ? workTime.startedAtMs : undefined}
             completedAtMs={workTime?.sessionId === sessionId ? workTime.completedAtMs : undefined}
           />
 
           <div className="workspaceComposerDock">
+          {(!isSidebarOpen || compactLayout && !drawerOpen) && sessionActions.actionError?.sessionId === sessionId && deleteConfirmationSessionId !== sessionId
+            ? <div className="workspaceConversationFeedback workspaceToolOutputStatus isError" role="alert">{sessionActions.actionError.message}</div> : null}
+          {!readFeedbackInEmptyState && readFeedback ? <div className="workspaceConversationFeedback workspaceToolOutputStatus" role="status">{readFeedback}</div> : null}
           {pendingQuestion?.sessionId === sessionId && pendingQuestion.agentRunId === activeAgentRunId ? <SessionQuestionCard
             key={pendingQuestion.continuationId}
             question={pendingQuestion} onAnswer={answer => answerQuestion(pendingQuestion, answer)}
@@ -1401,9 +1601,16 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
             onRemoveAttachment={removePendingAttachment}
             onRemoveUpload={removePendingUploadFile}
             draft={draft}
+            feedback={composerError || assetsUnavailable ? <div className="workspaceToolOutputStatus isError" role="alert">
+              <span>{composerError || t("appRoute.sessionAttachmentsUnavailable")}</span>
+              {composerError && operations.pending() && !acceptedReadFailed ? <button type="button" disabled={sending} onClick={() => void checkPendingOperation()}>{t("operations.check")}</button> : null}
+              {composerError && operationReviewLink && operationReviewLink.operationId === operations.pending()?.operationId ? <a
+                href={operationReviewLink.href} target={operationReviewLink.target} rel={operationReviewLink.rel}
+                onClick={() => void consumeOperationReview(operationReviewLink.operationId)}
+              >{t("operations.reviewSeparate")}</a> : null}
+            </div> : null}
             onDraftChange={setDraft}
             enterStartsNewLine={enterStartsNewLine}
-            workspaceName={workspace.name}
             workspaceAvailable={Boolean(workspace)}
             sending={sending}
             loadingHistory={loadingHistory}
@@ -1424,25 +1631,32 @@ export function AppPageContent({ initialSession = null, workspaceDraft, location
             onCancelActiveAgentRun={cancelActiveAgentRun}
           />
           </div>
-          {isHome ? <HomeQuickActions onQuickAction={handleQuickAction} /> : null}
+          {isHome ? <div className="shHomeFollowups">
+            <HomeQuickActions onQuickAction={handleQuickAction} />
+          </div> : null}
         </div>
       </section>
 
-      <ConnectedWorkspaceContextPanel
+      {catalogContent ? <section className="workspaceCatalog" inert={search.open}>
+        {catalogContent}
+      </section> : null}
+      {search.open ? <WorkspaceSearch workspaceId={workspace.id} sessions={sessions} onClose={search.close} inputRef={search.inputRef} /> : null}
+      {visible ? <ConnectedWorkspaceContextPanel
         panel={contextPanel}
         browserWidthPx={browserPanelWidthPx}
         onBrowserWidthChange={updateBrowserPanelWidth}
-        onClose={clearContextPanel}
+        onClose={closeFilePreview}
         onReturn={returnFromFilePreview}
-      />
+      /> : null}
       <ConfirmDialog
-        open={Boolean(deleteConfirmationSessionId)}
+        open={(visible || Boolean(catalogContent)) && Boolean(deleteConfirmationSessionId)}
         title={t("appRoute.deleteThisConversation")}
+        message={sessionActions.actionError?.sessionId === deleteConfirmationSessionId ? sessionActions.actionError.message : undefined}
         busy={Boolean(deletingSessionId)}
         onCancel={() => setDeleteConfirmationSessionId("")}
         onConfirm={() => void deleteSession(deleteConfirmationSessionId)}
       />
-      {attachmentPreview ? (
+      {visible && attachmentPreview ? (
         <div className="attachmentPreviewBackdrop" role="presentation" onMouseDown={() => setAttachmentPreview(null)}>
           <section className="attachmentPreviewDialog" ref={attachmentDialogRef} role="dialog" aria-modal="true" aria-label={t("attachmentCard.previewValue", { value1: attachmentPreview.displayName })} tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
             <header><strong>{attachmentPreview.displayName}</strong><a href={attachmentDownloadUrl(attachmentPreview)}>{t("libraryObjectRoute.downloadFile")}</a><button type="button" onClick={() => setAttachmentPreview(null)} aria-label={t("attachmentCard.closePreview")}><X aria-hidden="true" /></button></header>

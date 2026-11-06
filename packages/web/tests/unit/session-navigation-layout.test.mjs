@@ -13,7 +13,7 @@ const appLoader = subjectLoader({ extraOverrides: [
   ["react-router", stub(`export {matchPath} from ${JSON.stringify(import.meta.resolve("react-router"))}; import {context} from ${JSON.stringify(harness)}; export const Link=()=>null; export const useRouteLoaderData=id=>id==='authenticated'?{user:context.user}:{workspace:context.workspace}; export const useNavigate=()=>context.navigate;`)],
   ["../i18n", stub("export const t=key=>key; export const i18n={language:'en'}; export const useTranslation=()=>({t});")],
   ["react", stub(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect} from ${JSON.stringify(harness)}; import {useEffect} from ${JSON.stringify(harness)}; export const useLayoutEffect=useEffect; export const useEffectEvent=callback=>callback; export const useSyncExternalStore=(_subscribe,getSnapshot)=>getSnapshot();`)],
-  ["../chat/operationReceipts", stub("export class OperationClient {pending(){return null;}} export const acceptedConversationReviewLink=()=>null; export const consumeReviewedOperation=()=>{}; export const loadAcceptedConversation=()=>{};")],
+  ["../chat/operationReceipts", stub("export class OperationClient {pending(){return null;}} export const acceptedConversationReviewLink=()=>null; export const consumeReviewedOperation=()=>{}; export const isDefiniteSubmissionRejection=()=>false; export const isWorkspacePreservationPending=()=>false; export const loadAcceptedConversation=()=>{};")],
   ["../preferences", stub("export const useEnterStartsNewLine=()=>false; export const readModelThinkingMode=()=>''; export const readPreferredModelIdentity=()=>''; export const writeModelThinkingMode=()=>{}; export const writePreferredModelIdentity=()=>{};")],
   ["../chat/transcriptTransport", stub("export const createWorkspaceTranscriptTransport=()=>({});")],
   ["../chat/workspacePresentationTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const streamWorkspacePresentation=options=>context.presentation?.(options)??new Promise(resolve=>options.signal.addEventListener("abort",resolve,{once:true}));`)],
@@ -49,7 +49,8 @@ test("ordinary Session rows retain running, unread and pin indicators and all me
     for (const label of ["appRoute.running", "appRoute.pinned", "appRoute.unread"]) assert.ok(nodes(row(), node => node.props["aria-label"] === label).length);
     assert.equal(nodes(row(), node => node.props.children === "appRoute.auto").length, 0, "Agent work remains an ordinary Session without an automatic badge");
     await openMenu();
-    for (const label of ["appRoute.rename", "appRoute.unpin", "appRoute.markAsRead", "appRoute.delete"]) assert.ok(button(row(), label));
+    for (const label of ["appRoute.rename", "appRoute.unpin", "appRoute.markAsRead", "archive.title"]) assert.ok(button(row(), label));
+    assert.equal(button(row(), "archive.title").props.disabled, true, "a running Session cannot be archived");
     button(row(), "appRoute.unpin").props.onClick(); await subject.settle();
     assert.deepEqual(JSON.parse(calls.find(([, options]) => options.method === "PATCH")[1].body), { isPinned: false });
     await openMenu(); button(row(), "appRoute.rename").props.onClick(); await subject.settle();
@@ -63,12 +64,6 @@ test("ordinary Session rows retain running, unread and pin indicators and all me
     const countBeforeCancel = calls.filter(([, options]) => options.method === "PATCH").length;
     cancelInput.props.onKeyDown({ key: "Escape", preventDefault() {}, currentTarget: cancelledTarget }); await subject.settle();
     assert.equal(calls.filter(([, options]) => options.method === "PATCH").length, countBeforeCancel, "Escape cancels the rename without a metadata command");
-    await openMenu(); button(row(), "appRoute.delete").props.onClick(); await subject.settle();
-    const dialog = component(subject.tree, "ConfirmDialog");
-    assert.equal(dialog.props.open, true);
-    assert.equal(calls.some(([, options]) => options.method === "DELETE"), false, "delete remains protected by confirmation");
-    await dialog.props.onConfirm(); await subject.settle();
-    assert.equal(calls.filter(([, options]) => options.method === "DELETE").length, 1);
   } finally { subject.unmount(); }
 });
 
@@ -142,7 +137,10 @@ test("background Session deletion completes against the current conversation sel
   } finally { subject.unmount(); }
 });
 
-test("pushed workspace navigation updates sessions without rereading the list or project catalog", async () => {
+test("pushed workspace navigation updates sessions without rereading the list or project catalog", async context => {
+  const previousWindow = globalThis.window;
+  globalThis.window = { addEventListener() {}, removeEventListener() {}, matchMedia: () => ({ matches: false }) };
+  context.after(() => { globalThis.window = previousWindow; });
   const calls = [];
   const env = environment({ request: async path => { calls.push(path); return path.includes("session-projects") ? { projects: [] } : { sessions: [] }; } });
   const item = { id: "work", workspaceId: "workspace", projectId: null, title: "Initial",

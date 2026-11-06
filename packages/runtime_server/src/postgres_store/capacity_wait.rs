@@ -1,10 +1,37 @@
 use centaeris_core::session::RuntimeJobLeaseFence;
 use postgres::GenericClient;
 
-// Capacity signals change eligibility, never the resource debit or execution authority.
-// The epoch comparison remains true across lost notifications, yield races and
-// process restarts. No release transaction scans or locks waiting Job owners.
-pub(super) const DUE_AT: &str = "LEAST(j.run_at_ms,COALESCE((SELECT c.changed_at_ms FROM runtime.resident_capacity_clock c JOIN runtime.resident_capacity_waiters w ON w.job_id=j.job_id WHERE c.singleton AND w.observed_generation<c.generation),j.run_at_ms))";
+// A capacity signal is only an opportunity to recheck. The preparation gate
+// has one owner, so a generation can advance one contended preparation early.
+// Derive the candidate before SKIP LOCKED so competing claimers cannot skip
+// its locked row and wake a second waiter.
+pub(super) fn preparation_candidate() -> String {
+    format!(
+        "SELECT j.job_id,c.generation,c.changed_at_ms
+         FROM runtime.resident_capacity_clock c
+         JOIN runtime.resident_capacity_waiters w ON w.observed_generation<c.generation
+         JOIN runtime.runtime_jobs j ON j.job_id=w.job_id
+         JOIN runtime.execution_job_tenants t ON t.job_id=j.job_id
+         WHERE c.singleton AND j.job_kind='agent_run.lifecycle' AND j.status='queued'
+         AND j.last_error='{}'
+         AND COALESCE(j.lease_reclaim_not_before_ms,0)<=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint
+         AND NOT({})
+         AND NOT EXISTS(SELECT 1 FROM runtime.runtime_events e
+                        WHERE e.event_id='host_preparation_claim:'||c.generation)
+         ORDER BY j.created_at_ms,j.job_id LIMIT 1",
+        crate::resident_capacity::HOST_PREPARATION_WAIT,
+        super::lifecycle_control::PENDING,
+    )
+}
+
+// Expired timers remain eligible even if the early claim was consumed. Resident
+// capacity waiters still use the ordinary generation comparison.
+pub(super) const DUE_AT: &str = "LEAST(j.run_at_ms,COALESCE(
+    CASE WHEN j.last_error='execution_host_preparation_wait' THEN p.changed_at_ms
+    ELSE (SELECT c.changed_at_ms FROM runtime.resident_capacity_clock c
+          JOIN runtime.resident_capacity_waiters w ON w.job_id=j.job_id
+          WHERE c.singleton AND w.observed_generation<c.generation)
+    END,j.run_at_ms))";
 const TABLE_DDL: &str = r#"
 CREATE TABLE runtime.resident_capacity_clock(
  singleton boolean PRIMARY KEY DEFAULT true,

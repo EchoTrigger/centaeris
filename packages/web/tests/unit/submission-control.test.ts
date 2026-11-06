@@ -138,7 +138,7 @@ test("stopping from the dispatch notification still settles as undispatched when
   assert.equal(f.control.getSnapshot().feedback, "stoppedBeforeDispatch");
 });
 
-for (const status of [400, 422, 429]) test(`a confirmed first-request ${status} rejection releases its stop without claiming a terminal Run`, async () => {
+for (const status of [400, 413, 422, 429]) test(`a confirmed first-request ${status} rejection releases its stop without claiming a terminal Run`, async () => {
   const response = deferred(); const f = setup(async () => response.promise);
   f.control.begin(); const sending = submit(f); await until(() => Boolean(f.operations.pending()));
   await f.control.stop(); response.reject(new ApiError("request_rejected", status));

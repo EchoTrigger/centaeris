@@ -147,7 +147,9 @@ pub(crate) fn provision_environment(
         plugin_volume_name: &plugin_volume,
         plugin_mounts: &mounts,
     };
-    ensure_container(&expected, allocation.reused)?;
+    ensure_container(&expected, allocation.reused).map_err(
+        crate::postgres_store::execution_instances::InstancePreparationFailure::into_error,
+    )?;
     let facts = inspect_container(&name)?.ok_or("provision_container_missing")?;
     if allocation
         .container_id

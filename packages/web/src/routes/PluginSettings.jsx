@@ -2,6 +2,7 @@ import { t } from "../i18n";
 import { useTranslation } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import { Blocks, ChevronRight, Upload } from "lucide-react";
+import { Switch } from "@centaeris/frontend-foundations/switch";
 import { apiJson, jsonOptions } from "../api";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
@@ -28,7 +29,11 @@ function canEnable(plugin) {
   return plugin.errors.length === 0 && plugin.mcpServers !== null && plugin.hooks !== null;
 }
 
-export default function PluginSettings({ workspace, isSuperuser }) {
+function pluginStatusKey(plugin) {
+  return plugin.errors.length ? "extensions.needsAttention" : plugin.enabled ? "pluginSettings.enabled" : "extensions.pluginDisabled";
+}
+
+export default function PluginSettings({ workspace, isSuperuser, filter = "", catalog }) {
   const { t } = useTranslation();
   const [plugins, setPlugins] = useState(null);
   const [pluginRevision, setPluginRevision] = useState(0);
@@ -216,46 +221,89 @@ export default function PluginSettings({ workspace, isSuperuser }) {
 
   if (!workspace) return <div className="capabilitySettingsEmpty">{t("pluginSettings.noWorkspaceAvailableToConfigure")}</div>;
 
+  const selected = catalog?.selectedName ? plugins?.find(plugin => plugin.name === catalog.selectedName) : null;
+  const visiblePlugins = catalog?.selectedName ? (selected ? [selected] : [])
+    : filter
+    ? plugins?.filter(plugin => `${plugin.displayName} ${plugin.shortDescription || ""} ${plugin.name}`.toLocaleLowerCase().includes(filter))
+    : plugins;
+  const uploadControl = canManage ? <>
+    <input ref={uploadInputRef} type="file" accept=".zip,application/zip" aria-label={t("workspaceResources.choosePackage")} disabled={Boolean(busyPlugin)} onChange={event => upload(event.target.files?.[0])} />
+    <button type="button" disabled={Boolean(busyPlugin)} onClick={() => uploadInputRef.current?.click()}><Upload aria-hidden="true" />{t("workspaceResources.uploadPackage")}</button>
+  </> : null;
+  const uploadHints = <>
+    <small>{t("workspaceResources.skillPackageHint")}</small>
+    <small>{t("workspaceResources.environmentVersionHint")}</small>
+  </>;
+
   return (
     <div className="pluginSettings">
-      {canManage ? <div className="globalPluginUpload pluginPackageUpload"><input ref={uploadInputRef} type="file" accept=".zip,application/zip" aria-label={t("workspaceResources.choosePackage")} disabled={Boolean(busyPlugin)} onChange={(event) => upload(event.target.files?.[0])} /><button type="button" disabled={Boolean(busyPlugin)} onClick={() => uploadInputRef.current?.click()}><Upload aria-hidden="true" />{t("workspaceResources.uploadPackage")}</button><small>{t("workspaceResources.skillPackageHint")}</small><small>{t("workspaceResources.environmentVersionHint")}</small></div> : null}
+      {catalog ? <>
+        {catalog.selectedName ? catalog.back : null}
+        <header className="extensionHeading">
+          <div><h1 tabIndex={catalog.selectedName ? -1 : undefined}>{selected?.displayName || t("settingsRoute.workspacePlugins")}</h1>{selected?.shortDescription ? <p>{selected.shortDescription}</p> : null}</div>
+          {selected && canManage ? <div className="pluginSettingsToggle">
+            <span>{t(busyPlugin === selected.name ? "libraryObjectRoute.saving" : selected.enabled ? "pluginSettings.enabled" : "extensions.pluginDisabled")}</span>
+            <Switch checked={selected.enabled} disabled={Boolean(busyPlugin) || (!selected.enabled && !canEnable(selected))}
+              aria-label={`${selected.enabled ? t("pluginSettings.disable") : t("pluginSettings.enable")} ${selected.displayName}`}
+              onCheckedChange={enabled => void setEnabled(selected, enabled)} />
+          </div> : !catalog.selectedName && uploadControl ? <div className="globalPluginUpload extensionUpload">{uploadControl}</div> : null}
+        </header>
+        {selected ? <div className="pluginSettingsMeta">
+          <span className={selected.errors.length ? "managementAttention" : undefined}>{t(pluginStatusKey(selected))}</span>
+          {selected.version ? <span>{t("globalPluginSettings.version")} {selected.version}</span> : null}
+          <span>{t(selected.scope === "platform" ? "workspaceResources.sharedReadOnly" : "settingsRoute.workspace")}</span>
+        </div> : null}
+        {!catalog.selectedName ? <div className="extensionToolbar">
+          {catalog.search}
+          {canManage ? <details className="extensionUploadHelp"><summary>{t("extensions.packageHelp")}</summary>{uploadHints}</details> : null}
+        </div> : null}
+      </> : uploadControl ? <div className="globalPluginUpload pluginPackageUpload">{uploadControl}{uploadHints}</div> : null}
       {notice ? <p className="globalPluginNotice" role="status">{notice}</p> : null}
       {error ? <div className="capabilitySettingsError" role="alert">{t("pluginSettings.unableToLoadPlugin")}{error}</div> : null}
       {canManage && credentialError ? <div className="capabilitySettingsError" role="alert">{t("pluginSettings.credentialActionFailed")}{credentialError} <button className="pluginEnableButton" type="button" disabled={Boolean(busyCredential)} onClick={() => setCredentialRevision((value) => value + 1)}>{t("pluginSettings.reloadCredentials")}</button></div> : null}
       {plugins === null && !error ? <div className="capabilitySettingsEmpty">{t("pluginSettings.loadingPlugins")}</div> : null}
-      {plugins?.length === 0 && !error ? <div className="capabilitySettingsEmpty">{t("pluginSettings.thisDistributionHasNoPlugins")}</div> : null}
+      {plugins?.length === 0 && !error && !catalog?.selectedName ? <div className="capabilitySettingsEmpty">{t("pluginSettings.thisDistributionHasNoPlugins")}</div> : null}
+      {plugins && catalog?.selectedName && !selected ? <div className="capabilitySettingsEmpty" role="status">{t("extensions.pluginNotFound")}</div> : null}
+      {plugins?.length > 0 && visiblePlugins.length === 0 && !catalog?.selectedName ? <div className="capabilitySettingsEmpty" role="status">{t("extensions.noMatches")}</div> : null}
       <div className="pluginSettingsRows" ref={pluginRowsRef} role="list" aria-label={t("pluginSettings.availablePlugins")}>
-        {(plugins || []).map((plugin) => {
-          const expanded = expandedPluginNames.includes(plugin.name);
+        {(visiblePlugins || []).map((plugin) => {
+          const expanded = Boolean(catalog?.selectedName) || expandedPluginNames.includes(plugin.name);
           const detailId = `plugin-detail-${plugin.name}`;
           const credentialRefs = expanded ? [...new Set([
             ...(plugin.mcpCredentialRefs || []),
             ...(credentials || []).filter((item) => item.pluginName === plugin.name).map((item) => item.credentialRef),
           ])] : [];
           return <article className="pluginSettingsEntry" role="listitem" key={plugin.name}>
-            <div className="pluginSettingsRow">
-              <button className="pluginSettingsIdentity" type="button" id={`${detailId}-toggle`} aria-expanded={expanded} aria-controls={detailId} onClick={() => setExpandedPluginNames((current) => current.includes(plugin.name) ? current.filter((name) => name !== plugin.name) : [...current, plugin.name])} aria-label={t("pluginSettings.viewDetailsForValue", { value1: plugin.displayName })}>
-                <Blocks aria-hidden="true" />
-                <span><strong>{plugin.displayName}</strong><small>{plugin.shortDescription || plugin.name}</small><small role={plugin.errors.length ? "status" : undefined}>{plugin.errors.length ? pluginErrors(plugin) : canEnable(plugin) ? t("pluginSettings.declarationsValidated") : t("pluginSettings.checkingDeclarations")}</small></span>
+            {!catalog?.selectedName ? <button className="managementRow managementRowButton pluginSettingsIdentity" type="button" id={`${detailId}-toggle`}
+              aria-expanded={catalog ? undefined : expanded} aria-controls={catalog ? undefined : detailId}
+              onClick={() => catalog ? catalog.onSelect(plugin.name) : setExpandedPluginNames(current => current.includes(plugin.name) ? [] : [plugin.name])}
+              aria-label={t("pluginSettings.viewDetailsForValue", { value1: plugin.displayName })}>
+              <span className="managementRowIcon"><Blocks aria-hidden="true" /></span>
+              <span className="managementRowCopy"><strong>{plugin.displayName}</strong><small>{plugin.shortDescription || plugin.name}</small></span>
+              <span className="managementRowEnd">
+                <span className={plugin.errors.length ? "managementAttention" : undefined}>{t(pluginStatusKey(plugin))}</span>
                 <ChevronRight aria-hidden="true" />
-              </button>
-              <button
-                className={plugin.enabled ? "pluginEnableButton is-enabled" : "pluginEnableButton"}
-                type="button"
-                disabled={!canManage || busyPlugin === plugin.name || (!plugin.enabled && !canEnable(plugin))}
-                aria-label={`${plugin.enabled ? t("pluginSettings.disable") : t("pluginSettings.enable")} ${plugin.displayName}`}
-                aria-pressed={plugin.enabled}
-                onClick={() => void setEnabled(plugin, !plugin.enabled)}
-              >{busyPlugin === plugin.name ? t("libraryObjectRoute.saving") : plugin.enabled ? t("pluginSettings.enabled") : t("pluginSettings.enable")}</button>
-            </div>
-            <div className="pluginSettingsDetail" id={detailId} role="region" aria-labelledby={`${detailId}-toggle`} hidden={!expanded}>
+              </span>
+            </button> : null}
+            <div className={`pluginSettingsDetail${catalog ? " isPage" : ""}`} id={detailId} role="region" aria-label={catalog ? plugin.displayName : undefined} aria-labelledby={catalog ? undefined : `${detailId}-toggle`} hidden={!expanded}>
               {expanded ? <>
+                {!catalog ? <div className="managementToolbar">
+                  <span>{t(plugin.errors.length ? "extensions.needsAttention" : canEnable(plugin) ? "pluginSettings.declarationsValidated" : "pluginSettings.checkingDeclarations")}</span>
+                  {canManage ? <button
+                    className={plugin.enabled ? "pluginEnableButton is-enabled" : "pluginEnableButton"}
+                    type="button"
+                    disabled={busyPlugin === plugin.name || (!plugin.enabled && !canEnable(plugin))}
+                    aria-label={`${plugin.enabled ? t("pluginSettings.disable") : t("pluginSettings.enable")} ${plugin.displayName}`}
+                    aria-pressed={plugin.enabled}
+                    onClick={() => void setEnabled(plugin, !plugin.enabled)}
+                  >{busyPlugin === plugin.name ? t("libraryObjectRoute.saving") : plugin.enabled ? t("pluginSettings.enabled") : t("pluginSettings.enable")}</button> : null}
+                </div> : null}
                 {plugin.errors.length ? <p className="capabilitySettingsError" role="alert">{pluginErrors(plugin)}{" "}{t("pluginSettings.otherPluginsAreUnaffectedYouCanStillDisableThis")}</p> : null}
+                {canManage && plugin.scope === "workspace" && plugin.writable !== false ? <div className="pluginSettingsActions"><button className="pluginEnableButton is-danger" type="button" disabled={Boolean(busyPlugin)} onClick={() => setRemovePlugin(plugin)}>{t("globalPluginSettings.remove")}</button></div> : null}
 
                 <section className="pluginSettingsSection" aria-labelledby={`${detailId}-general-heading`}>
                   <h3 id={`${detailId}-general-heading`}>{t("pluginSettings.general")}</h3>
-                  {plugin.scope === "platform" ? <p>{t("workspaceResources.sharedReadOnly")}</p> : null}
-                  {canManage && plugin.scope === "workspace" && plugin.writable !== false ? <button className="pluginEnableButton is-danger" type="button" disabled={Boolean(busyPlugin)} onClick={() => setRemovePlugin(plugin)}>{t("globalPluginSettings.remove")}</button> : null}
+                  {!catalog && plugin.scope === "platform" ? <p className="pluginSettingsMuted">{t("workspaceResources.sharedReadOnly")}</p> : null}
                   <div className="pluginSettingsProperty">
                     <strong>{t("pluginSettings.capabilities")}</strong>
                     <p>{plugin.capabilities.length ? plugin.capabilities.join("、") : t("pluginSettings.notDeclared")}</p>

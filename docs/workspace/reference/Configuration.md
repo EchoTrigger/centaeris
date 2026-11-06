@@ -274,6 +274,7 @@ yielding an execution lease does not free its resident sandbox capacity.
 | `RESIDENT_TENANT_PIDS` | 2048 | Workspace process budget |
 | `RESIDENT_TENANT_WORKSPACE_BYTES` | 34359738368 | Workspace byte budget (32 GiB) |
 | `RESIDENT_STARTUP_MEMORY_BYTES` | 268435456 | Host memory allowance for a new preparation (256 MiB), capped by its cgroup ceiling |
+| `RESIDENT_HOST_COUNT` | 8 | Sandbox positions per Docker host, capped by the global count. A start awaiting a resident entry occupies a position for the duration of its execution lease |
 | `RESIDENT_HOST_MEMORY_HEADROOM_BYTES` | Greater of 20% of Docker host RAM or 512 MiB | Memory reserved for host services |
 | `RESIDENT_HOST_CPU_HEADROOM_MILLI` | 100 per Docker host CPU core | CPU reserved for host services |
 

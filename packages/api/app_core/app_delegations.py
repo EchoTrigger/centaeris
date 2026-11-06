@@ -22,5 +22,5 @@ def require_run_delegation(run, **kwargs):
 
 def session_authority_is_current(user_id, session_id):
     user = get_user_model().objects.filter(id=user_id, is_active=True).first()
-    session = Session.objects.filter(id=session_id, owner_id=user_id, status="active").first()
+    session = Session.objects.filter(id=session_id, owner_id=user_id, status="active", purpose="interactive").first()
     return bool(user and session and workspace_membership_for(user, session.workspace_id))

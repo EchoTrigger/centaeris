@@ -1556,12 +1556,30 @@ def _expire_queued_run_locked(agent_run):
     Logical waits remain running and never enter this policy. Cancellation is
     committed by Runtime; the API records the reason, not a fabricated terminal.
     """
+    if agent_run.session.purpose == "oneShot":
+        return _cancel_one_shot_run_if_required(agent_run)
     if (agent_run.status != "queued" or agent_run.startedAt is not None
             or (timezone.now() - agent_run.createdAt).total_seconds()
             < settings.EXECUTION_QUEUE_WAIT_SECONDS):
         return False
     request_agent_run_cancellation(agent_run)
     agent_run.transitionReason = "execution_queue_expired"
+    agent_run.save(update_fields=["transitionReason", "updatedAt"])
+    return True
+
+
+def _cancel_one_shot_run_if_required(agent_run):
+    if agent_run.status not in {"queued", "running"}:
+        return False
+    policy = agent_run.authorization.payload["executionPolicy"]
+    if timezone.now().timestamp() * 1000 >= policy["deadlineAtMs"]:
+        reason = "one_shot_deadline_expired"
+    elif not agent_run_membership_is_current(agent_run):
+        reason = "one_shot_authority_revoked"
+    else:
+        return False
+    request_agent_run_cancellation(agent_run, require_current_authority=False)
+    agent_run.transitionReason = reason
     agent_run.save(update_fields=["transitionReason", "updatedAt"])
     return True
 
@@ -1647,8 +1665,12 @@ def reconcile_agent_run_lifecycle(request):
                     )
                 terminalized += 1
                 continue
-            schedule_agent_run_lifecycle(agent_run)
-            if agent_run.status == "queued":
+            if agent_run.session.purpose == "oneShot":
+                schedule_agent_run_lifecycle(agent_run, require_current_authority=False)
+                _cancel_one_shot_run_if_required(agent_run)
+            else:
+                schedule_agent_run_lifecycle(agent_run)
+            if agent_run.status == "queued" and agent_run.session.purpose != "oneShot":
                 with transaction.atomic():
                     current = (AgentRun.objects.select_for_update(of=("self",))
                                .select_related("authorization", "modelConfig", "session", "environment")
@@ -1663,7 +1685,7 @@ def reconcile_agent_run_lifecycle(request):
             )
             AgentRun.objects.filter(
                 id=agent_run.id, status__in={"queued", "running"}
-            ).exclude(transitionReason="execution_queue_expired").update(
+            ).exclude(transitionReason__in={"execution_queue_expired", "one_shot_deadline_expired", "one_shot_authority_revoked"}).update(
                 transitionReason="agent_run_lifecycle_reconcile_pending")
     return JsonResponse(
         {"scheduled": scheduled, "terminalized": terminalized, "pending": pending,
@@ -1700,6 +1722,10 @@ def reconcile_agent_run_cleanup(request):
             status = "unknown"
         pending.append({"agentRunId": run.pk, "authorizationDigest": run.authorization.digest,
             "terminalState": terminal, "jobStatus": status})
+    # The Worker visits this boundary every five seconds. Daily product GC also
+    # invokes this collector, while this bounded pass reclaims one-shot data promptly.
+    from app_core.one_shot_cleanup import collect_one_shot_cleanup
+    collect_one_shot_cleanup(limit=1)
     return JsonResponse({"schema": "runtime.agent_run_cleanup.reconciled.v1", "checked": len(runs),
         "pending": pending, "next": next_cursor})
 
@@ -1767,8 +1793,8 @@ def transition_agent_run(request):
                     response = JsonResponse({"error": "execution_queue_expiry_unavailable"}, status=503)
                     response["Retry-After"] = "5"
                     return response
-            if agent_run.transitionReason == "execution_queue_expired":
-                reason = "execution_queue_expired"
+            if agent_run.transitionReason in {"execution_queue_expired", "one_shot_deadline_expired", "one_shot_authority_revoked"}:
+                reason = agent_run.transitionReason
             if state == "running":
                 if agent_run.status == "running":
                     agent_run.transitionReason = reason

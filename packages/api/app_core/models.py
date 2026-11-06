@@ -67,6 +67,10 @@ def new_credential_id() -> str:
     return new_id("credential")
 
 
+def new_one_shot_credential_id() -> str:
+    return new_id("api_credential")
+
+
 def new_credential_audit_id() -> str:
     return new_id("credential_audit")
 
@@ -926,6 +930,7 @@ class SessionProject(models.Model):
 class Session(models.Model):
     objects = ResourceQuerySet.as_manager()
     id = models.CharField(primary_key=True, max_length=64, default=new_session_id)
+    purpose = models.CharField(max_length=16, default="interactive")
     workspace = models.ForeignKey(
         Workspace, on_delete=models.PROTECT, related_name="sessions"
     )
@@ -947,6 +952,7 @@ class Session(models.Model):
     title = models.CharField(max_length=200, default="New chat")
     origin = models.CharField(max_length=32, default="user")
     status = models.CharField(max_length=32, default="active")
+    archivedAt = models.DateTimeField(null=True, blank=True)
     deletedAt = models.DateTimeField(null=True, blank=True)
     deletedBy = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -982,6 +988,10 @@ class Session(models.Model):
 
     class Meta:
         constraints = [
+            models.CheckConstraint(
+                condition=models.Q(purpose__in=("interactive", "oneShot")),
+                name="session_purpose_valid",
+            ),
             models.CheckConstraint(
                 condition=models.Q(status__in=("active", "deleted")),
                 name="session_status_valid",
@@ -1434,6 +1444,47 @@ class AgentRun(models.Model):
         if stored_snapshot[3:5] != (self.session_id, self.environment_id):
             raise ValueError("agent_run_environment_binding_immutable")
         return super().save(*args, **kwargs)
+
+
+class OneShotCredential(models.Model):
+    id = models.CharField(primary_key=True, max_length=64, default=new_one_shot_credential_id)
+    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    membership_ref = models.CharField(max_length=64)
+    name = models.CharField(max_length=120)
+    modelConfig = models.ForeignKey(ModelConfig, on_delete=models.PROTECT)
+    pluginNames = models.JSONField(default=list)
+    sourceObjectRefs = models.JSONField(default=list)
+    secretDigest = models.CharField(max_length=64)
+    revokedAt = models.DateTimeField(null=True, blank=True)
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+
+class OneShotOperation(models.Model):
+    credential = models.ForeignKey(OneShotCredential, on_delete=models.PROTECT)
+    operationId = models.CharField(max_length=128)
+    requestDigest = models.CharField(max_length=64)
+    # Keep acceptance independent of temporary execution records and their erasure.
+    agentRunId = models.CharField(max_length=64, unique=True)
+    sessionId = models.CharField(max_length=64, unique=True)
+    acceptedAt = models.DateTimeField(auto_now_add=True)
+    deadlineAt = models.DateTimeField()
+    expiresAt = models.DateTimeField()
+    runStatus = models.CharField(max_length=16, default="queued")
+    cleanupStatus = models.CharField(max_length=16, default="pending")
+    reasonCode = models.CharField(max_length=160, blank=True, default="")
+    deliveryLeaseUntil = models.DateTimeField(null=True, blank=True)
+    deliveryClosedAt = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["credential", "operationId"], name="one_shot_operation_unique"),
+            models.CheckConstraint(condition=models.Q(runStatus__in=("queued", "running", "completed", "failed", "cancelled")),
+                                   name="one_shot_run_status_valid"),
+            models.CheckConstraint(condition=models.Q(cleanupStatus__in=("pending", "cleaning", "completed", "failed")),
+                                   name="one_shot_cleanup_status_valid"),
+        ]
+        indexes = [models.Index(fields=["cleanupStatus", "acceptedAt"], name="one_shot_cleanup_due")]
 
 
 class HostedOperationReceipt(models.Model):

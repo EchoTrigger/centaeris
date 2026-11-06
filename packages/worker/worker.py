@@ -714,6 +714,9 @@ def _execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
             next_run_at_ms = yielded_at_ms + RUNTIME_JOB_WAIT_RECHECK_MS
         else:
             next_run_at_ms = yielded_at_ms + AGENT_RUN_LIFECYCLE_RECHECK_MS
+        policy = agent_run_start["authorization"].get("executionPolicy")
+        if policy is not None:
+            next_run_at_ms = min(next_run_at_ms, max(yielded_at_ms, policy["deadlineAtMs"]))
         yield_job(
             job["jobId"],
             lease_owner,

@@ -1,4 +1,4 @@
-"""Workspace resource scope. Platform records remain shared and immutable to tenant admins."""
+"""Scope model and credential access to a workspace."""
 
 from django.db import connection
 from django.db.models import Q
@@ -33,25 +33,21 @@ def workspace_resource_admin(user, workspace_id):
 
 
 def models_for_workspace(workspace_id):
-    # The nullable provider is the existing fake model, also platform shared.
-    return ModelConfig.objects.filter(
-        Q(provider__workspace_id=workspace_id) | Q(provider__workspace__isnull=True)
-    )
+    # The provider-less diagnostic model is not workspace configuration.
+    scope = Q(provider__isnull=True)
+    if workspace_id is not None:
+        scope |= Q(provider__workspace_id=workspace_id)
+    return ModelConfig.objects.filter(scope)
 
 
 def credential_for_workspace(workspace_id, plugin_name, credential_ref, *, lock=False):
     query = McpBearerCredential.objects
     if lock:
         query = query.select_for_update()
-    own = query.filter(
+    return query.get(
         workspace_id=workspace_id,
         plugin_name=plugin_name,
         credential_ref=credential_ref,
-    ).first()
-    if own is not None:
-        return own
-    return query.get(
-        workspace__isnull=True, plugin_name=plugin_name, credential_ref=credential_ref
     )
 
 

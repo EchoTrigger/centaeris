@@ -21,7 +21,11 @@ function SessionLayout({ sidebar = true, preview = false, initialWidth = null }:
   const [width, setWidth] = useState<number | null>(initialWidth);
   const [draft, setDraft] = useState("Synthetic unsent text");
   const fileInputRef = useRef<HTMLInputElement>(null);
-  return <main className={`workspaceWorkbench ${sidebar ? "withSidebar" : "withoutSidebar"} ${open ? "withContextPanel withFilePreview" : ""}`} style={{ "--browser-panel-width": width === null ? undefined : `${width}px` } as React.CSSProperties}>
+  return <main className={`workspaceWorkbench ${sidebar ? "withSidebar" : "withoutSidebar"}`} style={{
+    "--workspace-sidebar-progress": sidebar ? 1 : 0,
+    "--workspace-preview-progress": open ? 1 : 0,
+    "--browser-panel-width": width === null ? undefined : `${width}px`,
+  } as React.CSSProperties}>
     <div className="workspaceSidebarSlot">{sidebar ? <aside className="workspaceSidebar shSidebar">Synthetic navigation</aside> : null}</div>
     <header className="workspaceTopbar">Synthetic Session<button className="fixtureTogglePreview" type="button" onClick={() => setOpen(value => !value)}>Toggle synthetic preview</button></header>
     <section className="workspaceChatColumn"><div className="workspaceConversationPlane">

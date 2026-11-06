@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Outlet, matchPath, useLocation, useNavigate, useRouteLoaderData } from "react-router";
 import { AppPageContent } from "./AppRoute";
+import { isWorkspaceCatalogPath } from "../shell/sessionNavigation.mjs";
 
 export default function WorkspaceChatLayout() {
   const { workspace, selectedSession } = useRouteLoaderData("workspace");
@@ -12,24 +13,34 @@ export default function WorkspaceChatLayout() {
   const [notice, setNotice] = useState("");
   const base = `/w/${encodeURIComponent(workspace.id)}`;
   const isChatRoute = Boolean(matchPath(`${base}/app`, location.pathname) || matchPath(`${base}/sessions/:sessionId`, location.pathname));
+  const isCatalogRoute = isWorkspaceCatalogPath(base, location.pathname);
   const [chatLocation, setChatLocation] = useState(() => isChatRoute ? location : null);
   const [chatSession, setChatSession] = useState(() => isChatRoute ? selectedSession : null);
   const [modelsVersion, setModelsVersion] = useState(0);
   const onModelsChanged = useCallback(() => setModelsVersion((version) => version + 1), []);
 
-  // Retain one conversation at this layout position while its settings Outlet changes.
-  if (isChatRoute && chatLocation !== location) { setChatLocation(location); setChatSession(selectedSession); }
+  // Keep the conversation and its navigation alive while a catalog or settings is open.
+  if (isChatRoute && chatLocation !== location) {
+    setChatLocation(location);
+    if (chatSession?.id !== selectedSession?.id) setChatSession(selectedSession);
+  }
   const sessionRoute = Boolean(chatLocation && matchPath(`${base}/sessions/:sessionId`, chatLocation.pathname));
 
-  function acceptSession(path) {
+  function acceptSession(path, session) {
     const currentLocation = locationRef.current;
-    if (!currentLocation.pathname.startsWith(`${base}/settings/`)) {
+    if (matchPath(`${base}/app`, currentLocation.pathname) || matchPath(`${base}/sessions/:sessionId`, currentLocation.pathname)) {
       navigate(path, { replace: true });
       return;
     }
     const url = new URL(path, window.location.origin);
     setChatLocation({ pathname: url.pathname, search: url.search, state: null });
-    navigate(`${currentLocation.pathname}${currentLocation.search}`, { replace: true, state: { ...currentLocation.state, returnTo: path } });
+    setChatSession(session);
+    if (currentLocation.pathname.startsWith(`${base}/settings/`)) {
+      const returnTo = currentLocation.state?.returnTo;
+      if (!returnTo || returnTo === `${chatLocation?.pathname}${chatLocation?.search || ""}${chatLocation?.hash || ""}`) {
+        navigate(`${currentLocation.pathname}${currentLocation.search}`, { replace: true, state: { ...currentLocation.state, returnTo: path } });
+      }
+    }
   }
 
   useEffect(() => {
@@ -46,14 +57,19 @@ export default function WorkspaceChatLayout() {
   }, [notice]);
 
   return <>
-    {chatLocation ? <AppPageContent
-      initialSession={chatSession}
-      workspaceDraft={!sessionRoute}
-      location={chatLocation}
-      modelsVersion={modelsVersion}
-      onSessionAccepted={acceptSession}
-    /> : null}
+    {chatLocation || isCatalogRoute ? <div hidden={!isChatRoute && !isCatalogRoute}>
+      <AppPageContent
+        initialSession={chatSession}
+        workspaceDraft={!sessionRoute}
+        visible={isChatRoute}
+        location={chatLocation ?? { pathname: `${base}/app`, search: "", state: null }}
+        navigationKey={location.key}
+        catalogContent={isCatalogRoute ? <Outlet /> : null}
+        modelsVersion={modelsVersion}
+        onSessionAccepted={acceptSession}
+      />
+    </div> : null}
     {notice ? <div className="shWorkspaceToast" role="status">{notice}</div> : null}
-    <Outlet context={{ returnTo: chatLocation ? `${chatLocation.pathname}${chatLocation.search}` : null, onModelsChanged }} />
+    {!isCatalogRoute ? <Outlet context={{ returnTo: chatLocation ? `${chatLocation.pathname}${chatLocation.search}${chatLocation.hash || ""}` : null, onModelsChanged }} /> : null}
   </>;
 }

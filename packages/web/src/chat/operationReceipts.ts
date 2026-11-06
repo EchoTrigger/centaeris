@@ -37,7 +37,17 @@ function receipt(value: unknown, command: Command, operationId: string): Receipt
 function isUnconfirmedRequest(error: unknown) {
   return error instanceof TypeError
     || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))
-    || (error instanceof ApiError && error.status >= 500);
+    || (error instanceof ApiError && (error.status === 408 || error.status >= 500));
+}
+
+export function isWorkspacePreservationPending(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.message === "session_workspace_preservation_pending";
+}
+
+export function isDefiniteSubmissionRejection(error: unknown): boolean {
+  return isWorkspacePreservationPending(error) || (error instanceof ApiError
+    && (([400, 401, 403, 404, 413, 422, 429].includes(error.status) && error.message !== "operation_not_found")
+      || (error.status === 409 && error.message === "session_has_active_agent_run")));
 }
 
 function samePendingVersion(current: Pending | null, expected: Pending) {
@@ -160,8 +170,11 @@ export class OperationClient {
         throw new Error("operation_input_acceptance_unconfirmed");
       }
       const current = this.pending();
-      if (!previouslyPending && error instanceof ApiError && [400, 422, 429].includes(error.status)
-        && samePendingVersion(current, item) && current?.receipt === null) this.complete(item.operationId);
+      // The message endpoint checks the receipt under the operation lock before this rejection.
+      const rejected = isWorkspacePreservationPending(error)
+        || (!previouslyPending && (this.scope.command === "submitMessage" ? isDefiniteSubmissionRejection(error)
+          : error instanceof ApiError && [400, 422, 429].includes(error.status)));
+      if (rejected && samePendingVersion(current, item) && current?.receipt === null) this.complete(item.operationId);
       // A response lost after admission is recovered by identity, never by a
       // second POST. Keep corrected-input ambiguity and stale-tab guards intact.
       if (!item.inputChanged && samePendingVersion(current, item)

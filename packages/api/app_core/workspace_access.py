@@ -87,13 +87,18 @@ def shared_submission_membership_for(user, workspace_id: str) -> WorkspaceMember
 
 
 def agent_run_membership_is_current(agent_run) -> bool:
-    return WorkspaceMembership.objects.filter(
+    current = WorkspaceMembership.objects.filter(
         id=agent_run.membership_ref,
         workspace_id=agent_run.workspace_id,
         workspace__status="active",
         user_id=agent_run.user_id,
         role__in=WORKSPACE_ROLES,
     ).exists()
+    if not current or agent_run.session.purpose != "oneShot":
+        return current
+    from .one_shot_credentials import authority_is_current, credential_for_run
+    credential = credential_for_run(agent_run)
+    return credential is not None and authority_is_current(credential)
 
 
 def source_grants_for_membership(membership: WorkspaceMembership):
