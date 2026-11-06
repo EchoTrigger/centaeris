@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import Q
 
 from .credentials import encrypt_credential_secret
-from .models import AgentRunApiCredential, AgentRunApiOperation, SourceObject, WorkspaceMembership
+from .models import AgentRunApiCredential, AgentRunApiOperation, ConversationResetPolicy, SourceObject, WorkspaceMembership
 from .plugin_catalog import (
     activation_digest,
     plugin_activation_for_workspace,
@@ -98,6 +98,7 @@ def create_credential(
     name,
     plugin_names=None,
     source_object_refs=None,
+    reset_policy=ConversationResetPolicy.NEVER,
 ):
     plugin_names = sorted(set(plugin_names or []))
     source_object_refs = sorted(set(source_object_refs or []))
@@ -127,6 +128,7 @@ def create_credential(
             modelConfig=model,
             pluginNames=plugin_names,
             sourceObjectRefs=source_object_refs,
+            resetPolicy=reset_policy,
         )
         objects = SourceObject.objects.select_related("source").filter(pk__in=source_object_refs)
         if len(objects) != len(source_object_refs) or any(

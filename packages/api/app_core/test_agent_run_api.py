@@ -16,7 +16,8 @@ from django.utils import timezone
 
 from .http.agent_run_api import CreateRunRequest
 from .migration_testing import isolated_migration_database
-from .models import AgentRun, AgentRunApiCredential, AgentRunApiOperation, Session, Workspace, WorkspaceMembership, ModelConfig
+from .models import AgentRun, AgentRunApiConversation, AgentRunApiCredential, AgentRunApiOperation, Session, Workspace, WorkspaceMembership, ModelConfig
+from .agent_run_api_cleanup import collect_agent_run_api_cleanup
 from .agent_run_api_credentials import create_credential
 from .agent_run_api_runs import accept_run
 from .agent_run_api_stream import operation_receipt
@@ -48,6 +49,117 @@ class AgentRunApiApiTests(TransactionTestCase):
 
     def query(self):
         return self.client.get(f"/api/v1/agent/operations/{self.operation_id}", HTTP_AUTHORIZATION=f"Bearer {self.token}")
+
+    def message(self, conversation_id=None, *, key=None, token=None, client=None):
+        body = {"prompt": "Reply OK"}
+        if conversation_id:
+            body["conversationId"] = conversation_id
+        key = key or f"{int(time.time())}.{uuid.uuid4()}"
+        response = (client or self.client).post("/api/v1/agent/messages", json.dumps(body), content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token or self.token}", HTTP_IDEMPOTENCY_KEY=key)
+        if response.streaming:
+            asyncio.run(response.aclose())
+        return response, AgentRunApiOperation.objects.filter(credential=self.credential, operationId=key).first()
+
+    def close_conversation(self, conversation_id, *, token=None):
+        return self.client.post(f"/api/v1/agent/conversations/{conversation_id}/close", data=b"",
+            content_type="application/json", HTTP_AUTHORIZATION=f"Bearer {token or self.token}")
+
+    def settle_message(self, operation):
+        now = timezone.now()
+        AgentRun.objects.filter(pk=operation.agentRunId).update(
+            status="cancelled", completedAt=now, preAdmissionCancelledAt=now,
+        )
+        AgentRunApiOperation.objects.filter(pk=operation.pk).update(deliveryClosedAt=now)
+
+    def test_message_reuses_private_session_and_receipt_and_rejects_concurrent_turn(self):
+        _, first = self.message(key=self.operation_id)
+        self.assertTrue(first.conversationId)
+        self.assertEqual(self.query().json()["conversationId"], first.conversationId)
+        self.assertEqual(self.query().json()["cleanupStatus"], "retained")
+        self.assertEqual(self.message(first.conversationId)[0].json()["error"], "session_has_active_agent_run")
+        self.settle_message(first)
+        _, second = self.message(first.conversationId)
+        self.assertEqual(second.sessionId, first.sessionId)
+        replay, _ = self.message(key=self.operation_id)
+        self.assertEqual(replay.json()["runId"], first.agentRunId)
+        self.assertEqual(self.post().status_code, 409)
+        self.assertEqual(AgentRun.objects.count(), 2)
+
+    def test_close_is_scoped_and_idempotent(self):
+        _, operation = self.message()
+        _, other = create_credential(self.user, self.workspace.pk, self.model.pk, name="Other")
+        self.assertEqual(self.close_conversation(operation.conversationId, token=other).status_code, 404)
+        self.assertEqual(self.message(operation.conversationId, token=other)[0].status_code, 404)
+        first = self.close_conversation(operation.conversationId)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json(), self.close_conversation(operation.conversationId).json())
+        self.assertEqual(AgentRun.objects.get(pk=operation.agentRunId).status, "queued")
+        self.assertFalse(self.message()[1].conversationId == operation.conversationId)
+
+    def test_reset_policies_apply_at_reopen_and_timed_boundaries(self):
+        for policy, minutes in (("never", None), ("onReopen", 0), ("after10Minutes", 10),
+                                ("after15Minutes", 15), ("after30Minutes", 30), ("after60Minutes", 60)):
+            for should_reset in (False, True) if minutes else (minutes == 0,):
+                with self.subTest(policy=policy, should_reset=should_reset):
+                    self.credential.resetPolicy = policy
+                    self.credential.save(update_fields=["resetPolicy"])
+                    _, first = self.message()
+                    self.settle_message(first)
+                    self.close_conversation(first.conversationId)
+                    elapsed = timedelta(minutes=minutes if minutes is not None else 60)
+                    if not should_reset and minutes:
+                        elapsed -= timedelta(seconds=30)
+                    AgentRunApiConversation.objects.filter(pk=first.conversationId).update(closedAt=timezone.now() - elapsed)
+                    response, following = self.message(first.conversationId)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(following.conversationId != first.conversationId, should_reset)
+                    self.assertIsNone(AgentRunApiConversation.objects.get(pk=following.conversationId).closedAt)
+
+    def test_concurrent_reset_selects_one_successor_and_replays_winner(self):
+        self.credential.resetPolicy = "onReopen"
+        self.credential.save(update_fields=["resetPolicy"])
+        _, first = self.message()
+        self.close_conversation(first.conversationId)
+        keys = [f"{int(time.time())}.{uuid.uuid4()}" for _ in range(2)]
+
+        def submit(key):
+            close_old_connections()
+            try:
+                response, _ = self.message(first.conversationId, key=key, client=Client())
+                return response.status_code, None if response.streaming else response.json()
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(submit, keys))
+        self.assertCountEqual([status for status, _ in results], [200, 409])
+        winner = next(key for key, (status, _) in zip(keys, results) if status == 200)
+        loser = next(body for status, body in results if status == 409)
+        replay, _ = self.message(first.conversationId, key=winner)
+        self.assertEqual(loser, {"error": "conversation_reset", "conversationId": replay.json()["conversationId"]})
+        self.assertEqual(AgentRunApiConversation.objects.count(), 2)
+        self.assertEqual(AgentRun.objects.count(), 2)
+
+    def test_cleanup_waits_for_all_deliveries_and_retirement_then_keeps_receipts(self):
+        _, first = self.message()
+        self.settle_message(first)
+        _, second = self.message(first.conversationId)
+        with patch("app_core.agent_run_api_cleanup._purge_runtime") as purge, patch("app_core.agent_run_api_cleanup.redis.Redis.from_url"):
+            self.assertEqual(collect_agent_run_api_cleanup().cleaned, [])
+            self.credential.resetPolicy = "onReopen"
+            self.credential.save(update_fields=["resetPolicy"])
+            self.close_conversation(first.conversationId)
+            _, replacement = self.message(first.conversationId)
+            self.assertEqual(collect_agent_run_api_cleanup().cleaned, [])
+            purge.assert_not_called()
+            self.settle_message(second)
+            report = collect_agent_run_api_cleanup()
+            self.assertEqual(report.failures, [])
+            self.assertEqual(report.cleaned, [second.agentRunId])
+        self.assertFalse(Session.objects.filter(pk=first.sessionId).exists())
+        self.assertTrue(Session.objects.filter(pk=replacement.sessionId).exists())
+        self.assertEqual(AgentRunApiOperation.objects.filter(sessionId=first.sessionId, cleanupStatus="completed").count(), 2)
 
     def test_acceptance_has_signed_private_runtime_and_receipt(self):
         operation, run = accept_run(self.credential, self.operation_id, CreateRunRequest(**self.body))

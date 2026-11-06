@@ -28,7 +28,7 @@ class AgentRunApiStreamTests(SimpleTestCase):
         self.operation = SimpleNamespace(
             pk=1, operationId="operation", agentRunId="run", acceptedAt=self.now,
             deadlineAt=self.now + timedelta(minutes=10), expiresAt=self.now + timedelta(hours=24),
-            runStatus="completed", cleanupStatus="pending", reasonCode="",
+            runStatus="completed", cleanupStatus="pending", reasonCode="", conversationId="",
             deliveryLeaseUntil=self.now + timedelta(seconds=60),
         )
         self.run = SimpleNamespace(id="run", session_id="private-session")

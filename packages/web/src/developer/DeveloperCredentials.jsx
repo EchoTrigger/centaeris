@@ -5,6 +5,17 @@ import { useTranslation } from "../i18n";
 import { CopyButton } from "./DeveloperExample";
 
 const MAX_SCOPE_ITEMS = 64;
+const RESET_POLICIES = ["never", "onReopen", "after10Minutes", "after15Minutes", "after30Minutes", "after60Minutes"];
+
+function ResetPolicyField({ value, onChange, disabled, label }) {
+  const { t } = useTranslation();
+  return <label className="field">
+    {t("developer.resetPolicy")}
+    <select aria-label={label} value={value} onChange={event => onChange(event.target.value)} disabled={disabled}>
+      {RESET_POLICIES.map(policy => <option key={policy} value={policy}>{t("developer.resetPolicy." + policy)}</option>)}
+    </select>
+  </label>;
+}
 
 function focusNewInput(element) {
   element?.focus();
@@ -116,12 +127,13 @@ function CredentialForm({ workspaceId, workspacePath, busy, onCreate, onClose })
   const [modelConfigRef, setModel] = useState("");
   const [pluginNames, setPlugins] = useState([]);
   const [sourceObjectRefs, setSourceObjects] = useState([]);
+  const [resetPolicy, setResetPolicy] = useState("never");
   const [scopesRequested, setScopesRequested] = useState(false);
 
   const validModel = models.items?.some(item => item.id === modelConfigRef);
   return <form className="developerCredentialForm" onSubmit={event => {
     event.preventDefault();
-    if (validModel && name.trim() && !busy) void onCreate({ name: name.trim(), modelConfigRef, pluginNames, sourceObjectRefs });
+    if (validModel && name.trim() && !busy) void onCreate({ name: name.trim(), modelConfigRef, pluginNames, sourceObjectRefs, resetPolicy });
   }}>
     <fieldset disabled={busy}>
       <legend>{t("developer.createCredential")}</legend>
@@ -140,6 +152,8 @@ function CredentialForm({ workspaceId, workspacePath, busy, onCreate, onClose })
       {models.failed ? <CatalogError message="developer.modelsLoadFailed" onRetry={models.retry} />
         : !models.items ? <p role="status">{t("agentChat.loading")}</p>
         : models.items.length === 0 ? <p>{t("developer.noModels")}</p> : null}
+      <ResetPolicyField value={resetPolicy} onChange={setResetPolicy} />
+      <p>{t("developer.resetPolicyHint")}</p>
       <details className="developerOptionalScopes" onToggle={event => {
         if (event.currentTarget.open) setScopesRequested(true);
       }}>
@@ -159,6 +173,7 @@ function credentialErrorKey(error, action) {
   if (error instanceof ApiError && error.message === "csrf_failed") return "developer.csrfFailed";
   if (error instanceof ApiError && error.status === 403) return "developer.permissionChanged";
   if (action === "delete") return "developer.deleteFailed";
+  if (action === "resetPolicy") return "developer.resetPolicyFailed";
   if (error instanceof ApiError) {
     if (error.message === "model_not_found") return "developer.modelUnavailable";
     if (error.message === "api_credential_plugin_unavailable") return "developer.pluginUnavailable";
@@ -248,6 +263,19 @@ export function DeveloperCredentials({ workspaceId }) {
     }
   }
 
+  async function updateResetPolicy(item, resetPolicy) {
+    setError("");
+    setBusy(true);
+    try {
+      const { credential } = await apiJson(path + "/" + encodeURIComponent(item.id), jsonOptions("PATCH", { resetPolicy }));
+      setCredentials(values => values.map(value => value.id === credential.id ? credential : value));
+    } catch (error) {
+      setError(credentialErrorKey(error, "resetPolicy"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return <section className="settingsPanel developerSection" aria-labelledby="developer-credentials-heading">
     <div className="developerSectionHead">
       <div>
@@ -258,7 +286,7 @@ export function DeveloperCredentials({ workspaceId }) {
         onClick={() => { setError(""); setCreating(true); }}>{t("developer.createCredential")}</button> : null}
     </div>
     {error ? <p role="alert">{t(error)}{" "}
-      {error === "developer.createFailed" || error === "developer.deleteFailed" ? <button type="button" className="secondary"
+      {["developer.createFailed", "developer.deleteFailed", "developer.resetPolicyFailed"].includes(error) ? <button type="button" className="secondary"
         onClick={() => { setCreating(false); setError(""); reload(); }}>{t("developer.refreshCredentials")}</button> : null}
     </p> : null}
     {issued ? <section className="developerIssued" aria-labelledby="developer-issued-heading">
@@ -283,6 +311,9 @@ export function DeveloperCredentials({ workspaceId }) {
           <strong>{item.name}</strong>
           <p><code>{item.modelConfigRef}</code></p>
           <p>{t("developer.scopeCounts", { plugins: item.pluginNames.length, files: item.sourceObjectRefs.length })}</p>
+          <ResetPolicyField value={item.resetPolicy} disabled={busy || creating || Boolean(issued)}
+            label={t("developer.resetPolicyNamed", { name: item.name })}
+            onChange={policy => void updateResetPolicy(item, policy)} />
           {item.pluginNames.length || item.sourceObjectRefs.length ? <details className="developerScopeDetails">
             <summary>{t("developer.grantedPermissions")}</summary>
             {item.pluginNames.length ? <p>{t("developer.plugins")}{" "}<code>{item.pluginNames.join(", ")}</code></p> : null}

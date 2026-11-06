@@ -1,6 +1,7 @@
 """Reclaim Agent Run API payloads after execution, physical cleanup and delivery settle."""
 
 from dataclasses import dataclass
+from datetime import timedelta
 import logging
 import urllib.error
 
@@ -8,7 +9,7 @@ import redis
 from django.apps import apps
 from django.conf import settings
 from django.db import connection, transaction
-from django.db.models import Q
+from django.db.models import OuterRef, Q, Subquery
 from django.utils import timezone
 
 from . import models
@@ -32,10 +33,13 @@ class AgentRunApiCleanupReport:
     failures: list[str]
 
 
-def _delivery_closed(operation):
-    return operation.deliveryClosedAt is not None or (
-        operation.deliveryLeaseUntil is not None and operation.deliveryLeaseUntil <= timezone.now()
-    )
+def _session_ready(session_id):
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT agent_run_api_session_retired(%s) AND agent_run_api_session_settled(%s)",
+            [session_id, session_id],
+        )
+        return cursor.fetchone()[0]
 
 
 def _purge_runtime(run):
@@ -123,7 +127,7 @@ def _shared_storage_key(key, session, artifact_ids):
     ).exclude(state="cleaned").exists()
 
 
-def _purge_payloads(operation, session):
+def _purge_payloads(operations, session):
     doomed = _owned_rows(session)
     artifact_ids = doomed.get(models.Artifact, set())
     keys = _storage_keys(session, artifact_ids)
@@ -133,15 +137,16 @@ def _purge_payloads(operation, session):
             delete_stored_object_for_gc(key)
     transient = redis.Redis.from_url(settings.REDIS_URL, socket_timeout=5, socket_connect_timeout=5)
     try:
-        prefix = f"workspace-agent:agent-run:{{{operation.agentRunId}}}"
-        transient.delete(f"{prefix}:signals", f"{prefix}:live:text", f"{prefix}:live:meta")
+        for operation in operations:
+            prefix = f"workspace-agent:agent-run:{{{operation.agentRunId}}}"
+            transient.delete(f"{prefix}:signals", f"{prefix}:live:text", f"{prefix}:live:meta")
     finally:
         transient.close()
     representations = models.DerivedRepresentation.objects.filter(ownerKind="artifact", ownerId__in=artifact_ids)
     models.KnowledgeSegment.objects.filter(representation__in=representations).delete()
     representations.delete()
     models.DerivedResource.objects.filter(ownerKind="artifact", ownerId__in=artifact_ids).delete()
-    models.ModelRunLog.objects.filter(agentRunId=operation.agentRunId).delete()
+    models.ModelRunLog.objects.filter(agentRunId__in=[item.agentRunId for item in operations]).delete()
     # These two guards need the signed Run and Session while evaluating deletes.
     first = (models.SessionEnvironment, models.AgentRunEnvironmentRelease)
     last = (models.AgentRunAuthorization, models.AgentRun, models.Session)
@@ -158,17 +163,13 @@ def _purge_payloads(operation, session):
 
 
 def _collect_operation(operation_id, dry_run):
-    operation = models.AgentRunApiOperation.objects.get(pk=operation_id)
-    if operation.cleanupStatus == "completed" or not _delivery_closed(operation):
+    operation = models.AgentRunApiOperation.objects.filter(pk=operation_id).first()
+    if operation is None or operation.cleanupStatus == "completed" or not _session_ready(operation.sessionId):
         return "blocked"
-    run = models.AgentRun.objects.select_related("session", "authorization", "workspace", "modelConfig").get(
+    run = models.AgentRun.objects.select_related("session", "authorization", "workspace", "modelConfig").filter(
         pk=operation.agentRunId, session_id=operation.sessionId, session__purpose="agentRunApi",
-    )
-    if run.status not in TERMINAL_STATUSES:
-        return "blocked"
-    if models.SessionEnvironment.objects.filter(session_id=operation.sessionId, controller_released=False).exists():
-        return "blocked"
-    if not (run.preAdmissionCancelledAt is not None or models.AgentRunEnvironmentRelease.objects.filter(agent_run=run).exists()):
+    ).first()
+    if run is None:
         return "blocked"
     if dry_run:
         return "planned"
@@ -185,35 +186,39 @@ def _collect_operation(operation_id, dry_run):
         raise
     with transaction.atomic():
         operation = models.AgentRunApiOperation.objects.select_for_update(skip_locked=True).filter(pk=operation_id).first()
-        if operation is None or operation.cleanupStatus == "completed" or not _delivery_closed(operation):
+        if operation is None or operation.cleanupStatus == "completed":
             return "blocked"
         session = models.Session.objects.select_for_update().get(pk=operation.sessionId, purpose="agentRunApi")
-        run = models.AgentRun.objects.select_related("session", "authorization", "workspace", "modelConfig").get(
-            pk=operation.agentRunId, session=session,
-        )
-        operation.runStatus = run.status
-        if run.status in {"failed", "cancelled"}:
-            operation.reasonCode = run.transitionReason
-        if run.status not in TERMINAL_STATUSES:
-            operation.save(update_fields=["runStatus"])
+        if not _session_ready(session.pk):
             return "blocked"
-        if models.SessionEnvironment.objects.filter(session=session, controller_released=False).exists():
-            return "blocked"
-        if not (run.preAdmissionCancelledAt is not None or models.AgentRunEnvironmentRelease.objects.filter(agent_run=run).exists()):
-            return "blocked"
+        operations = list(models.AgentRunApiOperation.objects.filter(sessionId=session.pk))
+        terminal = {item.pk: (item.status, item.transitionReason) for item in session.agent_runs.all()}
         operation.cleanupStatus = "cleaning"
-        operation.save(update_fields=["runStatus", "cleanupStatus", "reasonCode"])
-        _purge_payloads(operation, session)
-        operation.cleanupStatus = "completed"
-        operation.deliveryClosedAt = operation.deliveryClosedAt or timezone.now()
-        operation.deliveryLeaseUntil = None
-        operation.save(update_fields=["cleanupStatus", "deliveryClosedAt", "deliveryLeaseUntil"])
+        operation.save(update_fields=["cleanupStatus"])
+        _purge_payloads(operations, session)
+        now = timezone.now()
+        for item in operations:
+            item.runStatus, reason = terminal[item.agentRunId]
+            item.reasonCode = reason if item.runStatus in {"failed", "cancelled"} else ""
+            item.cleanupStatus = "completed"
+            item.deliveryClosedAt = item.deliveryClosedAt or now
+            item.deliveryLeaseUntil = None
+        models.AgentRunApiOperation.objects.bulk_update(
+            operations, ["runStatus", "reasonCode", "cleanupStatus", "deliveryClosedAt", "deliveryLeaseUntil"],
+            batch_size=64,
+        )
+        models.AgentRunApiConversation.objects.filter(sessionId=session.pk).update(purgedAt=now)
         return "cleaned"
 
 
 def collect_agent_run_api_cleanup(dry_run=False, *, limit=64):
     report = AgentRunApiCleanupReport([], [], [], [])
+    retired = models.AgentRunApiConversation.objects.filter(
+        Q(credential__isnull=True) | ~Q(supersededById=""), purgedAt__isnull=True,
+    )
+    latest = models.AgentRunApiOperation.objects.filter(sessionId=OuterRef("sessionId")).order_by("-pk").values("pk")[:1]
     due = models.AgentRunApiOperation.objects.exclude(cleanupStatus="completed").filter(
+        Q(conversationId="") | Q(sessionId__in=retired.values("sessionId"), pk=Subquery(latest)),
         agentRunId__in=models.AgentRun.objects.filter(status__in=TERMINAL_STATUSES).values("pk"),
     ).filter(Q(deliveryClosedAt__isnull=False) | Q(deliveryLeaseUntil__lte=timezone.now())).order_by("acceptedAt")
     for operation in due[:limit]:
@@ -227,5 +232,8 @@ def collect_agent_run_api_cleanup(dry_run=False, *, limit=64):
     if not dry_run:
         models.AgentRunApiOperation.objects.filter(cleanupStatus="completed").filter(
             Q(credential__isnull=True) | Q(expiresAt__lte=timezone.now()),
+        ).delete()
+        models.AgentRunApiConversation.objects.filter(purgedAt__isnull=False).filter(
+            Q(credential__isnull=True) | Q(purgedAt__lte=timezone.now() - timedelta(hours=24)),
         ).delete()
     return report

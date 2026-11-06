@@ -10,6 +10,8 @@ from .http.schema import StrictSchema
 
 
 CREATE_RUN_PATH = "/v1/agent/execute"
+SEND_MESSAGE_PATH = "/v1/agent/messages"
+CLOSE_CONVERSATION_PATH = "/v1/agent/conversations/{conversation_id}/close"
 GET_OPERATION_PATH = "/v1/agent/operations/{operation_id}"
 CANCEL_RUN_PATH = "/v1/agent/executions/{run_id}/cancel"
 IDEMPOTENCY_HEADER = "Idempotency-Key"
@@ -25,6 +27,20 @@ class CreateRunRequest(StrictSchema):
     source_object_refs: list[str] = Field(default_factory=list, max_length=64)
 
 
+class SendMessageRequest(CreateRunRequest):
+    conversation_id: str | None = Field(default_factory=lambda: None, min_length=1, max_length=64)
+
+
+class ClosedConversation(TypedDict):
+    conversationId: str
+    closedAt: DateTimeText
+
+
+class ConversationResetResponse(TypedDict):
+    error: Literal["conversation_reset"]
+    conversationId: str
+
+
 class OperationReceipt(TypedDict):
     operationId: str
     runId: str
@@ -32,7 +48,8 @@ class OperationReceipt(TypedDict):
     deadlineAt: DateTimeText
     expiresAt: DateTimeText
     runStatus: RunStatus
-    cleanupStatus: Literal["pending", "cleaning", "completed", "failed"]
+    cleanupStatus: Literal["pending", "cleaning", "completed", "failed", "retained"]
+    conversationId: NotRequired[str]
     reasonCode: NotRequired[str]
 
 

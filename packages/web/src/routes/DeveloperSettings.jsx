@@ -3,11 +3,11 @@ import { Link } from "react-router";
 import { apiUrl } from "../api";
 import { DeveloperCredentials } from "../developer/DeveloperCredentials";
 import { DeveloperDocumentation } from "../developer/DeveloperDocumentation";
-import { CopyButton, DeveloperExample, runPath } from "../developer/DeveloperExample";
+import { CopyButton, DeveloperExample, messagePath, runPath } from "../developer/DeveloperExample";
 import { useTranslation } from "../i18n";
 
 export const DEVELOPER_DOC_GROUPS = [
-  { label: "developer.guides", topics: ["quickstart", "authorization", "lifecycle"] },
+  { label: "developer.guides", topics: ["quickstart", "conversations", "authorization", "lifecycle"] },
   { label: "developer.reference", topics: ["events", "artifacts", "errors"] },
 ];
 
@@ -25,6 +25,7 @@ export function developerDocSearch(topic) {
 export function DeveloperSettings({ workspaceId, canManage, topic, lastTopic, navigationState }) {
   const { t } = useTranslation();
   const endpoint = apiUrl(runPath);
+  const messageEndpoint = apiUrl(messagePath);
   const [exampleLanguage, setExampleLanguage] = useState("curl");
   return <div className="preferenceSettings developerSettings">
     <nav className="extensionTabs" aria-label={t("developer.title")}>
@@ -42,6 +43,11 @@ export function DeveloperSettings({ workspaceId, canManage, topic, lastTopic, na
           <CopyButton value={endpoint} label={t("developer.copyAddress")} />
         </div>
         <div className="developerEndpoint"><code className="developerMethod">POST</code><code>{endpoint}</code></div>
+        <div className="developerSectionHead">
+          <h3>{t("developer.operation.sendMessage")}</h3>
+          <CopyButton value={messageEndpoint} label={t("developer.copyMessageAddress")} />
+        </div>
+        <div className="developerEndpoint"><code className="developerMethod">POST</code><code>{messageEndpoint}</code></div>
       </section>
       {canManage ? <DeveloperCredentials workspaceId={workspaceId} /> : <section className="settingsPanel developerSection">
         <h2>{t("developer.credentials")}</h2>

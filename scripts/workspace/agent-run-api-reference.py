@@ -33,6 +33,18 @@ def _reference():
                           {**receipt, "condition": "existingOperation"}],
         },
         {
+            "id": "sendMessage", "method": "POST", "path": _public_path(wire.SEND_MESSAGE_PATH),
+            "requestSchema": wire.SendMessageRequest.__name__,
+            "headers": [authorization, {"name": wire.IDEMPOTENCY_HEADER, "required": True, "schema": {"type": "string"}}],
+            "responses": [{"status": 200, "contentType": "text/event-stream", "condition": "newRun"},
+                          {**receipt, "condition": "existingOperation"}],
+        },
+        {
+            "id": "closeConversation", "method": "POST", "path": _public_path(wire.CLOSE_CONVERSATION_PATH),
+            "headers": [authorization], "emptyBody": True,
+            "responses": [{"status": 200, "contentType": "application/json", "schema": wire.ClosedConversation.__name__}],
+        },
+        {
             "id": "getOperation", "method": "GET", "path": _public_path(wire.GET_OPERATION_PATH),
             "headers": [authorization],
             "responses": [{**receipt, "condition": "statusOnly"}],
@@ -46,7 +58,10 @@ def _reference():
             }],
         },
     ]
-    types = (wire.CreateRunRequest, wire.CancellationRequested, *(event.schema for event in wire.EVENTS))
+    types = (
+        wire.CreateRunRequest, wire.SendMessageRequest, wire.ClosedConversation,
+        wire.CancellationRequested, *(event.schema for event in wire.EVENTS),
+    )
     return {
         "operations": operations,
         "schemas": {payload.__name__: TypeAdapter(payload).json_schema() for payload in types},

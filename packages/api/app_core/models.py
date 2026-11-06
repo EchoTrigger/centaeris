@@ -71,6 +71,10 @@ def new_agent_run_api_credential_id() -> str:
     return new_id("api_credential")
 
 
+def new_agent_run_api_conversation_id() -> str:
+    return new_id("conversation")
+
+
 # Referenced by migration 0044.
 new_one_shot_credential_id = new_agent_run_api_credential_id
 
@@ -1450,6 +1454,15 @@ class AgentRun(models.Model):
         return super().save(*args, **kwargs)
 
 
+class ConversationResetPolicy(models.TextChoices):
+    NEVER = "never"
+    ON_REOPEN = "onReopen"
+    AFTER_10_MINUTES = "after10Minutes"
+    AFTER_15_MINUTES = "after15Minutes"
+    AFTER_30_MINUTES = "after30Minutes"
+    AFTER_60_MINUTES = "after60Minutes"
+
+
 class AgentRunApiCredential(models.Model):
     id = models.CharField(primary_key=True, max_length=64, default=new_agent_run_api_credential_id)
     workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT)
@@ -1461,7 +1474,17 @@ class AgentRunApiCredential(models.Model):
     sourceObjectRefs = models.JSONField(default=list)
     secretDigest = models.CharField(max_length=64, unique=True)
     encryptedSecret = models.TextField(blank=True, default="")
+    resetPolicy = models.CharField(max_length=16, choices=ConversationResetPolicy, default=ConversationResetPolicy.NEVER)
     createdAt = models.DateTimeField(auto_now_add=True)
+
+
+class AgentRunApiConversation(models.Model):
+    id = models.CharField(primary_key=True, max_length=64, default=new_agent_run_api_conversation_id)
+    credential = models.ForeignKey(AgentRunApiCredential, on_delete=models.SET_NULL, null=True)
+    sessionId = models.CharField(max_length=64, unique=True)
+    closedAt = models.DateTimeField(null=True, blank=True)
+    supersededById = models.CharField(max_length=64, blank=True, default="")
+    purgedAt = models.DateTimeField(null=True, blank=True)
 
 
 class AgentRunApiOperation(models.Model):
@@ -1470,7 +1493,8 @@ class AgentRunApiOperation(models.Model):
     requestDigest = models.CharField(max_length=64)
     # Keep acceptance independent of temporary execution records and their erasure.
     agentRunId = models.CharField(max_length=64, unique=True)
-    sessionId = models.CharField(max_length=64, unique=True)
+    sessionId = models.CharField(max_length=64, db_index=True)
+    conversationId = models.CharField(max_length=64, blank=True, default="")
     acceptedAt = models.DateTimeField(auto_now_add=True)
     deadlineAt = models.DateTimeField()
     expiresAt = models.DateTimeField()
@@ -1485,7 +1509,7 @@ class AgentRunApiOperation(models.Model):
             models.UniqueConstraint(fields=["credential", "operationId"], name="agent_run_api_operation_unique"),
             models.CheckConstraint(condition=models.Q(runStatus__in=("queued", "running", "completed", "failed", "cancelled")),
                                    name="agent_run_api_run_status_valid"),
-            models.CheckConstraint(condition=models.Q(cleanupStatus__in=("pending", "cleaning", "completed", "failed")),
+            models.CheckConstraint(condition=models.Q(cleanupStatus__in=("pending", "cleaning", "completed", "failed", "retained")),
                                    name="agent_run_api_cleanup_status_valid"),
         ]
         indexes = [models.Index(fields=["cleanupStatus", "acceptedAt"], name="agent_run_api_cleanup_due")]

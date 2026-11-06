@@ -36,6 +36,63 @@
       ]
     },
     {
+      "id": "sendMessage",
+      "method": "POST",
+      "path": "/api/v1/agent/messages",
+      "requestSchema": "SendMessageRequest",
+      "headers": [
+        {
+          "name": "Authorization",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "Idempotency-Key",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "status": 200,
+          "contentType": "text/event-stream",
+          "condition": "newRun"
+        },
+        {
+          "status": 200,
+          "contentType": "application/json",
+          "schema": "OperationReceipt",
+          "condition": "existingOperation"
+        }
+      ]
+    },
+    {
+      "id": "closeConversation",
+      "method": "POST",
+      "path": "/api/v1/agent/conversations/{conversationId}/close",
+      "headers": [
+        {
+          "name": "Authorization",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "emptyBody": true,
+      "responses": [
+        {
+          "status": 200,
+          "contentType": "application/json",
+          "schema": "ClosedConversation"
+        }
+      ]
+    },
+    {
       "id": "getOperation",
       "method": "GET",
       "path": "/api/v1/agent/operations/{operationId}",
@@ -112,6 +169,62 @@
       "title": "CreateRunRequest",
       "type": "object"
     },
+    "SendMessageRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "prompt": {
+          "maxLength": 131072,
+          "minLength": 1,
+          "title": "Prompt",
+          "type": "string"
+        },
+        "sourceObjectRefs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Sourceobjectrefs",
+          "type": "array"
+        },
+        "conversationId": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Conversationid"
+        }
+      },
+      "required": [
+        "prompt"
+      ],
+      "title": "SendMessageRequest",
+      "type": "object"
+    },
+    "ClosedConversation": {
+      "properties": {
+        "conversationId": {
+          "title": "Conversationid",
+          "type": "string"
+        },
+        "closedAt": {
+          "format": "date-time",
+          "title": "Closedat",
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversationId",
+        "closedAt"
+      ],
+      "title": "ClosedConversation",
+      "type": "object"
+    },
     "CancellationRequested": {
       "properties": {
         "runId": {
@@ -172,9 +285,14 @@
             "pending",
             "cleaning",
             "completed",
-            "failed"
+            "failed",
+            "retained"
           ],
           "title": "Cleanupstatus",
+          "type": "string"
+        },
+        "conversationId": {
+          "title": "Conversationid",
           "type": "string"
         },
         "reasonCode": {

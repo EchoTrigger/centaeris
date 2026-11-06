@@ -21,6 +21,21 @@ Send \`GET /api/v1/agent/operations/{operationId}\` with the original credential
 
 Connection loss stops delivery; the Run continues. Repeating POST returns only a receipt if the original request was accepted. Lost output cannot be replayed. Check external side effects before deliberately generating a new run. The **Lifecycle**, **Files** and **Errors** pages explain cancellation, file verification and the other recovery outcomes.
 `,
+    conversations: `
+### Start and continue a conversation
+
+Send \`POST /api/v1/agent/messages\` with the same Bearer and Idempotency-Key headers as an independent execution. For the first message use \`{"prompt":"Remember the word amber."}\`. Save the \`conversationId\` in \`runAccepted\` or the operation receipt. Then send \`{"prompt":"What word did I give you?","conversationId":"<saved ID>"}\` with a new operation key. Omitting the ID starts a fresh conversation.
+
+Each conversation belongs to its original credential. Wait for the previous turn and workspace release before sending another message. On \`session_has_active_agent_run\` or \`session_workspace_preservation_pending\`, wait and retry the same submission. If conversation authorization changes, start fresh under the current scope.
+
+### Close and reopen
+
+Send an empty \`POST /api/v1/agent/conversations/{conversationId}/close\`. The response records \`closedAt\`. Repeated closes preserve that timestamp. Closing leaves an accepted run executing. Disconnecting the stream leaves the conversation open.
+
+The policy on the credential applies when the next message is sent to the closed conversation. Choose **Never** (the default), **On reopen**, or **10 / 15 / 30 / 60 minutes after close**. A message before the chosen time resumes the conversation and clears the close timestamp. At or after that time the message starts a fresh conversation and returns a new ID. Use that ID for later messages. A competing submit to a superseded ID receives \`409 conversation_reset\` with the replacement ID. A retry of an accepted operation keeps its original Run and conversation IDs.
+
+The service retains private conversation context while it can still be continued (\`cleanupStatus: retained\`). After replacement or credential deletion, it reclaims the retired conversation once its executions, workspace releases and delivery streams settle. Prior outputs stay bound to their original deliveries.
+`,
     authorization: `
 ### Send the credential from your backend
 
@@ -53,7 +68,7 @@ The receipt keeps operation and run IDs, acceptance, deadline and expiry times, 
 
 These are separate limits: the client's wait, the Run's execution deadline, the original stream's delivery lease, and the operation's lookup/duplicate-prevention window. \`expiresAt\` is not a result-download deadline. Generate the key immediately before the first submit; a nearly expired unused key can be accepted with little lookup time left.
 
-The reset policy for resumable interactive sessions is separate from Agent Run API cleanup.
+These cleanup rules describe independent executions. See **Conversations and reset** for the lifecycle of retained conversation context.
 `,
     events: `
 ### Submit and read the first response
@@ -154,6 +169,21 @@ Example of a request rejected because its operation ID is invalid.
 
 断线会结束交付，Run 仍继续执行。原请求已被接受时，重复 POST 只返回回执，无法重放丢失的输出。决定重新运行前先核对外部副作用。取消、文件校验和其他恢复情况分别见**生命周期**、**文件产物**和**错误处理**。
 `,
+    conversations: `
+### 开始和续接会话
+
+调用 \`POST /api/v1/agent/messages\`，使用与独立执行相同的 Bearer 和 Idempotency-Key 请求头。首条消息发送 \`{"prompt":"记住暗号是琥珀。"}\`，保存 \`runAccepted\` 或状态回执中的 \`conversationId\`。下一条用新操作键发送 \`{"prompt":"暗号是什么？","conversationId":"<保存的 ID>"}\`。省略 ID 就会开始新会话。
+
+会话归属原凭证。发送下一条前，等上一轮运行结束并完成工作区释放。收到 \`session_has_active_agent_run\` 或 \`session_workspace_preservation_pending\` 时，稍后重试同一请求。会话权限发生变化时，可按当前权限开始新会话。
+
+### 关闭和重新打开
+
+向 \`POST /api/v1/agent/conversations/{conversationId}/close\` 发送空请求体。回执给出 \`closedAt\`，重复关闭沿用第一次关闭时间。关闭后，已受理的 Run 继续执行。SSE 断线后，会话仍保持打开状态。
+
+凭证的重置策略在下一条消息到来时生效。可选**从不**（默认）、**重新打开时**、**关闭后 10／15／30／60 分钟**。时间未到时续接上下文并清除关闭时间，达到条件时为这条消息创建新会话，回执返回新 ID。后续消息使用新 ID。并发请求命中已经替换的旧 ID 时，返回 \`409 conversation_reset\` 和替换 ID。重试已受理的请求会沿用原 Run 和会话 ID。
+
+可续接的会话会保留私有上下文（\`cleanupStatus: retained\`）。会话被替换或凭证删除后，服务在运行、工作区释放和交付结束后清理旧上下文。已交付的结果仍属于各自的原响应。
+`,
     authorization: `
 ### 从调用端发送凭证
 
@@ -186,7 +216,7 @@ Example of a request rejected because its operation ID is invalid.
 
 调用端等待时限、Run 执行期限、原流的交付租期、操作查询与去重窗口是不同边界。\`expiresAt\` 不是结果下载期限。应在首次发送前生成键；快到期但从未使用的键仍可能被接受，此时剩余查询时间很短。
 
-可恢复交互会话的关闭后重置策略单独定义。
+本页描述独立执行的清理。聊天上下文的生命周期见「会话与重置」。
 `,
     events: `
 ### 提交并读取首次响应

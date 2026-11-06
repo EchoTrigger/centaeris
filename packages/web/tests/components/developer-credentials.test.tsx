@@ -38,7 +38,7 @@ test("owners can create scoped credentials, copy the secret after returning to s
   const secret = "credential_1.test_secret";
   const credential = {
     id: "credential_1", workspaceId: "research", name: "Document worker", modelConfigRef: "model_1",
-    pluginNames: ["documents"], sourceObjectRefs: ["file_1"], createdAt: "2026-11-06T12:00:00Z", canCopy: true,
+    pluginNames: ["documents"], sourceObjectRefs: ["file_1"], createdAt: "2026-11-06T12:00:00Z", canCopy: true, resetPolicy: "never",
   };
   const credentialPath = "/api/workspaces/research/api-credentials";
   const writes: Array<{ path: string; method: string; csrf: string | null; body: unknown }> = [];
@@ -46,7 +46,7 @@ test("owners can create scoped credentials, copy the secret after returning to s
   vi.stubGlobal("fetch", async (url: string, options: RequestInit) => {
     const { pathname: path } = new URL(url);
     if (path === "/api/csrf") return Response.json({ csrfToken: "session-csrf" });
-    if (options.method === "POST" || options.method === "DELETE") {
+    if (options.method === "POST" || options.method === "DELETE" || options.method === "PATCH") {
       expect(options.credentials).toBe("include");
       const csrf = new Headers(options.headers).get("X-CSRFToken");
       const body = typeof options.body === "string" ? JSON.parse(options.body) : undefined;
@@ -57,6 +57,10 @@ test("owners can create scoped credentials, copy the secret after returning to s
       return Response.json({ credential, secret }, { status: 201 });
     }
     if (path === credentialPath) return Response.json({ credentials: hasCredential ? [credential] : [] });
+    if (path === credentialPath + "/credential_1" && options.method === "PATCH") {
+      credential.resetPolicy = JSON.parse(String(options.body)).resetPolicy;
+      return Response.json({ credential });
+    }
     if (path === credentialPath + "/credential_1" && options.method === "DELETE") {
       hasCredential = false;
       return new Response(null, { status: 204 });
@@ -98,6 +102,9 @@ test("owners can create scoped credentials, copy the secret after returning to s
   writeText.mockClear();
   await user.click(screen.getByRole("button", { name: "Copy secret for Document worker" }));
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(secret));
+  const policy = screen.getByRole("combobox", { name: "Reset policy for Document worker" }) as HTMLSelectElement;
+  await user.selectOptions(policy, "after15Minutes");
+  await waitFor(() => expect(policy.value).toBe("after15Minutes"));
   await user.click(screen.getByText("Granted permissions"));
   expect(screen.getByText("file_1")).toBeTruthy();
   await user.click(screen.getByRole("link", { name: "Docs" }));
@@ -107,14 +114,15 @@ test("owners can create scoped credentials, copy the secret after returning to s
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(secret));
   await user.click(await screen.findByRole("button", { name: "Delete Document worker" }));
   expect(screen.queryByDisplayValue(secret)).toBeNull();
-  expect(writes).toHaveLength(1);
+  expect(writes).toHaveLength(2);
   await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }));
   await waitFor(() => expect(screen.queryByText("Document worker")).toBeNull());
   expect(writes).toEqual([
     { path: credentialPath, method: "POST", csrf: "session-csrf", body: {
       name: credential.name, modelConfigRef: credential.modelConfigRef, pluginNames: credential.pluginNames,
-      sourceObjectRefs: credential.sourceObjectRefs,
+      sourceObjectRefs: credential.sourceObjectRefs, resetPolicy: "never",
     } },
+    { path: credentialPath + "/" + credential.id, method: "PATCH", csrf: "session-csrf", body: { resetPolicy: "after15Minutes" } },
     { path: credentialPath + "/" + credential.id, method: "DELETE", csrf: "session-csrf", body: undefined },
   ]);
 });
@@ -125,7 +133,7 @@ test("a basic credential loads only models and can be created without optional c
   const writes: unknown[] = [];
   const credential = {
     id: "basic", name: "Basic worker", workspaceId: "research", modelConfigRef: "model_1",
-    pluginNames: [], sourceObjectRefs: [], canCopy: true,
+    pluginNames: [], sourceObjectRefs: [], canCopy: true, resetPolicy: "never",
   };
   vi.stubGlobal("fetch", async (url: string, options: RequestInit) => {
     const { pathname: path } = new URL(url);
@@ -154,7 +162,7 @@ test("a basic credential loads only models and can be created without optional c
   await user.click(screen.getByRole("button", { name: "Create credential" }));
   expect(await screen.findByDisplayValue("basic.one_time_secret")).toBeTruthy();
   expect(writes).toEqual([{
-    name: credential.name, modelConfigRef: credential.modelConfigRef, pluginNames: [], sourceObjectRefs: [],
+    name: credential.name, modelConfigRef: credential.modelConfigRef, pluginNames: [], sourceObjectRefs: [], resetPolicy: "never",
   }]);
 });
 

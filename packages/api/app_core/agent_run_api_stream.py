@@ -47,6 +47,8 @@ def operation_receipt(operation) -> OperationReceipt:
     }
     if operation.reasonCode:
         receipt["reasonCode"] = operation.reasonCode
+    if operation.conversationId:
+        receipt["conversationId"] = operation.conversationId
     return receipt
 
 

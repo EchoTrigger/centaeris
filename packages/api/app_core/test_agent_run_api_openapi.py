@@ -19,6 +19,8 @@ class AgentRunApiOpenApiTests(SimpleTestCase):
         cls.reference = json.loads(reference_path.read_text(encoding="utf-8"))
         cls.routes = {
             "createRun": ("post", "/api" + wire.CREATE_RUN_PATH),
+            "sendMessage": ("post", "/api" + wire.SEND_MESSAGE_PATH),
+            "closeConversation": ("post", "/api" + wire.CLOSE_CONVERSATION_PATH),
             "getOperation": ("get", "/api" + wire.GET_OPERATION_PATH),
             "cancelRun": ("post", "/api" + wire.CANCEL_RUN_PATH),
         }

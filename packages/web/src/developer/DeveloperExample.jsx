@@ -5,6 +5,7 @@ import { nodeRequestExample, nodeStatusExample } from "./nodeExamples";
 import reference from "./agentRunApiReference.json";
 
 export const runPath = reference.operations.find(operation => operation.id === "createRun").path;
+export const messagePath = reference.operations.find(operation => operation.id === "sendMessage").path;
 
 function shellQuote(value) {
   return "'" + value.replaceAll("'", "'\"'\"'") + "'";

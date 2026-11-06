@@ -180,6 +180,42 @@ the canonical `sandbox_unavailable` category for receipt recovery. Old results
 are not replayed or rewritten. Container selection and authorization checks are
 unchanged; nono is not introduced into hosted execution.
 
+### Conversation messages and reset
+
+`POST /api/v1/agent/messages` accepts the same prompt, material references and
+headers as `/execute`, with an optional `conversationId`. The first message
+creates a credential-owned conversation. Save the ID from `runAccepted` or the
+operation receipt. Supply that ID to continue with a new operation key, or omit
+it to start a new conversation. Output uses the original SSE response.
+
+`POST /api/v1/agent/conversations/{conversationId}/close` takes an empty body
+and returns `conversationId` and `closedAt`. Repeating a close preserves the
+timestamp until the next accepted message. The run and delivery have their own
+lifecycles.
+
+Workspace owners and administrators can set `resetPolicy` when creating a key
+or by sending `PATCH /api/workspaces/{workspaceId}/api-credentials/{credentialId}`
+with `{"resetPolicy":"onReopen"}`. The supported values are `never` (the
+default), `onReopen`, `after10Minutes`, `after15Minutes`, `after30Minutes`,
+and `after60Minutes`. The current policy applies when a new message arrives after
+an explicit close. Before the threshold, the original conversation resumes. At
+or after the threshold, the accepted message starts a fresh conversation and
+returns its new ID. A competing request for the superseded ID receives
+`409 conversation_reset` with the replacement `conversationId`. An accepted
+operation replay returns the original IDs.
+
+Allow the preceding run and workspace release to finish before continuing the
+same conversation. On `session_has_active_agent_run` or
+`session_workspace_preservation_pending`, wait and retry the same request. Use
+the original credential for messages, close, receipt lookup and cancellation.
+An unrelated credential receives `404` for the conversation.
+
+The service keeps the private context for resumable conversations and reports
+`cleanupStatus: retained`. Context reclamation starts after replacement or
+credential deletion and waits for every run, release and delivery in that
+conversation. Operation lookup remains subject to the original key's expiry.
+Conversation IDs do not provide transcript or artifact retrieval.
+
 ## Workspace and Session resources
 
 Browser REST and SSE use the signed-in user's authority, current Workspace

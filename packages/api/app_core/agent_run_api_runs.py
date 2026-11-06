@@ -11,6 +11,7 @@ from .agent_run_authorization_factory import create_agent_run_authorization
 from .assets import captured_input_fields
 from .hosted_operations import HostedOperationError, lock_operation_identity, request_digest
 from .models import AgentRun, AgentRunApiCredential, AgentRunApiOperation, Session, SessionAssetLink, SourceObject
+from .agent_run_api_conversations import message_session
 from .agent_run_api_credentials import authority_is_current, source_object_allowed
 from .runtime_client import request_execution_profile, schedule_agent_run_lifecycle
 from .session_model_settings import selected_session_model
@@ -56,7 +57,7 @@ def _replay(credential, operation_id, digest):
     return operation
 
 
-def accept_run(credential, operation_id, payload):
+def accept_run(credential, operation_id, payload, *, message=False):
     expires_at = operation_expiry(operation_id)
     payload.prompt = payload.prompt.strip()
     if not payload.prompt:
@@ -64,7 +65,7 @@ def accept_run(credential, operation_id, payload):
     refs = payload.source_object_refs
     if refs != sorted(set(refs)):
         raise HostedOperationError(400, "source_object_refs_invalid")
-    digest = request_digest(payload)
+    digest = request_digest(payload, target="message" if message else None)
     with transaction.atomic():
         current = _locked_credential(credential)
         replay = _replay(current, operation_id, digest)
@@ -80,7 +81,11 @@ def accept_run(credential, operation_id, payload):
         sources = list(SourceObject.objects.select_related("source").filter(id__in=refs))
         if len(sources) != len(refs) or any(not source_object_allowed(current, item) for item in sources):
             raise HostedOperationError(404, "source_object_not_found")
-        session = Session.objects.create(workspace=current.workspace, owner=current.user, purpose="agentRunApi")
+        if message:
+            session, conversation, previous_scope = message_session(current, payload.conversation_id, timezone.now())
+        else:
+            session = Session.objects.create(workspace=current.workspace, owner=current.user, purpose="agentRunApi")
+            conversation, previous_scope = None, None
         asset_refs = []
         for item in sources:
             link = SessionAssetLink.objects.create(
@@ -99,14 +104,18 @@ def accept_run(credential, operation_id, payload):
         operation = AgentRunApiOperation.objects.create(
             credential=current, operationId=operation_id, requestDigest=digest,
             agentRunId=run.pk, sessionId=session.pk,
+            conversationId=conversation.pk if conversation else "",
+            cleanupStatus="retained" if conversation else "pending",
             deadlineAt=deadline, expiresAt=expires_at,
             deliveryLeaseUntil=deadline + DELIVERY_LIFETIME,
         )
-        create_agent_run_authorization(
+        authorization = create_agent_run_authorization(
             run, message_asset_refs=sorted(asset_refs), image_digest=profile["imageDigest"],
             personal_library=False,
             execution_policy={"purpose": "agentRunApi", "deadlineAtMs": int(deadline.timestamp() * 1000)},
         )
+        if previous_scope is not None and previous_scope != authorization.payload["pluginActivation"]["digest"]:
+            raise HostedOperationError(403, "conversation_authority_changed")
         from .material_files import check_original_budget
         check_original_budget(run)
         # Profile resolution and transaction locks may outlive the key window.
