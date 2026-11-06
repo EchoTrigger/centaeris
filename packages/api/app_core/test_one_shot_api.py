@@ -214,6 +214,8 @@ class OneShotApiTests(TransactionTestCase):
 
 
 class OneShotCredentialUpgradeTests(TransactionTestCase):
+    serialized_rollback = True
+
     def test_revoked_credentials_are_removed_while_pending_cleanup_survives(self):
         previous = [("app_core", "0046_workspace_owned_resources")]
         target = [("app_core", "0047_one_shot_credential_copy_and_delete")]
