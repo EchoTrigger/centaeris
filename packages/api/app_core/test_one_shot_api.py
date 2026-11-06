@@ -10,10 +10,12 @@ from asgiref.sync import async_to_sync
 
 from django.contrib.auth.models import User
 from django.db import close_old_connections
+from django.db.migrations.executor import MigrationExecutor
 from django.test import Client, TransactionTestCase
 from django.utils import timezone
 
 from .http.one_shot import CreateRunRequest
+from .migration_testing import isolated_migration_database
 from .models import AgentRun, OneShotCredential, OneShotOperation, Session, Workspace, WorkspaceMembership, ModelConfig
 from .one_shot_credentials import create_credential
 from .one_shot_runs import accept_run
@@ -209,3 +211,40 @@ class OneShotApiTests(TransactionTestCase):
             )
         self.assertEqual(response.status_code, 200, response.content)
         collect.assert_called_once_with(limit=1)
+
+
+class OneShotCredentialUpgradeTests(TransactionTestCase):
+    def test_revoked_credentials_are_removed_while_pending_cleanup_survives(self):
+        previous = [("app_core", "0046_workspace_owned_resources")]
+        target = [("app_core", "0047_one_shot_credential_copy_and_delete")]
+        now = timezone.now()
+        with isolated_migration_database(previous) as database:
+            alias = database.alias
+            executor = MigrationExecutor(database)
+            old = executor.loader.project_state(previous).apps
+            user = old.get_model("auth", "User").objects.using(alias).create(username="issuer")
+            workspace = old.get_model("app_core", "Workspace").objects.using(alias).create(
+                name="API", createdBy_id=user.pk,
+            )
+            model = old.get_model("app_core", "ModelConfig").objects.using(alias).create(displayName="Model")
+            credentials = old.get_model("app_core", "OneShotCredential").objects.using(alias)
+            scope = {"workspace_id": workspace.pk, "user_id": user.pk, "membership_ref": "membership",
+                     "modelConfig_id": model.pk, "secretDigest": "a" * 64}
+            active = credentials.create(name="Existing", **scope)
+            revoked = credentials.create(name="Revoked", revokedAt=now, **scope)
+            operations = old.get_model("app_core", "OneShotOperation").objects.using(alias)
+            for state in ("pending", "completed"):
+                operations.create(
+                    credential_id=revoked.pk, operationId=state, requestDigest="b" * 64,
+                    agentRunId="run_" + state, sessionId="session_" + state,
+                    deadlineAt=now, expiresAt=now + timedelta(hours=24), cleanupStatus=state,
+                )
+
+            executor.migrate(target)
+            upgraded = executor.loader.project_state(target).apps
+            saved = upgraded.get_model("app_core", "OneShotCredential").objects.using(alias).get()
+            self.assertEqual(saved.pk, active.pk)
+            self.assertEqual(saved.encryptedSecret, "")
+            pending = upgraded.get_model("app_core", "OneShotOperation").objects.using(alias).get()
+            self.assertEqual(pending.cleanupStatus, "pending")
+            self.assertIsNone(pending.credential_id)

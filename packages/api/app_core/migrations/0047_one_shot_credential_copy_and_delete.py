@@ -9,6 +9,8 @@ def remove_revoked_credentials(apps, schema_editor):
     revoked = credential.objects.using(alias).filter(revokedAt__isnull=False)
     operation.objects.using(alias).filter(credential__in=revoked, cleanupStatus="completed").delete()
     revoked.delete()
+    # Flush PostgreSQL FK triggers before altering the credential table below.
+    schema_editor.execute("SET CONSTRAINTS ALL IMMEDIATE")
 
 
 class Migration(migrations.Migration):
