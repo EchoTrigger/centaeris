@@ -74,11 +74,11 @@ class UnifiedEnvironmentAuthorizationTests(SimpleTestCase):
         run = SimpleNamespace(id=value["agentRunId"], workspace_id=value["workspaceId"],
             user_id=value["userId"], session_id=value["sessionId"], modelConfig_id=value["modelConfigRef"],
             thinkingMode=None, workspace=object(),
-            session=SimpleNamespace(workspaceBaselineKnown=True), environment=SimpleNamespace(
+            session=SimpleNamespace(workspaceBaselineKnown=True, purpose="interactive"), environment=SimpleNamespace(
                 environment_profile=value["environmentProfile"], environment_profile_digest=value["environmentProfileDigest"],
                 network="disabled", benchmark_profile=None))
         with patch("app_core.runtime_contract.session_workspace_for_session", return_value=value["sessionWorkspace"]), \
-                patch("app_core.runtime_contract.plugin_activation_for_workspace", return_value=value["pluginActivation"]), \
+                patch("app_core.one_shot_credentials.plugin_activation_for_workspace", return_value=value["pluginActivation"]), \
                 patch("app_core.library_materials.personal_library_allowed", return_value=False):
             built = build_agent_run_authorization_payload(run, value["id"], image_digest="sha256:" + "b" * 64,
                 declared_inputs=value["assetRefs"], message_asset_refs=value["messageAssetRefs"])

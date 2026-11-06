@@ -12,6 +12,7 @@ from app_core.http.internal import _expire_queued_run_locked
 class InitialQueueExpiryTests(SimpleTestCase):
     def run_state(self, *, status="queued", started_at=None, age=301):
         return SimpleNamespace(status=status, startedAt=started_at,
+                               session=SimpleNamespace(purpose="interactive"),
                                createdAt=timezone.now() - timedelta(seconds=age),
                                transitionReason="agent_run_created", save=Mock())
 

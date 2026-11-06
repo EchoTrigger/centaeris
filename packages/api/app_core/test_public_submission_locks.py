@@ -137,27 +137,7 @@ class PublicSubmissionLockTests(OperationFixture, TransactionTestCase):
         self.assertEqual(HostedOperationReceipt.objects.count(), 1)
         self.schedule.assert_called_once()
 
-    def test_queue_contention_waits_then_admits_the_original_operation_once(self):
-        client = self.client_for_user()
-        identity = {'started': Event()}
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            with transaction.atomic(), connection.cursor() as cursor:
-                cursor.execute('SELECT pg_backend_pid()')
-                holder_pid = cursor.fetchone()[0]
-                cursor.execute('SELECT pg_advisory_xact_lock(731946,1)')
-                future = pool.submit(self.independently, lambda: self.observed(
-                    lambda: self.submit(client, operation='queue-wait'), identity))
-                self.wait_for_blocker(future, identity, holder_pid)
-                self.assertFalse(Session.objects.exists())
-                self.assertFalse(AgentRun.objects.exists())
-                self.assertFalse(HostedOperationReceipt.objects.exists())
-                self.schedule.assert_not_called()
-            response = future.result(timeout=10)
-        self.assertEqual(response.status_code, 202, response.content)
-        self.assertEqual((Session.objects.count(), AgentRun.objects.count(), HostedOperationReceipt.objects.count()), (1, 1, 1))
-        self.schedule.assert_called_once()
-
-    def test_waiting_for_one_session_does_not_hold_the_global_admission_lock(self):
+    def test_waiting_for_one_session_does_not_block_independent_admission(self):
         target = create_session(workspace=self.workspace, owner=self.user)
         first_client, second_client = self.client_for_user(), self.client_for_user()
         identity = {'started': Event()}

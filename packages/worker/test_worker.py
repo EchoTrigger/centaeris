@@ -38,6 +38,7 @@ def lifecycle_fixture(agentRunId="agent_run_1"):
         "agentRunId": agentRunId,
         "turnId": "turn_fixture",
         "authorizationDigest": digest,
+        "authorization": {},
     }
     return job, agentRunStart
 

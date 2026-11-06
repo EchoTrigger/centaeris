@@ -24,6 +24,8 @@ from app_core.one_shot_protocol import (
     IDEMPOTENCY_HEADER,
     CancellationRequested,
     CreateRunRequest,
+    DateTimeText,
+    OperationReceipt,
 )
 from app_core.one_shot_runs import accept_run, operation_expiry, refresh_operation
 from app_core.one_shot_stream import operation_receipt, stream_one_shot
@@ -31,6 +33,7 @@ from app_core.runtime_client import request_agent_run_cancellation
 from app_core.session_model_settings import SessionModelSettingsError
 from app_core.workspace_access import WORKSPACE_ADMIN_ROLES, locked_workspace_membership_for
 
+from .response_schema import COMMON_ERROR_RESPONSES
 from .schema import StrictSchema
 from .security import session_auth
 from .stream_response import OwnedAsyncStreamingHttpResponse, stream_database_call
@@ -44,6 +47,29 @@ class CreateCredentialRequest(StrictSchema):
     model_config_ref: str
     plugin_names: list[str] = Field(default_factory=list, max_length=64)
     source_object_refs: list[str] = Field(default_factory=list, max_length=64)
+
+
+class CredentialResponse(StrictSchema):
+    id: str
+    name: str
+    workspace_id: str
+    model_config_ref: str
+    plugin_names: list[str]
+    source_object_refs: list[str]
+    created_at: DateTimeText
+    revoked_at: DateTimeText | None
+
+
+class CredentialListResponse(StrictSchema):
+    credentials: list[CredentialResponse]
+
+
+class CredentialEnvelope(StrictSchema):
+    credential: CredentialResponse
+
+
+class CreatedCredentialResponse(CredentialEnvelope):
+    secret: str
 
 
 class OneShotAuth(HttpBearer):
@@ -88,7 +114,10 @@ def _admin(user, workspace_id):
     return member
 
 
-@router.get("/workspaces/{workspace_id}/api-credentials", auth=session_auth, response=None)
+@router.get(
+    "/workspaces/{workspace_id}/api-credentials", auth=session_auth,
+    response={200: CredentialListResponse} | COMMON_ERROR_RESPONSES,
+)
 def list_api_credentials(request, workspace_id: str):
     with transaction.atomic():
         _admin(request.user, workspace_id)
@@ -96,7 +125,10 @@ def list_api_credentials(request, workspace_id: str):
         return _json({"credentials": [_credential_value(item) for item in credentials]})
 
 
-@router.post("/workspaces/{workspace_id}/api-credentials", auth=session_auth, response=None)
+@router.post(
+    "/workspaces/{workspace_id}/api-credentials", auth=session_auth,
+    response={201: CreatedCredentialResponse} | COMMON_ERROR_RESPONSES,
+)
 def create_api_credential(request, workspace_id: str, payload: CreateCredentialRequest):
     try:
         credential, token = create_credential(
@@ -112,7 +144,10 @@ def create_api_credential(request, workspace_id: str, payload: CreateCredentialR
         return _json({"error": str(error)}, 400)
 
 
-@router.delete("/workspaces/{workspace_id}/api-credentials/{credential_id}", auth=session_auth, response=None)
+@router.delete(
+    "/workspaces/{workspace_id}/api-credentials/{credential_id}", auth=session_auth,
+    response={200: CredentialEnvelope} | COMMON_ERROR_RESPONSES,
+)
 def revoke_api_credential(request, workspace_id: str, credential_id: str):
     with transaction.atomic():
         _admin(request.user, workspace_id)
@@ -128,7 +163,13 @@ def revoke_api_credential(request, workspace_id: str, credential_id: str):
     return _json({"credential": _credential_value(credential)})
 
 
-@router.post(CREATE_RUN_PATH, auth=external_auth, response=None)
+@router.post(
+    CREATE_RUN_PATH, auth=external_auth, response={200: OperationReceipt} | COMMON_ERROR_RESPONSES,
+    openapi_extra={"responses": {200: {
+        "description": "Run event stream for first acceptance or receipt for a repeated request",
+        "content": {"text/event-stream": {"schema": {"type": "string"}}},
+    }}},
+)
 async def create_one_shot_run(request, payload: CreateRunRequest):
     if request.GET:
         return _json({"error": "request_invalid"}, 400)
@@ -158,7 +199,9 @@ async def create_one_shot_run(request, payload: CreateRunRequest):
     return response
 
 
-@router.get(GET_OPERATION_PATH, auth=external_auth, response=None)
+@router.get(
+    GET_OPERATION_PATH, auth=external_auth, response={200: OperationReceipt} | COMMON_ERROR_RESPONSES,
+)
 def get_one_shot_operation(request, operation_id: str):
     if request.GET:
         return _json({"error": "request_invalid"}, 400)
@@ -172,7 +215,10 @@ def get_one_shot_operation(request, operation_id: str):
     return _json(operation_receipt(refresh_operation(operation)))
 
 
-@router.post(CANCEL_RUN_PATH, auth=external_auth, response=None)
+@router.post(
+    CANCEL_RUN_PATH, auth=external_auth,
+    response={200: OperationReceipt, 202: CancellationRequested} | COMMON_ERROR_RESPONSES,
+)
 def cancel_one_shot_run(request, run_id: str):
     if request.META.get("CONTENT_LENGTH", "0") not in ("", "0") or request.GET:
         return _json({"error": "request_invalid"}, 400)

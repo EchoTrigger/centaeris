@@ -93,6 +93,8 @@ class ModelDatabaseLeaseTests(TransactionTestCase):
         self.start_provider()
         workspace = Workspace.objects.create(name="Model lease test", createdBy=self.admin)
         workspace.members.add(self.admin)
+        self.provider.workspace = workspace
+        self.provider.save(update_fields=["workspace"])
         session = fixtures.create_session(workspace=workspace, owner=self.admin)
         run = AgentRun.objects.create(
             workspace=workspace, session=session, user=self.admin,
