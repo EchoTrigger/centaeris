@@ -9,6 +9,7 @@ export function ConfirmDialog({
   message,
   confirmLabel = t("confirmDialog.confirm"),
   cancelLabel = t("agentRunRow.cancel"),
+  popupClassName = "",
   busy = false,
   onCancel,
   onConfirm,
@@ -24,7 +25,7 @@ export function ConfirmDialog({
   }}>
     <Dialog.Portal>
       <Dialog.Backdrop className="themeConfirmBackdrop">
-        <Dialog.Popup render={<section />} className="themeConfirmDialog" initialFocus={busy ? true : cancel}>
+        <Dialog.Popup render={<section />} className={"themeConfirmDialog " + popupClassName} initialFocus={busy ? true : cancel}>
           <Dialog.Title render={<h2 />}>{title}</Dialog.Title>
           {message ? <Dialog.Description render={<p />}>{message}</Dialog.Description> : null}
           <footer>

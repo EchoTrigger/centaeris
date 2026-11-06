@@ -47,9 +47,9 @@ class TrashProjectionTests(TestCase):
             status="ready",
             createdBy=self.owner,
         )
-        self.library = UserLibraryObject.objects.create(
+        self.folder = UserLibraryObject.objects.create(
             owner=self.owner,
-            displayName="Private Note",
+            displayName="Private Folder",
             objectKind="folder",
             contentType="application/vnd.centaeris.folder",
             sizeBytes=0,
@@ -62,29 +62,38 @@ class TrashProjectionTests(TestCase):
             ).status_code,
             200,
         )
-        self.assertEqual(self.client.delete(f"/api/library/{self.library.id}").status_code, 200)
+        self.assertEqual(self.client.delete(f"/api/library/{self.folder.id}").status_code, 200)
+        self.files = [
+            UserLibraryObject.objects.create(
+                owner=self.owner, displayName=name, objectKind=kind, status="deleted",
+                deletedAt=timezone.now(), deletedBy=self.owner, deletedFromStatus="ready",
+            )
+            for name, kind in (("Uploaded file", "file"), ("Uploaded image", "image"), ("Saved output", "savedArtifact"))
+        ]
+        UserLibraryObject.objects.create(
+            owner=self.owner, displayName="Private Note", objectKind="note", status="deleted",
+            deletedAt=timezone.now(), deletedBy=self.owner, deletedFromStatus="ready",
+        )
 
-    def test_unified_trash_filters_truthful_tombstones_and_binds_cursor(self):
-        for item in (self.session, self.source, self.library):
+    def test_trash_lists_only_library_files_and_binds_cursor(self):
+        for item in (self.session, self.source, self.folder):
             item.refresh_from_db()
             self.assertEqual(item.deletedBy_id, self.owner.id)
 
         response = self.client.get(f"/api/workspaces/{self.workspace.id}/trash")
         self.assertEqual(response.status_code, 200, response.content)
         payload = response.json()
-        self.assertEqual(
-            {item["kind"] for item in payload["items"]},
-            {"session", "source", "library"},
-        )
+        self.assertEqual({item["id"] for item in payload["items"]}, {item.id for item in self.files})
+        self.assertEqual({item["kind"] for item in payload["items"]}, {"library"})
         self.assertTrue(
             all(item["deletedBy"]["userId"] == str(self.owner.id) for item in payload["items"])
         )
         self.assertIn(
             {
-                "kind": "workspace",
+                "kind": "libraryRoot",
                 "id": None,
-                "label": self.workspace.name,
-                "scope": "workspace",
+                "label": "私人",
+                "scope": "privateLibrary",
             },
             payload["filterOptions"]["locations"],
         )
@@ -93,17 +102,24 @@ class TrashProjectionTests(TestCase):
             f"/api/workspaces/{self.workspace.id}/trash",
             {"query": "Needle"},
         ).json()
-        self.assertEqual([item["id"] for item in searched["items"]], [self.session.id])
+        self.assertEqual(searched["items"], [])
         private = self.client.get(
             f"/api/workspaces/{self.workspace.id}/trash",
             {"scope": "privateLibrary"},
         ).json()
-        self.assertEqual([item["id"] for item in private["items"]], [self.library.id])
+        self.assertEqual({item["id"] for item in private["items"]}, {item.id for item in self.files})
         located = self.client.get(
             f"/api/workspaces/{self.workspace.id}/trash",
             {"locationKind": "workspace"},
-        ).json()
-        self.assertEqual({item["id"] for item in located["items"]}, {self.session.id, self.source.id})
+        )
+        self.assertEqual(located.status_code, 400)
+
+        unsupported_kind = self.client.get(
+            f"/api/workspaces/{self.workspace.id}/trash",
+            {"kind": "session"},
+        )
+        self.assertEqual(unsupported_kind.status_code, 400)
+        self.assertEqual(unsupported_kind.json(), {"error": "trash_filter_invalid"})
 
         with (
             patch("app_core.http.trash.TRASH_PAGE_SIZE", 1),
@@ -112,7 +128,7 @@ class TrashProjectionTests(TestCase):
             first = self.client.get(f"/api/workspaces/{self.workspace.id}/trash").json()
             changed = self.client.get(
                 f"/api/workspaces/{self.workspace.id}/trash",
-                {"cursor": first["nextCursor"], "kind": "source"},
+                {"cursor": first["nextCursor"], "query": "Uploaded"},
             )
         self.assertEqual(changed.status_code, 400)
         self.assertEqual(changed.json(), {"error": "trash_cursor_invalid"})

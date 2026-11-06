@@ -29,7 +29,12 @@ export function AddSkillLocation({ workspaceRoot, pending, confirmAction, onAdd,
     try {
       const confirmed = await confirmAction({ title: "Discard this location?", message: "The location has not been added. Discard your changes and return to locations?" });
       if (owner === pickerOwner.current && confirmed) onCancel();
-    } catch (failure) { if (owner === pickerOwner.current) setError({ message: failure instanceof Error ? failure.message : String(failure), retryBrowse: false }); }
+    } catch (failure) {
+      if (owner === pickerOwner.current) {
+        console.error("Desktop skill location confirmation failed", failure);
+        setError({ message: "The form could not be closed. Try again.", retryBrowse: false });
+      }
+    }
     finally { if (owner === pickerOwner.current) setConfirming(false); }
   };
   const browse = async () => {
@@ -38,7 +43,12 @@ export function AddSkillLocation({ workspaceRoot, pending, confirmAction, onAdd,
     try {
       const selected = await selectSkillSourcePath(kind);
       if (owner === pickerOwner.current && !selected.cancelled && selected.path) setPath(selected.path);
-    } catch (failure) { if (owner === pickerOwner.current) setError({ message: failure instanceof Error ? failure.message : String(failure), retryBrowse: true }); }
+    } catch (failure) {
+      if (owner === pickerOwner.current) {
+        console.error("Desktop skill location picker failed", failure);
+        setError({ message: "The file picker could not be opened.", retryBrowse: true });
+      }
+    }
     finally { if (owner === pickerOwner.current) setBrowsing(false); }
   };
   return <form className="dmForm" aria-label="Add skill location" onSubmit={event => {

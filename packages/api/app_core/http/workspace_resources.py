@@ -1,9 +1,8 @@
-"""Tenant administration of local resources; platform resources stay read-only."""
+"""Administration of workspace resources."""
 
 from types import SimpleNamespace
 from typing import Literal
 from django.db import IntegrityError, transaction
-from django.db.models import Q
 from django.http import JsonResponse, HttpResponse
 from ninja import Router, Status
 from ninja.responses import codes_4xx
@@ -31,10 +30,10 @@ from .response_schema import (
 from .schema import ErrorResponse, StrictSchema
 from .serialization import serialize_model_provider, serialize_admin_model
 
+
+
 router = Router(tags=["workspace resources"], by_alias=True)
 plugin_upload_router = Router(tags=["workspace resources"], by_alias=True)
-
-
 class ResourceScopeResponse(StrictSchema):
     scope: Literal["workspace", "platform"]
     writable: bool
@@ -76,16 +75,6 @@ class ScopedMcpBearerCredentialsEnvelope(StrictSchema):
     credentials: list[ScopedMcpBearerCredentialResponse]
 
 
-class WorkspaceResourceMetadataResponse(StrictSchema):
-    id: str
-    name: str
-    status: Literal["active", "archived"]
-
-
-class WorkspaceResourceMetadataEnvelope(StrictSchema):
-    workspaces: list[WorkspaceResourceMetadataResponse]
-
-
 def _response(result):
     status = result.status_code if isinstance(result, Status) else 200
     value = result.value if isinstance(result, Status) else result
@@ -123,7 +112,7 @@ def providers(request, workspace_id: str):
         except PermissionError:
             return JsonResponse({"error": "workspace_not_found"}, status=404)
         items = ModelProvider.objects.filter(
-            Q(workspace_id=workspace_id) | Q(workspace__isnull=True),
+            workspace_id=workspace_id,
             archivedAt__isnull=True,
         ).order_by("displayName", "id")
         return JsonResponse(
@@ -146,8 +135,7 @@ def models(request, workspace_id: str):
         items = (
             ModelConfig.objects.select_related("provider")
             .filter(
-                Q(provider__workspace_id=workspace_id)
-                | Q(provider__workspace__isnull=True),
+                provider__workspace_id=workspace_id,
                 isCurrent=True,
                 provider__archivedAt__isnull=True,
             )
@@ -157,7 +145,7 @@ def models(request, workspace_id: str):
             {
                 "models": [
                     serialize_admin_model(x)
-                    | resource_scope(x.provider.workspace_id if x.provider_id else None)
+                    | resource_scope(x.provider.workspace_id)
                     for x in items
                 ]
             }
@@ -192,7 +180,7 @@ def credentials(request, workspace_id: str):
         except PermissionError:
             return JsonResponse({"error": "workspace_not_found"}, status=404)
         items = McpBearerCredential.objects.filter(
-            Q(workspace_id=workspace_id) | Q(workspace__isnull=True)
+            workspace_id=workspace_id
         ).order_by("plugin_name", "credential_ref", "workspace_id")
         return JsonResponse(
             {
@@ -493,17 +481,3 @@ def uninstall_plugin(request, workspace_id: str, plugin_name: str):
         return JsonResponse({"error": "workspace_not_found"}, status=404)
     except PluginLifecycleError as error:
         return JsonResponse({"error": error.code}, status=409)
-
-
-@router.get("/admin/workspace-resources", auth=session_auth, response={200: WorkspaceResourceMetadataEnvelope} | COMMON_ERROR_RESPONSES)
-def operator_workspace_resources(request):
-    # This is an explicit operator metadata endpoint, not workspace membership.
-    if not request.user.is_superuser:
-        return JsonResponse({"error": "resource_not_found"}, status=404)
-    return JsonResponse(
-        {
-            "workspaces": list(
-                Workspace.objects.order_by("name", "id").values("id", "name", "status")
-            )
-        }
-    )

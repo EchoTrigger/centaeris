@@ -13,18 +13,11 @@ from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase, TestCase, override_settings
 
-from app_core.credentials import encrypt_credential_secret
-from app_core.models import (
-    McpBearerCredential,
-    Workspace,
-    WorkspacePluginEnablement,
-)
-from app_core.plugin_catalog import load_plugin_catalog
+from app_core.models import Workspace, WorkspaceMembership
 from app_core.plugin_install_source import (
     PluginInstallSourceError,
     UploadedZip,
 )
-from app_core.plugin_lifecycle import initialize_plugin_catalog
 
 
 def _zip_bytes(entries: list[tuple[str, bytes, int | None]]) -> bytes:
@@ -150,26 +143,25 @@ class PluginUploadLifecycleTests(TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name) / "plugins"
         self.enterContext(override_settings(PLUGIN_CATALOG_ROOT=str(self.root)))
-        for module in (
-            "plugin_catalog",
-            "plugin_lifecycle",
-            "http.plugin_lifecycle",
-        ):
+        for module in ("workspace_plugins", "http.workspaces"):
             self.enterContext(
                 patch(f"app_core.{module}.plugin_lifecycle_lock", side_effect=nullcontext)
             )
-        initialize_plugin_catalog()
+        self.root.mkdir()
         self.inspect = self.enterContext(
             patch(
-                "app_core.plugin_lifecycle.request_plugin_inspection",
+                "app_core.workspace_plugins.request_plugin_inspection",
                 side_effect=self._inspect,
             )
         )
-        self.admin = User.objects.create_superuser(
+        self.admin = User.objects.create_user(
             username="plugin-admin@example.test",
             email="plugin-admin@example.test",
             password="test-password",
         )
+        self.workspace = Workspace.objects.create(name="Plugins", createdBy=self.admin)
+        WorkspaceMembership.objects.create(workspace=self.workspace, user=self.admin, role="owner")
+        self.base = f"/api/workspaces/{self.workspace.id}/plugins"
         self.client.force_login(self.admin)
 
     def _inspect(self, package_path: str) -> dict:
@@ -191,34 +183,16 @@ class PluginUploadLifecycleTests(TestCase):
 
     def upload(self, content: bytes, **extra):
         return self.client.post(
-            "/api/admin/plugins/upload",
+            f"{self.base}/upload",
             data={"file": SimpleUploadedFile("plugin.zip", content), **extra},
         )
 
     def test_upload_installs_lists_updates_and_removes_without_release_catalog(self):
         installed = self.upload(_plugin_zip(wrapper=True))
         self.assertEqual(installed.status_code, 200, installed.content)
-        self.assertEqual(
-            installed.json(),
-            {
-                "plugin": {
-                    "name": "banana",
-                    "displayName": "Banana",
-                    "shortDescription": "banana test Plugin.",
-                    "capabilities": ["Synthetic capability"],
-                    "version": "1.0.0",
-                    "enabledWorkspaceCount": 0,
-                    "credentialCount": 0,
-                    "removable": True,
-                    "errors": [],
-                }
-            },
-        )
         self.assertFalse(any(path.name.startswith(".upload-") for path in self.root.iterdir()))
-        self.assertEqual(
-            self.client.get("/api/admin/plugins").json(),
-            {"plugins": [installed.json()["plugin"]]},
-        )
+        self.assertEqual(installed.json()["plugin"]["scope"], "workspace")
+        self.assertEqual(self.client.get(self.base).json(), {"plugins": [installed.json()["plugin"]]})
 
         duplicate = self.upload(_plugin_zip())
         self.assertEqual(duplicate.status_code, 409, duplicate.content)
@@ -227,92 +201,22 @@ class PluginUploadLifecycleTests(TestCase):
         updated = self.upload(_plugin_zip(version="1.0.1"))
         self.assertEqual(updated.status_code, 200, updated.content)
         self.assertEqual(updated.json()["plugin"]["version"], "1.0.1")
-        self.assertEqual(load_plugin_catalog()["packages"][0]["version"], "1.0.1")
+        self.assertEqual(self.client.get(self.base).json()["plugins"][0]["version"], "1.0.1")
 
-        removed = self.client.delete("/api/admin/plugins/banana")
+        removed = self.client.delete(f"{self.base}/banana/installation")
         self.assertEqual(removed.status_code, 204, removed.content)
-        self.assertEqual(self.client.get("/api/admin/plugins").json(), {"plugins": []})
+        self.assertEqual(self.client.get(self.base).json(), {"plugins": []})
 
     def test_update_is_blocked_while_the_plugin_is_in_an_active_run(self):
         self.assertEqual(self.upload(_plugin_zip()).status_code, 200)
         with patch(
-            "app_core.http.plugin_lifecycle._plugin_has_active_agent_runs",
+            "app_core.workspace_plugins._active_package",
             return_value=True,
         ):
             blocked = self.upload(_plugin_zip(version="1.0.1"))
         self.assertEqual(blocked.status_code, 409, blocked.content)
         self.assertEqual(blocked.json(), {"error": "plugin_in_active_agent_runs"})
-        self.assertEqual(load_plugin_catalog()["packages"][0]["version"], "1.0.0")
-
-    def test_remove_reports_and_enforces_each_live_dependency(self):
-        self.assertEqual(self.upload(_plugin_zip()).status_code, 200)
-        workspace = Workspace.objects.create(name="Plugin use", createdBy=self.admin)
-        WorkspacePluginEnablement.objects.create(
-            workspace=workspace,
-            pluginName="banana",
-        )
-        self.assertFalse(
-            self.client.get("/api/admin/plugins").json()["plugins"][0]["removable"]
-        )
-        enabled = self.client.delete("/api/admin/plugins/banana")
-        self.assertEqual(enabled.status_code, 409, enabled.content)
-        self.assertEqual(enabled.json(), {"error": "plugin_enabled_in_workspaces"})
-        WorkspacePluginEnablement.objects.all().delete()
-
-        credential = McpBearerCredential.objects.create(
-            plugin_name="banana",
-            credential_ref="banana-token",
-            display_name="Banana",
-            encrypted_secret=encrypt_credential_secret("test-secret"),
-            created_by=self.admin,
-            updated_by=self.admin,
-        )
-        configured = self.client.delete("/api/admin/plugins/banana")
-        self.assertEqual(configured.status_code, 409, configured.content)
-        self.assertEqual(
-            configured.json(), {"error": "plugin_credentials_configured"}
-        )
-        credential.delete()
-
-        with (
-            patch(
-                "app_core.http.plugin_lifecycle._active_plugin_names",
-                return_value={"banana"},
-            ),
-            patch(
-                "app_core.http.plugin_lifecycle._plugin_has_active_agent_runs",
-                return_value=True,
-            ),
-        ):
-            self.assertFalse(
-                self.client.get("/api/admin/plugins").json()["plugins"][0][
-                    "removable"
-                ]
-            )
-            active = self.client.delete("/api/admin/plugins/banana")
-        self.assertEqual(active.status_code, 409, active.content)
-        self.assertEqual(active.json(), {"error": "plugin_in_active_agent_runs"})
-
-    def test_catalog_write_failure_rolls_back_package_bytes(self):
-        self.assertEqual(self.upload(_plugin_zip()).status_code, 200)
-        with patch(
-            "app_core.plugin_lifecycle._write_catalog",
-            side_effect=OSError("synthetic catalog failure"),
-        ):
-            failed = self.upload(_plugin_zip(version="1.0.1"))
-        self.assertEqual(failed.status_code, 503, failed.content)
-        self.assertEqual(failed.json(), {"error": "plugin_lifecycle_unavailable"})
-        self.assertEqual(load_plugin_catalog()["packages"][0]["version"], "1.0.0")
-        installed_manifest = json.loads(
-            (self.root / "banana/.centaeris-plugin/plugin.json").read_text()
-        )
-        self.assertEqual(installed_manifest["version"], "1.0.0")
-        self.assertFalse(
-            any(
-                path.name.startswith((".upload-", ".backup-"))
-                for path in self.root.iterdir()
-            )
-        )
+        self.assertEqual(self.client.get(self.base).json()["plugins"][0]["version"], "1.0.0")
 
     def test_upload_strictly_rejects_extra_fields_and_invalid_carriers(self):
         extra = self.upload(_plugin_zip(), extra="unexpected")
@@ -328,14 +232,15 @@ class PluginUploadLifecycleTests(TestCase):
         rejected = self.upload(_plugin_zip())
         self.assertEqual(rejected.status_code, 400, rejected.content)
         self.assertEqual(rejected.json(), {"error": "plugin_package_invalid"})
-        self.assertEqual(load_plugin_catalog()["packages"], [])
+        self.assertEqual(self.client.get(self.base).json(), {"plugins": []})
         self.assertFalse(any(path.name.startswith(".upload-") for path in self.root.iterdir()))
 
-    def test_non_superuser_cannot_upload_or_remove_plugins(self):
+    def test_workspace_member_cannot_upload_or_remove_plugins(self):
         member = User.objects.create_user(
             username="plugin-member@example.test",
             password="test-password",
         )
+        WorkspaceMembership.objects.create(workspace=self.workspace, user=member, role="member")
         self.client.force_login(member)
-        self.assertEqual(self.upload(_plugin_zip()).status_code, 403)
-        self.assertEqual(self.client.delete("/api/admin/plugins/banana").status_code, 403)
+        self.assertEqual(self.upload(_plugin_zip()).status_code, 404)
+        self.assertEqual(self.client.delete(f"{self.base}/banana/installation").status_code, 404)

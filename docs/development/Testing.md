@@ -343,9 +343,9 @@ Shared frontend primitive changes also run `pnpm --filter web run test:component
 These mounted React tests protect controlled model/effort choices, focus,
 dismissal, confirmation and drafts. Web retains its own page and transcript
 interaction policy. For optional local investigation, with `CHROME_BIN` pointing to a local Chromium executable,
-`pnpm --filter web run test:chat-ui` checks production styles, floating-control
-placement, transcript folding and reading position in the browser. The shared
-package has its own `typecheck` script, run by both frontend product gates.
+`pnpm --filter web run test:chat-ui` can help diagnose browser behavior. Web
+visual and interaction acceptance is performed manually by the maintainer.
+The shared package has its own `typecheck` script, run by both frontend product gates.
 
 ## Test data
 

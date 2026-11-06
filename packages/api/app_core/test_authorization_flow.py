@@ -13,7 +13,7 @@ class AuthorizationFlowTests(SimpleTestCase):
         payload = fixture()
         self.run = SimpleNamespace(id=payload["agentRunId"], workspace_id=payload["workspaceId"],
             session_id=payload["sessionId"], user_id=payload["userId"], modelConfig_id=payload["modelConfigRef"],
-            thinkingMode=payload["thinkingMode"], session=SimpleNamespace(id=payload["sessionId"]),
+            thinkingMode=payload["thinkingMode"], session=SimpleNamespace(id=payload["sessionId"], purpose="interactive"),
             environment_id="environment-test", environment=SimpleNamespace(
                 id="environment-test", session_id=payload["sessionId"], environment_profile=payload["environmentProfile"],
                 environment_profile_digest=payload["environmentProfileDigest"], network="disabled"))
@@ -72,6 +72,39 @@ class AuthorizationFlowTests(SimpleTestCase):
             _validate_agent_run_binding(self.run)
         # Input authority does not depend on the current reasoning selection.
         self.test_valid_authorization_reaches_resource_scope_check()
+
+    def test_agent_run_api_start_and_cleanup_force_per_run_environment(self):
+        from .runtime_client import build_agent_run_start, build_agent_run_cleanup
+        self.run.pk = self.run.id
+        self.run.session.purpose = "agentRunApi"
+        self.run.turn_id = "turn-test"
+        self.run.prompt = "Generate a document"
+        self.run.agent_instructions = ""
+        self.run.tailPolicy = "append"
+        self.run.modelConfig = SimpleNamespace(contextTokens=8192, maxOutputTokens=4096)
+        payload = self.run.authorization.payload
+        payload["schema"] = "workspace.agent_run_authorization.v3"
+        payload["executionPolicy"] = {"purpose": "agentRunApi", "deadlineAtMs": 1_800_000_000_000}
+        self.run.authorization.digest = authorization_digest(payload)
+        self.run.authorization.signature = authorization_signature(payload, KEY)
+        authority = {"environmentId": self.run.environment_id, "controllerId": self.run.id,
+            "controllerEpoch": 1, "controllerLeaseDigest": "sha256:" + "a" * 64,
+            "controllerPurpose": "execute"}
+        start = build_agent_run_start(self.run, controller_authority=authority, execution_mode="retained")
+        self.assertEqual(start["environmentAuthorization"]["payload"]["executionMode"], "perRun")
+        authority["controllerPurpose"] = "cleanup"
+        cleanup = build_agent_run_cleanup(self.run, authority, execution_mode="retained")
+        self.assertEqual(cleanup["environmentAuthorization"]["payload"]["executionMode"], "perRun")
+
+    def test_revocation_blocks_execution_but_retains_immutable_cancel_control(self):
+        from .runtime_client import build_agent_run_control
+        self.run.pk = self.run.id
+        with patch("app_core.runtime_client.agent_run_membership_is_current", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "no longer current"):
+                build_agent_run_control(self.run)
+            control = build_agent_run_control(self.run, require_current_authority=False)
+        self.assertEqual(control["authorizationDigest"], self.run.authorization.digest)
+        self.assertEqual(control["authorizationSignature"], self.run.authorization.signature)
 
     def test_environment_must_belong_to_the_signed_session_before_startup_or_input_access(self):
         for attribute, value in (("environment_id", None), ("environment_id", "different-environment")):

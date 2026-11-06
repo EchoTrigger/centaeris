@@ -117,7 +117,7 @@ fn postgres_confirmed_resident_initialization_does_not_hold_global_preparation()
                 ))
             },
             |_, _| Ok(()),
-            |allocation| confirm(&first_run, allocation, &first_physical),
+            |allocation| confirm(&first_run, allocation, &first_physical).map_err(Into::into),
             move |_| {
                 entered_tx.send(()).unwrap();
                 release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -188,7 +188,7 @@ fn postgres_confirmed_resident_initialization_does_not_hold_global_preparation()
             })
         },
         |_, _| Ok(()),
-        |allocation| confirm(&other, allocation, &physical),
+        |allocation| confirm(&other, allocation, &physical).map_err(Into::into),
         |_| Ok(()),
     );
     release_tx.send(()).unwrap();
@@ -318,7 +318,9 @@ fn postgres_four_environment_initializations_overlap_with_shared_authority() {
                         thread_backends[index].store(pid, Ordering::SeqCst);
                         Ok(())
                     },
-                    |allocation| confirm(&current, allocation, &thread_physical),
+                    |allocation| {
+                        confirm(&current, allocation, &thread_physical).map_err(Into::into)
+                    },
                     move |_| {
                         thread_active.fetch_add(1, Ordering::SeqCst);
                         let result = entered
@@ -488,7 +490,7 @@ fn postgres_initialization_failure_preserves_confirmed_resident_and_dispatch_res
                         ))
                     },
                     |_, _| Ok(()),
-                    |allocation| confirm(&current, allocation, &physical),
+                    |allocation| confirm(&current, allocation, &physical).map_err(Into::into),
                     |_| Err(initialization_error.into()),
                 )
                 .unwrap_err();
@@ -749,7 +751,7 @@ fn postgres_environment_unlock_closes_registration_after_global_unlock_wake() {
                 ))
             },
             |_, _| Ok(()),
-            |allocation| confirm(&current, allocation, &physical),
+            |allocation| confirm(&current, allocation, &physical).map_err(Into::into),
             |_| Ok(()),
         )
         .unwrap();
@@ -797,7 +799,7 @@ fn postgres_initialization_rechecks_controller_and_job_after_resident_commit() {
                     Vec::new()
                 )),
                 |_, _| Ok(()),
-                |allocation| confirm(&current, allocation, &physical),
+                |allocation| confirm(&current, allocation, &physical).map_err(Into::into),
                 |_| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Ok(())
@@ -877,7 +879,7 @@ fn postgres_cleanup_during_initialization_declines_before_global_inventory_and_r
                 Vec::new()
             )),
             |_, _| Ok(()),
-            |allocation| confirm(&current, allocation, &physical),
+            |allocation| confirm(&current, allocation, &physical).map_err(Into::into),
             |_| panic!("changed cleanup authority must prevent execute initialization")
         )
         .is_err());

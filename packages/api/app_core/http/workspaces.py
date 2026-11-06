@@ -6,7 +6,7 @@ from typing import Literal
 
 from django.db import transaction
 from django.http import HttpResponse, JsonResponse
-from django.db.models import Max, Q
+from django.db.models import Max
 from django.utils import timezone
 from ninja import Router, Status
 from ninja.responses import codes_4xx
@@ -14,7 +14,6 @@ from pydantic import Field, ValidationError, field_validator, model_validator
 
 from app_core.assets import captured_input_fields
 from app_core.app_delegations import require_delegated_session, require_request_delegation
-from app_core.execution_admission import queued_admission_error
 from app_core.hosted_operations import (
     OPERATION_ID_PATTERN,
     HostedOperationError,
@@ -35,7 +34,6 @@ from app_core.models import (
     McpBearerCredential,
     Workspace,
     WorkspacePluginEnablement,
-    WorkspacePluginInstallation,
     validate_thinking_mode,
 )
 from app_core.plugin_catalog import (
@@ -115,7 +113,6 @@ from .serialization import (
 
 
 from app_core.workspace_plugins import workspace_plugin_catalog
-from app_core.workspace_resources import models_for_workspace
 
 logger = logging.getLogger(__name__)
 router = Router(tags=["workspaces-sessions"], by_alias=True)
@@ -454,7 +451,7 @@ def prepare_workspace_session_list(request, workspace_id: str):
     if request.GET:
         return Status(400, {"error": "session_filter_unsupported"})
     require_request_delegation(request, "sessions:read", workspace_id=workspace_id)
-    return Session.objects.filter(workspace=workspace, owner=request.user, status="active")
+    return Session.objects.filter(workspace=workspace, owner=request.user, status="active", purpose="interactive")
 
 
 @router.get(
@@ -466,7 +463,7 @@ def list_workspace_sessions(request, workspace_id: str):
     sessions_query = prepare_workspace_session_list(request, workspace_id)
     if isinstance(sessions_query, Status):
         return sessions_query
-    sessions = list(sessions_query.order_by("-isPinned", "-updatedAt"))
+    sessions = list(sessions_query.filter(archivedAt__isnull=True).order_by("-isPinned", "-updatedAt"))
     from app_core.session_attention import refresh_session_attention_many
     refresh_session_attention_many(sessions)
     running_session_ids = set(
@@ -479,6 +476,26 @@ def list_workspace_sessions(request, workspace_id: str):
             serialize_session(session, has_active_agent_run=session.id in running_session_ids, attention_is_current=True)
             for session in sessions
         ]
+    }
+
+
+@router.get(
+    "/workspaces/{workspace_id}/archived-sessions",
+    auth=session_auth,
+    response={200: SessionsEnvelope} | COMMON_ERROR_RESPONSES,
+)
+def list_archived_sessions(request, workspace_id: str):
+    sessions_query = prepare_workspace_session_list(request, workspace_id)
+    if isinstance(sessions_query, Status):
+        return sessions_query
+    sessions = list(sessions_query.filter(archivedAt__isnull=False).order_by("-archivedAt", "-id"))
+    from app_core.session_attention import refresh_session_attention_many
+    refresh_session_attention_many(sessions)
+    return {
+        "sessions": [
+            serialize_session(session, has_active_agent_run=False, attention_is_current=True)
+            for session in sessions
+        ],
     }
 
 
@@ -558,6 +575,8 @@ def get_session(request, session_id: str):
     session = _authorized_transcript_session(request.user, session_id)
     if session is None:
         return Status(404, {"error": "session_not_found"})
+    if session.archivedAt is not None:
+        return Status(409, {"error": "session_archived"})
     return {"session": serialize_session(session)}
 
 
@@ -678,6 +697,7 @@ def delete_session(request, session_id: str):
                 ).update(transitionReason="agent_run_cancel_requested")
         deleted_at = timezone.now()
         session.status = "deleted"
+        session.archivedAt = None
         session.deletedAt = deleted_at
         session.deletedBy = request.user
         session.purgedAt = deleted_at
@@ -685,6 +705,7 @@ def delete_session(request, session_id: str):
         session.save(
             update_fields=[
                 "status",
+                "archivedAt",
                 "deletedAt",
                 "deletedBy",
                 "purgedAt",
@@ -692,6 +713,38 @@ def delete_session(request, session_id: str):
             ]
         )
     return {"deleted": True}
+
+
+def _set_session_archived(user, session_id: str, *, archived: bool):
+    with transaction.atomic():
+        _, session = _locked_owned_session(user, session_id)
+        if session is None or session.status != "active":
+            return Status(404, {"error": "session_not_found"})
+        if archived and session.agent_runs.filter(status__in={"queued", "running"}).exists():
+            return Status(409, {"error": "session_has_active_agent_run"})
+        if archived != (session.archivedAt is not None):
+            session.archivedAt = timezone.now() if archived else None
+            # The existing Session update trigger publishes the navigation change.
+            session.save(update_fields=["archivedAt", "updatedAt"])
+    return {"session": serialize_session(session)}
+
+
+@router.put(
+    "/sessions/{session_id}/archive",
+    auth=session_auth,
+    response={200: SessionEnvelope} | COMMON_ERROR_RESPONSES,
+)
+def archive_session(request, session_id: str):
+    return _set_session_archived(request.user, session_id, archived=True)
+
+
+@router.delete(
+    "/sessions/{session_id}/archive",
+    auth=session_auth,
+    response={200: SessionEnvelope} | COMMON_ERROR_RESPONSES,
+)
+def unarchive_session(request, session_id: str):
+    return _set_session_archived(request.user, session_id, archived=False)
 
 
 @router.post(
@@ -1095,6 +1148,7 @@ def _authorized_transcript_session(user, session_id: str) -> Session | None:
         session = Session.objects.select_related("workspace").get(
             id=session_id,
             owner=user,
+            purpose="interactive",
             purgedAt__isnull=True,
         )
     except Session.DoesNotExist:
@@ -1194,7 +1248,7 @@ def create_session_message(
             id=payload.project_id, workspace=workspace, owner=request.user,
         ).exists():
             return Status(404, {"error": "session_project_not_found"})
-    elif not Session.objects.filter(id=session_id, workspace=workspace, owner=request.user, status="active").exists():
+    elif not Session.objects.filter(id=session_id, workspace=workspace, owner=request.user, status="active", archivedAt__isnull=True, purpose="interactive").exists():
         return Status(404, {"error": "session_not_found"})
     try:
         selected_session_model(workspace.id, payload.model_config_ref, payload.thinking_mode)
@@ -1232,13 +1286,8 @@ def create_session_message(
             session = None
             if session_id != "new":
                 session = Session.objects.select_for_update(of=("self",)).filter(
-                    id=session_id, workspace=workspace, owner=request.user, status="active",
+                    id=session_id, workspace=workspace, owner=request.user, status="active", archivedAt__isnull=True, purpose="interactive",
                 ).first()
-            # Retain the previous quota-error precedence over the business
-            # existence/status checks below; no resource has been created yet.
-            admission_error = queued_admission_error(workspace.id)
-            if admission_error is not None:
-                raise AgentSessionCreationError(*admission_error)
             if session_id == "new":
                 project = None
                 if payload.project_id is not None:
@@ -1419,7 +1468,7 @@ def _parse_session_message_request(request):
     response={202: HostedOperationResponse} | COMMON_ERROR_RESPONSES,
 )
 def respond_question(request, session_id: str, agent_run_id: str, question_id: str, payload: QuestionResponseRequest):
-    session = Session.objects.filter(id=session_id, owner=request.user, status="active").first()
+    session = Session.objects.filter(id=session_id, owner=request.user, status="active", purpose="interactive").first()
     if session is None:
         return Status(404, {"error": "session_not_found"})
     digest = request_digest(payload, target={"sessionId": session_id, "agentRunId": agent_run_id, "questionId": question_id})
@@ -1435,7 +1484,7 @@ def respond_question(request, session_id: str, agent_run_id: str, question_id: s
                 digest, app_delegation=grant)
             if receipt is not None:
                 return Status(202, serialize_operation(receipt))
-            session = Session.objects.select_for_update().filter(id=session_id, owner=request.user, status="active").first()
+            session = Session.objects.select_for_update().filter(id=session_id, owner=request.user, status="active", purpose="interactive").first()
             if session is None:
                 return Status(404, {"error": "session_not_found"})
             run = AgentRun.objects.select_related("authorization", "modelConfig", "session").filter(
@@ -1482,6 +1531,7 @@ def supplement_agent_run(
             session_id=session_id,
             status__in={"queued", "running"},
             session__owner=request.user,
+            session__purpose="interactive",
         )
     except AgentRun.DoesNotExist:
         return Status(404, {"error": "active_agent_run_not_found"})
@@ -1527,6 +1577,7 @@ def cancel_agent_run(request, session_id: str, agent_run_id: str):
             id=agent_run_id,
             session_id=session_id,
             session__owner=request.user,
+            session__purpose="interactive",
         )
     except AgentRun.DoesNotExist:
         return Status(404, {"error": "agent_run_not_found"})
@@ -1677,7 +1728,7 @@ def _workspace_plugin(package: dict, enabled: bool, *, inspect: bool = False, wo
             logger.exception("Plugin credential metadata is unavailable: %s", package["name"])
             errors.append("plugin_credentials_unavailable")
     if inspect and "plugin_manifest_invalid" not in errors:
-        configured = set(McpBearerCredential.objects.filter(Q(workspace=workspace)|Q(workspace__isnull=True)).values_list("plugin_name", "credential_ref"))
+        configured = set(McpBearerCredential.objects.filter(workspace=workspace).values_list("plugin_name", "credential_ref"))
         for field, contribution, loader, code in (
             (
                 "mcpServers",
@@ -1703,8 +1754,7 @@ def _workspace_plugin(package: dict, enabled: bool, *, inspect: bool = False, wo
             except (OSError, RuntimeError, ValueError, KeyError, TypeError):
                 logger.exception("Plugin inspection failed: %s %s", package["name"], field)
                 errors.append(code)
-    local = workspace is not None and WorkspacePluginInstallation.objects.filter(workspace=workspace,plugin_name=package["name"]).exists()
-    plugin.update(scope="workspace" if local else "platform",writable=local)
+    plugin.update(scope="workspace", writable=True)
     return plugin
 
 
@@ -1843,7 +1893,9 @@ def _session_for_update(user, session_id: str, *, lock: bool):
         session = query.select_related("workspace").get(
             id=session_id,
             owner=user,
+            purpose="interactive",
             status="active",
+            archivedAt__isnull=True,
         )
     except Session.DoesNotExist:
         return None
@@ -1851,8 +1903,8 @@ def _session_for_update(user, session_id: str, *, lock: bool):
 
 
 def _locked_owned_session(user, session_id: str):
-    workspace_id = Session.objects.filter(id=session_id, owner=user).values_list("workspace_id", flat=True).first()
+    workspace_id = Session.objects.filter(id=session_id, owner=user, purpose="interactive").values_list("workspace_id", flat=True).first()
     if workspace_id is None or locked_workspace_membership_for(user, workspace_id) is None:
         return None, None
-    session = Session.objects.select_for_update().filter(id=session_id, workspace_id=workspace_id, owner=user).first()
+    session = Session.objects.select_for_update().filter(id=session_id, workspace_id=workspace_id, owner=user, purpose="interactive").first()
     return None, session

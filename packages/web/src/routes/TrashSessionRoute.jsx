@@ -1,6 +1,6 @@
 import { useTranslation } from "../i18n";
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams, useRevalidator, useRouteLoaderData } from "react-router";
+import { Link, useLocation, useNavigate, useParams, useRevalidator, useRouteLoaderData } from "react-router";
 import { ArrowLeft, LoaderCircle, RotateCcw, Trash2 } from "lucide-react";
 import { apiJson } from "../api";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -23,6 +23,8 @@ export default function TrashSessionRoute() {
   const { sessionId = "" } = useParams();
   const { workspace } = useRouteLoaderData("workspace");
   const base = `/w/${encodeURIComponent(workspace.id)}`;
+  const deletedView = `${base}/settings/archive?view=deleted`;
+  const { state } = useLocation();
   const navigate = useNavigate();
   const revalidator = useRevalidator();
   const storeRef = useRef(null);
@@ -38,7 +40,8 @@ export default function TrashSessionRoute() {
   const [restoring, setRestoring] = useState(false);
   const [purging, setPurging] = useState(false);
   const [purgeOpen, setPurgeOpen] = useState(false);
-  const [error, setError] = useState("");
+  const [readError, setReadError] = useState("");
+  const [actionError, setActionError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -48,7 +51,8 @@ export default function TrashSessionRoute() {
     setSession(null);
     setLoading(true);
     setLoadingOlder(false);
-    setError("");
+    setReadError("");
+    setActionError("");
     Promise.all([
       apiJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
         signal: controller.signal,
@@ -70,7 +74,7 @@ export default function TrashSessionRoute() {
     }).catch((requestError) => {
       if (controller.signal.aborted) return;
       if (requestError.status === 404) navigate(`${base}/app`, { replace: true });
-      else setError(t("trashSessionRoute.unableToLoadConversationHistoryValue", { value1: requestError.message }));
+      else setReadError(t("trashSessionRoute.unableToLoadConversationHistory"));
     }).finally(() => {
       if (!controller.signal.aborted) setLoading(false);
     });
@@ -95,6 +99,7 @@ export default function TrashSessionRoute() {
     };
     olderRequestRef.current = request;
     setLoadingOlder(true);
+    setReadError("");
     try {
       const page = await transport.loadOlder({
         sessionId: current.sessionId,
@@ -104,9 +109,9 @@ export default function TrashSessionRoute() {
       }, current.olderCursor, controller.signal);
       if (olderRequestRef.current !== request) return;
       store.prependPage(page, current.viewEpoch);
-    } catch (requestError) {
+    } catch {
       if (!controller.signal.aborted) {
-        setError(t("trashSessionRoute.unableToLoadEarlierMessagesValue", { value1: requestError.message }));
+        setReadError(t("trashSessionRoute.unableToLoadEarlierMessages"));
       }
     } finally {
       if (olderRequestRef.current === request) {
@@ -119,15 +124,15 @@ export default function TrashSessionRoute() {
   async function restore() {
     if (!session || session.status !== "deleted" || restoring) return;
     setRestoring(true);
-    setError("");
+    setActionError("");
     try {
       await apiJson(`/api/sessions/${encodeURIComponent(session.id)}/restore`, { method: "POST" });
       await revalidator.revalidate();
       navigate(`${base}/sessions/${encodeURIComponent(session.id)}`);
     } catch (requestError) {
-      if (requestError.status === 404 || requestError.status === 410) navigate(`${base}/app`, { replace: true });
+      if (requestError.status === 404 || requestError.status === 410) navigate(deletedView, { replace: true, state });
       else if (requestError.message === "session_not_deleted") navigate(`${base}/sessions/${encodeURIComponent(session.id)}`, { replace: true });
-      else setError(t("trashSessionRoute.unableToRestoreValue", { value1: requestError.message }));
+      else setActionError(t("trashSessionRoute.unableToRestore"));
     } finally {
       setRestoring(false);
     }
@@ -136,14 +141,14 @@ export default function TrashSessionRoute() {
   async function purge() {
     if (!session || purging) return;
     setPurging(true);
-    setError("");
+    setActionError("");
     try {
       await apiJson(`/api/sessions/${encodeURIComponent(session.id)}/trash`, { method: "DELETE" });
       await revalidator.revalidate();
-      navigate(`${base}/app`, { replace: true });
+      navigate(deletedView, { replace: true, state });
     } catch (requestError) {
-      if (requestError.status === 404 || requestError.status === 410 || requestError.message === "session_not_deleted") navigate(`${base}/app`, { replace: true });
-      else setError(t("trashSessionRoute.unableToDeletePermanentlyValue", { value1: requestError.message }));
+      if (requestError.status === 404 || requestError.status === 410 || requestError.message === "session_not_deleted") navigate(deletedView, { replace: true, state });
+      else setActionError(t("trashSessionRoute.unableToDeletePermanently"));
     } finally {
       setPurging(false);
     }
@@ -152,24 +157,29 @@ export default function TrashSessionRoute() {
   const remainingDays = session?.deletedAt ? Math.max(1, Math.ceil((new Date(session.deletedAt).valueOf() + 30 * 86400000 - Date.now()) / 86400000)) : null;
 
   return (
-    <ShellPage>
-      <div className="shDeletedTopbar"><Link to={`${base}/app`}><ArrowLeft aria-hidden="true" />{t("trashSessionRoute.back")}</Link><span>{session?.title || t("trashSessionRoute.deletedConversation")}</span></div>
-      <div className="shDeletedBanner">
-        <span>{remainingDays ? t("trash.remaining", { count: remainingDays }) : t("trash.inTrash")}</span>
-        {session?.status === "deleted" ? <button type="button" disabled={restoring} onClick={restore}>{restoring ? <LoaderCircle className="statusIcon" aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}{t("trashSessionRoute.restoreConversation")}</button> : null}
-        {session?.status === "deleted" ? <button type="button" disabled={purging} onClick={() => setPurgeOpen(true)}><Trash2 aria-hidden="true" />{t("trashSessionRoute.deletePermanently")}</button> : null}
+    <ShellPage mainClassName="shDeletedSessionPage">
+      <div className="shDeletedTopbar">
+        <Link to={deletedView} state={state}><ArrowLeft aria-hidden="true" />{t("settingsRoute.recentlyDeleted")}</Link>
+        <span>{session?.title || t("trashSessionRoute.deletedConversation")}</span>
+        {session?.status === "deleted" ? <div className="shDeletedActions">
+          <small>{remainingDays ? t("trash.remaining", { count: remainingDays }) : t("trash.inTrash")}</small>
+          {!purgeOpen && actionError ? <small className="error" role="alert">{actionError}</small> : null}
+          <button type="button" className="pluginEnableButton" disabled={restoring} onClick={restore}>{restoring ? <LoaderCircle className="statusIcon" aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}{t("trashSessionRoute.restoreConversation")}</button>
+          <button type="button" className="pluginEnableButton" disabled={purging} onClick={() => { setActionError(""); setPurgeOpen(true); }}><Trash2 aria-hidden="true" />{t("trashSessionRoute.deletePermanently")}</button>
+        </div> : null}
       </div>
-      {error ? <div className="errorBanner" role="alert">{error}</div> : null}
       <section className="shTrashHistory" aria-label={t("trashSessionRoute.readOnlyConversationHistory")}>
+        {session && readError ? <p className="shTrashReadError" role="alert">{readError} <button type="button" className="pluginEnableButton" onClick={() => void loadOlder()}>{t("agentChat.retry")}</button></p> : null}
         <TranscriptBlockList
           store={store}
           sessionId={sessionId}
           loadingHistory={loading}
           loadingOlderHistory={loadingOlder}
           onLoadOlderHistory={loadOlder}
+          emptyState={readError ? <p className="libraryCatalogEmpty" role="alert">{readError}</p> : null}
         />
       </section>
-      <ConfirmDialog open={purgeOpen} title={t("appRoute.deleteThisConversation")} busy={purging} onCancel={() => setPurgeOpen(false)} onConfirm={() => void purge()} />
+      <ConfirmDialog open={purgeOpen} title={t("appRoute.deleteThisConversation")} message={actionError} busy={purging} onCancel={() => { setActionError(""); setPurgeOpen(false); }} onConfirm={() => void purge()} />
     </ShellPage>
   );
 }

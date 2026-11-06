@@ -68,9 +68,9 @@
 .desktopModelKeyInput [data-slot="button"] { position: absolute; inset-inline-end: 3px; top: 2px; color: var(--process-text); }
 .desktopModelEditActions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--outline-variant); }
 .desktopModelEditActions > span { margin-right: auto; color: var(--process-text); font-size: 12px; }
-.desktopModelFeedback, .desktopModelTestResult, .desktopModelDiagnostic { display: flex; align-items: flex-start; gap: 8px; margin: 18px 0 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--error) 22%, var(--outline-variant)); border-radius: 8px; color: var(--error); background: color-mix(in srgb, var(--error) 4%, var(--surface-color)); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.desktopModelFeedback, .desktopModelTestResult, .desktopModelDiagnostic { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 0; color: var(--process-text); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .desktopModelFeedback > svg, .desktopModelTestResult > svg, .desktopModelDiagnostic > svg { flex-shrink: 0; margin-top: 2px; }
-.desktopModelFeedback[data-success="true"], .desktopModelTestResult[data-success="true"] { color: var(--on-surface); border-color: var(--outline-variant); background: var(--surface-variant); }
+.desktopModelFeedback[data-success="true"], .desktopModelTestResult[data-success="true"] { color: var(--on-surface); }
 .desktopModelFeedback > span, .desktopModelTestResult > span, .desktopModelDiagnostic > span { min-width: 0; white-space: pre-wrap; }
 .desktopModelRecovery { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .desktopModelSearch { position: relative; margin: 0 0 10px; }

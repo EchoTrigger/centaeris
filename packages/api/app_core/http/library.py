@@ -530,6 +530,7 @@ def upload_session_library_objects(request, session_id: str):
         session = Session.objects.select_related("workspace").get(
             id=session_id,
             owner=request.user,
+            purpose="interactive",
             status="active",
         )
         if workspace_membership_for(request.user, session.workspace_id) is None:
@@ -551,7 +552,7 @@ def upload_session_library_objects(request, session_id: str):
             if membership is None:
                 raise DelegationRejected("session_not_found", 404)
             require_request_delegation(request, "attachments:write", session_id=session_id, lock=True)
-            session = Session.objects.select_for_update().filter(id=session_id, owner=request.user, status="active").first()
+            session = Session.objects.select_for_update().filter(id=session_id, owner=request.user, status="active", purpose="interactive").first()
             if session is None:
                 raise DelegationRejected("session_not_found", 404)
             library_objects = _create_uploaded_library_objects(request.user, stored)
@@ -930,6 +931,7 @@ def _session_for_assets(user, session_id: str):
     session = Session.objects.select_related("workspace").filter(
         id=session_id,
         owner=user,
+        purpose="interactive",
     ).first()
     if session is None or workspace_membership_for(user, session.workspace_id) is None:
         return None

@@ -121,7 +121,21 @@ impl PostgresRuntimeStore {
             return Err("control stage invalid".into());
         }
         self.with_execution_control_client(|client| {
-            client.query_one(&format!("SELECT (SELECT count(*) FROM runtime_jobs WHERE job_kind='agent_run.lifecycle' AND status IN('leased','running') AND lease_purpose='control' AND lease_control_stage=$3)<2 AND EXISTS(SELECT 1 FROM runtime_jobs j WHERE {} )",control_candidates(stage)),&[&None::<String>,&(stage=="cleanup"),&stage]).map(|row|row.get(0)).map_err(|e|e.to_string())
+            let affinity = super::execution_capacity::host_affinity("$3");
+            client
+                .query_one(
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM runtime_jobs j WHERE {} AND {affinity})",
+                        control_candidates(stage)
+                    ),
+                    &[
+                        &None::<String>,
+                        &(stage == "cleanup"),
+                        &self.dispatch_host_id(),
+                    ],
+                )
+                .map(|row| row.get(0))
+                .map_err(|e| e.to_string())
         })
     }
     pub(crate) fn claim_control_jobs(
@@ -137,11 +151,9 @@ impl PostgresRuntimeStore {
         self.with_execution_control_client(|client| {
             let mut tx=client.transaction().map_err(|e|e.to_string())?;
             super::resource_commit::require_durable_resource_commit(&mut tx)?;
-            if !tx.query_one("SELECT pg_try_advisory_xact_lock(731946,2)",&[]).map_err(|e|e.to_string())?.get::<_,bool>(0) { return Err("execution claim busy".into()); }
-            let used=tx.query_one("SELECT count(*) FROM runtime_jobs WHERE job_kind='agent_run.lifecycle' AND status IN('leased','running') AND lease_purpose='control' AND lease_control_stage=$1", &[&stage]).map_err(|e|e.to_string())?.get::<_,i64>(0);
-            let available=(2i64-used).max(0).min(req.limit as i64);
-            if available==0 { return Ok(vec![]); }
-            let rows=tx.query(&format!("SELECT j.job_id,j.status FROM runtime_jobs j WHERE {} ORDER BY j.run_at_ms,j.created_at_ms,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT $3",control_candidates(stage)), &[&req.job_id,&(stage=="cleanup"),&available]).map_err(|e|e.to_string())?;
+            let host = self.dispatch_host_id();
+            let affinity = super::execution_capacity::host_affinity("$4");
+            let rows=tx.query(&format!("SELECT j.job_id,j.status FROM runtime_jobs j WHERE {} AND {affinity} ORDER BY j.run_at_ms,j.created_at_ms,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT $3",control_candidates(stage)), &[&req.job_id,&(stage=="cleanup"),&(req.limit as i64),&host]).map_err(|e|e.to_string())?;
             let now=tx.query_one("SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",&[]).map_err(|e|e.to_string())?.get::<_,i64>(0);
             let until=now.saturating_add(i64::try_from(req.lease_ms).map_err(|_|"lease overflow")?);
             let mut jobs=vec![];
@@ -151,7 +163,7 @@ impl PostgresRuntimeStore {
                 if row.get::<_,String>(1)!="queued" {
                     record_cleanup_recovery(&mut tx,&id,&owner,now)?;
                 }
-                tx.execute("UPDATE runtime_jobs SET status='leased',lease_owner=$5,lease_expires_at_ms=$2,heartbeat_at_ms=$3,updated_at_ms=$3,lease_purpose='control',lease_control_stage=$4 WHERE job_id=$1", &[&id,&until,&now,&stage,&owner]).map_err(|e|e.to_string())?;
+                tx.execute("UPDATE runtime_jobs SET status='leased',lease_owner=$5,lease_expires_at_ms=$2,heartbeat_at_ms=$3,updated_at_ms=$3,lease_purpose='control',lease_control_stage=$4,lease_host_id=$6 WHERE job_id=$1", &[&id,&until,&now,&stage,&owner,&host]).map_err(|e|e.to_string())?;
                 jobs.push(super::reliability::load_job(&mut tx,&id)?.ok_or("claimed control Job missing")?);
             }
             tx.commit().map_err(|e|e.to_string())?; Ok(jobs)
@@ -159,13 +171,13 @@ impl PostgresRuntimeStore {
     }
     pub(crate) fn start_control_job(&self, id: &str, owner: &str) -> Result<(), String> {
         self.with_execution_control_client(|client| {
-            let changed=client.execute("UPDATE runtime_jobs SET status='running',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE job_id=$1 AND job_kind='agent_run.lifecycle' AND status='leased' AND lease_owner=$2 AND lease_purpose='control' AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint", &[&id,&owner]).map_err(|e|e.to_string())?;
+            let changed=client.execute("UPDATE runtime_jobs SET status='running',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE job_id=$1 AND job_kind='agent_run.lifecycle' AND status='leased' AND lease_owner=$2 AND lease_purpose='control' AND ($3::text IS NULL OR lease_host_id=$3) AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint", &[&id,&owner,&self.dispatch_host_id()]).map_err(|e|e.to_string())?;
             if changed!=1 {return Err("control start rejected".into());} Ok(())
         })
     }
     pub(crate) fn require_execute_lease(&self, id: &str, owner: &str) -> Result<(), String> {
         self.with_client(|client| {
-            let valid=client.query_opt("SELECT 1 FROM runtime_jobs WHERE job_id=$1 AND lease_owner=$2 AND status IN('leased','running') AND lease_purpose='execute' AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint", &[&id,&owner]).map_err(|e|e.to_string())?;
+            let valid=client.query_opt("SELECT 1 FROM runtime_jobs WHERE job_id=$1 AND lease_owner=$2 AND status IN('leased','running') AND lease_purpose='execute' AND ($3::text IS NULL OR job_kind<>'agent_run.lifecycle' OR lease_host_id=$3) AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint", &[&id,&owner,&self.dispatch_host_id()]).map_err(|e|e.to_string())?;
             if valid.is_none() {return Err("ordinary execution lease rejected".into());} Ok(())
         })
     }
@@ -176,7 +188,7 @@ impl PostgresRuntimeStore {
         owner: &str,
     ) -> Result<(), String> {
         self.with_execution_control_client(|client| {
-            let valid=client.query_opt("SELECT 1 FROM runtime_jobs WHERE job_id=$1 AND job_id='agent_run.lifecycle:'||$3 AND job_kind='agent_run.lifecycle' AND lease_owner=$2 AND status='running' AND lease_purpose='control' AND session_id=$4 AND idempotency_key=job_id||':'||$5 AND payload_ref='record:agent_run:'||$3 AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint", &[&id,&owner,&control.agent_run_id,&control.authorization.session_id,&control.authorization_digest]).map_err(|e|e.to_string())?;
+            let valid=client.query_opt("SELECT 1 FROM runtime_jobs WHERE job_id=$1 AND job_id='agent_run.lifecycle:'||$3 AND job_kind='agent_run.lifecycle' AND lease_owner=$2 AND status='running' AND lease_purpose='control' AND session_id=$4 AND idempotency_key=job_id||':'||$5 AND payload_ref='record:agent_run:'||$3 AND ($6::text IS NULL OR lease_host_id=$6) AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint", &[&id,&owner,&control.agent_run_id,&control.authorization.session_id,&control.authorization_digest,&self.dispatch_host_id()]).map_err(|e|e.to_string())?;
             if valid.is_none() { return Err("control lease rejected".into()); } Ok(())
         })
     }

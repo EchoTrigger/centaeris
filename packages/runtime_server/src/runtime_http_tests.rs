@@ -16,7 +16,7 @@ fn http_state(runtime: Arc<tokio::runtime::Runtime>) -> HttpServerState {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
             image_digest: "sha256:synthetic-http-fixture".into(),
         }),
-        request_capacity: request_capacity::RequestCapacity::for_http_tests(Duration::from_secs(2)),
+        request_policy: request_policy::RequestPolicy::for_http_tests(Duration::from_secs(2)),
     }
 }
 
@@ -102,7 +102,7 @@ pub(crate) fn stored_request(
         let mut state = http_state(runtime.clone());
         state.store = Arc::new(RuntimeStoreActor::start(store.clone()).unwrap());
         state.job_store = Arc::new(store);
-        state.request_capacity = request_capacity::RequestCapacity::from_env().unwrap();
+        state.request_policy = request_policy::RequestPolicy::from_env().unwrap();
         let response = TowerToHyperService::new(http_router(state))
             .call(
                 Request::builder()
@@ -128,15 +128,15 @@ pub(crate) fn stored_request(
 }
 
 #[test]
-fn runtime_http_timeout_and_disconnect_hold_capacity_until_blocking_work_exits() {
+fn runtime_http_timeout_and_disconnect_do_not_cancel_blocking_work() {
     let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
     runtime.block_on(async {
         for disconnect in [false, true] {
             let mut state = http_state(runtime.clone());
-            state.request_capacity =
-                request_capacity::RequestCapacity::for_http_tests(Duration::from_millis(100));
-            let slots = state.request_capacity.lane("POST", "/skills/catalog").slots;
+            state.request_policy =
+                request_policy::RequestPolicy::for_http_tests(Duration::from_millis(100));
             let (entered, entered_rx) = tokio::sync::oneshot::channel();
+            let (finished, mut finished_rx) = tokio::sync::oneshot::channel();
             let (release, release_rx) = std::sync::mpsc::channel();
             let task = tokio::spawn(dispatch_http_operation(
                 State(state),
@@ -148,6 +148,7 @@ fn runtime_http_timeout_and_disconnect_hold_capacity_until_blocking_work_exits()
                 move |_, _| {
                     entered.send(()).unwrap();
                     release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    finished.send(()).unwrap();
                     Ok(http_response(200, "text/plain", b"completed".to_vec()))
                 },
             ));
@@ -161,19 +162,106 @@ fn runtime_http_timeout_and_disconnect_hold_capacity_until_blocking_work_exits()
             } else {
                 assert_eq!(task.await.unwrap().status(), 504);
             }
-            assert_eq!(
-                slots.available_permits(),
-                0,
-                "detaching the response must not refund running work"
-            );
-            assert!(slots.clone().try_acquire_owned().is_err());
+            assert!(matches!(
+                finished_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
             release.send(()).unwrap();
-            let permit = tokio::time::timeout(Duration::from_secs(3), slots.acquire_owned())
+            tokio::time::timeout(Duration::from_secs(3), finished_rx)
                 .await
                 .unwrap()
                 .unwrap();
-            drop(permit);
         }
+    });
+}
+
+#[test]
+fn runtime_http_concurrent_handlers_progress_independently() {
+    let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    runtime.block_on(async {
+        let state = http_state(runtime.clone());
+        let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let changed = Arc::new(tokio::sync::Notify::new());
+        let (release, receiver) = std::sync::mpsc::channel();
+        let receiver = Arc::new(std::sync::Mutex::new(receiver));
+        let mut tasks = Vec::new();
+        for _ in 0..32 {
+            let entered = entered.clone();
+            let changed = changed.clone();
+            let receiver = receiver.clone();
+            tasks.push(tokio::spawn(dispatch_http_operation(
+                State(state.clone()),
+                Request::builder()
+                    .method("POST")
+                    .uri("/agent-runs/step")
+                    .body(Body::empty())
+                    .unwrap(),
+                move |_, _| {
+                    entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    changed.notify_one();
+                    receiver
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                    Ok(http_response(200, "text/plain", b"completed".to_vec()))
+                },
+            )));
+        }
+        let all_entered = tokio::time::timeout(Duration::from_secs(3), async {
+            while entered.load(std::sync::atomic::Ordering::SeqCst) < 32 {
+                changed.notified().await;
+            }
+        })
+        .await
+        .is_ok();
+        for _ in 0..32 {
+            release.send(()).unwrap();
+        }
+        assert!(
+            all_entered,
+            "concurrent HTTP work must not be rejected by a local request quota"
+        );
+        for task in tasks {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status(),
+                200
+            );
+        }
+    });
+}
+
+#[test]
+fn runtime_http_accepts_new_requests_with_many_incomplete_connections() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route("/", axum::routing::get(|| async { "ready" }));
+        let server = tokio::spawn(accept_http_connections(listener, router));
+        let mut pending = Vec::new();
+        for _ in 0..128 {
+            pending.push(tokio::net::TcpStream::connect(address).await.unwrap());
+        }
+        let mut request = tokio::net::TcpStream::connect(address).await.unwrap();
+        request
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        let result =
+            tokio::time::timeout(HTTP_HEADER_TIMEOUT / 2, request.read_to_end(&mut response)).await;
+        drop(pending);
+        server.abort();
+        result
+            .expect("a complete request must progress independently of idle connections")
+            .unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+        assert!(response.ends_with(b"ready"));
     });
 }
 
@@ -385,22 +473,6 @@ fn runtime_http_router_contract() {
             assert_eq!(status, expected);
             records.push(record);
         }
-        let _slot = state
-            .request_capacity
-            .lane("POST", "/agent-runs/step")
-            .slots
-            .try_acquire_owned()
-            .unwrap();
-        let (status, record) = router_request(
-            &router,
-            Request::builder()
-                .uri("/banana")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(status, 503);
-        records.push(record);
         if let Ok(directory) = env::var("CENTAERIS_HTTP_CONTRACT_RECORD_DIR") {
             std::fs::create_dir_all(&directory).unwrap();
             std::fs::write(

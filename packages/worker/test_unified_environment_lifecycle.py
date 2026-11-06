@@ -33,6 +33,19 @@ class UnifiedEnvironmentLifecycleTests(unittest.TestCase):
                 self.assertEqual(runtime.call_args.args[0], {'schema': 'runtime.agent_run.step.v1',
                     'jobId': job['jobId'], 'leaseOwner': 'worker:fixture-owner', 'agentRunStart': start})
 
+    def test_agent_run_api_wait_wakes_at_its_signed_execution_deadline(self):
+        job, start = self.start()
+        start['authorization']['executionPolicy'] = {'purpose': 'agentRunApi', 'deadlineAtMs': 1001}
+        resolved = {'schema': 'runtime.agent_run_lifecycle.resolved.v1', 'disposition': 'ready', 'agentRunStart': start}
+        step = {'schema': 'runtime.agent_run.step.result.v1', 'agentRunId': start['agentRunId'],
+            'disposition': 'waiting', 'terminalState': None, 'transitionReason': 'runtime_job_wait'}
+        with patch.object(worker, 'api_request', return_value=resolved), \
+                patch.object(worker, 'transition_agent_run'), patch.object(worker, 'yield_job') as yielded, \
+                patch.object(worker, 'now_ms', return_value=1000), \
+                patch.object(worker, 'agent_run_step_request', return_value=step):
+            worker.execute_agent_run_lifecycle_job(job, 'worker:fixture-owner', lambda: None)
+        self.assertEqual(yielded.call_args.args[2], 1001)
+
     def test_terminal_replay_only_tears_down_and_releases_after_a_durable_cleanup_receipt(self):
         for mode in ('perRun', 'retained'):
             with self.subTest(mode=mode):

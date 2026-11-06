@@ -6,8 +6,14 @@ The document-processor image is a required material-worker dependency. The
 dedicated Python service inspects its image and specification, then registers the
 current specification with the platform. Runtime obtains that identity from the
 API when registering material MCP tools; it has no processor implementation.
-Missing/invalid processor configuration fails Worker startup. Material tool
+An unavailable processor prevents work from being claimed. Material tool
 registration fails closed until a platform specification is available.
+
+The deployment runs one `material-scheduler` and a Celery `material-worker`
+with concurrency one. Their dedicated `material-broker` uses a persistent Redis
+volume and disables eviction. PostgreSQL holds the authoritative processing
+status and result. A broker restart can delay delivery, and the scheduler
+recovers eligible PostgreSQL tasks even when delivery never occurred.
 
 Specification checks and document containers use a read-only root, no network,
 dropped capabilities, a non-root user, and fixed limits of 4 CPUs, 4 GiB memory,

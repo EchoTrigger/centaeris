@@ -2718,16 +2718,18 @@ fn authorized_system_skill_path(model_path: &str) -> Result<bool, ExecutionFileS
 fn ensure_container(
     expected: &ContainerExpectation<'_>,
     has_execution_fact: bool,
-) -> Result<(), String> {
-    crate::observations::timed("sandboxEnsure", || {
-        ensure_container_inner(expected, has_execution_fact)
-    })
+) -> Result<(), crate::postgres_store::execution_instances::InstancePreparationFailure> {
+    let mut span = crate::observations::Span::new("sandboxEnsure");
+    let result = ensure_container_inner(expected, has_execution_fact);
+    span.finished(result.is_ok());
+    result
 }
 
 fn ensure_container_inner(
     expected: &ContainerExpectation<'_>,
     has_execution_fact: bool,
-) -> Result<(), String> {
+) -> Result<(), crate::postgres_store::execution_instances::InstancePreparationFailure> {
+    use crate::postgres_store::execution_instances::InstancePreparationFailure;
     let body = container_create_body(expected)?;
     if let Some(facts) = inspect_container(expected.name)? {
         require_plugin_mounts_match(
@@ -2763,9 +2765,13 @@ fn ensure_container_inner(
         // No Execution fact or user tool dispatch exists at this preparation
         // boundary. Remove only the verified immutable container we prepared.
         let cleanup = crate::docker_engine::remove(&id, false);
-        return Err(match cleanup {
+        let error = match cleanup {
             Ok(()) => error,
             Err(cleanup) => format!("{error}; sandbox preparation cleanup failed: {cleanup}"),
+        };
+        return Err(InstancePreparationFailure::Created {
+            container_id: id,
+            error,
         });
     }
     Ok(())
@@ -3056,6 +3062,9 @@ impl ContainerFacts {
     }
 
     fn matches_configuration(&self, expected: &ContainerExpectation<'_>) -> bool {
+        if !crate::docker_engine::sandbox_deployment_matches(&self.labels) {
+            return false;
+        }
         container_create_body(expected).is_ok_and(|mut body| {
             // Archive backing is a capability, not part of an older live
             // instance's original signed identity or execution eligibility.

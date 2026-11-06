@@ -62,6 +62,19 @@ Enable `WORKSPACE_PERF_OBSERVATIONS=1` on the isolated Worker and Runtime to
 record renewal attempts, controlled outcomes, stages and elapsed times. Owner
 identities are hashed; request bodies, tokens and SQL text are excluded.
 
+For startup latency, correlate the Worker and Runtime records by `jobId`. Use
+the persisted AgentRun creation time and the Worker's `claimResult` to measure
+submission to claim. The Worker's `rpc` records cover Job start and lifecycle
+resolution. Runtime's `startupProfile` separates its prelude, sandbox preparation,
+workspace restore and Session start commit. `dockerCreate`, `dockerDaemonStart`
+and `dockerCreatePermitWait` are nested measurements within sandbox preparation;
+they should not be added to the enclosing duration. The `model_request_safe_point`
+boundary includes recovery checkpoint preparation and the durable request commit.
+The `model_request_started` event timestamp is assigned before that work finishes.
+Use the HTTP observation's timestamp minus its elapsed time to locate the
+Runtime-to-API dispatch. Response headers, first event and first text are
+separate measurements; the first event may not carry user-visible content.
+
 ## Upgrade and rollback
 
 The explicit forward migrations upgrade SQLite schema 4 to 5 and PostgreSQL

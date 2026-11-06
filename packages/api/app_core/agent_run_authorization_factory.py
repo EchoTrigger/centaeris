@@ -18,8 +18,11 @@ def create_agent_run_authorization(
     image_digest: str,
     declared_inputs: list[dict] | None = None,
     personal_library: bool = False,
+    execution_policy: dict | None = None,
 ) -> AgentRunAuthorization:
     with plugin_lifecycle_lock():
+        if agent_run.session.purpose == "agentRunApi" and personal_library:
+            raise ValueError("agent_run_api_personal_library_forbidden")
         if not agent_run_membership_is_current(agent_run):
             raise ValueError("AgentRun WorkspaceMembership is no longer current")
         if not agent_run_environment_matches(agent_run):
@@ -37,6 +40,7 @@ def create_agent_run_authorization(
             message_asset_refs,
             image_digest=image_digest,
             declared_inputs=declared_inputs,
+            execution_policy=execution_policy,
         )
         return AgentRunAuthorization.objects.create(
             id=authorization_id,

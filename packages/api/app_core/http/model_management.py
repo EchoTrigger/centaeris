@@ -1,12 +1,9 @@
 from time import perf_counter
 from functools import wraps
-import hashlib
-import json
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
-from ninja import Router, Status
-from ninja.responses import codes_4xx
+from ninja import Status
 from pydantic import Field
 
 from app_core.model_adapter import (
@@ -28,26 +25,11 @@ from app_core.models import (
 from app_core.runtime_client import request_model_catalog
 from app_core.workspace_resources import workspace_resource_admin
 
-from .response_schema import (
-    AdminModelEnvelope,
-    AdminModelsEnvelope,
-    COMMON_ERROR_RESPONSES,
-    ModelProviderEnvelope,
-    ModelProvidersEnvelope,
-    ModelTestResponse,
-    ModelProviderTemplatesEnvelope,
-    ModelCatalogReconciliationEnvelope,
-    RunIdsErrorResponse,
-)
-from .schema import ErrorResponse, StrictSchema
-from .security import superuser_auth
+from .schema import StrictSchema
 from .serialization import (
     serialize_admin_model,
     serialize_model_provider,
 )
-
-
-router = Router(tags=["model-management"], by_alias=True)
 
 
 def _model_resource_authority(action):
@@ -55,33 +37,17 @@ def _model_resource_authority(action):
     @wraps(action)
     def authorized(request, *args, **kwargs):
         user = getattr(request, "user", None)
-        if user is None or not user.is_authenticated:
+        workspace = getattr(request, "resource_workspace", None)
+        if user is None or not user.is_authenticated or workspace is None:
             return Status(403, {"error": "workspace_resource_forbidden"})
         with transaction.atomic():
-            workspace = getattr(request, "resource_workspace", None)
-            if workspace is None:
-                if not user.is_superuser:
-                    return Status(403, {"error": "workspace_resource_forbidden"})
-            else:
-                try:
-                    request.resource_workspace = workspace_resource_admin(user, workspace.pk)
-                except PermissionError:
-                    return Status(403, {"error": "workspace_resource_forbidden"})
+            try:
+                request.resource_workspace = workspace_resource_admin(user, workspace.pk)
+            except PermissionError:
+                return Status(403, {"error": "workspace_resource_forbidden"})
             return action(request, *args, **kwargs)
     return authorized
 
-
-
-def _platform_model_authority(action):
-    """Catalog reconciliation remains an independent platform operation."""
-    @wraps(action)
-    def authorized(request, *args, **kwargs):
-        user = getattr(request, "user", None)
-        if user is None or not user.is_authenticated or not user.is_superuser:
-            return Status(403, {"error": "workspace_resource_forbidden"})
-        with transaction.atomic():
-            return action(request, *args, **kwargs)
-    return authorized
 
 
 def _catalog_templates() -> tuple[dict, dict]:
@@ -163,177 +129,12 @@ class EmptyRequest(StrictSchema):
     pass
 
 
-class ApplyModelCatalogReconciliationRequest(StrictSchema):
-    expected_digest: str
-
-
-def _model_catalog_reconciliation(templates: dict, route_overrides: dict, *, lock: bool = False) -> dict:
-    providers_query = ModelProvider.objects.filter(
-        workspace__isnull=True, template_id__isnull=False, archivedAt__isnull=True
-    ).order_by("id")
-    if lock:
-        providers_query = providers_query.select_for_update()
-    entries = []
-    for provider in providers_query:
-        template = templates.get(provider.template_id)
-        if template is None:
-            entries.append({"providerId": provider.id, "templateId": provider.template_id,
-                            "changes": [], "blockers": ["template_removed"]})
-            continue
-        current_query = ModelConfig.objects.filter(provider=provider, isCurrent=True).order_by("modelName")
-        if lock:
-            current_query = current_query.select_for_update()
-        current = {model.modelName: model for model in current_query}
-        target = {model["modelName"]: model for model in template["models"]}
-        blockers = []
-        changes = []
-        if provider.api != template["api"] or provider.apiBase != template["apiBase"]:
-            changes.append({"action": "update_provider_route", "from": {
-                "api": provider.api, "apiBase": provider.apiBase,
-            }, "to": {"api": template["api"], "apiBase": template["apiBase"]}})
-        if provider.displayName != template["displayName"]:
-            changes.append({"action": "rename_provider", "from": provider.displayName,
-                            "to": template["displayName"]})
-        for name, model in current.items():
-            expected = target.get(name)
-            if expected is None:
-                active_ids = list(AgentRun.objects.filter(
-                    modelConfig=model, status__in=["queued", "running"]
-                ).order_by("id").values_list("id", flat=True))
-                changes.append({"action": "retire", "modelName": name, "modelId": model.id,
-                                "activeAgentRunIds": active_ids})
-                continue
-            desired = (
-                expected["displayName"], expected.get("apiOverride"),
-                expected.get("apiOverride") or template["api"],
-                expected["contextTokens"], expected["maxOutputTokens"],
-                expected.get("thinkingMode") or "", expected.get("thinkingModes", []),
-                route_overrides.get((provider.template_id, name)) or template["apiBase"],
-            )
-            existing = (
-                model.displayName, model.apiOverride, model.resolvedApi, model.contextTokens,
-                model.maxOutputTokens, model.thinkingMode, model.thinkingModes,
-                model.resolvedApiBase,
-            )
-            if desired != existing:
-                changes.append({"action": "revise", "modelName": name,
-                                "modelId": model.id, "revision": model.revision + 1})
-        for name in target.keys() - current.keys():
-            changes.append({"action": "add", "modelName": name})
-        changes.sort(key=lambda change: (change.get("modelName", ""), change["action"]))
-        entries.append({"providerId": provider.id, "templateId": provider.template_id,
-                        "changes": changes, "blockers": sorted(set(blockers))})
-    catalog_projection = {
-        template_id: {
-            "displayName": template["displayName"], "api": template["api"],
-            "apiBase": template["apiBase"], "models": template["models"],
-        }
-        for template_id, template in templates.items()
-    }
-    digest_entries = [
-        {**entry, "changes": [
-            {key: value for key, value in change.items() if key != "activeAgentRunIds"}
-            for change in entry["changes"]
-        ]}
-        for entry in entries
-    ]
-    digest_input = {"entries": digest_entries, "catalog": catalog_projection,
-                    "routeOverrides": sorted((list(key) + [base]) for key, base in route_overrides.items())}
-    digest = hashlib.sha256(json.dumps(digest_input, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return {"digest": digest, "providers": entries,
-            "blocked": any(entry["blockers"] for entry in entries)}
-
-
-@router.get(
-    "/admin/model-catalog-reconciliation",
-    auth=superuser_auth,
-    response={200: ModelCatalogReconciliationEnvelope} | COMMON_ERROR_RESPONSES,
-)
-@_platform_model_authority
-def preview_model_catalog_reconciliation(request):
-    templates, route_overrides = _catalog_templates()
-    return _model_catalog_reconciliation(templates, route_overrides)
-
-
-@router.post(
-    "/admin/model-catalog-reconciliation",
-    auth=superuser_auth,
-    response={200: ModelCatalogReconciliationEnvelope} | COMMON_ERROR_RESPONSES,
-)
-@_platform_model_authority
-def apply_model_catalog_reconciliation(request, payload: ApplyModelCatalogReconciliationRequest):
-    templates, route_overrides = _catalog_templates()
-    with transaction.atomic():
-        preview = _model_catalog_reconciliation(templates, route_overrides, lock=True)
-        if preview["digest"] != payload.expected_digest:
-            return Status(409, {"error": "model_catalog_reconciliation_stale"})
-        if preview["blocked"]:
-            return Status(409, {"error": "model_catalog_reconciliation_blocked"})
-        for entry in preview["providers"]:
-            template = templates[entry["templateId"]]
-            provider = ModelProvider.objects.get(id=entry["providerId"])
-            for change in entry["changes"]:
-                action = change["action"]
-                if action == "rename_provider":
-                    provider.displayName = template["displayName"]
-                    provider.save(update_fields=["displayName", "updatedAt"])
-                    continue
-                if action == "update_provider_route":
-                    provider.api = template["api"]
-                    provider.apiBase = template["apiBase"]
-                    provider.save(update_fields=["api", "apiBase", "updatedAt"])
-                    continue
-                current = None
-                was_enabled = True
-                if action in {"retire", "revise"}:
-                    current = ModelConfig.objects.get(id=change["modelId"], isCurrent=True)
-                    was_enabled = current.enabled
-                    current.isCurrent = False
-                    current.enabled = False
-                    current.save(update_fields=["isCurrent", "enabled", "updatedAt"])
-                if action == "retire":
-                    continue
-                values = next(model for model in template["models"] if model["modelName"] == change["modelName"])
-                _new_model_config(
-                    provider=provider, display_name=values["displayName"],
-                    model_name=values["modelName"], api_override=values.get("apiOverride"),
-                    resolved_api_base=route_overrides.get((entry["templateId"], values["modelName"])),
-                    context_tokens=values["contextTokens"], max_output_tokens=values["maxOutputTokens"],
-                    thinking_mode=values.get("thinkingMode"), thinking_modes=values.get("thinkingModes", []),
-                    enabled=was_enabled,
-                    family_id=current.familyId if current is not None else None,
-                    revision=current.revision + 1 if current is not None else 1,
-                ).save()
-    return _model_catalog_reconciliation(templates, route_overrides)
-
-
-@router.get(
-    "/admin/model-providers",
-    auth=superuser_auth,
-    response={200: ModelProvidersEnvelope} | COMMON_ERROR_RESPONSES,
-)
-@_model_resource_authority
-def list_model_providers(request):
-    providers = ModelProvider.objects.filter(workspace=getattr(request, "resource_workspace", None), archivedAt__isnull=True).order_by("displayName", "id")
-    return {"providers": [serialize_model_provider(provider) for provider in providers]}
-
-
-@router.get(
-    "/admin/model-provider-templates",
-    auth=superuser_auth,
-    response={200: ModelProviderTemplatesEnvelope} | COMMON_ERROR_RESPONSES,
-)
 @_model_resource_authority
 def list_model_provider_templates(request):
     templates, _ = _catalog_templates()
     return {"templates": list(templates.values())}
 
 
-@router.post(
-    "/admin/model-provider-templates/{template_id}/instantiate",
-    auth=superuser_auth,
-    response={201: ModelProviderEnvelope} | COMMON_ERROR_RESPONSES,
-)
 @_model_resource_authority
 def instantiate_model_provider_template(
     request,
@@ -379,11 +180,6 @@ def instantiate_model_provider_template(
     return Status(201, {"provider": serialize_model_provider(provider)})
 
 
-@router.post(
-    "/admin/model-providers",
-    auth=superuser_auth,
-    response={201: ModelProviderEnvelope} | COMMON_ERROR_RESPONSES,
-)
 @_model_resource_authority
 def create_model_provider(request, payload: CreateModelProviderRequest):
     try:
@@ -406,11 +202,6 @@ def create_model_provider(request, payload: CreateModelProviderRequest):
     return Status(201, {"provider": serialize_model_provider(provider)})
 
 
-@router.patch(
-    "/admin/model-providers/{provider_id}",
-    auth=superuser_auth,
-    response={200: ModelProviderEnvelope} | COMMON_ERROR_RESPONSES,
-)
 @_model_resource_authority
 def update_model_provider(request, provider_id: str, payload: UpdateModelProviderRequest):
     try:
@@ -448,11 +239,6 @@ def update_model_provider(request, provider_id: str, payload: UpdateModelProvide
     return {"provider": serialize_model_provider(provider)}
 
 
-@router.post(
-    "/admin/model-providers/{provider_id}/credential/rotate",
-    auth=superuser_auth,
-    response={200: ModelProviderEnvelope} | COMMON_ERROR_RESPONSES,
-)
 @_model_resource_authority
 def rotate_model_provider_credential(
     request,
@@ -482,11 +268,6 @@ def rotate_model_provider_credential(
     return {"provider": serialize_model_provider(provider)}
 
 
-@router.delete(
-    "/admin/model-providers/{provider_id}",
-    auth=superuser_auth,
-    response={204: None, codes_4xx: ErrorResponse | RunIdsErrorResponse},
-)
 @_model_resource_authority
 def delete_model_provider(request, provider_id: str):
     with transaction.atomic():
@@ -518,22 +299,6 @@ def delete_model_provider(request, provider_id: str):
     return Status(204, None)
 
 
-@router.get(
-    "/admin/models",
-    auth=superuser_auth,
-    response={200: AdminModelsEnvelope} | COMMON_ERROR_RESPONSES,
-)
-@_model_resource_authority
-def list_models(request):
-    models = ModelConfig.objects.select_related("provider").filter(provider__workspace=getattr(request, "resource_workspace", None), isCurrent=True, provider__archivedAt__isnull=True).order_by("displayName", "id")
-    return {"models": [serialize_admin_model(model) for model in models]}
-
-
-@router.post(
-    "/admin/models",
-    auth=superuser_auth,
-    response={201: AdminModelEnvelope} | COMMON_ERROR_RESPONSES,
-)
 @_model_resource_authority
 def create_model(request, payload: CreateModelRequest):
     try:
@@ -567,11 +332,6 @@ def create_model(request, payload: CreateModelRequest):
     return Status(201, {"model": serialize_admin_model(model)})
 
 
-@router.patch(
-    "/admin/models/{model_id}",
-    auth=superuser_auth,
-    response={200: AdminModelEnvelope} | COMMON_ERROR_RESPONSES,
-)
 @_model_resource_authority
 def update_model(request, model_id: str, payload: UpdateModelRequest):
     try:
@@ -620,11 +380,6 @@ def update_model(request, model_id: str, payload: UpdateModelRequest):
     return {"model": serialize_admin_model(model)}
 
 
-@router.delete(
-    "/admin/models/{model_id}",
-    auth=superuser_auth,
-    response={204: None, codes_4xx: ErrorResponse | RunIdsErrorResponse},
-)
 @_model_resource_authority
 def delete_model(request, model_id: str):
     with transaction.atomic():
@@ -640,18 +395,13 @@ def delete_model(request, model_id: str):
     return Status(204, None)
 
 
-@router.post(
-    "/admin/models/{model_id}/test",
-    auth=superuser_auth,
-    response={200: ModelTestResponse, codes_4xx: ErrorResponse},
-)
 @_model_resource_authority
 def test_model(request, model_id: str, payload: EmptyRequest | None = None):
     started_at = perf_counter()
     try:
         model = ModelConfig.objects.select_related("provider").get(id=model_id, isCurrent=True, provider__workspace=getattr(request, "resource_workspace", None))
         credential = credential_for_provider(model.provider)
-        result = test_model_config(model)
+        http_status = test_model_config(model)
     except ModelConfig.DoesNotExist:
         return Status(404, {"error": "model_not_found"})
     except ModelEndpointValidationError as error:
@@ -665,7 +415,7 @@ def test_model(request, model_id: str, payload: EmptyRequest | None = None):
     except Exception as error:
         return _test_result(error=ModelProviderError(safe_model_error_reason(error)), started_at=started_at)
     _record_credential_audit(credential, "tested", request.user)
-    return _test_result(result=result, started_at=started_at)
+    return _test_result(http_status=http_status, started_at=started_at)
 
 
 def _validated_secret(secret: str) -> str:
@@ -702,7 +452,7 @@ def _create_provider(
     return provider
 
 
-def _test_result(*, started_at: float, result: dict | None = None, error: ModelProviderError | None = None) -> dict:
+def _test_result(*, started_at: float, http_status: int | None = None, error: ModelProviderError | None = None) -> dict:
     latency_ms = max(0, round((perf_counter() - started_at) * 1000))
     if error is not None:
         return {
@@ -712,13 +462,11 @@ def _test_result(*, started_at: float, result: dict | None = None, error: ModelP
             "outputPreview": None,
             "errorKeyword": error.reasonType,
         }
-    output = result["text"] if isinstance(result, dict) else ""
-    output_preview = " ".join(output.split())[:96] if isinstance(output, str) else ""
     return {
         "ok": True,
-        "httpStatus": 200,
+        "httpStatus": http_status,
         "latencyMs": latency_ms,
-        "outputPreview": output_preview or None,
+        "outputPreview": None,
         "errorKeyword": None,
     }
 

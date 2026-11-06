@@ -289,7 +289,8 @@ const materializeBlock = (
   projectionGeneration: string,
 ): ChatMessage => {
   const body = block.body;
-  const reference = body.kind === "tool" ? body.summaryRef : body.content.sourceRef;
+  const runBoundary = body.kind === "notice" && body.noticeType === "run_boundary";
+  const reference = body.kind === "tool" ? body.summaryRef : runBoundary ? null : body.content.sourceRef;
   const transcriptText = reference ? { sessionId, projectionGeneration, reference } : undefined;
   if (body.kind === "userText") {
     return {
@@ -358,9 +359,13 @@ const materializeBlock = (
     case "notice":
       if (body.noticeType === "run_boundary") {
         const source = block.presentation?.sourceType;
-        if (source === "agent_run_failed" || source === "agent_run_interrupted") {
+        const failureReason = block.presentation?.reasonType ?? undefined;
+        const cancelled = source === "agent_run_interrupted" && (failureReason === "cancelled"
+          || (!failureReason && body.content.inlineContent === "" && !body.content.sourceRef));
+        if (!cancelled && (source === "agent_run_failed" || source === "agent_run_interrupted")) {
           turn.chunks.push({ id: block.blockId, kind: "narrative", text: materializeText(body.content),
-            tone: "error", runFailure: source === "agent_run_failed" ? "failed" : "interrupted" });
+            tone: "error", runFailure: source === "agent_run_failed" ? "failed" : "interrupted",
+            failureReason });
         }
         break;
       }

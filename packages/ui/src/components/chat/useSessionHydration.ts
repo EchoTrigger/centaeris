@@ -134,6 +134,7 @@ export const useSessionHydration = ({
         }
         setIsSyncingSession(false);
         setIsHydratingSession(false);
+        console.error("Desktop conversation could not be synchronized", error);
         if (plan.kind === "cached") {
           reportSyncError(formatExecutionError(error));
         } else {

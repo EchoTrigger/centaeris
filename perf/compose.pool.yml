@@ -20,8 +20,6 @@ services:
   worker:
     cpus: 1
     mem_limit: 512m
-    environment:
-      WORKER_SLOT_COUNT: "2"
   redis:
     cpus: 0.5
     mem_limit: 256m

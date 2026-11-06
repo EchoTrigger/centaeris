@@ -49,6 +49,7 @@ export type TranscriptBlock = Readonly<{
     displayTarget: string | null;
     durationMs: number | null;
     operation: unknown;
+    reasonType?: string | null;
   }> | null;
   orderKey: Readonly<{ sourceSequence: string; ordinal: number }>;
   body: TranscriptBlockBody;
@@ -207,9 +208,13 @@ function validStatus(value: unknown) {
 
 function validPresentation(value: unknown) {
   if (value === null) return true;
-  if (!isRecord(value) || !exactKeys(value, [
-    "agentRunId", "sourceType", "observedAtMs", "displayTarget", "durationMs", "operation",
-  ])) return false;
+  if (!isRecord(value)) return false;
+  const fields = ["agentRunId", "sourceType", "observedAtMs", "displayTarget", "durationMs", "operation"];
+  if (Object.hasOwn(value, "reasonType")) {
+    fields.push("reasonType");
+    if (value.reasonType !== null && !identifier(value.reasonType)) return false;
+  }
+  if (!exactKeys(value, fields)) return false;
   return (value.agentRunId === null || typeof value.agentRunId === "string")
     && typeof value.sourceType === "string" && Number.isSafeInteger(value.observedAtMs)
     && (value.displayTarget === null || typeof value.displayTarget === "string")

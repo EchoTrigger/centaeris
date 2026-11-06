@@ -3,7 +3,7 @@
 Run from the repository root. The only deployment controller is
 `python perf/harness/control.py`. It pins project `centaeris-perf`, the base and
 performance Compose files, and `perf/.state/test.env`. It does not read the root
-private `.env`. Do not invoke Compose manually to change slots.
+private `.env`. Use the controller for owned deployment changes.
 
 ## Setup and smoke
 
@@ -22,7 +22,6 @@ python perf/harness/control.py check
 python perf/harness/control.py build
 python perf/harness/control.py up
 python perf/harness/control.py smoke --experiment-id smoke-001
-python perf/harness/control.py slots --slots 6
 python perf/harness/control.py smoke --experiment-id smoke-002
 ```
 
@@ -62,10 +61,9 @@ Runtime mounts the helper at its original path and the socket directory at
 `/run/centaeris-host`, both read-only. Configuration validation checks those exact
 bindings and rejects production host paths or access from other services.
 
-Slot changes require zero queued/running runs, replace only the worker using
-`--no-deps`, and verify that all other container identities are unchanged. Run
-`stop` only after the stack drains; it preserves test volumes. There is no automatic
-volume deletion, password reset, cancellation, or replay of failed runs.
+The Worker dispatches each claimed Job independently. Run `stop` only after the
+stack drains; it preserves test volumes. There is no automatic volume deletion,
+password reset, cancellation, or replay of failed runs.
 
 ## Evidence and source boundary
 
@@ -201,7 +199,7 @@ The existing document processor image must also be available under the isolated
 `centaeris-perf-processor:local` tag. This controller uses the same ownership and
 configuration validation as `control.py`, with the checked-in `compose.pool.yml`
 overlay. It does not read the private root `.env`. It fixes one API process and
-two worker slots; CPU/memory budgets are explicit in that overlay. Docker startup
+two environments; CPU/memory budgets are explicit in that overlay. Docker startup
 may also start unrelated containers according to their own restart policies;
 the experiment never changes those containers.
 
@@ -241,7 +239,7 @@ The largest acknowledged fixture remains in the test database. This probe does
 not establish steady-state CPU or capacity; do not run it alongside another test.
 
 For a bounded loaded comparison, run `python perf/harness/history_load.py
---experiment-id history-load-001`. It requires two worker slots and an idle stack,
+--experiment-id history-load-001`. It requires two environments and an idle stack,
 then runs 30 arrivals/minute for 90 seconds at 0/3,641/36,410/0 acknowledged
 synthetic notification rows. Each fixture change stops only the idle worker and
 preserves all real runs. Real run history accumulates; the final zero-fixture
@@ -305,6 +303,12 @@ model-independent tool comparison. `single-tool` runs the first real Bash comman
 those iterations still create distinct physical instances after prior cleanup.
 Do not run a preparation command before the measured first tool.
 
+For a startup comparison, run `PERF_EXPERIENCE_TASK=single-tool` with
+`PERF_EXPERIENCE_ITERATIONS=1` and `PERF_EXPERIENCE_SAME_SESSION=false`. Run each
+Runtime variant with `PERF_EXPERIENCE_VUS=1` and then `PERF_EXPERIENCE_VUS=8`
+against the same model configuration. Each batch requires one verified tool
+result per admitted Run.
+
 Enable `WORKSPACE_PERF_OBSERVATIONS=1` on the Runtime and HostSupervisor before
 starting the isolated fixture. This adds no execution permission or persistent
 ready state. The Runtime emits `startupProfile`, model-attempt timings,
@@ -330,6 +334,15 @@ JSON logs. The reader bounds input bytes and selected record counts, filters to
 original admitted Jobs, and writes only approved scalar fields. Use the existing
 fixture-owned paths and credentials; this command does not load credentials,
 submit Runs, generate model requests, or collect arbitrary log prose.
+
+For startup comparisons, also enable `WORKSPACE_PERF_OBSERVATIONS=1` on the
+Worker and pass its log with `--worker-observations`. `startupMetrics` counts
+Worker RPCs, yield RPCs, and model HTTP attempts attributable to each Run. It
+reports the first request's safe point and its overlap with post-capture
+generation observation. Pass `--shared-wall-clock` only when the client, Worker,
+and Runtime use the same wall clock, as in a single WSL2 host. That enables
+submission-to-first-HTTP and the interval between the first and last observed
+claim before dispatch. Absent observations are reported as `null`.
 
 Interpret the measurements independently:
 

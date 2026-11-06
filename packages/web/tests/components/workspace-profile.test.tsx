@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import WorkspaceProfileSettings from "../../src/routes/WorkspaceProfileSettings";
@@ -10,7 +10,7 @@ import { WORKSPACE_IDENTITY_CACHE_KEY, clearWorkspaceIdentityCache } from "../..
 const fixture = vi.hoisted(() => ({ request: vi.fn(), revalidate: vi.fn() }));
 vi.mock("../../src/api", async original => ({ ...await original<object>(), apiJson: (...args: unknown[]) => fixture.request(...args) }));
 vi.mock("react-router", async original => ({ ...await original<object>(), useRevalidator: () => ({ revalidate: fixture.revalidate }) }));
-vi.mock("../../src/i18n", () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
+vi.mock("../../src/i18n", () => ({ useTranslation: () => ({ t: (key: string, options?: { setting: string }) => options?.setting ? `${key} ${options.setting}` : key }) }));
 const workspace = { id: "workspace", name: "Research", role: "owner", avatarUrl: null };
 const customAvatar = `/api/workspaces/workspace/avatar/${"a".repeat(64)}`;
 beforeEach(() => {
@@ -19,59 +19,72 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.restoreAllMocks(); });
 
-test("profile saves only dirty fields, refreshes workspace data and retains a rejected draft", async () => {
+test("editing a workspace name keeps a rejected draft and discards cancelled changes", async () => {
   const user = userEvent.setup();
-  const onClose = vi.fn();
-  render(<WorkspaceProfileSettings workspace={workspace} onClose={onClose} />);
-  const save = screen.getByRole("button", { name: "workspaceProfile.save" }) as HTMLButtonElement;
+  render(<WorkspaceProfileSettings workspace={workspace} />);
+  const edit = screen.getByRole("button", { name: "settingsRoute.editSetting workspaceProfile.name" });
+  expect(screen.queryByRole("textbox")).toBeNull();
+  await user.click(edit);
+  const dialog = within(screen.getByRole("dialog", { name: "workspaceProfile.name" }));
+  const save = dialog.getByRole("button", { name: "modelSettings.save" }) as HTMLButtonElement;
   expect(save.disabled).toBe(true);
-  const name = screen.getByRole("textbox", { name: "workspaceProfile.name" }) as HTMLInputElement;
+  const name = dialog.getByRole("textbox", { name: "workspaceProfile.name" }) as HTMLInputElement;
   await user.clear(name); await user.type(name, "New research");
   fixture.request.mockRejectedValueOnce(new Error("offline"));
   await user.click(save);
-  await screen.findByRole("alert");
+  await dialog.findByRole("alert");
   expect(name.value).toBe("New research");
   expect(save.disabled).toBe(false);
   expect(fixture.revalidate).not.toHaveBeenCalled();
   fixture.request.mockResolvedValueOnce({ workspace: { ...workspace, name: "New research" } });
   await user.click(save);
   await screen.findByRole("status");
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.getByText("New research")).toBeTruthy();
   expect(JSON.parse(fixture.request.mock.calls[1][1].body)).toEqual({ name: "New research" });
   expect(fixture.request.mock.calls[1][0]).toBe("/api/workspaces/workspace/profile");
   expect(fixture.revalidate).toHaveBeenCalledTimes(1);
-  expect(save.disabled).toBe(true);
-  await user.type(name, " draft");
+  await user.click(edit);
+  await user.type(screen.getByRole("textbox"), " draft");
   await user.click(screen.getByRole("button", { name: "agentRunRow.cancel" }));
-  expect(onClose).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await user.click(edit);
+  expect(screen.getByDisplayValue("New research")).toBeTruthy();
   expect(fixture.request).toHaveBeenCalledTimes(2);
 });
 
-test("avatar removal sends null and replacement sends the selected image together with the name", async () => {
+test("avatar editor submits removal and replacement together with the workspace name", async () => {
   const user = userEvent.setup();
-  render(<WorkspaceProfileSettings workspace={{ ...workspace, avatarUrl: customAvatar }} onClose={() => {}} />);
+  render(<WorkspaceProfileSettings workspace={{ ...workspace, avatarUrl: customAvatar }} />);
+  const edit = screen.getByRole("button", { name: "settingsRoute.editSetting workspaceProfile.avatar" });
+  await user.click(edit);
   fixture.request.mockResolvedValueOnce({ workspace });
   await user.click(screen.getByRole("button", { name: "workspaceProfile.remove" }));
-  await user.click(screen.getByRole("button", { name: "workspaceProfile.save" }));
+  await user.click(screen.getByRole("button", { name: "modelSettings.save" }));
   await screen.findByRole("status");
   expect(JSON.parse(fixture.request.mock.calls[0][1].body)).toEqual({ name: "Research", avatarDataUrl: null });
+  await user.click(edit);
   const input = screen.getByLabelText("workspaceProfile.upload", { selector: "input" }) as HTMLInputElement;
   await user.upload(input, new File(["png"], "avatar.png", { type: "image/png" }));
-  await waitFor(() => expect((screen.getByRole("button", { name: "workspaceProfile.save" }) as HTMLButtonElement).disabled).toBe(false));
+  const save = screen.getByRole("button", { name: "modelSettings.save" }) as HTMLButtonElement;
+  await waitFor(() => expect(save.disabled).toBe(false));
   fixture.request.mockResolvedValueOnce({ workspace: { ...workspace, avatarUrl: customAvatar } });
-  await user.click(screen.getByRole("button", { name: "workspaceProfile.save" }));
-  await waitFor(() => expect(fixture.request).toHaveBeenCalledTimes(2));
+  await user.click(save);
+  await screen.findByRole("status");
   expect(JSON.parse(fixture.request.mock.calls[1][1].body)).toEqual({ name: "Research", avatarDataUrl: "data:image/png;base64,cG5n" });
 });
 
 test("invalid avatar format and size leave the existing avatar unchanged", async () => {
   const user = userEvent.setup({ applyAccept: false });
-  const { container } = render(<WorkspaceProfileSettings workspace={{ ...workspace, avatarUrl: customAvatar }} onClose={() => {}} />);
-  const input = screen.getByLabelText("workspaceProfile.upload", { selector: "input" }) as HTMLInputElement;
+  render(<WorkspaceProfileSettings workspace={{ ...workspace, avatarUrl: customAvatar }} />);
+  await user.click(screen.getByRole("button", { name: "settingsRoute.editSetting workspaceProfile.avatar" }));
+  const dialog = screen.getByRole("dialog", { name: "workspaceProfile.avatar" });
+  const input = within(dialog).getByLabelText("workspaceProfile.upload", { selector: "input" }) as HTMLInputElement;
   for (const file of [new File(["gif"], "avatar.gif", { type: "image/gif" }), new File([new Uint8Array(1024 * 1024 + 1)], "avatar.png", { type: "image/png" })]) {
     await user.upload(input, file);
-    expect(screen.getByRole("alert").textContent).toBe("workspaceProfile.avatarInvalid");
-    expect(container.querySelector("img")?.getAttribute("src")).toBe(apiUrl(customAvatar));
-    expect((screen.getByRole("button", { name: "workspaceProfile.save" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(within(dialog).getByRole("alert").textContent).toBe("workspaceProfile.avatarInvalid");
+    expect(dialog.querySelector("img")?.getAttribute("src")).toBe(apiUrl(customAvatar));
+    expect((within(dialog).getByRole("button", { name: "modelSettings.save" }) as HTMLButtonElement).disabled).toBe(true);
   }
   expect(fixture.request).not.toHaveBeenCalled();
 });

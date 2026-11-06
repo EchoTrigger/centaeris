@@ -22,8 +22,9 @@ services:
   worker:
     image: centaeris-platform-mcp-e2e-worker:local
     environment:
-      WORKER_SLOT_COUNT: "1"
   material-worker:
     image: centaeris-platform-mcp-e2e-api:local
     environment:
       MATERIAL_PROCESSOR_IMAGE: centaeris-platform-mcp-e2e-processor:local
+  material-scheduler:
+    image: centaeris-platform-mcp-e2e-api:local

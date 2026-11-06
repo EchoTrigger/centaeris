@@ -31,7 +31,7 @@ use super::PostgresRuntimeStore;
 /// encoding changes. A different value yields a distinct projection generation,
 /// so projections written by an older encoding are invalidated and rebuilt
 /// instead of being decoded under the new field names.
-const WORKSPACE_TRANSCRIPT_BLOCK_SCHEMA_VERSION: u32 = 1;
+const WORKSPACE_TRANSCRIPT_BLOCK_SCHEMA_VERSION: u32 = 2;
 
 fn workspace_transcript_initial_generation() -> String {
     if WORKSPACE_TRANSCRIPT_BLOCK_SCHEMA_VERSION <= 1 {

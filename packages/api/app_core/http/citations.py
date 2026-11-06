@@ -16,7 +16,7 @@ router = Router(tags=["citations"], by_alias=True)
             response={200: CitationSnapshotResponse} | COMMON_ERROR_RESPONSES)
 def run_citations(request, response: HttpResponse, session_id: str, agent_run_id: str):
     response["Cache-Control"] = "no-store"
-    run = AgentRun.objects.filter(pk=agent_run_id, session_id=session_id, user=request.user).first()
+    run = AgentRun.objects.filter(pk=agent_run_id, session_id=session_id, user=request.user, session__purpose="interactive").first()
     if run is None or workspace_membership_for(request.user, run.workspace_id) is None:
         return Status(404, {"error": "agent_run_not_found"})
     if request.GET:
@@ -66,6 +66,7 @@ def citation_detail(request, citation_id: str):
         citation = SessionCitationProjection.objects.select_related("agent_run").get(
             citationId=citation_id,
             agent_run__user=request.user,
+            session__purpose="interactive",
         )
     except SessionCitationProjection.DoesNotExist:
         return Status(404, {"error": "citation_not_found"})

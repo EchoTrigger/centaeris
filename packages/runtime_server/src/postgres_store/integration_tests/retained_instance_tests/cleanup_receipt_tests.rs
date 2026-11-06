@@ -5,6 +5,7 @@ use crate::postgres_store::cleanup_receipts::{
     CleanupAllocation, CleanupAuthorityRequest, CleanupTarget,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 fn terminal(db: &mut Client, r: &mut Run, pre_cancel: bool) -> AgentRunCleanup {
     let mut b = r.grant.payload.clone();
@@ -756,6 +757,77 @@ fn postgres_per_run_cleanup_requires_physical_removal_and_allows_fresh_instance_
         db.query_one("SELECT count(*) FROM runtime.environment_retirements", &[])
             .unwrap()
             .get::<_, i64>(0),
+        0
+    );
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL cleanup database"]
+fn postgres_cleanup_waits_for_host_inventory_without_releasing_its_resident() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let (_url, store, mut db) = setup();
+    let mut run = run(&store, &mut db, "run-cleanup-turn", 1);
+    let physical = Arc::new(Mutex::new(Vec::new()));
+    let allocation = prepare(&store, &run, "execution-cleanup-turn", &physical).unwrap();
+    let cleanup = terminal(&mut db, &mut run, false);
+    db.query_one("SELECT pg_advisory_lock(731946,3)", &[])
+        .unwrap();
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            store.with_cleanup_target(
+                &CleanupAuthorityRequest {
+                    cleanup: &cleanup,
+                    signing_key: KEY,
+                    lease: &run.fence,
+                    host_id: "host",
+                },
+                || Ok(physical.lock().unwrap().clone()),
+                |target, _| {
+                    let CleanupTarget::Instance {
+                        allocation: actual, ..
+                    } = target
+                    else {
+                        panic!("cleanup must retain its exact resident")
+                    };
+                    assert_eq!(actual.instance_id, allocation.instance_id);
+                    assert_eq!(actual.container_id, allocation.container_id);
+                    Ok(())
+                },
+            )
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut waiting = false;
+        while !waiting && !handle.is_finished() && std::time::Instant::now() < deadline {
+            waiting = db.query_one(
+                "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=731946 AND objid=3 AND NOT granted)",
+                &[],
+            ).unwrap().get(0);
+            if !waiting {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        db.query_one("SELECT pg_advisory_unlock(731946,3)", &[])
+            .unwrap();
+        let result = handle.join().unwrap();
+        assert!(
+            waiting,
+            "cleanup must keep its turn instead of yielding under preparation contention"
+        );
+        assert_eq!(result.unwrap(), Some(()));
+    });
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM runtime.resident_sandboxes", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(
+        db.query_one(
+            "SELECT count(*) FROM runtime.agent_run_cleanup_receipts",
+            &[]
+        )
+        .unwrap()
+        .get::<_, i64>(0),
         0
     );
 }

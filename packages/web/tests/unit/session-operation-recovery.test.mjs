@@ -8,12 +8,12 @@ const loader = subjectLoader({ extraOverrides: [
   ["../api.ts", stub(`import {context,ApiError} from ${JSON.stringify(harness)}; export {ApiError}; export const apiJson=(...args)=>context.request(...args); export const apiResponse=(...args)=>context.response(...args);`)],
   ["../i18n", stub("export const t=key=>key; export const i18n={language:'en'}; export const useTranslation=()=>({t});")],
   ["react-router", stub(`export const matchPath=()=>null; import {context} from ${JSON.stringify(harness)}; export const Link=()=>null; export const useRouteLoaderData=id=>id==='authenticated'?{user:context.user}:{workspace:context.workspace}; export const useNavigate=()=>context.navigate;`)],
-  ["react", stub(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useLayoutEffect} from ${JSON.stringify(harness)}; export const useEffectEvent=callback=>callback; export const useSyncExternalStore=(_subscribe,snapshot)=>snapshot();`)],
+  ["react", stub(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useLayoutEffect,useId} from ${JSON.stringify(harness)}; export const useEffectEvent=callback=>callback; export const useSyncExternalStore=(_subscribe,snapshot)=>snapshot();`)],
 
   ["../preferences", stub("export const useEnterStartsNewLine=()=>false; export const readModelThinkingMode=()=>''; export const readPreferredModelIdentity=()=>''; export const writeModelThinkingMode=()=>{}; export const writePreferredModelIdentity=()=>{};")],
   ["../chat/transcriptTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const createWorkspaceTranscriptTransport=()=>({loadTail:async id=>context.tail(id),loadPatches:async()=>{},loadActiveAgentRun:async()=>({agentRun:context.activeRun??null})});`)],
   ["../chat/workspacePresentationTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const streamWorkspacePresentation=options=>context.stream(options);`)],
-  ...["../components/WorkspaceContextPanel", "../components/DocumentPreview", "../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../shell/ShellSidebar"].map(s => [s, stub(`export const ${s.split("/").at(-1)}=()=>null;`)]),
+  ...["../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../shell/ShellSidebar"].map(s => [s, stub(`export const ${s.split("/").at(-1)}=()=>null;`)]),
   ["../shell/HomePlane", stub("export const HomePlane=()=>null; export const HomeQuickActions=()=>null;")],
 ] });
 const { AppPageContent } = await import(await loader(fileURLToPath(new URL("../../src/routes/AppRoute.jsx", import.meta.url))));
@@ -71,20 +71,20 @@ for(const outcome of ["accepted","conflict","offline"])test(`changed resubmit pr
    posts++;if(posts===1)throw new TypeError("offline");throw new ApiError("operation_conflict",409);
  });
  try{await f.subject.settle();await send(f.subject,"original");const id=JSON.parse(f.data.get(pendingKey)).operationId;await send(f.subject,"edited");
- assert.equal(composer(f.subject).draft,"edited");assert.equal(JSON.parse(f.data.get(pendingKey)).operationId,id);assert.equal(posts,outcome==="conflict"?2:1);if(outcome!=="offline")assert.equal(nodes(f.subject.tree,n=>n.type==="a"&&n.props.children==="operations.reviewSeparate").length,1);
+ assert.equal(composer(f.subject).draft,"edited");assert.equal(JSON.parse(f.data.get(pendingKey)).operationId,id);assert.equal(posts,outcome==="conflict"?2:1);if(outcome!=="offline")assert.equal(nodes(composer(f.subject).feedback,n=>n.type==="a"&&n.props.children==="operations.reviewSeparate").length,1);
  }finally{f.subject.unmount();}
 });
 
 test("modified submit with an already accepted receipt restores review while keeping the new draft",async context=>{
  const f=fixture(context,async(_path,options)=>{assert.equal(options,undefined);return receipt("old");});
  f.data.set(pendingKey,JSON.stringify({operationId:"old",fingerprint:"a".repeat(64),assetIds:[],inputChanged:false,receipt:receipt("old")}));
- try{await f.subject.settle();await send(f.subject,"edited");assert.equal(composer(f.subject).draft,"edited");assert.equal(f.calls.filter(([,o])=>o?.method==="POST").length,0);assert.equal(nodes(f.subject.tree,n=>n.type==="a"&&n.props.children==="operations.reviewSeparate").length,1);}
+ try{await f.subject.settle();await send(f.subject,"edited");assert.equal(composer(f.subject).draft,"edited");assert.equal(f.calls.filter(([,o])=>o?.method==="POST").length,0);assert.equal(nodes(composer(f.subject).feedback,n=>n.type==="a"&&n.props.children==="operations.reviewSeparate").length,1);}
  finally{f.subject.unmount();}
 });
 
 test("accepted original in the current Session restores history without consuming the edited draft",async context=>{
  const f=fixture(context,async(_path,options)=>{assert.equal(options,undefined);return receipt("old");});
  f.props.workspaceDraft=false;f.props.initialSession=f.session;
- try{await f.subject.settle();f.data.set(pendingKey,JSON.stringify({operationId:"old",fingerprint:"a".repeat(64),assetIds:[],inputChanged:false,receipt:receipt("old")}));await send(f.subject,"edited");assert.equal(composer(f.subject).draft,"edited");assert.equal(f.calls.filter(([,o])=>o?.method==="POST").length,0);assert.equal(nodes(f.subject.tree,n=>n.props.role==="alert")[0].props.children[0],"operations.inputUnconfirmed");assert.equal(f.data.has(pendingKey),false);}
+ try{await f.subject.settle();f.data.set(pendingKey,JSON.stringify({operationId:"old",fingerprint:"a".repeat(64),assetIds:[],inputChanged:false,receipt:receipt("old")}));await send(f.subject,"edited");assert.equal(composer(f.subject).draft,"edited");assert.equal(f.calls.filter(([,o])=>o?.method==="POST").length,0);assert.equal(composer(f.subject).feedback.props.children[0].props.children,"operations.inputUnconfirmed");assert.equal(f.data.has(pendingKey),false);}
  finally{f.subject.unmount();}
 });

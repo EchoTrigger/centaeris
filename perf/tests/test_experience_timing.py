@@ -66,6 +66,31 @@ class ExperienceTimingTests(unittest.TestCase):
         self.assertEqual(rows[1]["firstTextMs"],60)
         self.assertEqual(rows[1]["httpMs"],120)
 
+    def test_startup_report_separates_worker_reclaims_from_generation_overlap(self):
+        observations = [
+            span("claimResult", 0, 1100, source="worker", outcome="claimed"),
+            span("rpc", 20, 1130, source="worker", route="/internal/jobs/yield"),
+            span("claimResult", 0, 1400, source="worker", outcome="claimed"),
+            span("rpc", 10, 1410, source="worker", route="/internal/jobs/start"),
+            span("model_request_safe_point", 80, 1500),
+            span("modelHttp", 500, 2000, requestId="request-a", attempt=1, streaming=True),
+            span("recoveryPostCaptureGeneration", 150, 1600),
+            span("recoveryPostCaptureGeneration", 90, 1670),
+            span("model_request_safe_point", 200, 2200),
+            span("claimResult", 0, 2300, source="worker", outcome="claimed"),
+            span("rpc", 20, 1130, run="foreign", source="worker", route="/internal/jobs/yield"),
+        ]
+        startup = self.report(observations, shared_wall_clock=True)["runs"][0]["startupMetrics"]
+        self.assertEqual(startup["workerRpcCount"], 2)
+        self.assertEqual(startup["workerYieldRpcCount"], 1)
+        self.assertEqual(startup["firstToLastObservedClaimMs"], 300)
+        self.assertEqual(startup["firstModelSafePointMs"], 80)
+        self.assertEqual(startup["submitToFirstModelHttpMs"], 500)
+        self.assertEqual(startup["postCaptureGenerationOverlapMs"], 170)
+        separate = self.report(observations)["runs"][0]["startupMetrics"]
+        self.assertIsNone(separate["submitToFirstModelHttpMs"])
+        self.assertIsNone(separate["firstToLastObservedClaimMs"])
+
     def test_host_clocks_are_joined_by_task_identity_without_cross_clock_subtraction(self):
         host=lambda phase,elapsed,end,task="task-a":{
             "schema":"workspace.perf.v1","source":"host","phase":phase,

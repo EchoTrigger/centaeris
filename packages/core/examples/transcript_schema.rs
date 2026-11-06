@@ -56,6 +56,7 @@ fn main() {
                     display_target: Some("README.md".into()),
                     duration_ms: Some(25),
                     operation: None,
+                    reason_type: None,
                 }),
                 order_key: TranscriptOrderKeyV1 {
                     source_sequence: "1".into(),

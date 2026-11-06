@@ -87,7 +87,7 @@ test("failed save retry sends the draft again and never reloads it over local ed
   await settled(f.subject);
   const getCount = f.calls.filter(([, options]) => !options?.method).length;
   const failure = nodes(f.subject.tree, node => node.props.role === "alert")[0];
-  assert.equal(failure.props.children[0], "libraryObjectRoute.saveFailedHelp");
+  assert.equal(failure.props.children, "libraryObjectRoute.saveFailedHelp");
   button(f.subject.tree, "libraryObjectRoute.retry").props.onClick();
   await settled(f.subject);
   assert.equal(f.calls.filter(([, options]) => !options?.method).length, getCount);

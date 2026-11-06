@@ -622,6 +622,30 @@ fn hold_host_preparation(
     hold_host_preparation_with_inventory(store, Vec::new())
 }
 
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_startup_reconciles_when_another_host_holds_inventory() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (url, store, _) = fixture::setup();
+    let (release, first) = hold_host_preparation(&store);
+    let second_store = PostgresRuntimeStore::new(&url).unwrap();
+    let (completed, result) = std::sync::mpsc::channel();
+    let second = std::thread::spawn(move || {
+        completed
+            .send(second_store.reconcile_resident_sandboxes("other-host", || Ok(Vec::new())))
+            .unwrap();
+    });
+    let while_held = result.recv_timeout(std::time::Duration::from_millis(300));
+    release.send(()).unwrap();
+    first.join().unwrap().unwrap();
+    assert_eq!(while_held, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+    result
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    second.join().unwrap();
+}
+
 fn hold_host_preparation_with_inventory(
     store: &PostgresRuntimeStore,
     inventory: Vec<ObservedResidentSandbox>,
@@ -834,6 +858,81 @@ fn postgres_preparation_unlock_before_yield_is_durable_and_contention_fact_is_id
         )
     );
     assert!(evidence["availableAtMs"].as_i64().is_some());
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_preparation_signal_advances_one_waiter_and_the_next_release_advances_another() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let first = run_scoped(
+        &store,
+        &mut db,
+        "wake-first",
+        "wake-first-session",
+        "wake-first-environment",
+        profile(),
+    );
+    let second = run_scoped(
+        &store,
+        &mut db,
+        "wake-second",
+        "wake-second-session",
+        "wake-second-environment",
+        profile(),
+    );
+    let (release, holder) = hold_host_preparation(&store);
+    for run in [&first, &second] {
+        let digest = run.original.environment_profile.digest().unwrap();
+        let reason = store
+            .prepare_retained_instance_with_inventory(
+                &run.request("contended-execution", &digest),
+                shared_limits(),
+                || panic!("a waiter cannot inspect inventory"),
+                |_, _| panic!("a waiter cannot publish execution"),
+                |_| panic!("a waiter cannot dispatch creation"),
+            )
+            .unwrap_err();
+        assert_eq!(reason, crate::resident_capacity::HOST_PREPARATION_WAIT);
+        preparation_yield(&store, &mut db, run, &reason);
+    }
+    release.send(()).unwrap();
+    holder.join().unwrap().unwrap();
+
+    let kinds = ["agent_run.lifecycle".to_string()];
+    assert!(
+        store
+            .wait_for_runtime_jobs(&kinds, std::time::Duration::ZERO)
+            .unwrap()
+            .ready
+    );
+    let mut claimed = 0;
+    for run in [&first, &second] {
+        claimed += preparation_claim(&store, &mut db, run).len();
+    }
+    assert_eq!(
+        claimed, 1,
+        "one preparation release advances one waiting Job"
+    );
+    assert!(
+        !store
+            .wait_for_runtime_jobs(&kinds, std::time::Duration::ZERO)
+            .unwrap()
+            .ready
+    );
+
+    let (release, holder) = hold_host_preparation(&store);
+    release.send(()).unwrap();
+    holder.join().unwrap().unwrap();
+    assert!(
+        store
+            .wait_for_runtime_jobs(&kinds, std::time::Duration::ZERO)
+            .unwrap()
+            .ready
+    );
+    let next = preparation_claim(&store, &mut db, &first).len()
+        + preparation_claim(&store, &mut db, &second).len();
+    assert_eq!(next, 1, "the next release advances the remaining Job");
 }
 
 #[test]

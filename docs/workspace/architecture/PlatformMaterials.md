@@ -9,8 +9,8 @@ current membership, ownership, lifecycle and content identity.
 
 ## Responsibilities and execution
 
-Material processing follows Python API/admission -> durable platform task ->
-dedicated Python material Worker -> isolated document processor -> atomic
+Material processing follows API admission -> durable platform task -> Celery
+delivery -> dedicated material Worker -> isolated document processor -> atomic
 platform publication.
 
 Model access follows Runtime's generic MCP client -> Workspace material MCP
@@ -19,10 +19,13 @@ inputs or its accepted personal-library grant. Normal sandbox file reads,
 image inputs and artifact publication use their respective execution contracts.
 
 The API owns access decisions, task admission, material storage and database
-records. The material Worker uses the API image and runs
-`python manage.py process_materials`. It claims tasks directly through the
-platform database. Runtime and the lifecycle Worker do not orchestrate document
-processing.
+records. After admission commits, the API sends the task identity through the
+dedicated Redis broker. The material Worker claims the corresponding PostgreSQL
+lease before processing. PostgreSQL records ownership, attempt limits and final
+publication. A single Celery Beat scheduler asks the Worker to recover older
+pending tasks, expired leases and abandoned processor containers. This also
+recovers admissions that committed while the broker was unavailable. Runtime and
+the lifecycle Worker do not orchestrate document processing.
 
 Only Runtime and the material Worker receive the Docker socket in bundled
 Compose. Both are trusted infrastructure components: Runtime controls generic

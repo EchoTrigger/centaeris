@@ -64,6 +64,10 @@ pub(super) fn router(state: HttpServerState) -> Router {
             on_blocking(MethodFilter::POST, agent_runs::cleanup_receipt),
         )
         .route(
+            "/internal/agent-runs/api-run-purge",
+            on_blocking(MethodFilter::POST, agent_runs::agent_run_api_purge),
+        )
+        .route(
             "/internal/model-catalog",
             on_blocking(MethodFilter::GET, catalogs::model_catalog),
         )
@@ -292,30 +296,10 @@ where
         };
     let admission_started = Instant::now();
     let lane = state
-        .request_capacity
+        .request_policy
         .lane(request.method().as_str(), request.uri().path());
     let observed_lane = if lane.control { 1 } else { observed_lane };
     let deadline = lane.deadline.map(|duration| Instant::now() + duration);
-    let slot = if lane.control {
-        // Absorb brief heartbeat bursts within the same control deadline.
-        // Connection admission bounds these waiters; they execute no DB work.
-        tokio::time::timeout_at(
-            deadline.expect("control deadline").into(),
-            lane.slots.acquire_owned(),
-        )
-        .await
-        .ok()
-        .and_then(Result::ok)
-    } else {
-        lane.slots.try_acquire_owned().ok()
-    };
-    let request_slot = match slot {
-        Some(slot) => slot,
-        None => {
-            observations::Request::rejected(observed_route, observed_lane, admission_started);
-            return bounded_json_error_response(503, "runtime_busy");
-        }
-    };
     let observed_request =
         observations::Request::admitted(observed_route, observed_lane, admission_started);
     let read = read_axum_request(request);
@@ -336,7 +320,6 @@ where
     let task = tokio::task::spawn_blocking(move || {
         let _context = observations::Context::enter(request.body());
         let _observed_request = observed_request;
-        let _request_slot = request_slot;
         let _deadline = postgres_store::RequestDeadline::enter(deadline);
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(bounded_json_error_response(
@@ -356,8 +339,8 @@ where
         match tokio::time::timeout_at(deadline.into(), task).await {
             Ok(result) => result,
             // Dropping a JoinHandle does not stop blocking work. The closure owns
-            // the permit until it actually exits; timeout must not mint capacity
-            // or imply that an uncertain write was rolled back.
+            // blocking operation until it exits; timeout does not imply that an
+            // uncertain write was rolled back.
             Err(_) => {
                 return bounded_json_error_response(504, "request_deadline_exceeded");
             }

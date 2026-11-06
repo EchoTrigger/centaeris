@@ -151,13 +151,7 @@ pub(crate) fn claim(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult
             limit: request.limit,
             lease_ms: request.lease_ms,
         })
-        .map_err(|error| {
-            if error == "execution claim busy" {
-                (503, "execution_claim_busy")
-            } else {
-                (409, "job_claim_rejected")
-            }
-        })?;
+        .map_err(|_| (409, "job_claim_rejected"))?;
     Ok(json!({"jobs":jobs}))
 }
 

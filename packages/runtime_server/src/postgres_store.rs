@@ -77,6 +77,7 @@ impl Default for PostgresConnectionLimits {
     }
 }
 
+pub(crate) mod agent_run_api_purge;
 pub(crate) mod allocation_origin;
 mod capacity_wait;
 pub(crate) mod cleanup_preservation;
@@ -108,6 +109,7 @@ pub(crate) mod workspace_snapshot_roots;
 
 #[derive(Clone)]
 pub struct PostgresRuntimeStore {
+    dispatch_host: Option<Arc<execution_capacity::DispatchHost>>,
     ordinary_connections: Arc<PostgresConnectionPool>,
     control_connections: Arc<PostgresConnectionPool>,
     cleanup_connections: Arc<PostgresConnectionPool>,
@@ -149,6 +151,10 @@ pub struct AgentRunExecutionControlState {
 }
 
 impl PostgresRuntimeStore {
+    pub(crate) fn sandbox_deployment_id(&self) -> Result<String, String> {
+        self.with_client(schema::sandbox_deployment_id)
+    }
+
     #[cfg(test)]
     pub(crate) fn rejecting_http_test_store() -> Self {
         let pool = Arc::new(PostgresConnectionPool::new(
@@ -157,6 +163,7 @@ impl PostgresRuntimeStore {
             Duration::from_millis(1),
         ));
         Self {
+            dispatch_host: None,
             ordinary_connections: pool.clone(),
             control_connections: pool.clone(),
             cleanup_connections: pool.clone(),
@@ -168,6 +175,7 @@ impl PostgresRuntimeStore {
     /// including preflight Session reads. This shares the pool, not its capacity.
     pub(crate) fn execution_control_view(&self) -> Self {
         Self {
+            dispatch_host: self.dispatch_host.clone(),
             ordinary_connections: self.control_connections.clone(),
             cleanup_connections: self.cleanup_connections.clone(),
             control_connections: self.control_connections.clone(),
@@ -176,6 +184,7 @@ impl PostgresRuntimeStore {
     }
     pub(crate) fn cleanup_view(&self) -> Self {
         Self {
+            dispatch_host: self.dispatch_host.clone(),
             ordinary_connections: self.cleanup_connections.clone(),
             control_connections: self.control_connections.clone(),
             cleanup_connections: self.cleanup_connections.clone(),
@@ -209,6 +218,7 @@ impl PostgresRuntimeStore {
             return Err("Postgres connection pool checkout timeout is too large".to_string());
         }
         let store = Self {
+            dispatch_host: None,
             ordinary_connections: Arc::new(PostgresConnectionPool::new(
                 postgres_config(
                     database_url,
@@ -233,7 +243,7 @@ impl PostgresRuntimeStore {
                     limits.connect_timeout,
                     "centaeris-runtime-cleanup",
                 )?,
-                crate::request_capacity::capacity("RUNTIME_POSTGRES_CLEANUP_POOL_SIZE", 2)?,
+                crate::request_policy::capacity("RUNTIME_POSTGRES_CLEANUP_POOL_SIZE", 2)?,
                 limits.checkout_timeout,
             )),
             listener_connections: Arc::new(PostgresConnectionPool::new(
@@ -263,6 +273,7 @@ impl PostgresRuntimeStore {
             return Err("Postgres connection pool checkout timeout is too large".to_string());
         }
         let store = Self {
+            dispatch_host: None,
             ordinary_connections: Arc::new(PostgresConnectionPool::new(
                 postgres_config(
                     database_url,

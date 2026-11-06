@@ -5,41 +5,45 @@ import {
   memo,
   useCallback,
   useEffect,
+  useImperativeHandle,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
   useSyncExternalStore,
   type ReactNode,
+  type Ref,
 } from "react";
 import { useTranscriptTurnMetadata } from "./useTranscriptTurnMetadata";
 import { WorkProgress } from "./WorkProgress";
-import { TranscriptActivity } from "./TranscriptActivity";
+import { TranscriptActivity, type TranscriptActivityState } from "./TranscriptActivity";
 import { groupTranscriptTurns, hasCommittedPendingMessage, shouldLoadEarlier, shouldReleaseLoadedHistory, type PendingTranscriptMessage } from "./transcriptTurns";
 import { ChevronDown } from "lucide-react";
 import { useTranslation } from "../i18n";
-import { TranscriptBlockRow, TranscriptLiveTail, TranscriptToolGroupCard } from "./TranscriptBlockContent";
+import { TranscriptBlockRow, TranscriptFailureNotice, TranscriptLiveTail, TranscriptToolGroupCard } from "./TranscriptBlockContent";
 import type { TranscriptToolOperationRegistry } from "./transcriptToolOperations";
 import type { TranscriptViewStore } from "./transcriptViewStore";
-import type { PresentationActivity } from "./workspacePresentationProtocol";
 
 
 type Props = Readonly<{
+  ref?: Ref<{ preserveReadingPosition(): void }>;
   store: TranscriptViewStore;
   toolOperations?: TranscriptToolOperationRegistry;
   sessionId: string | null;
   loadingHistory: boolean;
   loadingOlderHistory: boolean;
   onLoadOlderHistory(): Promise<void>;
+  olderHistoryError?: boolean;
   emptyState?: ReactNode;
   pendingUserMessage?: PendingTranscriptMessage | null;
+  submissionRejected?: boolean;
   historyMemoryPressure?: boolean;
   onReleaseLoadedHistory?(): void;
   onReadingLatestChange?(sessionId: string | null, readingLatest: boolean): void;
   onShowCitation?(citation: CitationSummary, origin: { elementId: string }): void;
-  onShowArtifact?(artifact: import("./useTranscriptTurnMetadata").PublishedArtifact): void;
+  onShowArtifact?(artifact: import("./useTranscriptTurnMetadata").PublishedArtifact, origin: { elementId: string }): void;
   running?: boolean;
-  activity?: PresentationActivity["activity"] | "stopping";
+  activity?: TranscriptActivityState;
   startedAtMs?: number;
   completedAtMs?: number;
 }>;
@@ -99,14 +103,17 @@ function groupTranscriptBlocks(
 }
 
 export const TranscriptBlockList = memo(function TranscriptBlockList({
+  ref,
   store,
   toolOperations,
   sessionId,
   loadingHistory,
   loadingOlderHistory,
   onLoadOlderHistory,
+  olderHistoryError = false,
   emptyState,
   pendingUserMessage,
+  submissionRejected = false,
   historyMemoryPressure = false,
   onReleaseLoadedHistory,
   onReadingLatestChange,
@@ -139,13 +146,13 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   const loadingOlderRef = useRef(false);
   const anchorRef = useRef<{ blockId: string; offset: number } | null>(null);
   const recoveryAnchorRef = useRef<{ blockId: string; offset: number } | null>(null);
-  const disclosureAnchorRef = useRef<{
+  const readingAnchorRef = useRef<{
     element: HTMLElement;
     offset: number;
     detail: Element | null;
     closingContentEnd: number | null;
   } | null>(null);
-  const disclosurePaddingRef = useRef(0);
+  const readingPaddingRef = useRef(0);
   const controllerPaddingRef = useRef(0);
   const renderedViewEpochRef = useRef(viewEpoch);
   const followingLatestRef = useRef(true);
@@ -181,28 +188,52 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     ? [...turns, { id: "pending:user", userBlockId: null, processIds: [], answerIds: [] }]
     : turns;
 
+  useImperativeHandle(ref, () => ({
+    preserveReadingPosition() {
+      const viewport = scrollRef.current;
+      const content = contentRef.current;
+      if (!viewport?.clientHeight || !content || followingLatestRef.current
+        || readingAnchorRef.current?.element.isConnected || recoveryAnchorRef.current) return;
+      const bounds = viewport.getBoundingClientRect();
+      const firstVisible = (elements: NodeListOf<HTMLElement>) => Array.from(elements).find(element => {
+        const rect = element.getBoundingClientRect();
+        return rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom;
+      });
+      const block = firstVisible(content.querySelectorAll<HTMLElement>("[data-block-id]"));
+      if (!block) return;
+      // Anchor to the visible paragraph rather than the top of a long answer.
+      const element = firstVisible(block.querySelectorAll<HTMLElement>("p, li, pre, table, blockquote")) ?? block;
+      readingAnchorRef.current = {
+        element,
+        offset: element.getBoundingClientRect().top - bounds.top,
+        detail: null,
+        closingContentEnd: null,
+      };
+    },
+  }), []);
+
   const applyTailPadding = useCallback(() => {
-    if (spacerRef.current) spacerRef.current.style.height = `${Math.max(controllerPaddingRef.current, disclosurePaddingRef.current)}px`;
+    if (spacerRef.current) spacerRef.current.style.height = `${Math.max(controllerPaddingRef.current, readingPaddingRef.current)}px`;
   }, []);
 
-  const reclaimDisclosurePadding = useCallback(() => {
+  const reclaimReadingPadding = useCallback(() => {
     const element = scrollRef.current;
     const content = contentRef.current;
     if (!element || !content) return;
     // Reclaim only below the reader's viewport, never by clamping their position.
-    disclosurePaddingRef.current = Math.min(disclosurePaddingRef.current,
+    readingPaddingRef.current = Math.min(readingPaddingRef.current,
       Math.max(0, element.scrollTop + element.clientHeight - measuredContentEnd(element, content)));
     applyTailPadding();
   }, [applyTailPadding]);
 
-  const restoreDisclosureAnchor = useCallback(() => {
+  const restoreReadingAnchor = useCallback(() => {
     const element = scrollRef.current;
     const content = contentRef.current;
-    const anchor = disclosureAnchorRef.current;
+    const anchor = readingAnchorRef.current;
     if (!element || !content) return;
     if (!anchor?.element.isConnected) {
-      disclosureAnchorRef.current = null;
-      reclaimDisclosurePadding();
+      readingAnchorRef.current = null;
+      reclaimReadingPadding();
       return;
     }
     const top = element.scrollTop + anchor.element.getBoundingClientRect().top
@@ -211,11 +242,11 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
       anchor.closingContentEnd = null;
     }
     const contentEnd = measuredContentEnd(element, content);
-    disclosurePaddingRef.current = Math.max(0, top + element.clientHeight
+    readingPaddingRef.current = Math.max(0, top + element.clientHeight
       - Math.min(contentEnd, anchor.closingContentEnd ?? contentEnd));
     applyTailPadding();
     setProgrammaticScrollTop(element, top);
-  }, [applyTailPadding, reclaimDisclosurePadding, setProgrammaticScrollTop]);
+  }, [applyTailPadding, reclaimReadingPadding, setProgrammaticScrollTop]);
 
   const getController = useCallback(() => {
     controllerRef.current ??= createMessageScroll({
@@ -239,8 +270,8 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
         followingLatestRef.current = value;
         if (value) {
           recoveryAnchorRef.current = null;
-          disclosureAnchorRef.current = null;
-          disclosurePaddingRef.current = 0;
+          readingAnchorRef.current = null;
+          readingPaddingRef.current = 0;
           applyTailPadding();
         }
         setFollowingLatest(value);
@@ -274,7 +305,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     void resetIdentity;
     anchorRef.current = null;
     recoveryAnchorRef.current = null;
-    disclosureAnchorRef.current = null;
+    readingAnchorRef.current = null;
     upwardIntentRef.current = false;
     if (pendingStartedAt === undefined) {
       getController().reset();
@@ -302,7 +333,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     const unsubscribe = store.subscribeManagedContent(() => {
       const snapshot = store.getListSnapshot();
       if (snapshot.sessionId !== sessionId || snapshot.viewEpoch === renderedViewEpochRef.current || followingLatestRef.current) return;
-      disclosureAnchorRef.current = null;
+      readingAnchorRef.current = null;
       const element = scrollRef.current;
       if (!element) return;
       const bounds = element.getBoundingClientRect();
@@ -363,14 +394,14 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
       // Deferred content layout can finish after the replacement commit.
       // Retain the recovered pixel anchor until the reader provides new input.
       restoreRecoveryAnchor();
-      restoreDisclosureAnchor();
+      restoreReadingAnchor();
       getController().update();
       observeReadingLatest();
     });
     observer.observe(content);
     observer.observe(element);
     return () => { observer.disconnect(); controllerRef.current?.dispose(); };
-  }, [getController, restoreRecoveryAnchor, restoreDisclosureAnchor, observeReadingLatest]);
+  }, [getController, restoreRecoveryAnchor, restoreReadingAnchor, observeReadingLatest]);
 
   async function requestOlder() {
     const element = scrollRef.current;
@@ -395,7 +426,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   function recordUpwardIntent() {
     upwardIntentRef.current = true;
     const element = scrollRef.current;
-    if (element && shouldLoadEarlier(element.scrollTop, hasOlder, loadingOlderHistory)) {
+    if (element && !olderHistoryError && shouldLoadEarlier(element.scrollTop, hasOlder, loadingOlderHistory)) {
       upwardIntentRef.current = false;
       // Loading earlier content is an actual reading action even at the top
       // boundary. Preserve that anchor; other input waits for real movement.
@@ -416,11 +447,11 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     if (element.scrollTop === previousScrollTop) return;
     const movedUpward = element.scrollTop < previousScrollTop;
     recoveryAnchorRef.current = null;
-    disclosureAnchorRef.current = null;
-    reclaimDisclosurePadding();
+    readingAnchorRef.current = null;
+    reclaimReadingPadding();
     if (movedUpward) getController().pause();
     else getController().userScroll();
-    if (shouldLoadEarlier(element.scrollTop, hasOlder, loadingOlderHistory) && upwardIntentRef.current) {
+    if (!olderHistoryError && shouldLoadEarlier(element.scrollTop, hasOlder, loadingOlderHistory) && upwardIntentRef.current) {
       upwardIntentRef.current = false;
       void requestOlder();
     }
@@ -462,11 +493,11 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
               - button.getBoundingClientRect().bottom) : 0;
           const closingContentEnd = button.getAttribute("aria-expanded") === "true"
             ? contentEnd - detailExtent : null;
-          disclosureAnchorRef.current = { element: button,
+          readingAnchorRef.current = { element: button,
             offset: button.getBoundingClientRect().top - element.getBoundingClientRect().top,
             detail, closingContentEnd };
           // Reserve the closed layout before Chrome can shrink its scroll range.
-          disclosurePaddingRef.current = Math.max(disclosurePaddingRef.current,
+          readingPaddingRef.current = Math.max(readingPaddingRef.current,
             element.scrollTop + element.clientHeight - (closingContentEnd ?? contentEnd), 0);
           applyTailPadding();
           getController().pause();
@@ -515,6 +546,10 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
           <button type="button" onClick={citations.retry}>{t("codePreview.retry")}</button>
         </div> : null}
         <div className="workspaceTranscriptBlocks" ref={contentRef}>
+          {olderHistoryError && hasOlder ? <div className="workspaceToolOutputStatus" role="status">
+            <span>{t("appRoute.unableToLoadEarlierMessagesPleaseTryAgain")}</span>
+            <button type="button" disabled={loadingOlderHistory} onClick={() => void requestOlder()}>{t("agentChat.retry")}</button>
+          </div> : null}
           {renderedTurns.map((turn, index) => {
             const isPending = pendingVisible && index === turns.length;
             const isLast = index === renderedTurns.length - 1;
@@ -546,12 +581,16 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
               {time?.artifacts.length ? <div className="workspaceArtifactInline" aria-label={t("agentRunRow.generatedFiles")}>
                 {time.artifacts.map((artifact) => <span className="workspaceArtifactInlineRow" key={artifact.artifactRef}>
                   <span className="workspaceArtifactPlus" aria-hidden="true">+</span>
-                  <a href={artifact.downloadUrl} onClick={onShowArtifact ? (event) => { event.preventDefault(); onShowArtifact(artifact); } : undefined}>{artifact.filename}</a>
+                  <a id={`artifact:${artifact.artifactRef}`} href={artifact.downloadUrl} onClick={onShowArtifact ? (event) => {
+                    event.preventDefault();
+                    onShowArtifact(artifact, { elementId: event.currentTarget.id });
+                  } : undefined}>{artifact.filename}</a>
                 </span>)}
               </div> : null}
-              {isLast && (activity === "preserving" || (isPending ? !pendingTerminal : running)) ? <TranscriptActivity activity={activity} /> : null}
+              {isLast && (isPending ? !pendingTerminal : running) ? <TranscriptActivity activity={activity} /> : null}
             </div>;
           })}
+          {submissionRejected ? <TranscriptFailureNotice message={t("appRoute.messageNotSent")} /> : null}
         </div>
         <div ref={spacerRef} aria-hidden="true" style={{ height: 0, flexShrink: 0, transitionProperty: "none" }} />
       </div>

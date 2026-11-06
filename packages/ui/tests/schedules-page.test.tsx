@@ -35,7 +35,7 @@ test("schedule pagination preserves previous rows and retries the failed page cu
   });
   const user = userEvent.setup(); render(<SchedulesPage onSession={() => {}} />);
   await user.click(await screen.findByRole("button", { name: "Load more schedules" }));
-  expect(await screen.findByRole("alert")).toHaveProperty("textContent", expect.stringContaining("Page unavailable"));
+  expect(await screen.findByRole("alert")).toHaveProperty("textContent", expect.stringContaining("Unable to load schedules."));
   expect(screen.getByRole("button", { name: "Open schedule first" })).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Retry" }));
   await screen.findByRole("button", { name: "Open schedule second" });

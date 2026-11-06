@@ -34,7 +34,7 @@ def _require_authorized_runtime_job(user, job_id: str) -> dict:
     if job is None:
         raise LookupError("job_not_found")
     session_id = job.get("sessionId")
-    session = Session.objects.filter(id=session_id, owner=user).first()
+    session = Session.objects.filter(id=session_id, owner=user, purpose="interactive").first()
     if session is None or workspace_membership_for(user, session.workspace_id) is None:
         raise LookupError("job_not_found")
     return job

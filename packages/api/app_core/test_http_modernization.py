@@ -225,12 +225,12 @@ class NinjaContractTests(TestCase):
             "displayName": "Shared", "api": "openai-completions",
             "apiBase": "https://api.example.invalid/v1", "secret": "synthetic-shared-secret",
         }), content_type="application/json")
-        self.assertEqual(shared.status_code, 201, shared.content)
+        self.assertEqual(shared.status_code, 404, shared.content)
         listed = self.client.get(f"/api/workspaces/{workspace.pk}/model-providers")
         data = validate_response(listed, "/api/workspaces/{workspace_id}/model-providers", "get")
         self.assertEqual(
             {(provider["scope"], provider["writable"]) for provider in data["providers"]},
-            {("workspace", True), ("platform", False)},
+            {("workspace", True)},
         )
         self.assertNotContains(listed, "synthetic-local-secret")
         self.assertNotContains(listed, "synthetic-shared-secret")

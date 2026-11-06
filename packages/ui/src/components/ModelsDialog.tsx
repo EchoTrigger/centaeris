@@ -72,8 +72,10 @@ const newCustomModelDraft = (): CustomModelDraft => ({
   supportsVision: false,
 });
 
-const errorText = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error || "model_configuration_failed");
+function reportModelFailure(error: unknown, message = "Model settings could not be updated. Try again."): string {
+  console.error("Desktop model settings request failed", error);
+  return message;
+}
 
 const customProviderId = (): string => `custom.${crypto.randomUUID().replaceAll("-", "")}`;
 
@@ -126,9 +128,10 @@ const testSummary = (result: ModelTestState): string => {
       .filter(Boolean)
       .join(" · ");
   }
-  return ["Failed", `${result.latencyMs}ms`, status, result.errorKeyword?.trim() || "unknown_error"]
-    .filter(Boolean)
-    .join(" · ");
+  if (result.httpStatus === 401 || result.httpStatus === 403) return "The model service could not authenticate. Check the API key and permissions.";
+  if (result.httpStatus === 429) return "The model service is limiting requests. Try again later.";
+  if (result.httpStatus && result.httpStatus >= 500) return "The model service is temporarily unavailable. Try again later.";
+  return "The model test failed. Check the model settings and try again.";
 };
 
 function SettingsDialog({ title, description, children, onClose, busy = false, initialFocus }: {
@@ -206,12 +209,12 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
       setCanResetUnsupportedConfig(false);
     } catch (error) {
       if (sequence !== loadSequence.current) return;
-      const nextMessage = errorText(error);
+      const errorDetail = error instanceof Error ? error.message : String(error);
       setConfig(null);
-      setMessage(nextMessage);
+      setMessage(reportModelFailure(error, "Unable to load model services."));
       setCanResetUnsupportedConfig(
-        nextMessage.includes("runtime_config_unsupported")
-        || nextMessage.includes("runtime_secret_unsupported"),
+        errorDetail.includes("runtime_config_unsupported")
+        || errorDetail.includes("runtime_secret_unsupported"),
       );
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
@@ -238,7 +241,7 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
       setCanResetUnsupportedConfig(false);
       setMessage("Runtime configuration reset");
     } catch (error) {
-      if (owner === screenOwner.current) setMessage(errorText(error));
+      if (owner === screenOwner.current) setMessage(reportModelFailure(error));
     } finally {
       if (owner === screenOwner.current) setSavingSettings(false);
     }
@@ -316,7 +319,7 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
       setMessage("Saved");
     } catch (error) {
       if (owner !== screenOwner.current) return;
-      setMessage(`${settingsSaved ? "Connection settings saved, but the API key was not saved. Retry saving the key. " : ""}${errorText(error)}`);
+      setMessage(reportModelFailure(error, settingsSaved ? "Connection settings saved, but the API key was not saved. Retry saving the key." : undefined));
     } finally { if (owner === screenOwner.current) setSavingSettings(false); }
   };
 
@@ -336,7 +339,7 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
       select({ kind: "provider", providerId });
       setMessage("Credential removed");
     } catch (error) {
-      if (owner === screenOwner.current) setMessage(errorText(error));
+      if (owner === screenOwner.current) setMessage(reportModelFailure(error));
     } finally {
       if (owner === screenOwner.current) setCredentialProviderId("");
     }
@@ -389,7 +392,7 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
       select({ kind: "provider", providerId: selectedCustomProvider.providerId });
       setMessage("Model removed");
     } catch (error) {
-      if (owner === screenOwner.current) setMessage(errorText(error));
+      if (owner === screenOwner.current) setMessage(reportModelFailure(error));
     } finally {
       if (owner === screenOwner.current) setSavingSettings(false);
     }
@@ -415,7 +418,7 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
       select({ kind: "empty" });
       setMessage("Service removed");
     } catch (error) {
-      if (owner === screenOwner.current) setMessage(errorText(error));
+      if (owner === screenOwner.current) setMessage(reportModelFailure(error));
     } finally {
       if (owner === screenOwner.current) setSavingSettings(false);
     }
@@ -440,7 +443,7 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
         model: catalogModel.model,
         httpStatus: null,
         latencyMs: 0,
-        errorKeyword: errorText(error),
+        errorKeyword: reportModelFailure(error, "The model test failed."),
       });
     } finally {
       if (testOwner.current === owner) {
@@ -513,6 +516,7 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
             <label className="desktopModelField">API key<div className="desktopModelKeyInput"><Input aria-label="API key" autoComplete="off" spellCheck={false} disabled={busy} type={revealedProviderId === selectedProviderId ? "text" : "password"} value={apiKeys[selectedProviderId!] ?? ""} onChange={event => setApiKeys(keys => ({ ...keys, [selectedProviderId!]: event.target.value }))} placeholder={selectedProvider?.configured ? "Leave blank to keep current credential" : "Enter API key"} /><Button variant="ghost" size="icon-sm" disabled={busy} aria-label="Toggle API key visibility" aria-pressed={revealedProviderId === selectedProviderId} onClick={() => setRevealedProviderId(revealedProviderId ? null : selectedProviderId)}>{revealedProviderId ? <EyeOff size={16} /> : <Eye size={16} />}</Button></div><small>Stored locally. Blank keeps the current credential.</small></label>
           </div>{saveButtons}
         </> : <dl className="desktopModelFacts"><div><dt>Credential</dt><dd><KeyRound size={14} />{credentialLabel(selectedProvider)}</dd></div>{selectedCustomProvider ? <><div><dt>Base URL</dt><dd>{selectedCustomProvider.baseUrl || "No endpoint configured"}</dd></div><div><dt>API protocol</dt><dd>{selectedCustomProvider.api}</dd></div></> : null}</dl>}
+        {selection.kind === "provider" ? feedback : null}
       </section>
       {!editing || selection.kind === "model" ? <section className="desktopModelSection" aria-labelledby="modelListHeading"><header className="desktopModelSectionHeading"><div><h2 id="modelListHeading">Models <span className="desktopModelCount">{modelRows.length}</span></h2></div>{selectedCustomProvider ? <Button variant="outline" disabled={busy} onClick={() => addModel(selectedProviderId!)}><Plus size={16} />Add model</Button> : null}</header>
         {modelRows.length ? <div className="desktopModelSearch"><Search size={15} /><Input aria-label="Search models" placeholder="Search models" value={modelQuery} onChange={event => setModelQuery(event.target.value)} /></div> : null}
@@ -525,11 +529,11 @@ export function ModelsDialog({ onConfigured, confirmAction }: ModelsDialogProps)
     </>}
     {busy && !editing ? <div className="desktopModelLoading" role="status"><LoaderCircle size={16} className="desktopSettingsSpinner" />Updating service…</div> : null}
     {loading ? <div className="desktopModelLoading" role="status"><LoaderCircle size={16} className="desktopSettingsSpinner" />Loading model services…</div> : null}
-    {selection.kind !== "model" ? feedback : null}
-    {!loading && !config ? <div className="desktopModelRecovery"><Button variant="outline" disabled={busy} onClick={() => void load()}>Retry</Button>{canResetUnsupportedConfig ? <Button variant="destructive" disabled={busy} onClick={() => void resetUnsupportedConfig()}>Reset configuration…</Button> : null}</div> : null}
+    {selection.kind === "empty" && config ? feedback : null}
+    {!loading && !config ? <div className="desktopModelRecovery">{feedback}<Button variant="outline" disabled={busy} onClick={() => void load()}>Retry</Button>{canResetUnsupportedConfig ? <Button variant="destructive" disabled={busy} onClick={() => void resetUnsupportedConfig()}>Reset configuration…</Button> : null}</div> : null}
     {selection.kind === "model" ? <SettingsDialog title={selectedModelId || "New model"} description={providerName} onClose={cancelEdit} busy={busy} initialFocus={selectedCustomModel ? dialogInput : undefined}>
       <div className="desktopModelDialogToolbar"><span>{selectedCustomModel ? <Badge variant="secondary">{hasChanges ? "Unsaved changes" : "Custom model"}</Badge> : <Badge variant="secondary">Provider model</Badge>}</span><Button variant="outline" disabled={busy || settingsDirty || !selectedCatalogModel || Boolean(selectedCatalogModel.diagnostic) || Boolean(testingModelId)} onClick={() => void runTest()}>{isTestingSelectedModel ? <LoaderCircle size={15} className="desktopSettingsSpinner" /> : null}{isTestingSelectedModel ? "Testing…" : "Test"}</Button></div>
-      {selectedCatalogModel?.diagnostic ? <p className="desktopModelDiagnostic"><CircleAlert size={16} /><span>{selectedCatalogModel.diagnostic}</span></p> : null}
+      {selectedCatalogModel?.diagnostic ? <p className="desktopModelDiagnostic"><CircleAlert size={16} /><span>Check this model’s configuration before testing.</span></p> : null}
       {selectedResult}
       {selectedCustomModel ? <><div className="desktopModelForm">
         <label className="desktopModelField">ID *<Input ref={dialogInput} value={selectedCustomModel.model} disabled={busy} onChange={event => updateCustomModel(selectedCustomModel.key, { model: event.target.value })} placeholder="model-id" /><small>Exact model ID from this provider.</small></label>

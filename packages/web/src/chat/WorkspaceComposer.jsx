@@ -22,9 +22,9 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
   onRemoveAttachment,
   onRemoveUpload,
   draft,
+  feedback,
   onDraftChange,
   enterStartsNewLine,
-  workspaceName,
   sending,
   hasActiveAgentRun,
   uploadingAttachment,
@@ -43,6 +43,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
 }) {
   const { t } = useTranslation();
   const thinkingLabel = thinkingModeLabels(t)[thinkingMode] || thinkingMode;
+  const showStop = hasActiveAgentRun && !draft.trim();
   return (
     <form ref={formRef} className={`workspaceComposer ${isHome ? "shComposerHero" : ""}`} onSubmit={onSubmit}>
       {pendingAttachments.length || pendingUploadFiles.length ? (
@@ -69,8 +70,9 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
             event.currentTarget.form?.requestSubmit();
           }
         }}
-        placeholder={t("appRoute.describeATaskForValue", { value1: workspaceName })}
+        placeholder={t(isHome ? "appRoute.describeATask" : "appRoute.reply")}
       />
+      {feedback}
       <div className="workspaceComposerFooter">
         <div className="workspaceComposerControlGroup">
           <span className="workspaceComposerControl" data-tooltip={t("appRoute.add")}>
@@ -97,8 +99,8 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
           <span className="workspaceComposerControl" data-tooltip={t("appRoute.aiModelValue", { value1: currentModel?.displayName || (modelGroups.length ? t("appRoute.selectAnOption") : t("appRoute.notConfigured")) })}>
             <ModelPicker groups={modelGroups} model={currentModel} value={modelId} onChange={onModelIdChange} disabled={!modelGroups.length || sending} />
           </span>
-          <span className="workspaceComposerControl" data-tooltip={hasActiveAgentRun ? t("appRoute.stop") : t("appRoute.input")}>
-            {hasActiveAgentRun ? (
+          <span className="workspaceComposerControl" data-tooltip={t(showStop ? "appRoute.stop" : "appRoute.send")}>
+            {showStop ? (
               <button
                 className="workspaceSendButton"
                 type="button"
@@ -112,7 +114,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
               <button
                 className="workspaceSendButton"
                 type="submit"
-                aria-label={t("appRoute.input")}
+                aria-label={t("appRoute.send")}
                 aria-busy={controlBusy || sending}
               >
                 {sending ? <LoaderCircle className="statusIcon" aria-hidden="true" /> : <ArrowUp aria-hidden="true" />}

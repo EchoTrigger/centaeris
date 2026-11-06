@@ -401,11 +401,7 @@ export function ChatArea({
       }
     })()
       .catch((error: unknown) => {
-        const detail =
-          error instanceof Error && error.message.trim()
-            ? error.message.trim()
-            : "unknown transcript update error";
-        setRuntimeConfigError(`Transcript update failed: ${detail}`);
+        console.error("Desktop transcript update failed", error);
       })
       .finally(() => {
         transcriptPatchRefreshInFlightRef.current = null;
@@ -687,11 +683,10 @@ export function ChatArea({
         syncTranscriptView();
       })
       .catch((error: unknown) => {
-        const detail =
-          error instanceof Error && error.message.trim()
-            ? error.message.trim()
-            : "unknown transcript paging error";
-        setRuntimeConfigError(`Loading earlier messages failed: ${detail}`);
+        console.error("Desktop transcript paging failed", error);
+        if (transcriptViewRef.current === view && visibleSessionIdRef.current === expectedSessionId) {
+          setRuntimeConfigError(t("chatArea.earlierMessagesUnavailable"));
+        }
       })
       .finally(() => {
         if (olderTranscriptRequestRef.current === task) {
@@ -917,6 +912,9 @@ export function ChatArea({
   const handleCompactAction = useCallback(() => {
     void handleCompactContext();
   }, [handleCompactContext]);
+  const shouldReleaseHistory = transcriptManagedBytes >= TRANSCRIPT_MEMORY_WARNING_BYTES;
+  const jumpToLatestLabel = t(shouldReleaseHistory
+    ? "chatArea.releaseHistoryAndReturnToLatest" : "chatArea.jumpToLatest");
 
   return (
     <div
@@ -981,13 +979,6 @@ export function ChatArea({
         </section>
       ) : null}
 
-      {syncError && !sessionLoadError ? (
-        <div className="session-sync-status" role="status">
-          <span>{t("chatArea.syncPaused", { message: syncError })}</span>
-          <Button variant="outline" size="sm" type="button" onClick={retrySessionSync}>{t("chatArea.retrySync")}</Button>
-        </div>
-      ) : null}
-
       <div
         className="chat-main"
         style={{ marginBottom: isWelcomeComposer ? 0 : composerHeight + 12 }}
@@ -1000,7 +991,7 @@ export function ChatArea({
               role="alert"
             >
               <h2>{t("chatArea.unableToLoadConversation")}</h2>
-              <p>{sessionLoadError}</p>
+              <Button variant="ghost" size="sm" type="button" onClick={retrySessionSync}>{t("chatArea.retrySync")}</Button>
             </section>
           ) : chatViewMode === "welcome" ? (
             null
@@ -1016,15 +1007,6 @@ export function ChatArea({
               </span>
             </div>
           ) : (
-            <>
-            {transcriptManagedBytes >= TRANSCRIPT_MEMORY_WARNING_BYTES ? (
-              <div className="transcript-memory-warning" role="status">
-                <span>{t("chatArea.loadedConversationDataExceeds32MiB")}</span>
-                <button type="button" onClick={handleReleaseTranscriptHistory}>
-                  {t("chatArea.releaseHistoryAndReturnToLatest")}
-                </button>
-              </div>
-            ) : null}
             <VirtualMessageList
               containerRef={messagesContainerRef}
               contentRef={messagesContentRef}
@@ -1049,15 +1031,21 @@ export function ChatArea({
               onStartEditingUserMessage={handleStartEditingUserMessage}
               onOpenWorkspacePath={onOpenWorkspacePath}
             />
-            </>
           )}
         </div>
-        {!sessionLoadError && !isFollowingLatest && chatViewMode === "conversation" ? (
+        {!sessionLoadError && syncError ? (
+          <Button variant="ghost" size="sm" type="button" className="chatSyncRetry" onClick={retrySessionSync}>
+            {t("chatArea.retryConversationSync")}
+          </Button>
+        ) : null}
+        {!sessionLoadError && chatViewMode === "conversation"
+          && (!isFollowingLatest || shouldReleaseHistory) ? (
           <button
             type="button"
             className="jump-to-latest"
-            onClick={handleJumpToLatest}
-            aria-label={t("chatArea.jumpToLatest")}
+            onClick={shouldReleaseHistory ? handleReleaseTranscriptHistory : handleJumpToLatest}
+            aria-label={jumpToLatestLabel}
+            title={jumpToLatestLabel}
           >
             <ChevronDown aria-hidden="true" />
           </button>

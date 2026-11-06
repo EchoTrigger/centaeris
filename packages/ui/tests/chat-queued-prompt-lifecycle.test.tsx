@@ -1447,7 +1447,7 @@ test("a rejected rewrite restores the exact transcript and editable draft", asyn
   ).toEqual(originalMessages);
   expect(getMessageList().editingUserMessageId).toBe(originalUserMessage.id);
   expect(getMessageList().editingPrompt).toBe("retry this rewrite");
-  expect(getComposer().runtimeConfigError).toContain("rewrite rejected");
+  expect(getComposer().runtimeConfigError).toBe("The edit couldn’t be confirmed. Check the conversation before trying again.");
   expect(harness.streams).toHaveLength(1);
 
   await act(async () => renderer.unmount());
@@ -1849,12 +1849,13 @@ test("a new draft waits for actual response content through submission, session 
   await act(async () => renderer.unmount());
 });
 
-test("a failed first submission reveals the error in the docked conversation", async () => {
-  harness.sendAgentInput.mockRejectedValueOnce(new Error("Provider unavailable"));
+test("an unconfirmed first submission stays in the docked conversation without retrying", async () => {
+  harness.sendAgentInput.mockRejectedValueOnce(new Error("Runtime request timed out with unknown outcome"));
   const renderer = await renderEmptyChat();
   await submitPrompt("Please help");
   expect(composerPosition(renderer)).toBe("bottom");
-  expect(Object.values(useChatViewStore.getState().messageById).some(message => message.role === "assistant" && message.turn.chunks.some(chunk => chunk.kind === "narrative" && chunk.text.includes("Provider unavailable")))).toBe(true);
+  expect(getComposer().runtimeConfigError).toBe("Delivery couldn’t be confirmed. Check the conversation before sending again.");
+  expect(harness.sendAgentInput).toHaveBeenCalledTimes(1);
   await act(async () => renderer.unmount());
 });
 

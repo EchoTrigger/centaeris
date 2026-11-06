@@ -1,0 +1,401 @@
+"""Workspace-managed credentials and the external v1 single-response API."""
+from typing import Annotated
+
+from django.conf import settings
+from django.db import transaction
+from django.http import JsonResponse
+from django.utils import timezone
+from ninja import Router, Status
+from ninja.security import HttpBearer
+from pydantic import Field
+
+from app_core.app_delegations import DelegationRejected
+from app_core.credentials import CredentialDecryptionError, decrypt_credential_secret
+from app_core.hosted_operations import HostedOperationError
+from app_core.material_contract import KnowledgeError
+from app_core.models import AgentRun, AgentRunApiCredential, AgentRunApiOperation, ConversationResetPolicy
+from app_core.agent_run_api_conversations import ConversationReset, close_conversation
+from app_core.agent_run_api_credentials import (
+    CredentialRejected,
+    authenticate_credential,
+    authority_is_current,
+    create_credential,
+)
+from app_core.agent_run_api_protocol import (
+    CANCEL_RUN_PATH,
+    CLOSE_CONVERSATION_PATH,
+    SEND_MESSAGE_PATH,
+    CREATE_RUN_PATH,
+    GET_OPERATION_PATH,
+    IDEMPOTENCY_HEADER,
+    CancellationRequested,
+    ClosedConversation,
+    ConversationResetResponse,
+    CreateRunRequest,
+    DateTimeText,
+    OperationReceipt,
+    SendMessageRequest,
+)
+from app_core.agent_run_api_runs import _locked_credential, accept_run, operation_expiry, refresh_operation
+from app_core.agent_run_api_stream import operation_receipt, stream_agent_run_api
+from app_core.runtime_client import request_agent_run_cancellation
+from app_core.session_model_settings import SessionModelSettingsError
+from app_core.workspace_access import WORKSPACE_ADMIN_ROLES, locked_workspace_membership_for
+
+from .response_schema import COMMON_ERROR_RESPONSES, ErrorResponse
+from .schema import StrictSchema
+from .security import session_auth
+from .stream_response import OwnedAsyncStreamingHttpResponse, stream_database_call
+
+
+router = Router(tags=["agent"], by_alias=True)
+ResetPolicyValue = Annotated[ConversationResetPolicy, Field(strict=False)]
+
+
+class CreateCredentialRequest(StrictSchema):
+    name: str = Field(min_length=1, max_length=120)
+    model_config_ref: str
+    plugin_names: list[str] = Field(default_factory=list, max_length=64)
+    source_object_refs: list[str] = Field(default_factory=list, max_length=64)
+    reset_policy: ResetPolicyValue = ConversationResetPolicy.NEVER
+
+
+class UpdateResetPolicyRequest(StrictSchema):
+    reset_policy: ResetPolicyValue
+
+
+class CredentialResponse(StrictSchema):
+    id: str
+    name: str
+    workspace_id: str
+    model_config_ref: str
+    plugin_names: list[str]
+    source_object_refs: list[str]
+    created_at: DateTimeText
+    can_copy: bool
+    reset_policy: ResetPolicyValue
+
+
+class CredentialListResponse(StrictSchema):
+    credentials: list[CredentialResponse]
+
+
+class CredentialEnvelope(StrictSchema):
+    credential: CredentialResponse
+
+
+class CreatedCredentialResponse(CredentialEnvelope):
+    secret: str
+
+
+class CredentialSecretResponse(StrictSchema):
+    secret: str
+
+
+class AgentRunApiAuth(HttpBearer):
+    openapi_description = (
+        "Use the complete Agent Run API credential as Authorization: Bearer <credential>. "
+        "The credential fixes the workspace and allowed execution scope. Use the same credential "
+        "for submission, status lookup and cancellation. Browser session cookies or an authenticated "
+        "product session cannot be combined with this credential. Revoked credentials cannot read "
+        "their old receipts."
+    )
+
+    def __call__(self, request):
+        if settings.SESSION_COOKIE_NAME in request.COOKIES or request.user.is_authenticated:
+            raise DelegationRejected("authentication_mixed", 400)
+        return super().__call__(request)
+
+    def authenticate(self, request, token):
+        try:
+            return authenticate_credential(token)
+        except CredentialRejected as error:
+            raise DelegationRejected(error.code, error.status) from error
+
+
+external_auth = AgentRunApiAuth()
+
+
+def _json(value, status=200):
+    response = JsonResponse(value, status=status)
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+def _credential_value(credential, user):
+    return {
+        "id": credential.pk,
+        "name": credential.name,
+        "workspaceId": credential.workspace_id,
+        "modelConfigRef": credential.modelConfig_id,
+        "pluginNames": credential.pluginNames,
+        "sourceObjectRefs": credential.sourceObjectRefs,
+        "createdAt": credential.createdAt.isoformat(),
+        "resetPolicy": credential.resetPolicy,
+        "canCopy": bool(credential.user_id == user.pk and credential.encryptedSecret),
+    }
+
+
+def _admin(user, workspace_id):
+    member = locked_workspace_membership_for(user, workspace_id, allowed_roles=WORKSPACE_ADMIN_ROLES)
+    if member is None:
+        raise DelegationRejected("workspace_forbidden", 403)
+    return member
+
+
+@router.get(
+    "/workspaces/{workspace_id}/api-credentials", auth=session_auth,
+    response={200: CredentialListResponse} | COMMON_ERROR_RESPONSES,
+)
+def list_api_credentials(request, workspace_id: str):
+    with transaction.atomic():
+        _admin(request.user, workspace_id)
+        credentials = AgentRunApiCredential.objects.filter(workspace_id=workspace_id).order_by("createdAt", "id")
+        return _json({"credentials": [_credential_value(item, request.user) for item in credentials]})
+
+
+@router.post(
+    "/workspaces/{workspace_id}/api-credentials", auth=session_auth,
+    response={201: CreatedCredentialResponse} | COMMON_ERROR_RESPONSES,
+)
+def create_api_credential(request, workspace_id: str, payload: CreateCredentialRequest):
+    try:
+        credential, token = create_credential(
+            request.user, workspace_id, payload.model_config_ref,
+            plugin_names=payload.plugin_names,
+            source_object_refs=payload.source_object_refs,
+            name=payload.name,
+            reset_policy=payload.reset_policy,
+        )
+        return _json({"credential": _credential_value(credential, request.user), "secret": token}, 201)
+    except CredentialRejected as error:
+        return _json({"error": error.code}, error.status)
+    except ValueError as error:
+        return _json({"error": str(error)}, 400)
+
+
+@router.get(
+    "/workspaces/{workspace_id}/api-credentials/{credential_id}/secret", auth=session_auth,
+    response={200: CredentialSecretResponse} | COMMON_ERROR_RESPONSES,
+)
+def read_api_credential_secret(request, workspace_id: str, credential_id: str):
+    with transaction.atomic():
+        _admin(request.user, workspace_id)
+        credential = AgentRunApiCredential.objects.select_for_update().filter(
+            pk=credential_id, workspace_id=workspace_id, user=request.user,
+        ).first()
+        if credential is None or not credential.encryptedSecret:
+            return _json({"error": "credential_secret_not_found"}, 404)
+        if not authority_is_current(credential):
+            return _json({"error": "api_credential_revoked"}, 403)
+        try:
+            return _json({"secret": decrypt_credential_secret(credential.encryptedSecret)})
+        except CredentialDecryptionError:
+            return _json({"error": "credential_secret_unavailable"}, 503)
+
+
+@router.patch(
+    "/workspaces/{workspace_id}/api-credentials/{credential_id}", auth=session_auth,
+    response={200: CredentialEnvelope} | COMMON_ERROR_RESPONSES,
+)
+def update_api_credential_reset_policy(request, workspace_id: str, credential_id: str, payload: UpdateResetPolicyRequest):
+    with transaction.atomic():
+        _admin(request.user, workspace_id)
+        credential = AgentRunApiCredential.objects.select_for_update().filter(
+            pk=credential_id, workspace_id=workspace_id,
+        ).first()
+        if credential is None:
+            return _json({"error": "credential_not_found"}, 404)
+        credential.resetPolicy = payload.reset_policy
+        credential.save(update_fields=["resetPolicy"])
+        return _json({"credential": _credential_value(credential, request.user)})
+
+
+@router.delete(
+    "/workspaces/{workspace_id}/api-credentials/{credential_id}", auth=session_auth,
+    response={204: None} | COMMON_ERROR_RESPONSES,
+)
+def delete_api_credential(request, workspace_id: str, credential_id: str):
+    with transaction.atomic():
+        _admin(request.user, workspace_id)
+        credential = AgentRunApiCredential.objects.select_for_update().filter(
+            pk=credential_id, workspace_id=workspace_id,
+        ).first()
+        if credential is None:
+            return _json({"error": "credential_not_found"}, 404)
+        AgentRunApiOperation.objects.filter(credential=credential, cleanupStatus="completed").delete()
+        # Unfinished operations stay detached until the existing cancellation and cleanup reconcile.
+        credential.delete()
+    return Status(204, None)
+
+
+SUBMISSION_OPENAPI = {
+    "parameters": [{
+        "in": "header", "name": IDEMPOTENCY_HEADER, "required": True,
+        "schema": {"type": "string"},
+        "description": (
+            "Client-generated operation ID: Unix seconds, a dot, and a lowercase UUIDv4. "
+            "Keep the same credential, key and request body for retries. A previously accepted "
+            "operation with different input returns 409. The key expires 24 hours after its "
+            "timestamp; timestamps more than five minutes in the future are rejected."
+        ),
+    }],
+    "responses": {200: {
+        "description": (
+            "A newly accepted operation returns text/event-stream. An already accepted "
+            "operation with the same credential, key and request returns an application/json "
+            "receipt only. A retry after an earlier submission was not accepted can still "
+            "be the first acceptance and return SSE."
+        ),
+        "content": {"text/event-stream": {"schema": {"type": "string"}}},
+    }},
+}
+
+
+@router.post(
+    CREATE_RUN_PATH, auth=external_auth, response={200: OperationReceipt} | COMMON_ERROR_RESPONSES,
+    description=(
+        "Submit one execution scoped to this credential and Idempotency-Key. Inspect the response "
+        "Content-Type to choose the parser; the Accept header does not choose the response format. "
+        "Only a newly accepted submission can deliver text and artifacts over SSE. Disconnecting does "
+        "not cancel execution, and the stream and results cannot be replayed. Save the original "
+        "operation ID before sending, and use it to check status after a timeout. Query parameters "
+        "are rejected."
+    ),
+    openapi_extra=SUBMISSION_OPENAPI,
+)
+async def create_agent_run_api_run(request, payload: CreateRunRequest):
+    return await _submit(request, payload)
+
+
+@router.post(
+    SEND_MESSAGE_PATH, auth=external_auth,
+    response={200: OperationReceipt} | COMMON_ERROR_RESPONSES | {409: ErrorResponse | ConversationResetResponse},
+    description=(
+        "Send the first message or continue a credential-owned conversation. Omit conversationId "
+        "to start fresh. When a closed conversation meets its reset policy, the accepted receipt "
+        "returns the new conversationId. A competing submission to the superseded ID receives "
+        "409 conversation_reset and the replacement ID."
+    ),
+    openapi_extra=SUBMISSION_OPENAPI,
+)
+async def send_agent_message(request, payload: SendMessageRequest):
+    return await _submit(request, payload, message=True)
+
+
+async def _submit(request, payload, *, message=False):
+    if request.GET:
+        return _json({"error": "request_invalid"}, 400)
+    operation_id = request.headers.get(IDEMPOTENCY_HEADER, "")
+    try:
+        operation, run = await stream_database_call(accept_run)(request.auth, operation_id, payload, message=message)
+    except ConversationReset as error:
+        return _json({"error": error.code, "conversationId": error.replacement_id}, error.status)
+    except (HostedOperationError, KnowledgeError) as error:
+        return _json({"error": error.code}, error.status)
+    except CredentialRejected as error:
+        return _json({"error": error.code}, error.status)
+    except SessionModelSettingsError as error:
+        return _json({"error": str(error)}, 400)
+    except RuntimeError:
+        return _json({"error": "runtime_unavailable"}, 503)
+    if run is None:
+        operation = await stream_database_call(refresh_operation)(operation)
+        return _json(operation_receipt(operation))
+
+    async def authority_check():
+        return await stream_database_call(authority_is_current)(request.auth)
+
+    response = OwnedAsyncStreamingHttpResponse(
+        stream_agent_run_api(operation, run, authority_check), content_type="text/event-stream",
+    )
+    response["Cache-Control"] = "no-store"
+    response["X-Accel-Buffering"] = "no"
+    return response
+
+
+@router.post(
+    CLOSE_CONVERSATION_PATH, auth=external_auth,
+    response={200: ClosedConversation} | COMMON_ERROR_RESPONSES | {409: ConversationResetResponse},
+    description=(
+        "Record an explicit conversation close. Send zero bytes and no query parameters. "
+        "Repeated closes preserve the original timestamp until a message reopens the conversation. "
+        "Closing leaves accepted executions running."
+    ),
+)
+def close_agent_conversation(request, conversation_id: str):
+    if request.META.get("CONTENT_LENGTH", "0") not in ("", "0") or request.GET:
+        return _json({"error": "request_invalid"}, 400)
+    try:
+        with transaction.atomic():
+            conversation = close_conversation(_locked_credential(request.auth), conversation_id)
+    except ConversationReset as error:
+        return _json({"error": error.code, "conversationId": error.replacement_id}, error.status)
+    except HostedOperationError as error:
+        return _json({"error": error.code}, error.status)
+    return _json({"conversationId": conversation.pk, "closedAt": conversation.closedAt.isoformat()})
+
+
+@router.get(
+    GET_OPERATION_PATH, auth=external_auth, response={200: OperationReceipt} | COMMON_ERROR_RESPONSES,
+    description=(
+        "Read the status receipt using the original operation ID and the same credential that "
+        "submitted it. This endpoint never returns answer text, artifact bytes or a replay stream. "
+        "A valid, unexpired ID with no operation under this credential returns 404; an expired "
+        "operation ID returns 410. Query parameters are rejected."
+    ),
+    openapi_extra={"responses": {200: {
+        "description": "Operation status receipt only; no results or replay.",
+    }}},
+)
+def get_agent_run_api_operation(request, operation_id: str):
+    if request.GET:
+        return _json({"error": "request_invalid"}, 400)
+    try:
+        operation_expiry(operation_id)
+    except HostedOperationError as error:
+        return _json({"error": error.code}, error.status)
+    operation = AgentRunApiOperation.objects.filter(credential=request.auth, operationId=operation_id).first()
+    if operation is None:
+        return _json({"error": "operation_not_found"}, 404)
+    return _json(operation_receipt(refresh_operation(operation)))
+
+
+@router.post(
+    CANCEL_RUN_PATH, auth=external_auth,
+    response={200: OperationReceipt, 202: CancellationRequested} | COMMON_ERROR_RESPONSES,
+    description=(
+        "Request cancellation using the runId from the original operation and the same credential. "
+        "Send an empty body (zero bytes, not a JSON object) and no query parameters. A 202 response "
+        "only acknowledges the cancellation request; use the original operation ID to confirm the "
+        "terminal run status. Cancellation does not undo effects already performed."
+    ),
+    openapi_extra={"responses": {
+        200: {
+            "description": "The run is already terminal; return its operation status receipt.",
+        },
+        202: {
+            "description": "Cancellation requested; this does not confirm that execution has stopped.",
+        },
+    }},
+)
+def cancel_agent_run_api_run(request, run_id: str):
+    if request.META.get("CONTENT_LENGTH", "0") not in ("", "0") or request.GET:
+        return _json({"error": "request_invalid"}, 400)
+    operation = AgentRunApiOperation.objects.filter(credential=request.auth, agentRunId=run_id).first()
+    if operation is None:
+        return _json({"error": "agent_run_not_found"}, 404)
+    if operation.expiresAt <= timezone.now():
+        return _json({"error": "operation_expired"}, 410)
+    run = AgentRun.objects.filter(pk=run_id).first()
+    if run is None or run.status in {"completed", "failed", "cancelled"}:
+        return _json(operation_receipt(refresh_operation(operation)))
+    try:
+        result = request_agent_run_cancellation(run)
+    except RuntimeError:
+        return _json({"error": "agent_run_cancel_unavailable"}, 503)
+    if result["disposition"] == "terminal":
+        from app_core.session_event import project_committed_agent_run
+        project_committed_agent_run(run, result["terminalState"])
+        return _json(operation_receipt(refresh_operation(operation)))
+    return _json(CancellationRequested(runId=run_id, cancelStatus="requested"), 202)

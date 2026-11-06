@@ -20,6 +20,7 @@ x-upload-temp-mount: &upload-temp-mount
 x-plugin-root: &plugin-root /opt/centaeris/plugins
 x-api-internal-url: &api-internal-url http://api:8000
 x-redis-url: &redis-url redis://redis:6379/0
+x-material-broker-url: &material-broker-url redis://material-broker:6379/0
 
 x-workspace-general-image: &workspace-general-image centaeris-workspace-general:local
 
@@ -78,6 +79,18 @@ services:
       timeout: 3s
       retries: 20
 
+  material-broker:
+    restart: unless-stopped
+    image: redis:8-alpine@sha256:978f0e01593e65eed801f2402944efcd936d43b5027e4908a7897baf88ed6241
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - material-broker-data:/data
+
   document-processor:
     image: *document-processor-image
     build:
@@ -116,7 +129,6 @@ services:
       ENVIRONMENT_MAINTENANCE_TOKEN: ${ENVIRONMENT_MAINTENANCE_TOKEN-}
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       RUNTIME_POSTGRES_POOL_SIZE: ${RUNTIME_POSTGRES_POOL_SIZE-10}
-      EXECUTION_GLOBAL_LIMIT: ${EXECUTION_GLOBAL_LIMIT-8}
       DOCKER_CREATE_CONCURRENCY: ${DOCKER_CREATE_CONCURRENCY-4}
       RESIDENT_GLOBAL_COUNT: ${RESIDENT_GLOBAL_COUNT-8}
       RESIDENT_GLOBAL_MEMORY_BYTES: ${RESIDENT_GLOBAL_MEMORY_BYTES-12884901888}
@@ -129,12 +141,9 @@ services:
       RESIDENT_TENANT_PIDS: ${RESIDENT_TENANT_PIDS-2048}
       RESIDENT_TENANT_WORKSPACE_BYTES: ${RESIDENT_TENANT_WORKSPACE_BYTES-34359738368}
       RESIDENT_STARTUP_MEMORY_BYTES: ${RESIDENT_STARTUP_MEMORY_BYTES-268435456}
+      RESIDENT_HOST_COUNT: ${RESIDENT_HOST_COUNT-8}
       RESIDENT_HOST_MEMORY_HEADROOM_BYTES:
       RESIDENT_HOST_CPU_HEADROOM_MILLI:
-      RUNTIME_HTTP_REQUEST_LIMIT: ${RUNTIME_HTTP_REQUEST_LIMIT-24}
-      RUNTIME_HTTP_LISTENER_LIMIT: ${RUNTIME_HTTP_LISTENER_LIMIT-8}
-      RUNTIME_HTTP_CONTROL_LIMIT: ${RUNTIME_HTTP_CONTROL_LIMIT-4}
-      RUNTIME_HTTP_CLEANUP_LIMIT: ${RUNTIME_HTTP_CLEANUP_LIMIT-2}
       RUNTIME_HTTP_REQUEST_TIMEOUT_SECONDS: ${RUNTIME_HTTP_REQUEST_TIMEOUT_SECONDS-30}
       RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS: ${RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS-5}
       RUNTIME_EXECUTION_RECOVERY_MAX_ATTEMPTS: ${RUNTIME_EXECUTION_RECOVERY_MAX_ATTEMPTS-5}
@@ -200,7 +209,6 @@ services:
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
       AGENT_RUN_EXECUTION_MODE: ${AGENT_RUN_EXECUTION_MODE-perRun}
       WORKER_LEASE_MS: ${WORKER_LEASE_MS}
-      WORKER_SLOT_COUNT: ${WORKER_SLOT_COUNT-8}
       RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS: ${RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS-5}
     depends_on:
       redis:
@@ -264,8 +272,6 @@ services:
         REDIS_BROWSER_MAX_CONNECTIONS: ${REDIS_BROWSER_MAX_CONNECTIONS}
         RUNTIME_URL: http://runtime:${RUNTIME_PORT}
         RUNTIME_START_TIMEOUT_SECONDS: ${RUNTIME_START_TIMEOUT_SECONDS}
-        EXECUTION_GLOBAL_QUEUE_LIMIT: ${EXECUTION_GLOBAL_QUEUE_LIMIT-128}
-        EXECUTION_TENANT_QUEUE_LIMIT: ${EXECUTION_TENANT_QUEUE_LIMIT-32}
         EXECUTION_QUEUE_WAIT_SECONDS: ${EXECUTION_QUEUE_WAIT_SECONDS-300}
         RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS: ${RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS-5}
         WORK_RETURN_AUDIT_INTERVAL_SECONDS: ${WORK_RETURN_AUDIT_INTERVAL_SECONDS:?Set the shared work-return audit page interval}
@@ -286,6 +292,7 @@ services:
         MODEL_PROVIDER_TIMEOUT_SECONDS: ${MODEL_PROVIDER_TIMEOUT_SECONDS}
         PLUGIN_CATALOG_ROOT: *plugin-root
         REDIS_URL: *redis-url
+        MATERIAL_BROKER_URL: *material-broker-url
       BOOTSTRAP_SUPERADMIN_EMAIL: ${BOOTSTRAP_SUPERADMIN_EMAIL}
       BOOTSTRAP_SUPERADMIN_PASSWORD: ${BOOTSTRAP_SUPERADMIN_PASSWORD}
       POSTGRES_APPLICATION_NAME: centaeris-api-init
@@ -366,7 +373,7 @@ services:
 
   material-worker:
     image: centaeris-workspace-agent-api
-    entrypoint: ["python", "manage.py", "process_materials"]
+    entrypoint: ["celery", "-A", "api.material_queue:app", "worker", "--concurrency=1", "--loglevel=WARNING"]
     restart: unless-stopped
     environment:
       <<: *api-environment
@@ -386,11 +393,31 @@ services:
         condition: service_completed_successfully
       document-processor:
         condition: service_completed_successfully
+      material-broker:
+        condition: service_healthy
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     pids_limit: 128
+
+  material-scheduler:
+    image: centaeris-workspace-agent-api
+    entrypoint: ["celery", "-A", "api.material_queue:app", "beat", "--schedule=/tmp/material-celerybeat", "--loglevel=WARNING"]
+    restart: unless-stopped
+    environment:
+      <<: *api-environment
+      POSTGRES_APPLICATION_NAME: centaeris-material-scheduler
+    depends_on:
+      api-init:
+        condition: service_completed_successfully
+      material-broker:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
 
   gc:
     image: centaeris-workspace-agent-api
@@ -430,6 +457,7 @@ services:
 volumes:
   postgres-data:
   postgres-test-data:
+  material-broker-data:
   runtime-data:
   storage-data:
   plugin-data:

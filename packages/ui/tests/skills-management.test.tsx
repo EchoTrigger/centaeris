@@ -128,7 +128,7 @@ test("invalid skills explain disabled controls and source removal requires appro
   await user.click(await screen.findByRole("button", { name: "Open invalid skill" }));
   await user.click(screen.getByRole("switch", { name: "Disable skill" }));
   expect(bridge.setSkillEnabled).not.toHaveBeenCalled();
-  expect(screen.getByRole("alert")).toHaveProperty("textContent", expect.stringContaining("missing a name"));
+  expect(screen.getByRole("alert")).toHaveProperty("textContent", expect.stringContaining("This skill needs attention."));
   await user.click(screen.getByRole("button", { name: "Back to skills" }));
   await user.click(screen.getByRole("button", { name: "Manage skill locations" }));
   await user.click(screen.getByRole("button", { name: "Open location personal" }));
@@ -184,7 +184,7 @@ test("location removal receipts update data without interrupting subsequent navi
 test("catalog diagnostics are visible even when a location cannot produce any skill rows", async () => {
   vi.mocked(bridge.getSkillCatalog).mockResolvedValue({ ...catalog([]), diagnostics: [{ code: "unavailable", message: "Personal location is unavailable", sourceId: "personal" }] });
   const user = userEvent.setup(); render(<SkillsDialog workspaceRoot="/project" confirmAction={confirm} />);
-  await screen.findByText("Personal location is unavailable");
+  await screen.findByText("Some skills could not be loaded. Check their locations.");
   await user.click(screen.getByRole("button", { name: "Review location" }));
   expect(screen.getByRole("heading", { name: "personal" })).toBeTruthy();
 });
@@ -197,7 +197,7 @@ test("failed location addition retains input for retry and prevents duplicate su
   await user.click(await screen.findByRole("button", { name: "Add location" }));
   await user.type(screen.getByRole("textbox", { name: "Path" }), "/retry/skills");
   await user.click(screen.getByRole("button", { name: "Add location" }));
-  await screen.findByText("Location unavailable");
+  await screen.findByText("Unable to add this location. Try again.");
   expect(screen.getByRole("textbox", { name: "Path" })).toHaveProperty("value", "/retry/skills");
   await user.click(screen.getByRole("button", { name: "Add location" }));
   await user.click(screen.getByRole("button", { name: "Adding…" }));
@@ -219,8 +219,8 @@ test.each(["different-detail", "same-detail-again", "current-detail"] as const)(
     await screen.findByRole("heading", { name: destination === "different-detail" ? "workspace skill" : "personal skill" });
   }
   await act(async () => reject(new Error("skill policy write unavailable")));
-  if (destination === "current-detail") expect(screen.getByText("skill policy write unavailable")).toBeTruthy();
-  else expect(screen.queryByText("skill policy write unavailable")).toBeNull();
+  if (destination === "current-detail") expect(screen.getByText("The skill action could not be completed. Try again.")).toBeTruthy();
+  else expect(screen.queryByText("The skill action could not be completed. Try again.")).toBeNull();
   await user.click(screen.getByRole("switch"));
   expect(bridge.setSkillEnabled).toHaveBeenCalledTimes(2);
   expect(vi.mocked(bridge.setSkillEnabled).mock.calls[1][0]).toEqual({ cwd: "/project", skillId: destination === "different-detail" ? "workspace" : "personal", enabled: false });

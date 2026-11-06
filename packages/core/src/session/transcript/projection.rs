@@ -599,6 +599,15 @@ impl TranscriptProjectorV1 {
                     }
                     op
                 }),
+            reason_type: match event.event_type {
+                SessionRecordType::AgentRunFailed | SessionRecordType::AgentRunInterrupted => {
+                    payload
+                        .get("reasonType")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                }
+                _ => None,
+            },
         };
         let mut block = match event.event_type {
             SessionRecordType::UserMessage => {

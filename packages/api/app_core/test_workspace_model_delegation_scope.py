@@ -11,7 +11,8 @@ class WorkspaceModelCatalogScopeTests(TestCase):
         self.foreign = Workspace.objects.create(name="Foreign", createdBy=self.user)
         self.own_model = self.model(self.workspace, "Own")
         self.foreign_model = self.model(self.foreign, "Foreign")
-        self.shared_model = ModelConfig.objects.create(displayName="Shared fixture")
+        self.diagnostic_model = ModelConfig.objects.create(displayName="Diagnostic fixture")
+        self.model(None, "Retired scope")
         self.client.force_login(self.user)
 
     def model(self, workspace, name):
@@ -26,14 +27,14 @@ class WorkspaceModelCatalogScopeTests(TestCase):
         WorkspaceMembership.objects.create(workspace=self.foreign, user=self.user, role="member")
         response = self.client.get(path)
         self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual({item["id"] for item in response.json()["models"]}, {self.foreign_model.pk, self.shared_model.pk})
+        self.assertEqual({item["id"] for item in response.json()["models"]}, {self.foreign_model.pk, self.diagnostic_model.pk})
 
-    def test_workspace_catalog_contains_only_local_and_shared_models(self):
+    def test_workspace_catalog_excludes_unowned_providers(self):
         response = self.client.get(f"/api/models?workspaceId={self.workspace.pk}")
         self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual({item["id"] for item in response.json()["models"]}, {self.own_model.pk, self.shared_model.pk})
+        self.assertEqual({item["id"] for item in response.json()["models"]}, {self.own_model.pk, self.diagnostic_model.pk})
 
-    def test_no_query_returns_only_shared_models(self):
+    def test_no_query_returns_only_the_diagnostic_model(self):
         response = self.client.get("/api/models")
         self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual({item["id"] for item in response.json()["models"]}, {self.shared_model.pk})
+        self.assertEqual({item["id"] for item in response.json()["models"]}, {self.diagnostic_model.pk})

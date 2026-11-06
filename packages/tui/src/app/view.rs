@@ -2172,8 +2172,7 @@ pub(super) fn transcript_to_lines(items: &[TranscriptLine], width: u16) -> Vec<L
     transcript_to_lines_from(items, 0, width)
 }
 
-fn run_failure_lines(reason: &str, width: u16) -> Vec<Line<'static>> {
-    let text = super::run_errors::detail(reason);
+fn run_failure_lines(text: &str, width: u16) -> Vec<Line<'static>> {
     let content_width = usize::from(width.saturating_sub(2).max(1));
     let mut lines = hard_wrap_input_lines(
         text.split('\n')

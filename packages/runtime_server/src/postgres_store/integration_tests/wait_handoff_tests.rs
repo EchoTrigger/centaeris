@@ -719,7 +719,7 @@ fn postgres_completion_delivery_upgrade_preserves_records_and_accepts_core_obser
     ).map_err(|error| error.to_string())).unwrap();
     let before = legacy_retained_rows(&f);
     let upgraded = PostgresRuntimeStore::new(&test_url()).unwrap();
-    assert_eq!(observation_versions(&f), (1..=17).collect::<Vec<_>>());
+    assert_eq!(observation_versions(&f), (1..=19).collect::<Vec<_>>());
     assert_eq!(legacy_retained_rows(&f), before);
     upgraded.with_client(|db| db.execute(
         "INSERT INTO runtime.model_observation_contents VALUES($1,$2,'required_completion_delivery','{}',2,1)",
@@ -763,7 +763,7 @@ fn postgres_current_schema_reopen_retains_sealed_wait_handoff() {
     append(&mut f).unwrap();
     let before = retained_rows(&f);
     let reopened = PostgresRuntimeStore::new(&test_url()).unwrap();
-    assert_eq!(observation_versions(&f), (1..=17).collect::<Vec<_>>());
+    assert_eq!(observation_versions(&f), (1..=19).collect::<Vec<_>>());
     assert_eq!(retained_rows(&f), before);
     assert_eq!(
         reopened
@@ -859,6 +859,14 @@ fn legacy_retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, Strin
             assert_eq!(evidence, "[]", "migration must not invent {table} evidence");
         }
     }
+    if let Some(deployment) = rows.remove("runtime.sandbox_deployment") {
+        let deployment: Vec<serde_json::Value> = serde_json::from_str(&deployment).unwrap();
+        assert_eq!(deployment.len(), 1);
+        assert_eq!(deployment[0]["singleton"], true);
+        assert!(deployment[0]["deployment_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
+    }
     let jobs = rows.get_mut("runtime.runtime_jobs").unwrap();
     let mut values: Vec<serde_json::Value> = serde_json::from_str(jobs).unwrap();
     for value in &mut values {
@@ -871,6 +879,9 @@ fn legacy_retained_rows(f: &Fixture) -> std::collections::BTreeMap<String, Strin
         }
         if let Some(stage) = value.remove("lease_control_stage") {
             assert!(stage.is_null());
+        }
+        if let Some(host) = value.remove("lease_host_id") {
+            assert!(host.is_null(), "migration must not invent a lease host");
         }
         if let Some(count) = value.remove("lease_reclaim_count") {
             assert_eq!(count, 0);

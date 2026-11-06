@@ -226,6 +226,7 @@ fn postgres_runsc_forward_migration_preserves_populated_residents() {
         .unwrap()
         .get::<_, String>(0);
     drop(store);
+    super::super::schema::restore_sandbox_deployment_fixture(&mut db);
     db.batch_execute("DROP TABLE runtime.runsc_environment_power; DELETE FROM runtime.schema_migrations WHERE version=17").unwrap();
     assert_eq!(
         db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
@@ -235,10 +236,17 @@ fn postgres_runsc_forward_migration_preserves_populated_residents() {
     );
     let reopened = PostgresRuntimeStore::new(&url).unwrap();
     assert_eq!(
+        reopened.sandbox_deployment_id().unwrap(),
+        PostgresRuntimeStore::new(&url)
+            .unwrap()
+            .sandbox_deployment_id()
+            .unwrap()
+    );
+    assert_eq!(
         db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
             .unwrap()
             .get::<_, i64>(0),
-        17
+        19
     );
     assert_eq!(
         db.query_one("SELECT count(*) FROM runtime.runsc_environment_power", &[])

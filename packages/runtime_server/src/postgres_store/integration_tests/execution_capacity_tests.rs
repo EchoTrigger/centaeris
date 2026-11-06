@@ -1,4 +1,5 @@
-//! Execution leases are global AgentRun-step permits, independent of Workspace size.
+//! Job row leases preserve ownership without imposing Run concurrency quotas.
+use super::retained_instance_tests as fixture;
 use super::*;
 
 const LIFECYCLE: &str = "agent_run.lifecycle";
@@ -36,158 +37,212 @@ fn claim(store: &PostgresRuntimeStore, worker: &str) -> Vec<RuntimeJobRecord> {
         .unwrap()
 }
 
-#[test]
-#[ignore = "requires owned disposable PostgreSQL and default execution limits"]
-fn postgres_execution_capacity_one_workspace_uses_global_permits_with_ready_claim_agreement() {
-    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    assert_eq!(
-        crate::execution_capacity::ExecutionCapacity::from_env()
-            .unwrap()
-            .global,
-        8
-    );
-    let url = test_url();
-    reset_store(&url);
-    let one = PostgresRuntimeStore::new(&url).unwrap();
-    let two = PostgresRuntimeStore::new(&url).unwrap();
-    for index in 0..9 {
-        schedule(
-            &one,
-            &format!("agent_run.lifecycle:same-workspace-{index}"),
-            "one-workspace",
-            RuntimeJobStatus::Queued,
-            None,
-        );
-    }
-    for index in 0..4 {
-        assert_eq!(claim(&one, &format!("first-{index}")).len(), 1);
-    }
-    let ready = two
-        .wait_for_runtime_jobs(&[LIFECYCLE.into()], Duration::from_millis(10))
+fn queued_run(
+    store: &PostgresRuntimeStore,
+    db: &mut Client,
+    run: &str,
+    environment: &str,
+) -> String {
+    db.execute(
+        "INSERT INTO public.app_core_agentrun(id,session_id,environment_id) VALUES($1,'sess_1',$2)",
+        &[&run, &environment],
+    )
+    .unwrap();
+    let id = format!("agent_run.lifecycle:{run}");
+    let mut record = job(&id, &format!("{id}:fixture"));
+    record.job_kind = LIFECYCLE.into();
+    record.session_id = Some("sess_1".into());
+    record.payload_ref = Some(format!("record:agent_run:{run}"));
+    store
+        .schedule_worker_job(ScheduleRuntimeJobRequest { job: record }, Some("ws_1"))
         .unwrap();
-    let fifth = claim(&two, "fifth");
-    assert!(
-        ready.ready && fifth.len() == 1,
-        "Workspace must not cap AgentRun steps at four while global permits remain: ready={}, fifthClaimCount={}",
-        ready.ready,
-        fifth.len()
-    );
-    for index in 5..8 {
-        assert_eq!(claim(&two, &format!("next-{index}")).len(), 1);
-    }
-    assert!(claim(&one, "ninth").is_empty());
-    assert!(
-        !two.wait_for_runtime_jobs(&[LIFECYCLE.into()], Duration::from_millis(10))
-            .unwrap()
-            .ready
-    );
-    let mut db = Client::connect(&url, NoTls).unwrap();
-    assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_jobs WHERE job_kind='agent_run.lifecycle' AND status IN('leased','running') AND lease_purpose='execute'", &[]).unwrap().get::<_,i64>(0),8);
-    assert_eq!(
-        db.query_one(
-            "SELECT count(*) FROM runtime.execution_job_tenants WHERE workspace_id='one-workspace'",
-            &[]
-        )
-        .unwrap()
-        .get::<_, i64>(0),
-        9
-    );
-    let mut conflicting = job(
-        "agent_run.lifecycle:same-workspace-0",
-        "agent_run.lifecycle:same-workspace-0",
-    );
-    conflicting.job_kind = LIFECYCLE.into();
-    assert!(one
-        .schedule_worker_job(
-            ScheduleRuntimeJobRequest { job: conflicting },
-            Some("foreign-workspace")
-        )
-        .is_err());
+    id
 }
 
 #[test]
-#[ignore = "requires owned disposable PostgreSQL and default execution limits"]
-fn postgres_execution_capacity_terminal_history_does_not_count_but_expired_owners_do_until_yield() {
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_dispatch_reserves_one_start_slot_and_another_host_claims_remaining_work() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let url = test_url();
-    reset_store(&url);
-    let one = PostgresRuntimeStore::new(&url).unwrap();
-    let two = PostgresRuntimeStore::new(&url).unwrap();
-    let mut db = Client::connect(&url, NoTls).unwrap();
-    let now: i64 = db
+    let (_url, store, mut db) = fixture::setup();
+    let host = store
+        .clone()
+        .with_dispatch_host("first-host".into(), 1)
+        .unwrap();
+    let other = store
+        .clone()
+        .with_dispatch_host("second-host".into(), 1)
+        .unwrap();
+    let first = queued_run(&store, &mut db, "dispatch-a", "environment-a");
+    let second = queued_run(&store, &mut db, "dispatch-b", "environment-b");
+    let third = queued_run(&store, &mut db, "dispatch-c", "environment-c");
+    let ready = |s: &PostgresRuntimeStore| {
+        s.wait_for_runtime_jobs(&[LIFECYCLE.into()], Duration::ZERO)
+            .unwrap()
+            .ready
+    };
+    assert!(ready(&host));
+    let (one, two) = std::thread::scope(|scope| {
+        let one = scope.spawn(|| claim(&host, "first-worker"));
+        let two = claim(&host, "second-worker-on-same-host");
+        (one.join().unwrap(), two)
+    });
+    let mut claims = one.into_iter().chain(two).collect::<Vec<_>>();
+    assert_eq!(claims.len(), 1);
+    let claimed = claims.pop().unwrap();
+    assert_eq!(claimed.job_id, first);
+    assert!(!ready(&host));
+    assert!(ready(&other));
+    assert_eq!(claim(&other, "other-host-worker")[0].job_id, second);
+    assert!(!ready(&other));
+    let owner = claimed.lease_owner.unwrap();
+    host.require_execute_lease(&first, &owner).unwrap();
+    assert!(other.require_execute_lease(&first, &owner).is_err());
+    let now = db
         .query_one(
             "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
             &[],
         )
         .unwrap()
-        .get(0);
-    for index in 0..40 {
-        let state = match index % 4 {
-            0 => RuntimeJobStatus::Succeeded,
-            1 => RuntimeJobStatus::Failed,
-            2 => RuntimeJobStatus::Cancelled,
-            _ => RuntimeJobStatus::DeadLettered,
-        };
-        schedule(
-            &one,
-            &format!("agent_run.lifecycle:historical-{index}"),
-            "history-workspace",
-            state,
-            None,
-        );
-    }
-    for index in 0..7 {
-        schedule(
-            &one,
-            &format!("agent_run.lifecycle:expired-{index}"),
-            &format!("expired-workspace-{index}"),
-            if index % 2 == 0 {
-                RuntimeJobStatus::Running
-            } else {
-                RuntimeJobStatus::Leased
-            },
-            Some(("expired-owner", now - 1000)),
-        );
-    }
-    let fresh = "agent_run.lifecycle:current-owner";
-    schedule(
-        &one,
-        fresh,
-        "current-workspace",
-        RuntimeJobStatus::Running,
-        Some(("current-owner", now + 60_000)),
-    );
-    schedule(
-        &one,
-        "agent_run.lifecycle:waiting-next",
-        "next-workspace",
-        RuntimeJobStatus::Queued,
-        None,
-    );
-    assert!(
-        !two.wait_for_runtime_jobs(&[LIFECYCLE.into()], Duration::from_millis(10))
-            .unwrap()
-            .ready
-    );
-    assert!(claim(&two, "before-expired-reconciliation").is_empty());
-    assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_jobs WHERE job_kind='agent_run.lifecycle' AND status IN('leased','running') AND lease_purpose='execute' AND lease_expires_at_ms<$1", &[&now]).unwrap().get::<_,i64>(0),7);
-    one.yield_runtime_job(YieldRuntimeJobRequest {
-        job_id: fresh.into(),
-        lease_owner: "current-owner".into(),
+        .get::<_, i64>(0);
+    host.yield_runtime_job(YieldRuntimeJobRequest {
+        job_id: first,
+        lease_owner: owner,
         yielded_at_ms: now,
         run_at_ms: now + 60_000,
         transition_reason: "question_wait".into(),
     })
     .unwrap();
+    assert!(ready(&host));
+    assert_eq!(claim(&host, "first-host-worker")[0].job_id, third);
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_dispatch_pins_existing_residency_and_control_to_its_owning_host() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let prior = fixture::run(&store, &mut db, "resident-origin", 1);
+    fixture::prepare(
+        &store,
+        &prior,
+        "resident-execution",
+        &std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+    )
+    .unwrap();
+    let host = store.clone().with_dispatch_host("host".into(), 1).unwrap();
+    let other = store
+        .clone()
+        .with_dispatch_host("other-host".into(), 1)
+        .unwrap();
+    let job_id = queued_run(&store, &mut db, "resident-next", "environment");
+    assert!(claim(&other, "other-host-worker").is_empty());
+    let claimed = claim(&host, "owner-host-worker").pop().unwrap();
+    assert_eq!(claimed.job_id, job_id);
+    let now = db
+        .query_one(
+            "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+            &[],
+        )
+        .unwrap()
+        .get::<_, i64>(0);
+    store
+        .yield_runtime_job(YieldRuntimeJobRequest {
+            job_id: job_id.clone(),
+            lease_owner: claimed.lease_owner.unwrap(),
+            yielded_at_ms: now,
+            run_at_ms: now,
+            transition_reason: "question_wait".into(),
+        })
+        .unwrap();
+    super::super::lifecycle_control::mark_terminal_pending(&mut db, "resident-next").unwrap();
+    let control = |store: &PostgresRuntimeStore| {
+        store
+            .claim_control_jobs(
+                ClaimDueRuntimeJobsRequest {
+                    now_ms: now,
+                    worker_id: "control-worker".into(),
+                    job_id: Some(job_id.clone()),
+                    job_kind: Some(LIFECYCLE.into()),
+                    session_id: None,
+                    limit: 1,
+                    lease_ms: 60_000,
+                },
+                "advance",
+            )
+            .unwrap()
+    };
+    assert!(!other.control_ready("advance").unwrap());
+    assert!(control(&other).is_empty());
+    assert!(host.control_ready("advance").unwrap());
+    let control_job = control(&host).pop().unwrap();
+    let owner = control_job.lease_owner.unwrap();
+    assert!(other.start_control_job(&job_id, &owner).is_err());
+    host.start_control_job(&job_id, &owner).unwrap();
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_execution_claims_are_unique_across_replicas_with_many_active_jobs() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let url = test_url();
+    reset_store(&url);
+    let replicas = [
+        PostgresRuntimeStore::new(&url).unwrap(),
+        PostgresRuntimeStore::new(&url).unwrap(),
+    ];
+    for index in 0..16 {
+        schedule(
+            &replicas[0],
+            &format!("agent_run.lifecycle:independent-{index}"),
+            "one-workspace",
+            RuntimeJobStatus::Queued,
+            None,
+        );
+    }
+    let claimed = std::thread::scope(|scope| {
+        let handles = (0..16)
+            .map(|index| {
+                let store = replicas[index % 2].clone();
+                scope.spawn(move || claim(&store, &format!("worker-{index}")))
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(claimed.len(), 16);
+    let ids = claimed
+        .iter()
+        .map(|j| j.job_id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(ids.len(), 16);
+    schedule(
+        &replicas[0],
+        "agent_run.lifecycle:next",
+        "one-workspace",
+        RuntimeJobStatus::Queued,
+        None,
+    );
     assert!(
-        two.wait_for_runtime_jobs(&[LIFECYCLE.into()], Duration::from_millis(10))
+        replicas[1]
+            .wait_for_runtime_jobs(&[LIFECYCLE.into()], Duration::from_millis(10))
             .unwrap()
             .ready
     );
-    let next = claim(&two, "after-explicit-yield");
-    assert_eq!(next.len(), 1);
-    assert_eq!(next[0].job_id, "agent_run.lifecycle:waiting-next");
-    assert!(claim(&one, "still-full").is_empty());
-    assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_jobs WHERE job_kind='agent_run.lifecycle' AND status IN('leased','running') AND lease_purpose='execute'", &[]).unwrap().get::<_,i64>(0),8);
-    assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_jobs WHERE status IN('succeeded','failed','cancelled','dead_lettered')", &[]).unwrap().get::<_,i64>(0),40);
+    assert_eq!(
+        claim(&replicas[1], "next-owner")[0].job_id,
+        "agent_run.lifecycle:next"
+    );
+    let mut conflicting = job(
+        "agent_run.lifecycle:independent-0",
+        "agent_run.lifecycle:independent-0",
+    );
+    conflicting.job_kind = LIFECYCLE.into();
+    assert!(replicas[1]
+        .schedule_worker_job(
+            ScheduleRuntimeJobRequest { job: conflicting },
+            Some("foreign-workspace")
+        )
+        .is_err());
 }

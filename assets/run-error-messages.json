@@ -1,5 +1,4 @@
 {
-  "failureLabel": "Model request failed",
   "messages": {
     "provider_authentication_failed": {
       "translationKey": "modelErrors.authenticationFailed",
@@ -14,12 +13,20 @@
       "english": "The model account’s API key is unavailable. Configure the key again and retry."
     },
     "provider_unavailable": {
+      "translationKey": "modelErrors.serviceUnavailable",
+      "english": "The model service is temporarily unavailable. Try again later."
+    },
+    "model_unavailable": {
       "translationKey": "modelErrors.modelUnavailable",
       "english": "The model is unavailable. Check its configuration and retry."
     },
     "provider_rate_limited": {
       "translationKey": "modelErrors.rateLimited",
-      "english": "The model account’s usage limit was reached. Try again later."
+      "english": "The model service is limiting requests. Try again later."
+    },
+    "provider_busy_or_rate_limited": {
+      "translationKey": "modelErrors.rateLimited",
+      "english": "The model service is limiting requests. Try again later."
     },
     "provider_request_rejected": {
       "translationKey": "modelErrors.requestRejected",
@@ -33,7 +40,19 @@
       "translationKey": "modelErrors.timeout",
       "english": "The model took too long to respond. Retry the request."
     },
+    "timeout": {
+      "translationKey": "modelErrors.timeout",
+      "english": "The model took too long to respond. Retry the request."
+    },
+    "auth_failed": {
+      "translationKey": "modelErrors.authenticationFailed",
+      "english": "Model account authentication failed. Update its API key and retry."
+    },
     "provider_unreachable": {
+      "translationKey": "modelErrors.unreachable",
+      "english": "Unable to connect to the model. Check the connection and retry."
+    },
+    "network": {
       "translationKey": "modelErrors.unreachable",
       "english": "Unable to connect to the model. Check the connection and retry."
     },
@@ -41,9 +60,25 @@
       "translationKey": "modelErrors.interrupted",
       "english": "The model response was interrupted. Retry the request."
     },
+    "provider_response_interrupted": {
+      "translationKey": "modelErrors.interrupted",
+      "english": "The model response was interrupted. Retry the request."
+    },
+    "provider_interrupted": {
+      "translationKey": "modelErrors.interrupted",
+      "english": "The model response was interrupted. Retry the request."
+    },
+    "provider_response_invalid": {
+      "translationKey": "modelErrors.interrupted",
+      "english": "The model response was interrupted. Retry the request."
+    },
+    "empty_final_response": {
+      "translationKey": "modelErrors.interrupted",
+      "english": "The model response was interrupted. Retry the request."
+    },
     "model_adapter_failed": {
       "translationKey": "modelErrors.failed",
-      "english": "The request could not be completed. Retry the request."
+      "english": "The request could not be completed."
     },
     "completion_tool_delivery_required": {
       "translationKey": "modelErrors.replyNotDelivered",
@@ -53,17 +88,65 @@
       "translationKey": "modelErrors.replyContextLimit",
       "english": "The context limit prevented the Agent from submitting its reply. Reduce the task and retry."
     },
+    "execution_input_rejected": {
+      "translationKey": "modelErrors.executionInputRejected",
+      "english": "The task started, but this input was rejected. Do not repeat the command."
+    },
+    "execution_start_unknown": {
+      "translationKey": "modelErrors.executionOutcomeUnknown",
+      "english": "The execution outcome could not be confirmed. Check what happened before repeating the operation."
+    },
+    "execution_input_unknown": {
+      "translationKey": "modelErrors.executionOutcomeUnknown",
+      "english": "The execution outcome could not be confirmed. Check what happened before repeating the operation."
+    },
+    "execution_query_unknown": {
+      "translationKey": "modelErrors.executionOutcomeUnknown",
+      "english": "The execution outcome could not be confirmed. Check what happened before repeating the operation."
+    },
+    "execution_output_unavailable": {
+      "translationKey": "modelErrors.executionOutputUnavailable",
+      "english": "The task output is unavailable. Check the task before repeating the command."
+    },
+    "stopped": {
+      "translationKey": "modelErrors.executionInterrupted",
+      "english": "The work session was interrupted. Retry the request."
+    },
+    "shutdown": {
+      "translationKey": "modelErrors.executionInterrupted",
+      "english": "The work session was interrupted. Retry the request."
+    },
     "The model response was interrupted. Retry the request.": {
       "translationKey": "modelErrors.interrupted",
       "english": "The model response was interrupted. Retry the request."
     },
     "AgentRun did not complete. Retry the request.": {
       "translationKey": "modelErrors.failed",
-      "english": "The request could not be completed. Retry the request."
+      "english": "The request could not be completed."
     },
     "The execution environment was interrupted. Retry the request.": {
       "translationKey": "modelErrors.executionInterrupted",
       "english": "The work session was interrupted. Retry the request."
+    },
+    "The task was started, but this input was not accepted because execution resources are exhausted. Do not repeat the command.": {
+      "translationKey": "modelErrors.executionInputRejected",
+      "english": "The task started, but this input was rejected. Do not repeat the command."
+    },
+    "The task start outcome is unknown. Do not repeat the operation.": {
+      "translationKey": "modelErrors.executionOutcomeUnknown",
+      "english": "The execution outcome could not be confirmed. Check what happened before repeating the operation."
+    },
+    "The task was started, but input delivery is unconfirmed. Do not repeat the operation.": {
+      "translationKey": "modelErrors.executionOutcomeUnknown",
+      "english": "The execution outcome could not be confirmed. Check what happened before repeating the operation."
+    },
+    "Task execution result could not be confirmed. Do not repeat the operation.": {
+      "translationKey": "modelErrors.executionOutcomeUnknown",
+      "english": "The execution outcome could not be confirmed. Check what happened before repeating the operation."
+    },
+    "Task output is unavailable. The command must not be repeated automatically.": {
+      "translationKey": "modelErrors.executionOutputUnavailable",
+      "english": "The task output is unavailable. Check the task before repeating the command."
     }
   }
 }

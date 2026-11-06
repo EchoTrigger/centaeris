@@ -60,6 +60,7 @@ def main(skip_frontend_tests=False, stage="All"):
         ("Outbox PostgreSQL regressions", [*api, "scripts/workspace/runtime_outbox_gate.py"]),
         ("Authorization gate guards", [py, "scripts/workspace/test_authorization_gate.py"]),
         ("AgentRun authorization parity", [py, "scripts/workspace/agent-run-authorization-gate.py"]),
+        ("Agent Run API reference drift", [*api, "scripts/workspace/agent-run-api-reference.py", "--check"]),
         ("Deployment identity contracts", [*api, "scripts/workspace/deployment-contract.test.py"]),
         ("Python discovery gate regressions", [py, "scripts/workspace/python_test_gate.py", "gate"]),
         ("Worker tests", [py, "scripts/workspace/python_test_gate.py", "worker"]),
@@ -92,7 +93,7 @@ def main(skip_frontend_tests=False, stage="All"):
     backend_labels = {
         "Contracts": {"Portable CI behavior", "Product version parity", "Outbox gate isolation and discovery guards",
                       "Authorization gate guards", "AgentRun authorization parity", "Deployment identity contracts",
-                      "Django migration drift"},
+                      "Django migration drift", "Agent Run API reference drift"},
         "RuntimePostgres": {"Outbox PostgreSQL regressions"},
         "ApiPostgres": {"Full Django PostgreSQL suite", "First-party MCP Rust/Python client"},
         "Support": {"Workspace Harbor adapter regressions", "Python discovery gate regressions", "Worker tests",

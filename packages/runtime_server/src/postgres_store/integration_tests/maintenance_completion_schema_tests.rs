@@ -53,6 +53,35 @@ fn completion(db: &mut Client) -> String {
 
 #[test]
 #[ignore = "requires exclusively owned disposable PostgreSQL"]
+fn postgres_concurrent_openers_bootstrap_one_runtime_schema() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let url = test_url();
+    reset_store(&url);
+    let ready = std::sync::Barrier::new(4);
+    std::thread::scope(|scope| {
+        let openers = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    ready.wait();
+                    PostgresRuntimeStore::new(&url).map(drop)
+                })
+            })
+            .collect::<Vec<_>>();
+        for opener in openers {
+            opener.join().unwrap().unwrap();
+        }
+    });
+    let mut db = Client::connect(&url, NoTls).unwrap();
+    let history = history(&mut db);
+    assert!(!history.is_empty());
+    assert_eq!(
+        history.iter().map(|row| row.0).collect::<Vec<_>>(),
+        (1..=history.len() as i64).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+#[ignore = "requires exclusively owned disposable PostgreSQL"]
 fn postgres_maintenance_completion_fresh_schema_persists_immutable_facts() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let (url, mut db) = setup();
@@ -99,7 +128,7 @@ fn postgres_maintenance_completion_v11_migration_preserves_existing_facts_and_hi
     drop(PostgresRuntimeStore::new(&url).unwrap());
     assert_eq!(
         history(&mut db).iter().map(|row| row.0).collect::<Vec<_>>(),
-        (1..=17).collect::<Vec<_>>()
+        (1..=19).collect::<Vec<_>>()
     );
     assert_eq!(&history(&mut db)[..11], previous.as_slice());
     assert_eq!(

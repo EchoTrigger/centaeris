@@ -6,7 +6,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
 
-from .models import Session, Source, UserLibraryObject, Workspace, WorkspaceMembership
+from .models import UserLibraryObject, Workspace, WorkspaceMembership
 
 
 class TrashOrderingTests(TestCase):
@@ -21,33 +21,25 @@ class TrashOrderingTests(TestCase):
         identities = [(f"{letter}{number:03}", instant) for letter in "aA_0-Zz" for number in range(17)]
         # Deliberately oppose lexical order: time must remain the primary key.
         identities += [("zz-newest", instant + timedelta(seconds=1)), ("00-oldest", instant - timedelta(seconds=1))]
-        for kind in ("library", "session", "source"):
-            for suffix, deleted_at in identities:
-                identity = f"{kind}_{suffix}"
-                base = {"id": identity, "status": "deleted", "deletedAt": deleted_at}
-                if kind == "session":
-                    Session.objects.create(**base, workspace=cls.workspace, owner=cls.user)
-                elif kind == "source":
-                    Source.objects.create(**base, workspace=cls.workspace, createdBy=cls.user,
-                                          name=identity, sourceType="uploadedFile", deletedFromStatus="ready")
-                else:
-                    UserLibraryObject.objects.create(**base, owner=cls.user, displayName=identity,
-                                                     objectKind="folder", deletedFromStatus="ready")
-                cls.expected.append((deleted_at, kind, identity))
-        cls.expected.sort(key=lambda item: (item[1], item[2]))
+        for suffix, deleted_at in identities:
+            identity = f"library_{suffix}"
+            UserLibraryObject.objects.create(id=identity, status="deleted", deletedAt=deleted_at,
+                                             owner=cls.user, displayName=identity, objectKind="file",
+                                             deletedFromStatus="ready")
+            cls.expected.append((deleted_at, identity))
+        cls.expected.sort(key=lambda item: item[1])
         cls.expected.sort(key=lambda item: item[0], reverse=True)
 
-    def assert_pages(self, kind=None):
+    def test_files_have_exact_pages_with_no_missing_or_repeated_ids(self):
         self.client.force_login(self.user)
-        expected = [(item_kind, identity) for _, item_kind, identity in self.expected
-                    if kind is None or item_kind == kind]
+        expected = [identity for _, identity in self.expected]
         collected, cursors = [], set()
-        query = {"kind": kind} if kind else {}
+        query = {}
         for offset in range(0, len(expected), 50):
             response = self.client.get(f"/api/workspaces/{self.workspace.id}/trash", query)
             self.assertEqual(response.status_code, 200, response.content)
             body = response.json()
-            page = [(item["kind"], item["id"]) for item in body["items"]]
+            page = [item["id"] for item in body["items"]]
             self.assertEqual(page, expected[offset:offset + 50])
             collected.extend(page)
             has_more = offset + 50 < len(expected)
@@ -61,11 +53,3 @@ class TrashOrderingTests(TestCase):
                 self.assertIsNone(body["nextCursor"])
         self.assertEqual(collected, expected)
         self.assertEqual(len(set(collected)), len(expected))
-
-    def test_each_kind_has_exact_pages_and_no_missing_or_repeated_ids(self):
-        for kind in ("library", "session", "source"):
-            with self.subTest(kind=kind):
-                self.assert_pages(kind)
-
-    def test_mixed_kinds_share_the_same_total_order_and_cursor(self):
-        self.assert_pages()

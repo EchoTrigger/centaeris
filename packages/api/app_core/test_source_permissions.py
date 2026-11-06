@@ -459,17 +459,6 @@ class SourcePermissionTests(TestCase):
             ).json()["sources"],
             [],
         )
-        trash = self.request(
-            self.controller,
-            "get",
-            f"/api/workspaces/{self.workspace.id}/trash?kind=source",
-        )
-        self.assertEqual(trash.status_code, 200, trash.content)
-        self.assertEqual(
-            [source["id"] for source in trash.json()["items"]],
-            [self.source.id],
-        )
-        self.assertIsNotNone(trash.json()["items"][0]["deletedAt"])
         for method, suffix, payload in (
             ("delete", "", None),
             ("patch", "", {"name": "New name"}),
@@ -484,6 +473,10 @@ class SourcePermissionTests(TestCase):
             )
             self.assertEqual(response.status_code, 410, response.content)
             self.assertEqual(response.json(), {"error": "source_deleted"})
+
+        for method, suffix in (("post", "/restore"), ("delete", "/trash")):
+            denied = self.request(self.member, method, self.source_endpoint(suffix))
+            self.assertEqual(denied.status_code, 404, denied.content)
 
         with patch.object(Source, "save", side_effect=RuntimeError("restore failed")):
             failed = self.request(
@@ -512,14 +505,6 @@ class SourcePermissionTests(TestCase):
             set(self.source.sourceObjects.values_list("id", flat=True)),
             object_ids,
         )
-        self.assertEqual(
-            self.request(
-                self.controller,
-                "get",
-                f"/api/workspaces/{self.workspace.id}/trash?kind=source",
-            ).json()["items"],
-            [],
-        )
         repeated = self.request(
             self.controller,
             "post",
@@ -537,12 +522,6 @@ class SourcePermissionTests(TestCase):
         Source.objects.filter(id=self.source.id).update(
             deletedAt=timezone.now() - timedelta(days=31),
         )
-        trash = self.request(
-            self.controller,
-            "get",
-            f"/api/workspaces/{self.workspace.id}/trash?kind=source",
-        )
-        self.assertEqual(trash.json()["items"], [])
         expired = self.request(
             self.controller,
             "post",
@@ -558,87 +537,6 @@ class SourcePermissionTests(TestCase):
         self.assertEqual(permanent.status_code, 200)
         self.source.refresh_from_db()
         self.assertIsNotNone(self.source.purgedAt)
-
-    def test_source_trash_uses_control_acl_and_fixed_cursor_pages(self):
-        deleted_sources = [
-            Source(
-                workspace=self.workspace,
-                sourceType="fileTree",
-                name=f"Deleted {index:02d}",
-                status="deleted",
-                deletedAt=timezone.now() - timedelta(seconds=index),
-                deletedFromStatus="ready",
-                createdBy=self.owner,
-            )
-            for index in range(51)
-        ]
-        Source.objects.bulk_create(deleted_sources)
-        controller_grant = self.grant(
-            self.controller_group,
-            "control",
-            source=deleted_sources[0],
-        )
-
-        controller_trash = self.request(
-            self.controller,
-            "get",
-            f"/api/workspaces/{self.workspace.id}/trash?kind=source",
-        ).json()
-        self.assertEqual(
-            [source["id"] for source in controller_trash["items"]],
-            [deleted_sources[0].id],
-        )
-        controller_grant.delete()
-        self.assertEqual(
-            self.request(
-                self.controller,
-                "get",
-                f"/api/workspaces/{self.workspace.id}/trash?kind=source",
-            ).json()["items"],
-            [],
-        )
-        self.assertEqual(
-            self.request(
-                self.controller,
-                "post",
-                f"/api/workspaces/{self.workspace.id}/sources/{deleted_sources[0].id}/restore",
-            ).status_code,
-            404,
-        )
-        self.assertEqual(
-            self.request(
-                self.member,
-                "get",
-                f"/api/workspaces/{self.workspace.id}/trash?kind=source",
-            ).json()["items"],
-            [],
-        )
-
-        first = self.request(
-            self.owner,
-            "get",
-            f"/api/workspaces/{self.workspace.id}/trash?kind=source",
-        ).json()
-        second = self.client.get(
-            f"/api/workspaces/{self.workspace.id}/trash",
-            {"cursor": first["nextCursor"], "kind": "source"},
-        ).json()
-        self.assertEqual(len(first["items"]), 50)
-        self.assertTrue(first["hasMore"])
-        self.assertEqual(len(second["items"]), 1)
-        self.assertFalse(second["hasMore"])
-        invalid = self.client.get(
-            f"/api/workspaces/{self.workspace.id}/trash",
-            {"cursor": "banana", "kind": "source"},
-        )
-        self.assertEqual(invalid.status_code, 400)
-        self.assertEqual(invalid.json(), {"error": "trash_cursor_invalid"})
-        cross_endpoint = self.client.get(
-            f"/api/workspaces/{self.workspace.id}/trash",
-            {"cursor": first["nextCursor"], "kind": "session"},
-        )
-        self.assertEqual(cross_endpoint.status_code, 400)
-        self.assertEqual(cross_endpoint.json(), {"error": "trash_cursor_invalid"})
 
     def test_lifecycle_requires_control_and_failed_mutation_rolls_back(self):
         self.grant(self.member_group, "write")

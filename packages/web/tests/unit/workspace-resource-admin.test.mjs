@@ -30,6 +30,7 @@ test("workspace administrator loads scoped model metadata and replaces only a ne
   const subject = renderer(ModelSettings, { workspace: env.workspace, onClose() {}, onModelsChanged: async () => {} }, env);
   await subject.settle();
   assert.deepEqual(requests.slice(0, 3).map(([url]) => url).sort(), ["/api/workspaces/one/model-provider-templates", "/api/workspaces/one/model-providers", "/api/workspaces/one/models"]);
+  button(subject.tree, provider.displayName).props.onClick(); await subject.settle();
   const key = nodes(subject.tree, node => node.type === "input" && node.props.name === "providerApiKey")[0];
   assert.equal(key.props.value, "");
   assert.equal(key.props.type, "password");
@@ -41,14 +42,40 @@ test("workspace administrator loads scoped model metadata and replaces only a ne
   assert.equal(nodes(subject.tree, node => node.type === "input" && node.props.name === "providerApiKey")[0].props.value, "");
   subject.unmount();
 });
-test("shared model provider is read-only until an explicit workspace copy is created", async () => {
+test("model probe shows upstream HTTP status on success and failure", async () => {
+  const env = environment({ workspace: { id: "one", role: "admin" }, request: async (url) => {
+    if (url.endsWith("/model-providers")) return { providers: [provider] };
+    if (url.endsWith("/model-provider-templates")) return { templates: [] };
+    if (url.endsWith("/models")) return { models: [
+      { id: "one-model", displayName: "One model", providerId: provider.id, scope: "workspace", writable: true },
+      { id: "busy-model", displayName: "Busy model", providerId: provider.id, scope: "workspace", writable: true },
+    ] };
+    if (url.endsWith("/one-model/test")) return { ok: true, httpStatus: 200, latencyMs: 22 };
+    if (url.endsWith("/busy-model/test")) return { ok: false, httpStatus: 429, latencyMs: 19, errorKeyword: "provider_rate_limited" };
+    throw new Error("Unexpected test request");
+  } });
+  const subject = renderer(ModelSettings, { workspace: env.workspace, onModelsChanged: async () => {} }, env);
+  await subject.settle();
+  button(subject.tree, provider.displayName).props.onClick();
+  await subject.settle();
+  const testButtons = () => nodes(subject.tree, node => node.type === "button" && node.props.children === "interface.test");
+  testButtons()[0].props.onClick();
+  await subject.settle();
+  const status = () => nodes(subject.tree, node => node.props.role === "status")[0].props.children;
+  assert.match(status(), /HTTP 200/);
+  testButtons()[1].props.onClick();
+  await subject.settle();
+  assert.match(status(), /HTTP 429/);
+  subject.unmount();
+});
+test("an unowned model provider from stale metadata cannot be managed", async () => {
   const { env, requests } = modelEnvironment({ ...provider, id: "shared", scope: "platform", writable: false });
   const subject = renderer(ModelSettings, { workspace: env.workspace, onClose() {}, onModelsChanged: async () => {} }, env);
   await subject.settle();
   assert.equal(nodes(subject.tree, node => node.type === "input" && node.props.name === "providerApiKey").length, 0);
-  assert.ok(button(subject.tree, "workspaceResources.createCopy"));
-  button(subject.tree, "workspaceResources.createCopy").props.onClick(); await subject.settle();
-  assert.equal(nodes(subject.tree, node => node.type === "input" && node.props.name === "providerApiKey")[0].props.value, "");
+  button(subject.tree, provider.displayName).props.onClick(); await subject.settle();
+  assert.equal(button(subject.tree, "workspaceResources.createCopy"), undefined);
+  assert.equal(nodes(subject.tree, node => node.type === "input" && node.props.name === "providerApiKey").length, 0);
   assert.equal(requests.filter(([, options]) => options?.method).length, 0);
   subject.unmount();
 });
@@ -88,6 +115,24 @@ test("members cannot upload plugin packages or edit credentials", async () => {
   assert.equal(requests.some(([url]) => url.includes("mcp-bearer-credentials")), false);
   subject.unmount();
 });
+test("the plugin detail switch changes workspace enablement for administrators", async () => {
+  for (const role of ["admin", "member"]) {
+    const { env, requests } = pluginEnvironment(role);
+    const subject = renderer(PluginSettings, { workspace: env.workspace, catalog: { selectedName: plugin.name } }, env);
+    await subject.settle();
+    const toggle = () => nodes(subject.tree, node => node.props["aria-label"] === `pluginSettings.disable ${plugin.displayName}`)[0];
+    if (role === "admin") {
+      assert.equal(toggle().props.checked, true);
+      toggle().props.onCheckedChange(false);
+      await subject.settle();
+      assert.ok(requests.some(([url, options]) => url === "/api/workspaces/one/plugins/example" && options?.method === "PATCH" && JSON.parse(options.body).enabled === false));
+      assert.equal(toggle(), undefined);
+    } else {
+      assert.equal(toggle(), undefined);
+    }
+    subject.unmount();
+  }
+});
 test("admin plugin upload uses workspace package endpoint and shared credential is overridden with a fresh key", async () => {
   const { env, requests } = pluginEnvironment("admin", "platform");
   const subject = await expandedPlugin(env);
@@ -104,10 +149,12 @@ test("admin plugin upload uses workspace package endpoint and shared credential 
 });
 
 const harnessUrl = new URL("./componentHarness.mjs", import.meta.url).href;
-const routeStubs = ["ModelSettings", "GlobalPluginSettings", "PluginSettings", "WorkspaceGroupsRoute", "WorkspaceMembersRoute", "EnvironmentSettings", "WorkspaceProfileSettings"].map(name => [`./${name}`, module(`export default function ${name}(){return null}`)]);
+const routeStubs = ["ModelSettings", "PluginSettings", "WorkspaceGroupsRoute", "WorkspaceMembersRoute", "EnvironmentSettings", "WorkspaceProfileSettings"].map(name => [`./${name}`, module(`export default function ${name}(){return null}`)]);
 const routeLoad = subjectLoader({ extraOverrides: [
   ...routeStubs,
-  ["react-router", module(`import {context} from ${JSON.stringify(harnessUrl)};export const Link=()=>null;export const Navigate=()=>null;export const useRouteLoaderData=id=>id==="authenticated"?{user:context.user}:context.workspace?{workspace:context.workspace}:null;export const useLoaderData=()=>({workspace:context.workspace});export const useLocation=()=>context.location;export const useNavigate=()=>context.navigate;export const useOutletContext=()=>({});`)],
+  ["./SessionArchive", module("export const SessionArchive=()=>null;")],
+  ["./DeveloperSettings", module("export const DEVELOPER_DOC_GROUPS=[];export const developerTopic=()=>null;export const developerDocSearch=()=>'';export const DeveloperSettings=()=>null;")],
+  ["react-router", module(`import {context} from ${JSON.stringify(harnessUrl)};export const Link=()=>null;export const Navigate=()=>null;export const useRouteLoaderData=id=>id==="authenticated"?{user:context.user}:context.workspace?{workspace:context.workspace}:null;export const useLoaderData=()=>({workspace:context.workspace});export const useLocation=()=>context.location;export const useSearchParams=()=>[new URLSearchParams(context.location.search)];export const useNavigate=()=>context.navigate;export const useOutletContext=()=>({});`)],
   ["../components/ExternalLogin", module("export const ExternalIdentitySettings=()=>null;")],
   ["../components/LanguageSelector", module("export const LanguageSelector=()=>null;")],
   ["../components/ThemeSelector", module("export const ThemeSelector=()=>null;")],
@@ -123,12 +170,13 @@ test("workspace model settings allow owner and admin, reject member, and preserv
     assert.equal(nodes(platform.tree, node => node.type.name === "ModelSettings").length, 0);
   }
 });
-test("platform superuser can open platform settings without an invented workspace membership", () => {
-  const env = environment({ workspace: null, user: { id: "operator", isSuperuser: true }, location: { pathname: "/settings/platform-models", state: null } });
-  const subject = renderer(SettingsPage, {}, env); subject.render();
-  const modelSettings = nodes(subject.tree, node => node.type.name === "ModelSettings")[0];
-  assert.ok(modelSettings); assert.equal(modelSettings.props.workspace, undefined);
-  assert.doesNotThrow(() => modelSettings.props.onModelsChanged());
+test("retired platform settings stay unavailable to superusers", () => {
+  for (const section of ["platform-models", "global-plugins", "workspace-resources"]) {
+    const env = environment({ workspace: null, user: { id: "operator", isSuperuser: true }, location: { pathname: "/settings/" + section, state: null } });
+    const subject = renderer(SettingsPage, {}, env); subject.render();
+    assert.equal(nodes(subject.tree, node => node.type.name === "ModelSettings").length, 0);
+    assert.equal(nodes(subject.tree, node => node.props.to === "/settings/preferences").length, 1);
+  }
 });
 
 test("uninstall removes only a workspace installation; shared packages retain only enablement control", async () => {
@@ -157,51 +205,5 @@ test("package management explains that updates require a fresh environment witho
   const subject = renderer(PluginSettings, { workspace: env.workspace, isSuperuser: false }, env);
   await subject.settle();
   assert.ok(nodes(subject.tree, node => typeof node.props.children === "string" && node.props.children === "Existing environments keep their mounted package version. Create a new environment or conversation after updating to use the new version.").length);
-  subject.unmount();
-});
-
-test("platform operator selects another workspace's resource panels without a manufactured membership", async () => {
-  const { default: OperatorResources } = await import(await load(fileURLToPath(new URL("../../src/routes/OperatorWorkspaceResources.jsx", import.meta.url))));
-  const requests = [];
-  const env = environment({ workspace: null, user: { id: "operator", isSuperuser: true }, request: async (url) => {
-    requests.push(url); return { workspaces: [{ id: "foreign", name: "Other workspace", status: "active" }] };
-  } });
-  const subject = renderer(OperatorResources, { isSuperuser: true }, env);
-  await subject.settle();
-  assert.deepEqual(requests, ["/api/admin/workspace-resources"]);
-  nodes(subject.tree, node => node.type === "select")[0].props.onChange({ target: { value: "foreign" } });
-  await subject.settle();
-  let panel = nodes(subject.tree, node => node.props.workspace?.id === "foreign")[0];
-  assert.ok(panel); assert.equal(panel.props.workspace.role, undefined);
-  assert.doesNotThrow(() => panel.props.onModelsChanged());
-  button(subject.tree, "workspaceResources.plugins").props.onClick(); await subject.settle();
-  panel = nodes(subject.tree, node => node.props.workspace?.id === "foreign")[0];
-  assert.ok(panel); assert.equal(panel.props.isSuperuser, true);
-  subject.unmount();
-});
-
-test("ordinary workspace admin cannot use the operator workspace browser", async () => {
-  const { default: OperatorResources } = await import(await load(fileURLToPath(new URL("../../src/routes/OperatorWorkspaceResources.jsx", import.meta.url))));
-  const requests = [];
-  const env = environment({ request: async url => { requests.push(url); return { workspaces: [] }; } });
-  const subject = renderer(OperatorResources, { isSuperuser: false }, env);
-  await subject.settle();
-  assert.deepEqual(requests, []);
-  assert.equal(nodes(subject.tree, node => node.type === "select").length, 0);
-  subject.unmount();
-});
-
-test("operator resource metadata retries after a failed request", async () => {
-  const { default: OperatorResources } = await import(await load(fileURLToPath(new URL("../../src/routes/OperatorWorkspaceResources.jsx", import.meta.url))));
-  let attempts = 0;
-  const env = environment({ request: async () => { if (++attempts === 1) throw new Error("offline"); return { workspaces: [{ id: "foreign", name: "Other", status: "active" }] }; } });
-  const subject = renderer(OperatorResources, { isSuperuser: true }, env);
-  await subject.settle();
-  const alert = nodes(subject.tree, node => node.props.role === "alert")[0];
-  assert.ok(alert);
-  nodes(alert, node => node.type === "button")[0].props.onClick();
-  await subject.settle();
-  assert.equal(attempts, 2);
-  assert.equal(nodes(subject.tree, node => node.type === "option" && node.props.value === "foreign").length, 1);
   subject.unmount();
 });

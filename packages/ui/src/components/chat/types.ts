@@ -200,6 +200,7 @@ export type NarrativeChunk = {
   sourceItemId?: string;
   tone?: "normal" | "error";
   runFailure?: "failed" | "interrupted";
+  failureReason?: string;
   provisionalRunFailure?: boolean;
   waterfall?: EventWaterfall;
 };
@@ -386,6 +387,7 @@ export type TranscriptTextItem = {
   text: string;
   tone?: "normal" | "error";
   runFailure?: "failed" | "interrupted";
+  failureReason?: string;
   processState?: string;
   compactLabel?: string;
   detail?: string;

@@ -25,8 +25,7 @@ reauthentication.
 | Enable/disable an available Plugin | Own workspace | Denied | Scoped resource administration |
 | Create/edit workspace model providers, models, and replacement credentials | Own workspace | Denied | Any active workspace through its scoped resource API |
 | Read existing credential plaintext through management APIs | Denied | Denied | Denied |
-| Consume enabled shared/workspace models and Skills | Current membership and existing usage authorization | Same usage authorization | Platform authority does not manufacture a membership |
-| Mutate platform Plugin packages, providers, models, or credentials | Denied | Denied | Explicit platform administration APIs |
+| Consume enabled workspace models and Skills | Current membership and existing usage authorization | Same usage authorization | Platform authority does not manufacture a membership |
 | Invite members or adjust non-owner roles | Existing owner/admin membership rules | Denied | Existing membership rules remain separate |
 | Transfer ownership or remove/demote the current owner | Transfer requires current owner and password reauthentication; ordinary member mutation cannot remove an owner | Denied | Platform resource authority does not bypass ownership transfer |
 | Delete a workspace | This change adds no deletion workflow; deletion remains an owner-only boundary | Denied | No new deletion authority |
@@ -37,23 +36,12 @@ workspace. UI visibility is a convenience; HTTP and service authorization enforc
 the boundary. Generic workspace membership helpers do not gain a superuser
 bypass from resource administration.
 
-## Shared resources and local overrides
-
-Existing platform packages, providers, models, and MCP credential metadata remain
-shared. Workspace settings show their metadata as read-only. Platform settings
-use separate platform operator entries and `/api/admin/...` routes.
+## Workspace resources
 
 Workspace resource settings use `/api/workspaces/{workspaceId}/...` routes.
-Workspace model selection reads `/api/models?workspaceId={workspaceId}` after
-checking current membership. Calling the catalog without a workspace returns the
-platform catalog, without exposing another workspace's local models.
-
-To use a different model provider configuration, create a workspace provider
-from a template or copy the shared provider's public configuration and supply a
-new key. Create the required local models for a custom provider. Neither action
-copies or retrieves the platform's existing secret. Local MCP credentials take
-precedence over the platform credential with the same Plugin name and credential
-reference, only inside their owning workspace.
+Workspace model selection checks current membership before listing the workspace's
+models. Providers, installed Plugins, and connector credentials belong to one
+workspace.
 
 Upload a Skill ZIP or complete Plugin ZIP to workspace Plugin settings. A Skill
 ZIP contains a root `SKILL.md` or one enclosing Skill directory; the extractor
@@ -62,8 +50,7 @@ canonical lowercase kebab name. Plugin ZIPs keep the supported manifest layout
 and may contain Skills, MCP declarations, or hooks. The Skills library links
 administrators to package management. Reupload
 updates the workspace installation after package validation and active-run
-checks. Removing a local installation disables that workspace's enablement;
-it does not remove a shared platform package or another workspace's installation.
+checks. Removing an installation disables the package for that workspace.
 Workspace-local package content remains immutable for existing signed references.
 
 For workspace-local installations, an existing retained environment keeps its
@@ -71,69 +58,51 @@ original mounted package version, including while paused. Updating the installat
 container or discard its memory. A Run requesting a different package version
 in that environment must be rejected explicitly; start a new environment or
 conversation to use the updated package. Retirement of the old environment is a
-separate lifecycle action. This immutable-version guarantee covers workspace-local
-installations. Legacy platform catalog replacement retains its existing maintenance
-boundary and is not covered by workspace-local version continuity.
+separate lifecycle action.
 
 ## Credentials
 
 Management responses contain identifiers, configuration status, versions, and
 scope metadata. They never return an existing secret. Replacement forms start
 empty, remain masked, and are discarded when switching workspaces. Saving a
-replacement requires a newly supplied key. Local create/rotate/delete endpoints
-cannot mutate a platform credential by passing its ID. Secret decryption remains
+replacement requires a newly supplied key. Secret decryption remains
 inside the existing authorized execution/connector path, separate from resource
 management. Audit records describe the action without secret values.
 
-## Forward migration
+## Upgrade from shared platform configuration
 
-`0031_workspace_resource_scope` follows the published `0030_session_manual_unread`.
-It adds nullable workspace ownership to model providers and MCP credentials,
-adds explicit workspace Plugin installation bindings, and introduces uniqueness
-constraints for the platform and workspace scopes.
+Migration `0046_workspace_owned_resources` preserves provider/model rows for
+historical references, disables the shared models and providers, revokes Agent Run API
+credentials bound to those models, and deletes shared provider and MCP secrets.
+Workspace-local configuration and credentials remain scoped to their workspace.
+Preserving a historical identity does not preserve permission to execute with a
+retired secret. Configure replacement workspace credentials explicitly.
 
-Existing provider and credential rows retain `workspace = NULL`, meaning
-platform-shared. Their IDs, encrypted secret bytes, versions, model relationships,
-connector references, users, membership roles, and owners stay intact. Existing
-Plugin catalog packages remain platform-shared and existing workspace enablement
-is preserved. No ownership is guessed from a creator, most recent user, or page
-name. New local resources require an explicit workspace.
+Existing workspace plugin enablements without a workspace installation are
+converted to installation metadata from `PLUGIN_CATALOG_ROOT`. Existing
+installations are kept. This migration does not copy the legacy package bytes
+into content-addressed storage: legacy directories must remain mounted and
+unchanged while historical snapshots resolve through them. Do not remove the old
+plugin volume merely because the installation metadata has moved.
 
-The migration does not promote existing administrators, create replacement
-owners, delete rows, clear data, or copy shared secrets into tenant records.
-Preserving the platform fallback preserves reasonable existing access without
-allowing tenant admins to mutate a shared secret. Converting an existing shared
-resource into an exclusively tenant-owned resource needs a separately reviewed
-ownership decision and access-impact assessment.
+Before upgrading, preserve a database backup and the matching plugin storage,
+check that every existing enabled plugin is present in the mounted legacy
+catalog, and arrange replacement workspace model and connector credentials.
+Missing package data aborts conversion; it must not be repaired by substituting
+an unrelated package with the same name.
 
-Rollout must coordinate the migration and matching API/Runtime readers and
-writers; an older process must not continue interpreting workspace-owned rows as
-global. Verify migration fixtures preserve existing identities and ciphertext,
-then verify owner/admin/member/operator and cross-workspace allow/deny behavior,
-new-admin invitation persistence, local precedence, secret redaction, and package
-resolution. Deployment, production migration execution, reconstruction, and
-rollback are separate operational approvals. This document supplies no data
-clearing or production execution command.
+The migration is explicitly irreversible. Deleted secrets cannot be recovered by
+a reverse migration. Rolling deployment code back alone does not restore the
+previous platform configuration; recovery requires a coordinated restoration of
+the pre-upgrade database and matching storage. Settle in-flight external work
+before a planned credential retirement, since the retired key cannot query or
+cancel its former Agent Run API operations. Emergency revocation still takes priority.
 
-## Coordinated deployment boundary
-
-Apply schema migration 0031 and switch the matching API, Worker, and Runtime
-consumers together. Drain the old API and Worker consumers before enabling any
-workspace-local credential writes. Older scope-unaware lookups such as
-`filter(plugin_name=..., credential_ref=...).first()` can select a newly created
-tenant credential as if it were global. Old and new consumers must not coexist
-after local credentials are introduced.
-
-Runtime must understand immutable digest-addressed Plugin paths before local
-packages are used. Verify the matching Runtime adapter is running before making
-workspace package installations available to executions. This transition neither
-promotes administrator flags nor clears existing data. Production execution and
-any separate rollback plan still require explicit operational authorization.
-
-## Platform workspace resource browser
-
-A platform superuser can open `/settings/workspace-resources`, select an active workspace, and manage its local models, packages and credentials through the same scoped APIs. The operator-only metadata endpoint returns workspace IDs, names and status. It does not create memberships or grant access to private Sessions, Agents or Library objects. Ordinary workspace owners and administrators cannot use this cross-workspace browser.
-
-Experimental E2B databases are outside this released-schema migration path.
-Keep their data intact and validate a separate, bounded import into a native
-database before changing a deployment that used the experimental branch.
+The release gate must use a database at migration `0045` with a historical Run,
+legacy plugin binding and both shared and workspace-local credentials, migrate
+forward, then exercise authorized history reads, current selection and secret
+isolation. Directly invoking the migration function on today's model registry
+does not establish historical-state migration compatibility.
+See [Agent Run API upgrade acceptance](../eval/AgentRunAPIUpgradeAcceptance.md) for the
+historical PostgreSQL fixture, executable commands, and the separately recorded
+completed and pending checks.

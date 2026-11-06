@@ -28,6 +28,8 @@
   min-height: 0;
 }
 
+.chatSyncRetry { align-self: center; }
+
 /* 消息区域 */
 .messages-container {
   flex: 1;

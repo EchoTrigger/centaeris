@@ -2,12 +2,11 @@
 
 ## Package carrier
 
-Workspace accepts Plugin ZIPs through separate platform and workspace
-management APIs. Platform uploads require a superuser; workspace uploads require
-the current workspace owner/admin or explicit platform resource authority.
+Workspace accepts Plugin ZIPs through workspace management APIs. Uploads require
+the current workspace owner/admin or explicit operator authority for the target workspace.
 See [Workspace resource administration](WorkspaceResourceAdministration.md) for
-shared packages, local overrides, and the forward migration. ZIP is a transport
-carrier, not the installed package identity. The archive may contain the Plugin
+workspace scope and permissions. The ZIP carries the Plugin package.
+The archive may contain the Plugin
 root directly or one wrapping directory and must contain
 `.centaeris-plugin/plugin.json`.
 
@@ -21,8 +20,8 @@ carrier. The API does not execute `npm install` or package lifecycle scripts.
 1. The API streams the upload into a bounded staging location.
 2. Runtime/Core inspection validates manifest, resources, paths, contracts, and
    package digests.
-3. The API generates the installed catalog from the staged directory.
-4. A valid package is moved atomically into the Plugin volume.
+3. The API moves the validated package into digest-addressed storage in the Plugin volume.
+4. The API records the package binding for the workspace.
 5. The upload carrier and staging directory are removed.
 
 Failure leaves the previous installed package and catalog unchanged. The API
@@ -43,22 +42,17 @@ still be able to disable an enabled package whose connection or contract fails.
 
 ## Credentials
 
-Plugin declarations contain credential references, never secret values.
-Platform operators manage shared credentials. Workspace owners/admins create,
-rotate, or delete their workspace credentials through scoped management APIs;
-local credentials override the shared reference only inside that workspace.
+Plugin declarations contain credential references. Workspace owners/admins create,
+rotate, or delete their workspace credentials through scoped management APIs.
 Management responses contain metadata and never existing plaintext, and
 secrets do not enter AgentRun authorization, Session events, logs, prompts, or
 the package volume.
 
 ## Uninstall
 
-Platform uninstall checks active-run and enablement constraints, removes the
-installed directory, and regenerates the catalog atomically. Workspace uninstall
-removes its local installation and enablement while retaining immutable bytes
-needed by existing signed references. It does not delete unrelated
-packages, workspace data, Session history, or user files. Credentials have a
-separate explicit deletion path.
+Workspace uninstall removes the installation and enablement while retaining
+immutable bytes needed by existing signed references. Credentials have a separate
+deletion path.
 
 ## Release source
 

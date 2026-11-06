@@ -124,7 +124,7 @@ class ControlLifecycleTests(unittest.TestCase):
                 else:
                     self.assertEqual(output.getvalue(), "")
 
-    def test_queued_cancel_completes_while_eight_ordinary_slots_stay_held(self):
+    def test_queued_cancel_completes_while_ordinary_jobs_are_active(self):
         job, _ = lifecycle_fixture()
         job.update(status="leased", leaseOwner="worker:control-owner", leasePurpose="control", controlStage="advance")
         held = threading.Event()
@@ -141,7 +141,7 @@ class ControlLifecycleTests(unittest.TestCase):
             if callable(handler):
                 stop = handler
 
-        def ordinary(_slot):
+        def ordinary(_job):
             nonlocal active
             with lock:
                 active += 1
@@ -183,10 +183,12 @@ class ControlLifecycleTests(unittest.TestCase):
         def heartbeats(*_args):
             yield lambda: None
 
-        with patch.object(worker, "WORKER_SLOT_COUNT", 8), \
-                patch.object(worker.signal, "signal", side_effect=signal), \
+        ordinary_jobs=iter({"jobId":f"ordinary-{index}","leaseOwner":f"ordinary-owner-{index}"} for index in range(8))
+        with patch.object(worker.signal, "signal", side_effect=signal), \
                 patch.object(worker, "run_loop"), \
-                patch.object(worker, "execute_next_job", side_effect=ordinary), \
+                patch.object(worker, "claim_next_job", side_effect=lambda _sequence:next(ordinary_jobs,None)), \
+                patch.object(worker, "run_claimed_job", side_effect=ordinary), \
+                patch.object(worker, "wait_for_jobs", return_value="timeout"), \
                 patch.object(worker, "runtime_request", side_effect=runtime), \
                 patch.object(worker, "api_request", side_effect=api), \
                 patch.object(worker, "lease_heartbeats", heartbeats), \
@@ -199,7 +201,7 @@ class ControlLifecycleTests(unittest.TestCase):
                 timer.cancel()
                 release.set()
                 for thread in threading.enumerate():
-                    if thread.name.startswith("workspace-job-slot-"):
+                    if thread.name.startswith("workspace-active-job-"):
                         thread.join(timeout=2)
             self.assertEqual(completed_with, [8])
             execute.assert_not_called()

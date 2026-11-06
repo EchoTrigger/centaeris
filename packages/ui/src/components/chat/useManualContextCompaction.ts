@@ -1,6 +1,5 @@
 import { useCallback, useRef, useState } from "react";
 import { compactAgentContext } from "../../lib/chatBridge";
-import { formatExecutionError } from "./chatRuntimeCore";
 
 type ActiveCompaction = {
   requestId: number;
@@ -59,7 +58,8 @@ export const useManualContextCompaction = ({
       await refreshContextUsage(targetSessionId);
     } catch (error) {
       if (isCurrentRequest()) {
-        onError(`Compaction failed: ${formatExecutionError(error)}`);
+        console.error("Desktop conversation compaction failed", error);
+        onError("Conversation history could not be compacted. Try again.");
       }
     } finally {
       if (activeCompactionRef.current?.requestId === requestId) {

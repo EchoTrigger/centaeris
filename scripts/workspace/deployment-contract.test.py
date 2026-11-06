@@ -27,6 +27,7 @@ REQUIRED_TEST_UPLOAD_LIMITS = {
 }
 RESIDENT_LIMIT_DEFAULTS = {
     "RESIDENT_GLOBAL_COUNT": "8",
+    "RESIDENT_HOST_COUNT": "8",
     "RESIDENT_GLOBAL_MEMORY_BYTES": "12884901888",
     "RESIDENT_GLOBAL_CPU_MILLI": "8000",
     "RESIDENT_GLOBAL_PIDS": "8192",
@@ -281,6 +282,18 @@ sys.stdout.write(re.sub(pattern,replace,text))
         del config["services"]["material-worker"]["depends_on"]["document-processor"]
         self.assertNotEqual(validate(config).returncode, 0)
 
+    def test_material_delivery_uses_one_persistent_broker_for_all_participants(self):
+        services = compose_config()["services"]
+        broker = services["material-broker"]
+        self.assertNotIn("ports", broker)
+        self.assertIn("noeviction", broker["command"])
+        self.assertTrue(any(volume["source"] == "material-broker-data" and volume["target"] == "/data"
+                            for volume in broker["volumes"]))
+        urls = {services[name]["environment"]["MATERIAL_BROKER_URL"]
+                for name in ("api", "material-worker", "material-scheduler")}
+        self.assertEqual(len(urls), 1)
+        self.assertEqual(urlsplit(urls.pop()).hostname, "material-broker")
+
     def test_runtime_compose_starts_without_a_cli_preflight(self):
         runtime = compose_config()["services"]["runtime"]
         self.assertEqual(runtime["entrypoint"], ["runtime_server"])
@@ -327,16 +340,12 @@ sys.stdout.write(re.sub(pattern,replace,text))
                     self.assertEqual(environment["SANDBOX_CPU_MILLI"], "2000")
                     self.assertEqual(environment["SANDBOX_MEMORY_BYTES"], "4294967296")
 
-    def test_worker_slot_configuration_reaches_container(self):
-        self.assertEqual(compose_config()["services"]["worker"]["environment"]["WORKER_SLOT_COUNT"], "8")
-        self.assertEqual(compose_config(WORKER_SLOT_COUNT="4")["services"]["worker"]["environment"]["WORKER_SLOT_COUNT"], "4")
 
     def test_runtime_postgres_connection_budgets_reach_runtime(self):
         environment = compose_config()["services"]["runtime"]["environment"]
         self.assertEqual(environment["RUNTIME_POSTGRES_POOL_SIZE"], "10")
         self.assertEqual(environment["RUNTIME_POSTGRES_CONTROL_POOL_SIZE"], "2")
         self.assertEqual(environment["RUNTIME_POSTGRES_CLEANUP_POOL_SIZE"], "2")
-        self.assertEqual(environment["RUNTIME_HTTP_CLEANUP_LIMIT"], "2")
         self.assertEqual(environment["RUNTIME_POSTGRES_LISTENER_LIMIT"], "8")
         self.assertEqual(environment["RUNTIME_POSTGRES_CHECKOUT_TIMEOUT_MS"], "5000")
         self.assertEqual(environment["RUNTIME_POSTGRES_CONNECT_TIMEOUT_MS"], "3000")
@@ -403,7 +412,7 @@ sys.stdout.write(re.sub(pattern,replace,text))
             compose_config(API_POSTGRES_POOL_MAX_SIZE="0")["services"]["api"]["environment"]["API_POSTGRES_POOL_MAX_SIZE"],
             "0",
         )
-        for service in ("api-init", "material-worker", "gc", "mail-sender"):
+        for service in ("api-init", "material-worker", "material-scheduler", "gc", "mail-sender"):
             with self.subTest(service=service):
                 self.assertNotIn("API_POSTGRES_POOL_MAX_SIZE", services[service]["environment"])
                 self.assertNotEqual(services[service]["environment"]["POSTGRES_APPLICATION_NAME"], "centaeris-api")

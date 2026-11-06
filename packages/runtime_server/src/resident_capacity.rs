@@ -60,10 +60,14 @@ impl ResidentCapacity {
             })
         };
         let global = limits("RESIDENT_GLOBAL", defaults.global)?;
+        let host_count = crate::positive_u64_env("RESIDENT_HOST_COUNT", global.sandbox_count)?;
         Ok(Self {
             global,
             tenant: limits("RESIDENT_TENANT", defaults.tenant)?,
-            host: global,
+            host: ResidentResourceUsage {
+                sandbox_count: host_count.min(global.sandbox_count),
+                ..global
+            },
         })
     }
 

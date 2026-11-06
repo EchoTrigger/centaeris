@@ -97,14 +97,9 @@ export function useWorkspaceController({
 
   const reportCatalogFailure = useCallback((error: unknown, fallback: string) => {
     const message = errorMessage(error, fallback);
-    if (message.includes("workspace_catalog_")) {
-      setCatalogError({
-        message,
-        canReset: message.includes("workspace_catalog_corrupt"),
-      });
-      return;
-    }
     inputsRef.current.reportHostError(message);
+    const canReset = message.includes("workspace_catalog_corrupt");
+    setCatalogError({ message: canReset ? "The workspace list is damaged" : fallback, canReset });
   }, [setCatalogError]);
 
   const retryCatalog = useCallback(async () => {

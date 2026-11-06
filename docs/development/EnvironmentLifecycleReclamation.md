@@ -2,14 +2,14 @@
 
 Callers submit Agent invocations; the platform owns queuing, admission, environment reuse and reclamation. Reliable resource facts are the prerequisite for automated placement and elastic capacity supply.
 
-Queued cancellation and physical resource settlement must continue independently of ordinary execution capacity. Complete that lifecycle before making retained environments the default for ordinary Sessions. Execution limits remain eight globally and eight slots per Worker process; workspace identity is not a separate execution quota.
+Queued cancellation and physical resource settlement must continue independently of ordinary execution capacity. Complete that lifecycle before making retained environments the default for ordinary Sessions. Accepted Runs have no fixed global, per-Workspace or per-Worker concurrency quota; physical resident admission still enforces the configured resource budgets.
 
 ## Observed gaps and expected behavior
 
 | Boundary | Current evidence | Required behavior |
 | --- | --- | --- |
-| Workspace execution capacity exhausted | The deployed baseline could not claim a cancelled queued Job while four owners remained active. The control-lease implementation below now claims it independently. | An independent bounded control path commits the cancellation without waiting for an unrelated execution slot or granting execution authority. |
-| Global execution capacity exhausted | The deployed baseline could not claim a cancelled Job while eight owners across two Workspaces remained active. The same independent control path now handles it. | The same control progress must hold independently of the global execution limit. |
+| Workspace execution capacity exhausted | The deployed baseline could not claim a cancelled queued Job while four owners remained active. The control-lease implementation below now claims it independently. | An independent control path commits the cancellation without waiting for an unrelated execution slot or granting execution authority. |
+| Global execution capacity exhausted | The deployed baseline could not claim a cancelled Job while eight owners across two Workspaces remained active. The same independent control path now handles it. | The same control progress must hold alongside active execution owners. |
 | Failure before physical creation | The initial regression left a reservation charged after a fresh pre-create callback failed. The undispatched settlement below now closes this case. | Preserve allocation history and atomically settle the proven unmaterialized attempt, its holding and subsequent obligations. |
 | Cleanup proof lost at the host boundary | A controlled host callback removes its own synchronous attempt but returns only a string failure. The ledger retains the reservation. | Carry typed physical evidence to durable settlement. A string error or an empty inventory cannot authorize release. |
 | Historical reserved allocations | Earlier records may have no attempt evidence or container ID. | Recover a durable investigation obligation; never infer non-creation from age, lease expiry or an empty observation. |
@@ -39,23 +39,25 @@ Acceptance must exercise the real preparation and task path before judging works
 
 The opt-in `export_owned_runsc_storage_probe_request` test exports a request from the production container request builder for an explicitly owned physical probe. Probe drivers, private configuration and artifacts remain outside the source checkout. A separate Docker daemon must also run in a separate Linux network namespace; a different socket/data root alone does not isolate Docker's host network management.
 
-## Bounded lifecycle control leases
+## Lifecycle control leases
 
 Runtime schema 15 adds a persistent `execute/control` purpose and, for control leases, an `advance/cleanup` stage to the existing lifecycle Job. Missing historical purposes become `execute`; existing signed grants, owners and job history are preserved. The purpose and stage cannot change while the same lease owner remains current. Upgrade API, Worker and Runtime together after draining incompatible live consumers, following [Session environment upgrades](SessionEnvironments.md#persistence-and-upgrades).
 
-Ordinary ready/claim excludes Jobs with a digest-bound durable cancellation or terminal-control intent. Control ready and claim share the same server predicate: queued, due, no current owner, matching durable intent and the appropriate authoritative terminal state. Requesting `control` alone grants nothing. Execute capacity stays global 8, with eight ordinary Worker threads and no per-Workspace execution quota. Independent control threads and global control-lease budgets provide two advance and two cleanup slots. Reclaim exhaustion retains a pending control Job for investigation/retry rather than deleting its intent.
+Ordinary ready/claim excludes Jobs with a digest-bound durable cancellation or terminal-control intent. Control ready and claim share the same server predicate: queued, due, no current owner, matching durable intent and the appropriate authoritative terminal state. Requesting `control` alone grants nothing. Ordinary execution, advance and cleanup dispatchers each start claimed Jobs independently; exclusive row leases enforce ownership without a fixed active-Job quota. Reclaim exhaustion retains a pending control Job for investigation/retry rather than deleting its intent.
 
 The control API reads the original signed Run authorization without acquiring an Environment controller. Runtime restores Core Session state and uses Core's termination operations. A never-admitted Run with no allocation or owned controller receives a durable `noEffectsForRun` fact containing its no-operation cleanup and release receipt identities. It does not acquire another Run's controller. A Run with prior Core history or an allocation cannot use that shortcut: it yields the same Job to the cleanup stage and follows existing cleanup/release authority.
 
 Server boundaries reject control authority at ordinary start, API execute-controller/start resolution, Runtime step, model requests, ordinary record append and host execution-controller validation. An old signed execute grant does not override a current control lease. `complete` verifies an authoritative terminal plus matching cleanup/release facts, including on successful reply replay. Missing or altered no-effects evidence and unresolved physical cleanup are rejected.
 
-Short Runtime control HTTP/DB budgets remain four/two. Slow teardown uses a separate HTTP limit and DB pool, both defaulting to two (`RUNTIME_HTTP_CLEANUP_LIMIT`, `RUNTIME_POSTGRES_CLEANUP_POOL_SIZE`). It retains the existing authority pins across physical cleanup. This separation prevents slow teardown from consuming the short-control pools; it does not establish fixed completion times under database, host or shared-executor failure.
+Runtime HTTP handlers have no fixed concurrency quota. Short control and slow teardown retain separate PostgreSQL pools, each defaulting to two connections (`RUNTIME_POSTGRES_CONTROL_POOL_SIZE`, `RUNTIME_POSTGRES_CLEANUP_POOL_SIZE`). It retains the existing authority pins across physical cleanup. This separation prevents slow teardown from consuming the short-control pools; it does not establish fixed completion times under database, host or shared-executor failure.
 
 This boundary repairs queued cancellation under ordinary execution saturation. Active-owner failure handoff, historical terminal/dead-letter reconciliation, HTTP/DB combined saturation, physical cleanup under pressure, no-Run provision recovery, storage quotas and target-host acceptance still require their own tests. Retained is not yet the default.
 
+Cleanup waits for the current host inventory owner to release the existing coordination lock. It rechecks current controller authority after acquiring that lock. A new preparation still uses the nonblocking admission path. This gives physical settlement a turn during continuous submissions without refunding an unconfirmed holding.
+
 ## Capacity release scheduling contract
 
-The capacity-wake candidate adds Runtime schema 16 with an explicit forward migration from 15. Before attempting resident admission, the current execute owner durably registers the resource-release generation it observed. A transaction which actually deletes a resident holding advances a singleton generation and notifies `runtime_job_ready_v1`. The notification carries no permission: readiness and ordinary claim compare durable generations, then retain the existing global execution limit, lease fencing, reclaim embargo and control exclusion. The waiting Job remains the same Job.
+The capacity-wake candidate adds Runtime schema 16 with an explicit forward migration from 15. Before attempting resident admission, the current execute owner durably registers the resource-release generation it observed. A transaction which actually deletes a resident holding advances a singleton generation and notifies `runtime_job_ready_v1`. The notification carries no permission: readiness and ordinary claim compare durable generations, then retain lease fencing, reclaim embargo and control exclusion. The waiting Job remains the same Job.
 
 The release transaction does constant-size signaling work and does not scan or lock waiting Jobs. A release preceding yield remains visible afterward; missed notifications and Runtime restart do not erase eligibility. A new claim consumes the registration and records the release/claim timestamps; a non-capacity yield clears it. A subsequent failed admission registers the latest generation and waits for another release or the existing periodic fallback. An Unknown physical outcome does not remove its holding and supplies no release signal. Protected retained environments ending a Run keep their holding and supply no release signal either.
 
@@ -73,7 +75,7 @@ PostgreSQL [LISTEN](https://www.postgresql.org/docs/current/sql-listen.html) req
 
 ## Default lifetime change
 
-The maintainer-approved target is `retained` for ordinary Sessions after reclamation acceptance passes. Keep eight global execution permits and eight Worker slots. Do not change previously signed grants or silently reinterpret existing persistent data. Document and test the forward upgrade policy before switching the Worker default and API-visible lifetime consistently.
+The maintainer-approved target is `retained` for ordinary Sessions after reclamation acceptance passes. Execution and HTTP dispatch remain free of application concurrency quotas. Do not change previously signed grants or silently reinterpret existing persistent data. Document and test the forward upgrade policy before switching the Worker default and API-visible lifetime consistently.
 
 The switch is gated on the following evidence:
 

@@ -17,6 +17,9 @@ boundaries, and release verification.
   proposed fixed-content contract and isolated RustFS validation.
 - [Pre-admission cancellation](architecture/PreAdmissionCancellation.md): durable
   cancellation receipts without fabricated Session history.
+- [Agent Run API](architecture/AgentRunAPI.md): first-call workflow,
+  credential and timeout boundaries, bounded result-recovery proposal and migration
+  requirements for PR #55.
 - [Generated transcript contract](../../packages/api/app_core/generated/README.md):
   Core-derived wire structure and Python validation.
 - [Platform materials and MCP](architecture/PlatformMaterials.md): material
@@ -41,6 +44,8 @@ boundaries, and release verification.
 - [Data](operations/Data.md): volumes, persistence, deletion, backup, and
   recovery boundaries.
 - [Plugins](operations/Plugins.md): ZIP upload through uninstall.
+- [Workspace resource administration](operations/WorkspaceResourceAdministration.md):
+  scoped model and plugin management, shared-secret retirement and upgrade recovery.
 - [Document processing](operations/DocumentProcessing.md): required images,
   bounded streaming, and current measurement limits.
 - [Office preview](operations/OfficePreview.md): LibreOffice-derived read-only
@@ -52,6 +57,8 @@ boundaries, and release verification.
   and Plugin risk.
 - [Memory acceptance](eval/MemoryAcceptance.md): offline discovery and private
   persistence checks, plus bounded real-model follow-up.
+- [Agent Run API upgrade acceptance](eval/AgentRunAPIUpgradeAcceptance.md): separate
+  PostgreSQL 0045-to-0046 regression coverage and the remaining deployment checks.
 - [Release gate](eval/ReleaseGate.md): required source and deployment checks.
 - [Performance evaluation](eval/PerformanceEvaluation.md): reproducible measurement
   definitions without local run receipts.

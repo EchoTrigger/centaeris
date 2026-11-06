@@ -236,14 +236,14 @@ export default function WorkspaceGroupsRoute({ embedded = false } = {}) {
               <div>{renaming ? <form onSubmit={renameGroup}><input autoFocus maxLength={160} required aria-label={t("workspaceGroupsRoute.groupName")} value={renameName} onChange={(event) => setRenameName(event.target.value)} /><button type="button" onClick={() => setRenaming(false)}>{t("agentRunRow.cancel")}</button><button type="submit" disabled={busyKeys.has(`rename:${selected.id}`) || !renameName.trim()}>{t("modelSettings.save")}</button></form> : <><h2>{selected.name}</h2><p>{selected.kind === "all_members" ? t("workspaceGroupsRoute.automaticallyIncludesAllCurrentlyActiveMembers") : t("workspaceGroupsRoute.valueMembers", { value1: groupMemberIds.size })}</p></>}</div>
               {selected.kind === "custom" && !renaming ? <span><button type="button" onClick={() => { setRenameName(selected.name); setRenaming(true); }}>{t("appRoute.rename")}</button><button className="isDanger" type="button" aria-label={t("workspaceGroupsRoute.deleteValue", { value1: selected.name })} onClick={() => setDeleteTarget(selected)}><Trash2 aria-hidden="true" />{t("appRoute.delete")}</button></span> : null}
             </header>
-            {rosterLoading ? <div className="shWorkspaceSettingsState">{t("workspaceGroupsRoute.loadingGroupMembers")}</div> : <div className="shWorkspaceGroupMembers">
+            {rosterLoading ? <div className="shWorkspaceSettingsState">{t("workspaceGroupsRoute.loadingGroupMembers")}</div> : <div className="settingsPanel settingsListPanel shWorkspaceGroupMembers">
               {members.map((member) => {
                 const checked = selected.kind === "all_members" || groupMemberIds.has(member.membershipId);
                 const rowBusy = busyKeys.has(`member:${member.membershipId}`);
                 return <label key={member.membershipId}><input type="checkbox" checked={checked} disabled={selected.kind === "all_members" || rowBusy} onChange={() => void toggleMember(member)} /><span className="shWorkspaceMemberAvatar" aria-hidden="true">{member.email.slice(0, 1).toUpperCase()}</span><span><strong>{member.email}</strong><small>{roleLabel(member.role)}</small></span></label>;
               })}
             </div>}
-          </> : <div className="shWorkspaceSettingsEmpty">{t("workspaceGroupsRoute.noGroupsYet")}</div>}
+          </> : <div className="settingsPanel shWorkspaceSettingsEmpty">{t("workspaceGroupsRoute.noGroupsYet")}</div>}
         </section>
       </div> : null}
     </div>

@@ -82,7 +82,6 @@ class IsolationTests(unittest.TestCase):
         self.assertEqual(manifest['workspaceSha'], revision)
         self.assertEqual(manifest['coreSha'], revision)
         self.assertEqual(manifest['dirtyFiles'], dirty)
-        self.assertEqual(manifest['workerSlots'], 2)
         self.assertEqual(set(manifest['containers']), set(control.SERVICES))
 
     def test_command_utf8_io_does_not_depend_on_windows_locale(self):
@@ -232,14 +231,14 @@ class IsolationTests(unittest.TestCase):
         stack.assert_not_called()
 
     def test_compose_command_pins_every_input_and_clears_ambient_overrides(self):
-        with patch.dict('os.environ', {'COMPOSE_FILE': 'production.yml', 'POSTGRES_PASSWORD': 'secret', 'WORKER_SLOT_COUNT': '16'}):
+        with patch.dict('os.environ', {'COMPOSE_FILE': 'production.yml', 'POSTGRES_PASSWORD': 'secret', 'API_WORKERS': '16'}):
             command, env = control.compose_command(Path('/repo'), Path('/repo/perf/.state/test.env'), ['config'])
         self.assertIn('centaeris-perf', command)
         self.assertIn('/repo/perf/compose.perf.yml', command)
         self.assertIn('/repo/perf/.state/test.env', command)
         self.assertNotIn('COMPOSE_FILE', env)
         self.assertNotIn('POSTGRES_PASSWORD', env)
-        self.assertNotIn('WORKER_SLOT_COUNT', env)
+        self.assertNotIn('API_WORKERS', env)
 
     def test_validation_rejects_production_resources_and_missing_tls(self):
         valid = {
@@ -275,22 +274,6 @@ class IsolationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 control.validate_config(config, Path('/repo'))
 
-    def test_switch_slots_preserves_nonworker_identity_and_refuses_busy_stack(self):
-        fake = unittest.mock.Mock()
-        fake.quiet.return_value = True
-        fake.identities.return_value = {'api': 'a', 'runtime': 'r'}
-        control.switch_slots(fake, 6)
-        fake.compose.assert_called_once_with(['up', '-d', '--no-deps', '--force-recreate', 'worker'], slots=6)
-        fake.verify_slots.assert_called_once_with(6)
-        fake.quiet.return_value = False
-        fake.compose.reset_mock()
-        with self.assertRaises(RuntimeError):
-            control.switch_slots(fake, 2)
-        fake.compose.assert_not_called()
-        fake.quiet.return_value = True
-        fake.identities.side_effect = [{'api': 'a'}, {'api': 'b'}]
-        with self.assertRaises(RuntimeError):
-            control.switch_slots(fake, 2)
 
     def test_resource_parser_rejects_missing_or_invalid_samples(self):
         row = {'Name': 'centaeris-perf-api-1', 'CPUPerc': '12.5%', 'MemUsage': '20MiB / 1GiB'}

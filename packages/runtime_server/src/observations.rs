@@ -677,14 +677,6 @@ impl Request {
             started: Instant::now(),
         })
     }
-    pub fn rejected(route: &'static str, lane: usize, started: Instant) {
-        if !enabled() {
-            return;
-        }
-        emit(
-            serde_json::json!({"phase":"requestAdmission","route":route,"lane":LANES[lane],"inFlight":IN_FLIGHT[lane].load(Ordering::Relaxed),"outcome":"rejected","elapsedMs":started.elapsed().as_secs_f64()*1000.0}),
-        );
-    }
 }
 impl Drop for Request {
     fn drop(&mut self) {

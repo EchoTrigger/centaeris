@@ -51,7 +51,7 @@ class HttpErrorObservationTests(unittest.TestCase):
             {"error": "secret-response"},
             {"error": "retained_cleanup_unconfirmed:secret-response"},
             {"error": "retained_cleanup_unconfirmed", "details": "secret-response"},
-            {"error": "execution_claim_busy", "details": "secret-response"},
+            {"error": "environment_host_busy", "details": "secret-response"},
             {"error": ["secret-response"]},
         ):
             with self.subTest(payload=payload):
@@ -71,12 +71,12 @@ class HttpErrorObservationTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["errorCode"], "other")
         self.assertNotIn("secret", output.getvalue())
 
-    def test_local_known_rejection_still_has_its_existing_safe_category(self):
+    def test_local_error_text_cannot_become_a_public_http_error_code(self):
         output = io.StringIO()
         with patch.object(worker.observations, "ENABLED", True), patch("sys.stderr", output):
             with self.assertRaises(RuntimeError), worker.observations.measure("claimJob"):
-                raise RuntimeError("runtime_busy")
-        self.assertEqual(json.loads(output.getvalue())["errorCode"], "runtime_busy")
+                raise RuntimeError("environment_host_busy")
+        self.assertEqual(json.loads(output.getvalue())["errorCode"], "other")
 
 
 if __name__ == "__main__":

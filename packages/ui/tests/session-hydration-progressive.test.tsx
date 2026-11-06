@@ -91,7 +91,7 @@ test("an optional metadata failure leaves the readable body and its cache intact
   await act(async () => actions.applyHydrationSnapshot(snapshot("a"), "a"));
   expect(screen.getByText("Body for a")).toBeTruthy();
   expect(sessionViewCacheStore.get("a")?.snapshot.messages).toEqual([message("a")]);
-  expect(metadata.error).toHaveBeenCalledWith(expect.stringContaining("Model configuration unavailable"));
+  expect(metadata.error).toHaveBeenCalledWith("Unable to load model configuration");
 });
 
 test("runtime configuration can fill in before context usage without waiting for it", async () => {

@@ -149,12 +149,12 @@ reverse proxy. Do not expose internal service tokens or database ports through i
 - `REDIS_BROWSER_MAX_CONNECTIONS` bounds browser streaming connections per API
   process.
 - `API_WORKERS` must remain within the validated range.
-- Bundled Compose sets `API_POSTGRES_POOL_MAX_SIZE=8` on each ASGI API process;
+- Bundled Compose sets `API_POSTGRES_POOL_MAX_SIZE=10` on each ASGI API process;
   standalone Django processes default to `0` unless explicitly configured.
   `0` disables pooling. Django keeps `CONN_MAX_AGE=0`; its PostgreSQL
   backend uses `psycopg_pool` for connection reuse. The setting does not reach
   `api-init`, material processing, GC, or mail processes. Runtime has its own
-  connection budgets. Provider admission belongs to the model gateway.
+  connection budgets. Provider request concurrency and rate limits belong to the configured upstream gateway or provider.
   Before increasing API workers or replicas, budget
   `API_WORKERS × API replicas × API_POSTGRES_POOL_MAX_SIZE` together with the
   Runtime pools, other database clients, and operational reserve
@@ -172,18 +172,12 @@ reverse proxy. Do not expose internal service tokens or database ports through i
 
 Invalid or unsafe budgets fail instead of falling back to an unbounded value.
 
-### Execution admission and request capacity
+### Run ownership and request deadlines
 
 | Variable | Default | Scope |
 | --- | ---: | --- |
 | `AGENT_RUN_EXECUTION_MODE` | `perRun` | Worker physical lifetime: destroy the original instance after confirmed Run cleanup; `retained` explicitly keeps it for reuse |
-| `EXECUTION_GLOBAL_LIMIT` | 8 | Leased/running hosted AgentRun lifecycle steps across worker and Runtime replicas |
-| `EXECUTION_GLOBAL_QUEUE_LIMIT` | 128 | Queued and running AgentRuns across API replicas |
-| `EXECUTION_TENANT_QUEUE_LIMIT` | 32 | The same nonterminal obligations within one Workspace |
 | `EXECUTION_QUEUE_WAIT_SECONDS` | 300 | Maximum age before first execution; expiry requests semantic cancellation |
-| `RUNTIME_HTTP_REQUEST_LIMIT` | 24 | Ordinary handlers per Runtime process, including long executions |
-| `RUNTIME_HTTP_LISTENER_LIMIT` | 8 | Job wait handlers per Runtime process |
-| `RUNTIME_HTTP_CONTROL_LIMIT` | 4 | Cancellation, heartbeat, and job-status handlers per Runtime process |
 | `RUNTIME_HTTP_REQUEST_TIMEOUT_SECONDS` | 30 | Absolute handler response deadline for short ordinary RPCs |
 | `RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS` | 5 | Absolute control handler response deadline; also used by API/worker control clients |
 | `WORK_RETURN_AUDIT_INTERVAL_SECONDS` | required | Deployment-selected delay between shared work-return repair pages; a whole pass spans all retained source pages |
@@ -194,26 +188,15 @@ cross-Run process or workspace continuity. Changing this process setting does no
 retire existing instances: follow the [coordinated exit procedure](../eval/EnvironmentTaskService.md#supported-configuration-and-coordinated-exit)
 before switching a retained cohort.
 
-All replicas sharing one database must use the same execution/admission limits.
-Run admission retains its slot while Runtime capacity is unavailable or a Run
-waits for input. Moving from queued to running, replay, restart and retry do not
-release the obligation; a terminal state does. At capacity, new Run identities
-are refused while an accepted operation can still replay. Completed work returns
-retain their acceptance and pending carrier and bind a coordinator Run once
-capacity becomes available, without creating another receipt or attempt.
-All API replicas must use this revision for the expanded admission count to
-apply consistently. These limits do not bound unbound Agent inputs or the
-independent material-processing backlog.
+Run submission and lifecycle dispatch have no local concurrency quota. A Job
+lease establishes one current owner; yield, terminal transitions and lease
+reconciliation retain their existing authority contracts. Worker starts each
+claimed Job independently, with separate advance and cleanup dispatchers.
 
-The runtime job lease is the execution permit: yield and terminal transitions
-release it; expired leases remain counted until lifecycle reconciliation.
-`WORKER_SLOT_COUNT` remains a local worker-thread limit (default 8). It describes
-one deployment's ordinary Job handling capacity, not tools within an environment.
-Execution admission has no per-Workspace quota: one Workspace can use all eight
-global permits. Its persisted Workspace binding remains an identity fact. The
-execution limit does not count suspended environments, knowledge-processing jobs,
-or a parent's internal subagents; it is not a memory budget or a limit on all
-nonterminal AgentRuns. Parent logical waits release the lifecycle lease.
+Model request concurrency and rate limits belong to the configured upstream
+gateway or provider. The API validates authorization and prepared input before
+forwarding a model request. Physical environments retain their declared resource
+budgets, shared host admission and per-environment tool coordination.
 
 Hosted Runtime explicitly selects tool parallelism 64; Core's generic default
 remains 16. A parent and its hosted child runtimes share their tool coordinator.
@@ -258,7 +241,7 @@ A local concurrent model-request comparison rejected fixed mmap thresholds
 because they increased request latency. No periodic collection, heap trimming
 or automatic restart is added.
 
-Worker wait and slot-failure diagnostics use `workspace.worker.diagnostic.v1`
+Worker wait and dispatch-failure diagnostics use `workspace.worker.diagnostic.v1`
 without enabling performance tracing. A confirmed Job yield records its Job ID,
 lane, control stage, transition reason, and safe HTTP error category/status/route.
 An unconfirmed yield does not produce a waiting record. Exception text,
@@ -275,7 +258,7 @@ restarting an existing container does not apply new Compose configuration.
 ### Resident sandbox capacity
 
 Resident limits count containers while executing, paused, or waiting for work.
-They bound retained resources independently of execution leases and worker slots;
+They bound retained resources independently of execution leases and task dispatch;
 yielding an execution lease does not free its resident sandbox capacity.
 
 | Variable | Default | Scope |
@@ -291,6 +274,7 @@ yielding an execution lease does not free its resident sandbox capacity.
 | `RESIDENT_TENANT_PIDS` | 2048 | Workspace process budget |
 | `RESIDENT_TENANT_WORKSPACE_BYTES` | 34359738368 | Workspace byte budget (32 GiB) |
 | `RESIDENT_STARTUP_MEMORY_BYTES` | 268435456 | Host memory allowance for a new preparation (256 MiB), capped by its cgroup ceiling |
+| `RESIDENT_HOST_COUNT` | 8 | Sandbox positions per Docker host, capped by the global count. A start awaiting a resident entry occupies a position for the duration of its execution lease |
 | `RESIDENT_HOST_MEMORY_HEADROOM_BYTES` | Greater of 20% of Docker host RAM or 512 MiB | Memory reserved for host services |
 | `RESIDENT_HOST_CPU_HEADROOM_MILLI` | 100 per Docker host CPU core | CPU reserved for host services |
 
@@ -450,7 +434,7 @@ recovery are documented in [Garbage collection](../operations/GarbageCollection.
 
 Runtime's `DOCKER_CREATE_CONCURRENCY` limits simultaneous Docker container-create
 calls (integer 1..16, default 4); invalid values fail startup. This does not change
-worker slots, start/remove concurrency or execution limits. The production
+task dispatch, start/remove concurrency or execution limits. The production
 Compose configuration supplies 4 and passes explicit overrides through. Isolated
 perf experiments use
 `PERF_DOCKER_CREATE_CONCURRENCY` in `perf/.state/test.env` through the perf overlay.
@@ -478,11 +462,10 @@ container, memory and files, and every resident memory/PID/storage/count debit.
 Only an exact observed pause releases its running slot. Unknown outcomes remain
 charged; restart reconciles persisted power state before admission starts.
 
-Execution permits remain independent: `EXECUTION_GLOBAL_LIMIT=8` counts only
-execute lifecycle leases; there is no per-Workspace execution quota.
-`WORKER_SLOT_COUNT=8` limits local ordinary worker threads. Hosted tool concurrency
-is 64 while Core's existing default remains 16. Resident tenant limits are separate
-resource budgets. Control and cleanup do not consume execute permits.
+Run dispatch and Runtime HTTP handlers have no fixed concurrency quota. Hosted
+tool concurrency is 64 while Core's existing default remains 16. Resident tenant
+limits remain physical resource budgets. Control and cleanup retain their
+dedicated PostgreSQL connection pools.
 
 The native activation guard preserves released provider history and refuses
 activation while old physical, power, cleanup or creator-job responsibilities

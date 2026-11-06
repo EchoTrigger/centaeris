@@ -1,8 +1,8 @@
 [
-  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_queued_cancellation_is_claimable_when_one_workspace_fills_global_execution_capacity",
-  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_queued_cancellation_is_claimable_when_global_execution_capacity_is_full",
+  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_queued_cancellation_is_claimable_with_active_runs_in_one_workspace",
+  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_queued_cancellation_is_claimable_with_active_runs_across_workspaces",
   "postgres_store::integration_tests::resource_lifecycle_tests::postgres_control_cancellation_completes_without_taking_foreign_environment",
-  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_control_leases_require_intent_bound_capacity_and_survive_reclaim_exhaustion",
+  "postgres_store::integration_tests::resource_lifecycle_tests::postgres_control_leases_require_intent_and_survive_reclaim_exhaustion",
   "postgres_store::integration_tests::resource_lifecycle_tests::postgres_control_lease_forward_migration_preserves_active_execution_authority",
   "postgres_store::integration_tests::resource_lifecycle_tests::postgres_failed_before_create_releases_the_committed_reservation",
   "postgres_store::integration_tests::resource_lifecycle_tests::postgres_reused_resident_preparation_failure_keeps_original_allocation",
@@ -118,12 +118,10 @@
   "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_confirmed_release_wakes_future_capacity_wait_after_reopen",
   "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_release_before_capacity_yield_is_not_lost",
   "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_unconfirmed_removal_does_not_wake_capacity_wait",
-  "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_capacity_signal_preserves_execution_limits_and_reclaim_embargo",
+  "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_capacity_signal_preserves_lease_reclaim_embargo",
   "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_rolled_back_release_does_not_advance_capacity_wait",
   "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_capacity_wait_migration_preserves_existing_resource_and_authorization_facts",
   "postgres_store::integration_tests::residency_tests::capacity_wake_tests::postgres_capacity_wait_reopen_rejects_signal_and_binding_drift",
-  "postgres_store::integration_tests::execution_capacity_tests::postgres_execution_capacity_one_workspace_uses_global_permits_with_ready_claim_agreement",
-  "postgres_store::integration_tests::execution_capacity_tests::postgres_execution_capacity_terminal_history_does_not_count_but_expired_owners_do_until_yield",
   "postgres_store::integration_tests::runsc_rotation_tests::postgres_runsc_completed_pause_releases_only_running_capacity",
   "postgres_store::integration_tests::runsc_rotation_tests::postgres_runsc_yield_preserves_waiter_until_confirmed_pause_wakes_claim",
   "postgres_store::integration_tests::runsc_rotation_tests::postgres_runsc_unknown_pause_keeps_running_charge_and_is_reconcilable",
@@ -170,5 +168,7 @@
   "postgres_store::integration_tests::retained_instance_tests::concurrent_preparation_tests::pending_capacity_wake_tests::postgres_pending_confirmation_before_yield_preserves_future_waiter_opportunity",
   "postgres_store::integration_tests::retained_instance_tests::concurrent_preparation_tests::pending_capacity_wake_tests::postgres_reconciled_unknown_creation_wakes_future_waiter_without_refund",
   "postgres_store::integration_tests::retained_instance_tests::concurrent_preparation_tests::pending_capacity_wake_tests::postgres_confirmation_opportunity_does_not_loop_under_fresh_real_pressure",
-  "postgres_store::integration_tests::retained_instance_tests::concurrent_preparation_tests::pending_capacity_wake_tests::postgres_unknown_or_rolled_back_confirmation_does_not_advance_waiter"
+  "postgres_store::integration_tests::retained_instance_tests::concurrent_preparation_tests::pending_capacity_wake_tests::postgres_unknown_or_rolled_back_confirmation_does_not_advance_waiter",
+  "postgres_store::integration_tests::execution_capacity_tests::postgres_execution_claims_are_unique_across_replicas_with_many_active_jobs",
+  "postgres_store::integration_tests::retained_instance_tests::cleanup_receipt_tests::postgres_cleanup_waits_for_host_inventory_without_releasing_its_resident"
 ]

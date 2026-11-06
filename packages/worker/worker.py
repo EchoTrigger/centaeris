@@ -2,7 +2,6 @@ import json
 import hashlib
 import re
 import os
-import random
 import http.client
 import signal
 import socket
@@ -36,12 +35,6 @@ WORKER_JOB_KINDS = ("agent_run.lifecycle", "worker.noop")
 CONTROL_HTTP_TIMEOUT_SECONDS = int(os.environ.get("RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS", "5"))
 if not 1 <= CONTROL_HTTP_TIMEOUT_SECONDS <= 1_000_000:
     raise ValueError("RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS must be between 1 and 1000000")
-try:
-    WORKER_SLOT_COUNT = int(os.environ.get("WORKER_SLOT_COUNT", "8"))
-except ValueError:
-    raise ValueError("WORKER_SLOT_COUNT must be an integer between 1 and 16") from None
-if not 1 <= WORKER_SLOT_COUNT <= 16:
-    raise ValueError("WORKER_SLOT_COUNT must be an integer between 1 and 16")
 AGENT_RUN_WAITING_TRANSITION_REASONS = {
     "execution_host_preparation_wait",
     "execution_host_admission_wait",
@@ -632,12 +625,6 @@ def is_environment_host_busy(error):
 
 
 def environment_cleanup_wait_reason(error):
-    if (isinstance(error, DependencyUnavailable)
-            and type(getattr(error, "http_status", None)) is int
-            and error.http_status == 503
-            and getattr(error, "http_error_code", None) == "runtime_busy"
-            and getattr(error, "route", None) == "/agent-runs/teardown"):
-        return "execution_host_admission_wait"
     if is_environment_controller_wait(error):
         return "environment_controller_wait"
     if is_environment_host_busy(error):
@@ -719,7 +706,7 @@ def _execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
         yielded_at_ms = now_ms()
         if result["transitionReason"] in AGENT_RUN_SCHEDULED_WAIT_REASONS:
             # Runtime derives this deadline from its recovery boundary.
-            # Waiting releases the slot; retries never sleep inside a worker.
+            # Waiting releases the Job lease; retries never sleep inside a worker.
             next_run_at_ms = max(yielded_at_ms, result["retryAtMs"])
         elif result["transitionReason"] == "execution_host_admission_wait":
             next_run_at_ms = yielded_at_ms + ENVIRONMENT_CONTROLLER_RECHECK_MS
@@ -727,6 +714,9 @@ def _execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
             next_run_at_ms = yielded_at_ms + RUNTIME_JOB_WAIT_RECHECK_MS
         else:
             next_run_at_ms = yielded_at_ms + AGENT_RUN_LIFECYCLE_RECHECK_MS
+        policy = agent_run_start["authorization"].get("executionPolicy")
+        if policy is not None:
+            next_run_at_ms = min(next_run_at_ms, max(yielded_at_ms, policy["deadlineAtMs"]))
         yield_job(
             job["jobId"],
             lease_owner,
@@ -930,7 +920,7 @@ def wait_for_jobs():
 
 
 def execute_claimed_job(job, lease_owner):
-    with observations.context(jobId=job["jobId"]), observations.measure("slotHeld"):
+    with observations.context(jobId=job["jobId"]), observations.measure("jobActive"):
         return _execute_claimed_job(job, lease_owner)
 
 
@@ -984,15 +974,35 @@ def _execute_claimed_job(job, lease_owner):
         raise
 
 
-def execute_next_job(slot_index):
+def claim_next_job(sequence):
     worker_id = f"worker:{socket.gethostname()}:{uuid.uuid4().hex}"
     for offset in range(len(WORKER_JOB_KINDS)):
-        job_kind = WORKER_JOB_KINDS[(slot_index + offset) % len(WORKER_JOB_KINDS)]
+        job_kind = WORKER_JOB_KINDS[(sequence + offset) % len(WORKER_JOB_KINDS)]
         job = claim_job(job_kind, worker_id)
         if job is not None:
-            execute_claimed_job(job, job["leaseOwner"])
-            return True
-    return False
+            return job
+    return None
+
+
+class ClaimedJobDispatcher:
+    """One dispatcher owns these handles; accepted Jobs execute independently."""
+    def __init__(self):
+        self.threads = []
+
+    def start(self, job, operation):
+        self.threads = [thread for thread in self.threads if thread.is_alive()]
+        thread = threading.Thread(target=operation, args=(job,),
+            name="workspace-active-job-" + job["jobId"], daemon=True)
+        thread.start()
+        self.threads.append(thread)
+
+
+def run_claimed_job(job):
+    try:
+        execute_claimed_job(job, job["leaseOwner"])
+    except Exception as error:
+        # An unconfirmed operation retains its durable lease/reclaim responsibility.
+        observations.diagnostic("jobFailed", error, job_id=job["jobId"], lane="execution")
 
 
 def waiter_page_next(response, disposition, after):
@@ -1150,38 +1160,22 @@ def run_loop(operation, interval_seconds, stopped=None):
             stopped.wait(interval_seconds)
 
 
-def run_job_loop(slot_index, stopped):
-    with observations.context(slotIndex=slot_index):
-        return _run_job_loop(slot_index, stopped)
-
-
-def _run_job_loop(slot_index, stopped):
-    claim_contention_streak = 0
+def run_job_dispatcher(stopped):
+    dispatcher = ClaimedJobDispatcher()
+    sequence = 0
     while not stopped.is_set():
         try:
-            worked = execute_next_job(slot_index)
-            claim_contention_streak = 0
-            if not worked:
+            job = claim_next_job(sequence)
+            sequence += 1
+            if job is None:
                 wait_for_jobs()
-        except Exception as error:
-            observations.diagnostic("slotFailed", error, slot_index=slot_index, lane="execution")
-            if (isinstance(error, DependencyUnavailable)
-                    and type(getattr(error, "http_status", None)) is int
-                    and error.http_status == 503
-                    and getattr(error, "http_error_code", None) == "execution_claim_busy"
-                    and getattr(error, "route", None) == "/internal/jobs/claim"):
-                # A rejected pre-claim owns no Job. Retry the short transaction
-                # contention without spending its queued Job's failure budget.
-                ceiling = min(.05 * (2 ** claim_contention_streak), .8)
-                claim_contention_streak = min(claim_contention_streak + 1, 4)
-                delay = random.uniform(ceiling / 2, ceiling)
             else:
-                claim_contention_streak = 0
-                delay = 5 if str(error) in {"runtime_busy", "execution_claim_busy"} else JOB_WAIT_FAILURE_BACKOFF_SECONDS
-            with observations.measure("backoff", requestedMs=delay * 1000,
-                    route=getattr(error, "route", None),
-                    errorCode=str(error) if str(error) in {"runtime_busy", "execution_claim_busy"} else "other"):
-                stopped.wait(delay)
+                dispatcher.start(job, run_claimed_job)
+        except Exception as error:
+            observations.diagnostic("dispatchFailed", error, lane="execution")
+            with observations.measure("backoff", requestedMs=JOB_WAIT_FAILURE_BACKOFF_SECONDS * 1000,
+                    route=getattr(error, "route", None), errorCode="other"):
+                stopped.wait(JOB_WAIT_FAILURE_BACKOFF_SECONDS)
 
 
 def claim_control_job(stage, worker_id):
@@ -1273,7 +1267,7 @@ def _execute_control_job(job, run_id, digest, owner, healthy):
     else:
         if set(result) != {"schema", "agentRunId", "terminalState", "disposition"}:
             raise RuntimeError("agent_run_control_response_invalid")
-        # The same Job yields before the bounded slow-cleanup workers claim it.
+        # The same Job yields before the cleanup dispatcher claims it.
         # Its authoritative terminal fact determines that lane's eligibility.
         if job["controlStage"] == "cleanup":
             resolved = resolve_agent_run_lifecycle(job, owner, run_id, digest)
@@ -1284,16 +1278,17 @@ def _execute_control_job(job, run_id, digest, owner, healthy):
             yield_job(job["jobId"], owner, now_ms(), "control_cleanup_pending")
 
 
-def run_control_loop(stage, slot, stopped):
-    worker_id = "worker:control:" + stage + ":" + str(slot) + ":" + uuid.uuid4().hex
+def run_control_dispatcher(stage, stopped):
+    worker_id = "worker:control:" + stage + ":" + uuid.uuid4().hex
+    dispatcher = ClaimedJobDispatcher()
     while not stopped.is_set():
         try:
             job = claim_control_job(stage, worker_id)
             if job is not None:
-                execute_control_job(job)
+                dispatcher.start(job, execute_control_job)
                 continue
-        except (RuntimeError, urllib.error.URLError, OSError):
-            pass
+        except (RuntimeError, urllib.error.URLError, OSError) as error:
+            observations.diagnostic("dispatchFailed", error, control_stage=stage, lane="control")
         stopped.wait(0.25)
 
 
@@ -1319,19 +1314,12 @@ def run_worker_service():
             name="workspace-reconciler",
         ),
     ]
-    job_threads = [
-        threading.Thread(
-            target=run_job_loop,
-            args=(slot_index, stopped),
-            name=f"workspace-job-slot-{slot_index}",
-            daemon=True,
-        )
-        for slot_index in range(WORKER_SLOT_COUNT)
-    ]
+    job_threads = [threading.Thread(target=run_job_dispatcher, args=(stopped,),
+        name="workspace-job-dispatcher", daemon=True)]
     lifecycle_threads = [
-        threading.Thread(target=run_control_loop, args=(stage, slot, stopped),
-                         name=f"workspace-control-{stage}-{slot}", daemon=True)
-        for stage in ("advance", "cleanup") for slot in range(2)
+        threading.Thread(target=run_control_dispatcher, args=(stage, stopped),
+            name=f"workspace-control-{stage}", daemon=True)
+        for stage in ("advance", "cleanup")
     ]
     for thread in control_threads + job_threads + lifecycle_threads:
         thread.start()

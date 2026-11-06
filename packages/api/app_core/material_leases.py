@@ -45,11 +45,13 @@ def _locked(identity):
     return task, now
 
 
-def claim(identity, owner, seconds):
+def claim(identity, owner, seconds, *, spec_digest=None):
     _validate(owner, seconds)
     with transaction.atomic():
         task, now = _locked(identity)
         if task.executionBackend != "platform" or task.status not in {"pending", "running"}:
+            return None
+        if spec_digest is not None and task.payload.get("specDigest") != spec_digest:
             return None
         if task.leaseExpiresAt is not None and task.leaseExpiresAt > now:
             return None

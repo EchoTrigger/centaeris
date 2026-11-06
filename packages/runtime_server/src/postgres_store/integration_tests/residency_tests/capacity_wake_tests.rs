@@ -180,7 +180,7 @@ fn postgres_unconfirmed_removal_does_not_wake_capacity_wait() {
 
 #[test]
 #[ignore = "requires owned disposable PostgreSQL"]
-fn postgres_capacity_signal_preserves_execution_limits_and_reclaim_embargo() {
+fn postgres_capacity_signal_preserves_lease_reclaim_embargo() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (url, store) = setup();
     let blocker = sandbox(&store, &url, "full-blocker", "full-a");
@@ -193,15 +193,12 @@ fn postgres_capacity_signal_preserves_execution_limits_and_reclaim_embargo() {
     );
     let mut db = Client::connect(&url, NoTls).unwrap();
     yield_until(&store, &waiting, now(&mut db), RESIDENT_CAPACITY_WAIT);
-    let mut fillers = Vec::new();
-    for i in 0..7 {
-        fillers.push(sandbox(
-            &store,
-            &url,
-            &format!("full-{i}"),
-            if i < 3 { "full-a" } else { "full-b" },
-        ));
-    }
+    let embargo = now(&mut db) + 30_000;
+    db.execute(
+        "UPDATE runtime.runtime_jobs SET lease_reclaim_not_before_ms=$2 WHERE job_id=$1",
+        &[&waiting.job, &embargo],
+    )
+    .unwrap();
     store
         .remove_resident_sandboxes(
             "fake-docker-host",
@@ -220,19 +217,6 @@ fn postgres_capacity_signal_preserves_execution_limits_and_reclaim_embargo() {
             .unwrap()
             .ready
     };
-    assert!(!ready(), "release cannot grant a ninth execution");
-    assert!(claim_waiter(&store, &waiting, now(&mut db)).is_empty());
-    db.execute(
-        "UPDATE runtime.runtime_jobs SET lease_reclaim_not_before_ms=$2 WHERE job_id=$1",
-        &[
-            &waiting.job,
-            &(now(&mut Client::connect(&url, NoTls).unwrap()) + 30_000),
-        ],
-    )
-    .unwrap();
-    // A foreign Workspace frees the eighth global slot. The waiting Run
-    // still cannot claim it until its independent reclaim embargo expires.
-    yield_until(&store, &fillers[3], now(&mut db), "question_wait");
     assert!(!ready(), "release cannot bypass lease-reclaim backoff");
     assert!(claim_waiter(&store, &waiting, now(&mut db)).is_empty());
     db.execute(
@@ -242,7 +226,7 @@ fn postgres_capacity_signal_preserves_execution_limits_and_reclaim_embargo() {
     .unwrap();
     assert!(
         ready(),
-        "a fifth Workspace execution must be allowed while a global slot is free"
+        "the released capacity is claimable when the embargo ends"
     );
     assert_eq!(claim_waiter(&store, &waiting, now(&mut db)).len(), 1);
 }
@@ -290,14 +274,16 @@ fn preserved_facts(db: &mut Client) -> Vec<Vec<String>> {
     ]
     .into_iter()
     .map(|table| {
-        db.query(
-            &format!("SELECT row_to_json(t)::text FROM {table} t ORDER BY row_to_json(t)::text"),
-            &[],
-        )
-        .unwrap()
-        .iter()
-        .map(|row| row.get(0))
-        .collect()
+        let row = if table == "runtime.runtime_jobs" {
+            "(to_jsonb(t) - 'lease_host_id')::text"
+        } else {
+            "row_to_json(t)::text"
+        };
+        db.query(&format!("SELECT {row} FROM {table} t ORDER BY {row}"), &[])
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect()
     })
     .collect()
 }
@@ -329,6 +315,17 @@ fn postgres_capacity_wait_migration_preserves_existing_resource_and_authorizatio
     );
     drop(PostgresRuntimeStore::new(&url).unwrap());
     assert_eq!(preserved_facts(&mut db), facts);
+    let assigned_hosts: i64 = db
+        .query_one(
+            "SELECT count(*) FROM runtime.runtime_jobs WHERE lease_host_id IS NOT NULL",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        assigned_hosts, 0,
+        "migration must not invent lease host bindings"
+    );
     let after: Vec<(i64, i64)> = db
         .query(
             "SELECT version,applied_at_ms FROM runtime.schema_migrations ORDER BY version",

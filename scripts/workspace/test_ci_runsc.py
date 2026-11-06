@@ -79,7 +79,7 @@ if args[0] == "compose":
             services["workspace-general"]["image"] = "built-workspace-general"
             services["runtime"]["depends_on"] = {"workspace-general": {}}
             services["material-worker"] = {"depends_on": {"document-processor": {}}}
-            volumes = {name: {"name": "centaeris-workspace_" + name} for name in ["agent-memory", "plugin-data", "postgres-data", "runtime-data", "storage-data", "upload-temp"]}
+            volumes = {name: {"name": "centaeris-workspace_" + name} for name in ["agent-memory", "material-broker-data", "plugin-data", "postgres-data", "runtime-data", "storage-data", "upload-temp"]}
             print(json.dumps({"name": "centaeris-workspace", "services": services, "volumes": volumes}))
     elif args[0] == "images":
         print("built-" + args[-1])
@@ -91,7 +91,7 @@ if args[0] == "compose":
         assert pathlib.Path(os.environ["GATE_SUPERVISOR_STARTED"]).is_file(), "startup requires a live host supervisor"
         socket_directory = pathlib.Path(event["socket"])
         assert socket_directory.stat().st_mode & 0o777 == 0o700
-        assert helper.stat().st_mode & 0o777 == 0o500
+        assert helper.stat().st_mode & 0o777 == 0o555
         with socket.socket(socket.AF_UNIX) as connection:
             connection.connect(str(socket_directory / "control.sock"))
         if os.environ["GATE_FAIL"] == "startup":
@@ -99,7 +99,7 @@ if args[0] == "compose":
     elif args[0] == "build" and args[-1] == os.environ["GATE_FAIL"]:
         raise SystemExit(23)
     elif args[0] == "ps" and "--status" in args:
-        print("postgres\nredis\napi\nruntime\nworker\nmaterial-worker\nweb")
+        print("postgres\nredis\napi\nruntime\nworker\nmaterial-broker\nmaterial-worker\nmaterial-scheduler\nweb")
 else:
     event["action"] = args[0]
     record()

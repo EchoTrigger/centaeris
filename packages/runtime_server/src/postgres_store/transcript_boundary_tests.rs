@@ -2,7 +2,7 @@
 #[test]
 #[ignore = "explicit PostgreSQL catch-up contract against a fresh disposable database"]
 fn postgres_transcript_head_recovery_read_interleaves_with_next_commit() {
-    use crate::postgres_store::PostgresRuntimeStore;
+    use crate::postgres_store::{PostgresRuntimeStore, PostgresSessionLog};
     use centaeris_core::session::{AgentRunSessionState, SessionLogPort};
     use std::sync::mpsc;
     use std::time::Duration;
@@ -30,11 +30,16 @@ fn postgres_transcript_head_recovery_read_interleaves_with_next_commit() {
     "#).unwrap();
     let store = PostgresRuntimeStore::new(&url).unwrap();
     let session = "session-head-race";
-    let generation = "generation-1";
+    let current = store
+        .load_or_initialize_current_transcript_generation(session)
+        .unwrap();
+    let generation = current.projection_generation.as_str();
     let run = "run-head-race";
     let mut state = AgentRunSessionState::new(session, run).unwrap();
     let records = state.start(run, "synthetic", vec![], 1).unwrap();
-    let log = store.session_log(
+    // Leave the second event pending for the two explicit catch-up calls.
+    let log = PostgresSessionLog::new(
+        store.ordinary_connections.clone(),
         "workspace-fixture".into(),
         session.into(),
         "synthetic".into(),
@@ -54,6 +59,7 @@ fn postgres_transcript_head_recovery_read_interleaves_with_next_commit() {
     let (pinned_tx, pinned_rx) = mpsc::sync_channel(0);
     let (committed_tx, committed_rx) = mpsc::sync_channel(0);
     let reader_store = store.clone();
+    let reader_generation = generation.to_owned();
     let reader = std::thread::spawn(move || {
         super::CATCH_UP_AFTER_INITIAL_READ.with(|observer| {
             *observer.borrow_mut() = Some(Box::new(move || {
@@ -61,7 +67,7 @@ fn postgres_transcript_head_recovery_read_interleaves_with_next_commit() {
                 committed_rx.recv_timeout(Duration::from_secs(10)).unwrap();
             }));
         });
-        reader_store.catch_up_transcript_projection(session, generation, 2)
+        reader_store.catch_up_transcript_projection(session, &reader_generation, 2)
     });
     pinned_rx.recv_timeout(Duration::from_secs(10)).unwrap();
     let competing = store.catch_up_transcript_projection(session, generation, 2);
@@ -92,7 +98,7 @@ fn postgres_transcript_head_recovery_read_interleaves_with_next_commit() {
     );
 
     // A true missing checkpoint and a corrupt checkpoint must still fail loudly.
-    db.execute("INSERT INTO runtime.transcript_projection_heads(session_id,projection_version,projection_generation,source_high_water) VALUES('session-missing-recovery','transcript.projection.v1','generation-1',1)", &[]).unwrap();
+    db.execute("INSERT INTO runtime.transcript_projection_heads(session_id,projection_version,projection_generation,source_high_water) VALUES('session-missing-recovery','transcript.projection.v1',$1,1)", &[&generation]).unwrap();
     assert_eq!(
         store
             .catch_up_transcript_projection("session-missing-recovery", generation, 2)

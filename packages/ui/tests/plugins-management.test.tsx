@@ -69,7 +69,8 @@ test("installation cancellation preserves the catalog and a confirmed receipt su
   await user.click(screen.getByRole("button", { name: "Install plugin" }));
   await screen.findByRole("heading", { name: "new plugin" });
   expect(screen.getByText("new plugin installed.")).toBeTruthy();
-  expect(await screen.findByRole("alert")).toHaveProperty("textContent", expect.stringContaining("catalog disconnected"));
+  expect(await screen.findByRole("alert")).toHaveProperty("textContent", expect.stringContaining("Unable to refresh plugins."));
+  expect(screen.queryByText("catalog disconnected")).toBeNull();
   expect(bridge.selectAndInstallPlugin).toHaveBeenCalledTimes(2);
 });
 
@@ -140,8 +141,8 @@ test.each(["different-detail", "same-detail-again", "current-detail"] as const)(
     await screen.findByRole("heading", { name: destination === "different-detail" ? "beta plugin" : "alpha plugin" });
   }
   await act(async () => reject(new Error("policy write unavailable")));
-  if (destination === "current-detail") expect(screen.getByText("policy write unavailable")).toBeTruthy();
-  else expect(screen.queryByText("policy write unavailable")).toBeNull();
+  if (destination === "current-detail") expect(screen.getByText("The plugin action could not be completed. Try again.")).toBeTruthy();
+  else expect(screen.queryByText("The plugin action could not be completed. Try again.")).toBeNull();
   await user.click(screen.getByRole("switch"));
   expect(bridge.setPluginEnabled).toHaveBeenCalledTimes(2);
   expect(vi.mocked(bridge.setPluginEnabled).mock.calls[1][0]).toEqual({ id: destination === "different-detail" ? "beta" : "alpha", enabled: destination === "different-detail" });

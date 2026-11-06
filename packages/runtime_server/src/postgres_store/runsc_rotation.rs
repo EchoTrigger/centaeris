@@ -394,7 +394,7 @@ pub(super) fn validate(db: &mut impl GenericClient) -> Result<(), String> {
 }
 #[cfg(test)]
 pub(in crate::postgres_store) fn restore_previous_fixture(db: &mut postgres::Client) {
-    super::integration_tests::require_owned_migration_fixture(db);
+    super::schema::restore_sandbox_deployment_fixture(db);
     let exists: bool = db
         .query_one(
             "SELECT EXISTS(SELECT 1 FROM runtime.schema_migrations WHERE version=17)",

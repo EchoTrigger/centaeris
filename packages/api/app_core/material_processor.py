@@ -160,33 +160,41 @@ class MaterialWorker:
     def container_name(self, identity, epoch):
         return "material-" + hashlib.sha256((self.namespace + identity).encode()).hexdigest()[:32] + "-" + str(epoch)
 
-    def run_once(self, stopped):
+    def recover_one(self, pending_grace):
         close_old_connections()
         self.cleanup_expired()
-        identities = list(MaterialProcessingTask.objects.filter(executionBackend="platform", status__in={"pending", "running"},
+        eligible = MaterialProcessingTask.objects.filter(executionBackend="platform", status__in={"pending", "running"},
             payload__specDigest=self.digest).filter(Q(leaseExpiresAt__isnull=True) | Q(leaseExpiresAt__lte=Now()))
-            .order_by("updatedAt").values_list("pk", flat=True)[:10])
+        eligible = eligible.filter(Q(status="running") | Q(updatedAt__lte=Now() - pending_grace))
+        identities = list(eligible.order_by("updatedAt").values_list("pk", flat=True)[:10])
         for identity in identities:
-            lease = claim(identity, self.owner, LEASE_SECONDS)
-            if lease is None:
-                continue
-            try:
-                self.process(lease, stopped)
-            except Exception:
-                # Unknown processor outcomes are read-only and fenced; never
-                # acknowledge success without the atomic representation commit.
-                try:
-                    with fenced_task(lease) as task:
-                        task.status, task.errorCode = "pending", "material_processor_attempt_failed"
-                        task.leaseOwner, task.leaseExpiresAt = "", None
-                        task.save(update_fields=["status", "errorCode", "leaseOwner", "leaseExpiresAt", "updatedAt"])
-                except LeaseLost:
-                    pass
-                raise
-            return True
+            if self.process_one(identity):
+                return True
         return False
 
-    def process(self, lease, stopped):
+    def process_one(self, identity):
+        try:
+            lease = claim(identity, self.owner, LEASE_SECONDS, spec_digest=self.digest)
+        except MaterialProcessingTask.DoesNotExist:
+            return False
+        if lease is None:
+            return False
+        try:
+            self.process(lease)
+        except Exception:
+            # Unknown processor outcomes are read-only and fenced; never
+            # acknowledge success without the atomic representation commit.
+            try:
+                with fenced_task(lease) as task:
+                    task.status, task.errorCode = "pending", "material_processor_attempt_failed"
+                    task.leaseOwner, task.leaseExpiresAt = "", None
+                    task.save(update_fields=["status", "errorCode", "leaseOwner", "leaseExpiresAt", "updatedAt"])
+            except LeaseLost:
+                pass
+            raise
+        return True
+
+    def process(self, lease):
         task = MaterialProcessingTask.objects.get(pk=lease.representation_id)
         source = resolve_task_source(task)
         name = self.container_name(task.pk, lease.epoch)
@@ -225,7 +233,7 @@ class MaterialWorker:
                     container.start()
                     deadline = time.monotonic() + PROCESS_SECONDS
                     while True:
-                        if stopped.is_set() or time.monotonic() >= deadline:
+                        if time.monotonic() >= deadline:
                             raise RuntimeError("material_processor_interrupted")
                         renew(lease, LEASE_SECONDS)
                         resolve_task_source(task)
@@ -234,7 +242,7 @@ class MaterialWorker:
                             if container.attrs["State"]["ExitCode"] != 0:
                                 raise ValueError("material_processor_failed")
                             break
-                        stopped.wait(2)
+                        time.sleep(2)
                     chunks, _ = container.get_archive("/data/output")
                     unpack_outputs(chunks, root, self.spec["options"]["maxOutputBytes"])
                     self.publish(lease, root)

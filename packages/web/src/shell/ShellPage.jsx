@@ -4,21 +4,20 @@ import { useEffect, useState } from "react";
 import { useLocation, useRouteLoaderData } from "react-router";
 import { PanelLeft } from "lucide-react";
 import { ShellSidebar } from "./ShellSidebar";
+import { useWorkspaceSearch, WorkspaceSearch } from "./WorkspaceSearch";
 import { apiJson } from "../api";
 import { groupSessionNavigation, sortSessionNavigation } from "./sessionNavigation.mjs";
 import { SessionNavigationRow } from "./SessionNavigationRow";
 import { useSessionNavigationActions } from "./useSessionNavigationActions";
-import { ConfirmDialog } from "../components/ConfirmDialog";
 
-/** @param {{ children: import("react").ReactNode, initialTab?: string, mainClassName?: string, showRecentSessions?: boolean, recentRevision?: string, presentationNavigation?: readonly import("../chat/workspacePresentationProtocol").PresentationSession[] | null, onNavigationRetry?: () => void }} props */
-export function ShellPage({ children, initialTab = "home", mainClassName = "", showRecentSessions = false, recentRevision = "", presentationNavigation, onNavigationRetry }) {
+/** @param {{ children: import("react").ReactNode, mainClassName?: string, showRecentSessions?: boolean, recentRevision?: string, presentationNavigation?: readonly import("../chat/workspacePresentationProtocol").PresentationSession[] | null, onNavigationRetry?: () => void }} props */
+export function ShellPage({ children, mainClassName = "", showRecentSessions = false, recentRevision = "", presentationNavigation, onNavigationRetry }) {
   const { t } = useTranslation();
-  const location = useLocation();
   const { workspace } = useRouteLoaderData("workspace");
+  const search = useWorkspaceSearch(useLocation().key);
   const [sidebarOpen, setSidebarOpen] = useState(() => !showRecentSessions || typeof window === "undefined" || !window.matchMedia("(max-width: 760px)").matches);
   const [recent, setRecent] = useState({ scope: "", sessions: [], projects: [], loading: true, error: false });
   const [retry, setRetry] = useState(0);
-  const [actionError, setActionError] = useState("");
   const scope = workspace.id;
   const refreshKey = JSON.stringify([recentRevision, retry]);
   const pushedNavigation = presentationNavigation !== undefined;
@@ -52,7 +51,7 @@ export function ShellPage({ children, initialTab = "home", mainClassName = "", s
   const recentNavigation = showRecentSessions ? {
     ...(recent.scope === scope ? recent : { sessions: [], projects: [], loading: true, error: false }), onRetry: () => { onNavigationRetry?.(); setRetry(value => value + 1); },
   } : undefined;
-  const sessionActions = useSessionNavigationActions({ scopeKey: scope, sessions: recentNavigation?.sessions || [], onError: setActionError,
+  const sessionActions = useSessionNavigationActions({ scopeKey: scope, sessions: recentNavigation?.sessions || [],
     onChangeSessions: update => setRecent(previous => previous.scope === scope ? { ...previous, sessions: update(previous.sessions) } : previous),
   });
   const sessionNavigation = recentNavigation ? {
@@ -69,14 +68,12 @@ export function ShellPage({ children, initialTab = "home", mainClassName = "", s
   return (
     <div className={`shShellPage ${showRecentSessions ? "agentChatShell" : ""} ${sidebarOpen ? "isSidebarOpen" : "isSidebarClosed"}`}>
       <a className="shSkipLink" href="#workspace-main">{t("shellPage.skipToMainContent")}</a>
-      <ShellSidebar workspace={workspace} recentNavigation={recentNavigation} sessionProps={sessionNavigation} initialTab={location.state?.sidebarTab || initialTab} onCollapse={() => setSidebarOpen(false)} />
-      <main className={`shMain ${mainClassName}`} id="workspace-main" tabIndex="-1">
+      <ShellSidebar workspace={workspace} recentNavigation={recentNavigation} sessionProps={sessionNavigation} search={search} onCollapse={() => setSidebarOpen(false)} />
+      <main className={`shMain ${mainClassName}${search.open ? " isSearching" : ""}`} id="workspace-main" tabIndex="-1">
         {!sidebarOpen ? <button className="shSidebarOpen" type="button" aria-label={t("appRoute.showSidebar")} title={t("appRoute.showSidebar")} onClick={() => setSidebarOpen(true)}><PanelLeft aria-hidden="true" /></button> : null}
-        {actionError ? <p className="shEmptyHint" role="alert">{actionError}</p> : null}
         {children}
       </main>
-      <ConfirmDialog open={Boolean(sessionActions.deleteConfirmationSessionId)} title={t("appRoute.deleteThisConversation")} busy={Boolean(sessionActions.deletingSessionId)}
-        onCancel={() => sessionActions.setDeleteConfirmationSessionId("")} onConfirm={() => sessionActions.deleteSession(sessionActions.deleteConfirmationSessionId)} />
+      {search.open ? <WorkspaceSearch workspaceId={workspace.id} sessions={recentNavigation?.sessions} onClose={search.close} inputRef={search.inputRef} /> : null}
     </div>
   );
 }

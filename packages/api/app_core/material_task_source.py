@@ -13,6 +13,7 @@ from django.db import transaction
 
 from .material_access import bind_inputs
 from .material_contract import KnowledgeError
+from .material_dispatch import dispatch_after_commit
 from .material_identity import processing_spec_digest, representation_id
 from .models import Artifact, MaterialProcessingTask, Source, SourceObject, UserLibraryObject
 from .note_content import ContentSource
@@ -33,7 +34,7 @@ def admit_task(access, request):
                "inputIdentity": bound.input_identity, "specDigest": access.spec_digest,
                "sizeBytes": bound.resolved["sizeBytes"]}
     with transaction.atomic():
-        task, _ = MaterialProcessingTask.objects.get_or_create(
+        task, created = MaterialProcessingTask.objects.get_or_create(
             representationId=bound.representation_id,
             defaults={"executionBackend": "platform", "processingSpecification": access.processing_specification,
                       "payload": payload},
@@ -43,6 +44,8 @@ def admit_task(access, request):
         if task.payload != payload or task.processingSpecification != access.processing_specification:
             raise KnowledgeError("material_task_identity_mismatch", 409)
         resolve_task_source(task)
+        if created:
+            dispatch_after_commit(task)
         return task
 
 

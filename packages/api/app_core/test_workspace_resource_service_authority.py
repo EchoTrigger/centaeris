@@ -1,7 +1,6 @@
 """Resource services authorize actors even outside an HTTP router."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
 from django.contrib.auth.models import User
 from django.test import TestCase
 from ninja import Status
@@ -70,14 +69,8 @@ class WorkspaceResourceServiceAuthorityTests(TestCase):
         )
         self.assertNotIn("synthetic-new-write-only-key", str(result.value))
 
-    def test_platform_operator_can_create_platform_provider_directly(self):
-        result = models.create_model_provider(
-            SimpleNamespace(user=self.platform), self.payload()
-        )
-        self.assertEqual(result.status_code, 201)
-        self.assertIsNone(
-            ModelProvider.objects.get(id=result.value["provider"]["id"]).workspace_id
-        )
+    def test_operator_without_workspace_cannot_create_a_provider(self):
+        self.assert_denied(SimpleNamespace(user=self.platform))
 
     def test_forged_scope_cannot_rotate_update_or_delete_another_tenant_provider(self):
         request = SimpleNamespace(user=self.platform, resource_workspace=self.foreign)
@@ -127,16 +120,3 @@ class WorkspaceResourceServiceAuthorityTests(TestCase):
             user=self.admin, workspace=self.workspace
         ).update(role="member")
         self.assert_denied(request)
-
-    def test_workspace_scope_never_authorizes_global_catalog_reconciliation(self):
-        request = SimpleNamespace(user=self.admin, resource_workspace=self.workspace)
-        with patch.object(models, "_catalog_templates", return_value=({}, {})):
-            result = models.preview_model_catalog_reconciliation(request)
-            self.assertIsInstance(result, Status)
-            self.assertEqual(result.status_code, 403)
-            result = models.apply_model_catalog_reconciliation(
-                request,
-                models.ApplyModelCatalogReconciliationRequest(expectedDigest="stale"),
-            )
-            self.assertIsInstance(result, Status)
-            self.assertEqual(result.status_code, 403)

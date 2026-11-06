@@ -11,6 +11,8 @@ use unicode_normalization::UnicodeNormalization;
 
 pub const AGENT_RUN_AUTHORIZATION_SCHEMA: &str = "workspace.agent_run_authorization.v2";
 const AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN: &str = "workspace:agent-run-authorization:v2\0";
+pub const AGENT_RUN_API_AUTHORIZATION_SCHEMA: &str = "workspace.agent_run_authorization.v3";
+const AGENT_RUN_API_AUTHORIZATION_SIGNATURE_DOMAIN: &str = "workspace:agent-run-authorization:v3\0";
 const MAX_DECLARED_INPUTS: usize = 64;
 
 mod environment_profile;
@@ -50,6 +52,27 @@ pub struct WorkspaceAgentRunAuthorization {
     pub plugin_activation: PluginActivationSnapshotV1,
     pub environment_profile: EnvironmentProfile,
     pub environment_profile_digest: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_execution_policy",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub execution_policy: Option<ExecutionPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "purpose", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ExecutionPolicy {
+    AgentRunApi {
+        #[serde(rename = "deadlineAtMs")]
+        deadline_at_ms: i64,
+    },
+}
+
+fn deserialize_execution_policy<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ExecutionPolicy>, D::Error> {
+    ExecutionPolicy::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,8 +96,13 @@ pub struct SandboxResources {
 
 impl WorkspaceAgentRunAuthorization {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != AGENT_RUN_AUTHORIZATION_SCHEMA {
-            return Err("workspace_agent_run_authorization_schema_mismatch".into());
+        match (&*self.schema, &self.execution_policy) {
+            (AGENT_RUN_AUTHORIZATION_SCHEMA, None) => {}
+            (
+                AGENT_RUN_API_AUTHORIZATION_SCHEMA,
+                Some(ExecutionPolicy::AgentRunApi { deadline_at_ms }),
+            ) if *deadline_at_ms > 0 => {}
+            _ => return Err("workspace_agent_run_authorization_schema_mismatch".into()),
         }
         for (name, value) in [
             ("id", self.id.as_str()),
@@ -151,6 +179,12 @@ impl WorkspaceAgentRunAuthorization {
         Ok(self.environment_profile.network)
     }
 
+    pub fn deadline_at_ms(&self) -> Option<i64> {
+        self.execution_policy
+            .as_ref()
+            .map(|ExecutionPolicy::AgentRunApi { deadline_at_ms }| *deadline_at_ms)
+    }
+
     pub fn validate_agent_run_binding(&self, agent_run_id: &str) -> Result<(), String> {
         self.validate()?;
         if self.agent_run_id != agent_run_id {
@@ -203,10 +237,11 @@ impl WorkspaceAgentRunAuthorization {
     }
 
     fn signature_domain(&self) -> Result<&'static str, String> {
-        if self.schema != AGENT_RUN_AUTHORIZATION_SCHEMA {
-            return Err("workspace_agent_run_authorization_schema_mismatch".into());
+        match self.schema.as_str() {
+            AGENT_RUN_AUTHORIZATION_SCHEMA => Ok(AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN),
+            AGENT_RUN_API_AUTHORIZATION_SCHEMA => Ok(AGENT_RUN_API_AUTHORIZATION_SIGNATURE_DOMAIN),
+            _ => Err("workspace_agent_run_authorization_schema_mismatch".into()),
         }
-        Ok(AGENT_RUN_AUTHORIZATION_SIGNATURE_DOMAIN)
     }
 
     fn verify_digest_signature(
@@ -384,6 +419,30 @@ mod tests {
         authorization
             .verify_signature(b"test-key", signature.as_str())
             .expect("verify");
+    }
+
+    #[test]
+    fn agent_run_api_policy_is_required_signed_and_schema_specific() {
+        let mut grant = authorization();
+        grant.schema = AGENT_RUN_API_AUTHORIZATION_SCHEMA.into();
+        assert!(grant.validate().is_err());
+        grant.execution_policy = Some(ExecutionPolicy::AgentRunApi {
+            deadline_at_ms: 1_800_000_000_000,
+        });
+        grant.validate().unwrap();
+        let signature = grant.signature(b"test-key").unwrap();
+        grant.verify_signature(b"test-key", &signature).unwrap();
+        grant.execution_policy = Some(ExecutionPolicy::AgentRunApi {
+            deadline_at_ms: 1_800_000_000_001,
+        });
+        assert!(grant.verify_signature(b"test-key", &signature).is_err());
+        grant.execution_policy = Some(ExecutionPolicy::AgentRunApi { deadline_at_ms: 0 });
+        assert!(grant.validate().is_err());
+        grant.schema = AGENT_RUN_AUTHORIZATION_SCHEMA.into();
+        assert!(grant.validate().is_err());
+        let mut wire = serde_json::to_value(authorization()).unwrap();
+        wire["executionPolicy"] = Value::Null;
+        assert!(serde_json::from_value::<WorkspaceAgentRunAuthorization>(wire).is_err());
     }
 
     #[test]

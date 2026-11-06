@@ -1,8 +1,8 @@
 import { useCallback, useRef } from "react";
 import { getAgentContextUsage, getAgentRuntimeConfig } from "../../lib/chatBridge";
+import { t } from "../../i18n";
 import {
   AUTO_CONTINUE_AFTER_RESUME_WAIT_KEY,
-  formatExecutionError,
   readAutoContinueAfterResumeWaitPreference,
   sessionViewCacheStore,
 } from "./chatRuntimeModel";
@@ -60,7 +60,12 @@ export const useSessionViewSnapshotActions = ({
       if (typeof preference === "boolean") {
         window.localStorage.setItem(AUTO_CONTINUE_AFTER_RESUME_WAIT_KEY, String(preference));
       }
-    }).catch(error => { if (isCurrent()) reportRuntimeConfigError(formatExecutionError(error)); });
+    }).catch(error => {
+      if (isCurrent()) {
+        console.error("Desktop conversation model configuration could not be read", error);
+        reportRuntimeConfigError(t("app.unableToLoadModelConfiguration"));
+      }
+    });
     void getAgentContextUsage(sessionId).then(usage => {
       if (isCurrent()) applyContextUsage(sessionId, usage);
     }).catch(() => {

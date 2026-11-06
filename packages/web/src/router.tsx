@@ -8,6 +8,7 @@ import { ApiError, apiJson, hasAuthenticationRequiredHandler, isAuthenticationRe
 import { SessionExpiredDialog } from "./components/SessionExpiredDialog";
 import LibraryObjectRoute from "./routes/LibraryObjectRoute";
 import LibraryRoute from "./routes/LibraryRoute";
+import ExtensionsRoute from "./routes/ExtensionsRoute";
 import LoginRoute from "./routes/LoginRoute";
 import { ForgotPasswordRoute, ResetPasswordRoute } from "./routes/PasswordResetRoute";
 import InvitationActivationRoute from "./routes/InvitationActivationRoute";
@@ -183,6 +184,9 @@ async function workspaceLoader({ params, request }: { params: { workspaceId?: st
     }
     return { workspace, workspaces, selectedSession };
   } catch (error) {
+    if (error instanceof ApiError && error.status === 409 && error.message === "session_archived") {
+      throw redirect(`/w/${encodeURIComponent(workspaceId)}/settings/archive`);
+    }
     if (error instanceof ApiError && error.status === 404) throw redirect("/workspaces");
     throw error;
   }
@@ -209,7 +213,7 @@ export function createRouter() {
               Component: WorkspaceEntry,
             },
             { path: "workspaces", loader: workspacesLoader, Component: WorkspaceEntry },
-            ...["general", "preferences", "security", "platform-models", "global-plugins", "workspace-resources"].map((section) => ({ path: `settings/${section}`, loader: accountSettingsLoader, Component: SettingsRoute })),
+            ...["general", "preferences", "security"].map((section) => ({ path: `settings/${section}`, loader: accountSettingsLoader, Component: SettingsRoute })),
             {
               id: "workspace",
               path: "w/:workspaceId",
@@ -223,12 +227,15 @@ export function createRouter() {
                   children: [
                     { path: "app", element: <></> },
                     { path: "sessions/:sessionId", element: <></> },
-                    ...["preferences", "security", "general", "workspace-profile", "members", "groups", "plugins", "models", "platform-models", "global-plugins", "workspace-resources", "environment"].map((section) => ({ path: `settings/${section}`, Component: SettingsRoute })),
+                    { path: "library", loader: ({ request, params }) => new URL(request.url).searchParams.get("view") === "skills"
+                      ? redirect(`/w/${encodeURIComponent(params.workspaceId || "")}/extensions?view=skills`) : null, element: <LibraryRoute embedded /> },
+                    { path: "library/:libraryObjectId", element: <LibraryObjectRoute embedded /> },
+                    { path: "extensions", Component: ExtensionsRoute },
+                    { path: "settings/plugins", loader: ({ params }) => redirect(`/w/${encodeURIComponent(params.workspaceId || "")}/extensions`) },
+                    ...["preferences", "security", "general", "workspace-profile", "members", "groups", "models", "environment", "developer", "archive"].map((section) => ({ path: `settings/${section}`, Component: SettingsRoute })),
                   ],
                 },
                 { path: "trash/sessions/:sessionId", Component: TrashSessionRoute },
-                { path: "library", Component: LibraryRoute },
-                { path: "library/:libraryObjectId", Component: LibraryObjectRoute },
                 { path: "settings", loader: ({ params }) => redirect(`/w/${encodeURIComponent(params.workspaceId || "")}/settings/general`) },
               ],
             },

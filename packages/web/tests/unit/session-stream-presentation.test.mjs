@@ -8,12 +8,12 @@ const stub = code => `data:text/javascript;base64,${Buffer.from(code).toString("
 const loader = subjectLoader({ extraOverrides: [
   ["react-router", stub(`export {matchPath} from ${JSON.stringify(import.meta.resolve("react-router"))}; import {context} from ${JSON.stringify(harness)}; export const Link=()=>null; export const useRouteLoaderData=id=>id==='authenticated'?{user:context.user}:{workspace:context.workspace}; export const useNavigate=()=>context.navigate;`)],
   ["../i18n", stub("export const t=key=>key; export const i18n={language:'en'}; export const useTranslation=()=>({t});")],
-  ["react", stub(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect} from ${JSON.stringify(harness)}; import {useEffect} from ${JSON.stringify(harness)}; export const useLayoutEffect=useEffect; export const useEffectEvent=callback=>callback; export const useSyncExternalStore=(_subscribe,getSnapshot)=>getSnapshot();`)],
-  ["../chat/operationReceipts", stub(`import {context} from ${JSON.stringify(harness)}; export class OperationClient {pending(){return context.pendingOperation ?? null;} submit(...args){return context.submit(...args);} complete(){}} export const acceptedConversationReviewLink=()=>null; export const consumeReviewedOperation=()=>{}; export {loadAcceptedConversation} from ${JSON.stringify(new URL("../../src/chat/operationReceipts.ts", import.meta.url).href)};`)],
+  ["react", stub(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useId} from ${JSON.stringify(harness)}; import {useEffect} from ${JSON.stringify(harness)}; export const useLayoutEffect=useEffect; export const useEffectEvent=callback=>callback; export const useSyncExternalStore=(_subscribe,getSnapshot)=>getSnapshot();`)],
+  ["../chat/operationReceipts", stub(`import {context} from ${JSON.stringify(harness)}; export class OperationClient {pending(){return context.pendingOperation ?? null;} submit(...args){return context.submit(...args);} complete(){}} export const acceptedConversationReviewLink=()=>null; export const consumeReviewedOperation=()=>{}; export {isDefiniteSubmissionRejection, isWorkspacePreservationPending, loadAcceptedConversation} from ${JSON.stringify(new URL("../../src/chat/operationReceipts.ts", import.meta.url).href)};`)],
   ["../preferences", stub("export const useEnterStartsNewLine=()=>false; export const readModelThinkingMode=()=>''; export const readPreferredModelIdentity=()=>''; export const writeModelThinkingMode=()=>{}; export const writePreferredModelIdentity=()=>{};")],
   ["../chat/transcriptTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const createWorkspaceTranscriptTransport=()=>context.transport;`)],
   ["../chat/workspacePresentationTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const streamWorkspacePresentation=options=>context.stream(options);`)],
-  ...["../components/WorkspaceContextPanel", "../components/DocumentPreview", "../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../shell/ShellSidebar"].map(specifier => [specifier, stub(`export const ${specifier.split("/").at(-1)}=()=>null;`)]),
+  ...["../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../shell/ShellSidebar"].map(specifier => [specifier, stub(`export const ${specifier.split("/").at(-1)}=()=>null;`)]),
   ["../shell/HomePlane", stub("export const HomePlane=()=>null; export const HomeQuickActions=()=>null;")],
 ] });
 const { AppPageContent } = await import(await loader(fileURLToPath(new URL("../../src/routes/AppRoute.jsx", import.meta.url))));
@@ -25,7 +25,7 @@ const page = text => ({
     body: { kind: "assistantText", content: { inlineContent: text, sourceRef: null }, status: "completed" } }],
 });
 
-async function setup(context, tailPage = page("Retained authoritative answer"), idle = false) {
+async function setup(context, tailPage = page("Retained authoritative answer"), idle = false, runRead) {
   const oldStorage = globalThis.sessionStorage;
   const stored = new Map();
   globalThis.sessionStorage = { getItem:key=>stored.get(key)??null, setItem:(key,value)=>stored.set(key,value), removeItem:key=>stored.delete(key) };
@@ -33,7 +33,6 @@ async function setup(context, tailPage = page("Retained authoritative answer"), 
   const oldWindow = globalThis.window, oldDocument = globalThis.document;
   globalThis.window = { addEventListener() {}, removeEventListener() {}, requestAnimationFrame() {}, location: { pathname: "/w/workspace/sessions/session" } };
   globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {} };
-  context.after(() => { globalThis.window = oldWindow; globalThis.document = oldDocument; });
   const attempt = deferred();
   const session = { id: "session", workspaceId: "workspace", projectId: null, title: "Synthetic Session", origin: "user", status: "active", deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: true, updatedAt: "2026-10-05T00:00:00Z",  currentEnvironmentId: null, executionMode: "perRun", latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", isManuallyUnread: false };
   const env = environment({ location: { search: "", state: null },
@@ -41,10 +40,14 @@ async function setup(context, tailPage = page("Retained authoritative answer"), 
       : path.includes("session-projects") ? { projects: [] }
       : path.endsWith("/assets") ? { assets: [] }
       : path === "/api/sessions/session" ? { session } : { sessions: [session] } }),
-    transport: { loadActiveAgentRun: async () => ({agentRun: idle ? null : {agentRunId:"run",status:"running",streamCursor:"cursor:0"}}), loadOlder: async () => { throw new Error("unexpected older history request"); } },
+    transport: { loadActiveAgentRun: runRead ?? (async () => ({agentRun: idle ? null : {agentRunId:"run",status:"running",streamCursor:"cursor:0"}})), loadOlder: async () => { throw new Error("unexpected older history request"); } },
     stream: options => { env.streamOptions = options; const pending = env.nextAttempt ?? attempt; env.nextAttempt = null; return pending.promise; },
   });
   const subject = renderer(AppPageContent, { initialSession: session, workspaceDraft: false, location: env.location, modelsVersion: 0 }, env);
+  context.after(() => {
+    try { subject.unmount(); }
+    finally { globalThis.window = oldWindow; globalThis.document = oldDocument; }
+  });
   await subject.settle();
   assert.ok(env.streamOptions, `the selected Session started its stream; ${JSON.stringify(nodes(subject.tree, node => node.props.className === 'errorBanner').map(node => node.props.children))}`);
   const frame = (kind, body, cursor = null) => ({ cursor, item: {
@@ -66,7 +69,6 @@ async function setup(context, tailPage = page("Retained authoritative answer"), 
     assert.equal(store.getBlockSnapshot("answer").body.content.inlineContent, "Retained authoritative answer");
     assert.equal(composer().props.draft, "Unsent draft");
   };
-  context.after(() => subject.unmount());
   return { subject, env, attempt, preserved, store, list, composer, send, frame };
 }
 
@@ -122,6 +124,17 @@ test("current Run activity restores independently of transcript water and clears
   assert.equal(list().props.activity, undefined);
   await send("activity", activity("thinking"));
   assert.equal(list().props.activity, undefined, "late activity cannot revive a completed Run");
+});
+
+test("a missing Run lookup does not stop the conversation stream", async context => {
+  const { env, subject, preserved, list, send } = await setup(context, undefined, false, async () => {
+    throw Object.assign(new Error("session_not_found"), { status: 404 });
+  });
+  preserved();
+  assert.equal(env.streamOptions.signal.aborted, false);
+  assert.equal(button(subject.tree, "appRoute.retryStream"), undefined);
+  await send("activity", { agentRunId: "run", sourceHighWater: "99", activity: "thinking" });
+  assert.equal(list().props.activity, "thinking");
 });
 
 test("transient Session reconnects preserve content and draft without a visible status banner", async context => {
@@ -240,15 +253,15 @@ test("successful resynchronization cancels an older request and ignores its late
   assert.equal(store.getListSnapshot().olderCursor, "fresh-3");
 });
 
-for (const unavailable of ["snapshot", "checkpoint"]) test(`failed ${unavailable} recovery keeps the snapshot and offers a header retry`, async context => {
+for (const unavailable of ["snapshot", "checkpoint"]) test(`failed ${unavailable} recovery keeps the snapshot and offers a retry in the conversation`, async context => {
   const { subject, env, attempt, preserved, store, frame } = await setup(context);
   const stopped = new Error("presentation_stream_unavailable");
   attempt.reject(stopped); await subject.settle();
   preserved();
   const retry = button(subject.tree, "appRoute.retryStream");
-  const header = nodes(subject.tree, node => node.type === "header")[0];
+  const conversation = nodes(subject.tree, node => node.type === "section" && node.props.className === "workspaceChatColumn")[0];
   assert.ok(retry, "exhausted recovery remains actionable");
-  assert.ok(nodes(header, node => node === retry).length, "retry belongs in the existing header");
+  assert.ok(nodes(conversation, node => node === retry).length, "retry belongs in the conversation");
   assert.equal(nodes(subject.tree, node => node.props.className === "transcriptStreamStatus").length, 0);
   const before = store.getListSnapshot().viewEpoch;
   const next = deferred(); env.nextAttempt = next;

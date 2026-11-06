@@ -6,16 +6,16 @@ No concurrency, backoff, queue or timeout settings change. Duration uses monoton
 clocks; `atUnixMs` is only for correlating windows. Logging failures must not fail
 jobs. Observations contain no request bodies, credentials or raw error messages.
 
-Worker emits RPC timings, HTTP failure status, separate `runtime_busy` and
-`execution_claim_busy` labels, claim outcome, actual backoff duration and slot-held
-duration, with slot/job identity where available. `slotHeld` starts after claim
-returns and ends when the lifecycle handler returns; claim RPC is separate.
+Worker emits RPC timings, exact public HTTP failure codes, claim outcome, actual
+transport backoff duration and active-Job duration, with Job identity where available.
+`jobActive` starts after claim returns and ends when the lifecycle handler returns;
+claim RPC is separate.
 An `ok` timing means the function returned normally, not that the AgentRun succeeded.
-Heartbeat threads are not part of the slot thread's context; use lifecycle RPCs
+Heartbeat threads are not part of the Job thread's context; use lifecycle RPCs
 for the critical path, not a sum of all RPCs.
 
-Runtime emits bounded route/lane admission/rejection and in-flight snapshots.
-The release guard follows actual blocking work even after an HTTP deadline.
+Runtime emits bounded route/class timings and in-flight snapshots.
+Request accounting follows actual blocking work even after an HTTP deadline.
 Route `other` deliberately groups unrelated/dynamic routes. Docker records
 permit wait, daemon create/start/remove, ensure-created, sandbox ensure and
 teardown. These are nested spans: never sum them as independent work. Dropped
@@ -42,14 +42,15 @@ measure try-lock misses (those require worker/runtime observations).
 
 Before comparing throughput, deploy the current API/worker/Runtime images, apply
 the pre-admission cancellation migration, verify cancellation and smoke, verify
-both sources emit observations, then keep slots and limits fixed. A 120/min
+both sources emit observations, then keep images, physical resource budgets and
+offered workload fixed. A 120/min
 baseline and 250/min for 180 seconds are enough for an initial diagnostic window.
 Drain between runs; do not infer production capacity or improvement from the old
 uncontrolled Windows/VM runs. Instrumentation overhead is part of this new baseline.
 
 ## Docker create concurrency experiment
 
-Runtime accepts `DOCKER_CREATE_CONCURRENCY` (1..16, default 2). It is validated
+Runtime accepts `DOCKER_CREATE_CONCURRENCY` (1..16, default 4). It is validated
 at startup and controls only simultaneous Docker create calls; start/remove and
 the two Docker I/O runtime threads are unchanged. The perf overlay maps
 `PERF_DOCKER_CREATE_CONCURRENCY` from the isolated env file into this setting.
@@ -62,6 +63,6 @@ recreate only runtime (`up -d --no-deps --force-recreate runtime`). Confirm
 container configuration and health, verify other container identities and the
 Runtime image digest remain unchanged, and apply the same warmup every round.
 Use 250/min for 180 seconds per round and the existing observation collectors.
-Compare completions during arrival, queue peak/drain, mean slotHeld and nested
+Compare completions during arrival, queue peak/drain, mean jobActive and nested
 Docker spans. Reduced permit waiting alone is not an improvement if daemon
-latency rises or throughput remains unchanged. Restore 2 and preserve evidence.
+latency rises or throughput remains unchanged. Restore the fixture's declared baseline after the experiment.

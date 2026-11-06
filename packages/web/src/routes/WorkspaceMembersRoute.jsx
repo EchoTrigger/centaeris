@@ -270,7 +270,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
       {!loading && !pageError && members ? <>
         <section className="shWorkspaceSettingsSection">
           <header><div><h2>{t("invitationActivationRoute.member")}</h2><p>{t("members.count", { count: members.length })}</p></div></header>
-          <div className="shWorkspaceMemberList">
+          <div className="settingsPanel settingsListPanel shWorkspaceMemberList">
             {members.map((member) => {
               const isCurrent = member.userId === String(user.id);
               const canMutate = member.role !== "owner" && !isCurrent;
@@ -295,7 +295,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
 
         <section className="shWorkspaceSettingsSection">
           <header><div><h2>{t("workspaceMembersRoute.pendingInvitations")}</h2><p>{t("workspaceMembersRoute.invitationLinksAreShownOnlyWhenIssuedYouCan")}</p></div></header>
-          {invitations.length ? <div className="shWorkspaceInvitationList">
+          {invitations.length ? <div className="settingsPanel settingsListPanel shWorkspaceInvitationList">
             {invitations.map((invitation) => <div className="shWorkspaceInvitationRow" key={invitation.id}>
               <span className="shWorkspaceMemberIdentity"><strong>{invitation.email}</strong><small>{t("workspaceMembersRoute.created")}{" "}{formatDate(invitation.createdAt)}</small></span>
               <span>{roleLabel(invitation.role)}</span>
@@ -305,7 +305,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
                 <button type="button" onClick={() => setRevokeTarget(invitation)}>{t("workspaceMembersRoute.revoke")}</button>
               </span>
             </div>)}
-          </div> : <div className="shWorkspaceSettingsEmpty">{t("workspaceMembersRoute.noPendingInvitations")}</div>}
+          </div> : <div className="settingsPanel shWorkspaceSettingsEmpty">{t("workspaceMembersRoute.noPendingInvitations")}</div>}
         </section>
       </> : null}
     </div>

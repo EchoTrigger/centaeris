@@ -1,28 +1,30 @@
 .workspaceSidebar.shSidebar {
-  background: var(--surface-variant);
+  background: var(--workspace-rail);
   color: var(--on-surface);
-  font-size: 13px;
+  font-size: 14px;
 }
 
-.workspaceSidebarSlot:has(.shWsMenu[open]) { position: relative; z-index: 65; overflow: visible; }
-.workspaceSidebar:has(.shWsMenu[open]) { overflow: visible; }
-
-.shWs { position: relative; display: flex; align-items: center; gap: 3px; margin: 8px 8px 2px; }
-.shWsMenu { position: relative; min-width: 0; flex: 1; }
-.shWsMenu > summary { list-style: none; cursor: pointer; }
-.shWsMenu > summary::-webkit-details-marker { display: none; }
+.shWs { position: relative; display: flex; align-items: center; gap: 3px; margin: 18px 10px 8px; }
+.workspaceSidebarSlot .shWs { min-height: var(--workspace-header-height); margin-top: 0; }
 .shWsButton {
   display: flex;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
+  max-width: 100%;
   height: 34px;
   align-items: center;
-  gap: 8px;
-  padding: 0 8px;
+  gap: 6px;
+  padding: 0 var(--workspace-button-padding);
+  border: 0;
   border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   font-weight: 600;
 }
-.shWsButton:hover, .shWsMenu[open] > .shWsButton { background: color-mix(in srgb, var(--on-surface) 4.5%, transparent); }
-.shWsButton > svg { width: 13px; margin-left: auto; color: var(--process-text); }
+.shWsButton:hover, .shWsButton[data-popup-open] { background: color-mix(in srgb, var(--on-surface) 4.5%, transparent); }
+.shWsButton > svg { width: 13px; flex: none; margin-inline-start: auto; color: var(--process-text); opacity: 0; }
+.shWsButton:is(:hover, :focus-visible, [data-popup-open]) > svg { opacity: 1; }
 .shWsAvatar, .shAccountAvatar {
   display: inline-grid;
   flex: none;
@@ -32,41 +34,38 @@
   font-size: 11px;
   font-weight: 700;
 }
-.shWsAvatar { width: 20px; height: 20px; border-radius: 4px; }
-.shWsAvatar > img, .shHomeAvatar > img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
-.shWsAvatar[data-has-avatar="true"], .shHomeAvatar[data-has-avatar="true"] { background: transparent; }
-.shWsName, .shAccountMail { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.shWsMenuPopover { position: absolute; z-index: 65; top: 38px; left: 0; width: min(280px, calc(100vw - 16px)); padding: 6px; border: 1px solid var(--outline-variant); border-radius: 9px; background: var(--surface-color); box-shadow: 0 12px 36px rgba(0, 0, 0, .16); }
-.shWsMenuPopover a, .shWsMenuPopover > button { display: flex; width: 100%; min-height: 30px; align-items: center; gap: 9px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--on-surface); font: inherit; text-align: left; text-decoration: none; }
-.shWsMenuPopover a:hover, .shWsMenuPopover > button:hover:not(:disabled) { background: color-mix(in srgb, var(--on-surface) 4.5%, transparent); }
-.shWsMenuPopover > button:disabled { opacity: .55; }
-.shWsMenuPopover svg { width: 15px; flex: none; color: var(--process-text); }
-.shWsMenuIdentity { display: grid; min-width: 0; grid-template-columns: 24px minmax(0, 1fr); align-items: center; gap: 9px; padding: 7px 8px; }
-.shWsMenuIdentity > span:last-child { min-width: 0; }
-.shWsMenuIdentity strong { display: block; overflow: hidden; font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
-.shWsMenuIdentity small { display: block; margin-top: 2px; color: var(--process-text); font-size: 11px; }
-.shWsMenuAccount { overflow: hidden; padding: 4px 8px 5px; color: var(--process-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.shWsMenuWorkspaces { display: grid; gap: 1px; }
-.shWsMenuPopover .shWsMenuWorkspace { display: grid; min-height: 30px; grid-template-columns: 20px minmax(0, 1fr) 15px; gap: 7px; padding: 0 7px; }
+.shWsAvatar { width: var(--workspace-avatar-size); height: var(--workspace-avatar-size); border-radius: var(--workspace-avatar-radius); }
+.shWsAvatar > img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+.shWsAvatar[data-has-avatar="true"] { background: transparent; }
+.shWsName, .shAccountMail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shAccountMail { flex: 1; }
+.shWsMenuPositioner { z-index: 65; }
+.shWsMenuPopover { width: min(calc(var(--workspace-sidebar-width) - 20px), calc(100vw - 20px)); padding: 4px; border: 1px solid var(--workspace-frame-edge); border-radius: 7px; background: var(--surface-color); box-shadow: 0 6px 18px rgba(0, 0, 0, .14); font-size: 14px; outline: none; }
+.shWsMenuItem { display: flex; width: 100%; min-height: 30px; align-items: center; gap: 9px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--on-surface); font: inherit; text-align: left; text-decoration: none; cursor: pointer; }
+.shWsMenuItem[data-highlighted], .shWsMenuItem[data-popup-open] { background: color-mix(in srgb, var(--on-surface) 4.5%, transparent); outline: none; }
+.shWsMenuItem[data-disabled] { opacity: .55; cursor: default; }
+.shWsMenuSwitch { justify-content: space-between; }
+.shWsMenuSwitch > svg { width: 13px; flex: none; color: var(--process-text); }
+.shWsMenuWorkspaces { width: min(240px, calc(100vw - 20px)); max-height: var(--available-height, 360px); overflow-y: auto; }
+.shWsMenuWorkspace { gap: 7px; }
 .shWsMenuWorkspace > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.shWsMenuWorkspace > svg { width: 14px; justify-self: end; color: var(--on-surface); }
-.shWsMenuWorkspace.isCurrent { align-items: center; border-radius: 6px; background: color-mix(in srgb, var(--on-surface) 3.5%, transparent); }
 .shWsMenuWorkspace .shWsAvatar { width: 20px; height: 20px; }
 .shWsMenuDivider { height: 1px; margin: 5px 3px; background: color-mix(in srgb, var(--on-surface) 7%, transparent); }
 .shWsMenuError { margin: 5px 9px 3px; color: var(--danger); font-size: 11px; }
-.shSidebarCollapse { display: grid; width: 30px; height: 30px; flex: none; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--process-text); opacity: 0; transition: opacity 120ms ease; }
-.shWs:hover .shSidebarCollapse, .shSidebarCollapse:focus-visible { opacity: 1; }
-.shSidebarCollapse:hover { background: color-mix(in srgb, var(--on-surface) 6%, transparent); color: var(--on-surface); }
-.shSidebarCollapse svg { width: 16px; }
-
-.shTabs {
-  display: flex;
-  gap: 2px;
-  margin: 2px 8px 0;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--outline-variant);
+.shAvatarToggle { display: grid; width: var(--workspace-toggle-target); height: var(--workspace-toggle-target); place-items: center; padding: 0; border: 0; background: transparent; color: var(--process-text); }
+.shAvatarToggle::before { content: ""; grid-area: 1 / 1; width: var(--workspace-avatar-size); height: var(--workspace-avatar-size); border-radius: var(--workspace-avatar-radius); }
+.shAvatarToggle:is(:hover, :focus-visible):not(:disabled)::before { background: var(--workspace-selection); }
+.shAvatarToggle:is(:hover, :focus-visible):not(:disabled) { color: var(--on-surface); }
+.shAvatarToggle svg { position: relative; grid-area: 1 / 1; width: var(--workspace-avatar-size); height: var(--workspace-avatar-size); stroke-width: 1.7; }
+.shSidebarCollapse { position: absolute; inset-inline-start: var(--workspace-toggle-offset); inset-block-start: 50%; transform: translateY(-50%); opacity: 0; }
+.shSidebarCollapse:is(:hover, :focus-visible) { opacity: 1; }
+.shWs:has(.shSidebarCollapse:is(:hover, :focus-visible)) .shWsButton > .shWsAvatar { visibility: hidden; }
+@media (hover: none) {
+  .shSidebarCollapse { opacity: 1; }
+  .shWs:has(.shSidebarCollapse) .shWsButton > .shWsAvatar { visibility: hidden; }
 }
-.shTab, .shSearchButton {
+
+.shSearchButton {
   display: inline-flex;
   height: 29px;
   align-items: center;
@@ -77,11 +76,10 @@
   background: transparent;
   color: var(--process-text);
 }
-.shTab { width: 29px; padding: 0; }
-.shTab:hover, .shSearchButton:hover, .shTab.isActive { background: color-mix(in srgb, var(--on-surface) 5.5%, transparent); color: var(--on-surface); }
-.shTab.isActive { font-weight: 600; }
-.shTab svg, .shSearchButton svg { width: 15px; height: 15px; }
-.shSearchButton { width: 29px; margin-left: auto; }
+.shSearchButton { width: 29px; flex: none; padding: 0; }
+.shSearchButton:hover, .shSearchButton[aria-pressed="true"] { background: var(--workspace-selection); color: var(--on-surface); }
+.shSearchButton svg { width: 15px; height: 15px; stroke-width: 1.7; }
+.shWsButton:focus-visible, .shPrimaryNav .shRow:focus-visible { outline-offset: -2px; }
 
 .shScroll { min-height: 0; flex: 1; overflow-y: auto; padding: 8px; scrollbar-width: thin; }
 .shSection { margin-top: 13px; }
@@ -92,7 +90,7 @@
   align-items: center;
   padding: 0 8px;
   color: var(--process-text);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
 }
 .shSectionAction {
@@ -130,7 +128,7 @@
   background: transparent;
   color: var(--on-surface);
   padding: 0 8px;
-  font-size: 13px;
+  font-size: 14px;
   text-align: left;
   text-decoration: none;
 }
@@ -147,7 +145,7 @@
 .shSessionSection:focus-within > .shDisclosure > .shDisclosureSummary > svg { opacity: 1; }
 .shSessionSection .workspaceSessionList { padding: 0 0 2px; }
 .shSessionSection .workspaceSessionRow { height: 30px; contain-intrinsic-size: auto 30px; }
-.shSessionSection .workspaceSessionButton { text-decoration: none; display: flex; align-items: center; gap: 8px; border-radius: 6px; color: var(--on-surface); font-size: 13px; }
+.shSessionSection .workspaceSessionButton { text-decoration: none; display: flex; align-items: center; gap: 8px; border-radius: 6px; color: var(--on-surface); font-size: 14px; }
 .shSessionSection .workspaceSessionButton:hover, .shSessionSection .workspaceSessionButton.isActive { background: color-mix(in srgb, var(--on-surface) 6%, transparent); color: var(--on-surface); }
 .workspaceSessionKindIcon { width: 15px; height: 15px; flex: none; color: var(--process-text); }
 .shProject { position: relative; }
@@ -182,7 +180,11 @@
 .shProjectCreateDialog > footer .isPrimary:hover:not(:disabled) { background: var(--solid-surface); }
 .shNavGap { height: 18px; }
 .shDivider { height: 1px; margin: 10px 6px; background: color-mix(in srgb, var(--on-surface) 6%, transparent); }
-.shPrimaryNav { margin-top: 24px; }
+.shPrimaryNav { display: grid; gap: var(--workspace-list-row-gap); flex: none; margin: 0 10px 12px; }
+.shPrimaryNav .shRow { min-height: 30px; color: var(--process-text); font-weight: 500; }
+.shPrimaryNav .shRow > svg { width: 14px; height: 14px; stroke-width: 1.7; }
+.shPrimaryNav .shRow:hover, .shPrimaryNav .shRow[aria-current="page"], .shPrimaryNav .shRow[aria-expanded="true"] { background: var(--workspace-selection); color: var(--on-surface); }
+.shPrimaryNav .shRow[aria-current="page"] { font-weight: 600; }
 .shAgentGlyph {
   display: inline-grid;
   width: 20px;
@@ -205,12 +207,8 @@
 .shAgentLink small { margin-left: auto; color: var(--process-text); font-size: 10px; }
 .shEmptyHint { margin: 5px 8px; color: var(--process-text); font-size: 12px; }
 .shSidebar .workspaceSessionList { padding: 0; }
-.shSidebar .workspaceSessionButton { color: var(--on-surface); font-size: 13px; }
+.shSidebar .workspaceSessionButton { color: var(--on-surface); font-size: 14px; }
 .shSidebar .workspaceSessionButton:hover, .shSidebar .workspaceSessionButton.isActive { background: color-mix(in srgb, var(--on-surface) 6%, transparent); color: var(--on-surface); }
-.shSidebarNewChat { display: flex; flex: none; padding: 8px; }
-.shNewChat { display: flex; min-width: 0; height: 36px; flex: 1; align-items: center; gap: 8px; padding: 0 13px; border: 1px solid var(--outline-variant); border-radius: 18px; background: var(--surface-color); color: var(--on-surface); font-size: 13px; box-shadow: 0 1px 3px rgba(0, 0, 0, .04); }
-.shNewChat kbd { margin-left: auto; border: 0; background: transparent; color: var(--process-text); font: inherit; font-size: 10px; }
-.shNewChat:hover { background: var(--surface-variant); }
 
 .shPrivateCreateBackdrop { position: fixed; z-index: 120; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(20, 20, 20, .56); }
 .shPrivateCreateDialog { display: flex; width: min(1000px, calc(100vw - 48px)); height: min(650px, calc(100vh - 48px)); flex-direction: column; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: 13px; background: var(--surface-color); box-shadow: 0 28px 90px rgba(0, 0, 0, .3); }
@@ -226,18 +224,18 @@
 .shPrivateCreateScroll { min-height: 0; flex: 1; overflow-y: auto; scrollbar-width: thin; }
 .shPrivateCreateContent { width: min(600px, calc(100% - 40px)); margin: 0 auto; padding: 16px 0 64px; }
 .shPrivateCreateQuick { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.shPrivateCreateQuick > button { display: grid; min-height: 80px; align-content: center; justify-items: start; gap: 10px; border: 1px solid var(--outline-variant); border-radius: 10px; background: var(--surface-color); padding: 15px 18px; color: var(--on-surface); text-align: left; }
+.shPrivateCreateQuick > button { display: grid; min-height: 80px; align-content: center; justify-items: start; gap: 10px; border: 0; border-radius: 10px; background: var(--surface-container); padding: 15px 18px; color: var(--on-surface); text-align: left; }
 .shPrivateCreateQuick > button:hover { background: var(--surface-variant); }
 .shPrivateCreateQuick > button svg { width: 17px; color: var(--process-text); }
 .shPrivateCreateQuick > button strong { font-size: 13px; font-weight: 550; }
 .shPrivateCreateContent > h2 { display: flex; align-items: center; gap: 6px; margin: 26px 0 12px; color: var(--process-text); font-size: 13px; font-weight: 550; }
 .shPrivateCreateContent > h2 svg { width: 15px; }
 .shPrivateTemplateGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.shPrivateTemplateCard { --template-tint: #edf3ef; min-height: 174px; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: 10px; background: var(--template-tint); padding: 0; color: var(--on-surface); text-align: left; }
+.shPrivateTemplateCard { --template-tint: #edf3ef; min-height: 174px; overflow: hidden; border: 0; border-radius: 10px; background: var(--template-tint); padding: 0; color: var(--on-surface); text-align: left; }
 .shPrivateTemplateCard:nth-child(4n+2) { --template-tint: #edf2f7; }
 .shPrivateTemplateCard:nth-child(4n+3) { --template-tint: #f5f1ec; }
 .shPrivateTemplateCard:nth-child(4n+4) { --template-tint: #f6eeee; }
-.shPrivateTemplateCard:hover { border-color: var(--outline-variant); box-shadow: 0 5px 16px rgba(0, 0, 0, .07); transform: translateY(-1px); }
+.shPrivateTemplateCard:hover { background: color-mix(in srgb, var(--template-tint) 88%, var(--on-surface)); }
 .shPrivateTemplateCard > span { display: block; min-height: 67px; padding: 14px 18px 10px; }
 .shPrivateTemplateCard > span > strong { display: block; font-size: 14px; font-weight: 550; }
 .shPrivateTemplateCard > span > small { display: block; margin-top: 3px; color: var(--process-text); font-size: 11px; }
@@ -248,8 +246,10 @@
 .shPrivateTemplatePreview > i > em { border-radius: 4px; background: var(--template-tint); color: var(--process-text); padding: 1px 4px; font-size: 7px; font-style: normal; }
 .shPrivateTemplateGrid > p { grid-column: 1 / -1; padding: 64px 0; color: var(--process-text); text-align: center; }
 
-.shHome { display: grid; min-height: 100%; align-content: end; justify-items: center; gap: 8px; padding: 0 24px; text-align: center; }
-.shHomeAvatar, .shAgentPageIcon {
+.shHome { display: grid; justify-items: center; gap: 12px; padding: 12px 16px 20px; }
+.shHomeMark { display: block; flex: none; border-radius: 12px; }
+.shHome h1 { margin: 0; color: var(--on-surface); font-size: clamp(22px, 2.3vw, 28px); font-weight: 600; line-height: 1.2; text-align: center; }
+.shAgentPageIcon {
   display: inline-grid;
   place-items: center;
   border: 1px solid var(--outline-variant);
@@ -258,63 +258,64 @@
   color: var(--on-surface);
   box-shadow: 0 2px 8px rgba(0, 0, 0, .05);
 }
-.shHomeAvatar { width: 64px; height: 64px; }
-.shHomeAvatar svg { width: 28px; }
-.shHome h1 { max-width: 100%; overflow-wrap: anywhere; margin: 8px 0 0; color: var(--on-surface); font-size: 27px; font-weight: 650; letter-spacing: -.02em; }
-.shHome p { margin: 0; color: var(--process-text); font-size: 13px; }
-.shQuickActions { display: flex; flex-wrap: wrap; grid-row: 3; justify-content: center; gap: 24px; margin: 14px auto 0; color: var(--process-text); }
+.shHomeFollowups { grid-row: 3; width: var(--workspace-draft-width); margin: 10px auto 0; }
+.shQuickActions { display: flex; flex-wrap: wrap; justify-content: center; gap: 2px clamp(7px, 2vw, 20px); }
 .shQuickAction {
   display: inline-flex;
   height: 32px;
   align-items: center;
-  gap: 7px;
-  padding: 0;
+  gap: 6px;
+  padding: 0 7px;
   border: 0;
+  border-radius: 5px;
   background: transparent;
   color: var(--process-text);
   font-size: 12px;
 }
-.shQuickAction:hover { color: var(--on-surface); }
+.shQuickAction:hover { background: var(--workspace-selection); color: var(--on-surface); }
 .shQuickAction svg { width: 15px; color: var(--process-text); }
-.workspaceConversationPlane.isEmpty .workspaceMessages { display: grid; }
-.workspaceComposer.shComposerHero { width: min(704px, calc(100% - 32px)); min-height: 108px; border-radius: 22px; padding: 12px; box-shadow: 0 20px 24px rgba(25, 25, 25, .05), 0 5px 8px rgba(25, 25, 25, .027), 0 0 0 1px rgba(42, 28, 0, .07); }
-.workspaceComposer.shComposerHero:focus-within { border-color: var(--primary-color); box-shadow: 0 0 0 1px #2383e2, 0 6px 18px rgba(35, 131, 226, .12); }
+.workspaceComposer.shComposerHero { min-height: 108px; padding: 12px; }
 .workspaceComposer.shComposerHero textarea { min-height: 54px; font-size: 15px; }
 
-.shSearchBackdrop { position: fixed; z-index: 80; inset: 0; display: grid; justify-items: center; padding: 10vh 20px 20px; background: rgba(15, 15, 15, .28); }
-.shSearchDialog { display: flex; width: min(980px, 100%); height: min(720px, 80vh); flex-direction: column; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: 14px; background: var(--surface-color); box-shadow: 0 24px 70px rgba(0, 0, 0, .24); }
-.shSearchInputRow { display: flex; height: 58px; flex: none; align-items: center; gap: 10px; padding: 0 18px; }
-.shSearchInputRow svg { width: 18px; color: var(--process-text); }
-.shSearchInputRow input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--on-surface); font-size: 16px; }
-.shSearchFilters { display: flex; height: 38px; align-items: center; gap: 8px; padding: 0 18px; border-bottom: 1px solid var(--outline-variant); color: var(--process-text); font-size: 11px; }
-.shSearchFilters span { padding: 4px 8px; border-radius: 5px; background: var(--surface-variant); }
-.shSearchBody { display: grid; min-height: 0; flex: 1; grid-template-columns: minmax(260px, 1fr) minmax(320px, .9fr); }
-.shSearchResults { min-height: 0; overflow-y: auto; padding: 7px 10px 14px; border-right: 1px solid var(--outline-variant); }
-.shSearchResults header { padding: 10px 9px 5px; color: var(--process-text); font-size: 11px; font-weight: 600; }
-.shSearchResults button { display: flex; width: 100%; min-height: 46px; align-items: center; gap: 10px; padding: 5px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--on-surface); font-size: 13px; text-align: left; }
-.shSearchResults button:hover, .shSearchResults button.isSelected { background: var(--surface-variant); }
-.shSearchResults button > svg { width: 15px; flex: none; color: var(--process-text); }
-.shSearchResults button > span { display: grid; min-width: 0; gap: 2px; }
-.shSearchResults button strong, .shSearchResults button small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.shSearchResults button strong { font-weight: 500; }
-.shSearchResults button small { color: var(--process-text); font-size: 11px; }
-.shSearchPreview { min-width: 0; overflow-y: auto; margin: 18px; border: 1px solid var(--outline-variant); border-radius: 10px; background: var(--surface-color); box-shadow: 0 6px 18px rgba(0, 0, 0, .06); }
-.shSearchPreviewCover { height: 76px; background: var(--surface-variant); }
-.shSearchPreviewContent { padding: 22px 28px 32px; }
-.shSearchPreviewKind { color: var(--process-text); font-size: 11px; }
-.shSearchPreview h2 { margin: 7px 0 18px; color: var(--on-surface); font-size: 24px; }
-.shSearchPreview p, .shSearchPreview pre { margin: 0; color: var(--on-surface); font-family: inherit; font-size: 13px; line-height: 1.7; white-space: pre-wrap; }
-.shSearchEmpty { padding: 28px; color: var(--process-text); text-align: center; }
-.shSearchFoot { display: flex; justify-content: flex-end; gap: 16px; padding: 8px 16px; border-top: 1px solid var(--outline-variant); color: var(--process-text); font-size: 11px; }
+.workspaceSearchPanel { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; background: var(--surface-color); }
+.workspaceWorkbench.isSearching::before { visibility: hidden; }
+.workspaceWorkbench.isSearching > :is(.workspaceTopbar, .workspaceChatColumn, .workspaceContextPanel, .workspaceCatalog) { visibility: hidden; }
+.workspaceWorkbench.isBrowsing > :is(.workspaceTopbar, .workspaceChatColumn) { display: none; }
+.workspaceCatalog { grid-area: 1 / 2 / -1 / -1; min-width: 0; min-height: 0; overflow: auto; border-radius: var(--workspace-frame-radius); background: var(--surface-color); }
+.workspaceCatalog > .libraryWorkspace,
+.workspaceCatalog .libraryWorkspace > .libraryMain { height: 100%; }
+.workspaceWorkbench > .workspaceSearchPanel { z-index: 2; grid-area: 1 / 2 / -1 / -1; border: 1px solid var(--workspace-frame-edge); border-radius: var(--workspace-frame-radius); }
+.shMain.isSearching { visibility: hidden; }
+.shShellPage > .workspaceSearchPanel { z-index: 2; grid-area: 1 / 2 / -1 / -1; border: 1px solid var(--workspace-frame-edge); border-radius: var(--workspace-frame-radius); }
+.shSearchInputRow { display: flex; min-height: var(--workspace-header-height); flex: none; align-items: center; gap: 9px; border-bottom: 1px solid var(--workspace-frame-edge); padding: 0 14px; }
+.shSearchInputRow input { min-width: 0; align-self: stretch; flex: 1; border: 0; outline: 0; background: transparent; color: var(--on-surface); font: inherit; font-size: 14px; }
+.shSearchInputRow input::placeholder { color: var(--process-text); }
+.shSearchInputRow input:focus-visible { outline: none; }
+.shSearchInputRow:has(input:focus-visible) { border-bottom-color: color-mix(in srgb, var(--primary-color) 42%, var(--outline-variant)); }
+.shSearchFilters { display: flex; flex: none; flex-wrap: wrap; gap: 6px; padding: 8px 14px; }
+.shSearchFilters button { min-height: 26px; border: 0; border-radius: 999px; background: var(--surface-container); color: var(--process-text); padding: 0 10px; font-size: 12px; }
+.shSearchFilters button:hover, .shSearchFilters button[aria-pressed="true"] { background: var(--workspace-selection); color: var(--on-surface); }
+.shSearchResults { min-height: 0; overflow-y: auto; padding: 0 14px 10px; }
+.shSearchResults:empty { display: none; }
+.shSearchGroupLabel { padding: 10px 9px 5px; color: var(--process-text); font-size: 11px; font-weight: 600; }
+.shSearchResults button { display: flex; width: 100%; min-height: 34px; align-items: center; gap: 9px; border: 0; border-radius: 5px; background: transparent; color: var(--on-surface); padding: 0 9px; text-align: left; }
+.shSearchResults button:hover, .shSearchResults button[aria-selected="true"] { background: var(--workspace-selection); }
+.shSearchResults button > svg { width: 14px; flex: none; color: var(--process-text); }
+.shSearchResults button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shSearchEmpty { display: grid; flex: 1; place-content: center; justify-items: center; gap: 4px; padding: 24px; color: var(--process-text); text-align: center; }
+.shSearchEmpty strong { color: var(--on-surface); font-weight: 550; }
+.shSearchEmpty span { font-size: 12px; }
+.shSearchNotice { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; padding: 8px 14px 12px; color: var(--process-text); font-size: 13px; }
+.shSearchNotice button { border: 0; border-radius: 5px; background: var(--surface-container); color: var(--on-surface); padding: 4px 8px; font: inherit; }
 
-.shShellPage { --shell-sidebar-duration: 320ms; display: grid; height: 100vh; grid-template-columns: var(--workspace-sidebar-width) minmax(0, 1fr); overflow: hidden; background: var(--surface-color); transition: grid-template-columns var(--shell-sidebar-duration) var(--motion-sidebar); }
-.shShellPage.isSidebarClosed { grid-template-columns: 0 minmax(0, 1fr); }
+.shShellPage { --shell-sidebar-duration: 320ms; display: grid; height: 100dvh; grid-template-columns: var(--workspace-sidebar-width) minmax(0, 1fr); overflow: hidden; padding: var(--workspace-frame-inset); padding-left: 0; background: var(--workspace-rail); transition: grid-template-columns var(--shell-sidebar-duration) var(--motion-sidebar); }
+.shShellPage.isSidebarClosed { grid-template-columns: 0 minmax(0, 1fr); padding-left: var(--workspace-frame-inset); }
 .shSkipLink { position: fixed; z-index: 200; top: 8px; left: 8px; transform: translateY(calc(-100% - 16px)); border-radius: 6px; background: var(--solid-surface); color: var(--solid-text); padding: 7px 10px; font-size: 12px; text-decoration: none; }
 .shSkipLink:focus-visible { transform: translateY(0); outline-color: var(--outline); }
-.shShellPage > .shSidebar { grid-column: 1; width: var(--workspace-sidebar-width); min-width: 0; max-width: 100%; height: 100vh; overflow: hidden; border-right: 1px solid var(--outline-variant); visibility: visible; transition: visibility 0s linear 0s; }
+.shShellPage > .shSidebar { grid-column: 1; width: var(--workspace-sidebar-width); min-width: 0; max-width: 100%; height: 100%; overflow: hidden; visibility: visible; transition: visibility 0s linear 0s; }
 .shShellPage.isSidebarClosed > .shSidebar { overflow: hidden; visibility: hidden; pointer-events: none; transition-delay: var(--shell-sidebar-duration); }
 @media (prefers-reduced-motion: reduce) { .shShellPage { --shell-sidebar-duration: 0ms; } }
-.shMain { position: relative; grid-column: 2; min-width: 0; min-height: 0; overflow-y: auto; }
+.shMain { position: relative; grid-column: 2; min-width: 0; min-height: 0; overflow-y: auto; border: 1px solid var(--workspace-frame-edge); border-radius: var(--workspace-frame-radius); background: var(--surface-color); }
 .shSidebarOpen { position: sticky; z-index: 20; top: 2px; left: 4px; display: grid; width: 40px; height: 40px; place-items: center; margin-bottom: -40px; border: 0; border-radius: 0; background: transparent; color: var(--process-text); box-shadow: none; }
 .shSidebarOpen:hover { background: transparent; color: var(--on-surface); }
 .shSidebarOpen svg { width: 16px; }
@@ -356,7 +357,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shAgentPageHeader h1 { margin: 0; color: var(--on-surface); font-size: 30px; }
 .shAgentPageHeader p { display: flex; align-items: center; gap: 5px; margin: 4px 0 0; color: var(--process-text); font-size: 12px; }
 .shAgentPageHeader p svg { width: 12px; }
-.shQuietButton { display: inline-flex; height: 32px; align-items: center; gap: 6px; margin-left: auto; padding: 0 10px; border: 1px solid var(--outline-variant); border-radius: 7px; background: var(--surface-color); color: var(--on-surface); font-size: 12px; }
+.shQuietButton { display: inline-flex; height: 32px; align-items: center; gap: 6px; margin-left: auto; padding: 0 10px; border: 0; border-radius: 7px; background: var(--surface-container); color: var(--on-surface); font-size: 12px; }
 .shQuietButton svg { width: 14px; }
 .shDocumentTabs { display: flex; gap: 18px; margin-top: 26px; border-bottom: 1px solid var(--outline-variant); }
 .shDocumentTabs a { padding: 0 2px 8px; border-bottom: 2px solid transparent; color: var(--process-text); font-size: 12px; text-decoration: none; }
@@ -381,7 +382,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shAgentAvatarEdit:disabled { cursor: default; opacity: .6; }
 .shAvatarUpload { display: grid; justify-items: center; gap: 8px; margin-top: -8px; }
 .shAvatarUpload > div { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; }
-.shAvatarUpload button { display: inline-flex; min-height: 32px; align-items: center; gap: 6px; border: 1px solid var(--outline-variant); border-radius: 6px; background: var(--surface-color); color: var(--on-surface); padding: 0 10px; font: inherit; font-size: 11px; cursor: pointer; }
+.shAvatarUpload button { display: inline-flex; min-height: 32px; align-items: center; gap: 6px; border: 0; border-radius: 6px; background: var(--surface-container); color: var(--on-surface); padding: 0 10px; font: inherit; font-size: 11px; cursor: pointer; }
 .shAvatarUpload button:hover:not(:disabled) { background: var(--surface-variant); }
 .shAvatarUpload button:disabled { opacity: .6; cursor: default; }
 .shAvatarUpload button svg { width: 13px; height: 13px; }
@@ -394,17 +395,17 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shAgentPrivate svg { width: 11px; }
 .shAvatarChoices { display: flex; justify-content: center; gap: 8px; margin: 0; border: 0; padding: 0; }
 .shAvatarChoices legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.shAvatarChoices button { display: grid; width: 72px; justify-items: center; gap: 5px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: var(--process-text); padding: 6px; font: inherit; font-size: 10px; }
+.shAvatarChoices button { display: grid; width: 72px; justify-items: center; gap: 5px; border: 0; border-radius: 10px; background: transparent; color: var(--process-text); padding: 6px; font: inherit; font-size: 10px; }
 .shAvatarChoices button:hover { background: var(--surface-variant); }
-.shAvatarChoices button.isActive { border-color: var(--outline-variant); background: var(--surface-variant); color: var(--on-surface); }
+.shAvatarChoices button.isActive { background: var(--surface-variant); color: var(--on-surface); }
 .shAvatarChoices .shAgentMark { width: 42px; height: 42px; border-radius: 10px !important; }
 .shCreateLabel, .shInstructionsSection > small { color: var(--process-text); font-size: 11px; font-weight: 600; letter-spacing: .02em; }
 .shCreateLabel { margin: 4px 0 -12px; }
 .shAgentDescriptionInput { width: 100%; height: 44px; border: 1px solid var(--outline-variant); border-radius: 10px; background: var(--surface-color); color: var(--on-surface); padding: 0 13px; font: inherit; }
 .shAgentDescriptionInput::placeholder { color: var(--process-text); }
 .shInstructionsSection { display: grid; gap: 8px; }
-.shSoulCard { display: grid; width: 100%; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; gap: 12px; border: 1px solid var(--outline-variant); border-radius: 12px; background: var(--surface-variant); color: var(--on-surface); padding: 12px; text-align: left; }
-.shSoulCard:hover { border-color: var(--outline-variant); background: var(--surface-variant); }
+.shSoulCard { display: grid; width: 100%; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; gap: 12px; border: 0; border-radius: 12px; background: var(--surface-variant); color: var(--on-surface); padding: 12px; text-align: left; }
+.shSoulCard:hover { background: var(--surface-hover); }
 .shSoulCardIcon, .shAgentSoulPreview header > span { display: grid; width: 40px; height: 40px; place-items: center; border: 1px solid var(--outline-variant); border-radius: 9px; background: var(--surface-color); color: var(--process-text); }
 .shSoulCardIcon svg, .shAgentSoulPreview header svg { width: 18px; }
 .shSoulCardCopy { display: grid; min-width: 0; gap: 3px; }
@@ -432,7 +433,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shAgentTopbar button svg { width: 13px; }
 .shAgentBanner { display: flex; min-height: 78px; align-items: center; justify-content: center; gap: 12px; padding: 12px 24px; background: var(--surface-variant); color: var(--primary-color); font-size: 13px; }
 .shAgentBannerIcon { display: grid; width: 42px; height: 42px; flex: none; place-items: center; border: 1px solid var(--outline-variant); border-radius: 50%; background: var(--surface-color); font-size: 19px; }
-.shAgentBanner button { height: 29px; border: 1px solid rgba(35, 131, 226, .28); border-radius: 6px; background: transparent; color: var(--primary-color); padding: 0 10px; }
+.shAgentBanner button { height: 29px; border: 0; border-radius: 6px; background: var(--surface-container); color: var(--primary-color); padding: 0 10px; }
 .shAgentPage { width: min(790px, calc(100% - 64px)); margin: 0 auto; padding: 68px 0 100px; }
 .shAgentPage > h1 { margin: 0; color: var(--on-surface); font-size: 42px; line-height: 1.18; letter-spacing: -.035em; }
 .shAgentLead { margin: 22px 0 24px; color: var(--on-surface); font-size: 16px; line-height: 1.7; }
@@ -448,7 +449,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shFooterMark { width: 16px; height: 16px; flex: none; border-radius: 4px; }
 
 .shEmbeddedLibrary { min-height: 100%; }
-.shEmbeddedLibrary .libraryHeader { padding-top: 52px; }
+.shEmbeddedLibrary .libraryHeader { padding-top: 48px; }
 
 .shPluginPage { position: fixed; z-index: 70; inset: 0 0 0 270px; display: flex; flex-direction: column; overflow: hidden; background: var(--surface-color); }
 .shPluginHeader { display: flex; width: min(1040px, calc(100% - 64px)); align-items: flex-end; justify-content: space-between; margin: 0 auto; padding: 52px 0 18px; border-bottom: 1px solid var(--outline-variant); }
@@ -460,19 +461,15 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shPluginBody .capabilitySettings { border: 1px solid var(--outline-variant); border-radius: 10px; overflow: hidden; }
 .shPluginBody .capabilitySettingsList { background: var(--surface-variant); }
 .shPluginBody .capabilitySettingsDetail { background: var(--surface-color); }
-.shDeletedBanner { display: flex; min-height: 54px; align-items: center; justify-content: center; gap: 10px; background: var(--error); color: var(--solid-text); font-size: 13px; }
-.shDeletedBanner button { display: inline-flex; height: 30px; align-items: center; gap: 5px; border: 1px solid var(--outline-variant); border-radius: 6px; background: transparent; color: var(--solid-text); padding: 0 10px; }
-.shDeletedBanner button:disabled { opacity: .72; }
-.shDeletedBanner svg { width: 13px; }
 .shDeletedPage { width: min(720px, calc(100% - 64px)); margin: 0 auto; padding: 100px 0; }
 .shDeletedPage h1 { margin: 0; font-size: 44px; }
 
 .shAgentMark { display: inline-grid; place-items: center; overflow: hidden; border-radius: 9px !important; background: transparent; }
 .shAgentMark img { display: block; width: 100%; height: 100%; object-fit: cover; }
-.workspaceConversationBreadcrumb a { color: var(--on-surface); font-weight: 600; text-decoration: none; }
 .shAgentTopbar > a { margin-left: auto; color: var(--primary-color); text-decoration: none; }
 .shAgentSettingsActions { display: flex; gap: 8px; }
-.shQuietButton.isDanger { border-color: rgba(196, 92, 87, .35); color: var(--danger); }
+.shQuietButton.isDanger { background: var(--danger-button-fill); color: var(--danger); }
+.shQuietButton.isDanger:hover:not(:disabled) { background: var(--danger-button-hover); }
 
 .shWorkspaceChooser { display: grid; min-height: 100vh; place-items: center; padding: 16px; background: var(--surface-variant); }
 .shWorkspaceChooser > section { width: min(340px, 100%); padding: 18px; border: 1px solid var(--outline-variant); border-radius: 10px; background: var(--surface-color); box-shadow: 0 12px 32px rgba(0, 0, 0, .07); }
@@ -485,12 +482,14 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceChooser nav a > span svg { width: 13px; }
 .shWorkspaceChooser nav small { color: var(--process-text); font-size: 11px; }
 
-.shWorkspaceSettingsPage { width: min(940px, calc(100% - 64px)); margin: 0 auto; padding: 50px 0 80px; }
-.shWorkspaceSettingsPage.isEmbedded { width: min(900px, calc(100% - 80px)); padding: 58px 0 70px; }
+.shWorkspaceSettingsPage { width: min(var(--workspace-content-width), calc(100% - 64px)); margin: 0 auto; padding: 50px 0 80px; }
+.shWorkspaceSettingsPage.isEmbedded { width: var(--settings-page-width); padding: var(--settings-page-top) 0 64px; }
 .shWorkspaceSettingsPage.isEmbedded .shWorkspaceSettingsTabs { display: none; }
 .shWorkspaceSettingsHeader { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding-bottom: 18px; }
 .shWorkspaceSettingsHeader > div > span { color: var(--process-text); font-size: 11px; }
 .shWorkspaceSettingsHeader h1 { margin: 5px 0 0; color: var(--on-surface); font-size: 30px; letter-spacing: -.025em; }
+.shWorkspaceSettingsPage.isEmbedded .shWorkspaceSettingsHeader { align-items: center; padding-bottom: 28px; }
+.shWorkspaceSettingsPage.isEmbedded .shWorkspaceSettingsHeader h1 { margin: 0; font-size: 22px; font-weight: 500; line-height: 1.4; letter-spacing: normal; }
 .shWorkspaceSettingsHeader p { margin: 6px 0 0; color: var(--process-text); font-size: 13px; }
 .shWorkspaceSettingsTabs { display: flex; gap: 3px; margin-bottom: 27px; border-bottom: 1px solid var(--outline-variant); }
 .shWorkspaceSettingsTabs span, .shWorkspaceSettingsTabs a { min-height: 36px; padding: 9px 11px 8px; border-bottom: 2px solid transparent; color: var(--process-text); font-size: 13px; text-decoration: none; }
@@ -499,10 +498,10 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceSettingsSection { margin-top: 30px; }
 .shWorkspaceSettingsSection:first-of-type { margin-top: 0; }
 .shWorkspaceSettingsSection > header { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 9px; }
-.shWorkspaceSettingsSection h2 { margin: 0; color: var(--on-surface); font-size: 18px; }
+.shWorkspaceSettingsSection h2 { margin: 0; color: var(--on-surface); font-size: 14px; font-weight: 550; }
 .shWorkspaceSettingsSection header p { margin: 4px 0 0; color: var(--process-text); font-size: 12px; }
-.shWorkspaceMemberList, .shWorkspaceInvitationList { border-top: 1px solid var(--outline-variant); }
-.shWorkspaceMemberRow { position: relative; display: grid; min-height: 62px; grid-template-columns: 34px minmax(0, 1fr) 116px 32px; align-items: center; gap: 12px; padding: 8px 4px; border-bottom: 1px solid var(--outline-variant); }
+.shWorkspaceMemberRow + .shWorkspaceMemberRow, .shWorkspaceInvitationRow + .shWorkspaceInvitationRow, .shWorkspaceGroupMembers > label + label { border-top: 1px solid var(--outline-variant); }
+.shWorkspaceMemberRow { position: relative; display: grid; min-height: 62px; grid-template-columns: 34px minmax(0, 1fr) 116px 32px; align-items: center; gap: 12px; padding: 8px 0; }
 .shWorkspaceMemberAvatar { display: grid; width: 32px; height: 32px; place-items: center; border-radius: 7px; background: var(--surface-variant); color: var(--on-surface); font-size: 12px; font-weight: 600; }
 .shWorkspaceMemberIdentity { display: grid; min-width: 0; gap: 2px; }
 .shWorkspaceMemberIdentity strong, .shWorkspaceMemberIdentity small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -519,7 +518,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceRowMenu button { display: block; width: 100%; min-height: 31px; border: 0; border-radius: 5px; background: transparent; color: var(--on-surface); padding: 0 8px; font-size: 12px; text-align: left; }
 .shWorkspaceRowMenu button:hover { background: var(--surface-variant); }
 .shWorkspaceRowMenu button.isDanger { color: var(--danger); }
-.shWorkspaceInvitationRow { display: grid; min-height: 62px; grid-template-columns: minmax(0, 1fr) 86px 132px auto; align-items: center; gap: 12px; padding: 8px 4px; border-bottom: 1px solid var(--outline-variant); color: var(--process-text); font-size: 12px; }
+.shWorkspaceInvitationRow { display: grid; min-height: 62px; grid-template-columns: minmax(0, 1fr) 86px 132px auto; align-items: center; gap: 12px; padding: 8px 0; color: var(--process-text); font-size: 12px; }
 .shWorkspaceInvitationRow > small { color: var(--process-text); }
 .shWorkspaceInvitationActions { display: flex; justify-content: flex-end; gap: 4px; }
 .shWorkspaceInvitationActions button { min-height: 30px; border: 0; border-radius: 6px; background: transparent; color: var(--process-text); padding: 0 7px; }
@@ -540,7 +539,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceDialog form label { display: grid; gap: 6px; color: var(--process-text); font-size: 11px; }
 .shWorkspaceDialog form input, .shWorkspaceDialog form select { width: 100%; height: 38px; border: 1px solid var(--outline-variant); border-radius: 7px; background: var(--surface-color); color: var(--on-surface); padding: 0 10px; font-size: 13px; }
 .shWorkspaceDialog form footer, .shWorkspaceInviteResult footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
-.shWorkspaceDialog button.isPrimary { border-color: var(--outline); background: var(--solid-surface); color: var(--solid-text); }
+.shWorkspaceDialog button.isPrimary { background: var(--solid-surface); color: var(--solid-text); }
 .shWorkspaceInviteResult { display: grid; gap: 11px; }
 .shWorkspaceInviteResult > strong { font-size: 13px; }
 .shWorkspaceInviteResult code { padding: 11px; border-radius: 7px; background: var(--surface-variant); color: var(--process-text); font: 11px/1.55 "Google Sans Code", monospace; overflow-wrap: anywhere; }
@@ -571,8 +570,8 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceGroupDetail header button:hover { background: var(--surface-variant); }
 .shWorkspaceGroupDetail header button.isDanger { display: inline-flex; align-items: center; gap: 4px; color: var(--danger); }
 .shWorkspaceGroupDetail header button svg { width: 13px; }
-.shWorkspaceGroupMembers { margin-top: 12px; border-top: 1px solid var(--outline-variant); }
-.shWorkspaceGroupMembers > label { display: grid; min-height: 56px; grid-template-columns: 18px 32px minmax(0, 1fr); align-items: center; gap: 10px; border-bottom: 1px solid var(--outline-variant); cursor: pointer; }
+.shWorkspaceGroupMembers { margin-top: 12px; }
+.shWorkspaceGroupMembers > label { display: grid; min-height: 56px; grid-template-columns: 18px 32px minmax(0, 1fr); align-items: center; gap: 10px; cursor: pointer; }
 .shWorkspaceGroupMembers > label > span:last-child { display: grid; gap: 2px; }
 .shWorkspaceGroupMembers strong { font-size: 12px; }
 .shWorkspaceGroupMembers small { color: var(--process-text); font-size: 10px; }
@@ -591,27 +590,21 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceAgentEmpty > div { display: flex; gap: 8px; }
 
 .shRow.isActive { background: color-mix(in srgb, var(--on-surface) 5.5%, transparent); }
-.shTrashPopover { position: fixed; z-index: 80; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: 12px; background: var(--surface-color); box-shadow: 0 10px 32px rgba(0, 0, 0, .12); color: var(--on-surface); font-size: 12px; }
-.shTrashPopover > header { display: flex; min-height: 42px; flex: none; align-items: center; justify-content: space-between; padding: 6px 10px 2px 14px; }
-.shTrashPopover > header > span { display: flex; align-items: center; gap: 8px; }
-.shTrashPopover > header strong { font-size: 12px; font-weight: 600; }
-.shTrashPopover > header svg { width: 15px; height: 15px; color: var(--process-text); }
-.shTrashPopover > header button { display: grid; width: 26px; height: 26px; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; cursor: pointer; }
-.shTrashPopover > header button:hover { background: var(--surface-variant); }
-.shTrashTools { display: grid; flex: none; gap: 12px; padding: 8px 12px 12px; border-bottom: 1px solid var(--outline-variant); }
+.shTrashPage { min-width: 0; color: var(--on-surface); font-size: 14px; }
+.shTrashTools { display: grid; flex: none; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--outline-variant); }
 .shTrashSearch { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 0 9px; border: 1px solid transparent; border-radius: 7px; background: var(--surface-variant); }
 .shTrashSearch > svg { width: 14px; height: 14px; flex: none; color: var(--process-text); }
 .shTrashSearch > input { min-width: 0; width: 100%; height: 32px; border: 0; outline: 0; background: transparent; color: var(--on-surface); padding: 0; font: inherit; }
 .shTrashSearch:focus-within { border-color: var(--outline-variant); background: var(--surface-color); }
 .shTrashFilters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 9px 10px; }
 .shTrashFilters > label { display: grid; position: relative; min-width: 0; gap: 4px; }
-.shTrashFilters > label > span { padding-left: 1px; color: var(--process-text); font-size: 10px; }
-.shTrashFilters select { appearance: none; width: 100%; min-width: 0; height: 29px; border: 1px solid transparent; border-radius: 6px; background: var(--surface-variant); color: var(--process-text); padding: 0 23px 0 8px; font: inherit; font-size: 11px; text-overflow: ellipsis; cursor: pointer; }
+.shTrashFilters > label > span { padding-left: 1px; color: var(--process-text); font-size: 12px; }
+.shTrashFilters select { appearance: none; width: 100%; min-width: 0; height: 29px; border: 1px solid transparent; border-radius: 6px; background: var(--surface-variant); color: var(--process-text); padding: 0 23px 0 8px; font: inherit; font-size: 12px; text-overflow: ellipsis; cursor: pointer; }
 .shTrashFilters > label > svg { position: absolute; right: 7px; bottom: 8px; width: 12px; height: 12px; pointer-events: none; color: var(--process-text); }
 .shTrashFilters > label[data-active="true"] select { border-color: var(--outline-variant); background: var(--surface-color); color: var(--on-surface); }
-.shTrashFilters select:focus-visible, .shTrashPopover > header button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
-.shTrashPopoverBody { min-height: 0; overflow-y: auto; padding: 6px; }
-.shTrashPopover > footer { flex: none; padding: 7px 13px 10px; color: var(--process-text); font-size: 10px; line-height: 1.5; }
+.shTrashFilters select:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+.shTrashPopoverBody { min-height: 0; padding: 6px 0; }
+.shTrashPage > footer { padding: 7px 0 10px; color: var(--process-text); font-size: 12px; }
 .shTrashLoading { display: flex; min-height: 96px; align-items: center; justify-content: center; gap: 7px; color: var(--process-text); }
 .shTrashLoading svg { width: 14px; }
 .shTrashSection { margin: 0; }
@@ -622,7 +615,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shTrashOpenRow > svg, .shTrashFolderToggle > svg { flex: none; color: var(--process-text); }
 .shTrashOpenRow > span, .shTrashFolderToggle > span { display: grid; min-width: 0; }
 .shTrashOpenRow strong, .shTrashFolderToggle strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.shTrashOpenRow small, .shTrashFolderToggle small { color: var(--process-text); }
+.shTrashOpenRow small, .shTrashFolderToggle small { color: var(--process-text); font-size: 12px; }
 .shTrashActions { display: flex; flex: none; padding-right: 5px; opacity: .6; }
 .shTrashRow:hover .shTrashActions, .shTrashActions:focus-within { opacity: 1; }
 .shTrashActions button, .shTrashChild > button { display: grid; width: 27px; height: 27px; place-items: center; border: 0; border-radius: 5px; background: transparent; color: var(--process-text); }
@@ -642,19 +635,40 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shTrashAllEmpty > svg { width: 22px; height: 22px; opacity: .65; }
 .shTrashAllEmpty > p { margin: 0; font-size: 12px; }
 .shDeletedTopbar a { display: inline-flex; align-items: center; gap: 5px; color: var(--on-surface); text-decoration: none; }
-.shTrashHistory { height: calc(100vh - 98px); }
-.shTrashHistory .workspaceAgentRunList { height: 100%; }
+.shDeletedSessionPage { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.shDeletedTopbar { min-height: 44px; height: auto; flex-wrap: wrap; }
+.shDeletedActions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-inline-start: auto; }
+.shDeletedActions button { display: inline-flex; align-items: center; gap: 5px; }
+.shDeletedActions svg { width: 13px; }
+.shTrashHistory { display: flex; flex-direction: column; min-height: 0; }
+.shTrashHistory .workspaceAgentRunList { flex: 1; min-height: 0; }
+.shTrashReadError { align-self: center; margin: 4px 12px; color: var(--process-text); font-size: 12px; }
 .libraryAgentChoices { display: grid; gap: 6px; }
-.libraryAgentChoices button { min-height: 40px; border: 1px solid var(--outline-variant); border-radius: 8px; background: var(--surface-color); text-align: left; padding: 0 12px; }
+.libraryAgentChoices button { min-height: 40px; border: 0; border-radius: 8px; background: var(--surface-container); text-align: left; padding: 0 12px; }
 
 @media (max-width: 760px) {
   .workspaceSidebar.shSidebar { display: grid; width: 100%; min-width: 0; min-height: 91px; height: 91px; grid-template-columns: 1fr; grid-template-rows: 44px 47px; padding: 0 7px; }
   .shSidebar .shWs { grid-row: 1; margin: 5px 1px; }
-  .shSidebar .shTabs { grid-row: 2; margin: 0 1px; }
-  .shSidebar .shScroll, .shSidebar .shSidebarNewChat { display: none; }
-  .shShellPage { display: block; overflow-y: auto; }
-  .shShellPage > .shSidebar { display: none; }
-  .shMain { min-height: 100vh; }
+  .shSidebar .shPrimaryNav { display: flex; grid-row: 2; align-items: center; gap: 4px; margin: 0 1px; }
+  .shSidebar .shPrimaryNav .shRow { width: auto; min-height: 36px; }
+  .shSidebar .shScroll { display: none; }
+  .workspaceDrawer { position: fixed; inset: 0 auto 0 0; width: min(300px, calc(100% - 40px)); max-width: none; height: 100dvh; max-height: none; margin: 0; padding: 0; border: 0; background: var(--workspace-rail); color: var(--on-surface); overflow: visible; }
+  .workspaceDrawer::backdrop { background: rgb(0 0 0 / 32%); }
+  .workspaceDrawer .shSidebar { display: flex; width: 100%; height: 100%; }
+  .workspaceDrawer .shWs { margin-top: max(16px, env(safe-area-inset-top)); }
+  .workspaceDrawer .shPrimaryNav { display: grid; margin: 4px 1px; }
+  .workspaceDrawer .shScroll { display: block; }
+  .workspaceDrawer .workspaceSessionList { display: grid; }
+  .workspaceDrawer .workspaceSessionRow { width: 100%; }
+  .workspaceTopbar .workspacePanelToggle { width: 40px; height: 40px; }
+  .workspaceTopbar .workspaceConversationActions .workspacePanelToggle { width: 32px; }
+  .workspaceWorkbench.isBrowsing > .workspaceTopbar { display: flex; border-bottom: 1px solid var(--workspace-frame-edge); }
+  .workspaceWorkbench.isSearching > .workspaceTopbar { display: none; }
+  .shSearchInputRow input { font-size: 16px; }
+  .shShellPage, .shShellPage.isSidebarClosed { display: block; overflow-y: auto; padding: 0; }
+  .shShellPage > .shSidebar { height: 91px; border-bottom: 1px solid var(--workspace-frame-edge); }
+  .shShellPage.isSidebarClosed > .shSidebar { display: none; }
+  .shMain { min-height: 100dvh; border: 0; border-radius: 0; }
   .shPageHead, .shPageBody, .shAgentPage { width: calc(100% - 32px); }
   .shPageHead { padding-top: 28px; }
   .shLibraryTools { align-items: stretch; flex-direction: column; }
@@ -665,20 +679,20 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
   .shAgentCreate { width: calc(100vw - 20px); max-height: calc(100vh - 20px); padding: 48px 22px 22px; }
   .shAgentHeroMark { width: 92px; height: 92px; border-radius: 20px !important; }
   .shSoulCardAction { width: 28px; overflow: hidden; white-space: nowrap; }
-  .shSearchBackdrop { padding: 10px; }
-  .shSearchDialog { height: calc(100vh - 20px); }
+  .workspaceWorkbench.isSearching > :is(.workspaceTopbar, .workspaceChatColumn, .workspaceContextPanel, .workspaceCatalog) { display: none; }
+  .workspaceCatalog { flex: 1; border-radius: 0; }
+  .workspaceWorkbench > .workspaceSearchPanel { flex: 1; border: 0; border-radius: 0; }
+  .shMain.isSearching { display: none; }
+  .shShellPage > .workspaceSearchPanel { height: calc(100dvh - 91px); border: 0; border-radius: 0; }
+  .shShellPage.isSidebarClosed > .workspaceSearchPanel { height: 100dvh; }
   .shPrivateCreateBackdrop { padding: 10px; }
   .shPrivateCreateDialog { width: calc(100vw - 20px); height: calc(100vh - 20px); }
   .shPrivateCreateHeader { grid-template-columns: minmax(0, 1fr); height: auto; gap: 10px; padding: 12px; }
   .shPrivateCreateHeader > label { grid-column: 1; width: 100%; }
   .shPrivateCreateContent { width: calc(100% - 24px); }
   .shPrivateCreateQuick, .shPrivateTemplateGrid { grid-template-columns: 1fr; }
-  .shSearchBody { grid-template-columns: 1fr; }
-  .shSearchPreview { display: none; }
-  .shSearchResults { border-right: 0; }
   .shDeletedPage { width: calc(100% - 32px); padding-top: 44px; }
   .shWorkspaceHome { width: calc(100% - 32px); }
-  .shTrashPopover { top: auto; right: 10px; bottom: 10px; left: 10px; width: auto; max-height: calc(100vh - 20px); }
   .shWorkspaceSettingsPage { width: calc(100% - 32px); padding-top: 28px; }
   .shWorkspaceSettingsHeader { align-items: flex-start; flex-direction: column; }
   .shWorkspaceSettingsTabs { overflow-x: auto; }

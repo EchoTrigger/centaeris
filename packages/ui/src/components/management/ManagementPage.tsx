@@ -25,7 +25,7 @@ export function ManagementBack({ children, onClick, disabled }: { children: Reac
   return <Button variant="ghost" size="sm" className="dmBack" onClick={onClick} disabled={disabled}><ArrowLeft aria-hidden="true" />{children}</Button>;
 }
 export function ManagementError({ children, onRetry, retryLabel = "Retry" }: { children: ReactNode; onRetry?: () => void; retryLabel?: string }) {
-  return <div className="dmError" role="alert"><CircleAlert size={16} aria-hidden="true" /><div>{children}</div>{onRetry ? <Button variant="outline" size="sm" onClick={onRetry}>{retryLabel}</Button> : null}</div>;
+  return <div className="dmError" role="alert"><CircleAlert size={16} aria-hidden="true" /><div>{children}</div>{onRetry ? <Button variant="ghost" size="sm" onClick={onRetry}>{retryLabel}</Button> : null}</div>;
 }
 export function ManagementLoading({ children }: { children: ReactNode }) {
   return <p className="dmLoading" role="status"><LoaderCircle size={16} className="dmSpinner" aria-hidden="true" />{children}</p>;

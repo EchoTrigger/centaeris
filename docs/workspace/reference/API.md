@@ -1,5 +1,149 @@
 # Workspace API
 
+## Agent Run API
+
+Workspace owners and administrators manage API credentials through
+session-authenticated `GET` and `POST /api/workspaces/{workspaceId}/api-credentials`
+and `DELETE /api/workspaces/{workspaceId}/api-credentials/{credentialId}`.
+Creation requires `name` and `modelConfigRef`. `pluginNames` and `sourceObjectRefs`
+are optional and default to empty scopes. Each credential binds the issuing
+membership, Workspace, model configuration and explicit plugin and material scopes.
+
+Lists return metadata and `canCopy`. The issuer can retrieve the secret through
+`GET /api/workspaces/{workspaceId}/api-credentials/{credentialId}/secret` when
+the credential still authorizes execution. The response uses `Cache-Control: no-store`.
+Secrets issued before this feature are available only to callers who saved them.
+If creation times out, check the list before trying again.
+
+Deletion returns `204`, permanently removes the credential and invalidates its
+secret. Active runs are cancelled through the lifecycle reconciler. Internal
+operations needed for cleanup are erased once cleanup completes. Routine
+rotation settles and saves results before deletion. Delete a compromised
+credential immediately.
+
+New API keys use the prefix `app-` and 24 random letters or digits.
+Previously issued keys continue to work. External callers send the complete key in `Authorization: Bearer <secret>`.
+`POST /api/v1/agent/execute` accepts a required `prompt` and optional sorted, unique
+`sourceObjectRefs` selected from the credential's current material scope. Its
+required `Idempotency-Key` has the form `<Unix-seconds>.<UUIDv4>`. The key is valid
+for 24 hours from its embedded timestamp, with at most five minutes of future clock
+skew. Unknown fields and query parameters are rejected. Acceptance atomically
+records the Run and receipt, then schedules the existing Runtime lifecycle.
+
+Inspect `Content-Type` before parsing: a new accepted POST returns
+`200 text/event-stream`; repeating an already accepted operation with the same
+credential, key and input returns `200 application/json` containing only its
+current receipt. A same-key retry after an uncommitted attempt can still be the
+first accepted call and return SSE.
+`Accept` does not select a response mode. HTTP `200` is not proof that the Run or
+delivery completed. An accepted new call streams the following sequence.
+
+1. `runAccepted` provides `operationId`, `runId`, `acceptedAt`, `deadlineAt`,
+   `expiresAt`, `runStatus`, and `cleanupStatus`.
+2. `runProgress` provides `runId` and a `stage` of `queued`, `running`, or
+   `delivering`. Comment frames keep idle connections active.
+3. `outputText` provides committed assistant text in ordered `text` chunks
+   after execution reaches a terminal state; it is not a live token stream.
+   A failed or cancelled Run may contain only the last partial assistant response.
+4. Each artifact starts with `artifactStarted`, followed by indexed
+   `artifactChunk` frames containing Base64 `data`, then `artifactCompleted` or
+   `artifactFailed`. Start and completion metadata include `artifactId`,
+   `filename`, `contentType`, `sizeBytes`, and `sha256`. Completion also includes
+   `chunkCount`. Artifact chunks are numbered from zero. Verify length and SHA-256
+   before publishing the received file locally. Completion metadata must match
+   the start event. Keep partial files separate and never replace an existing
+   caller file. A failed artifact can be followed by other valid artifacts;
+   retain verified files while reporting the overall delivery failure.
+5. `runFinished` separately reports `runStatus` and `deliveryStatus`. The Run may
+   succeed while file delivery fails. A lost terminal frame leaves the caller's
+   observation uncertain.
+
+Each file is limited to 8 MiB, each Run to 16 MiB of raw artifact bytes and four
+artifacts. Execution has a ten-minute deadline from acceptance, including queue
+time. Terminal output delivery is bounded to 60 seconds. Connection loss closes
+delivery while the original Run continues. Explicit cancellation uses
+`POST /api/v1/agent/executions/{runId}/cancel` with an empty body. A `202` response records
+the request, while a `200` response reports an existing terminal state. Query the
+original operation to confirm cancellation; completion may win the race.
+Cancellation does not undo external side effects.
+
+For an already accepted operation, the same key and input return its minimal
+JSON receipt. Changed input returns `409 operation_conflict`. Callers can inspect the original identity with
+`GET /api/v1/agent/operations/{operationId}`. This endpoint returns receipt and
+status fields, including a known terminal `reasonCode`. Text and files are
+delivered only through the original response. An expired key returns
+`410 operation_expired` even after its receipt has been erased. Timeouts, proxy
+failures, and response loss require checking or resubmitting the same identity.
+The Core tool-execution intent and receipt determine recovery of uncertain
+side effects. Deduplication applies to Run acceptance within one credential's
+scope, not exactly-once external plugin effects or identities across key rotation.
+The request fingerprint uses the trimmed prompt and validated material IDs.
+
+Persist the original endpoint, credential reference, operation ID and request
+body before POST, and retain the Run ID and receipt timestamps after acceptance.
+Use the same credential for lookup. A `404` immediately after a timed-out submit
+can precede acceptance and is not proof that retrying with a new key is safe.
+For an intentional submit retry, reuse the original key and request body. Never
+change a timestamp or generate a new key merely to recover a lost response.
+
+The client's wait, execution deadline, delivery lease and receipt expiry are
+separate boundaries. `expiresAt` is not a result-download deadline. Generate a
+key immediately before its first use: a nearly expired unused key can currently
+be accepted even when its lookup window ends before the Run's deadline. Proposed
+changes to this and to recoverable results are recorded separately in the
+[Agent Run API design](../architecture/AgentRunAPI.md).
+
+Agent Run API execution uses a private temporary Session, a signed v3 execution policy,
+`perRun` allocation, disabled human questions, and explicit credential scopes.
+Personal-library access is disabled. Artifact publication verifies the existing
+publication identity and bytes into temporary Run-owned storage. After terminal
+execution, settled physical cleanup and Host retirement, and closed or expired
+delivery, the collector erases execution content, temporary files, snapshots,
+authorization, and private Session records. The minimal receipt remains until
+its key expires. Immutable physical-cleanup provenance remains available to the
+Runtime's control contracts.
+
+Run the backend example with `CENTAERIS_RUN_KEY` set in the caller's environment.
+Save the operation identity printed before network access. The example verifies
+artifact bytes and atomically creates each destination file.
+
+```sh
+python scripts/workspace/agent_run_client.py \
+  --url https://workspace.example \
+  --prompt 'Generate an editable Word project brief and publish the final docx.' \
+  --output ./received
+```
+
+Inspect an uncertain call without submitting another Run:
+
+```sh
+python scripts/workspace/agent_run_client.py \
+  --url https://workspace.example \
+  --status --operation-id '<original-operation-id>'
+```
+
+Submission exits `0` only after complete successful delivery, `2` when it receives
+a JSON receipt without output, and `1` for transport, protocol or delivery
+failure. `--status` exits `0` for a successful lookup; inspect `runStatus`
+separately. If deliberately retrying a submit, use the original `--operation-id`,
+prompt and credential. No retry resumes a lost original stream.
+
+In Workspace Web, **Settings → Developer** provides the API address, credential
+management and a minimal request example in cURL and Node.js. Quickstart adds
+a saved first request and status lookup for both choices.
+The **Docs** tab bundles the integration guides and the generated request,
+response and event fields with that Web build. The quickstart explains the
+first-call and original-operation status examples. The first-call example saves
+request identity before sending and refuses to overwrite an existing request directory.
+The artifacts guide owns the Word example and file-verification instructions.
+Link directly to a page using its URL, for example
+`/w/{workspaceId}/settings/developer?view=docs&topic=events`.
+After changing the public wire definitions, regenerate the reference with
+`uv run --frozen --package api python scripts/workspace/agent-run-api-reference.py`.
+The generated reference includes required headers, response media types and the
+condition for each success response. Human guides explain recovery policy; they
+must not present a receipt as output or invent a result-replay endpoint.
+
 This document owns only Workspace transports. Exact fields are enforced by the
 Django and Rust definitions in this repository.
 
@@ -35,6 +179,42 @@ Historical Host details remain stored JSON facts; the durable tool error retains
 the canonical `sandbox_unavailable` category for receipt recovery. Old results
 are not replayed or rewritten. Container selection and authorization checks are
 unchanged; nono is not introduced into hosted execution.
+
+### Conversation messages and reset
+
+`POST /api/v1/agent/messages` accepts the same prompt, material references and
+headers as `/execute`, with an optional `conversationId`. The first message
+creates a credential-owned conversation. Save the ID from `runAccepted` or the
+operation receipt. Supply that ID to continue with a new operation key, or omit
+it to start a new conversation. Output uses the original SSE response.
+
+`POST /api/v1/agent/conversations/{conversationId}/close` takes an empty body
+and returns `conversationId` and `closedAt`. Repeating a close preserves the
+timestamp until the next accepted message. The run and delivery have their own
+lifecycles.
+
+Workspace owners and administrators can set `resetPolicy` when creating a key
+or by sending `PATCH /api/workspaces/{workspaceId}/api-credentials/{credentialId}`
+with `{"resetPolicy":"onReopen"}`. The supported values are `never` (the
+default), `onReopen`, `after10Minutes`, `after15Minutes`, `after30Minutes`,
+and `after60Minutes`. The current policy applies when a new message arrives after
+an explicit close. Before the threshold, the original conversation resumes. At
+or after the threshold, the accepted message starts a fresh conversation and
+returns its new ID. A competing request for the superseded ID receives
+`409 conversation_reset` with the replacement `conversationId`. An accepted
+operation replay returns the original IDs.
+
+Allow the preceding run and workspace release to finish before continuing the
+same conversation. On `session_has_active_agent_run` or
+`session_workspace_preservation_pending`, wait and retry the same request. Use
+the original credential for messages, close, receipt lookup and cancellation.
+An unrelated credential receives `404` for the conversation.
+
+The service keeps the private context for resumable conversations and reports
+`cleanupStatus: retained`. Context reclamation starts after replacement or
+credential deletion and waits for every run, release and delivery in that
+conversation. Operation lookup remains subject to the original key's expiry.
+Conversation IDs do not provide transcript or artifact retrieval.
 
 ## Workspace and Session resources
 
@@ -232,12 +412,11 @@ HTTP request. On local POSIX storage an already opened authorized download can
 finish after the file name is reclaimed. The collector only considers permanently
 purged Sessions, so restorable trash retains its files.
 
-`GET /api/workspaces/{workspaceId}/trash` orders entries by deletion time
-descending, then kind and ID ascending. ID ordering and cursor comparisons use
-PostgreSQL `C` collation, matching the Python merge independently of the database
-default locale. IDs are tie-breakers, not timestamps. Each kind contributes at
-most 51 candidates and the response contains at most 50 entries. Permissions,
-filters, and cursor fields are unchanged by the choice of database locale.
+`GET /api/workspaces/{workspaceId}/trash` lists the caller’s deleted private
+library files, images, and saved artifacts. It orders entries by deletion time
+descending, then ID ascending using PostgreSQL `C` collation. Each response
+contains at most 50 entries. Session deletion marks the Session permanently
+deleted and makes its workspace file tree eligible for the existing collector.
 
 ## Transcript page and committed patch reads
 

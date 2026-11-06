@@ -25,8 +25,8 @@
 .dmStatus[data-tone=success] { color:var(--process-text); }
 .dmStatus[data-tone=warning] { color:var(--warning); }
 .dmStatus[data-tone=error] { color:var(--error); }
-.dmError { display:flex; align-items:flex-start; gap:10px; margin-block:16px; padding:12px; border:1px solid color-mix(in srgb,var(--error) 25%,transparent); border-radius:8px; color:var(--error); font-size:12px; line-height:1.6; }
-.dmError > svg { flex-shrink:0; margin-top:2px; }.dmError > div { flex:1; min-width:0; overflow-wrap:anywhere; }
+.dmError { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-block:8px; color:var(--process-text); font-size:12px; line-height:1.6; }
+.dmError > svg { flex-shrink:0; }.dmError > div { min-width:0; overflow-wrap:anywhere; }
 .dmLoading { display:flex; align-items:center; gap:9px; color:var(--process-text); padding-block:14px; font-size:12px; }
 .dmSpinner { animation:dmSpin 1s linear infinite; } @keyframes dmSpin { to { transform:rotate(360deg); } }
 .dmEmpty { padding:42px 16px; text-align:center; }.dmEmpty h2 { margin:0; font-size:15px; font-weight:550; }.dmEmpty p { max-width:55ch; margin:8px auto 18px; color:var(--process-text); font-size:13px; line-height:1.6; }

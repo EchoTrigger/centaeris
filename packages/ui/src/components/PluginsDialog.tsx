@@ -5,7 +5,6 @@ import { Button } from "./ui/button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ManagementBack, ManagementEmpty, ManagementError, ManagementFilter, ManagementHeader, ManagementLoading, ManagementSearch, ManagementStatus, ManagementToggle } from "./management/ManagementPage";
 
-const message = (error: unknown) => error instanceof Error ? error.message : String(error || "Plugin request failed");
 function pluginStatus(item: PluginDescriptorV1) {
   return item.errors.length ? "Needs attention" : item.enabled ? "Enabled" : "Disabled";
 }
@@ -40,7 +39,10 @@ export function PluginsDialog({ selectedPluginId, onSelect }: { selectedPluginId
       const result = await listPlugins();
       if (epoch === owner.current && request === listRequest.current) setItems(result);
     } catch (error) {
-      if (epoch === owner.current && request === listRequest.current) setCatalogError(message(error));
+      if (epoch === owner.current && request === listRequest.current) {
+        console.error("Desktop plugin catalog request failed", error);
+        setCatalogError("Unable to refresh plugins.");
+      }
     } finally { if (epoch === owner.current && request === listRequest.current) setLoading(false); }
   }, []);
   const loadDetail = useCallback(async (id: string) => {
@@ -50,7 +52,10 @@ export function PluginsDialog({ selectedPluginId, onSelect }: { selectedPluginId
       const result = await getPluginDetail({ id });
       if (epoch === owner.current && request === detailRequest.current) setDetail(result);
     } catch (error) {
-      if (epoch === owner.current && request === detailRequest.current) setDetailError(message(error));
+      if (epoch === owner.current && request === detailRequest.current) {
+        console.error("Desktop plugin detail request failed", error);
+        setDetailError("Unable to load plugin details.");
+      }
     } finally { if (epoch === owner.current && request === detailRequest.current) setDetailLoading(false); }
   }, []);
   useEffect(() => {
@@ -69,7 +74,12 @@ export function PluginsDialog({ selectedPluginId, onSelect }: { selectedPluginId
     const navigation = navigationOwner.current;
     const isCurrent = () => epoch === owner.current;
     try { await action(isCurrent); }
-    catch (error) { if (isCurrent() && navigation === navigationOwner.current) setActionError(message(error)); }
+    catch (error) {
+      if (isCurrent() && navigation === navigationOwner.current) {
+        console.error("Desktop plugin operation failed", error);
+        setActionError("The plugin action could not be completed. Try again.");
+      }
+    }
     finally { busy.current = false; if (isCurrent()) setPending(""); }
   };
   const install = () => {
@@ -124,27 +134,27 @@ export function PluginsDialog({ selectedPluginId, onSelect }: { selectedPluginId
       <ManagementBack onClick={() => select("")}>Back to plugins</ManagementBack>
       <ManagementHeader focusOnNavigation={focusOnNavigation} title={selectedItem?.name ?? "Plugin"} description={selectedItem?.description}
         actions={selectedItem ? <ManagementToggle checked={selectedItem.enabled} disabled={Boolean(pending)} label={selectedItem.enabled ? "Disable plugin" : "Enable plugin"} onChange={() => void toggle(selectedItem)} /> : null} />
-      {actionError ? <ManagementError>{actionError}</ManagementError> : null}
-      {notice ? <p className="dmNotice" role="status">{notice}</p> : null}
-      {detailError ? <ManagementError onRetry={() => void loadDetail(selectedId)}>Unable to load plugin details. {detailError}</ManagementError> : null}
       {selectedItem ? <>
         <div className="dmMeta"><ManagementStatus tone={selectedItem.errors.length ? "warning" : selectedItem.enabled ? "success" : "neutral"}>{pluginStatus(selectedItem)}</ManagementStatus><span>{selectedItem.source}</span>{selectedItem.version ? <span>Version {selectedItem.version}</span> : null}</div>
         <div className="dmActions"><Button variant="outline" disabled={Boolean(pending)} onClick={() => void reveal(selectedItem)}><FolderOpen />Show in folder</Button>{selectedItem.source === "managed" ? <Button variant="destructive" disabled={Boolean(pending)} onClick={() => setRemoving(selectedItem)}><Trash2 />Remove plugin</Button> : null}</div>
-        {selectedItem.errors.map(error => <ManagementError key={error}>{error}</ManagementError>)}
+        {actionError ? <ManagementError>{actionError}</ManagementError> : null}
+        {notice ? <p className="dmNotice" role="status">{notice}</p> : null}
+        {selectedItem.errors.length ? <ManagementError>This plugin needs attention. Check its configuration.</ManagementError> : null}
         {detailLoading ? <ManagementLoading>Loading plugin details…</ManagementLoading> : null}
         {selectedDetail ? <PluginCapabilities detail={selectedDetail} /> : null}
         <section className="dmSection"><h2>Information</h2><dl className="dmFacts"><div><dt>Source</dt><dd>{selectedItem.source}</dd></div><div><dt>Location</dt><dd>{selectedItem.path}</dd></div>{selectedItem.manifestPath ? <div><dt>Manifest</dt><dd>{selectedItem.manifestPath}</dd></div> : null}<div><dt>Activation</dt><dd>{selectedItem.activationStatus}</dd></div>{selectedItem.scopes.length ? <div><dt>Scopes</dt><dd>{selectedItem.scopes.join(", ")}</dd></div> : null}</dl></section>
       </> : detailLoading || loading ? <ManagementLoading>Loading plugin…</ManagementLoading> : !detailError ? <ManagementEmpty title="Plugin is unavailable" action={<Button variant="ghost" onClick={() => void load(true)}>Refresh plugins</Button>} /> : null}
+      {detailError ? <ManagementError onRetry={() => void loadDetail(selectedId)}>{detailError}</ManagementError> : null}
     </> : <>
       <ManagementHeader focusOnNavigation={focusOnNavigation} title="Plugins" actions={<><Button variant="ghost" size="icon-sm" aria-label="Reload plugins" disabled={loading || Boolean(pending)} onClick={() => void load(true)}><RefreshCw /></Button><Button variant="outline" disabled={Boolean(pending)} onClick={() => void install()}><Plus />{pending === "install" ? "Installing…" : "Install plugin"}</Button></>} />
       <div className="dmToolbar"><ManagementSearch label="Search plugins" value={query} onChange={setQuery} /><ManagementFilter label="Plugin status" value={filter} onChange={setFilter} options={[["all", "All statuses"], ["enabled", "Enabled"], ["disabled", "Disabled"], ["attention", "Needs attention"]]} /></div>
-      {catalogError ? <ManagementError onRetry={() => void load(true)}>Unable to refresh plugins. {catalogError}</ManagementError> : null}
       {actionError ? <ManagementError>{actionError}</ManagementError> : null}
       {notice ? <p className="dmNotice" role="status">{notice}</p> : null}
       {loading ? <ManagementLoading>{items.length ? "Refreshing plugins…" : "Loading plugins…"}</ManagementLoading> : null}
       {visible.length ? <div className="dmList" aria-label="Installed plugins" aria-busy={loading}>{visible.map(item => <Button variant="ghost" key={item.id} className="dmRow" aria-label={`Open ${item.name}`} onClick={() => select(item.id)}><span className="dmRowIcon"><Blocks /></span><span className="dmRowCopy"><strong>{item.name}</strong><small>{item.description || item.source}</small></span><span className="dmRowEnd"><ManagementStatus tone={item.errors.length ? "warning" : item.enabled ? "success" : "neutral"}>{pluginStatus(item)}</ManagementStatus><ChevronRight size={15} aria-hidden="true" /></span></Button>)}</div> : !loading && !catalogError ? <ManagementEmpty title={items.length ? "No matching plugins" : "No plugins installed"} action={items.length ? <Button variant="outline" onClick={() => { setQuery(""); setFilter("all"); }}>Clear filters</Button> : <Button variant="outline" disabled={Boolean(pending)} onClick={() => void install()}><Plus />Install plugin</Button>} /> : null}
+      {catalogError ? <ManagementError onRetry={() => void load(true)}>{catalogError}</ManagementError> : null}
     </>}
-    {selectedId && catalogError ? <ManagementError onRetry={() => void load()}>The catalog could not be refreshed. Your current view is kept. {catalogError}</ManagementError> : null}
+    {selectedId && catalogError ? <ManagementError onRetry={() => void load()}>{catalogError}</ManagementError> : null}
     <ConfirmDialog open={Boolean(removing)} title="Remove this plugin?" message={`${removing?.name ?? "This plugin"} and its managed package will be removed.`} onCancel={() => setRemoving(null)} onConfirm={confirmRemove} />
   </main></section>;
 }

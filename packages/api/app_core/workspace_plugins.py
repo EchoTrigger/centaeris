@@ -1,4 +1,4 @@
-"""Workspace installations pin immutable packages alongside the shared catalog."""
+"""Workspace installations pin their packages."""
 
 import os
 import uuid
@@ -11,9 +11,9 @@ from .models import (
     AgentRunAuthorization,
 )
 from .plugin_catalog import (
-    load_plugin_catalog,
     plugin_lifecycle_lock,
     activation_digest,
+    plugin_package_root,
     validate_plugin_activation,
 )
 from .plugin_install_source import discard_staging
@@ -23,19 +23,24 @@ from .workspace_resources import workspace_resource_admin
 
 
 def workspace_plugin_catalog(workspace, *, require_packages=True):
-    packages = {
-        p["name"]: p
-        for p in load_plugin_catalog(require_packages=require_packages)["packages"]
-    }
-    for install in WorkspacePluginInstallation.objects.filter(workspace=workspace):
-        packages[install.plugin_name] = install.package
-    selected = [packages[name] for name in sorted(packages)]
+    installed = WorkspacePluginInstallation.objects.filter(workspace=workspace)
+    selected = [
+        package for _, package in sorted(installed.values_list("plugin_name", "package"))
+    ]
     snapshot = {
         "schema": "plugin_activation_snapshot_v1",
         "digest": activation_digest(selected),
         "packages": selected,
     }
     validate_plugin_activation(snapshot)
+    if require_packages:
+        for package in selected:
+            try:
+                exists = plugin_package_root(package).is_dir()
+            except FileNotFoundError:
+                exists = False
+            if not exists:
+                raise ValueError(f"plugin_package_missing:{package['name']}")
     return snapshot
 
 

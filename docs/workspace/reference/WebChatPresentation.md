@@ -20,7 +20,7 @@ body size; code remains monospaced. Error colors retain their semantic meaning.
 | --- | --- | --- |
 | Hover, disclosure arrows | 140 ms | Color/background or rotation only |
 | Thinking, tools, work process | 180 ms | Height and opacity; reverse from current position |
-| Source preview panel | 240 ms | Opacity and 16 px horizontal displacement |
+| Source preview panel | 240 ms | Motion drives the split width, or the height when stacked |
 | Preview ready content | 150 ms | Fade once when ready content mounts |
 | Sent-message positioning | Existing 320 ms | User scroll interrupts; existing controller unchanged |
 | Streaming prose | Existing at most 120 ms per burst | Durable/history content is not replayed |
@@ -30,9 +30,13 @@ Disclosure initial mounts do not animate. Content mounts only on first opening,
 remains during closure, becomes inert immediately, and unmounts on completion.
 Reversal cancels the previous completion so it cannot remove reopened content.
 The source panel retains an empty inert shell during exit; file content is
-released immediately. The workbench's existing grid/sidebar transition is unchanged.
-Reduced motion settles disclosure immediately and removes panel delays and
-movement animation; existing shimmer and send-scroll reductions remain in effect.
+released immediately. The header spans both panes. An open preview keeps its
+chosen width, and direct resizing updates the split without a tween. While
+reading earlier messages, the transcript anchors a visible paragraph before the
+workbench changes size. The existing disclosure and recovery anchors take
+precedence, and following readers remain on the latest content.
+Reduced motion settles disclosure and panel geometry immediately; existing
+shimmer and send-scroll reductions remain in effect.
 
 ## Automatic folding
 

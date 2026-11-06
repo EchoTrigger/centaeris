@@ -14,6 +14,7 @@ from app_core.models import PresentationChangeOutbox
 from app_core.trash_retention import trash_cutoff
 from app_core.workspace_snapshot_gc import collect_workspace_snapshot_gc
 from app_core.note_history import collect_note_history_gc
+from app_core.agent_run_api_cleanup import collect_agent_run_api_cleanup
 
 
 class Command(BaseCommand):
@@ -35,6 +36,7 @@ class Command(BaseCommand):
         dry_run = options["dry_run"]
         cutoff = timezone.now() - timedelta(seconds=older_than_seconds)
         collectors = [
+            ("Agent Run API execution cleanup", lambda: self.agent_run_api(dry_run)),
             ("Trash expiration", lambda: self.expire(dry_run)),
             ("Note history GC", lambda: self.note_history(dry_run)),
             ("Retired Session storage GC", lambda: self.retired(dry_run)),
@@ -55,6 +57,14 @@ class Command(BaseCommand):
                     failures.append(f"{label} failed for {count} resources")
         if failures:
             raise CommandError("; ".join(failures))
+
+    def agent_run_api(self, dry_run):
+        report = collect_agent_run_api_cleanup(dry_run)
+        self.stdout.write(
+            f"Agent Run API execution cleanup: {len(report.planned)} planned, "
+            f"{len(report.cleaned)} cleaned, {len(report.blocked)} waiting, {len(report.failures)} failed"
+        )
+        return len(report.failures)
 
     def presentation(self, dry_run):
         # This existing low-frequency maintenance path also works without any

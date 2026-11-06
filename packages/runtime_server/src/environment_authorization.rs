@@ -183,6 +183,7 @@ impl EnvironmentAuthorization {
         if self.payload.agent_run_id != authorization.agent_run_id
             || self.payload.session_id != authorization.session_id
             || self.payload.agent_run_authorization_digest != digest
+            || (authorization.execution_policy.is_some() && self.payload.execution_mode != "perRun")
             || key.is_empty()
         {
             return Err("environment_authorization_binding_invalid".into());

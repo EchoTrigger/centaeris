@@ -1,0 +1,545 @@
+{
+  "operations": [
+    {
+      "id": "createRun",
+      "method": "POST",
+      "path": "/api/v1/agent/execute",
+      "requestSchema": "CreateRunRequest",
+      "headers": [
+        {
+          "name": "Authorization",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "Idempotency-Key",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "status": 200,
+          "contentType": "text/event-stream",
+          "condition": "newRun"
+        },
+        {
+          "status": 200,
+          "contentType": "application/json",
+          "schema": "OperationReceipt",
+          "condition": "existingOperation"
+        }
+      ]
+    },
+    {
+      "id": "sendMessage",
+      "method": "POST",
+      "path": "/api/v1/agent/messages",
+      "requestSchema": "SendMessageRequest",
+      "headers": [
+        {
+          "name": "Authorization",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "Idempotency-Key",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "status": 200,
+          "contentType": "text/event-stream",
+          "condition": "newRun"
+        },
+        {
+          "status": 200,
+          "contentType": "application/json",
+          "schema": "OperationReceipt",
+          "condition": "existingOperation"
+        }
+      ]
+    },
+    {
+      "id": "closeConversation",
+      "method": "POST",
+      "path": "/api/v1/agent/conversations/{conversationId}/close",
+      "headers": [
+        {
+          "name": "Authorization",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "emptyBody": true,
+      "responses": [
+        {
+          "status": 200,
+          "contentType": "application/json",
+          "schema": "ClosedConversation"
+        }
+      ]
+    },
+    {
+      "id": "getOperation",
+      "method": "GET",
+      "path": "/api/v1/agent/operations/{operationId}",
+      "headers": [
+        {
+          "name": "Authorization",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responses": [
+        {
+          "status": 200,
+          "contentType": "application/json",
+          "schema": "OperationReceipt",
+          "condition": "statusOnly"
+        }
+      ]
+    },
+    {
+      "id": "cancelRun",
+      "method": "POST",
+      "path": "/api/v1/agent/executions/{runId}/cancel",
+      "headers": [
+        {
+          "name": "Authorization",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "emptyBody": true,
+      "responses": [
+        {
+          "status": 200,
+          "contentType": "application/json",
+          "schema": "OperationReceipt",
+          "condition": "terminal"
+        },
+        {
+          "status": 202,
+          "contentType": "application/json",
+          "schema": "CancellationRequested",
+          "condition": "cancelRequested"
+        }
+      ]
+    }
+  ],
+  "schemas": {
+    "CreateRunRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "prompt": {
+          "maxLength": 131072,
+          "minLength": 1,
+          "title": "Prompt",
+          "type": "string"
+        },
+        "sourceObjectRefs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Sourceobjectrefs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "prompt"
+      ],
+      "title": "CreateRunRequest",
+      "type": "object"
+    },
+    "SendMessageRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "prompt": {
+          "maxLength": 131072,
+          "minLength": 1,
+          "title": "Prompt",
+          "type": "string"
+        },
+        "sourceObjectRefs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Sourceobjectrefs",
+          "type": "array"
+        },
+        "conversationId": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Conversationid"
+        }
+      },
+      "required": [
+        "prompt"
+      ],
+      "title": "SendMessageRequest",
+      "type": "object"
+    },
+    "ClosedConversation": {
+      "properties": {
+        "conversationId": {
+          "title": "Conversationid",
+          "type": "string"
+        },
+        "closedAt": {
+          "format": "date-time",
+          "title": "Closedat",
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversationId",
+        "closedAt"
+      ],
+      "title": "ClosedConversation",
+      "type": "object"
+    },
+    "CancellationRequested": {
+      "properties": {
+        "runId": {
+          "title": "Runid",
+          "type": "string"
+        },
+        "cancelStatus": {
+          "const": "requested",
+          "title": "Cancelstatus",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "cancelStatus"
+      ],
+      "title": "CancellationRequested",
+      "type": "object"
+    },
+    "OperationReceipt": {
+      "properties": {
+        "operationId": {
+          "title": "Operationid",
+          "type": "string"
+        },
+        "runId": {
+          "title": "Runid",
+          "type": "string"
+        },
+        "acceptedAt": {
+          "format": "date-time",
+          "title": "Acceptedat",
+          "type": "string"
+        },
+        "deadlineAt": {
+          "format": "date-time",
+          "title": "Deadlineat",
+          "type": "string"
+        },
+        "expiresAt": {
+          "format": "date-time",
+          "title": "Expiresat",
+          "type": "string"
+        },
+        "runStatus": {
+          "enum": [
+            "queued",
+            "running",
+            "completed",
+            "failed",
+            "cancelled"
+          ],
+          "title": "Runstatus",
+          "type": "string"
+        },
+        "cleanupStatus": {
+          "enum": [
+            "pending",
+            "cleaning",
+            "completed",
+            "failed",
+            "retained"
+          ],
+          "title": "Cleanupstatus",
+          "type": "string"
+        },
+        "conversationId": {
+          "title": "Conversationid",
+          "type": "string"
+        },
+        "reasonCode": {
+          "title": "Reasoncode",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operationId",
+        "runId",
+        "acceptedAt",
+        "deadlineAt",
+        "expiresAt",
+        "runStatus",
+        "cleanupStatus"
+      ],
+      "title": "OperationReceipt",
+      "type": "object"
+    },
+    "RunProgress": {
+      "properties": {
+        "runId": {
+          "title": "Runid",
+          "type": "string"
+        },
+        "stage": {
+          "enum": [
+            "queued",
+            "running",
+            "delivering"
+          ],
+          "title": "Stage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "stage"
+      ],
+      "title": "RunProgress",
+      "type": "object"
+    },
+    "OutputText": {
+      "properties": {
+        "runId": {
+          "title": "Runid",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "text"
+      ],
+      "title": "OutputText",
+      "type": "object"
+    },
+    "ArtifactStarted": {
+      "properties": {
+        "artifactId": {
+          "title": "Artifactid",
+          "type": "string"
+        },
+        "filename": {
+          "title": "Filename",
+          "type": "string"
+        },
+        "contentType": {
+          "title": "Contenttype",
+          "type": "string"
+        },
+        "sizeBytes": {
+          "minimum": 0,
+          "title": "Sizebytes",
+          "type": "integer"
+        },
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "filename",
+        "contentType",
+        "sizeBytes",
+        "sha256"
+      ],
+      "title": "ArtifactStarted",
+      "type": "object"
+    },
+    "ArtifactChunk": {
+      "properties": {
+        "artifactId": {
+          "title": "Artifactid",
+          "type": "string"
+        },
+        "index": {
+          "minimum": 0,
+          "title": "Index",
+          "type": "integer"
+        },
+        "data": {
+          "contentEncoding": "base64",
+          "title": "Data",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "index",
+        "data"
+      ],
+      "title": "ArtifactChunk",
+      "type": "object"
+    },
+    "ArtifactCompleted": {
+      "properties": {
+        "artifactId": {
+          "title": "Artifactid",
+          "type": "string"
+        },
+        "filename": {
+          "title": "Filename",
+          "type": "string"
+        },
+        "contentType": {
+          "title": "Contenttype",
+          "type": "string"
+        },
+        "sizeBytes": {
+          "minimum": 0,
+          "title": "Sizebytes",
+          "type": "integer"
+        },
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        },
+        "chunkCount": {
+          "minimum": 0,
+          "title": "Chunkcount",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "artifactId",
+        "filename",
+        "contentType",
+        "sizeBytes",
+        "sha256",
+        "chunkCount"
+      ],
+      "title": "ArtifactCompleted",
+      "type": "object"
+    },
+    "ArtifactFailed": {
+      "properties": {
+        "artifactId": {
+          "title": "Artifactid",
+          "type": "string"
+        },
+        "error": {
+          "const": "artifact_delivery_failed",
+          "title": "Error",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifactId",
+        "error"
+      ],
+      "title": "ArtifactFailed",
+      "type": "object"
+    },
+    "RunFinished": {
+      "properties": {
+        "runId": {
+          "title": "Runid",
+          "type": "string"
+        },
+        "runStatus": {
+          "enum": [
+            "completed",
+            "failed",
+            "cancelled"
+          ],
+          "title": "Runstatus",
+          "type": "string"
+        },
+        "deliveryStatus": {
+          "enum": [
+            "completed",
+            "failed"
+          ],
+          "title": "Deliverystatus",
+          "type": "string"
+        },
+        "reasonCode": {
+          "title": "Reasoncode",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "runStatus",
+        "deliveryStatus"
+      ],
+      "title": "RunFinished",
+      "type": "object"
+    }
+  },
+  "events": [
+    {
+      "name": "runAccepted",
+      "schema": "OperationReceipt"
+    },
+    {
+      "name": "runProgress",
+      "schema": "RunProgress"
+    },
+    {
+      "name": "outputText",
+      "schema": "OutputText"
+    },
+    {
+      "name": "artifactStarted",
+      "schema": "ArtifactStarted"
+    },
+    {
+      "name": "artifactChunk",
+      "schema": "ArtifactChunk"
+    },
+    {
+      "name": "artifactCompleted",
+      "schema": "ArtifactCompleted"
+    },
+    {
+      "name": "artifactFailed",
+      "schema": "ArtifactFailed"
+    },
+    {
+      "name": "runFinished",
+      "schema": "RunFinished"
+    }
+  ]
+}
