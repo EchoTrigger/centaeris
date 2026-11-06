@@ -908,23 +908,30 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .workspaceSettingsPlaceholder > span { display: inline-block; border-radius: 5px; background: var(--surface-variant); color: var(--process-text); padding: 3px 7px; font-size: 10px; }
 .workspaceSettingsPlaceholder h1 { margin: 14px 0 7px; color: var(--on-surface); font-size: 30px; }
 .preferenceSettings { width: var(--settings-page-width); margin: 0 auto; padding: var(--settings-page-top) 0 64px; }
-.settingsFormRow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 24px; min-height: 56px; padding: 10px 0; }
-.settingsFormRow + .settingsFormRow { border-top: 1px solid var(--outline-variant); }
-.settingsFormRow > span { color: var(--on-surface); font-size: 14px; font-weight: 500; }
-.settingsFormRow small { display: block; margin-top: 4px; color: var(--process-text); font-size: 12px; font-weight: 400; line-height: 1.5; }
-.settingsFormRow > input { width: min(100%, 320px); height: 36px; border: 1px solid var(--outline-variant); border-radius: 6px; background: var(--surface-color); color: var(--on-surface); padding: 0 10px; font: inherit; font-size: 12px; outline: none; }
-.settingsFormRow > input:focus { border-color: var(--primary-color); box-shadow: 0 0 0 2px rgba(68, 108, 196, .14); }
-.accountSecurityError, .accountSecurityNotice { margin: 8px 0 0; font-size: 12px; line-height: 1.5; }
-.accountSecurityError { color: var(--error); }
-.accountSecurityNotice { color: var(--process-text); }
-.accountSecurityActions { display: flex; justify-content: flex-end; padding-top: 12px; }
-.accountSecurityActions button { min-width: 92px; height: 34px; border: 0; border-radius: 6px; background: var(--solid-surface); color: var(--solid-text); padding: 0 14px; font: inherit; font-size: 11px; font-weight: 600; }
-.accountSecurityActions button:disabled { opacity: .45; cursor: default; }
-.workspaceProfileAvatar.shWsAvatar { width: 44px; height: 44px; font-size: 20px; border-radius: 8px; }
+.settingsEditRow { display: flex; min-height: 54px; align-items: center; justify-content: space-between; gap: 12px; padding-block: 8px; }
+.settingsEditRow + .settingsEditRow { border-top: 1px solid var(--outline-variant); }
+.settingsEditRow > span { color: var(--on-surface); font-size: 14px; font-weight: 500; }
+.settingsEditValue { display: flex; min-width: 0; align-items: center; gap: 6px; color: var(--process-text); font-size: 13px; }
+.settingsEditValue > span { min-width: 0; overflow-wrap: anywhere; text-align: end; }
+.settingsEditIcon { display: grid; width: 30px; height: 30px; flex: none; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--process-text); }
+.settingsEditIcon svg { width: 14px; height: 14px; }
+.settingsEditIcon:hover { background: var(--surface-hover); color: var(--on-surface); }
+.settingsEditButton { min-height: 32px; font-size: 13px; font-weight: 500; }
+.settingsEditNotice { margin: 0; padding: 0 0 12px; color: var(--process-text); font-size: 12px; line-height: 1.5; }
+.themeConfirmDialog.settingsEditDialog { max-height: calc(100dvh - 36px); overflow-y: auto; padding: 20px; border: 0; border-radius: 14px; background: var(--surface-variant); }
+.settingsEditDialog > header { margin-bottom: 16px; }
+.settingsEditDialog > header h2 { font-size: 17px; font-weight: 600; line-height: 30px; }
+.settingsEditDialog form label { color: var(--on-surface); font-size: 13px; font-weight: 500; }
+.settingsEditDialog form input:focus { border-color: var(--primary-color); outline: 1px solid var(--primary-color); }
+.settingsEditDialog form small { color: var(--process-text); font-size: 12px; font-weight: 400; }
+.settingsEditDialog form button { font-size: 13px; font-weight: 500; }
+.settingsEditDialog form button.secondary { background: var(--surface-container); }
+.settingsEditDialog form button.secondary:hover:not(:disabled) { background: var(--surface-hover); }
+.settingsEditDialog form button:disabled { opacity: .45; }
+.settingsEditDialog .settingsEditError { margin: 0; color: var(--error); font-size: 13px; }
+.workspaceProfileAvatar.shWsAvatar { width: 30px; height: 30px; font-size: 14px; border-radius: 6px; }
 .workspaceProfileAvatarActions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.workspaceProfileAvatarActions button { min-height: 34px; border-radius: 6px; font-size: 12px; }
-.workspaceProfileActions { gap: 8px; }
-.workspaceProfileActions button[type="button"] { background: var(--surface-container); color: var(--on-surface); }
+.workspaceProfileAvatarActions .workspaceProfileAvatar { width: 44px; height: 44px; font-size: 20px; border-radius: 8px; }
 .settingsPageHeading { margin-bottom: 28px; }
 .settingsPanel { padding: 16px; border-radius: 9px; background: var(--surface-variant); }
 .settingsPanel + .settingsPanel { margin-top: 16px; }
@@ -1127,7 +1134,9 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .extensionUploadHelp[open] { flex-basis: 100%; }
 .extensionUploadHelp small { display: block; font-size: inherit; }
 .extensionList { margin: 0; list-style: none; }
-.extensionPage .settingsListPanel { gap: 0; }
+.extensionPage .settingsListPanel { gap: 0; padding-block: 4px; }
+.extensionPage .settingsListPanel .managementRowButton:hover:not(:disabled) { background: transparent; }
+.extensionPage .managementRowButton:hover .managementRowEnd svg { color: var(--on-surface); }
 .extensionList > li + li, .extensionPage .settingsListPanel > article + article { border-top: 1px solid var(--outline-variant); }
 .extensionList a { text-decoration: none; }
 .extensionSkillFacts dl { display: grid; gap: 9px; margin: 0; color: var(--process-text); font-size: 13px; }
@@ -1312,7 +1321,6 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
   .librarySkillRow:not(.isHead) { min-height: 0; grid-template-columns: minmax(0, 1fr) auto; gap: 7px 12px; padding: 13px 0; }
   .librarySkillRow:not(.isHead) > span:nth-child(2), .librarySkillRow:not(.isHead) > span:nth-child(3) { grid-column: 1 / -1; }
   .extensionPage { width: calc(100% - 32px); padding-top: 24px; }
-  .settingsFormRow > input { width: 100%; }
   .libraryPreviewBody.libraryNotePreview { padding: 48px 28px 90px; }
   .libraryUploadDialog { max-height: calc(100vh - 24px); overflow-y: auto; padding: 18px; }
   .libraryUploadDropzone { min-height: 140px; padding: 18px; }

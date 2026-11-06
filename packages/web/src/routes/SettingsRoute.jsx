@@ -7,6 +7,7 @@ import { ApiError, apiJson, jsonOptions } from "../api";
 import { LanguageSelector } from "../components/LanguageSelector";
 import { ThemeSelector } from "../components/ThemeSelector";
 import { ExternalIdentitySettings } from "../components/ExternalLogin";
+import { WorkspaceDialog } from "../components/WorkspaceDialog";
 import { useEnterStartsNewLine, writeEnterStartsNewLine } from "../preferences";
 import ModelSettings from "./ModelSettings";
 import WorkspaceGroupsRoute from "./WorkspaceGroupsRoute";
@@ -63,12 +64,21 @@ function GeneralSettings() {
 
 function AccountSecurity() {
   const { t } = useTranslation();
+  const [editing, setEditing] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+
+  function closeEditor() {
+    setEditing(false);
+    setCurrentPassword("");
+    setNewPassword("");
+    setConfirmation("");
+    setError("");
+  }
 
   function update(setter) {
     return (event) => {
@@ -80,6 +90,7 @@ function AccountSecurity() {
 
   async function submit(event) {
     event.preventDefault();
+    if (busy || !currentPassword || !newPassword || !confirmation) return;
     if (newPassword !== confirmation) {
       setError(t("settingsRoute.theNewPasswordsDoNotMatch"));
       return;
@@ -89,9 +100,7 @@ function AccountSecurity() {
     setNotice("");
     try {
       await apiJson("/api/account/password", jsonOptions("PATCH", { currentPassword, newPassword }));
-      setCurrentPassword("");
-      setNewPassword("");
-      setConfirmation("");
+      closeEditor();
       setNotice(t("settingsRoute.passwordUpdatedThisDeviceStaysSignedInOtherSessions"));
     } catch (requestError) {
       const messages = {
@@ -107,15 +116,30 @@ function AccountSecurity() {
 
   return <div className="preferenceSettings">
     <header className="settingsPageHeading"><h1>{t("settingsRoute.security")}</h1></header>
-    <form className="settingsPanel accountSecurityForm" onSubmit={submit}>
-      <label className="settingsFormRow"><span>{t("settingsRoute.currentPassword")}</span><input autoComplete="current-password" type="password" value={currentPassword} onChange={update(setCurrentPassword)} required /></label>
-      <label className="settingsFormRow"><span>{t("passwordResetRoute.newPassword")}<small id="new-password-hint">{t("settingsRoute.atLeast15Characters")}</small></span><input aria-label={t("passwordResetRoute.newPassword")} aria-describedby="new-password-hint" autoComplete="new-password" type="password" minLength={15} value={newPassword} onChange={update(setNewPassword)} required /></label>
-      <label className="settingsFormRow"><span>{t("settingsRoute.confirmNewPassword")}</span><input autoComplete="new-password" type="password" minLength={15} value={confirmation} onChange={update(setConfirmation)} required /></label>
-      {error ? <p className="accountSecurityError" role="alert">{error}</p> : null}
-      {notice ? <p className="accountSecurityNotice" role="status">{notice}</p> : null}
-      <div className="accountSecurityActions"><button type="submit" disabled={busy || !currentPassword || !newPassword || !confirmation}>{busy ? t("passwordResetRoute.updating") : t("passwordResetRoute.updatePassword")}</button></div>
-    </form>
+    <div className="settingsPanel settingsListPanel">
+      <div className="settingsEditRow">
+        <span>{t("loginForm.password")}</span>
+        <button className="secondary settingsEditButton" type="button" onClick={() => { setNotice(""); setEditing(true); }}>{t("passwordResetRoute.updatePassword")}</button>
+      </div>
+      {notice ? <p className="settingsEditNotice" role="status">{notice}</p> : null}
+    </div>
     <ExternalIdentitySettings />
+    {editing ? <WorkspaceDialog className="settingsEditDialog" title={t("passwordResetRoute.updatePassword")} busy={busy} onClose={closeEditor}>
+      <form onSubmit={submit}>
+        <label>{t("settingsRoute.currentPassword")}<input autoFocus autoComplete="current-password" type="password" value={currentPassword} onChange={update(setCurrentPassword)} required disabled={busy} /></label>
+        <label>
+          <span>{t("passwordResetRoute.newPassword")}</span>
+          <input aria-label={t("passwordResetRoute.newPassword")} aria-describedby="new-password-hint" autoComplete="new-password" type="password" minLength={15} value={newPassword} onChange={update(setNewPassword)} required disabled={busy} />
+          <small id="new-password-hint">{t("settingsRoute.atLeast15Characters")}</small>
+        </label>
+        <label>{t("settingsRoute.confirmNewPassword")}<input autoComplete="new-password" type="password" minLength={15} value={confirmation} onChange={update(setConfirmation)} required disabled={busy} /></label>
+        {error ? <p className="settingsEditError" role="alert">{error}</p> : null}
+        <footer>
+          <button className="secondary" type="button" disabled={busy} onClick={closeEditor}>{t("agentRunRow.cancel")}</button>
+          <button className="isPrimary" type="submit" disabled={busy || !currentPassword || !newPassword || !confirmation}>{busy ? t("passwordResetRoute.updating") : t("passwordResetRoute.updatePassword")}</button>
+        </footer>
+      </form>
+    </WorkspaceDialog> : null}
   </div>;
 }
 
@@ -183,7 +207,7 @@ export default function SettingsPage() {
 
   const body = section === "preferences" ? <Preferences userId={user.id} />
     : section === "security" ? <AccountSecurity />
-    : section === "workspace-profile" ? <WorkspaceProfileSettings key={workspace.id} workspace={workspace} onClose={() => navigate(closeTo)} />
+    : section === "workspace-profile" ? <WorkspaceProfileSettings key={workspace.id} workspace={workspace} />
     : section === "members" ? <WorkspaceMembersRoute embedded />
     : section === "archive" ? <SessionArchive key={workspace.id} workspace={workspace} returnTo={closeTo} />
     : section === "developer" ? <DeveloperSettings key={workspace.id} workspaceId={workspace.id} canManage={canManageWorkspace}

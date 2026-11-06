@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
 import { createMemoryRouter, RouterProvider, useRouteLoaderData } from "react-router";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { configureApi } from "../../src/api";
+import { clearCsrfToken, configureApi } from "../../src/api";
 import SettingsRoute from "../../src/routes/SettingsRoute";
 import { SessionArchive } from "../../src/routes/SessionArchive";
 import WorkspaceHomeRoute from "../../src/routes/WorkspaceHomeRoute";
@@ -36,8 +36,54 @@ beforeEach(() => configureApi({ apiBaseUrl: window.location.origin }));
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  clearCsrfToken();
   delete document.documentElement.dataset.themePreference;
   localStorage.removeItem(THEME_STORAGE_KEY);
+});
+
+test("password editing keeps validation in the dialog and clears a cancelled draft", async () => {
+  const user = userEvent.setup();
+  const writes: unknown[] = [];
+  vi.stubGlobal("fetch", async (url: string, options?: RequestInit) => {
+    if (url.endsWith("/api/csrf")) return Response.json({ csrfToken: "csrf-token" });
+    if (url.endsWith("/api/account/external-identities")) return Response.json({ providers: [] });
+    if (url.endsWith("/api/account/password")) {
+      writes.push(JSON.parse(String(options?.body)));
+      return Response.json({});
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  });
+  const router = createMemoryRouter([{
+    id: "authenticated",
+    loader: () => ({ user: { id: "owner" } }),
+    HydrateFallback: () => null,
+    children: [{ path: "settings/security", Component: SettingsRoute }],
+  }], { initialEntries: ["/settings/security"] });
+  render(<RouterProvider router={router} />);
+  const edit = await screen.findByRole("button", { name: "passwordResetRoute.updatePassword" });
+  expect(screen.queryByLabelText("settingsRoute.currentPassword")).toBeNull();
+  await user.click(edit);
+  let dialog = within(screen.getByRole("dialog", { name: "passwordResetRoute.updatePassword" }));
+  await user.type(dialog.getByLabelText("settingsRoute.currentPassword"), "discarded password");
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await user.click(edit);
+  dialog = within(screen.getByRole("dialog", { name: "passwordResetRoute.updatePassword" }));
+  const current = dialog.getByLabelText("settingsRoute.currentPassword") as HTMLInputElement;
+  expect(current.value).toBe("");
+  await user.type(current, "current password");
+  await user.type(dialog.getByLabelText("passwordResetRoute.newPassword"), "new test password");
+  const confirmation = dialog.getByLabelText("settingsRoute.confirmNewPassword");
+  await user.type(confirmation, "different password");
+  await user.click(dialog.getByRole("button", { name: "passwordResetRoute.updatePassword" }));
+  expect(dialog.getByRole("alert").textContent).toBe("settingsRoute.theNewPasswordsDoNotMatch");
+  expect(writes).toEqual([]);
+  await user.clear(confirmation);
+  await user.type(confirmation, "new test password");
+  await user.click(dialog.getByRole("button", { name: "passwordResetRoute.updatePassword" }));
+  expect(await screen.findByText("settingsRoute.passwordUpdatedThisDeviceStaysSignedInOtherSessions")).toBeTruthy();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(writes).toEqual([{ currentPassword: "current password", newPassword: "new test password" }]);
 });
 
 test("archive deletion confirms its scope and retries only conversations that failed", async () => {
