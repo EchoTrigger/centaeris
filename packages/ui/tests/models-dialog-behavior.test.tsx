@@ -224,7 +224,7 @@ test("service actions remove only the stored credential and recover after a fail
   await openProvider(user);
   await user.click(screen.getByRole("button", { name: "Service actions" }));
   await user.click(await screen.findByRole("menuitem", { name: "Remove credential" }));
-  expect((await screen.findByRole("status")).textContent).toBe("credential store unavailable");
+  expect((await screen.findByRole("status")).textContent).toBe("Model settings could not be updated. Try again.");
   expect(runtime.setAgentRuntimeConfig).toHaveBeenCalledExactlyOnceWith({ modelProviderId: "custom.test", clearModelApiKey: true });
   await user.click(screen.getByRole("button", { name: "Service actions" }));
   await user.click(await screen.findByRole("menuitem", { name: "Remove credential" }));
@@ -235,11 +235,12 @@ test("service actions remove only the stored credential and recover after a fail
 test("a failed configuration load offers an explicit retry without discarding the error", async () => {
   runtime.getAgentRuntimeConfig.mockRejectedValueOnce(new Error("runtime unavailable")).mockResolvedValueOnce(config);
   const user = renderModels();
-  expect((await screen.findByText("runtime unavailable")).closest("[role=status]")).not.toBeNull();
+  expect((await screen.findByText("Unable to load model services.")).closest("[role=status]")).not.toBeNull();
+  expect(screen.queryByText("runtime unavailable")).toBeNull();
   await user.click(screen.getByRole("button", { name: "Retry" }));
   expect(await screen.findByRole("button", { name: "Open Test provider" })).toBeDefined();
   expect(runtime.getAgentRuntimeConfig).toHaveBeenCalledTimes(2);
-  expect(screen.queryByText("runtime unavailable")).toBeNull();
+  expect(screen.queryByText("Unable to load model services.")).toBeNull();
 });
 
 test("removing a model locks repeated writes and closing until the runtime responds", async () => {
@@ -328,7 +329,7 @@ test("cancelling an unsupported configuration reset keeps recovery actions avail
   runtime.resetAgentRuntimeConfig.mockResolvedValue({ config: { ...config, customModelProviders: [], modelProviders: [] } });
   const user = userEvent.setup();
   render(<ModelsDialog onClose={() => {}} confirmAction={confirmAction} />);
-  await screen.findByText("runtime_config_unsupported");
+  await screen.findByText("Unable to load model services.");
   await user.click(screen.getByRole("button", { name: "Reset configuration…" }));
   expect(confirmAction).toHaveBeenCalledTimes(1);
   expect(runtime.resetAgentRuntimeConfig).not.toHaveBeenCalled();

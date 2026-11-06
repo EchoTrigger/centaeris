@@ -276,7 +276,7 @@ test("a cached synchronization failure keeps messages and the composer available
   expect(sessionViewCacheStore.get("cached")).not.toBeNull();
   expect(renderer!.root.findAllByProps({ role: "alert" })).toHaveLength(0);
   expect(renderer!.root.findAllByProps({ "data-testid": "chat-composer" })).toHaveLength(1);
-  expect(renderer!.root.findByProps({ role: "status" }).findByType("span").children.join(" ")).toContain("projection identity invalid");
+  expect(renderer!.root.findAllByType("button").some(button => button.children.join(" ") === "Retry conversation sync")).toBe(true);
   await act(async () => renderer!.unmount());
 });
 
@@ -317,9 +317,7 @@ test("a hydration failure clears stale state and renders the session error", asy
   expect(useChatViewStore.getState().messageIds).toEqual([]);
   const alert = renderer!.root.findByProps({ role: "alert" });
   expect(alert.findByType("h2").children.join(" ")).toBe("Unable to load conversation");
-  expect(alert.findByType("p").children.join(" ")).toContain(
-    "projection unavailable",
-  );
+  expect(alert.findByType("button").children.join(" ")).toBe("Retry");
   expect(
     renderer!.root.findAllByProps({ "data-testid": "chat-composer" }),
   ).toHaveLength(0);

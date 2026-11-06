@@ -169,6 +169,7 @@ export const buildTranscriptProcessViewModel = (
         text: entry.chunk.text,
         tone: entry.chunk.tone,
         runFailure: entry.chunk.runFailure,
+        failureReason: entry.chunk.failureReason,
         turnId: entry.chunk.turnId,
         waterfall: entry.chunk.waterfall,
       });

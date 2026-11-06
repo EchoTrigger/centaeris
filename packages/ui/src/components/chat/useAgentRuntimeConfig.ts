@@ -10,15 +10,9 @@ import {
 import {
   buildModelRuntimeDraft,
   EMPTY_MODEL_RUNTIME_DRAFT,
-  formatRuntimeModelError,
 } from "./chatRuntimeCore";
 
 const EMPTY_THINKING_MODES: ModelThinkingMode[] = [];
-
-const formatConfigRequestError = (error: unknown): string =>
-  formatRuntimeModelError({
-    message: error instanceof Error ? error.message : String(error),
-  });
 
 type UseAgentRuntimeConfigOptions = {
   revision: number;
@@ -72,7 +66,8 @@ export const useAgentRuntimeConfig = ({
         }
       } catch (error) {
         if (!cancelled && requestIdRef.current === requestId) {
-          onError(formatConfigRequestError(error));
+          console.error("Desktop model configuration could not be read", error);
+          onError(t("app.unableToLoadModelConfiguration"));
         }
       }
     })();
@@ -100,7 +95,8 @@ export const useAgentRuntimeConfig = ({
         }
       } catch (error) {
         if (requestIdRef.current === requestId) {
-          onError(formatConfigRequestError(error));
+          console.error("Desktop model selection failed", error);
+          onError(t("useAgentRuntimeConfig.selectionFailed"));
         }
       }
       return false;
@@ -148,7 +144,8 @@ export const useAgentRuntimeConfig = ({
         }
       } catch (error) {
         if (requestIdRef.current === requestId) {
-          onError(formatConfigRequestError(error));
+          console.error("Desktop reasoning effort change failed", error);
+          onError(t("useAgentRuntimeConfig.selectionFailed"));
         }
       }
     },

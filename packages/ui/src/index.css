@@ -470,23 +470,12 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   height: 12px;
 }
 
-.thinWorkspaceError {
-  display: grid;
-  gap: 6px;
-  margin: 0 9px 9px;
-  padding: 9px;
-  border: 1px solid var(--error);
-  border-radius: 7px;
-  background: var(--surface-color);
-  font-size: 11px;
-}
-
-.thinWorkspaceError > span {
+.desktopCatalogRecovery {
+  padding: 6px 9px;
+  font-size: 12px;
   color: var(--text-muted);
-}
-
-.thinWorkspaceError > div {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 6px;
 }
@@ -2911,38 +2900,6 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
   color: var(--error) !important;
 }
 
-.thinHostError {
-  position: fixed;
-  z-index: 300;
-  right: 16px;
-  bottom: 16px;
-  max-width: min(520px, calc(100vw - 32px));
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 11px;
-  border: 1px solid var(--error);
-  border-radius: 7px;
-  background: var(--surface-variant);
-  color: var(--error);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
-}
-
-.thinHostError button {
-  width: 24px;
-  height: 24px;
-  display: grid;
-  flex: 0 0 auto;
-  place-items: center;
-  border: 0;
-  background: transparent;
-}
-
-.thinHostError svg {
-  width: 14px;
-  height: 14px;
-}
-
 @media (max-width: 980px) {
   :root {
     --thin-sidebar-width: 224px;
@@ -3170,17 +3127,6 @@ html[data-platform="darwin"] .thinAppShell.is-sidebar-collapsed .nativeTitlebarS
 .scheduleDetail > p { font-size:14px; line-height:1.65; }
 .settingsPage button:focus-visible, .settingsRow select:focus-visible, .schedulesPage button:focus-visible { outline:2px solid currentColor; outline-offset:2px; }
 @media (max-width:640px) { .settingsPage { grid-template-columns:140px minmax(0,1fr); } .settingsContent { padding:18px; } .schedulesPage { padding:24px 18px; } }
-
-.session-sync-status {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 16px;
-  color: hsl(var(--muted-foreground));
-  font-size: 12px;
-}
-.session-sync-status span { min-width: 0; overflow-wrap: anywhere; }
-.session-sync-status button { flex-shrink: 0; text-decoration: underline; }
 
 .sidebarWorkspaceGroup { margin: 3px 0 9px; }
 .sidebarWorkspaceGroup > summary { display: flex; align-items: center; gap: 7px; padding: 7px 10px; color: var(--process-text); font-size: 12px; cursor: pointer; list-style: none; }

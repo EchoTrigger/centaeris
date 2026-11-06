@@ -1,5 +1,5 @@
 import { t } from "../../i18n";
-import { useCallback, useEffect, useRef, type RefObject } from "react";
+import { useCallback, useEffect, useRef, type Dispatch, type RefObject, type SetStateAction } from "react";
 import { isNativeHostRuntime } from "../../host/hostBridge";
 import {
   cancelAgentRun,
@@ -22,8 +22,6 @@ import {
 import {
   appendGuidedSupplementChunk,
   buildPendingTurn,
-  formatExecutionError,
-  makeId,
   normalizeAgentRunId,
   normalizeRuntimeActivity,
 } from "./chatRuntimeModel";
@@ -60,7 +58,7 @@ type ViewPort = {
   stoppedAssistantMessageIdsRef: RefObject<Set<string>>;
   visibleSessionIdRef: RefObject<string>;
   visibleActiveReplayRef: RefObject<CachedActiveReplay | null>;
-  setInputValue: (value: string) => void;
+  setInputValue: Dispatch<SetStateAction<string>>;
   setEditingUserMessageId: (messageId: string | null) => void;
   setEditingPrompt: (prompt: string) => void;
   setRuntimeConfigError: (message: string) => void;
@@ -148,32 +146,6 @@ const buildPromptMessagePair = (prompt: string): PromptMessagePair => {
       id: `assistant-${now}-${Math.random().toString(36).slice(2, 6)}`,
       role: "assistant",
       turn: buildPendingTurn(),
-    },
-  };
-};
-
-const buildFailedPromptMessagePair = (
-  prompt: string,
-  error: unknown,
-): PromptMessagePair => {
-  const pair = buildPromptMessagePair(prompt);
-  return {
-    ...pair,
-    assistantMessage: {
-      ...pair.assistantMessage,
-      turn: {
-        ...pair.assistantMessage.turn,
-        isStreaming: false,
-        activity: undefined,
-        chunks: [
-          {
-            id: makeId("narrative"),
-            kind: "narrative",
-            text: formatExecutionError(error),
-            tone: "error",
-          },
-        ],
-      },
     },
   };
 };
@@ -423,9 +395,10 @@ export const useChatPromptTransactions = ({
           message: prompt,
         });
         if (response.accepted !== true) {
-          throw new Error(
-            "_centaeris/session/supplement rejected supplement input",
+          updateAssistantTurn(activeStream.assistantMessageId, (turn) =>
+            appendNarrativeChunk(turn, t("useChatPromptTransactions.supplementRejected"), "error"),
           );
+          return;
         }
         const expectedAgentRunId = normalizeAgentRunId(
           activeStream.agentRunId,
@@ -446,8 +419,9 @@ export const useChatPromptTransactions = ({
         }
         void refreshContextUsage(responseSessionId);
       } catch (error) {
+        console.error("Desktop supplement result could not be confirmed", error);
         updateAssistantTurn(activeStream.assistantMessageId, (turn) =>
-          appendNarrativeChunk(turn, formatExecutionError(error), "error"),
+          appendNarrativeChunk(turn, t("useChatPromptTransactions.supplementUnconfirmed"), "error"),
         );
       }
     },
@@ -477,16 +451,13 @@ export const useChatPromptTransactions = ({
 
       let targetSession: UiSession;
       const promptOperationId = createRuntimeOperationId();
+      setRuntimeConfigError("");
       try {
         targetSession = await createTargetSession(prompt);
       } catch (error) {
-        const pair = buildFailedPromptMessagePair(prompt, error);
-        setMessages((previous) => [
-          ...prunePendingTailMessages(previous),
-          pair.userMessage,
-          pair.assistantMessage,
-        ]);
-        setInputValue("");
+        console.error("Desktop could not prepare a session for the prompt", error);
+        if (queuedPrompt !== undefined) setInputValue(current => current || prompt);
+        setRuntimeConfigError(t("useChatPromptTransactions.messageNotSent"));
         return;
       }
 
@@ -530,24 +501,21 @@ export const useChatPromptTransactions = ({
         if (!ownsSessionRequest(requestOwner)) {
           return;
         }
+        console.error("Desktop prompt result could not be confirmed", error);
+        setRuntimeConfigError(t("useChatPromptTransactions.messageUnconfirmed"));
+        if (getActiveStream()?.sessionId === targetSession.id) return;
         onAgentRunningChange?.(targetSession.id, false);
         updateAssistantTurn(pair.assistantMessage.id, (turn) => ({
-          ...appendNarrativeChunk(
-            turn,
-            formatExecutionError(error),
-            "error",
-          ),
+          ...turn,
           isStreaming: false,
           activity: undefined,
         }));
-        closeActiveStream();
       }
     },
     [
       adoptSession,
       autoContinueAfterResumeWait,
       captureSessionRequest,
-      closeActiveStream,
       createTargetSession,
       currentSession,
       finishAcceptedPrompt,
@@ -564,6 +532,7 @@ export const useChatPromptTransactions = ({
       setEditingUserMessageId,
       setInputValue,
       setMessages,
+      setRuntimeConfigError,
       updateAssistantTurn,
       visibleSessionIdRef,
     ],
@@ -617,28 +586,13 @@ export const useChatPromptTransactions = ({
 
       let targetSession: UiSession;
       const promptOperationId = createRuntimeOperationId();
+      setRuntimeConfigError("");
       try {
         targetSession = await createTargetSession(prompt);
       } catch (error) {
-        const pair = buildFailedPromptMessagePair(prompt, error);
-          setMessages((previous) => {
-            const index = previous.findIndex((item) => item.id === messageId);
-            if (index < 0) {
-              return [
-                ...prunePendingTailMessages(previous),
-                pair.userMessage,
-                pair.assistantMessage,
-              ];
-            }
-            return [
-              ...previous.slice(0, index),
-              pair.userMessage,
-              pair.assistantMessage,
-            ];
-          });
-          setEditingUserMessageId(null);
-          setEditingPrompt("");
-          return;
+        console.error("Desktop could not prepare a session for the edited prompt", error);
+        setRuntimeConfigError(t("useChatPromptTransactions.messageNotSent"));
+        return;
       }
 
       if (!currentSession) {
@@ -694,34 +648,33 @@ export const useChatPromptTransactions = ({
         if (!ownsSessionRequest(requestOwner)) {
           return;
         }
+        console.error("Desktop could not confirm the edited prompt", error);
+        if (getActiveStream()?.sessionId === targetSession.id) {
+          setRuntimeConfigError(t("useChatPromptTransactions.messageUnconfirmed"));
+          return;
+        }
         onAgentRunningChange?.(targetSession.id, false);
         if (!inputAccepted) {
-          closeActiveStream();
           setMessages(currentMessages);
           setEditingUserMessageId(messageId);
           setEditingPrompt(prompt);
           setRuntimeConfigError(
-            t("useChatPromptTransactions.editFailedValue", { value1: formatExecutionError(error) }),
+            t("useChatPromptTransactions.editUnconfirmed"),
           );
           return;
         }
+        setRuntimeConfigError(t("useChatPromptTransactions.messageUnconfirmed"));
         updateAssistantTurn(pair.assistantMessage.id, (turn) => ({
-          ...appendNarrativeChunk(
-            turn,
-            formatExecutionError(error),
-            "error",
-          ),
+          ...turn,
           isStreaming: false,
           activity: undefined,
         }));
-        closeActiveStream();
       }
     },
     [
       adoptSession,
       autoContinueAfterResumeWait,
       captureSessionRequest,
-      closeActiveStream,
       createTargetSession,
       currentSession,
       editingPrompt,

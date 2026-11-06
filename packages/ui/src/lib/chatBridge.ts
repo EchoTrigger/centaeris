@@ -163,6 +163,7 @@ export type TranscriptPresentationV1 = {
   displayTarget: string | null;
   durationMs: number | null;
   operation: Record<string, unknown> | null;
+  reasonType?: string | null;
 };
 
 export type TranscriptBlockV1 = {

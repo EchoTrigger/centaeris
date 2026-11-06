@@ -5494,6 +5494,7 @@ fn run_block(
             display_target: None,
             duration_ms: None,
             operation: None,
+            reason_type: None,
         },
     );
     block

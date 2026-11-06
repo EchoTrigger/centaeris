@@ -368,9 +368,7 @@ test("reasoning updates report the latest failure and clear it on success", asyn
     await expect(failedUpdate.promise).rejects.toThrow("config write failed");
     await Promise.resolve();
   });
-  expect(getComposerProps().runtimeConfigError).toContain(
-    "config write failed",
-  );
+  expect(getComposerProps().runtimeConfigError).toBe("The model selection could not be changed. Try again.");
 
   await act(async () => getComposerProps().onReasoningEffortSelect("medium"));
   const successfulUpdate = harness.configUpdates[1];

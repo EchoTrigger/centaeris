@@ -12,7 +12,10 @@ const emptySources: SkillSourcesConfig = { schemaVersion: "skill.sources.v1", so
 const normalize = (path?: string | null) => String(path || "").trim().replace(/^\\\\\?\\/, "").replace(/\\/g, "/").replace(/\/+$/, "");
 const leaf = (path: string) => path.split(/[\\/]/).filter(Boolean).at(-1) || path;
 const scopeName = (scope: string) => ({ workspace: "Workspace", user: "Personal", system: "System", plugin: "Plugin" })[scope] ?? scope;
-const message = (error: unknown) => error instanceof Error ? error.message : String(error || "Skill request failed");
+function reportSkillFailure(error: unknown, message: string) {
+  console.error("Desktop skill request failed", error);
+  return message;
+}
 function skillStatus(skill: SkillEntry) { return skill.errors.length ? "Needs attention" : skill.shadowedBy ? "Shadowed" : skill.enabled ? "Enabled" : "Disabled"; }
 
 export function SkillsDialog(props: { workspaceRoot?: string | null; confirmAction: ConfirmAction }) {
@@ -39,7 +42,7 @@ function WorkspaceSkills({ workspaceRoot, confirmAction }: { workspaceRoot?: str
       const [nextSources, nextCatalog] = await Promise.all([listSkillSources(), reload ? reloadSkillCatalog(workspaceRoot) : getSkillCatalog(workspaceRoot)]);
       if (epoch !== owner.current || request !== loadRequest.current) return;
       setSources(nextSources); setCatalog(nextCatalog);
-    } catch (error) { if (epoch === owner.current && request === loadRequest.current) setLoadError(message(error)); }
+    } catch (error) { if (epoch === owner.current && request === loadRequest.current) setLoadError(reportSkillFailure(error, "Unable to refresh skills.")); }
     finally { if (epoch === owner.current && request === loadRequest.current) setLoading(false); }
   }, [workspaceRoot]);
   useEffect(() => { void load(); return () => { owner.current++; loadRequest.current++; detailRequest.current++; }; }, [load]);
@@ -52,7 +55,7 @@ function WorkspaceSkills({ workspaceRoot, confirmAction }: { workspaceRoot?: str
     try {
       const next = await getSkillDetail({ cwd: workspaceRoot, skillId: skill.skillId });
       if (epoch === owner.current && request === detailRequest.current) setDetail(next);
-    } catch (error) { if (epoch === owner.current && request === detailRequest.current) setDetailError(message(error)); }
+    } catch (error) { if (epoch === owner.current && request === detailRequest.current) setDetailError(reportSkillFailure(error, "Unable to load instructions.")); }
     finally { if (epoch === owner.current && request === detailRequest.current) setDetailLoading(false); }
   };
   const mutate = async (key: string, action: (current: () => boolean) => Promise<void>) => {
@@ -61,10 +64,11 @@ function WorkspaceSkills({ workspaceRoot, confirmAction }: { workspaceRoot?: str
     const epoch = owner.current, navigation = navigationRevision.current;
     const current = () => epoch === owner.current;
     try { await action(current); return current(); }
-    catch (error) { if (current() && navigation === navigationRevision.current) setActionError(message(error)); return false; }
+    catch (error) { if (current() && navigation === navigationRevision.current) setActionError(reportSkillFailure(error, key === "add" ? "Unable to add this location. Try again." : "The skill action could not be completed. Try again.")); return false; }
     finally { mutationBusy.current = false; if (current()) setPending(""); }
   };
   const visibleSources = useMemo(() => sources.sources.filter(source => source.scope === "user" || source.scope === "workspace" && normalize(source.workspaceRoot) === normalize(workspaceRoot)), [sources.sources, workspaceRoot]);
+  const affectedLocations = visibleSources.filter(source => catalog?.diagnostics.some(item => item.sourceId === source.sourceId));
   const matchingSources = visibleSources.filter(source => `${source.path} ${source.scope}`.toLowerCase().includes(sourceQuery.trim().toLowerCase()));
   const skills = (catalog?.skills ?? []).filter(skill => skill.scope !== "plugin");
   const visibleSkills = skills.filter(skill => (scope === "all" || (scope === "personal" ? skill.scope === "user" || skill.scope === "workspace" : skill.scope === "system")) &&
@@ -113,19 +117,16 @@ function WorkspaceSkills({ workspaceRoot, confirmAction }: { workspaceRoot?: str
         if (selectionRef.current?.kind === "source" && selectionRef.current.id === source.sourceId) navigate({ kind: "sources" });
         setNotice("Location removed. Files on disk stay unchanged."); await load(true);
       });
-    } catch (error) { if (epoch === owner.current) setActionError(message(error)); }
+    } catch (error) { if (epoch === owner.current) setActionError(reportSkillFailure(error, "Unable to remove this location. Try again.")); }
   };
   const refresh = <Button variant="ghost" size="icon-sm" aria-label="Reload skills" disabled={loading || Boolean(pending)} onClick={() => void load(true)}><RefreshCw /></Button>;
   return <section className="desktopManagement" aria-label="Skills"><main className="dmPage">
     {selection?.kind === "add" ? <>
       <ManagementHeader focusOnNavigation={focusOnNavigation} title="Add skill location" />
-      {actionError ? <ManagementError>{actionError}</ManagementError> : null}
       <AddSkillLocation workspaceRoot={workspaceRoot} pending={pending === "add"} confirmAction={confirmAction} onAdd={add} onCancel={() => navigate({ kind: "sources" })} />
+      {actionError ? <ManagementError>{actionError}</ManagementError> : null}
     </> : <>
       {selection ? <ManagementBack onClick={() => navigate(selection.kind === "skill" && selection.fromSource ? { kind: "source", id: selection.fromSource } : selection.kind === "source" ? { kind: "sources" } : null)}>{selection.kind === "skill" && selection.fromSource ? "Back to location" : selection.kind === "source" ? "Back to locations" : "Back to skills"}</ManagementBack> : null}
-      {loadError ? <ManagementError onRetry={() => void load(true)}>Unable to refresh skills. {loadError}</ManagementError> : null}
-      {actionError ? <ManagementError>{actionError}</ManagementError> : null}
-      {notice ? <p className="dmNotice" role="status">{notice}</p> : null}
       {selection?.kind === "sources" ? <>
         <ManagementHeader focusOnNavigation={focusOnNavigation} title="Skill locations" actions={<>{refresh}<Button variant="outline" disabled={Boolean(pending)} onClick={() => navigate({ kind: "add" })}><Plus />Add location</Button></>} />
         <div className="dmToolbar"><ManagementSearch label="Search skill locations" value={sourceQuery} onChange={setSourceQuery} /><span className="dmCount">{matchingSources.length} of {visibleSources.length} locations</span></div>
@@ -137,22 +138,25 @@ function WorkspaceSkills({ workspaceRoot, confirmAction }: { workspaceRoot?: str
         <ManagementHeader focusOnNavigation={focusOnNavigation} title={leaf(selectedSource.path)} description={`${scopeName(selectedSource.scope)} skill location`} actions={<ManagementToggle checked={selectedSource.enabled} disabled={Boolean(pending)} label={selectedSource.enabled ? "Disable location" : "Enable location"} onChange={() => void toggleSource(selectedSource)} />} />
         <div className="dmActions"><Button variant="outline" disabled={Boolean(pending)} onClick={() => void revealSource(selectedSource)}><FolderOpen />Show in folder</Button>{selectedSource.scope === "user" || selectedSource.scope === "workspace" ? <Button variant="destructive" disabled={Boolean(pending)} onClick={() => void removeSource(selectedSource)}><Trash2 />Remove location</Button> : null}</div>
         <section className="dmSection"><h2>Location</h2><dl className="dmFacts"><div><dt>Path</dt><dd>{selectedSource.path}</dd></div><div><dt>Type</dt><dd>{selectedSource.kind === "skillFile" ? "SKILL.md file" : "Catalog directory"}</dd></div><div><dt>Scope</dt><dd>{scopeName(selectedSource.scope)}</dd></div>{selectedSource.workspaceRoot ? <div><dt>Workspace</dt><dd>{selectedSource.workspaceRoot}</dd></div> : null}</dl></section>
-        {(catalog?.diagnostics ?? []).filter(item => item.sourceId === selectedSource.sourceId).map(item => <ManagementError key={`${item.code}:${item.message}`}>{item.message}</ManagementError>)}
+        {catalog?.diagnostics.some(item => item.sourceId === selectedSource.sourceId) ? <ManagementError>Check that this location is available and contains valid skills.</ManagementError> : null}
         <section className="dmSection"><h2>Skills in this location</h2>{skills.filter(skill => skill.sourceId === selectedSource.sourceId).length ? <div className="dmList">{skills.filter(skill => skill.sourceId === selectedSource.sourceId).map(skill => <SkillRow key={skill.skillId} skill={skill} onClick={() => void openSkill(skill, selectedSource.sourceId)} />)}</div> : <p>{selectedSource.enabled ? "No skills found." : "Location disabled."}</p>}</section>
       </> : selectedSkill ? <>
         <ManagementHeader focusOnNavigation={focusOnNavigation} title={selectedSkill.name} description={selectedSkill.description} actions={<ManagementToggle checked={selectedSkill.enabled} disabled={Boolean(pending) || selectedSkill.errors.length > 0} label={selectedSkill.enabled ? "Disable skill" : "Enable skill"} onChange={() => void toggleSkill(selectedSkill)} />} />
         <div className="dmMeta"><ManagementStatus tone={selectedSkill.errors.length || selectedSkill.shadowedBy ? "warning" : selectedSkill.enabled ? "success" : "neutral"}>{skillStatus(selectedSkill)}</ManagementStatus><span>{scopeName(selectedSkill.scope)}</span><span>{selectedSkill.allowImplicitInvocation ? "Available to the agent" : "Explicit invocation only"}</span></div>
-        {selectedSkill.errors.map(item => <ManagementError key={item}>{item}</ManagementError>)}
-        {selectedSkill.shadowedBy ? <ManagementError>A skill with higher priority overrides this skill: {selectedSkill.shadowedBy}</ManagementError> : null}
+        {selectedSkill.errors.length ? <ManagementError>This skill needs attention. Check its instructions and location.</ManagementError> : null}
+        {selectedSkill.shadowedBy ? <ManagementError>A skill with higher priority overrides this skill.</ManagementError> : null}
         <section className="dmSection"><h2>Location and access</h2><dl className="dmFacts"><div><dt>SKILL.md</dt><dd>{selectedSkill.skillMdPath}</dd></div><div><dt>Allowed tools</dt><dd>{selectedSkill.capabilityMetadata.allowedTools.length ? selectedSkill.capabilityMetadata.allowedTools.join(", ") : "Uses the session’s tool permissions"}</dd></div></dl>{visibleSources.some(source => source.sourceId === selectedSkill.sourceId) ? <Button className="mt-3" variant="outline" onClick={() => navigate({ kind: "source", id: selectedSkill.sourceId })}><Settings2 />Manage location</Button> : null}</section>
-        <section className="dmSection"><h2>Instructions</h2>{detailLoading ? <ManagementLoading>Loading SKILL.md…</ManagementLoading> : detailError ? <ManagementError onRetry={() => void openSkill(selectedSkill, selection?.kind === "skill" ? selection.fromSource : undefined)}>Unable to load instructions. {detailError}</ManagementError> : knownDetail ? <div className="dmMarkdown"><MarkdownContent text={knownDetail.content} /></div> : <p>Instructions unavailable. Refresh the catalog and reopen this skill.</p>}</section>
+        <section className="dmSection"><h2>Instructions</h2>{detailLoading ? <ManagementLoading>Loading SKILL.md…</ManagementLoading> : detailError ? <ManagementError onRetry={() => void openSkill(selectedSkill, selection?.kind === "skill" ? selection.fromSource : undefined)}>{detailError}</ManagementError> : knownDetail ? <div className="dmMarkdown"><MarkdownContent text={knownDetail.content} /></div> : <p>Instructions unavailable. Refresh the catalog and reopen this skill.</p>}</section>
       </> : selection ? <ManagementEmpty title="This item is unavailable" action={refresh} /> : <>
         <ManagementHeader focusOnNavigation={focusOnNavigation} title="Skills" actions={<>{refresh}<Button variant="outline" aria-label="Manage skill locations" onClick={() => navigate({ kind: "sources" })}><Settings2 />Locations</Button><Button variant="outline" onClick={() => navigate({ kind: "add" })}><Plus />Add location</Button></>} />
         <div className="dmToolbar"><ManagementSearch label="Search skills" value={query} onChange={setQuery} /><ManagementFilter label="Skill scope" value={scope} onChange={setScope} options={[["all", "All sources"], ["personal", "Personal"], ["system", "System"]]} /><ManagementFilter label="Skill status" value={status} onChange={setStatus} options={[["all", "All statuses"], ["enabled", "Enabled"], ["disabled", "Disabled"], ["attention", "Needs attention"]]} /></div>
         {loading ? <ManagementLoading>{catalog ? "Refreshing skills…" : "Loading skills…"}</ManagementLoading> : null}
-        {(catalog?.diagnostics ?? []).map(item => <ManagementError key={`${item.sourceId ?? "catalog"}:${item.code}:${item.message}`}>{item.message}{item.sourceId && visibleSources.some(source => source.sourceId === item.sourceId) ? <div className="dmDiagnosticAction"><Button variant="outline" size="sm" onClick={() => { if (item.sourceId) navigate({ kind: "source", id: item.sourceId }); }}>Review location</Button></div> : null}</ManagementError>)}
+        {catalog?.diagnostics.length ? <ManagementError>Some skills could not be loaded. Check their locations.<Button variant="ghost" size="sm" onClick={() => navigate(affectedLocations.length === 1 ? { kind: "source", id: affectedLocations[0].sourceId } : { kind: "sources" })}>{affectedLocations.length === 1 ? "Review location" : "Review locations"}</Button></ManagementError> : null}
         {visibleSkills.length ? <div className="dmList" aria-label="Available skills" aria-busy={loading}>{skillGroups.map(group => <section className="dmSkillGroup" role="group" aria-label={`${group.name} skills`} key={group.name}><h2>{group.name}</h2>{group.items.map(skill => <SkillRow key={skill.skillId} skill={skill} onClick={() => void openSkill(skill)} />)}</section>)}</div> : !loading && !loadError ? <ManagementEmpty title={skills.length ? "No matching skills" : "No skills available"} action={skills.length ? <Button variant="outline" onClick={() => { setQuery(""); setScope("all"); setStatus("all"); }}>Clear filters</Button> : <Button variant="outline" onClick={() => navigate({ kind: "sources" })}>Manage locations</Button>} /> : null}
       </>}
+      {loadError ? <ManagementError onRetry={() => void load(true)}>{loadError}</ManagementError> : null}
+      {actionError ? <ManagementError>{actionError}</ManagementError> : null}
+      {notice ? <p className="dmNotice" role="status">{notice}</p> : null}
     </>}
   </main></section>;
 }

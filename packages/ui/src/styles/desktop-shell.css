@@ -32,9 +32,6 @@ html[data-platform="darwin"] .nativeTitlebar .nativeTitlebarSafeArea { padding-l
 .desktopResourcesPage .dmPage { padding-top: 24px; }
 .desktopResourceTabs > [data-slot="tabs-trigger"] { flex: 0 0 auto; padding: 5px 2px; font-size: 13px; }
 .desktopResourcesPage > [data-slot="tabs-content"] { min-height: 0; overflow: auto; }
-.desktopHostNotice { display: flex; align-items: flex-start; gap: 8px; max-width: min(560px,calc(100vw - 40px)); border: 1px solid color-mix(in srgb,var(--error) 25%,var(--outline-variant)); background: var(--surface-color); color: var(--on-surface); border-radius: 10px; box-shadow: 0 8px 24px #0001; padding: 10px 10px 10px 14px; font-size: 12px; line-height: 1.6; }
-.desktopHostNotice > span { flex: 1; min-width: 0; overflow-wrap: anywhere; padding-top: 3px; }
-.desktopHostNotice > button { flex-shrink: 0; }
 @media (max-width: 1000px) { .thinWorkspaceShell .desktopConversationHeader { padding-inline: 14px; } }
 @media (prefers-reduced-motion: reduce) { .desktopLoadingIcon { animation: none; } }
 

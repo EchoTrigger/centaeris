@@ -25,7 +25,7 @@ const renderProcessHeading = (entry: TranscriptTextItem, onOpenWorkspacePath: Op
       <span className="agentRunErrorIcon" aria-hidden="true">
         <CircleAlert />
       </span>
-      <div className="agentRunErrorText">{runFailureDetail(entry.text)}</div>
+      <div className="agentRunErrorText">{runFailureDetail(entry.text, entry.failureReason)}</div>
     </div>
   ) : (
     <div

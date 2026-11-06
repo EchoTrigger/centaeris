@@ -15,25 +15,26 @@ function Text({ message, enabled = true }: { message: ChatMessage; enabled?: boo
   return <>{resolved.status}<pre>{resolved.message?.role === "assistant" ? resolved.message.turn.finalAnswer : resolved.message?.text ?? ""}</pre></>;
 }
 
-function ErrorText({ message }: { message: ChatMessage }) {
+function ProcessText({ message }: { message: ChatMessage }) {
   const resolved = useTranscriptText(message);
   return <>{resolved.status}{resolved.message?.role === "assistant" ? <AgentProcessTranscript
     processTranscript={buildTranscriptProcessViewModel(resolved.message.turn)} agentRunId="run" onOpenWorkspacePath={undefined} /> : null}</>;
 }
 
-test("referenced run errors retry failed reads and keep plain error presentation after loading", async () => {
+test("referenced process content retries failed reads and restores the text after loading", async () => {
   read.mockReset();
   read.mockRejectedValueOnce(new Error("disconnected"));
-  read.mockResolvedValueOnce({ content: "provider_timeout", endOffset: "16", hasMore: false });
-  const message: ChatMessage = { id: "run-boundary:event", role: "assistant",
-    turn: { id: "run", chunks: [{ id: "error", kind: "narrative", text: "", tone: "error", runFailure: "failed" }], finalAnswer: "", isStreaming: false },
-    transcriptText: { sessionId: "session", projectionGeneration: "generation", reference: { refId: "ref", revision: "1", byteLength: "16" } } };
+  const text = "Deferred process output";
+  read.mockResolvedValueOnce({ content: text, endOffset: String(text.length), hasMore: false });
+  const message: ChatMessage = { id: "event", role: "assistant",
+    turn: { id: "run", chunks: [{ id: "process", kind: "narrative", text: "" }], finalAnswer: "", isStreaming: false },
+    transcriptText: { sessionId: "session", projectionGeneration: "generation", reference: { refId: "ref", revision: "1", byteLength: String(text.length) } } };
   let renderer: ReactTestRenderer;
-  await act(async () => { renderer = create(<ErrorText message={message} />); });
+  await act(async () => { renderer = create(<ProcessText message={message} />); });
   expect(renderer!.root.findByProps({ role: "alert" }).children.join("")).toContain("Unable to load content.");
   await act(async () => { renderer!.root.findByType("button").props.onClick(); });
   const strings = JSON.stringify(renderer!.toJSON());
-  expect(strings).toContain("The model took too long to respond. Retry the request. · provider_timeout");
+  expect(strings).toContain(text);
   expect(strings).not.toContain("Unable to load content.");
   expect(read).toHaveBeenCalledTimes(2);
   await act(async () => { renderer!.unmount(); });

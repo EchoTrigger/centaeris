@@ -639,8 +639,10 @@ export const applySessionEventToAssistantTurn = (
       .map((chunk) => chunk.kind === "reasoning" && chunk.status === "streaming" ? { ...chunk, status: "interrupted" as const } : chunk);
     if (event.type === "AgentRunFailed" || event.type === "AgentRunInterrupted") {
       const id = `run-boundary:${event.id}`;
-      if (!chunks.some((chunk) => chunk.id === id)) {
-        chunks.push({ id, kind: "narrative", text: getEventPayloadRawString(getEventPayload(event), "message"),
+      const payload = getEventPayload(event);
+      const failureReason = getEventPayloadString(payload, "reasonType") ?? undefined;
+      if (failureReason !== "cancelled" && !chunks.some((chunk) => chunk.id === id)) {
+        chunks.push({ id, kind: "narrative", text: getEventPayloadRawString(payload, "message"), failureReason,
           tone: "error", runFailure: event.type === "AgentRunFailed" ? "failed" : "interrupted" });
       }
     }
@@ -818,6 +820,7 @@ export const applySessionEventToAssistantTurn = (
       if (turn.terminalEventObserved || turn.chunks.some((chunk) => chunk.id === id)) return turn;
       return { ...turn, activity: undefined, chunks: [...turn.chunks.filter((chunk) => chunk.kind !== "narrative" || !chunk.provisionalRunFailure), {
         id, kind: "narrative", text: getEventPayloadRawString(payload, "message"), turnId: eventTurnId,
+        failureReason: getEventPayloadString(payload, "reasonType") ?? undefined,
         tone: "error", runFailure: "failed", provisionalRunFailure: true,
       }] };
     }

@@ -603,16 +603,16 @@ test("workspace catalog failures stay distinct from ordinary host errors", async
   harness.workspaceInfoError = new Error("workspace_catalog_corrupt: invalid JSON");
   await act(async () => getSidebarProps().onRetryWorkspaceCatalog());
   expect(getSidebarProps().workspaceCatalogError).toEqual({
-    message: "workspace_catalog_corrupt: invalid JSON",
+    message: "The workspace list is damaged",
     canReset: true,
   });
 
   harness.workspaceInfoError = new Error("workspace directory is unavailable");
   await act(async () => getSidebarProps().onRetryWorkspaceCatalog());
-  const hostAlert = renderer!.root.findByProps({ role: "alert" });
-  expect(hostAlert.findByType("span").children.join(" ")).toBe(
-    "workspace directory is unavailable",
-  );
+  expect(getSidebarProps().workspaceCatalogError).toEqual({
+    message: "Unable to reload workspaces",
+    canReset: false,
+  });
 
   await act(async () => renderer?.unmount());
 });

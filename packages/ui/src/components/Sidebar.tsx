@@ -57,6 +57,8 @@ type SidebarProps = {
 	completedSessionIds: Set<string>;
 	waitingSessionIds?: ReadonlySet<string>;
 	workspaceCatalogError: { message: string; canReset: boolean } | null;
+	sessionListError?: string;
+	onRetrySessions?: () => Promise<void>;
 	onNewChat: () => void;
 	onOpenWorkspace: (mode: WorkspaceOpenMode) => WorkspaceAction;
 	onSelectWorkspace: (root: string) => WorkspaceAction;
@@ -88,6 +90,8 @@ export function Sidebar({
 	completedSessionIds,
 	waitingSessionIds,
 	workspaceCatalogError,
+	sessionListError,
+	onRetrySessions,
 	onNewChat,
 	onRetryWorkspaceCatalog,
 	onResetWorkspaceCatalog,
@@ -121,8 +125,8 @@ export function Sidebar({
 		try {
 			await action();
 			if (close) setDialog(null);
-		} catch (failure) {
-			setError(failure instanceof Error ? failure.message : String(failure));
+		} catch {
+			setError("The conversation could not be updated. Try again.");
 		} finally {
 			pendingRef.current = false;
 			setPending(false);
@@ -134,8 +138,8 @@ export function Sidebar({
 		setError("");
 		try {
 			await action();
-		} catch (failure) {
-			setError(failure instanceof Error ? failure.message : String(failure));
+		} catch {
+			setError("The list could not be refreshed. Try again.");
 		} finally {
 			setCatalogBusy(false);
 		}
@@ -279,44 +283,6 @@ export function Sidebar({
 				))}
 			</nav>
 			<div className="sidebarExpandedContent" hidden={collapsed}>
-				{workspaceCatalogError ? (
-					<div className="thinWorkspaceError" role="alert">
-						<strong>
-							{workspaceCatalogError.canReset
-								? "Workspace list is corrupted"
-								: "Workspace list unavailable"}
-						</strong>
-						<span>{workspaceCatalogError.message}</span>
-						<div>
-							<Button
-								variant="outline"
-								size="sm"
-								disabled={catalogBusy}
-								onClick={() => void recoverCatalog(onRetryWorkspaceCatalog)}
-							>
-								{catalogBusy ? (
-									<LoaderCircle className="workbenchSpinner" aria-hidden="true" />
-								) : null}
-								Retry
-							</Button>
-							{workspaceCatalogError.canReset ? (
-								<Button
-									variant="ghost"
-									size="sm"
-									disabled={catalogBusy}
-									onClick={() => void recoverCatalog(onResetWorkspaceCatalog)}
-								>
-									Reset list…
-								</Button>
-							) : null}
-						</div>
-					</div>
-				) : null}
-				{error && !dialog ? (
-					<p role="alert" className="workbenchInlineError">
-						{error}
-					</p>
-				) : null}
 				<section className="thinSessionRegion" aria-label="Pinned">
 					<div className="thinSectionHeader">
 						<span>Pinned</span>
@@ -325,6 +291,7 @@ export function Sidebar({
 						) : null}
 					</div>
 					<div className="thinSessionList">
+						{error && !dialog ? <p role="alert" className="workbenchInlineError">{error}</p> : null}
 						{onReorderPinnedSessions && !hasMore?.("pinned") ? (
 							<SortablePinnedSessions
 								sessions={pinnedSessions}
@@ -352,6 +319,15 @@ export function Sidebar({
 						<span>Recents</span>
 					</div>
 					<div className="thinSessionList">
+						{workspaceCatalogError ? (
+							<div className="desktopCatalogRecovery">
+								<span role="status">{workspaceCatalogError.message}</span>
+								<Button variant="ghost" size="sm" disabled={catalogBusy} onClick={() => void recoverCatalog(onRetryWorkspaceCatalog)}>Retry</Button>
+								{workspaceCatalogError.canReset ? (
+									<Button variant="ghost" size="sm" disabled={catalogBusy} onClick={() => void recoverCatalog(onResetWorkspaceCatalog)}>Reset list…</Button>
+								) : null}
+							</div>
+						) : null}
 						{groups.map((group) => (
 							<SidebarWorkspaceGroup
 								key={group.root}
@@ -379,6 +355,12 @@ export function Sidebar({
 								) : null}
 							</SidebarWorkspaceGroup>
 						))}
+						{sessionListError ? (
+							<div className="desktopCatalogRecovery">
+								<span role="status">{sessionListError}</span>
+								{onRetrySessions ? <Button variant="ghost" size="sm" disabled={catalogBusy} onClick={() => void recoverCatalog(onRetrySessions)}>Retry</Button> : null}
+							</div>
+						) : null}
 					</div>
 				</section>
 			</div>

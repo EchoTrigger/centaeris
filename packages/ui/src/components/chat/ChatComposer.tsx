@@ -485,7 +485,7 @@ const ChatComposerLifecycle = memo(function ChatComposerLifecycle({
       </div>
 
       {runtimeConfigError.trim() ? (
-        <div className="composer-error">{runtimeConfigError}</div>
+        <div className="composer-error" role="status">{runtimeConfigError}</div>
       ) : null}
     </div>
   );

@@ -8,7 +8,7 @@ import { useAppNavigation, type AppPage } from "./components/app/useAppNavigatio
 import { listenHost } from "./host/hostBridge";
 import { t } from "./i18n";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PanelRight, X, Settings2, LoaderCircle, Folder } from "lucide-react";
+import { PanelRight, Settings2, LoaderCircle, Folder } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "./components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
@@ -47,12 +47,7 @@ const normalizeRoot = (root?: string | null): string =>
     .replace(/\/+$/, "")
     .toLowerCase();
 
-const errorMessage = (error: unknown, fallback: string): string =>
-  error instanceof Error && error.message.trim()
-    ? error.message
-    : typeof error === "string" && error.trim()
-      ? error
-      : fallback;
+const reportHostError = (error: unknown) => console.error("Desktop host operation failed", error);
 
 function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
@@ -65,7 +60,7 @@ function App() {
   const [workspaceBootstrapPending, setWorkspaceBootstrapPending] = useState(true);
   const [hasSelectableModel, setHasSelectableModel] = useState<boolean | null>(null);
   const [runtimeConfigRevision, setRuntimeConfigRevision] = useState(0);
-  const [hostError, setHostError] = useState("");
+  const [sessionListError, setSessionListError] = useState("");
   const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
   const confirmationResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
   const runtimeConfigRequestIdRef = useRef(0);
@@ -90,7 +85,7 @@ function App() {
 
   const workspaceController = useWorkspaceController({
     confirmAction,
-    reportHostError: setHostError,
+    reportHostError,
   });
   const {
     workspaces,
@@ -114,7 +109,8 @@ function App() {
   const sessionController = useSessionController({
     activeWorkspaceRoot,
     isChatVisible: page === "chat",
-    reportError: setHostError,
+    reportError: reportHostError,
+    reportCatalogError: setSessionListError,
   });
   const {
     sessions,
@@ -172,13 +168,15 @@ function App() {
       if (sessionResult.status === "fulfilled") {
         sessionInitialization.applySessions(sessionResult.value);
       } else if (sessionInitialization.isCurrent()) {
-        setHostError(errorMessage(sessionResult.reason, t("app.unableToLoadConversations")));
+        reportHostError(sessionResult.reason);
+        setSessionListError(t("app.unableToLoadConversations"));
       }
     });
     void getAgentRuntimeConfig().then(config => {
       if (!cancelled && runtimeConfigRequestIdRef.current === runtimeConfigRequestId)
         setHasSelectableModel(config.selectableModels.length > 0);
-    }, () => {
+    }, error => {
+      reportHostError(error);
       if (!cancelled && runtimeConfigRequestIdRef.current === runtimeConfigRequestId)
         setHasSelectableModel(false);
     });
@@ -205,7 +203,7 @@ function App() {
         }
       }).catch((error) => {
         if (!disposed && runtimeConfigRequestIdRef.current === requestId) {
-          setHostError(errorMessage(error, t("app.unableToLoadModelConfiguration")));
+          reportHostError(error);
         }
       });
     }).then((nextUnlisten) => {
@@ -215,7 +213,7 @@ function App() {
         unlisten = nextUnlisten;
       }
     }).catch((error) => {
-      if (!disposed) setHostError(errorMessage(error, t("app.unableToSubscribeToModelConfiguration")));
+      if (!disposed) reportHostError(error);
     });
     return () => {
       disposed = true;
@@ -235,7 +233,12 @@ function App() {
       workspacePanel.actions.saveScope(scope(currentSessionId, activeWorkspaceRoot));
       if (location.sessionId && location.sessionId !== currentSessionId) {
         const result = await selectSession(location.sessionId);
-        if (!result || !isCurrent()) return false;
+        if (!isCurrent()) return false;
+        if (!result) {
+          setSessionListError(t("chatArea.unableToLoadConversation"));
+          return false;
+        }
+        setSessionListError("");
         if (result.workspaceSnapshot) applyWorkspaceSnapshot(result.workspaceSnapshot);
         workspacePanel.actions.restoreScope(scope(location.sessionId, location.root));
       } else if (!location.sessionId) {
@@ -269,7 +272,7 @@ function App() {
   const newChat = () => { setNewChatRevision(revision => revision + 1); void navigation.move({ page: "chat", sessionId: null, root: activeWorkspaceRoot }); };
   const menuActions = useRef<(action: string) => void>(() => {});
   menuActions.current = action => {
-    if (action === "open-folder") void handleOpenWorkspace("customPath").catch(error => setHostError(String(error)));
+    if (action === "open-folder") void handleOpenWorkspace("customPath").catch(reportHostError);
     if (action === "new-chat") newChat();
     if (action === "settings" || action === "about") navigatePage(action);
     if (action === "toggle-sidebar") setIsSidebarOpen(value => !value);
@@ -277,7 +280,7 @@ function App() {
   };
   useEffect(() => {
     let disposed = false; let unlisten: (() => void) | undefined;
-    void listenHost<{ action: string }>("centaeris/navigation", payload => menuActions.current(payload.action)).then(stop => { if (disposed) stop(); else unlisten = stop; }).catch(error => setHostError(String(error)));
+    void listenHost<{ action: string }>("centaeris/navigation", payload => menuActions.current(payload.action)).then(stop => { if (disposed) stop(); else unlisten = stop; }).catch(reportHostError);
     const keydown = (event: KeyboardEvent) => {
       if (event.target instanceof Element && event.target.closest(".workspaceTerminal")) return;
       if ((!event.ctrlKey && !event.metaKey) || event.altKey || event.shiftKey) return;
@@ -303,7 +306,7 @@ function App() {
 
   return (
     <DesktopShell expanded={isSidebarOpen} className={`thinAppShell ${isSidebarOpen ? "is-sidebar-open" : "is-sidebar-collapsed"}`}>
-      <ApplicationBar expanded={isSidebarOpen} onToggle={() => setIsSidebarOpen(open => !open)} canBack={navigation.canBack} canForward={navigation.canForward} onBack={() => void navigation.move(-1)} onForward={() => void navigation.move(1)} onError={setHostError} />
+      <ApplicationBar expanded={isSidebarOpen} onToggle={() => setIsSidebarOpen(open => !open)} canBack={navigation.canBack} canForward={navigation.canForward} onBack={() => void navigation.move(-1)} onForward={() => void navigation.move(1)} onError={reportHostError} />
 
       <div className="thinSidebarSlot" inert={!isSidebarOpen}>
         <Sidebar
@@ -323,6 +326,16 @@ function App() {
           completedSessionIds={completedSessionIds}
           waitingSessionIds={waitingSessionIds}
           workspaceCatalogError={workspaceCatalogError}
+          sessionListError={sessionListError}
+          onRetrySessions={async () => {
+            const retry = beginSessionInitialization();
+            try {
+              if (retry.applySessions(await retry.load(), currentSessionId)) setSessionListError("");
+            } catch (error) {
+              reportHostError(error);
+              if (retry.isCurrent()) setSessionListError(t("app.unableToLoadConversations"));
+            }
+          }}
           onNewChat={newChat}
           onOpenWorkspace={handleOpenWorkspace}
           onRenameWorkspace={renameWorkspace}
@@ -453,9 +466,6 @@ function App() {
         </DialogContent>
       </Dialog>
 
-      {hostError ? (
-        <div className="thinHostError desktopHostNotice" role="alert"><span>{hostError}</span><Button variant="ghost" size="icon-sm" aria-label="Dismiss notification" onClick={() => setHostError("")}><X aria-hidden="true" /></Button></div>
-      ) : null}
     </DesktopShell>
   );
 }

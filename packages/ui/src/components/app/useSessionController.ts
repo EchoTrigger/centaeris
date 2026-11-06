@@ -62,10 +62,12 @@ export function useSessionController({
   activeWorkspaceRoot,
   isChatVisible = true,
   reportError,
+  reportCatalogError,
 }: {
   activeWorkspaceRoot: string | null;
   isChatVisible?: boolean;
   reportError: (message: string) => void;
+  reportCatalogError?: (message: string) => void;
 }) {
   const catalogRef = useRef<SessionCatalogClient | null>(null);
   if (!catalogRef.current) catalogRef.current = new SessionCatalogClient(querySessionCatalog);
@@ -84,13 +86,13 @@ export function useSessionController({
     })),
   );
   const { setSessions, setCurrentSession, setRunningSessionIds, setCompletedSessionIds, setWaitingSessionIds, advanceCatalogRevision } = getViewState();
-  const inputsRef = useRef({ activeWorkspaceRoot, reportError, isChatVisible });
+  const inputsRef = useRef({ activeWorkspaceRoot, reportError, reportCatalogError, isChatVisible });
   const selectionEpochRef = useRef(0);
   const refreshRequestIdRef = useRef(0);
   const catalogMutationRef = useRef(0);
   const activityMutationRef = useRef(0);
   const pendingPins = useRef(new Set<string>());
-  inputsRef.current = { activeWorkspaceRoot, reportError, isChatVisible };
+  inputsRef.current = { activeWorkspaceRoot, reportError, reportCatalogError, isChatVisible };
 
   const clearSelection = useCallback(() => {
     selectionEpochRef.current += 1;
@@ -450,14 +452,20 @@ export function useSessionController({
       const items = await catalog.expand(root);
       setSessions(previous => sortSessions([...previous.filter(p => !items.some(i => i.id === p.id)), ...items.map(toUiSession)]));
       advanceCatalogRevision();
-    } catch(error) { inputsRef.current.reportError(errorMessage(error, "Unable to load chats")); }
+    } catch(error) {
+      inputsRef.current.reportError(errorMessage(error, "Unable to load chats"));
+      inputsRef.current.reportCatalogError?.("Unable to load chats");
+    }
   }, [catalog, setSessions, advanceCatalogRevision]);
   const loadMore = useCallback(async (root: string) => {
     try {
       const items = await catalog.more(root);
       setSessions(previous => sortSessions([...previous.filter(p => !items.some(i => i.id === p.id)), ...items.map(toUiSession)]));
       advanceCatalogRevision();
-    } catch(error) { inputsRef.current.reportError(errorMessage(error, "Unable to load chats")); }
+    } catch(error) {
+      inputsRef.current.reportError(errorMessage(error, "Unable to load chats"));
+      inputsRef.current.reportCatalogError?.("Unable to load chats");
+    }
   }, [catalog, setSessions, advanceCatalogRevision]);
   useEffect(() => { if (activeWorkspaceRoot) void expandWorkspace(activeWorkspaceRoot); }, [activeWorkspaceRoot, expandWorkspace]);
 
