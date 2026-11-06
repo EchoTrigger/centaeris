@@ -106,7 +106,7 @@ test("configuration reasons have useful product copy and unknown hosted codes ha
 test("model settings displays the translated provider authentication error from the API", async () => {
   const { default: ModelSettings } = await import(await subjectLoader()(fileURLToPath(new URL("../../src/routes/ModelSettings.jsx", import.meta.url))));
   const error = new ApiError("provider_authentication_failed", 401);
-  const subject = renderer(ModelSettings, { onClose() {}, onModelsChanged() {} }, environment({ request: async () => { throw error; } }));
+  const subject = renderer(ModelSettings, { workspace: { id: "test-workspace" }, onModelsChanged() {} }, environment({ request: async () => { throw error; } }));
   await subject.settle();
   assert.ok(nodes(subject.tree, node => node.props.children === "modelErrors.authenticationFailed").length);
   subject.unmount();
