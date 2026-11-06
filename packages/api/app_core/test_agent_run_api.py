@@ -112,6 +112,23 @@ class AgentRunApiApiTests(TransactionTestCase):
         self.assertEqual(AgentRun.objects.get(pk=operation.agentRunId).status, "queued")
         self.assertFalse(self.message()[1].conversationId == operation.conversationId)
 
+    def test_workspace_admin_can_create_and_change_reset_policy(self):
+        self.client.force_login(self.user)
+        base = f"/api/workspaces/{self.workspace.pk}/api-credentials"
+        created = self.client.post(base, json.dumps({
+            "name": "Conversation", "modelConfigRef": self.model.pk, "resetPolicy": "after15Minutes",
+        }), content_type="application/json")
+        self.assertEqual(created.status_code, 201, created.content)
+        self.assertEqual(created.json()["credential"]["resetPolicy"], "after15Minutes")
+        url = f"{base}/{self.credential.pk}"
+        updated = self.client.patch(url, json.dumps({"resetPolicy": "onReopen"}), content_type="application/json")
+        self.assertEqual(updated.status_code, 200, updated.content)
+        self.assertEqual(updated.json()["credential"]["resetPolicy"], "onReopen")
+        rejected = self.client.patch(url, json.dumps({"resetPolicy": "on_reopen"}), content_type="application/json")
+        self.assertEqual(rejected.status_code, 400, rejected.content)
+        self.credential.refresh_from_db()
+        self.assertEqual(self.credential.resetPolicy, "onReopen")
+
     def test_reset_policies_apply_at_reopen_and_timed_boundaries(self):
         for policy, minutes in (("never", None), ("onReopen", 0), ("after10Minutes", 10),
                                 ("after15Minutes", 15), ("after30Minutes", 30), ("after60Minutes", 60)):

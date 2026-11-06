@@ -1,4 +1,6 @@
 """Workspace-managed credentials and the external v1 single-response API."""
+from typing import Annotated
+
 from django.conf import settings
 from django.db import transaction
 from django.http import JsonResponse
@@ -47,6 +49,7 @@ from .stream_response import OwnedAsyncStreamingHttpResponse, stream_database_ca
 
 
 router = Router(tags=["agent"], by_alias=True)
+ResetPolicyValue = Annotated[ConversationResetPolicy, Field(strict=False)]
 
 
 class CreateCredentialRequest(StrictSchema):
@@ -54,11 +57,11 @@ class CreateCredentialRequest(StrictSchema):
     model_config_ref: str
     plugin_names: list[str] = Field(default_factory=list, max_length=64)
     source_object_refs: list[str] = Field(default_factory=list, max_length=64)
-    reset_policy: ConversationResetPolicy = ConversationResetPolicy.NEVER
+    reset_policy: ResetPolicyValue = ConversationResetPolicy.NEVER
 
 
 class UpdateResetPolicyRequest(StrictSchema):
-    reset_policy: ConversationResetPolicy
+    reset_policy: ResetPolicyValue
 
 
 class CredentialResponse(StrictSchema):
@@ -70,7 +73,7 @@ class CredentialResponse(StrictSchema):
     source_object_refs: list[str]
     created_at: DateTimeText
     can_copy: bool
-    reset_policy: ConversationResetPolicy
+    reset_policy: ResetPolicyValue
 
 
 class CredentialListResponse(StrictSchema):
