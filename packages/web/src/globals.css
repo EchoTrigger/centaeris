@@ -853,6 +853,9 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .developerSectionHead, .developerActions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
 .developerSectionHead { justify-content: space-between; }
 .developerSectionHead p { margin-top: 4px; }
+.developerExampleLanguages { display: flex; gap: 2px; padding: 3px; border-radius: 8px; background: var(--surface-color); }
+.developerExampleLanguages button { min-height: 28px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: var(--process-text); font: inherit; font-size: 12px; }
+.developerExampleLanguages button:hover, .developerExampleLanguages button[aria-pressed="true"] { background: var(--surface-container); color: var(--on-surface); }
 .developerActions { justify-content: flex-end; }
 .developerSettings :is(.primary, .secondary) { min-height: 34px; border-radius: 7px; padding: 5px 12px; font-size: 12px; }
 .developerCopy { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }

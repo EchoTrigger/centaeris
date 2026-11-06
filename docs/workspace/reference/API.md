@@ -129,8 +129,8 @@ separately. If deliberately retrying a submit, use the original `--operation-id`
 prompt and credential. No retry resumes a lost original stream.
 
 In Workspace Web, **Settings → Developer** provides the API address, credential
-management and the first-call example. The console and quickstart render that
-example from one shared generator.
+management and a minimal request example in cURL and Node.js. Quickstart adds
+a saved first request and status lookup for both choices.
 The **Docs** tab bundles the integration guides and the generated request,
 response and event fields with that Web build. The quickstart explains the
 first-call and original-operation status examples. The first-call example saves

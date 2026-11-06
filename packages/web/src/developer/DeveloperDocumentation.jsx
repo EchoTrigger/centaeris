@@ -66,16 +66,16 @@ function ReferenceTables() {
   </section>;
 }
 
-export function DeveloperDocumentation({ topic }) {
+export function DeveloperDocumentation({ topic, exampleLanguage, onExampleLanguageChange }) {
   const { t, i18n } = useTranslation();
   const guides = developerGuides[i18n.resolvedLanguage] || developerGuides.en;
   return <article className="developerArticle">
     <header className="settingsPageHeading"><h1>{t("developer.doc." + topic + ".title")}</h1></header>
     <div className="developerProse"><MarkdownContent text={guides[topic]} /></div>
     {topic === "quickstart" ? <>
-      <DeveloperExample saveRequest />
+      <DeveloperExample saveRequest language={exampleLanguage} onLanguageChange={onExampleLanguageChange} />
       <div className="developerProse"><MarkdownContent text={guides.firstResult} /></div>
-      <DeveloperStatusExample />
+      <DeveloperStatusExample language={exampleLanguage} />
       <div className="developerProse"><MarkdownContent text={guides.recovery} /></div>
     </> : null}
     {topic === "events" ? <ReferenceTables /> : null}

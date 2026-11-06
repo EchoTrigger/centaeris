@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link } from "react-router";
 import { apiUrl } from "../api";
 import { DeveloperCredentials } from "../developer/DeveloperCredentials";
@@ -24,12 +25,13 @@ export function developerDocSearch(topic) {
 export function DeveloperSettings({ workspaceId, canManage, topic, lastTopic, navigationState }) {
   const { t } = useTranslation();
   const endpoint = apiUrl(runPath);
+  const [exampleLanguage, setExampleLanguage] = useState("curl");
   return <div className="preferenceSettings developerSettings">
     <nav className="extensionTabs" aria-label={t("developer.title")}>
       <Link to={{ search: "" }} state={navigationState} aria-current={!topic ? "page" : undefined}>{t("developer.console")}</Link>
       <Link to={{ search: developerDocSearch(lastTopic) }} state={navigationState} aria-current={topic ? "page" : undefined}>{t("developer.docs")}</Link>
     </nav>
-    {topic ? <DeveloperDocumentation topic={topic} /> : <>
+    {topic ? <DeveloperDocumentation topic={topic} exampleLanguage={exampleLanguage} onExampleLanguageChange={setExampleLanguage} /> : <>
       <header className="settingsPageHeading">
         <h1>{t("developer.oneShotApi")}</h1>
         <p>{t("developer.consoleDescription")}</p>
@@ -45,7 +47,7 @@ export function DeveloperSettings({ workspaceId, canManage, topic, lastTopic, na
         <h2>{t("developer.credentials")}</h2>
         <p>{t("developer.memberCredentialsHint")}</p>
       </section>}
-      <DeveloperExample />
+      <DeveloperExample language={exampleLanguage} onLanguageChange={setExampleLanguage} />
     </>}
   </div>;
 }

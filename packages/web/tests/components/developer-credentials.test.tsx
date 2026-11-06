@@ -269,3 +269,30 @@ test("a workspace member can open a direct docs link without loading credential 
   expect(screen.queryByRole("button", { name: "Create credential" })).toBeNull();
   expect(fetch).not.toHaveBeenCalled();
 });
+
+
+test("the example selector copies the selected request and switches the quickstart lookup with it", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.spyOn(navigator.clipboard, "writeText");
+  await openDeveloper("member");
+  const examples = within(await screen.findByRole("group", { name: "Example language" }));
+  expect(examples.getByRole("button", { name: "cURL", pressed: true })).toBeTruthy();
+  await user.click(examples.getByRole("button", { name: "Node.js" }));
+  await user.click(screen.getByRole("button", { name: "Copy example" }));
+  expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("await fetch(endpoint"));
+  expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("https://workspace.example/api/v1/agent-runs"));
+  await user.click(examples.getByRole("button", { name: "cURL" }));
+  await user.click(screen.getByRole("button", { name: "Copy example" }));
+  expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("curl -N"));
+
+  await user.click(screen.getByRole("link", { name: "Docs" }));
+  const quickstartExamples = within(await screen.findByRole("group", { name: "Example language" }));
+  await user.click(quickstartExamples.getByRole("button", { name: "Node.js" }));
+  await user.click(screen.getByRole("button", { name: "Copy example" }));
+  expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("centaeris-first-call"));
+  await user.click(screen.getByRole("button", { name: "Copy status request" }));
+  expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining('fetch(endpoint + "/operations/"'));
+  await user.click(quickstartExamples.getByRole("button", { name: "cURL" }));
+  await user.click(screen.getByRole("button", { name: "Copy status request" }));
+  expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("curl --disable"));
+});

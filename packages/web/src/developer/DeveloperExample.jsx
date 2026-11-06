@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { apiUrl } from "../api";
 import { useTranslation } from "../i18n";
+import { nodeRequestExample, nodeStatusExample } from "./nodeExamples";
 import reference from "./oneShotReference.json";
 
 export const runPath = reference.operations.find(operation => operation.id === "createRun").path;
@@ -92,29 +93,39 @@ export function CopyButton({ value, label, accessibleLabel }) {
   </span>;
 }
 
-export function DeveloperExample({ saveRequest = false }) {
+export function DeveloperExample({ saveRequest = false, language, onLanguageChange }) {
   const { t } = useTranslation();
   const endpoint = apiUrl(runPath);
-  const command = saveRequest ? firstCallExample(endpoint) : minimalRequestExample(endpoint);
+  const command = language === "node"
+    ? nodeRequestExample(endpoint, saveRequest)
+    : saveRequest ? firstCallExample(endpoint) : minimalRequestExample(endpoint);
+  const hint = language === "node" ? "developer.nodeExampleHint"
+    : saveRequest ? "developer.savedExampleHint" : "developer.exampleHint";
 
   return <section className="settingsPanel developerSection" aria-labelledby="developer-example-heading">
     <div className="developerSectionHead">
       <div><h2 id="developer-example-heading">{t(saveRequest ? "developer.savedRequest" : "developer.minimumRequest")}</h2>
-        <p>{t(saveRequest ? "developer.savedExampleHint" : "developer.exampleHint")}</p></div>
-      <CopyButton value={command} label={t("developer.copyExample")} />
+        <p>{t(hint)}</p></div>
+      <div className="developerActions">
+        <div className="developerExampleLanguages" role="group" aria-label={t("developer.exampleLanguage")}>
+          <button type="button" aria-pressed={language === "curl"} onClick={() => onLanguageChange("curl")}>cURL</button>
+          <button type="button" aria-pressed={language === "node"} onClick={() => onLanguageChange("node")}>Node.js</button>
+        </div>
+        <CopyButton key={language} value={command} label={t("developer.copyExample")} />
+      </div>
     </div>
     <pre><code>{command}</code></pre>
   </section>;
 }
 
-export function DeveloperStatusExample() {
+export function DeveloperStatusExample({ language }) {
   const { t } = useTranslation();
-  const command = statusExample();
+  const command = language === "node" ? nodeStatusExample : statusExample();
   return <section className="settingsPanel developerSection" aria-labelledby="developer-status-heading">
     <div className="developerSectionHead">
       <div><h2 id="developer-status-heading">{t("developer.checkOriginalOperation")}</h2>
         <p>{t("developer.statusExampleHint")}</p></div>
-      <CopyButton value={command} label={t("developer.copyStatusExample")} />
+      <CopyButton key={language} value={command} label={t("developer.copyStatusExample")} />
     </div>
     <pre><code>{command}</code></pre>
   </section>;

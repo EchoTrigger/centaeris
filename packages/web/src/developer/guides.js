@@ -2,20 +2,22 @@ export const developerGuides = {
   en: {
     quickstart: `
 1. In **Settings → Developer → Console**, enter a credential name and choose a model. Plugins and materials are optional; leave them empty for this first call.
-2. Save the secret in your backend's secret store and export it as \`CENTAERIS_RUN_KEY\`. This is the Workspace API credential, not the model provider's key. You can copy it from the credential list until you leave the console.
-3. Run the complete example below in **Bash**, with curl and Python 3 installed. No repository checkout or SDK is needed. It saves the operation ID, request, endpoint, credential fingerprint, headers and response in \`./centaeris-first-call\`; the secret stays in the environment. The fingerprint lets the status example reject an accidentally changed credential before making a request.
+2. Save the Workspace API credential in your secret store and set \`CENTAERIS_RUN_KEY\` in the environment where you run the example. You can copy it from the credential list until you leave the console.
+3. Choose **cURL** to run in Bash with curl and Python 3 installed, or **Node.js** to save the example as an \`.mjs\` file and run it with Node.js 22 or later. Both save the operation ID, request body, endpoint, credential fingerprint, response headers and raw response in \`./centaeris-first-call\`. The status example uses the fingerprint to detect a changed credential before making a request.
 
 The example refuses to reuse an existing directory, so copying it again cannot accidentally start another run. Keep the directory after a timeout and use the status example below. Choose a different directory only for an intentional new call.
 `,
     firstResult: `
 ### Recognize the result
 
-The first accepted call returns \`200 text/event-stream\`. Read \`runAccepted\`, join \`outputText\` chunks, and require \`runFinished\` with both \`runStatus: completed\` and \`deliveryStatus: completed\`. Text is emitted after execution ends, not as live model tokens. Failed or cancelled runs may contain only the last partial assistant response. A successful curl exit or HTTP \`200\` alone does not establish run success.
+Check the saved response headers for \`Content-Type\`. A newly accepted call returns \`200 text/event-stream\`. Read \`runAccepted\`, join \`outputText\` chunks, and check that \`runFinished\` reports both \`runStatus: completed\` and \`deliveryStatus: completed\`. Text is emitted after execution ends. Failed or cancelled runs may contain only the last partial assistant response.
+
+A \`200 application/json\` submit response means the operation was already accepted and you received its receipt. Both examples save the raw response, so check the events separately to confirm delivery. For file verification, use the **Artifacts** guide.
 
 Before sending, retain the **original credential reference, endpoint, operation ID and request body**. After acceptance, also retain the Run ID and receipt times. Keep the received text and verified files in your application. The status endpoint cannot recover text or files from a disconnected stream.
 `,
     recovery: `
-The lookup is read-only. A \`200 application/json\` response is a status receipt, even when \`runStatus\` is \`completed\`; it contains no output. A \`404\` immediately after a timeout can race acceptance. If you retry submission, reuse the **same credential, saved operation ID and saved request body**. Never generate a new key just to recover a timed-out call.
+Send \`GET /api/v1/agent-runs/operations/{operationId}\` with the original credential. A \`200 application/json\` response gives the run and cleanup states, including when \`runStatus\` is \`completed\`. A \`404\` immediately after a timeout can race acceptance. If you retry submission, reuse the **same credential, saved operation ID and saved request body**. Never generate a new key just to recover a timed-out call.
 
 Connection loss stops delivery; the Run continues. Repeating POST returns only a receipt if the original request was accepted. Lost output cannot be replayed. Check external side effects before deliberately generating a new run. The **Lifecycle**, **Files** and **Errors** pages explain cancellation, file verification and the other recovery outcomes.
 `,
@@ -107,7 +109,7 @@ Submission exits \`0\` only for complete successful delivery, \`2\` for a receip
 
 | Response | What to do |
 | --- | --- |
-| \`400\` invalid request | Check the JSON, exact field names, prompt, material IDs and operation ID format. Fix the request after a definite validation rejection. |
+| \`400\` invalid request | Check the JSON, exact field names, prompt, material IDs and operation ID format. For \`authentication_mixed\`, remove the Workspace login cookie and use the Bearer credential. |
 | \`401\` invalid or missing credential | Check the Bearer header and use a valid Workspace API credential. |
 | \`403\` credential authority lost | Ask a Workspace owner or administrator to verify the issuer's role, model access and revocation state. Treat an earlier timed-out request as uncertain. |
 | \`404\` source, operation or run unavailable | Check the scope and identifiers. After a timed-out submit, status lookup may precede acceptance. If retrying, use the original credential, key and input. |
@@ -133,20 +135,22 @@ Example of a request rejected because its operation ID is invalid.
   "zh-CN": {
     quickstart: `
 1. 在 **设置 → 开发者 → 控制台** 中填写凭证名称并选择模型。插件和资料都是可选项，首次调用可以留空。
-2. 将密钥保存到后端的密钥存储，并导出环境变量 \`CENTAERIS_RUN_KEY\`。这是 Workspace API 凭证，不是模型厂商密钥。离开控制台前，可从凭证列表再次复制。
-3. 在已安装 curl 和 Python 3 的 **Bash** 中运行下面的完整示例，无需下载仓库或安装 SDK。示例将操作 ID、请求正文、地址、凭证指纹、响应头和响应保存到 \`./centaeris-first-call\`；密钥只从环境变量读取。查询示例会用指纹发现误换凭证，并在发出请求前停止。
+2. 保存 Workspace API 凭证，在运行示例的环境中设置 \`CENTAERIS_RUN_KEY\`。离开控制台前，可从凭证列表再次复制。
+3. 选择 **cURL** 时，在装有 curl 和 Python 3 的 Bash 中运行。选择 **Node.js** 时，将示例保存为 \`.mjs\` 文件，用 Node.js 22 或更高版本运行。两种示例都会把操作 ID、请求正文、地址、凭证指纹、响应头和原始响应保存到 \`./centaeris-first-call\`。如果凭证发生变化，查询示例会在发出请求前提示使用原凭证。
 
 示例拒绝使用已存在的目录，避免重复复制整段命令时误建另一个运行。超时后保留目录，使用下方的查询示例。只有明确要发起新调用时，才换一个目录名。
 `,
     firstResult: `
 ### 确认收到结果
 
-首次接受请求会返回 \`200 text/event-stream\`。读取 \`runAccepted\`，按顺序拼接 \`outputText\`，并确认 \`runFinished\` 同时包含 \`runStatus: completed\` 和 \`deliveryStatus: completed\`。文本在执行结束后发出，不是模型实时 token；失败或取消的运行可能只包含最后一段未完成的答复。curl 正常退出或 HTTP \`200\` 都不单独代表运行成功。
+查看保存的响应头中的 \`Content-Type\`。首次接受请求会返回 \`200 text/event-stream\`。读取 \`runAccepted\`，按顺序拼接 \`outputText\`，并确认 \`runFinished\` 同时报告 \`runStatus: completed\` 和 \`deliveryStatus: completed\`。文本在执行结束后发出。失败或取消的运行可能只包含最后一段未完成的答复。
+
+提交返回 \`200 application/json\` 表示操作此前已受理，本次拿到的是状态回执。两种示例都会保存原始响应，需另行检查事件来确认交付。文件校验见**文件产物**。
 
 发送前保留**原凭证的引用、请求地址、操作 ID 和请求正文**。接受后再保存 Run ID 和回执中的时间信息。收到的文本和校验通过的文件由调用方保存；状态接口无法找回断线时丢失的文本和文件。
 `,
     recovery: `
-查询不会创建运行。\`200 application/json\` 是状态回执，即使其中的 \`runStatus\` 为 \`completed\`，也不包含输出。超时后立即查到 \`404\`，仍可能是查询早于请求接受。如需重试提交，沿用**同一个凭证、保存的操作 ID 和保存的请求正文**，不能为了恢复超时请求而生成新键。
+用原凭证发送 \`GET /api/v1/agent-runs/operations/{operationId}\`。\`200 application/json\` 返回运行与清理状态，\`runStatus\` 为 \`completed\` 时也一样。超时后立即查到 \`404\`，仍可能是查询早于请求接受。如需重试提交，沿用**同一个凭证、保存的操作 ID 和保存的请求正文**，不能为了恢复超时请求而生成新键。
 
 断线会结束交付，Run 仍继续执行。原请求已被接受时，重复 POST 只返回回执，无法重放丢失的输出。决定重新运行前先核对外部副作用。取消、文件校验和其他恢复情况分别见**生命周期**、**文件产物**和**错误处理**。
 `,
@@ -238,7 +242,7 @@ python3 scripts/workspace/one_shot_client.py \\
 
 | 响应 | 调用方操作 |
 | --- | --- |
-| \`400\` 请求无效 | 检查 JSON、字段名、提示词、资料 ID 和操作 ID 格式。确认因校验被拒后，修正请求。 |
+| \`400\` 请求无效 | 检查 JSON、字段名、提示词、资料 ID 和操作 ID 格式。收到 \`authentication_mixed\` 时，去掉 Workspace 登录 Cookie，使用 Bearer 凭证。 |
 | \`401\` 凭证缺失或无效 | 检查 Bearer 请求头并使用有效的 Workspace API 凭证。 |
 | \`403\` 凭证授权已失效 | 请 Workspace 所有者或管理员核对签发人角色、模型权限和凭证撤销状态。此前超时请求的接受结果仍需核实。 |
 | \`404\` 资料、操作或运行不可用 | 检查授权范围和 ID。提交超时后的查询可能早于服务接受请求。如需重试，沿用原凭证、原键和原输入。 |
