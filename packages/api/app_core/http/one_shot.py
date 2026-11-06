@@ -73,6 +73,14 @@ class CreatedCredentialResponse(CredentialEnvelope):
 
 
 class OneShotAuth(HttpBearer):
+    openapi_description = (
+        "Use the complete one-shot credential as Authorization: Bearer <credential>. "
+        "The credential fixes the workspace and allowed execution scope. Use the same credential "
+        "for submission, status lookup and cancellation. Browser session cookies or an authenticated "
+        "product session cannot be combined with this credential. Revoked credentials cannot read "
+        "their old receipts."
+    )
+
     def __call__(self, request):
         if settings.SESSION_COOKIE_NAME in request.COOKIES or request.user.is_authenticated:
             raise DelegationRejected("authentication_mixed", 400)
@@ -165,10 +173,35 @@ def revoke_api_credential(request, workspace_id: str, credential_id: str):
 
 @router.post(
     CREATE_RUN_PATH, auth=external_auth, response={200: OperationReceipt} | COMMON_ERROR_RESPONSES,
-    openapi_extra={"responses": {200: {
-        "description": "Run event stream for first acceptance or receipt for a repeated request",
-        "content": {"text/event-stream": {"schema": {"type": "string"}}},
-    }}},
+    description=(
+        "Submit one execution scoped to this credential and Idempotency-Key. Inspect the response "
+        "Content-Type to choose the parser; the Accept header does not choose the response format. "
+        "Only a newly accepted submission can deliver text and artifacts over SSE. Disconnecting does "
+        "not cancel execution, and the stream and results cannot be replayed. Save the original "
+        "operation ID before sending, and use it to check status after a timeout. Query parameters "
+        "are rejected."
+    ),
+    openapi_extra={
+        "parameters": [{
+            "in": "header", "name": IDEMPOTENCY_HEADER, "required": True,
+            "schema": {"type": "string"},
+            "description": (
+                "Client-generated operation ID: Unix seconds, a dot, and a lowercase UUIDv4. "
+                "Keep the same credential, key and request body for retries. A previously accepted "
+                "operation with different input returns 409. The key expires 24 hours after its "
+                "timestamp; timestamps more than five minutes in the future are rejected."
+            ),
+        }],
+        "responses": {200: {
+            "description": (
+                "A newly accepted operation returns text/event-stream. An already accepted "
+                "operation with the same credential, key and request returns an application/json "
+                "receipt only. A retry after an earlier submission was not accepted can still "
+                "be the first acceptance and return SSE."
+            ),
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        }},
+    },
 )
 async def create_one_shot_run(request, payload: CreateRunRequest):
     if request.GET:
@@ -201,6 +234,15 @@ async def create_one_shot_run(request, payload: CreateRunRequest):
 
 @router.get(
     GET_OPERATION_PATH, auth=external_auth, response={200: OperationReceipt} | COMMON_ERROR_RESPONSES,
+    description=(
+        "Read the status receipt using the original operation ID and the same credential that "
+        "submitted it. This endpoint never returns answer text, artifact bytes or a replay stream. "
+        "A valid, unexpired ID with no operation under this credential returns 404; an expired "
+        "operation ID returns 410. Query parameters are rejected."
+    ),
+    openapi_extra={"responses": {200: {
+        "description": "Operation status receipt only; no results or replay.",
+    }}},
 )
 def get_one_shot_operation(request, operation_id: str):
     if request.GET:
@@ -218,6 +260,20 @@ def get_one_shot_operation(request, operation_id: str):
 @router.post(
     CANCEL_RUN_PATH, auth=external_auth,
     response={200: OperationReceipt, 202: CancellationRequested} | COMMON_ERROR_RESPONSES,
+    description=(
+        "Request cancellation using the runId from the original operation and the same credential. "
+        "Send an empty body (zero bytes, not a JSON object) and no query parameters. A 202 response "
+        "only acknowledges the cancellation request; use the original operation ID to confirm the "
+        "terminal run status. Cancellation does not undo effects already performed."
+    ),
+    openapi_extra={"responses": {
+        200: {
+            "description": "The run is already terminal; return its operation status receipt.",
+        },
+        202: {
+            "description": "Cancellation requested; this does not confirm that execution has stopped.",
+        },
+    }},
 )
 def cancel_one_shot_run(request, run_id: str):
     if request.META.get("CONTENT_LENGTH", "0") not in ("", "0") or request.GET:

@@ -23,21 +23,26 @@ def _reference():
     from app_core import one_shot_protocol as wire
 
     receipt = {"status": 200, "contentType": "application/json", "schema": wire.OperationReceipt.__name__}
+    authorization = {"name": "Authorization", "required": True, "schema": {"type": "string"}}
     operations = [
         {
             "id": "createRun", "method": "POST", "path": _public_path(wire.CREATE_RUN_PATH),
             "requestSchema": wire.CreateRunRequest.__name__,
-            "headers": [{"name": wire.IDEMPOTENCY_HEADER, "required": True, "schema": {"type": "string"}}],
-            "responses": [{"status": 200, "contentType": "text/event-stream"}, receipt],
+            "headers": [authorization, {"name": wire.IDEMPOTENCY_HEADER, "required": True, "schema": {"type": "string"}}],
+            "responses": [{"status": 200, "contentType": "text/event-stream", "condition": "newRun"},
+                          {**receipt, "condition": "existingOperation"}],
         },
         {
             "id": "getOperation", "method": "GET", "path": _public_path(wire.GET_OPERATION_PATH),
-            "responses": [receipt],
+            "headers": [authorization],
+            "responses": [{**receipt, "condition": "statusOnly"}],
         },
         {
             "id": "cancelRun", "method": "POST", "path": _public_path(wire.CANCEL_RUN_PATH),
-            "responses": [receipt, {
+            "headers": [authorization], "emptyBody": True,
+            "responses": [{**receipt, "condition": "terminal"}, {
                 "status": 202, "contentType": "application/json", "schema": wire.CancellationRequested.__name__,
+                "condition": "cancelRequested",
             }],
         },
     ]

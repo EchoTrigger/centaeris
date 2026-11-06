@@ -7,6 +7,13 @@
       "requestSchema": "CreateRunRequest",
       "headers": [
         {
+          "name": "Authorization",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
           "name": "Idempotency-Key",
           "required": true,
           "schema": {
@@ -17,12 +24,14 @@
       "responses": [
         {
           "status": 200,
-          "contentType": "text/event-stream"
+          "contentType": "text/event-stream",
+          "condition": "newRun"
         },
         {
           "status": 200,
           "contentType": "application/json",
-          "schema": "OperationReceipt"
+          "schema": "OperationReceipt",
+          "condition": "existingOperation"
         }
       ]
     },
@@ -30,11 +39,21 @@
       "id": "getOperation",
       "method": "GET",
       "path": "/api/v1/agent-runs/operations/{operationId}",
+      "headers": [
+        {
+          "name": "Authorization",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
       "responses": [
         {
           "status": 200,
           "contentType": "application/json",
-          "schema": "OperationReceipt"
+          "schema": "OperationReceipt",
+          "condition": "statusOnly"
         }
       ]
     },
@@ -42,16 +61,28 @@
       "id": "cancelRun",
       "method": "POST",
       "path": "/api/v1/agent-runs/{runId}/cancel",
+      "headers": [
+        {
+          "name": "Authorization",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "emptyBody": true,
       "responses": [
         {
           "status": 200,
           "contentType": "application/json",
-          "schema": "OperationReceipt"
+          "schema": "OperationReceipt",
+          "condition": "terminal"
         },
         {
           "status": 202,
           "contentType": "application/json",
-          "schema": "CancellationRequested"
+          "schema": "CancellationRequested",
+          "condition": "cancelRequested"
         }
       ]
     }

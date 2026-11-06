@@ -5,12 +5,22 @@
 Workspace owners and administrators manage API credentials through authenticated,
 CSRF-protected `GET` and `POST /api/workspaces/{workspaceId}/api-credentials` and
 `DELETE /api/workspaces/{workspaceId}/api-credentials/{credentialId}`. Creation
-accepts `name`, `modelConfigRef`, `pluginNames`, and `sourceObjectRefs`. The secret
-appears once in the creation response. Lists expose credential metadata. Each
+requires `name` and `modelConfigRef`; `pluginNames` and `sourceObjectRefs` are
+optional and default to empty scopes. The secret appears once in the creation
+response. Lists expose credential metadata. Each
 credential binds its issuing membership, one Workspace, one model configuration,
 and explicit plugin and material scopes. Sponsor removal, role loss, model access
 loss, and revocation invalidate current execution authority. Product access uses
 its existing authentication contract.
+
+Credential creation can itself have an uncertain outcome. Reconcile the list
+after a timeout; the list cannot recover the secret. Revoke a credential whose
+secret was lost before creating a replacement. Revocation and model retirement
+also block external status/cancel requests. A replacement credential cannot read
+the old credential's operations, even in the same Workspace. Routine rotation
+therefore settles and saves old results before revocation; a compromised key
+should be revoked immediately. No administrator recovery endpoint is promised by
+this transport.
 
 External callers use the new credential in `Authorization: Bearer <secret>`.
 `POST /api/v1/agent-runs` accepts a required `prompt` and optional sorted, unique
@@ -20,19 +30,30 @@ for 24 hours from its embedded timestamp, with at most five minutes of future cl
 skew. Unknown fields and query parameters are rejected. Acceptance atomically
 records the Run and receipt, then schedules the existing Runtime lifecycle.
 
-An accepted new call returns `text/event-stream` with the following sequence.
+Inspect `Content-Type` before parsing: a new accepted POST returns
+`200 text/event-stream`; repeating an already accepted operation with the same
+credential, key and input returns `200 application/json` containing only its
+current receipt. A same-key retry after an uncommitted attempt can still be the
+first accepted call and return SSE.
+`Accept` does not select a response mode. HTTP `200` is not proof that the Run or
+delivery completed. An accepted new call streams the following sequence.
 
 1. `runAccepted` provides `operationId`, `runId`, `acceptedAt`, `deadlineAt`,
    `expiresAt`, `runStatus`, and `cleanupStatus`.
 2. `runProgress` provides `runId` and a `stage` of `queued`, `running`, or
    `delivering`. Comment frames keep idle connections active.
-3. `outputText` provides committed final assistant text in ordered `text` chunks.
+3. `outputText` provides committed assistant text in ordered `text` chunks
+   after execution reaches a terminal state; it is not a live token stream.
+   A failed or cancelled Run may contain only the last partial assistant response.
 4. Each artifact starts with `artifactStarted`, followed by indexed
    `artifactChunk` frames containing Base64 `data`, then `artifactCompleted` or
    `artifactFailed`. Start and completion metadata include `artifactId`,
    `filename`, `contentType`, `sizeBytes`, and `sha256`. Completion also includes
    `chunkCount`. Artifact chunks are numbered from zero. Verify length and SHA-256
-   before publishing the received file locally.
+   before publishing the received file locally. Completion metadata must match
+   the start event. Keep partial files separate and never replace an existing
+   caller file. A failed artifact can be followed by other valid artifacts;
+   retain verified files while reporting the overall delivery failure.
 5. `runFinished` separately reports `runStatus` and `deliveryStatus`. The Run may
    succeed while file delivery fails. A lost terminal frame leaves the caller's
    observation uncertain.
@@ -42,17 +63,35 @@ artifacts. Execution has a ten-minute deadline from acceptance, including queue
 time. Terminal output delivery is bounded to 60 seconds. Connection loss closes
 delivery while the original Run continues. Explicit cancellation uses
 `POST /api/v1/agent-runs/{runId}/cancel` with an empty body. A `202` response records
-the request, while a `200` response reports an existing terminal state.
+the request, while a `200` response reports an existing terminal state. Query the
+original operation to confirm cancellation; completion may win the race.
+Cancellation does not undo external side effects.
 
-The same key and input return the original minimal JSON receipt. Changed input
-returns `409 operation_conflict`. Callers can inspect the original identity with
+For an already accepted operation, the same key and input return its minimal
+JSON receipt. Changed input returns `409 operation_conflict`. Callers can inspect the original identity with
 `GET /api/v1/agent-runs/operations/{operationId}`. This endpoint returns receipt and
 status fields, including a known terminal `reasonCode`. Text and files are
 delivered only through the original response. An expired key returns
 `410 operation_expired` even after its receipt has been erased. Timeouts, proxy
 failures, and response loss require checking or resubmitting the same identity.
 The Core tool-execution intent and receipt determine recovery of uncertain
-side effects.
+side effects. Deduplication applies to Run acceptance within one credential's
+scope, not exactly-once external plugin effects or identities across key rotation.
+The request fingerprint uses the trimmed prompt and validated material IDs.
+
+Persist the original endpoint, credential reference, operation ID and request
+body before POST, and retain the Run ID and receipt timestamps after acceptance.
+Use the same credential for lookup. A `404` immediately after a timed-out submit
+can precede acceptance and is not proof that retrying with a new key is safe.
+For an intentional submit retry, reuse the original key and request body. Never
+change a timestamp or generate a new key merely to recover a lost response.
+
+The client's wait, execution deadline, delivery lease and receipt expiry are
+separate boundaries. `expiresAt` is not a result-download deadline. Generate a
+key immediately before its first use: a nearly expired unused key can currently
+be accepted even when its lookup window ends before the Run's deadline. Proposed
+changes to this and to recoverable results are recorded separately in the
+[one-shot design boundary](../architecture/OneShotAgentAPI.md).
 
 One-shot execution uses a private temporary Session, a signed v3 execution policy,
 `perRun` allocation, disabled human questions, and explicit credential scopes.
@@ -65,9 +104,8 @@ its key expires. Immutable physical-cleanup provenance remains available to the
 Runtime's control contracts.
 
 Run the backend example with `CENTAERIS_RUN_KEY` set in the caller's environment.
-Save the printed operation identity and pass `--operation-id` when investigating
-an uncertain acceptance. The example verifies artifact bytes and atomically
-creates each destination file.
+Save the operation identity printed before network access. The example verifies
+artifact bytes and atomically creates each destination file.
 
 ```sh
 python scripts/workspace/one_shot_client.py \
@@ -76,13 +114,35 @@ python scripts/workspace/one_shot_client.py \
   --output ./received
 ```
 
+Inspect an uncertain call without submitting another Run:
+
+```sh
+python scripts/workspace/one_shot_client.py \
+  --url https://workspace.example \
+  --status --operation-id '<original-operation-id>'
+```
+
+Submission exits `0` only after complete successful delivery, `2` when it receives
+a JSON receipt without output, and `1` for transport, protocol or delivery
+failure. `--status` exits `0` for a successful lookup; inspect `runStatus`
+separately. If deliberately retrying a submit, use the original `--operation-id`,
+prompt and credential. No retry resumes a lost original stream.
+
 In Workspace Web, **Settings → Developer** provides the API address, credential
-management and a copyable curl example. The **Docs** tab bundles the integration
-guides and the generated request, response and event fields with that Web build.
+management and the first-call example. The console and quickstart render that
+example from one shared generator.
+The **Docs** tab bundles the integration guides and the generated request,
+response and event fields with that Web build. The quickstart explains the
+first-call and original-operation status examples. The first-call example saves
+request identity before sending and refuses to overwrite an existing request directory.
+The artifacts guide owns the Word example and file-verification instructions.
 Link directly to a page using its URL, for example
 `/w/{workspaceId}/settings/developer?view=docs&topic=events`.
 After changing the public wire definitions, regenerate the reference with
 `uv run --frozen --package api python scripts/workspace/one-shot-reference.py`.
+The generated reference includes required headers, response media types and the
+condition for each success response. Human guides explain recovery policy; they
+must not present a receipt as output or invent a result-replay endpoint.
 
 This document owns only Workspace transports. Exact fields are enforced by the
 Django and Rust definitions in this repository.
