@@ -76,7 +76,7 @@ test("owners can create scoped credentials, copy the secret after returning to s
   });
   await openDeveloper("owner");
 
-  expect(await screen.findByText("https://workspace.example/api/v1/agent-runs", { exact: true })).toBeTruthy();
+  expect(await screen.findByText("https://workspace.example/api/v1/agent/execute", { exact: true })).toBeTruthy();
   await user.click(await screen.findByRole("button", { name: "Create credential" }));
   await user.type(screen.getByRole("textbox", { name: "Credential name" }), credential.name);
   await screen.findByRole("option", { name: "Document model" });
@@ -285,7 +285,7 @@ test("the example selector copies the selected request and switches the quicksta
   await user.click(examples.getByRole("button", { name: "Node.js" }));
   await user.click(screen.getByRole("button", { name: "Copy example" }));
   expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("await fetch(endpoint"));
-  expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("https://workspace.example/api/v1/agent-runs"));
+  expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("https://workspace.example/api/v1/agent/execute"));
   await user.click(examples.getByRole("button", { name: "cURL" }));
   await user.click(screen.getByRole("button", { name: "Copy example" }));
   expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("curl -N"));
@@ -296,8 +296,8 @@ test("the example selector copies the selected request and switches the quicksta
   await user.click(screen.getByRole("button", { name: "Copy example" }));
   expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("centaeris-first-call"));
   await user.click(screen.getByRole("button", { name: "Copy status request" }));
-  expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining('fetch(endpoint + "/operations/"'));
+  expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining('new URL("operations/" + encodeURIComponent(operationId), endpoint)'));
   await user.click(quickstartExamples.getByRole("button", { name: "cURL" }));
   await user.click(screen.getByRole("button", { name: "Copy status request" }));
-  expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("curl --disable"));
+  expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining('"${endpoint%/*}/operations/$operation_id"'));
 });

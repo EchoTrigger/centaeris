@@ -3,7 +3,7 @@
     {
       "id": "createRun",
       "method": "POST",
-      "path": "/api/v1/agent-runs",
+      "path": "/api/v1/agent/execute",
       "requestSchema": "CreateRunRequest",
       "headers": [
         {
@@ -38,7 +38,7 @@
     {
       "id": "getOperation",
       "method": "GET",
-      "path": "/api/v1/agent-runs/operations/{operationId}",
+      "path": "/api/v1/agent/operations/{operationId}",
       "headers": [
         {
           "name": "Authorization",
@@ -60,7 +60,7 @@
     {
       "id": "cancelRun",
       "method": "POST",
-      "path": "/api/v1/agent-runs/{runId}/cancel",
+      "path": "/api/v1/agent/executions/{runId}/cancel",
       "headers": [
         {
           "name": "Authorization",

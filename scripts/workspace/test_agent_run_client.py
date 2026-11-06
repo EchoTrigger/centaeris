@@ -134,6 +134,7 @@ class AgentRunApiCommandTests(unittest.TestCase):
                 self.assertIn("receipt only", stderr.lower())
                 self.assertIn("not replay", stderr.lower())
                 self.assertEqual(urlopen.call_count, 1)
+                self.assertEqual(urlopen.call_args.args[0].full_url, "https://workspace.example/api/v1/agent/execute")
 
     def test_status_queries_the_original_operation_without_submitting(self):
         receipt = self.receipt("failed")
@@ -145,7 +146,7 @@ class AgentRunApiCommandTests(unittest.TestCase):
         urlopen.assert_called_once()
         request = urlopen.call_args.args[0]
         self.assertEqual(request.method, "GET")
-        self.assertEqual(request.full_url, f"https://workspace.example/api/v1/agent-runs/operations/{self.operation_id}")
+        self.assertEqual(request.full_url, f"https://workspace.example/api/v1/agent/operations/{self.operation_id}")
         self.assertIsNone(request.data)
         self.assertEqual(request.get_header("Authorization"), "Bearer fixture-run-key")
         self.assertIsNone(request.get_header("Idempotency-key"))

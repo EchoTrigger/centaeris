@@ -87,3 +87,12 @@ class AgentRunApiOpenApiTests(SimpleTestCase):
             self.assertEqual(security["type"], "http")
             self.assertEqual(security["scheme"], "bearer")
             self.assertTrue(security["description"])
+
+    def test_retired_routes_return_not_found(self):
+        for method, path in (
+            ("POST", "/api/v1/agent-runs"),
+            ("GET", "/api/v1/agent-runs/operations/operation"),
+            ("POST", "/api/v1/agent-runs/run/cancel"),
+        ):
+            with self.subTest(method=method, path=path):
+                self.assertEqual(self.client.generic(method, path).status_code, 404)

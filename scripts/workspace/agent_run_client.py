@@ -139,14 +139,14 @@ def main(argv=None):
         parser.error("CENTAERIS_RUN_KEY must contain a Workspace API credential")
     operation_id = args.operation_id or f"{int(time.time())}.{uuid.uuid4()}"
     print(f"operationId={operation_id}", file=sys.stderr, flush=True)
-    base_url = args.url.rstrip("/") + "/api/v1/agent-runs"
+    base_url = args.url.rstrip("/") + "/api/v1/agent"
     try:
         if args.status:
             request = urllib.request.Request(base_url + "/operations/" + quote(operation_id, safe=""), method="GET",
                 headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
         else:
             args.output.mkdir(parents=True, exist_ok=True)
-            request = urllib.request.Request(base_url,
+            request = urllib.request.Request(base_url + "/execute",
                 data=json.dumps({"prompt": args.prompt}).encode(), method="POST",
                 headers={"Authorization": f"Bearer {token}", "Idempotency-Key": operation_id,
                          "Content-Type": "application/json", "Accept": "text/event-stream, application/json"})

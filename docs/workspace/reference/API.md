@@ -23,7 +23,7 @@ credential immediately.
 
 New API keys use the prefix `app-` and 24 random letters or digits.
 Previously issued keys continue to work. External callers send the complete key in `Authorization: Bearer <secret>`.
-`POST /api/v1/agent-runs` accepts a required `prompt` and optional sorted, unique
+`POST /api/v1/agent/execute` accepts a required `prompt` and optional sorted, unique
 `sourceObjectRefs` selected from the credential's current material scope. Its
 required `Idempotency-Key` has the form `<Unix-seconds>.<UUIDv4>`. The key is valid
 for 24 hours from its embedded timestamp, with at most five minutes of future clock
@@ -62,14 +62,14 @@ Each file is limited to 8 MiB, each Run to 16 MiB of raw artifact bytes and four
 artifacts. Execution has a ten-minute deadline from acceptance, including queue
 time. Terminal output delivery is bounded to 60 seconds. Connection loss closes
 delivery while the original Run continues. Explicit cancellation uses
-`POST /api/v1/agent-runs/{runId}/cancel` with an empty body. A `202` response records
+`POST /api/v1/agent/executions/{runId}/cancel` with an empty body. A `202` response records
 the request, while a `200` response reports an existing terminal state. Query the
 original operation to confirm cancellation; completion may win the race.
 Cancellation does not undo external side effects.
 
 For an already accepted operation, the same key and input return its minimal
 JSON receipt. Changed input returns `409 operation_conflict`. Callers can inspect the original identity with
-`GET /api/v1/agent-runs/operations/{operationId}`. This endpoint returns receipt and
+`GET /api/v1/agent/operations/{operationId}`. This endpoint returns receipt and
 status fields, including a known terminal `reasonCode`. Text and files are
 delivered only through the original response. An expired key returns
 `410 operation_expired` even after its receipt has been erased. Timeouts, proxy

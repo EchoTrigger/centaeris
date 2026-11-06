@@ -40,7 +40,7 @@ from .security import session_auth
 from .stream_response import OwnedAsyncStreamingHttpResponse, stream_database_call
 
 
-router = Router(tags=["agent-runs"], by_alias=True)
+router = Router(tags=["agent"], by_alias=True)
 
 
 class CreateCredentialRequest(StrictSchema):

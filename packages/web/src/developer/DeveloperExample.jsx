@@ -69,7 +69,7 @@ export function statusExample() {
     "    --connect-timeout 15 --max-time 30 \\",
     '    --header "Authorization: Bearer $CENTAERIS_RUN_KEY" \\',
     '    --header "Accept: application/json" \\',
-    '    "$endpoint/operations/$operation_id"',
+    '    "${endpoint%/*}/operations/$operation_id"',
     ")",
   ].join("\n");
 }

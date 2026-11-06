@@ -63,7 +63,7 @@ export const nodeStatusExample = [
   '  throw new Error("Use the original API credential for this operation");',
   "}",
   "",
-  'const response = await fetch(endpoint + "/operations/" + encodeURIComponent(operationId), {',
+  'const response = await fetch(new URL("operations/" + encodeURIComponent(operationId), endpoint), {',
   '  redirect: "error",',
   "  signal: AbortSignal.timeout(30_000),",
   '  headers: { Authorization: "Bearer " + key, Accept: "application/json" },',

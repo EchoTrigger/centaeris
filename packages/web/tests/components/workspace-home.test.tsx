@@ -252,7 +252,7 @@ test("workspace settings replace the work navigation and return to the same draf
   await screen.findByRole("heading", { name: "developer.doc.quickstart.title" });
   const docs = screen.getByRole("navigation", { name: "developer.docs" });
   await user.click(within(docs).getByRole("link", { name: "developer.doc.events.title" }));
-  expect(await screen.findByText("/api/v1/agent-runs/operations/{operationId}")).toBeTruthy();
+  expect(await screen.findByText("/api/v1/agent/operations/{operationId}")).toBeTruthy();
   expect(screen.getByText("artifactCompleted")).toBeTruthy();
   await user.click(within(docs).getByRole("link", { name: "developer.doc.artifacts.title" }));
   expect(router.state.location.search).toBe("?view=docs&topic=artifacts");

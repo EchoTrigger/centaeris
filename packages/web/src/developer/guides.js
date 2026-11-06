@@ -17,7 +17,7 @@ A \`200 application/json\` submit response means the operation was already accep
 Before sending, retain the **original credential reference, endpoint, operation ID and request body**. After acceptance, also retain the Run ID and receipt times. Keep the received text and verified files in your application. The status endpoint cannot recover text or files from a disconnected stream.
 `,
     recovery: `
-Send \`GET /api/v1/agent-runs/operations/{operationId}\` with the original credential. A \`200 application/json\` response gives the run and cleanup states, including when \`runStatus\` is \`completed\`. A \`404\` immediately after a timeout can race acceptance. If you retry submission, reuse the **same credential, saved operation ID and saved request body**. Never generate a new key just to recover a timed-out call.
+Send \`GET /api/v1/agent/operations/{operationId}\` with the original credential. A \`200 application/json\` response gives the run and cleanup states, including when \`runStatus\` is \`completed\`. A \`404\` immediately after a timeout can race acceptance. If you retry submission, reuse the **same credential, saved operation ID and saved request body**. Never generate a new key just to recover a timed-out call.
 
 Connection loss stops delivery; the Run continues. Repeating POST returns only a receipt if the original request was accepted. Lost output cannot be replayed. Check external side effects before deliberately generating a new run. The **Lifecycle**, **Files** and **Errors** pages explain cancellation, file verification and the other recovery outcomes.
 `,
@@ -43,7 +43,7 @@ Invalidation also blocks status and cancel requests. A replacement credential ca
 
 The service keeps a private temporary execution session. The initial response delivers the output and the status endpoint returns a minimal receipt. Closing the connection ends delivery. The run continues until completion, cancellation or its deadline.
 
-The ten-minute deadline starts at acceptance and includes queue time. A client's connection or read timeout does not change it. To stop a run, send an empty \`POST /api/v1/agent-runs/{runId}/cancel\` with the original credential. A \`202\` acknowledges the cancellation request; it does not mean the Run is cancelled. A \`200\` returns the terminal receipt. Check the original operation until it reaches a terminal state. Completion can win a cancellation race, and cancellation does not roll back external side effects. A missing resource or an ordinary tool error may be returned to the model within the same run. Uncertain tool outcomes stay attached to that run's identity.
+The ten-minute deadline starts at acceptance and includes queue time. A client's connection or read timeout does not change it. To stop a run, send an empty \`POST /api/v1/agent/executions/{runId}/cancel\` with the original credential. A \`202\` acknowledges the cancellation request; it does not mean the Run is cancelled. A \`200\` returns the terminal receipt. Check the original operation until it reaches a terminal state. Completion can win a cancellation race, and cancellation does not roll back external side effects. A missing resource or an ordinary tool error may be returned to the model within the same run. Uncertain tool outcomes stay attached to that run's identity.
 
 ### When data is removed
 
@@ -86,7 +86,7 @@ On \`artifactFailed\`, an incomplete stream or a verification error, discard the
 
 ### Save an editable Word file
 
-From the Centaeris source checkout, set \`CENTAERIS_RUN_KEY\` and set \`CENTAERIS_WORKSPACE_URL\` to the Workspace base URL without \`/api/v1/agent-runs\`. This Python 3 client verifies files and writes them to \`./received\`.
+From the Centaeris source checkout, set \`CENTAERIS_RUN_KEY\` and set \`CENTAERIS_WORKSPACE_URL\` to the Workspace base URL without \`/api/v1/agent/execute\`. This Python 3 client verifies files and writes them to \`./received\`.
 
 \`\`\`sh
 python3 scripts/workspace/agent_run_client.py \\
@@ -150,7 +150,7 @@ Example of a request rejected because its operation ID is invalid.
 发送前保留**原凭证的引用、请求地址、操作 ID 和请求正文**。接受后再保存 Run ID 和回执中的时间信息。收到的文本和校验通过的文件由调用方保存；状态接口无法找回断线时丢失的文本和文件。
 `,
     recovery: `
-用原凭证发送 \`GET /api/v1/agent-runs/operations/{operationId}\`。\`200 application/json\` 返回运行与清理状态，\`runStatus\` 为 \`completed\` 时也一样。超时后立即查到 \`404\`，仍可能是查询早于请求接受。如需重试提交，沿用**同一个凭证、保存的操作 ID 和保存的请求正文**，不能为了恢复超时请求而生成新键。
+用原凭证发送 \`GET /api/v1/agent/operations/{operationId}\`。\`200 application/json\` 返回运行与清理状态，\`runStatus\` 为 \`completed\` 时也一样。超时后立即查到 \`404\`，仍可能是查询早于请求接受。如需重试提交，沿用**同一个凭证、保存的操作 ID 和保存的请求正文**，不能为了恢复超时请求而生成新键。
 
 断线会结束交付，Run 仍继续执行。原请求已被接受时，重复 POST 只返回回执，无法重放丢失的输出。决定重新运行前先核对外部副作用。取消、文件校验和其他恢复情况分别见**生命周期**、**文件产物**和**错误处理**。
 `,
@@ -176,7 +176,7 @@ Example of a request rejected because its operation ID is invalid.
 
 服务为执行保留一个私有临时会话。首次响应交付结果，状态接口只返回必要回执。连接断开会结束本次交付，运行仍可继续，直至完成、取消或达到期限。
 
-运行期限从接受请求起算十分钟，包含排队时间；调用端连接或读取超时不会改变它。要停止运行，请使用原凭证发送空请求体的 \`POST /api/v1/agent-runs/{runId}/cancel\`。\`202\` 表示收到取消请求，不代表已经取消；\`200\` 返回已达到终态的回执。查询原操作直到终态。运行完成可能先于取消生效，取消也不会回滚外部副作用。普通工具错误或资源缺失可以在本轮返回给模型处理。工具执行结果未知时，保留原运行身份。
+运行期限从接受请求起算十分钟，包含排队时间；调用端连接或读取超时不会改变它。要停止运行，请使用原凭证发送空请求体的 \`POST /api/v1/agent/executions/{runId}/cancel\`。\`202\` 表示收到取消请求，不代表已经取消；\`200\` 返回已达到终态的回执。查询原操作直到终态。运行完成可能先于取消生效，取消也不会回滚外部副作用。普通工具错误或资源缺失可以在本轮返回给模型处理。工具执行结果未知时，保留原运行身份。
 
 ### 数据何时回收
 
@@ -219,7 +219,7 @@ Example of a request rejected because its operation ID is invalid.
 
 ### 保存可编辑的 Word 文件
 
-在 Centaeris 源码目录运行下面的 Python 3 示例。设置 \`CENTAERIS_RUN_KEY\`，并将 \`CENTAERIS_WORKSPACE_URL\` 设为 Workspace 基础地址，不包含 \`/api/v1/agent-runs\`。脚本会校验文件并写入 \`./received\`。
+在 Centaeris 源码目录运行下面的 Python 3 示例。设置 \`CENTAERIS_RUN_KEY\`，并将 \`CENTAERIS_WORKSPACE_URL\` 设为 Workspace 基础地址，不包含 \`/api/v1/agent/execute\`。脚本会校验文件并写入 \`./received\`。
 
 \`\`\`sh
 python3 scripts/workspace/agent_run_client.py \\

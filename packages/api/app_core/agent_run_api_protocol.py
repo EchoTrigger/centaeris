@@ -9,9 +9,9 @@ from pydantic import Field, WithJsonSchema
 from .http.schema import StrictSchema
 
 
-CREATE_RUN_PATH = "/v1/agent-runs"
-GET_OPERATION_PATH = "/v1/agent-runs/operations/{operation_id}"
-CANCEL_RUN_PATH = "/v1/agent-runs/{run_id}/cancel"
+CREATE_RUN_PATH = "/v1/agent/execute"
+GET_OPERATION_PATH = "/v1/agent/operations/{operation_id}"
+CANCEL_RUN_PATH = "/v1/agent/executions/{run_id}/cancel"
 IDEMPOTENCY_HEADER = "Idempotency-Key"
 
 TerminalRunStatus = Literal["completed", "failed", "cancelled"]

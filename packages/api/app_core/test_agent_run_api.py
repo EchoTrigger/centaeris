@@ -43,11 +43,11 @@ class AgentRunApiApiTests(TransactionTestCase):
             self.addCleanup(mock.stop)
 
     def post(self, body=None, **headers):
-        return self.client.post("/api/v1/agent-runs", json.dumps(body or self.body), content_type="application/json",
+        return self.client.post("/api/v1/agent/execute", json.dumps(body or self.body), content_type="application/json",
                                 **(self.auth | headers))
 
     def query(self):
-        return self.client.get(f"/api/v1/agent-runs/operations/{self.operation_id}", HTTP_AUTHORIZATION=f"Bearer {self.token}")
+        return self.client.get(f"/api/v1/agent/operations/{self.operation_id}", HTTP_AUTHORIZATION=f"Bearer {self.token}")
 
     def test_acceptance_has_signed_private_runtime_and_receipt(self):
         operation, run = accept_run(self.credential, self.operation_id, CreateRunRequest(**self.body))
@@ -165,7 +165,7 @@ class AgentRunApiApiTests(TransactionTestCase):
     def test_delete_erases_credential_and_detaches_incomplete_cleanup(self):
         operation, run = accept_run(self.credential, self.operation_id, CreateRunRequest(**self.body))
         with patch("app_core.http.agent_run_api.request_agent_run_cancellation", return_value={"disposition": "requested", "terminalState": None}) as cancel:
-            response = self.client.post(f"/api/v1/agent-runs/{run.pk}/cancel", data=b"", content_type="application/json", **self.auth)
+            response = self.client.post(f"/api/v1/agent/executions/{run.pk}/cancel", data=b"", content_type="application/json", **self.auth)
         self.assertEqual(response.status_code, 202, response.content)
         self.assertEqual(cancel.call_args.args[0].pk, run.pk)
         self.client.force_login(self.user)
