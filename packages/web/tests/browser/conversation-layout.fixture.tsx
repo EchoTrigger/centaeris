@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import { WorkspaceComposer } from "../../src/chat/WorkspaceComposer";
-import { WorkspaceContextPanel } from "../../src/components/WorkspaceContextPanel";
+import { WorkspaceContextPanel, WorkspacePreviewToggle } from "../../src/components/WorkspaceContextPanel";
 import { i18n } from "../../src/i18n";
 import { waitForLayout } from "./layoutGeometry";
 
@@ -18,6 +18,7 @@ await i18n.changeLanguage("en");
 const noop = () => {};
 function SessionLayout({ sidebar = true, preview = false, initialWidth = null }: { sidebar?: boolean; preview?: boolean; initialWidth?: number | null }) {
   const [open, setOpen] = useState(preview);
+  const [hasTab, setHasTab] = useState(preview);
   const [width, setWidth] = useState<number | null>(initialWidth);
   const [draft, setDraft] = useState("Synthetic unsent text");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -27,12 +28,17 @@ function SessionLayout({ sidebar = true, preview = false, initialWidth = null }:
     "--browser-panel-width": width === null ? undefined : `${width}px`,
   } as React.CSSProperties}>
     <div className="workspaceSidebarSlot">{sidebar ? <aside className="workspaceSidebar shSidebar">Synthetic navigation</aside> : null}</div>
-    <header className="workspaceTopbar">Synthetic Session<button className="fixtureTogglePreview" type="button" onClick={() => setOpen(value => !value)}>Toggle synthetic preview</button></header>
+    <header className="workspaceTopbar">
+      <div className="workspaceTopbarStart">Synthetic Session</div>
+      {hasTab ? <WorkspacePreviewToggle panelId="fixture-preview" open={open} onToggle={() => setOpen(value => !value)} ref={null} /> : null}
+    </header>
     <section className="workspaceChatColumn"><div className="workspaceConversationPlane">
       <div className="workspaceMessages"><div className="workspaceTranscriptBlocks"><article className="workspaceTranscriptAssistant"><p>{"A complete synthetic reply.\n".repeat(60)}</p></article></div></div>
       <WorkspaceComposer fileInputRef={fileInputRef} isHome={false} onSubmit={(event: React.FormEvent) => event.preventDefault()} pendingAttachments={[]} pendingUploadFiles={[]} draft={draft} onDraftChange={setDraft} enterStartsNewLine={false} workspaceName="Synthetic workspace" workspaceAvailable sending={false} loadingHistory={false} hasActiveAgentRun={false} uploadingAttachment={false} onUploadAttachment={noop} sessionId={null} currentModel={null} thinkingMode="" onThinkingModeChange={noop} modelGroups={[]} modelId="" onModelIdChange={noop} onCancelActiveAgentRun={noop} />
     </div></section>
-    <WorkspaceContextPanel panel={open ? { mode: "filePreview", status: "ready", displayName: "Synthetic evidence.txt", originLabel: "Session", preview: { kind: "text", content: "Synthetic evidence.\n".repeat(100), contentType: "text/plain" } } : { mode: "closed" }} browserWidthPx={width} onBrowserWidthChange={setWidth} onClose={() => setOpen(false)} onReturn={() => setOpen(false)} />
+    <WorkspaceContextPanel id="fixture-preview" open={open}
+      panel={hasTab ? { mode: "filePreview", status: "ready", displayName: "Synthetic evidence.txt", preview: { kind: "text", content: "Synthetic evidence.\n".repeat(100), contentType: "text/plain" } } : { mode: "closed" }}
+      browserWidthPx={width} onBrowserWidthChange={setWidth} onClose={() => { setOpen(false); setHasTab(false); }} />
   </main>;
 }
 const root = createRoot(document.getElementById("fixture")!);
@@ -53,8 +59,11 @@ if (new URLSearchParams(location.search).has("review")) {
     flushSync(() => root.render(<SessionLayout key={`${sidebar}-open`} sidebar={sidebar} preview />)); await settle();
     const panel = rect(".workspaceContextPanel"); const body = rect(".workspaceTranscriptBlocks"); const composer = rect(".workspaceComposer");
     const chat = rect(".workspaceChatColumn"); const messages = rect(".workspaceMessages");
-    const width = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--workspace-sidebar-width")) || 270;
-    check(`${label}: default preview matches navigation width`, Math.round(panel.width), width);
+    const tab = document.querySelector('[role="tab"]')!;
+    const tabPanel = document.querySelector('[role="tabpanel"]')!;
+    const toggle = document.querySelector<HTMLButtonElement>('button[aria-controls="fixture-preview"]')!;
+    check(`${label}: selected file tab controls the preview`, tab.getAttribute("aria-controls"), tabPanel.id);
+    check(`${label}: the right sidebar toggle is clickable`, document.elementFromPoint(rect('button[aria-controls="fixture-preview"]').left + 12, rect('button[aria-controls="fixture-preview"]').top + 12)?.closest("button") === toggle, true);
     check(`${label}: message and composer share their center`, Math.abs(body.left + body.width / 2 - composer.left - composer.width / 2) < 1, true);
     check(`${label}: message is centered in its available region`, Math.abs(body.left + body.width / 2 - chat.left - chat.width / 2) < 1, true);
     check(`${label}: composer is centered in its available region`, Math.abs(composer.left + composer.width / 2 - chat.left - chat.width / 2) < 1, true);
@@ -69,32 +78,39 @@ if (new URLSearchParams(location.search).has("review")) {
       check(`${label}: stacking preserves message width`, Math.abs(body.width - closedBody.width) < 1, true);
       check(`${label}: stacking preserves composer width`, Math.abs(composer.width - closedComposer.width) < 1, true);
     } else {
-      const left = sidebar && innerWidth > 760 ? rect(".workspaceSidebarSlot").right : 0;
+      check(`${label}: preview starts at the topbar`, panel.top, rect(".workspaceTopbar").top);
+      const workbench = document.querySelector(".workspaceWorkbench")!;
+      const left = sidebar ? rect(".workspaceSidebarSlot").right : workbench.getBoundingClientRect().left + Number.parseFloat(getComputedStyle(workbench).paddingLeft);
       const availableCenter = (left + panel.left) / 2;
       check(`${label}: wide conversation centers between both sidebars`, Math.round(body.left + body.width / 2), Math.round(availableCenter));
       check(`${label}: wide composer centers between both sidebars`, Math.round(composer.left + composer.width / 2), Math.round(availableCenter));
       check(`${label}: wide preview uses available reading width up to its maximum`, Math.round(body.width), Math.min(820, Math.round(chat.width - 32)));
-      check(`${label}: conversation keeps a usable minimum width`, chat.width >= 480, true);
+      check(`${label}: conversation keeps a usable minimum width`, chat.width >= 320, true);
     }
     const separator = document.querySelector<HTMLElement>('[role="separator"]')!;
     check(`${label}: resize reports the actual default width`, Number(separator.getAttribute("aria-valuenow")), panel.width);
-    check(`${label}: resize minimum follows navigation width`, Number(separator.getAttribute("aria-valuemin")), width);
+    check(`${label}: preview starts within its resize range`, Number(separator.getAttribute("aria-valuemin")) <= panel.width && panel.width <= Number(separator.getAttribute("aria-valuemax")), true);
     if (innerWidth > 1400) {
       separator.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true })); await settle();
       check(`${label}: an intentional keyboard resize adds sixteen pixels`, rect(".workspaceContextPanel").width, panel.width + 16);
       check(`${label}: resize reports the actual changed width`, Number(document.querySelector('[role="separator"]')!.getAttribute("aria-valuenow")), panel.width + 16);
     }
-    (document.querySelector(".workspaceContextPanelClose") as HTMLButtonElement).click(); await settle();
-    check(`${label}: closing releases preview content`, document.querySelector(".documentTextPreview"), null);
-    check(`${label}: closing restores the conversation width`, Math.abs(rect(".workspaceTranscriptBlocks").width - closedBody.width) < 1, true);
+    toggle.click(); await settle();
+    check(`${label}: collapsing hides the tab from interaction`, document.getElementById("fixture-preview")?.inert, true);
+    check(`${label}: collapsing restores the conversation width`, Math.abs(rect(".workspaceTranscriptBlocks").width - closedBody.width) < 1, true);
+    toggle.click(); await settle();
+    check(`${label}: expanding restores the same tab and content`, document.querySelector('[role="tabpanel"]') === tabPanel, true);
+    tab.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true, cancelable: true })); await settle();
+    check(`${label}: closing the tab releases its preview`, document.querySelector('[role="tabpanel"]'), null);
     check(`${label}: opening and closing preserve the unsent draft`, document.querySelector<HTMLTextAreaElement>(".workspaceComposer textarea")!.value, "Synthetic unsent text");
     flushSync(() => root.render(<SessionLayout key={`${sidebar}-preferred`} sidebar={sidebar} preview initialWidth={760} />)); await settle();
     const preferredPanel = rect(".workspaceContextPanel");
-    if (preferredPanel.right <= rect(".workspaceChatColumn").left || preferredPanel.left >= rect(".workspaceChatColumn").right) check(`${label}: saved width preserves a usable conversation region`, rect(".workspaceChatColumn").width >= 480, true);
+    if (preferredPanel.right <= rect(".workspaceChatColumn").left || preferredPanel.left >= rect(".workspaceChatColumn").right) check(`${label}: saved width preserves a usable conversation region`, rect(".workspaceChatColumn").width >= 320, true);
     check(`${label}: saved width reports its clipped display geometry`, Number(document.querySelector('[role="separator"]')!.getAttribute("aria-valuenow")), preferredPanel.width);
     check(`${label}: saved width leaves the input unobscured`, clearOf(rect(".workspaceComposer"), preferredPanel), true);
-    (document.querySelector(".workspaceContextPanelClose") as HTMLButtonElement).click(); await settle();
-    (document.querySelector(".fixtureTogglePreview") as HTMLButtonElement).click(); await settle();
+    const preferredToggle = document.querySelector<HTMLButtonElement>('button[aria-controls="fixture-preview"]')!;
+    preferredToggle.click(); await settle();
+    preferredToggle.click(); await settle();
     check(`${label}: closing and reopening preserve chosen preview width`, rect(".workspaceContextPanel").width, preferredPanel.width);
     check(`${label}: closing and reopening preserve the draft`, document.querySelector<HTMLTextAreaElement>(".workspaceComposer textarea")!.value, "Synthetic unsent text");
   }

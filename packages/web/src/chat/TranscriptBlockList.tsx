@@ -41,7 +41,7 @@ type Props = Readonly<{
   onReleaseLoadedHistory?(): void;
   onReadingLatestChange?(sessionId: string | null, readingLatest: boolean): void;
   onShowCitation?(citation: CitationSummary, origin: { elementId: string }): void;
-  onShowArtifact?(artifact: import("./useTranscriptTurnMetadata").PublishedArtifact): void;
+  onShowArtifact?(artifact: import("./useTranscriptTurnMetadata").PublishedArtifact, origin: { elementId: string }): void;
   running?: boolean;
   activity?: TranscriptActivityState;
   startedAtMs?: number;
@@ -581,7 +581,10 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
               {time?.artifacts.length ? <div className="workspaceArtifactInline" aria-label={t("agentRunRow.generatedFiles")}>
                 {time.artifacts.map((artifact) => <span className="workspaceArtifactInlineRow" key={artifact.artifactRef}>
                   <span className="workspaceArtifactPlus" aria-hidden="true">+</span>
-                  <a href={artifact.downloadUrl} onClick={onShowArtifact ? (event) => { event.preventDefault(); onShowArtifact(artifact); } : undefined}>{artifact.filename}</a>
+                  <a id={`artifact:${artifact.artifactRef}`} href={artifact.downloadUrl} onClick={onShowArtifact ? (event) => {
+                    event.preventDefault();
+                    onShowArtifact(artifact, { elementId: event.currentTarget.id });
+                  } : undefined}>{artifact.filename}</a>
                 </span>)}
               </div> : null}
               {isLast && (isPending ? !pendingTerminal : running) ? <TranscriptActivity activity={activity} /> : null}

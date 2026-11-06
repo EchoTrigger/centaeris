@@ -1,10 +1,10 @@
 import { animate } from "@centaeris/frontend-foundations/motion";
 import { useTranslation } from "../i18n";
-import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useEffectEvent, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { matchPath, useNavigate, useRouteLoaderData } from "react-router";
 import { apiJson, apiResponse } from "../api";
 import { OperationClient, acceptedConversationReviewLink, consumeReviewedOperation, isDefiniteSubmissionRejection, isWorkspacePreservationPending } from "../chat/operationReceipts";
-import { WorkspaceContextPanel } from "../components/WorkspaceContextPanel";
+import { WorkspaceContextPanel, WorkspacePreviewToggle } from "../components/WorkspaceContextPanel";
 import { DocumentPreview } from "../components/DocumentPreview";
 import { officeFileType } from "../chat/officeFormats.mjs";
 import { officePreviewUrl } from "../chat/attachments.mjs";
@@ -172,19 +172,6 @@ function ConversationTitle({ session, actions, running }) {
   </div>;
 }
 
-function ConnectedWorkspaceContextPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose, onReturn }) {
-  useTranslation();
-  return (
-    <WorkspaceContextPanel
-      panel={panel}
-      browserWidthPx={browserWidthPx}
-      onBrowserWidthChange={onBrowserWidthChange}
-      onClose={onClose}
-      onReturn={onReturn}
-    />
-  );
-}
-
 export function AppPageContent({ initialSession = null, workspaceDraft, visible = true, location, navigationKey = location.key, catalogContent = null, modelsVersion, onSessionAccepted }) {
   const { t } = useTranslation();
   const { user } = useRouteLoaderData("authenticated");
@@ -285,6 +272,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const [loadingOlderHistory, setLoadingOlderHistory] = useState(false);
   const [activeTranscriptRun, setActiveTranscriptRun] = useState(null);
   const [contextPanel, setContextPanel] = useState(CLOSED_CONTEXT_PANEL);
+  const [filePreviewOpen, setFilePreviewOpen] = useState(false);
+  const previewPanelId = useId();
+  const previewToggleRef = useRef(null);
   const [browserPanelWidthPx, setBrowserPanelWidthPx] = useState(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const compactLayout = useSyncExternalStore(subscribeViewport, isCompactViewport);
@@ -296,7 +286,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const drawerOpen = compactLayout && drawerFor === navigationKey && !search.open && (visible || Boolean(catalogContent));
   useWorkbenchProgress(workbenchRef, "--workspace-sidebar-progress", isSidebarOpen,
     { initial: 1, duration: 0.22, immediate: compactLayout });
-  useWorkbenchProgress(workbenchRef, "--workspace-preview-progress", visible && contextPanel.mode === "filePreview",
+  useWorkbenchProgress(workbenchRef, "--workspace-preview-progress", visible && filePreviewOpen,
     { initial: 0, duration: 0.24, immediate: !visible });
   useLayoutEffect(() => {
     if (!compactLayout) return;
@@ -476,12 +466,13 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
 
   const clearContextPanel = useCallback(() => {
     previewRequestIdRef.current += 1;
+    setFilePreviewOpen(false);
     setContextPanel(CLOSED_CONTEXT_PANEL);
   }, []);
-  const closeFilePreview = useCallback(() => {
+  const toggleFilePreview = useCallback(() => {
     transcriptRef.current?.preserveReadingPosition();
-    clearContextPanel();
-  }, [clearContextPanel]);
+    setFilePreviewOpen(open => !open);
+  }, []);
   const clearConversationProjection = useCallback(() => {
     transcriptStore.clear();
     toolOperations.clear();
@@ -528,13 +519,17 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   }, [contextPanel]);
 
   useEffect(() => {
-    if (!visible || search.open || contextPanel.mode === "closed") return undefined;
+    if (!visible || search.open || !filePreviewOpen) return undefined;
     const closeOnEscape = (event) => {
-      if (event.key === "Escape") closeFilePreview();
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (document.getElementById(previewPanelId)?.contains(document.activeElement)) {
+        previewToggleRef.current?.focus();
+      }
+      toggleFilePreview();
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [visible, search.open, contextPanel.mode, closeFilePreview]);
+  }, [visible, search.open, filePreviewOpen, previewPanelId, toggleFilePreview]);
 
   useEffect(() => {
     requestScopeRef.current.active = true;
@@ -1284,10 +1279,11 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     setPendingUploadFiles((items) => items.filter((_file, itemIndex) => itemIndex !== index));
   }
 
-  function returnFromFilePreview() {
+  function closeFilePreview() {
     if (contextPanel.mode !== "filePreview") return;
     const { origin } = contextPanel;
-    closeFilePreview();
+    transcriptRef.current?.preserveReadingPosition();
+    clearContextPanel();
     window.requestAnimationFrame(() => {
       document.getElementById(origin.elementId)?.focus({ preventScroll: true });
     });
@@ -1295,6 +1291,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
 
   async function showCitation(citation, origin) {
     transcriptRef.current?.preserveReadingPosition();
+    setFilePreviewOpen(true);
     const requestId = previewRequestIdRef.current + 1;
     previewRequestIdRef.current = requestId;
     setContextPanel({
@@ -1363,6 +1360,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
 
   async function showArtifact(artifact, origin) {
     transcriptRef.current?.preserveReadingPosition();
+    setFilePreviewOpen(true);
     const requestId = previewRequestIdRef.current + 1;
     previewRequestIdRef.current = requestId;
     const panelIdentity = {
@@ -1370,7 +1368,6 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       displayName: artifact.filename,
       downloadUrl: artifact.downloadUrl,
       origin,
-      originLabel: "Artifact",
     };
     setContextPanel({
       mode: "filePreview",
@@ -1552,6 +1549,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           {compactLayout ? <button className="workspacePanelToggle" ref={search.triggerRef} type="button" onClick={search.toggle}
             aria-label={t("searchOverlay.searchConversationsAndNotes")} title={t("shellSidebar.searchCtrlK")}><Search aria-hidden="true" /></button> : null}
         </div>
+        {visible && contextPanel.mode === "filePreview" ? <WorkspacePreviewToggle
+          ref={previewToggleRef} panelId={previewPanelId} open={filePreviewOpen} onToggle={toggleFilePreview}
+        /> : null}
       </header>
 
       <section className="workspaceChatColumn" inert={search.open || Boolean(catalogContent)}>
@@ -1570,7 +1570,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
               <div className="workspaceToolOutputStatus">{readFeedback}</div>
             </div> : null}
             onShowCitation={showCitation}
-            onShowArtifact={(artifact) => showArtifact(artifact, "conversation")}
+            onShowArtifact={showArtifact}
             pendingUserMessage={visiblePendingMessage}
             submissionRejected={rejectedSubmissionScopes.has(requestScopeKey)}
             historyMemoryPressure={transcriptManagedBytes >= TRANSCRIPT_MEMORY_WARNING_BYTES}
@@ -1641,12 +1641,13 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
         {catalogContent}
       </section> : null}
       {search.open ? <WorkspaceSearch workspaceId={workspace.id} sessions={sessions} onClose={search.close} inputRef={search.inputRef} /> : null}
-      {visible ? <ConnectedWorkspaceContextPanel
+      {visible ? <WorkspaceContextPanel
+        id={previewPanelId}
         panel={contextPanel}
+        open={filePreviewOpen}
         browserWidthPx={browserPanelWidthPx}
         onBrowserWidthChange={updateBrowserPanelWidth}
         onClose={closeFilePreview}
-        onReturn={returnFromFilePreview}
       /> : null}
       <ConfirmDialog
         open={(visible || Boolean(catalogContent)) && Boolean(deleteConfirmationSessionId)}

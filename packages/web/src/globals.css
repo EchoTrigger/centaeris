@@ -118,6 +118,8 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
   --workspace-preview-width: calc(min(var(--browser-panel-width, var(--browser-panel-default-width)), var(--browser-panel-max-width)) * var(--workspace-preview-progress));
   --workspace-preview-height: calc(max(0px, min(50dvh, calc(100dvh - 144px))) * var(--workspace-preview-progress));
   --workspace-preview-stack-gap: calc(12px * var(--workspace-preview-progress));
+  --workspace-preview-topbar-space: var(--workspace-preview-width);
+  --workspace-preview-toggle-inset: 40px;
   position: relative;
   display: grid;
   grid-template-columns: var(--workspace-navigation-space) minmax(0, 1fr) var(--workspace-preview-width);
@@ -147,6 +149,10 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .workspacePanelToggle { display: inline-grid; width: 28px; height: 28px; flex: none; place-items: center; border: 0; border-radius: 5px; background: transparent; color: var(--on-surface-variant); }
 .workspacePanelToggle:hover:not(:disabled) { background: var(--workspace-selection); color: var(--on-surface); }
 .workspacePanelToggle svg { width: 15px; height: 15px; stroke-width: 1.7; }
+.workspaceRightSidebarToggle { position: relative; z-index: 3; }
+.workspaceTopbar:has(> .workspaceRightSidebarToggle) .workspaceTopbarStart {
+  max-width: calc(100% - max(32px, var(--workspace-preview-topbar-space)));
+}
 @media (min-width: 761px) {
   .workspaceWorkbench > .workspaceTopbar { padding-inline-start: calc(8px + 28px * (1 - var(--workspace-sidebar-progress))); }
   .workspaceSidebarToggle { position: absolute; z-index: 3; inset-inline-start: calc(10px + var(--workspace-toggle-offset)); inset-block-start: calc(var(--workspace-frame-inset) + (var(--workspace-header-height) - var(--workspace-toggle-target)) / 2); }
@@ -674,14 +680,9 @@ button.agent-operation-summary:focus-visible { outline: 2px solid var(--outline)
 .attachmentPreviewUnavailable svg { width: 34px; height: 34px; color: var(--primary-color); }
 .attachmentPreviewUnavailable a { color: var(--primary-color); }
 
-.workspaceContextPanel { position: relative; grid-column: 3; grid-row: 2 / -1; min-width: 0; height: 100%; margin: 0; overflow: hidden; border-left: 1px solid var(--outline-variant); background: var(--surface-color); opacity: var(--workspace-preview-progress); }
+.workspaceContextPanel { position: relative; grid-column: 3; grid-row: 1 / -1; min-width: 0; height: 100%; margin: 0; overflow: hidden; border-left: 1px solid var(--outline-variant); border-radius: 0 var(--workspace-frame-radius) var(--workspace-frame-radius) 0; background: var(--surface-color); opacity: var(--workspace-preview-progress); }
 .workspaceContextPanel[aria-hidden="true"] { pointer-events: none; }
-.workspaceContextPanelHeader { display: flex; min-height: 40px; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--outline-variant); background: var(--surface-variant); padding: 5px 9px 5px 13px; }
-.workspaceContextPanelHeader > strong { font-size: 12px; font-weight: 650; }
-.workspaceContextPanelHeader > strong span { color: var(--muted); font-weight: 450; }
-.workspaceContextPanelClose { display: grid; width: 27px; height: 27px; place-items: center; border: 0; border-radius: 5px; background: transparent; color: var(--on-surface-variant); padding: 0; }
-.workspaceContextPanelClose svg { width: 15px; height: 15px; }
-.workspaceContextPanelClose:hover { background: var(--surface-container); color: var(--on-surface); }
+.workspaceContextPanelHeader { display: flex; min-width: 0; height: var(--workspace-header-height); align-items: center; justify-content: space-between; gap: 6px; border-bottom: 1px solid var(--outline-variant); background: var(--surface-color); padding-inline: 8px max(8px, var(--workspace-preview-toggle-inset)); }
 .iconButton { display: inline-grid; width: 30px; height: 30px; flex: none; place-items: center; border: 0; background: transparent; color: var(--muted); }
 .iconButton:hover { background: var(--surface-container); color: var(--text); }
 .activityOperation { min-width: 0; }
@@ -718,20 +719,20 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .workspaceFilePreviewPanel { display: grid; grid-template-rows: auto minmax(0, 1fr); background: var(--surface); }
 .workspaceContextPanelResizeHandle { position: absolute; z-index: 4; top: 0; bottom: 0; left: -5px; width: 10px; cursor: col-resize; touch-action: none; }
 .workspaceContextPanelResizeHandle:focus-visible { outline: 2px solid #6d8fbd; outline-offset: -2px; }
-.filePreviewHeader { min-width: 0; }
-.filePreviewHeader nav { display: flex; min-width: 0; align-items: center; gap: 6px; }
-.filePreviewHeader nav button { flex: none; border: 0; border-radius: 7px; background: transparent; color: var(--muted); padding: 5px 6px; font-size: 12px; }
-.filePreviewHeader nav button:hover { background: var(--surface-container); color: var(--text); }
-.filePreviewHeader nav > span { flex: none; color: var(--process-text); font-size: 12px; }
-.filePreviewHeader nav strong { overflow: hidden; color: var(--text); font-size: 13px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.filePreviewTab { display: flex; min-width: 0; max-width: 200px; height: 32px; align-items: center; border-radius: 6px; background: var(--surface-variant); padding-inline-end: 4px; }
+.filePreviewTabs { min-width: 0; }
+.filePreviewTabs button { display: flex; max-width: 100%; height: 30px; align-items: center; gap: 6px; border: 0; border-radius: 5px; background: transparent; color: var(--on-surface); padding: 0 7px 0 9px; font: inherit; font-size: 12px; }
+.filePreviewTabs span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filePreviewTabs svg, .filePreviewTabClose svg { width: 14px; height: 14px; flex: none; }
+.filePreviewTabClose { display: grid; width: 22px; height: 22px; flex: none; place-items: center; border: 0; border-radius: 4px; background: transparent; color: var(--process-text); padding: 0; }
+.filePreviewTabClose:hover { background: var(--surface-container); color: var(--on-surface); }
 .filePreviewActions { display: flex; flex: none; align-items: center; gap: 3px; }
 .filePreviewActions a, .filePreviewActions button { display: inline-flex; width: 30px; height: 30px; align-items: center; justify-content: center; border: 0; border-radius: 7px; background: transparent; color: var(--text); }
 .filePreviewActions a:hover, .filePreviewActions button:hover { background: var(--surface-container); }
 .filePreviewActions svg { width: 17px; height: 17px; }
 .filePreviewState { display: grid; place-items: center; align-content: center; padding: 32px; color: var(--muted); font-size: 13px; text-align: center; }
 .filePreviewState.isError { color: var(--danger); }
-.filePreviewLayout { animation: filePreviewReady 150ms ease-out; display: grid; min-height: 0; grid-template-rows: minmax(0, 1fr); }
-@keyframes filePreviewReady { from { opacity: 0; } to { opacity: 1; } }
+.filePreviewLayout { display: grid; min-height: 0; grid-template-rows: minmax(0, 1fr); }
 .workProgressSummary svg { transition: transform 140ms ease; }
 .workProgressHeader { border-bottom: 1px solid var(--outline-variant); }
 .workspaceUserMessageMetaPlaceholder { min-height: 24px; }
@@ -1233,6 +1234,8 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
    workbenches put the preview above the independently scrolling chat. */
 @media (max-width: 1169px) {
   .workspaceWorkbench {
+    --workspace-preview-topbar-space: 0px;
+    --workspace-preview-toggle-inset: 0px;
     grid-template-columns: var(--workspace-navigation-space) minmax(0, 1fr) 0;
     grid-template-rows: var(--workspace-header-height) calc(var(--workspace-preview-height) + var(--workspace-preview-stack-gap)) minmax(0, 1fr);
   }
@@ -1253,19 +1256,21 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 /* A collapsed navigation leaves enough space for side-by-side preview sooner. */
 @media (min-width: 900px) and (max-width: 1169px) {
   .workspaceWorkbench.withoutSidebar {
+    --workspace-preview-topbar-space: var(--workspace-preview-width);
+    --workspace-preview-toggle-inset: 40px;
     grid-template-columns: var(--workspace-navigation-space) minmax(0, 1fr) var(--workspace-preview-width);
     grid-template-rows: var(--workspace-header-height) 0 minmax(0, 1fr);
   }
   .workspaceWorkbench.withoutSidebar .workspaceContextPanel {
     grid-column: 3;
-    grid-row: 2 / -1;
+    grid-row: 1 / -1;
     justify-self: stretch;
     width: auto;
     height: 100%;
     margin: 0;
     border: 0;
     border-left: 1px solid var(--outline-variant);
-    border-radius: 0;
+    border-radius: 0 var(--workspace-frame-radius) var(--workspace-frame-radius) 0;
     box-shadow: none;
   }
 }
