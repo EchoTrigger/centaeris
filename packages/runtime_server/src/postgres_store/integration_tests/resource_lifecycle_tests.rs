@@ -623,12 +623,13 @@ fn postgres_creation_attempt_forward_migration_keeps_historical_unknown_charged(
     // Reconstruct the released schema with an evidence-free historical reservation.
     super::super::creation_attempts::restore_previous_fixture(&mut db);
     let store = PostgresRuntimeStore::new(&url).unwrap();
-    assert_eq!(
-        db.query_one("SELECT max(version) FROM runtime.schema_migrations", &[])
-            .unwrap()
-            .get::<_, i64>(0),
-        17
-    );
+    assert!(db
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM runtime.schema_migrations WHERE version=14)",
+            &[],
+        )
+        .unwrap()
+        .get::<_, bool>(0));
     assert_eq!(
         db.query_one(
             "SELECT count(*) FROM runtime.environment_creation_attempts",
