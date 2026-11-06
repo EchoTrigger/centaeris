@@ -21,7 +21,8 @@ operations needed for cleanup are erased once cleanup completes. Routine
 rotation settles and saves results before deletion. Delete a compromised
 credential immediately.
 
-External callers use the new credential in `Authorization: Bearer <secret>`.
+New API keys use the prefix `app-` and 24 random letters or digits.
+Previously issued keys continue to work. External callers send the complete key in `Authorization: Bearer <secret>`.
 `POST /api/v1/agent-runs` accepts a required `prompt` and optional sorted, unique
 `sourceObjectRefs` selected from the credential's current material scope. Its
 required `Idempotency-Key` has the form `<Unix-seconds>.<UUIDv4>`. The key is valid

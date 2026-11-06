@@ -109,6 +109,7 @@ class OneShotCredentialAuthorityTests(TransactionTestCase):
 
     def test_list_excludes_secrets_and_deletion_invalidates_current_runs(self):
         credential, token = self.credential()
+        self.assertRegex(token, r"\Aapp-[A-Za-z0-9]{24}\Z")
         self.assertEqual(credential.secretDigest, hashlib.sha256(token.encode()).hexdigest())
         self.assertEqual(authenticate_credential(token).pk, credential.pk)
         run = self.create_run(credential)
@@ -126,6 +127,15 @@ class OneShotCredentialAuthorityTests(TransactionTestCase):
             authenticate_credential(token)
         with self.assertRaisesRegex(CredentialRejected, "api_credential_invalid"):
             authenticate_credential(token + "invalid")
+
+    def test_previously_issued_long_key_still_authenticates(self):
+        credential, _ = self.credential()
+        token = f"{credential.pk}.{'a' * 43}"
+        OneShotCredential.objects.filter(pk=credential.pk).update(
+            secretDigest=hashlib.sha256(token.encode()).hexdigest(),
+            encryptedSecret="",
+        )
+        self.assertEqual(authenticate_credential(token).pk, credential.pk)
 
     def test_sponsor_role_and_model_access_are_rechecked(self):
         credential, _ = self.credential()

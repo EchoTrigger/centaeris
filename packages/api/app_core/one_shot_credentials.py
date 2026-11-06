@@ -2,6 +2,7 @@
 
 import hashlib
 import secrets
+import string
 
 from django.db import transaction
 from django.db.models import Q
@@ -132,7 +133,8 @@ def create_credential(
             not source_object_allowed(credential, item) for item in objects
         ):
             raise CredentialRejected("api_credential_source_not_found", 404)
-        token = f"{credential.pk}.{secrets.token_urlsafe(32)}"
+        alphabet = string.ascii_letters + string.digits
+        token = "app-" + "".join(secrets.choice(alphabet) for _ in range(24))
         credential.secretDigest = hashlib.sha256(token.encode()).hexdigest()
         credential.encryptedSecret = encrypt_credential_secret(token)
         credential.save()
@@ -142,14 +144,11 @@ def create_credential(
 def authenticate_credential(token, *, require_current=True):
     if not isinstance(token, str) or len(token) > 256:
         raise CredentialRejected("api_credential_invalid", 401)
-    credential_id, separator, secret = token.partition(".")
-    if not separator or not secret:
-        raise CredentialRejected("api_credential_invalid", 401)
-    credential = OneShotCredential.objects.select_related("workspace", "user", "modelConfig").filter(
-        pk=credential_id,
-    ).first()
     digest = hashlib.sha256(token.encode()).hexdigest()
-    if credential is None or not secrets.compare_digest(credential.secretDigest, digest):
+    credential = OneShotCredential.objects.select_related("workspace", "user", "modelConfig").filter(
+        secretDigest=digest,
+    ).first()
+    if credential is None:
         raise CredentialRejected("api_credential_invalid", 401)
     if require_current and not authority_is_current(credential):
         raise CredentialRejected("api_credential_revoked")

@@ -1455,7 +1455,7 @@ class OneShotCredential(models.Model):
     modelConfig = models.ForeignKey(ModelConfig, on_delete=models.PROTECT)
     pluginNames = models.JSONField(default=list)
     sourceObjectRefs = models.JSONField(default=list)
-    secretDigest = models.CharField(max_length=64)
+    secretDigest = models.CharField(max_length=64, unique=True)
     encryptedSecret = models.TextField(blank=True, default="")
     createdAt = models.DateTimeField(auto_now_add=True)
 
