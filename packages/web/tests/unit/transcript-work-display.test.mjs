@@ -10,7 +10,7 @@ const stub = code => `data:text/javascript;base64,${Buffer.from(code).toString("
 const loader = createJsxSubjectLoader(new Map([
   ["./useTranscriptCitations", stub('export const useTranscriptCitations=()=>({citations:[],error:false});')],
   ["./useTranscriptTurnMetadata", stub('export const useTranscriptTurnMetadata=()=>new Map();')],
-  ["./TranscriptBlockContent", stub('import {createElement} from "' + import.meta.resolve("react") + '"; export const TranscriptBlockRow=({blockId})=>createElement("span",null,blockId); export const TranscriptLiveTail=()=>null; export const TranscriptToolGroupCard=({runEnded})=>createElement("span",{"data-tool-run-ended":String(runEnded)});')],
+  ["./TranscriptBlockContent", stub('import {createElement} from "' + import.meta.resolve("react") + '"; export const TranscriptBlockRow=({blockId})=>createElement("span",null,blockId); export const TranscriptFailureNotice=()=>null; export const TranscriptLiveTail=()=>null; export const TranscriptToolGroupCard=({runEnded})=>createElement("span",{"data-tool-run-ended":String(runEnded)});')],
 ]));
 const { TranscriptBlockList } = await import(await loader(fileURLToPath(new URL("../../src/chat/TranscriptBlockList.tsx", import.meta.url))));
 
@@ -42,10 +42,10 @@ test("the pending input reserves the metadata row without displaying fake copy c
 test("admission preserves the timer reconciliation identity and start time, including a new Session", async context => {
   const harness = new URL("./componentHarness.mjs", import.meta.url).href;
   const lifecycleLoader = createJsxSubjectLoader(new Map([
-    ["react", stub(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useLayoutEffect} from ${JSON.stringify(harness)}; export const useSyncExternalStore=(_subscribe,read)=>read();`)],
+    ["react", stub(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useLayoutEffect} from ${JSON.stringify(harness)}; export const useImperativeHandle=()=>{}; export const useSyncExternalStore=(_subscribe,read)=>read();`)],
     ["./useTranscriptCitations", stub('export const useTranscriptCitations=()=>({citations:[],error:false});')],
     ["./useTranscriptTurnMetadata", stub(`import {context} from ${JSON.stringify(harness)}; export const useTranscriptTurnMetadata=()=>context.workTimes;`)],
-    ["./TranscriptBlockContent", stub('export const TranscriptBlockRow=()=>null; export const TranscriptLiveTail=()=>null; export const TranscriptToolGroupCard=()=>null;')],
+    ["./TranscriptBlockContent", stub('export const TranscriptBlockRow=()=>null; export const TranscriptFailureNotice=()=>null; export const TranscriptLiveTail=()=>null; export const TranscriptToolGroupCard=()=>null;')],
   ]));
   const { TranscriptBlockList: List } = await import(await lifecycleLoader(fileURLToPath(new URL("../../src/chat/TranscriptBlockList.tsx", import.meta.url))));
   let blocks = [];

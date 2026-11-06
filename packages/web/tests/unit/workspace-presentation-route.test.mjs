@@ -25,7 +25,6 @@ async function setup(t, draft=false, navigationRead=null, controls={}) {
   const stored=new Map();globalThis.sessionStorage={getItem:key=>stored.get(key)??null,setItem:(key,value)=>stored.set(key,value),removeItem:key=>stored.delete(key)};
   globalThis.window={location:{pathname:draft?"/w/workspace/app":"/w/workspace/sessions/session"},requestAnimationFrame(){},addEventListener(){},removeEventListener(){}};
   globalThis.document={hidden:false,addEventListener(){},removeEventListener(){}};
-  t.after(()=>{globalThis.window=previousWindow;globalThis.document=previousDocument;globalThis.sessionStorage=previousStorage;});
   const calls=[]; let options; let serverRun=null;
   const env=environment({tail:page,activeRun:controls.activeRun || (async()=>({agentRun:serverRun})),request:async(path,request)=>{
     calls.push([path,request]);
@@ -46,7 +45,14 @@ async function setup(t, draft=false, navigationRead=null, controls={}) {
   }});
   const props={initialSession:draft?null:row(),workspaceDraft:draft,location:{search:draft?"?new=1":"",state:null},modelsVersion:0,onSessionAccepted:path=>controls.accepted?.(path)};
   const subject=renderer(AppPageContent,props,env);
-  t.after(()=>subject.unmount());
+  t.after(() => {
+    try { subject.unmount(); }
+    finally {
+      globalThis.window = previousWindow;
+      globalThis.document = previousDocument;
+      globalThis.sessionStorage = previousStorage;
+    }
+  });
   await subject.settle();
   if ((controls.models ?? ["model"]).length) { nodes(subject.tree,n=>n.type.name==="WorkspaceComposer")[0].props.onModelIdChange("model"); await subject.settle(); }
   const send=async(kind,body,cursor=null)=>{if(kind==="checkpoint") serverRun=body.agentRun && ["queued","running"].includes(body.agentRun.status) ? {...body.agentRun,streamCursor:cursor || "current"} : null;assert.ok(options,"the display subscription is active");await options.controller.acceptWithBackpressure({cursor,item:{schema:"workspace.presentation.v1",workspaceId:"workspace",sessionId:options.sessionId,kind,...(kind==="navigation"?{snapshotId:"navigation",offset:0,hasMore:false,...body}:body)}});await tick();await subject.settle();};
@@ -327,17 +333,17 @@ test("a stale empty checkpoint after receipt handoff cannot remove a currently q
 
 const transcript = f => nodes(f.subject.tree,n=>n.type.name==="TranscriptBlockList")[0].props;
 
-test("workspace preservation survives terminal checkpoints and explicit release clears it",async t=>{
+test("workspace preservation after a terminal checkpoint stays out of the transcript",async t=>{
   const f=await setup(t);
   await f.send("snapshot",{page});
   await f.send("checkpoint",checkpoint(run("ended","failed")),"terminal");
   await f.send("activity",{agentRunId:"ended",sourceHighWater:"10",activity:"preserving"});
-  assert.equal(transcript(f).activity,"preserving");
+  assert.equal(transcript(f).activity,undefined);
   assert.equal(transcript(f).running,false);
   assert.equal(composer(f).hasActiveAgentRun,false);
   composer(f).onDraftChange("next draft");await f.subject.settle();
   await f.send("checkpoint",checkpoint(run("ended","failed")),"terminal-repeat");
-  assert.equal(transcript(f).activity,"preserving");
+  assert.equal(transcript(f).activity,undefined);
   assert.equal(composer(f).draft,"next draft");
   await f.send("activity",{agentRunId:"ended",sourceHighWater:"10",activity:null});
   assert.equal(transcript(f).activity,undefined);
@@ -497,7 +503,7 @@ test("checking a stopped unknown submission cancels the recovered original Run w
  await f.send("snapshot",{page});await startSend(f);
  await composer(f).onCancelActiveAgentRun();await f.subject.settle();
  assert.ok(lookups>=2);available=true;
- const retry=nodes(f.subject.tree,n=>n.type==="button"&&n.props.children==="agentChat.retry")[0];
+ const retry=nodes(composer(f).feedback,n=>n.type==="button"&&n.props.children==="operations.check")[0];
  assert.ok(retry);retry.props.onClick();
  await settleUntil(f,()=>!composer(f).sending);
  assert.equal(f.calls.filter(([path])=>path==="/api/sessions/session/agent-runs/run-new/cancel").length,1);
