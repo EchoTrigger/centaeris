@@ -1,8 +1,8 @@
 
 import { useTranslation } from "../i18n";
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, ChevronRight, KeyRound, Plus, Search } from "lucide-react";
-import { apiJson as api } from "../api";
+import { ArrowLeft, ChevronRight, KeyRound, Plus } from "lucide-react";
+import { ApiError, apiJson as api } from "../api";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ProviderLogo } from "../components/ProviderLogo";
 import { localizedModelError, modelErrorText } from "../modelErrors";
@@ -49,10 +49,11 @@ function positiveInteger(value, label) {
 }
 
 function testSummary(result, t) {
-  if (!result.ok) return result.failureMessage ?? localizedModelError(result.errorKeyword || "model_adapter_failed", t) ?? t("modelErrors.failed");
-  const status = result.httpStatus ? `HTTP ${result.httpStatus}` : "OK";
-  const detail = result.outputPreview || "OK";
-  return `${status} · ${result.latencyMs}ms · ${detail}`;
+  const status = result.httpStatus ? "HTTP " + result.httpStatus : "";
+  const latency = Number.isFinite(result.latencyMs) ? result.latencyMs + "ms" : "";
+  const error = result.ok ? "" : result.failureMessage
+    ?? localizedModelError(result.errorKeyword || "model_adapter_failed", t) ?? t("modelErrors.failed");
+  return [status, latency, error].filter(Boolean).join(" · ");
 }
 
 const MODEL_FORM_ERRORS = new Map([
@@ -81,7 +82,6 @@ export default function ModelSettings({ workspace, onModelsChanged }) {
   const [providerForms, setProviderForms] = useState({});
   const [modelForms, setModelForms] = useState({});
   const [selection, setSelection] = useState({ kind: "empty" });
-  const [modelQuery, setModelQuery] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [busyAction, setBusyAction] = useState("");
   const [message, setMessage] = useState("");
@@ -107,10 +107,6 @@ export default function ModelSettings({ workspace, onModelsChanged }) {
   const selectedModelForm = selectedModel ? modelForms[selectedModel.id] : null;
   const selectedTest = modelTest?.modelId === selectedModel?.id ? modelTest : null;
   const providerModels = selectedProvider ? allModels.filter(model => model.providerId === selectedProvider.id) : [];
-  const visibleModels = providerModels.filter(model => {
-    const form = modelForms[model.id];
-    return `${form?.displayName || ""} ${form?.modelName || ""}`.toLocaleLowerCase().includes(modelQuery.trim().toLocaleLowerCase());
-  });
   async function load() {
     const [providersResult, modelsResult, templatesResult] = await Promise.all([
       api(`${apiBase}/model-providers`),
@@ -162,7 +158,6 @@ export default function ModelSettings({ workspace, onModelsChanged }) {
 
   function showProvider(providerId) {
     setSelection({ kind: "provider", providerId });
-    setModelQuery("");
     setMessage("");
     setError("");
   }
@@ -415,7 +410,8 @@ export default function ModelSettings({ workspace, onModelsChanged }) {
       const result = await api(`${apiBase}/models/${model.id}/test`, { method: "POST", body: "{}" });
       setModelTest({ ...result, modelId: model.id });
     } catch (testError) {
-      setModelTest({ modelId: model.id, ok: false, failureMessage: errorText(testError) });
+      setModelTest({ modelId: model.id, ok: false, failureMessage: errorText(testError),
+        httpStatus: testError instanceof ApiError ? testError.status : null });
     } finally {
       setBusyAction("");
     }
@@ -454,11 +450,14 @@ export default function ModelSettings({ workspace, onModelsChanged }) {
         {selection.kind === "provider" && selectedProvider && selectedProviderForm ? !writable(selectedProvider) ? <p role="alert">{t("workspaceResources.sharedReadOnly")}</p> : selectedProvider.templateId ? <section className="settingsPanel workspaceModelsPreset">
           <div className="workspaceModelsSectionHeader"><span>{t("interface.apiKey")}</span><small className={selectedProvider.credentialVersion ? "is-configured" : ""}><i aria-hidden="true" />{selectedProvider.credentialVersion ? t("modelSettings.configured") : t("modelSettings.notConfiguredYet")}</small></div>
           <div className="workspaceModelsField">
-            <div className="workspaceModelsKeyLine"><div className="workspaceModelsKeyInput"><KeyRound aria-hidden="true" /><input id={providerKeyInputId} name="providerApiKey" aria-label={t("interface.apiKey")} type="password" autoComplete="new-password" spellCheck={false} value={selectedProviderForm.secret} onChange={(event) => updateProviderForm(selectedProvider.id, { secret: event.target.value })} placeholder={selectedProvider.credentialVersion ? t("modelSettings.enterANewKeyToReplaceIt") : t("modelSettings.enterApiKey")} /></div><button type="button" className="workspaceModelsInlineSave" disabled={Boolean(busyAction) || !selectedProviderForm.secret.trim()} onClick={() => void saveProvider()}>{busyAction === "save-provider" ? t("modelSettings.saving") : t("modelSettings.save")}</button></div>
+            <div className="workspaceModelsKeyLine"><div className="workspaceModelsKeyInput"><KeyRound aria-hidden="true" /><input id={providerKeyInputId} name="providerApiKey" aria-label={t("interface.apiKey")} type="password" autoComplete="new-password" spellCheck={false} value={selectedProviderForm.secret} onChange={(event) => updateProviderForm(selectedProvider.id, { secret: event.target.value })} placeholder={selectedProvider.credentialVersion ? t("modelSettings.enterANewKeyToReplaceIt") : t("modelSettings.enterApiKey")} /></div>
+              {selectedProviderForm.secret.trim() || busyAction === "save-provider"
+                ? <button type="button" className="workspaceModelsInlineSave" disabled={Boolean(busyAction)} onClick={() => void saveProvider()}>{busyAction === "save-provider" ? t("modelSettings.saving") : t("modelSettings.save")}</button>
+                : selectedProvider.credentialVersion ? <button type="button" className="workspaceModelsDanger" onClick={() => { setError(""); setConfirmAction("provider"); }} disabled={Boolean(busyAction)}>{t("modelSettings.disconnect")}</button> : null}
+            </div>
           </div>
           {!confirmAction && error ? <small className="error" role="alert">{error}</small> : null}
           {message ? <small role="status">{message}</small> : null}
-          {selectedProvider.credentialVersion ? <button type="button" className="workspaceModelsDanger workspaceModelsDisconnect" onClick={() => { setError(""); setConfirmAction("provider"); }} disabled={Boolean(busyAction)}>{t("modelSettings.disconnect")}</button> : null}
         </section> : <section className="settingsPanel">
           <div className="workspaceModelsSectionHeader"><span>{t("interface.customProvider")}</span><button type="button" className="workspaceModelsDanger" onClick={() => { setError(""); setConfirmAction("provider"); }} disabled={Boolean(busyAction)}>{t("globalPluginSettings.remove")}</button></div>
           <label className="workspaceModelsField"><span>{t("modelSettings.providerName")}</span><input value={selectedProviderForm.nameInput} onChange={(event) => updateProviderForm(selectedProvider.id, { nameInput: event.target.value })} /></label>
@@ -475,8 +474,7 @@ export default function ModelSettings({ workspace, onModelsChanged }) {
           <div className="managementToolbar"><h3>{t("appRoute.models")} <small>{providerModels.length}</small></h3>
             {writable(selectedProvider) && !selectedProvider.templateId ? <button type="button" className="workspaceModelsAddProvider" disabled={Boolean(busyAction) || selectedProvider.isDraft} onClick={() => addModel(selectedProvider.id)}><Plus aria-hidden="true" />{t("models.addModel")}</button> : null}
           </div>
-          {providerModels.length ? <label className="librarySearch managementSearch"><Search aria-hidden="true" /><input aria-label={t("models.search")} placeholder={t("models.search")} value={modelQuery} onChange={event => setModelQuery(event.target.value)} /></label> : null}
-          {visibleModels.map(model => {
+          {providerModels.map(model => {
             const form = modelForms[model.id];
             const name = form?.displayName || form?.modelName || t("interface.newModel");
             return <div className="managementModelItem" key={model.id}>
@@ -490,7 +488,7 @@ export default function ModelSettings({ workspace, onModelsChanged }) {
               {modelTest?.modelId === model.id ? <div className={modelTest.ok ? "workspaceModelsTestResult is-ok" : "workspaceModelsTestResult is-error"} role="status">{testSummary(modelTest, t)}</div> : null}
             </div>;
           })}
-          {!visibleModels.length ? <p className="managementEmpty">{t(providerModels.length ? "models.noSearchMatches" : "modelSettings.noModels")}</p> : null}
+          {!providerModels.length ? <p className="managementEmpty">{t("modelSettings.noModels")}</p> : null}
         </section> : null}
 
         {selection.kind === "model" && selectedModel && selectedModelForm ? <fieldset disabled={!writable(selectedModel)} className="settingsPanel workspaceModelsForm">

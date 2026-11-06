@@ -995,6 +995,8 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .managementRowButton:focus-visible, .managementBack:focus-visible { outline: 2px solid var(--primary-color); outline-offset: -2px; }
 .managementRowIcon { display: grid; flex: 0 0 34px; height: 34px; place-items: center; border-radius: 7px; background: var(--surface-variant); color: var(--process-text); }
 .settingsPanel .managementRowButton:hover:not(:disabled) { background: var(--surface-hover); }
+.workspaceModelsLayout .settingsPanel .managementRowButton:hover:not(:disabled) { background: transparent; }
+.workspaceModelsLayout .managementRowButton:hover .managementRowEnd svg { color: var(--on-surface); }
 .settingsPanel .managementRowIcon { background: var(--surface-container); }
 .managementRowIcon > svg { width: 18px; height: 18px; }
 .managementRowIcon img { width: 24px; height: 24px; object-fit: contain; }
@@ -1182,7 +1184,6 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .workspaceModelsKeyInput button:hover { background: var(--surface-variant); }
 .workspaceModelsKeyInput button:focus-visible { background: var(--surface-variant); }
 .workspaceModelsForm { min-inline-size: 0; margin: 0; border: 0; }
-.workspaceModelsPreset .workspaceModelsSectionHeader { padding-bottom: 12px; border-bottom: 1px solid var(--outline-variant); }
 .workspaceModelsPreset .workspaceModelsSectionHeader small { display: inline-flex; align-items: center; gap: 6px; }
 .workspaceModelsPreset .workspaceModelsSectionHeader small i { width: 7px; height: 7px; border-radius: 50%; background: var(--surface-hover); }
 .workspaceModelsPreset .workspaceModelsSectionHeader small.is-configured i { background: var(--success); }
@@ -1191,7 +1192,6 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .workspaceModelsInlineSave { min-width: 58px; height: 38px; border: 0; border-radius: 6px; background: var(--primary-color); color: var(--solid-text); padding: 0 13px; font-size: 11px; font-weight: 600; }
 .workspaceModelsInlineSave:hover:not(:disabled) { background: var(--primary-color); }
 .workspaceModelsInlineSave:disabled { background: var(--surface-variant); color: var(--process-text); }
-.workspaceModelsDisconnect { margin-top: 16px; }
 .workspaceModelsFormGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .workspaceModelsDanger { min-height: 32px; padding: 0 11px; border: 0; border-radius: 6px; background: var(--danger-button-fill); color: var(--error); }
 .workspaceModelsTest { color: var(--process-text); }

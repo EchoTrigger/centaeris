@@ -4,9 +4,11 @@ import logging
 from copy import copy
 
 from asgiref.sync import sync_to_async
+from django.conf import settings
 
 from ..credentials import encrypt_credential_secret
 from ..models import ModelConfig, ModelRunLog
+from . import anthropic_messages, openai_completions, openai_responses
 from .anthropic_messages import call_anthropic_messages, stream_anthropic_messages
 from .common import (
     MODEL_STREAM_SCHEMA,
@@ -18,6 +20,7 @@ from .common import (
     credential_for_provider,
     fake_model_response,
     model_payload,
+    provider_error,
     model_database_operation,
     record_model_run,
     record_model_run_cancellation_safe,
@@ -189,23 +192,43 @@ async def stream_model_async(agent_run_id: str, model_config_ref: str, request_b
             await provider_stream.aclose()
 
 
-def test_model_config(model: ModelConfig) -> dict:
+def test_model_config(model: ModelConfig) -> int:
+    """Report the provider's HTTP response without waiting for generation."""
     probe_model = copy(model)
     probe_model.maxOutputTokens = min(model.maxOutputTokens, 32)
     request_body = {
         "preparedPrompt": {
             "schema": "prepared_prompt.v1",
-            "messages": [{"messageId": "health", "role": "user", "content": "health check"}],
+            "messages": [{"messageId": "health", "role": "user", "content": "Reply OK."}],
             "toolDefinitions": [],
             "toolChoice": {"type": "none"},
             "maxOutputTokens": probe_model.maxOutputTokens,
         }
     }
-    if model.thinkingMode:
-        request_body["thinkingMode"] = model.thinkingMode
-    result = call_model(
-        probe_model,
-        request_body,
-    )
-    validated_usage(result.get("usage"))
-    return result
+    api, _ = model_database_operation(resolve_model_route)(probe_model)
+    if api == "openai-completions":
+        payload = openai_completions.build_open_ai_completions_request(probe_model, request_body)
+        client = openai_completions.open_ai_completions_client(probe_model, request_body)
+        resource = client.chat.completions
+    elif api == "openai-responses":
+        payload = openai_responses.build_open_ai_responses_request(probe_model, request_body)
+        client = openai_responses.open_ai_responses_client(probe_model, request_body)
+        resource = client.responses
+    elif api == "anthropic-messages":
+        payload = anthropic_messages.build_anthropic_messages_request(probe_model, request_body)
+        client = anthropic_messages.anthropic_messages_client(probe_model, request_body)
+        resource = client.messages
+    else:
+        raise ModelProviderError("provider_api_unsupported")
+
+    timeout = min(settings.MODEL_PROVIDER_TIMEOUT_SECONDS, 12)
+    try:
+        with resource.with_streaming_response.create(**payload, stream=True, timeout=timeout) as response:
+            return response.status_code
+    except Exception as error:
+        mapped = provider_error(error)
+        if mapped is not None:
+            raise mapped from error
+        raise
+    finally:
+        client.close()

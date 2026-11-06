@@ -1,10 +1,10 @@
 """Gateway calls need credentials, not an application-owned supplier quota."""
+import json
 import threading
 from unittest.mock import patch
 
 import httpx
 from django.contrib.auth import get_user_model
-from django.conf import settings
 from django.test import TestCase
 from openai import OpenAI
 
@@ -46,14 +46,23 @@ class ModelGatewayTests(TestCase):
 
     def test_credential_without_quota_configuration_reaches_gateway(self):
         requests = []
+        class UnreadBody(httpx.SyncByteStream):
+            def __iter__(self):
+                raise AssertionError("probe waited for the provider body")
+
         def handle(request):
             requests.append(request)
-            return self.success()
+            return httpx.Response(200, stream=UnreadBody())
+
         with self.sdk_client(handle):
-            self.assertEqual(probe_model(self.model)["text"], "hello")
+            self.assertEqual(probe_model(self.model), 200)
         self.assertEqual(len(requests), 1)
         self.assertEqual(requests[0].url.path, "/v1/chat/completions")
-        self.assertEqual(requests[0].extensions["timeout"]["read"], settings.MODEL_PROVIDER_TIMEOUT_SECONDS)
+        self.assertLessEqual(requests[0].extensions["timeout"]["read"], 12)
+        payload = json.loads(requests[0].content)
+        self.assertEqual(payload["messages"], [{"role": "user", "content": "Reply OK."}])
+        self.assertTrue(payload["stream"])
+        self.assertNotIn("reasoning_effort", payload)
 
     def test_gateway_failure_preserves_retry_after_without_local_retry_or_cooldown(self):
         for status in (429, 503):
@@ -69,7 +78,7 @@ class ModelGatewayTests(TestCase):
                     probe_model(self.model)
                 self.assertEqual((caught.exception.httpStatus, caught.exception.retryAfter), (status, "3600"))
                 self.assertEqual(len(requests), 1)
-                self.assertEqual(probe_model(self.model)["text"], "hello")
+                self.assertEqual(probe_model(self.model), 200)
                 self.assertEqual(len(requests), 2)
 
     def test_cancelled_request_does_not_start_provider(self):

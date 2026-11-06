@@ -42,6 +42,32 @@ test("workspace administrator loads scoped model metadata and replaces only a ne
   assert.equal(nodes(subject.tree, node => node.type === "input" && node.props.name === "providerApiKey")[0].props.value, "");
   subject.unmount();
 });
+test("model probe shows upstream HTTP status on success and failure", async () => {
+  const env = environment({ workspace: { id: "one", role: "admin" }, request: async (url) => {
+    if (url.endsWith("/model-providers")) return { providers: [provider] };
+    if (url.endsWith("/model-provider-templates")) return { templates: [] };
+    if (url.endsWith("/models")) return { models: [
+      { id: "one-model", displayName: "One model", providerId: provider.id, scope: "workspace", writable: true },
+      { id: "busy-model", displayName: "Busy model", providerId: provider.id, scope: "workspace", writable: true },
+    ] };
+    if (url.endsWith("/one-model/test")) return { ok: true, httpStatus: 200, latencyMs: 22 };
+    if (url.endsWith("/busy-model/test")) return { ok: false, httpStatus: 429, latencyMs: 19, errorKeyword: "provider_rate_limited" };
+    throw new Error("Unexpected test request");
+  } });
+  const subject = renderer(ModelSettings, { workspace: env.workspace, onModelsChanged: async () => {} }, env);
+  await subject.settle();
+  button(subject.tree, provider.displayName).props.onClick();
+  await subject.settle();
+  const testButtons = () => nodes(subject.tree, node => node.type === "button" && node.props.children === "interface.test");
+  testButtons()[0].props.onClick();
+  await subject.settle();
+  const status = () => nodes(subject.tree, node => node.props.role === "status")[0].props.children;
+  assert.match(status(), /HTTP 200/);
+  testButtons()[1].props.onClick();
+  await subject.settle();
+  assert.match(status(), /HTTP 429/);
+  subject.unmount();
+});
 test("an unowned model provider from stale metadata cannot be managed", async () => {
   const { env, requests } = modelEnvironment({ ...provider, id: "shared", scope: "platform", writable: false });
   const subject = renderer(ModelSettings, { workspace: env.workspace, onClose() {}, onModelsChanged: async () => {} }, env);

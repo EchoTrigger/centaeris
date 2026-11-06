@@ -5131,7 +5131,7 @@ class ModelAdminAcceptanceTests(ModelAdminFixture, TestCase):
             body=None,
         )
         client = Mock()
-        client.chat.completions.create.side_effect = error
+        client.chat.completions.with_streaming_response.create.side_effect = error
         with patch(
             "app_core.model_adapter.openai_completions.open_ai_completions_client", return_value=client
         ):
@@ -5148,7 +5148,7 @@ class ModelAdminAcceptanceTests(ModelAdminFixture, TestCase):
         self.assertIsNone(result["outputPreview"])
         self.assertEqual(result["errorKeyword"], "provider_authentication_failed")
         self.assertNotIn("provider body with credential", json.dumps(result))
-        self.assertEqual(client.chat.completions.create.call_args.kwargs["max_tokens"], 32)
+        self.assertEqual(client.chat.completions.with_streaming_response.create.call_args.kwargs["max_tokens"], 32)
 
 
 class ModelProtocolAdapterTests(TestCase):

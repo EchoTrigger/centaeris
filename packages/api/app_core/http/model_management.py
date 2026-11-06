@@ -401,7 +401,7 @@ def test_model(request, model_id: str, payload: EmptyRequest | None = None):
     try:
         model = ModelConfig.objects.select_related("provider").get(id=model_id, isCurrent=True, provider__workspace=getattr(request, "resource_workspace", None))
         credential = credential_for_provider(model.provider)
-        result = test_model_config(model)
+        http_status = test_model_config(model)
     except ModelConfig.DoesNotExist:
         return Status(404, {"error": "model_not_found"})
     except ModelEndpointValidationError as error:
@@ -415,7 +415,7 @@ def test_model(request, model_id: str, payload: EmptyRequest | None = None):
     except Exception as error:
         return _test_result(error=ModelProviderError(safe_model_error_reason(error)), started_at=started_at)
     _record_credential_audit(credential, "tested", request.user)
-    return _test_result(result=result, started_at=started_at)
+    return _test_result(http_status=http_status, started_at=started_at)
 
 
 def _validated_secret(secret: str) -> str:
@@ -452,7 +452,7 @@ def _create_provider(
     return provider
 
 
-def _test_result(*, started_at: float, result: dict | None = None, error: ModelProviderError | None = None) -> dict:
+def _test_result(*, started_at: float, http_status: int | None = None, error: ModelProviderError | None = None) -> dict:
     latency_ms = max(0, round((perf_counter() - started_at) * 1000))
     if error is not None:
         return {
@@ -462,13 +462,11 @@ def _test_result(*, started_at: float, result: dict | None = None, error: ModelP
             "outputPreview": None,
             "errorKeyword": error.reasonType,
         }
-    output = result["text"] if isinstance(result, dict) else ""
-    output_preview = " ".join(output.split())[:96] if isinstance(output, str) else ""
     return {
         "ok": True,
-        "httpStatus": 200,
+        "httpStatus": http_status,
         "latencyMs": latency_ms,
-        "outputPreview": output_preview or None,
+        "outputPreview": None,
         "errorKeyword": None,
     }
 
