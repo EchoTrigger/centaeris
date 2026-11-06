@@ -4,6 +4,7 @@ import { createJsxSubjectLoader } from "./jsxSubject.mjs";
 // Synthetic route/API contexts let the real components drive visible props and
 // request/cancel behavior without starting a server or installing a dependency.
 let active;
+let nextId = 0;
 export let context;
 const equal = (left, right) => left && right && left.length === right.length && left.every((item, index) => Object.is(item, right[index]));
 export function useState(initial) {
@@ -16,6 +17,9 @@ export function useState(initial) {
 }
 export function useRef(initial) {
   const [ref] = useState(() => ({ current: initial })); return ref;
+}
+export function useId() {
+  const [id] = useState(() => `test-id-${nextId++}`); return id;
 }
 export function useMemo(create, dependencies) {
   const index = active.cursor++; const previous = active.slots[index];
@@ -82,10 +86,11 @@ const dataUrl = source => `data:text/javascript;base64,${Buffer.from(source).toS
 const stub = (specifier, source) => [specifier, dataUrl(`import {context,useRef} from ${JSON.stringify(moduleUrl)}; ${source}`)];
 export function subjectLoader({ realModal = false, realDocumentPreview = false, extraOverrides = [] } = {}) {
   const overrides = new Map([
-    ["react", dataUrl(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useLayoutEffect} from ${JSON.stringify(moduleUrl)};`)],
+    ["react", dataUrl(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useLayoutEffect,useId} from ${JSON.stringify(moduleUrl)};`)],
     stub("react-router", 'export const Link=()=>null; export const useRouteLoaderData=id=>id==="authenticated"?{user:context.user}:({workspace:context.workspace}); export const useNavigate=()=>context.navigate; export const useLocation=()=>context.location; export const useRevalidator=()=>context.revalidator; export const useBlocker=value=>{context.blocker.predicate=value;context.blocker.shouldBlock=typeof value==="function"?value({currentLocation:context.location,nextLocation:context.nextLocation||{...context.location,search:"?new=1"}}):Boolean(value);return context.router?context.router.getBlocker("model-draft",value):context.blocker;};'),
     stub("../api", `export {ApiError} from ${JSON.stringify(moduleUrl)}; export const apiJson=(...args)=>context.request(...args); export const apiResponse=(...args)=>context.request(...args); export const clearCsrfToken=()=>{}; export const apiUrl=path=>path; export const jsonOptions=(method,value)=>({method,body:JSON.stringify(value)});`),
     stub("../components/DocumentPreview", "export const DocumentPreview=()=>null;"),
+    stub("../components/WorkspaceContextPanel", "export const WorkspaceContextPanel=()=>null; export const WorkspacePreviewToggle=()=>null;"),
     stub("react-dom", "export const createPortal=(children)=>children;"),
     ...["../shell/ShellPage"].map(specifier => stub(specifier, `export const ${specifier.split("/").at(-1)}=()=>null;`)),
   ]);
