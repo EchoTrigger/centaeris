@@ -11,6 +11,19 @@ function shellQuote(value) {
 
 const credentialFingerprint = "python3 -c 'import hashlib, os; print(hashlib.sha256(os.environ[\"CENTAERIS_RUN_KEY\"].encode()).hexdigest())'";
 
+function minimalRequestExample(endpoint) {
+  return [
+    'export CENTAERIS_RUN_KEY="your-api-key"',
+    "operation_id=$(python3 -c 'import time, uuid; print(f\"{int(time.time())}.{uuid.uuid4()}\")')",
+    "",
+    "curl -N --fail-with-body " + shellQuote(endpoint) + " \\",
+    '  -H "Authorization: Bearer $CENTAERIS_RUN_KEY" \\',
+    '  -H "Idempotency-Key: $operation_id" \\',
+    '  -H "Content-Type: application/json" \\',
+    "  -d '{\"prompt\":\"Reply with one sentence describing Centaeris.\"}'",
+  ].join("\n");
+}
+
 export function firstCallExample(endpoint) {
   return [
     "(",
@@ -79,14 +92,15 @@ export function CopyButton({ value, label }) {
   </span>;
 }
 
-export function DeveloperExample() {
+export function DeveloperExample({ saveRequest = false }) {
   const { t } = useTranslation();
-  const command = firstCallExample(apiUrl(runPath));
+  const endpoint = apiUrl(runPath);
+  const command = saveRequest ? firstCallExample(endpoint) : minimalRequestExample(endpoint);
 
   return <section className="developerSection" aria-labelledby="developer-example-heading">
     <div className="developerSectionHead">
-      <div><h2 id="developer-example-heading">{t("developer.minimumRequest")}</h2>
-        <p>{t("developer.exampleHint")}</p></div>
+      <div><h2 id="developer-example-heading">{t(saveRequest ? "developer.savedRequest" : "developer.minimumRequest")}</h2>
+        <p>{t(saveRequest ? "developer.savedExampleHint" : "developer.exampleHint")}</p></div>
       <CopyButton value={command} label={t("developer.copyExample")} />
     </div>
     <pre><code>{command}</code></pre>

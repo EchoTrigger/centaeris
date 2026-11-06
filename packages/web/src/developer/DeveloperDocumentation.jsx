@@ -73,7 +73,7 @@ export function DeveloperDocumentation({ topic }) {
     <header className="settingsPageHeading"><h1>{t("developer.doc." + topic + ".title")}</h1></header>
     <div className="developerProse"><MarkdownContent text={guides[topic]} /></div>
     {topic === "quickstart" ? <>
-      <DeveloperExample />
+      <DeveloperExample saveRequest />
       <div className="developerProse"><MarkdownContent text={guides.firstResult} /></div>
       <DeveloperStatusExample />
       <div className="developerProse"><MarkdownContent text={guides.recovery} /></div>
