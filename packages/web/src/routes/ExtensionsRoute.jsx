@@ -23,16 +23,16 @@ function SkillDetail({ path, skillId, back }) {
     {back}
     <header className="extensionHeading"><div><h1 tabIndex={-1}>{detail?.skill.name || t("extensions.skills")}</h1>
       {detail?.skill.description ? <p>{detail.skill.description}</p> : null}</div></header>
-    {error ? <div className="libraryCatalogEmpty" role="alert">{error}</div> : detail ? <>
-      <section className="extensionSkillFacts">
+    {error ? <div className="settingsPanel libraryCatalogEmpty" role="alert">{error}</div> : detail ? <>
+      <section className="settingsPanel extensionSkillFacts">
         <dl>
           <div><dt>{t("libraryRoute.source")}</dt><dd>{detail.skill.skillId.startsWith("system:") ? t("libraryRoute.systemMount") : t("libraryRoute.pluginMount")}</dd></div>
           <div><dt>{t("libraryRoute.invocation")}</dt><dd>{detail.skill.allowImplicitInvocation ? t("libraryRoute.automaticOrExplicit") : t("libraryRoute.explicitOnly")}</dd></div>
           <div><dt>{t("libraryRoute.allowedTools")}</dt><dd>{detail.skill.allowedTools.length ? detail.skill.allowedTools.join(" · ") : t("libraryRoute.unrestricted")}</dd></div>
         </dl>
       </section>
-      <article className="extensionSkillDocument"><MarkdownContent text={detail.content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "")} /></article>
-    </> : <div className="libraryCatalogEmpty" role="status"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.openingSkill")}</div>}
+      <article className="settingsPanel extensionSkillDocument"><MarkdownContent text={detail.content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "")} /></article>
+    </> : <div className="settingsPanel libraryCatalogEmpty" role="status"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.openingSkill")}</div>}
   </>;
 }
 
@@ -79,10 +79,10 @@ function ExtensionCatalog({ workspace, view, isSuperuser, detailId, onSelectPlug
       : <>
         <header className="extensionHeading"><h1>{t("extensions.skills")}</h1></header>
         <div className="extensionToolbar">{search}</div>
-        {error ? <div className="libraryCatalogEmpty" role="alert">{error}</div> : items === null
-          ? <div className="libraryCatalogEmpty" role="status"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("agentChat.loading")}</div>
-          : rows.length === 0 ? <div className="libraryCatalogEmpty"><p>{t(filter ? "extensions.noMatches" : "libraryRoute.noSkillsAvailableInThisWorkspace")}</p></div>
-          : <ul className="extensionList">{rows.map(item => <li key={item.skillId}>
+        {error ? <div className="settingsPanel libraryCatalogEmpty" role="alert">{error}</div> : items === null
+          ? <div className="settingsPanel libraryCatalogEmpty" role="status"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("agentChat.loading")}</div>
+          : rows.length === 0 ? <div className="settingsPanel libraryCatalogEmpty"><p>{t(filter ? "extensions.noMatches" : "libraryRoute.noSkillsAvailableInThisWorkspace")}</p></div>
+          : <ul className="settingsPanel settingsListPanel extensionList">{rows.map(item => <li key={item.skillId}>
             <Link className="managementRow managementRowButton" to={`${skillList}&${new URLSearchParams({ skill: item.skillId })}`}>
               <span className="managementRowIcon"><Layers aria-hidden="true" /></span>
               <span className="managementRowCopy"><strong>{item.name}</strong><small>{item.description}</small></span>

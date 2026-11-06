@@ -177,6 +177,7 @@ export function DeveloperCredentials({ workspaceId }) {
   const [revision, setRevision] = useState(0);
   const [creating, setCreating] = useState(false);
   const [issued, setIssued] = useState(null);
+  const [issuedSecrets, setIssuedSecrets] = useState({});
   const [pendingRevoke, setPendingRevoke] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -202,7 +203,8 @@ export function DeveloperCredentials({ workspaceId }) {
     try {
       const result = await apiJson(path, jsonOptions("POST", payload));
       setCredentials(values => [...values, result.credential]);
-      setIssued({ name: result.credential.name, secret: result.secret });
+      setIssued(result.credential);
+      setIssuedSecrets(values => ({ ...values, [result.credential.id]: result.secret }));
       setCreating(false);
     } catch (error) {
       setError(credentialErrorKey(error, "create"));
@@ -217,6 +219,11 @@ export function DeveloperCredentials({ workspaceId }) {
     try {
       const { credential } = await apiJson(path + "/" + encodeURIComponent(pendingRevoke.id), { method: "DELETE" });
       setCredentials(values => values.map(item => item.id === credential.id ? credential : item));
+      setIssuedSecrets(values => {
+        const remaining = { ...values };
+        delete remaining[credential.id];
+        return remaining;
+      });
       setPendingRevoke(null);
     } catch (error) {
       setError(credentialErrorKey(error, "revoke"));
@@ -226,7 +233,7 @@ export function DeveloperCredentials({ workspaceId }) {
     }
   }
 
-  return <section className="developerSection" aria-labelledby="developer-credentials-heading">
+  return <section className="settingsPanel developerSection" aria-labelledby="developer-credentials-heading">
     <div className="developerSectionHead">
       <div>
         <h2 id="developer-credentials-heading">{t("developer.credentials")}</h2>
@@ -241,12 +248,12 @@ export function DeveloperCredentials({ workspaceId }) {
     </p> : null}
     {issued ? <section className="developerIssued" aria-labelledby="developer-issued-heading">
       <h3 id="developer-issued-heading">{t("developer.credentialCreated", { name: issued.name })}</h3>
-      <p>{t("developer.secretOnce")}</p>
+      <p>{t("developer.secretCopyHint")}</p>
       <label className="field">{t("developer.secret")}
-        <input ref={focusNewInput} type="text" readOnly autoComplete="off" spellCheck={false} value={issued.secret} onFocus={event => event.currentTarget.select()} />
+        <input ref={focusNewInput} type="text" readOnly autoComplete="off" spellCheck={false} value={issuedSecrets[issued.id]} onFocus={event => event.currentTarget.select()} />
       </label>
       <div className="developerActions">
-        <CopyButton value={issued.secret} label={t("developer.copySecret")} />
+        <CopyButton value={issuedSecrets[issued.id]} label={t("developer.copySecret")} />
         <button type="button" className="primary" onClick={() => setIssued(null)}>{t("developer.done")}</button>
       </div>
     </section> : null}
@@ -267,8 +274,12 @@ export function DeveloperCredentials({ workspaceId }) {
             {item.sourceObjectRefs.length ? <p>{t("developer.fileReferences")}{" "}<code>{item.sourceObjectRefs.join(", ")}</code></p> : null}
           </details> : null}
         </div>
-        {item.revokedAt ? <span>{t("developer.revoked")}</span> : <button className="secondary" type="button" disabled={busy || creating || Boolean(issued)}
-          aria-label={t("developer.revokeNamed", { name: item.name })} onClick={() => setPendingRevoke(item)}>{t("developer.revoke")}</button>}
+        {item.revokedAt ? <span>{t("developer.revoked")}</span> : <div className="developerActions">
+          {!issued && issuedSecrets[item.id] ? <CopyButton value={issuedSecrets[item.id]} label={t("developer.copySecret")}
+            accessibleLabel={t("developer.copySecretNamed", { name: item.name })} /> : null}
+          <button className="secondary" type="button" disabled={busy || creating || Boolean(issued)}
+            aria-label={t("developer.revokeNamed", { name: item.name })} onClick={() => setPendingRevoke(item)}>{t("developer.revoke")}</button>
+        </div>}
       </li>)}</ul>}
     <ConfirmDialog open={Boolean(pendingRevoke)} title={t("developer.revokeNamed", { name: pendingRevoke?.name })}
       message={t("developer.revokeHint")} confirmLabel={t("developer.revoke")} busy={busy}

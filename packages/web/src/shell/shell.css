@@ -449,7 +449,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shFooterMark { width: 16px; height: 16px; flex: none; border-radius: 4px; }
 
 .shEmbeddedLibrary { min-height: 100%; }
-.shEmbeddedLibrary .libraryHeader { padding-top: 52px; }
+.shEmbeddedLibrary .libraryHeader { padding-top: 48px; }
 
 .shPluginPage { position: fixed; z-index: 70; inset: 0 0 0 270px; display: flex; flex-direction: column; overflow: hidden; background: var(--surface-color); }
 .shPluginHeader { display: flex; width: min(1040px, calc(100% - 64px)); align-items: flex-end; justify-content: space-between; margin: 0 auto; padding: 52px 0 18px; border-bottom: 1px solid var(--outline-variant); }
@@ -483,11 +483,13 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceChooser nav small { color: var(--process-text); font-size: 11px; }
 
 .shWorkspaceSettingsPage { width: min(var(--workspace-content-width), calc(100% - 64px)); margin: 0 auto; padding: 50px 0 80px; }
-.shWorkspaceSettingsPage.isEmbedded { width: var(--settings-page-width); padding: 58px 0 70px; }
+.shWorkspaceSettingsPage.isEmbedded { width: var(--settings-page-width); padding: var(--settings-page-top) 0 64px; }
 .shWorkspaceSettingsPage.isEmbedded .shWorkspaceSettingsTabs { display: none; }
 .shWorkspaceSettingsHeader { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding-bottom: 18px; }
 .shWorkspaceSettingsHeader > div > span { color: var(--process-text); font-size: 11px; }
 .shWorkspaceSettingsHeader h1 { margin: 5px 0 0; color: var(--on-surface); font-size: 30px; letter-spacing: -.025em; }
+.shWorkspaceSettingsPage.isEmbedded .shWorkspaceSettingsHeader { align-items: center; padding-bottom: 28px; }
+.shWorkspaceSettingsPage.isEmbedded .shWorkspaceSettingsHeader h1 { margin: 0; font-size: 22px; font-weight: 500; line-height: 1.4; letter-spacing: normal; }
 .shWorkspaceSettingsHeader p { margin: 6px 0 0; color: var(--process-text); font-size: 13px; }
 .shWorkspaceSettingsTabs { display: flex; gap: 3px; margin-bottom: 27px; border-bottom: 1px solid var(--outline-variant); }
 .shWorkspaceSettingsTabs span, .shWorkspaceSettingsTabs a { min-height: 36px; padding: 9px 11px 8px; border-bottom: 2px solid transparent; color: var(--process-text); font-size: 13px; text-decoration: none; }
@@ -496,10 +498,10 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceSettingsSection { margin-top: 30px; }
 .shWorkspaceSettingsSection:first-of-type { margin-top: 0; }
 .shWorkspaceSettingsSection > header { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 9px; }
-.shWorkspaceSettingsSection h2 { margin: 0; color: var(--on-surface); font-size: 18px; }
+.shWorkspaceSettingsSection h2 { margin: 0; color: var(--on-surface); font-size: 14px; font-weight: 550; }
 .shWorkspaceSettingsSection header p { margin: 4px 0 0; color: var(--process-text); font-size: 12px; }
-.shWorkspaceMemberList, .shWorkspaceInvitationList { border-top: 1px solid var(--outline-variant); }
-.shWorkspaceMemberRow { position: relative; display: grid; min-height: 62px; grid-template-columns: 34px minmax(0, 1fr) 116px 32px; align-items: center; gap: 12px; padding: 8px 4px; border-bottom: 1px solid var(--outline-variant); }
+.shWorkspaceMemberRow + .shWorkspaceMemberRow, .shWorkspaceInvitationRow + .shWorkspaceInvitationRow, .shWorkspaceGroupMembers > label + label { border-top: 1px solid var(--outline-variant); }
+.shWorkspaceMemberRow { position: relative; display: grid; min-height: 62px; grid-template-columns: 34px minmax(0, 1fr) 116px 32px; align-items: center; gap: 12px; padding: 8px 0; }
 .shWorkspaceMemberAvatar { display: grid; width: 32px; height: 32px; place-items: center; border-radius: 7px; background: var(--surface-variant); color: var(--on-surface); font-size: 12px; font-weight: 600; }
 .shWorkspaceMemberIdentity { display: grid; min-width: 0; gap: 2px; }
 .shWorkspaceMemberIdentity strong, .shWorkspaceMemberIdentity small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -516,7 +518,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceRowMenu button { display: block; width: 100%; min-height: 31px; border: 0; border-radius: 5px; background: transparent; color: var(--on-surface); padding: 0 8px; font-size: 12px; text-align: left; }
 .shWorkspaceRowMenu button:hover { background: var(--surface-variant); }
 .shWorkspaceRowMenu button.isDanger { color: var(--danger); }
-.shWorkspaceInvitationRow { display: grid; min-height: 62px; grid-template-columns: minmax(0, 1fr) 86px 132px auto; align-items: center; gap: 12px; padding: 8px 4px; border-bottom: 1px solid var(--outline-variant); color: var(--process-text); font-size: 12px; }
+.shWorkspaceInvitationRow { display: grid; min-height: 62px; grid-template-columns: minmax(0, 1fr) 86px 132px auto; align-items: center; gap: 12px; padding: 8px 0; color: var(--process-text); font-size: 12px; }
 .shWorkspaceInvitationRow > small { color: var(--process-text); }
 .shWorkspaceInvitationActions { display: flex; justify-content: flex-end; gap: 4px; }
 .shWorkspaceInvitationActions button { min-height: 30px; border: 0; border-radius: 6px; background: transparent; color: var(--process-text); padding: 0 7px; }
@@ -568,8 +570,8 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceGroupDetail header button:hover { background: var(--surface-variant); }
 .shWorkspaceGroupDetail header button.isDanger { display: inline-flex; align-items: center; gap: 4px; color: var(--danger); }
 .shWorkspaceGroupDetail header button svg { width: 13px; }
-.shWorkspaceGroupMembers { margin-top: 12px; border-top: 1px solid var(--outline-variant); }
-.shWorkspaceGroupMembers > label { display: grid; min-height: 56px; grid-template-columns: 18px 32px minmax(0, 1fr); align-items: center; gap: 10px; border-bottom: 1px solid var(--outline-variant); cursor: pointer; }
+.shWorkspaceGroupMembers { margin-top: 12px; }
+.shWorkspaceGroupMembers > label { display: grid; min-height: 56px; grid-template-columns: 18px 32px minmax(0, 1fr); align-items: center; gap: 10px; cursor: pointer; }
 .shWorkspaceGroupMembers > label > span:last-child { display: grid; gap: 2px; }
 .shWorkspaceGroupMembers strong { font-size: 12px; }
 .shWorkspaceGroupMembers small { color: var(--process-text); font-size: 10px; }

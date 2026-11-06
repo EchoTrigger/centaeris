@@ -32,7 +32,7 @@ async function openDeveloper(role: "owner" | "member", query = "") {
   return router;
 }
 
-test("owners can create scoped credentials, copy the one-time secret, and confirm revocation", async () => {
+test("owners can create scoped credentials, copy the secret after dismissing its notice, and confirm revocation", async () => {
   const user = userEvent.setup();
   const writeText = vi.spyOn(navigator.clipboard, "writeText");
   const secret = "credential_1.test_secret";
@@ -93,6 +93,9 @@ test("owners can create scoped credentials, copy the one-time secret, and confir
   expect(writeText).toHaveBeenCalledWith(secret);
   await user.click(screen.getByRole("button", { name: "Done" }));
   expect(screen.queryByDisplayValue(secret)).toBeNull();
+  writeText.mockClear();
+  await user.click(screen.getByRole("button", { name: "Copy secret for Document worker" }));
+  expect(writeText).toHaveBeenCalledWith(secret);
   await user.click(screen.getByText("Granted permissions"));
   expect(screen.getByText("file_1")).toBeTruthy();
   await user.click(screen.getByRole("link", { name: "Docs" }));

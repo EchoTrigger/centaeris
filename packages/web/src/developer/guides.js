@@ -2,7 +2,7 @@ export const developerGuides = {
   en: {
     quickstart: `
 1. In **Settings → Developer → Console**, enter a credential name and choose a model. Plugins and materials are optional; leave them empty for this first call.
-2. Save the secret in your backend's secret store and export it as \`CENTAERIS_RUN_KEY\`. This is the Workspace API credential, not the model provider's key. The console shows it once.
+2. Save the secret in your backend's secret store and export it as \`CENTAERIS_RUN_KEY\`. This is the Workspace API credential, not the model provider's key. You can copy it from the credential list until you leave the console.
 3. Run the complete example below in **Bash**, with curl and Python 3 installed. No repository checkout or SDK is needed. It saves the operation ID, request, endpoint, credential fingerprint, headers and response in \`./centaeris-first-call\`; the secret stays in the environment. The fingerprint lets the status example reject an accidentally changed credential before making a request.
 
 The example refuses to reuse an existing directory, so copying it again cannot accidentally start another run. Keep the directory after a timeout and use the status example below. Choose a different directory only for an intentional new call.
@@ -26,7 +26,7 @@ Set the \`Authorization: Bearer <secret>\` header on submit, status and cancel r
 
 ### Choose the scope when issuing a credential
 
-Only active Workspace owners and administrators can create, list and revoke credentials. Each credential binds to its issuer's membership, one Workspace, and one enabled model configuration. The console shows the secret only on creation.
+Only active Workspace owners and administrators can create, list and revoke credentials. Each credential binds to its issuer's membership, one Workspace, and one enabled model configuration. The API returns the secret at creation. The console can copy it again from the list while it stays open.
 
 If credential creation times out, refresh the list to reconcile whether it was created. Refreshing cannot reveal the secret. Revoke an unusable credential whose secret was lost, then create a replacement.
 
@@ -133,7 +133,7 @@ Example of a request rejected because its operation ID is invalid.
   "zh-CN": {
     quickstart: `
 1. 在 **设置 → 开发者 → 控制台** 中填写凭证名称并选择模型。插件和资料都是可选项，首次调用可以留空。
-2. 将密钥保存到后端的密钥存储，并导出环境变量 \`CENTAERIS_RUN_KEY\`。这是 Workspace API 凭证，不是模型厂商密钥。控制台只显示一次。
+2. 将密钥保存到后端的密钥存储，并导出环境变量 \`CENTAERIS_RUN_KEY\`。这是 Workspace API 凭证，不是模型厂商密钥。离开控制台前，可从凭证列表再次复制。
 3. 在已安装 curl 和 Python 3 的 **Bash** 中运行下面的完整示例，无需下载仓库或安装 SDK。示例将操作 ID、请求正文、地址、凭证指纹、响应头和响应保存到 \`./centaeris-first-call\`；密钥只从环境变量读取。查询示例会用指纹发现误换凭证，并在发出请求前停止。
 
 示例拒绝使用已存在的目录，避免重复复制整段命令时误建另一个运行。超时后保留目录，使用下方的查询示例。只有明确要发起新调用时，才换一个目录名。
@@ -157,7 +157,7 @@ Example of a request rejected because its operation ID is invalid.
 
 ### 签发时确定授权范围
 
-只有当前 Workspace 的所有者和管理员可以创建、列出和撤销凭证。每个凭证绑定签发人的成员身份、一个 Workspace 和一项已启用的模型配置。控制台只在创建时显示密钥。
+只有当前 Workspace 的所有者和管理员可以创建、列出和撤销凭证。每个凭证绑定签发人的成员身份、一个 Workspace 和一项已启用的模型配置。API 在创建时返回密钥。控制台保持打开时，可从凭证列表再次复制。
 
 创建凭证超时后，先刷新列表核对是否已创建。刷新无法再次显示密钥；如果某个凭证已经创建但密钥丢失，应撤销这条无法使用的凭证，再创建新凭证。
 

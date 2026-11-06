@@ -73,7 +73,7 @@ export function statusExample() {
   ].join("\n");
 }
 
-export function CopyButton({ value, label }) {
+export function CopyButton({ value, label, accessibleLabel }) {
   const { t } = useTranslation();
   const [status, setStatus] = useState("");
 
@@ -87,7 +87,7 @@ export function CopyButton({ value, label }) {
   }
 
   return <span className="developerCopy">
-    <button type="button" className="secondary" onClick={() => void copy()}>{label}</button>
+    <button type="button" className="secondary" aria-label={accessibleLabel} onClick={() => void copy()}>{label}</button>
     <span role="status">{status ? t(status) : ""}</span>
   </span>;
 }
@@ -97,7 +97,7 @@ export function DeveloperExample({ saveRequest = false }) {
   const endpoint = apiUrl(runPath);
   const command = saveRequest ? firstCallExample(endpoint) : minimalRequestExample(endpoint);
 
-  return <section className="developerSection" aria-labelledby="developer-example-heading">
+  return <section className="settingsPanel developerSection" aria-labelledby="developer-example-heading">
     <div className="developerSectionHead">
       <div><h2 id="developer-example-heading">{t(saveRequest ? "developer.savedRequest" : "developer.minimumRequest")}</h2>
         <p>{t(saveRequest ? "developer.savedExampleHint" : "developer.exampleHint")}</p></div>
@@ -110,7 +110,7 @@ export function DeveloperExample({ saveRequest = false }) {
 export function DeveloperStatusExample() {
   const { t } = useTranslation();
   const command = statusExample();
-  return <section className="developerSection" aria-labelledby="developer-status-heading">
+  return <section className="settingsPanel developerSection" aria-labelledby="developer-status-heading">
     <div className="developerSectionHead">
       <div><h2 id="developer-status-heading">{t("developer.checkOriginalOperation")}</h2>
         <p>{t("developer.statusExampleHint")}</p></div>

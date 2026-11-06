@@ -265,7 +265,7 @@ export default function PluginSettings({ workspace, isSuperuser, filter = "", ca
       {plugins?.length === 0 && !error && !catalog?.selectedName ? <div className="capabilitySettingsEmpty">{t("pluginSettings.thisDistributionHasNoPlugins")}</div> : null}
       {plugins && catalog?.selectedName && !selected ? <div className="capabilitySettingsEmpty" role="status">{t("extensions.pluginNotFound")}</div> : null}
       {plugins?.length > 0 && visiblePlugins.length === 0 && !catalog?.selectedName ? <div className="capabilitySettingsEmpty" role="status">{t("extensions.noMatches")}</div> : null}
-      <div className="pluginSettingsRows" ref={pluginRowsRef} role="list" aria-label={t("pluginSettings.availablePlugins")}>
+      <div className={catalog && !catalog.selectedName && visiblePlugins?.length ? "settingsPanel settingsListPanel pluginSettingsRows" : "pluginSettingsRows"} ref={pluginRowsRef} role="list" aria-label={t("pluginSettings.availablePlugins")}>
         {(visiblePlugins || []).map((plugin) => {
           const expanded = Boolean(catalog?.selectedName) || expandedPluginNames.includes(plugin.name);
           const detailId = `plugin-detail-${plugin.name}`;
@@ -301,7 +301,7 @@ export default function PluginSettings({ workspace, isSuperuser, filter = "", ca
                 {plugin.errors.length ? <p className="capabilitySettingsError" role="alert">{pluginErrors(plugin)}{" "}{t("pluginSettings.otherPluginsAreUnaffectedYouCanStillDisableThis")}</p> : null}
                 {canManage && plugin.scope === "workspace" && plugin.writable !== false ? <div className="pluginSettingsActions"><button className="pluginEnableButton is-danger" type="button" disabled={Boolean(busyPlugin)} onClick={() => setRemovePlugin(plugin)}>{t("globalPluginSettings.remove")}</button></div> : null}
 
-                <section className="pluginSettingsSection" aria-labelledby={`${detailId}-general-heading`}>
+                <section className="settingsPanel pluginSettingsSection" aria-labelledby={`${detailId}-general-heading`}>
                   <h3 id={`${detailId}-general-heading`}>{t("pluginSettings.general")}</h3>
                   {!catalog && plugin.scope === "platform" ? <p className="pluginSettingsMuted">{t("workspaceResources.sharedReadOnly")}</p> : null}
                   <div className="pluginSettingsProperty">
@@ -310,7 +310,7 @@ export default function PluginSettings({ workspace, isSuperuser, filter = "", ca
                   </div>
                 </section>
 
-                <section className="pluginSettingsSection" aria-labelledby={`${detailId}-connections-heading`}>
+                <section className="settingsPanel pluginSettingsSection" aria-labelledby={`${detailId}-connections-heading`}>
                   <h3 id={`${detailId}-connections-heading`}>{t("pluginSettings.connection")}</h3>
                   {plugin.mcpServers === null ? <p className="pluginSettingsMuted">{t("pluginSettings.mcpConnectionDetailsHaveNotBeenValidatedAConnection")}</p> : plugin.mcpServers.length ? <div className="pluginConnectionRows">{plugin.mcpServers.map((server) => <div className="pluginConnectionRow" key={server.id}>
                     <span><strong>{server.id}</strong><small>{server.transport.type === "streamableHttp" ? t("pluginSettings.networkService") : t("pluginSettings.localService")}</small></span>

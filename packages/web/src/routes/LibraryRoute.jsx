@@ -488,8 +488,8 @@ function LibraryPageContent({ embedded = false } = {}) {
           {libraryView === "materials" ? <>
             {error && !dialog ? <p className="libraryOperationResult error" role="alert">{error} <button className="pluginEnableButton" type="button" disabled={working} onClick={() => operations.pending() ? void openPendingChat() : void loadLibrary()}>{t("libraryObjectRoute.retry")}</button></p> : null}
             {folderPath.length > 0 && <nav className="libraryBreadcrumb" aria-label={t("libraryRoute.currentFolder")}><button type="button" onClick={() => navigate(`${base}/library`)}>{t("libraryObjectRoute.library")}</button>{folderPath.map((folder) => <span key={folder.id}><ChevronRight aria-hidden="true" /><button type="button" onClick={() => navigate(libraryUrl(folder.id))}>{folder.displayName}</button></span>)}</nav>}
-            {loadError ? <div className="libraryEmptyState" role="alert">{t("libraryRoute.unableToLoadLibrary")}<button className="pluginEnableButton" type="button" onClick={() => void loadLibrary()}>{t("libraryObjectRoute.retry")}</button></div> : <>
-            <div className={`libraryList ${selectedItems.length ? "hasSelection" : ""}`} role="table" aria-label={t("libraryRoute.personalLibraryFiles")}>
+            {loadError ? <div className="settingsPanel libraryEmptyState" role="alert">{t("libraryRoute.unableToLoadLibrary")}<button className="pluginEnableButton" type="button" onClick={() => void loadLibrary()}>{t("libraryObjectRoute.retry")}</button></div> : <>
+            <div className={`settingsPanel settingsListPanel libraryList ${selectedItems.length ? "hasSelection" : ""}`} role="table" aria-label={t("libraryRoute.personalLibraryFiles")}>
               <div className="libraryListHeader" role="row">
                 <button className="librarySelect librarySelectAll" type="button" role="checkbox" aria-checked={allVisibleSelected} aria-label={allVisibleSelected ? t("libraryRoute.deselectAll") : t("libraryRoute.selectAllListedItems")} onClick={toggleAllVisible}>{allVisibleSelected ? <Minus aria-hidden="true" /> : null}</button>
                 <span role="columnheader">{t("libraryRoute.name")}</span><span role="columnheader">{t("libraryRoute.modified")}</span><span role="columnheader">{t("libraryRoute.size")}</span>
@@ -507,7 +507,7 @@ function LibraryPageContent({ embedded = false } = {}) {
               })}
             </div>
             </>}
-          </> : <div className="libraryCatalogEmpty"><BookOpen aria-hidden="true" /><strong>{t("libraryRoute.noKnowledgeBasesYet")}</strong><span>{t("libraryRoute.connectedSourcesWillAppearHere")}</span></div>}
+          </> : <div className="settingsPanel libraryCatalogEmpty"><BookOpen aria-hidden="true" /><strong>{t("libraryRoute.noKnowledgeBasesYet")}</strong><span>{t("libraryRoute.connectedSourcesWillAppearHere")}</span></div>}
         </div>
         </section>
       </div>

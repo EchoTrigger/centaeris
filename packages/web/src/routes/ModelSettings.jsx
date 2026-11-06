@@ -435,21 +435,23 @@ export default function ModelSettings({ workspace, onModelsChanged }) {
           <div className="managementToolbar workspaceModelsListToolbar"><button type="button" className="workspaceModelsAddProvider" disabled={Boolean(busyAction)} onClick={openPicker}><Plus aria-hidden="true" />{t("interface.addProvider")}</button></div>
           {busyAction === "load" ? <p role="status">{t("agentChat.loading")}</p> : null}
           {error ? <div className="workspaceModelsEmpty" role="alert">{error}</div> : null}
-          {allProviders.map(provider => {
+          {allProviders.length ? <div className="settingsPanel settingsListPanel managementProviderList">{allProviders.map(provider => {
             const name = providerForms[provider.id]?.displayName || provider.displayName;
-            return <button type="button" className="managementRow managementRowButton" aria-label={name} key={provider.id} onClick={() => showProvider(provider.id)}>
-              <span className="managementRowIcon"><ProviderLogo svg={templates.find(template => template.id === provider.templateId)?.logoSvg} name={name} /></span>
-              <span className="managementRowCopy"><strong>{name}</strong><small>{provider.apiBase || provider.api}</small></span>
-              <span className="managementRowEnd">{t(provider.credentialVersion ? "modelSettings.configured" : "modelSettings.notConfiguredYet")}<ChevronRight aria-hidden="true" /></span>
-            </button>;
-          })}
-          {!allProviders.length && !busyAction && !error ? <div className="workspaceModelsEmpty"><strong>{t("interface.noProviders")}</strong><span>{t("interface.addAProviderOrCustomHttpsEndpoint")}</span></div> : null}
+            return <div key={provider.id}>
+              <button type="button" className="managementRow managementRowButton" aria-label={name} onClick={() => showProvider(provider.id)}>
+                <span className="managementRowIcon"><ProviderLogo svg={templates.find(template => template.id === provider.templateId)?.logoSvg} name={name} /></span>
+                <span className="managementRowCopy"><strong>{name}</strong><small>{provider.apiBase || provider.api}</small></span>
+                <span className="managementRowEnd">{t(provider.credentialVersion ? "modelSettings.configured" : "modelSettings.notConfiguredYet")}<ChevronRight aria-hidden="true" /></span>
+              </button>
+            </div>;
+          })}</div> : null}
+          {!allProviders.length && !busyAction && !error ? <div className="settingsPanel workspaceModelsEmpty"><strong>{t("interface.noProviders")}</strong><span>{t("interface.addAProviderOrCustomHttpsEndpoint")}</span></div> : null}
         </> : <header className="managementDetailHeading">
           <button type="button" className="managementBack" onClick={back} disabled={Boolean(busyAction)} aria-label={t(selection.kind === "model" ? "interface.backToModels" : "interface.modelProviders")}><ArrowLeft aria-hidden="true" /></button>
           <h2>{selection.kind === "model" ? selectedModelForm?.displayName || selectedModelForm?.modelName || t("interface.newModel") : selectedProviderForm?.displayName || selectedProvider?.displayName}</h2>
         </header>}
 
-        {selection.kind === "provider" && selectedProvider && selectedProviderForm ? !writable(selectedProvider) ? <p role="alert">{t("workspaceResources.sharedReadOnly")}</p> : selectedProvider.templateId ? <section className="workspaceModelsSection workspaceModelsPreset">
+        {selection.kind === "provider" && selectedProvider && selectedProviderForm ? !writable(selectedProvider) ? <p role="alert">{t("workspaceResources.sharedReadOnly")}</p> : selectedProvider.templateId ? <section className="settingsPanel workspaceModelsPreset">
           <div className="workspaceModelsSectionHeader"><span>{t("interface.apiKey")}</span><small className={selectedProvider.credentialVersion ? "is-configured" : ""}><i aria-hidden="true" />{selectedProvider.credentialVersion ? t("modelSettings.configured") : t("modelSettings.notConfiguredYet")}</small></div>
           <div className="workspaceModelsField">
             <div className="workspaceModelsKeyLine"><div className="workspaceModelsKeyInput"><KeyRound aria-hidden="true" /><input id={providerKeyInputId} name="providerApiKey" aria-label={t("interface.apiKey")} type="password" autoComplete="new-password" spellCheck={false} value={selectedProviderForm.secret} onChange={(event) => updateProviderForm(selectedProvider.id, { secret: event.target.value })} placeholder={selectedProvider.credentialVersion ? t("modelSettings.enterANewKeyToReplaceIt") : t("modelSettings.enterApiKey")} /></div><button type="button" className="workspaceModelsInlineSave" disabled={Boolean(busyAction) || !selectedProviderForm.secret.trim()} onClick={() => void saveProvider()}>{busyAction === "save-provider" ? t("modelSettings.saving") : t("modelSettings.save")}</button></div>
@@ -457,7 +459,7 @@ export default function ModelSettings({ workspace, onModelsChanged }) {
           {!confirmAction && error ? <small className="error" role="alert">{error}</small> : null}
           {message ? <small role="status">{message}</small> : null}
           {selectedProvider.credentialVersion ? <button type="button" className="workspaceModelsDanger workspaceModelsDisconnect" onClick={() => { setError(""); setConfirmAction("provider"); }} disabled={Boolean(busyAction)}>{t("modelSettings.disconnect")}</button> : null}
-        </section> : <section className="workspaceModelsSection">
+        </section> : <section className="settingsPanel">
           <div className="workspaceModelsSectionHeader"><span>{t("interface.customProvider")}</span><button type="button" className="workspaceModelsDanger" onClick={() => { setError(""); setConfirmAction("provider"); }} disabled={Boolean(busyAction)}>{t("globalPluginSettings.remove")}</button></div>
           <label className="workspaceModelsField"><span>{t("modelSettings.providerName")}</span><input value={selectedProviderForm.nameInput} onChange={(event) => updateProviderForm(selectedProvider.id, { nameInput: event.target.value })} /></label>
           <button type="button" className="workspaceModelsRename" disabled={Boolean(busyAction)} onClick={() => void renameProvider()}>{busyAction === "rename" ? t("modelSettings.saving") : t("appRoute.rename")}</button>
@@ -469,7 +471,7 @@ export default function ModelSettings({ workspace, onModelsChanged }) {
           </section>
         </section> : null}
 
-        {selection.kind === "provider" && selectedProvider ? <section className="managementModelList" aria-label={t("appRoute.models")}>
+        {selection.kind === "provider" && selectedProvider ? <section className="settingsPanel managementModelList" aria-label={t("appRoute.models")}>
           <div className="managementToolbar"><h3>{t("appRoute.models")} <small>{providerModels.length}</small></h3>
             {writable(selectedProvider) && !selectedProvider.templateId ? <button type="button" className="workspaceModelsAddProvider" disabled={Boolean(busyAction) || selectedProvider.isDraft} onClick={() => addModel(selectedProvider.id)}><Plus aria-hidden="true" />{t("models.addModel")}</button> : null}
           </div>
@@ -491,7 +493,7 @@ export default function ModelSettings({ workspace, onModelsChanged }) {
           {!visibleModels.length ? <p className="managementEmpty">{t(providerModels.length ? "models.noSearchMatches" : "modelSettings.noModels")}</p> : null}
         </section> : null}
 
-        {selection.kind === "model" && selectedModel && selectedModelForm ? <fieldset disabled={!writable(selectedModel)} className="workspaceModelsSection">
+        {selection.kind === "model" && selectedModel && selectedModelForm ? <fieldset disabled={!writable(selectedModel)} className="settingsPanel workspaceModelsForm">
           {!writable(selectedModel) ? <p>{t("workspaceResources.sharedReadOnly")}</p> : null}
           <div className="workspaceModelsSectionHeader"><span>{t("interface.model")}</span><span><button type="button" className="workspaceModelsTest" disabled={selectedModel.isDraft || Boolean(busyAction)} onClick={() => void testModel()}>{busyAction === "test-model" ? t("interface.testing") : t("interface.test")}</button><button type="button" className="workspaceModelsDanger" disabled={Boolean(busyAction)} onClick={() => { setError(""); setConfirmAction("model"); }}>{t("interface.remove")}</button></span></div>
           {selectedTest ? <div className={selectedTest.ok ? "workspaceModelsTestResult is-ok" : "workspaceModelsTestResult is-error"}>{testSummary(selectedTest, t)}</div> : null}

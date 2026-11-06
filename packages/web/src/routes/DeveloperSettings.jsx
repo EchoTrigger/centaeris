@@ -34,14 +34,14 @@ export function DeveloperSettings({ workspaceId, canManage, topic, lastTopic, na
         <h1>{t("developer.oneShotApi")}</h1>
         <p>{t("developer.consoleDescription")}</p>
       </header>
-      <section className="developerSection" aria-labelledby="developer-api-heading">
+      <section className="settingsPanel developerSection" aria-labelledby="developer-api-heading">
         <div className="developerSectionHead">
           <h2 id="developer-api-heading">{t("developer.apiAddress")}</h2>
           <CopyButton value={endpoint} label={t("developer.copyAddress")} />
         </div>
         <div className="developerEndpoint"><code className="developerMethod">POST</code><code>{endpoint}</code></div>
       </section>
-      {canManage ? <DeveloperCredentials workspaceId={workspaceId} /> : <section className="developerSection">
+      {canManage ? <DeveloperCredentials workspaceId={workspaceId} /> : <section className="settingsPanel developerSection">
         <h2>{t("developer.credentials")}</h2>
         <p>{t("developer.memberCredentialsHint")}</p>
       </section>}

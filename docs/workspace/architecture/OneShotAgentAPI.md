@@ -33,7 +33,7 @@ environment does not require temporary, unrecoverable business results.
 
 | Stage | Required behavior |
 | --- | --- |
-| Create a credential | Ask for a name and available Workspace model. Plugins and materials default to empty scopes. Show the new secret once and explain where the caller must save it. |
+| Create a credential | Ask for a name and available Workspace model. Plugins and materials default to empty scopes. Display the new secret at creation and let the caller copy it from the list until leaving the console. |
 | Submit a task | Provide one runnable backend example. Save endpoint, credential reference/fingerprint, operation ID, and exact request body before sending. Require no optional material or plugin setup. |
 | Receive results | Save the receipt and Run ID immediately. Persist text as received; publish files only after integrity checks. Confirm both Run and delivery outcomes. |
 | Handle uncertainty | Query the original operation using the same credential. If deliberately resubmitting, preserve the original ID and body. Never manufacture a new identity merely because a response was lost. |

@@ -105,14 +105,12 @@ function AccountSecurity() {
     }
   }
 
-  return <div className="accountSecuritySettings">
-    <header>
-      <h1>{t("settingsRoute.security")}</h1>
-    </header>
-    <form className="accountSecurityForm" onSubmit={submit}>
-      <label>{t("settingsRoute.currentPassword")}<input autoComplete="current-password" type="password" value={currentPassword} onChange={update(setCurrentPassword)} required /></label>
-      <label>{t("passwordResetRoute.newPassword")}<input autoComplete="new-password" type="password" minLength={15} value={newPassword} onChange={update(setNewPassword)} required /><small>{t("settingsRoute.atLeast15Characters")}</small></label>
-      <label>{t("settingsRoute.confirmNewPassword")}<input autoComplete="new-password" type="password" minLength={15} value={confirmation} onChange={update(setConfirmation)} required /></label>
+  return <div className="preferenceSettings">
+    <header className="settingsPageHeading"><h1>{t("settingsRoute.security")}</h1></header>
+    <form className="settingsPanel accountSecurityForm" onSubmit={submit}>
+      <label className="settingsFormRow"><span>{t("settingsRoute.currentPassword")}</span><input autoComplete="current-password" type="password" value={currentPassword} onChange={update(setCurrentPassword)} required /></label>
+      <label className="settingsFormRow"><span>{t("passwordResetRoute.newPassword")}<small id="new-password-hint">{t("settingsRoute.atLeast15Characters")}</small></span><input aria-label={t("passwordResetRoute.newPassword")} aria-describedby="new-password-hint" autoComplete="new-password" type="password" minLength={15} value={newPassword} onChange={update(setNewPassword)} required /></label>
+      <label className="settingsFormRow"><span>{t("settingsRoute.confirmNewPassword")}</span><input autoComplete="new-password" type="password" minLength={15} value={confirmation} onChange={update(setConfirmation)} required /></label>
       {error ? <p className="accountSecurityError" role="alert">{error}</p> : null}
       {notice ? <p className="accountSecurityNotice" role="status">{notice}</p> : null}
       <div className="accountSecurityActions"><button type="submit" disabled={busy || !currentPassword || !newPassword || !confirmation}>{busy ? t("passwordResetRoute.updating") : t("passwordResetRoute.updatePassword")}</button></div>

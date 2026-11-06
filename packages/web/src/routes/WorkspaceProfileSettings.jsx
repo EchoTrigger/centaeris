@@ -70,22 +70,19 @@ export default function WorkspaceProfileSettings({ workspace, onClose }) {
     }
   }
 
-  return <div className="accountSecuritySettings">
-    <header><h1>{t("workspaceProfile.title")}</h1></header>
-    <form className="accountSecurityForm workspaceProfileForm" onSubmit={submit}>
-      <div className="workspaceProfileAvatarRow">
-        <WorkspaceAvatar workspace={{ name, avatarUrl }} className="shWsAvatar workspaceProfileAvatar" />
-        <div>
-          <strong>{t("workspaceProfile.avatar")}</strong>
-          <small>{t("workspaceProfile.avatarHint")}</small>
-          <div className="workspaceProfileAvatarActions">
-            <button type="button" disabled={busy || reading} onClick={() => inputRef.current?.click()}>{t("workspaceProfile.upload")}</button>
-            {avatarUrl ? <button type="button" disabled={busy || reading} onClick={() => { setAvatarDataUrl(null); setError(""); setNotice(""); }}>{t("workspaceProfile.remove")}</button> : null}
-          </div>
+  return <div className="preferenceSettings">
+    <header className="settingsPageHeading"><h1>{t("workspaceProfile.title")}</h1></header>
+    <form className="settingsPanel accountSecurityForm" onSubmit={submit}>
+      <div className="settingsFormRow">
+        <span>{t("workspaceProfile.avatar")}<small>{t("workspaceProfile.avatarHint")}</small></span>
+        <div className="workspaceProfileAvatarActions">
+          <WorkspaceAvatar workspace={{ name, avatarUrl }} className="shWsAvatar workspaceProfileAvatar" />
+          <button className="secondary" type="button" disabled={busy || reading} onClick={() => inputRef.current?.click()}>{t("workspaceProfile.upload")}</button>
+          {avatarUrl ? <button className="secondary" type="button" disabled={busy || reading} onClick={() => { setAvatarDataUrl(null); setError(""); setNotice(""); }}>{t("workspaceProfile.remove")}</button> : null}
         </div>
       </div>
+      <label className="settingsFormRow"><span>{t("workspaceProfile.name")}</span><input value={name} onChange={event => { setName(event.target.value); setError(""); setNotice(""); }} maxLength={160} required disabled={busy} /></label>
       <input hidden ref={inputRef} type="file" aria-label={t("workspaceProfile.upload")} accept="image/png,image/jpeg,image/webp" disabled={busy || reading} onChange={selectAvatar} />
-      <label>{t("workspaceProfile.name")}<input value={name} onChange={event => { setName(event.target.value); setError(""); setNotice(""); }} maxLength={160} required disabled={busy} /></label>
       {error ? <p className="accountSecurityError" role="alert">{error}</p> : null}
       {notice ? <p className="accountSecurityNotice" role="status">{notice}</p> : null}
       <div className="accountSecurityActions workspaceProfileActions">

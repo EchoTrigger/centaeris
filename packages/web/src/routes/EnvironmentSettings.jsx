@@ -45,15 +45,15 @@ export default function EnvironmentSettings({ workspace }) {
   }
 
   return <div className="preferenceSettings">
-    <section>
-      <h1>{t("environmentSettings.title")}</h1>
+    <header className="settingsPageHeading"><h1>{t("environmentSettings.title")}</h1></header>
+    <section className="settingsPanel environmentSettings">
       <label className="preferenceRow">
         <span><strong>{t("environmentSettings.internet")}</strong><small>{t("environmentSettings.newEnvironmentsOnly")}</small></span>
         <input type="checkbox" role="switch" aria-label={t("environmentSettings.internet")} checked={network === "publicInternet"} disabled={busy || network === null} onChange={update} />
       </label>
       {busy && network === null ? <p role="status">{t("environmentSettings.loading")}</p> : null}
       {error ? <p role="alert">{t(`environmentSettings.${error}`)}</p> : null}
-      {error === "loadError" ? <button type="button" onClick={load} disabled={busy}>{t("environmentSettings.retry")}</button> : null}
+      {error === "loadError" ? <button className="secondary" type="button" onClick={load} disabled={busy}>{t("environmentSettings.retry")}</button> : null}
       {saved ? <p role="status">{t("environmentSettings.saved")}</p> : null}
     </section>
   </div>;

@@ -96,7 +96,7 @@ function ArchivedSessions({ workspace, returnTo }) {
     {sessions === null ? error
       ? <div className="settingsPanel" role="alert">{error} <button className="pluginEnableButton" type="button" onClick={() => { setError(""); setAttempt(value => value + 1); }}>{t("agentChat.retry")}</button></div>
       : <p role="status">{t("agentChat.loading")}</p>
-      : sessions.length ? <ul className="settingsArchiveList">
+      : sessions.length ? <ul className="settingsPanel settingsListPanel settingsArchiveList">
         {sessions.map(session => <li className="settingsArchiveRow" key={session.id}>
           <span className="managementRowCopy"><strong>{session.title}</strong>{restoreErrorId === session.id ? <small className="error" role="alert">{t("archive.restoreFailed")}</small> : null}</span>
           <button type="button" className="settingsArchiveDelete" disabled={Boolean(busy)} aria-label={t("archive.deleteTitle", { title: session.title })}
