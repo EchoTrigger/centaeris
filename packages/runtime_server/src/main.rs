@@ -98,8 +98,8 @@ use centaeris_core::runtime::{
     persist_subagent_result_projection_from_scheduler_events, AgentRunInitialInput,
     AgentRunRequest, AgentRunResult, AgentRunStop, AgentRuntime, AgentRuntimeConfig,
     AgentRuntimeSubagentRunnerConfig, DurableTurnControlBinding, ModelClientSubagentRunner,
-    QueryLifecycleSubagentObserver, ToolConcurrencyCoordinator, ToolSafePoint,
-    ToolSafePointCommitPort, TurnStepResult, TurnUpdate,
+    ModelRequestPurposeV1, QueryLifecycleSubagentObserver, ToolConcurrencyCoordinator,
+    ToolSafePoint, ToolSafePointCommitPort, TurnStepResult, TurnUpdate,
 };
 use centaeris_core::session::manager::SessionManager;
 use centaeris_core::session::reliability::{
@@ -1101,6 +1101,7 @@ fn persist_hosted_subagent_tool_safe_point(
             }
         }
         ToolSafePoint::ModelRequestStarted(_)
+        | ToolSafePoint::ModelOutputReady
         | ToolSafePoint::ReasoningCompleted { .. }
         | ToolSafePoint::ProviderUsage { .. }
         | ToolSafePoint::CompletedTurn(_) => return Ok(()),
@@ -1965,6 +1966,29 @@ fn execute_agent_run(
             return Err("agent_run_lifecycle_lease_lost".to_string());
         }
         _ => {}
+    }
+    if has_execution_fact
+        && agent_run_start
+            .environment_authorization
+            .payload
+            .execution_mode
+            == "perRun"
+        && agent_run_start.authorization.execution_policy.is_none()
+        && sequence_guard(&session_record_sequence)?.has_model_request_without_recovery_checkpoint()
+    {
+        // The previous owner may already have sent the request. There is no
+        // checkpoint from which to resume it or evidence authorizing a replay.
+        return commit_failed_agent_run(
+            &runtime,
+            &session_log,
+            &agent_run_start,
+            &mut *sequence_guard(&session_record_sequence)?,
+            &mut *session_stream_guard(&session_stream)?,
+            "kind=provider_response_interrupted: first model request has no recovery checkpoint",
+            "provider_response_interrupted",
+            &AssistantTextProjection::default(),
+            &terminal_lease_fence,
+        );
     }
     let recovery_schedule = execution_recovery_schedule::ExecutionRecoverySchedule::from_env()?;
     if let Some((_, checkpoint)) = recovery_checkpoint.as_ref() {
@@ -3080,7 +3104,20 @@ fn execute_agent_run(
         .as_ref()
         .map_or(0, |checkpoint| checkpoint.session_sequence);
     let pending_recovery_upload = Mutex::new(None::<PendingRecoveryCheckpoint>);
+    let recovery_observation_context = Arc::new(
+        serde_json::to_vec(&serde_json::json!({
+            "jobId": workspace_lease.job_id,
+            "agentRunStart": {"agentRunId": agent_run_start.agent_run_id},
+        }))
+        .map_err(|error| error.to_string())?,
+    );
+    let mut first_model_request =
+        !has_started_fact && agent_run_start.authorization.execution_policy.is_none();
+    let mut first_checkpoint_pending = false;
     let mut commit_tool_safe_point = |safe_point: ToolSafePoint| {
+        if matches!(&safe_point, ToolSafePoint::ModelOutputReady) && !first_checkpoint_pending {
+            return Ok(());
+        }
         let safe_point_started = Instant::now();
         let observed_call = match &safe_point {
             ToolSafePoint::ModelRequestStarted(started) => {
@@ -3103,6 +3140,7 @@ fn execute_agent_run(
         };
         let stage = match &safe_point {
             ToolSafePoint::ModelRequestStarted(_) => "model_request_safe_point",
+            ToolSafePoint::ModelOutputReady => "model_output_ready_safe_point",
             ToolSafePoint::DurableToolCall { .. } => "tool_call_safe_point",
             ToolSafePoint::DurableReceipt { .. } => "tool_receipt_safe_point",
             ToolSafePoint::CompletedTurn(_) => "completed_turn_safe_point",
@@ -3155,6 +3193,7 @@ fn execute_agent_run(
                 ToolSafePoint::DurableToolCall { .. }
                     | ToolSafePoint::CompletedTurn(_)
                     | ToolSafePoint::ModelRequestStarted(_)
+                    | ToolSafePoint::ModelOutputReady
             );
             let completed_upload = if wait_for_upload {
                 observations::timed("recoveryUploadFence", || {
@@ -3178,11 +3217,20 @@ fn execute_agent_run(
                     .take()
                     .expect("completed upload binding");
                 let uploaded = upload_result?;
+                if first_checkpoint_pending {
+                    if let Some(reason) =
+                        fresh_execution_control_reason(&cancellation_probe_cache, || {
+                            cancellation_probe.as_ref()()
+                        })?
+                    {
+                        return Err(reason);
+                    }
+                }
                 let current_generation = observed_workspace_generation(docker_execution.as_ref());
                 let generation_stable = uploaded.generation.token().is_none()
                     || workspace_generations_match(&uploaded.generation, &current_generation);
                 if generation_stable
-                    && docker_execution.accept_captured_recovery_workspace(pending.evidence)?
+                    && docker_execution.accept_captured_recovery_workspace(uploaded.evidence)?
                 {
                     let (checkpoint, checkpoint_sequence) = uploaded_recovery_checkpoint(
                         &pending,
@@ -3217,11 +3265,19 @@ fn execute_agent_run(
                     recovery_workspace_generation = uploaded.generation;
                     previous_checkpoint_sequence = checkpoint_sequence;
                     recovery_suffix = execution_recovery_policy::RecoverySuffix::default();
+                    first_checkpoint_pending = false;
+                } else if first_checkpoint_pending {
+                    return Err("initial recovery checkpoint lost its workspace witness".into());
                 }
+            }
+            if matches!(&safe_point, ToolSafePoint::ModelOutputReady) {
+                return Ok(());
             }
             let mut recovery_checkpoint = None;
             let mut ending_lost_execution = false;
+            let mut initial_checkpoint = None;
             let events = match safe_point {
+                ToolSafePoint::ModelOutputReady => unreachable!("model output gate handled above"),
                 ToolSafePoint::ReasoningCompleted {
                     session_id,
                     turn_id,
@@ -3238,6 +3294,8 @@ fn execute_agent_run(
                         .collect()
                 }
                 ToolSafePoint::ModelRequestStarted(started) => 'checkpoint: {
+                    let parallel_capture = std::mem::take(&mut first_model_request)
+                        && started.purpose() == ModelRequestPurposeV1::Main;
                     let mut events =
                         committed_sequence.record_model_request_started(&started, now)?;
                     if !committed_sequence.open_tool_call_ids().is_empty() {
@@ -3275,6 +3333,14 @@ fn execute_agent_run(
                     // `executed: false`, and model output are never sufficient proof.
                     let pre_dispatch_loss = docker_execution.recovery_failure_evidence()
                     == execution_recovery_policy::HostFailureEvidence::PreDispatchProcessNotStarted;
+                    if parallel_capture && !pre_dispatch_loss {
+                        initial_checkpoint = Some((
+                            checkpoint_id,
+                            model_request_id.to_string(),
+                            turn_id.to_string(),
+                        ));
+                        break 'checkpoint events;
+                    }
                     if pre_dispatch_loss {
                         if committed_sequence
                             .recovery_attempt()
@@ -3334,7 +3400,7 @@ fn execute_agent_run(
                                 &recovery_workspace_generation,
                                 &current_generation,
                             ));
-                    let workspace_snapshot = if should_collect {
+                    if should_collect {
                         let Some(prepared) = observations::execution_boundary(
                             "recoveryWorkspacePrepare",
                             &agent_run_start.agent_run_id,
@@ -3352,50 +3418,25 @@ fn execute_agent_run(
                             // checkpoint nor reset the tool suffix used by recovery policy.
                             break 'checkpoint events;
                         };
-                        let evidence = prepared.evidence();
                         let upload_host = docker_execution.clone();
-                        let upload_context = serde_json::to_vec(&serde_json::json!({
-                            "jobId": workspace_lease.job_id,
-                            "agentRunStart": {"agentRunId": agent_run_start.agent_run_id},
-                        }))
-                        .map_err(|error| error.to_string())?;
+                        let upload_context = recovery_observation_context.clone();
                         *pending_recovery_upload = Some(PendingRecoveryCheckpoint {
                             checkpoint_id,
                             model_request_id: model_request_id.to_string(),
                             turn_id: turn_id.to_string(),
-                            evidence,
                             upload: recovery_upload::PendingRecoveryUpload::start(move || {
                                 let _context = observations::Context::enter(&upload_context);
-                                // The bytes are already frozen. Check their generation
-                                // while the model can run, then fence tool dispatch as usual.
-                                let generation_started = Instant::now();
-                                let after_collect =
-                                    observed_workspace_generation(upload_host.as_ref());
-                                observations::timing(
-                                    "recoveryPostCaptureGeneration",
-                                    generation_started,
-                                    "ok",
-                                );
-                                let generation =
-                                    stable_workspace_generation(&current_generation, after_collect);
-                                let snapshot = upload_host.upload_recovery_workspace(prepared)?;
-                                Ok(UploadedRecoveryWorkspace {
-                                    snapshot,
-                                    generation,
-                                })
+                                upload_recovery_workspace(
+                                    &upload_host,
+                                    prepared,
+                                    &current_generation,
+                                )
                             }),
                         });
                         break 'checkpoint events;
-                    } else {
-                        recovery_workspace_snapshot.clone()
-                    };
-                    let checkpoint_generation = if should_collect {
-                        let after_collect =
-                            observed_workspace_generation(docker_execution.as_ref());
-                        stable_workspace_generation(&current_generation, after_collect)
-                    } else {
-                        current_generation
-                    };
+                    }
+                    let workspace_snapshot = recovery_workspace_snapshot.clone();
+                    let checkpoint_generation = current_generation;
                     let session_sequence = committed_sequence
                         .committed_session_sequence()
                         .checked_add(events.len() as u64)
@@ -3565,6 +3606,40 @@ fn execute_agent_run(
                     Ok::<_, String>(())
                 },
             )?;
+            if let Some((checkpoint_id, model_request_id, turn_id)) = initial_checkpoint {
+                // The request fact is durable. Capture can now overlap the model
+                // call while the output and tool safe points fence workspace use.
+                let host = docker_execution.clone();
+                let baseline = recovery_workspace_snapshot.clone();
+                let capture_lease = workspace_lease.clone();
+                let capture_id = checkpoint_id.clone();
+                let run_id = agent_run_start.agent_run_id.clone();
+                let context = recovery_observation_context.clone();
+                first_checkpoint_pending = true;
+                *pending_recovery_upload = Some(PendingRecoveryCheckpoint {
+                    checkpoint_id,
+                    model_request_id,
+                    turn_id,
+                    upload: recovery_upload::PendingRecoveryUpload::start(move || {
+                        let _context = observations::Context::enter(&context);
+                        let generation = observed_workspace_generation(host.as_ref());
+                        let prepared = observations::execution_boundary(
+                            "recoveryWorkspacePrepare",
+                            &run_id,
+                            || {
+                                host.prepare_recovery_workspace(
+                                    &capture_lease,
+                                    &capture_id,
+                                    &baseline,
+                                    workspace_input_upper_bound_bytes,
+                                )
+                            },
+                        )?
+                        .ok_or("initial recovery checkpoint could not seal the workspace")?;
+                        upload_recovery_workspace(&host, prepared, &generation)
+                    }),
+                });
+            }
             // Capture publication is downstream of the durable Core event and
             // must never change its successful tool outcome or trigger replay.
             if let Ok(mut capture) = observations::execution_boundary(
@@ -3874,7 +3949,7 @@ fn execute_agent_run(
             .await
     });
     // Failed/cancelled model requests may never reach CompletedTurn. Drain their
-    // immutable upload before any final workspace save or execution teardown.
+    // workspace preparation before any final workspace save or execution teardown.
     if let Some(mut pending) = pending_recovery_upload
         .lock()
         .map_err(|_| "pending recovery upload lock poisoned")?
@@ -6158,13 +6233,31 @@ struct PendingRecoveryCheckpoint {
     checkpoint_id: String,
     model_request_id: String,
     turn_id: String,
-    evidence: execution_recovery_policy::WorkspaceReuseEvidence,
     upload: recovery_upload::PendingRecoveryUpload<UploadedRecoveryWorkspace>,
 }
 
 struct UploadedRecoveryWorkspace {
     snapshot: RecoveryWorkspaceSnapshotV1,
     generation: ExecutionWorkspaceGeneration,
+    evidence: execution_recovery_policy::WorkspaceReuseEvidence,
+}
+
+fn upload_recovery_workspace(
+    host: &DockerExecutionHostRunner,
+    prepared: docker_execution_host::PreparedRecoveryWorkspace,
+    before_collect: &ExecutionWorkspaceGeneration,
+) -> Result<UploadedRecoveryWorkspace, String> {
+    let evidence = prepared.evidence();
+    let generation_started = Instant::now();
+    let after_collect = observed_workspace_generation(host);
+    observations::timing("recoveryPostCaptureGeneration", generation_started, "ok");
+    let generation = stable_workspace_generation(before_collect, after_collect);
+    let snapshot = host.upload_recovery_workspace(prepared)?;
+    Ok(UploadedRecoveryWorkspace {
+        snapshot,
+        generation,
+        evidence,
+    })
 }
 
 fn uploaded_recovery_checkpoint(
@@ -7360,6 +7453,14 @@ mod tests {
             recovery_snapshot_from_session_workspace(&start.authorization.session_workspace)
                 .unwrap();
         let uploaded_snapshot = snapshot.clone();
+        let activity = execution_recovery_policy::ExecutionActivityWitness::for_execution(
+            1,
+            "upload-replay-test",
+        )
+        .unwrap();
+        let evidence = activity
+            .complete_quiesced_snapshot(activity.begin_snapshot_capture(), true, false)
+            .unwrap();
         let (release, wait) = std::sync::mpsc::channel();
         let mut upload = recovery_upload::PendingRecoveryUpload::start(move || {
             wait.recv().unwrap();
@@ -7368,6 +7469,7 @@ mod tests {
                 generation: ExecutionWorkspaceGeneration::Unknown {
                     reason: "watcher unavailable".into(),
                 },
+                evidence,
             })
         });
         assert!(upload.take(false).is_none());
@@ -7387,19 +7489,10 @@ mod tests {
         release.send(()).unwrap();
         let uploaded = upload.take(true).unwrap().unwrap();
         assert_eq!(uploaded.snapshot, snapshot);
-        let activity = execution_recovery_policy::ExecutionActivityWitness::for_execution(
-            1,
-            "upload-replay-test",
-        )
-        .unwrap();
-        let evidence = activity
-            .complete_quiesced_snapshot(activity.begin_snapshot_capture(), true, false)
-            .unwrap();
         let pending = PendingRecoveryCheckpoint {
             checkpoint_id: recovery_checkpoint_id("execution_1", "request_1"),
             model_request_id: "request_1".into(),
             turn_id: "turn_1".into(),
-            evidence,
             upload,
         };
         let mut committed = agent_run_session_state(&start);
@@ -7407,6 +7500,7 @@ mod tests {
             committed.restore(record).unwrap();
         }
         committed.set_committed_session_sequence(records.last().unwrap().sequence);
+        assert!(committed.has_model_request_without_recovery_checkpoint());
         state = committed;
         let (checkpoint, checkpoint_sequence) =
             uploaded_recovery_checkpoint(&pending, &uploaded, &start, "execution_1", &state, 5)
@@ -7456,6 +7550,7 @@ mod tests {
             Some(checkpoint.checkpoint_id.as_str())
         );
         assert!(replay.tool_ledger_is_checkpointed());
+        assert!(!replay.has_model_request_without_recovery_checkpoint());
         assert!(replay.open_tool_call_ids().is_empty());
         assert!(
             !replay.has_tool_call("call_1"),

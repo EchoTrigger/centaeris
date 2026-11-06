@@ -2916,30 +2916,11 @@ async fn query_loop_preserves_dynamic_description_at_durable_model_request_bound
 }
 
 #[tokio::test]
-async fn query_loop_persistence_failure_prevents_provider_call() {
-    let model_client = CompleteTurnTestModelClient {
-        request_count: AtomicUsize::new(0),
-        include_sibling: false,
-        sibling_first: false,
-    };
+async fn query_loop_persistence_fences_provider_dispatch_and_stream_output() {
     let config_store = StaticModelSessionConfigStore {
         config: Some(ModelSessionConfig::default()),
     };
-    let mut reject = |safe_point| match safe_point {
-        ToolSafePoint::ModelRequestStarted(_) => Err("session log unavailable".to_string()),
-        _ => Ok(()),
-    };
-    let safe_point = ToolSafePointDispatcher {
-        sink: Mutex::new(&mut reject),
-    };
     let composition_environment = empty_agent_composition_environment();
-    let driver = ModelClientGenerateDriver::new_with_tool_safe_point(
-        &model_client,
-        &config_store,
-        &safe_point,
-        &composition_environment,
-        Some("test-agent-run"),
-    );
     let prepared_prompt = crate::model::prepared_prompt::PreparedPromptV1::new(
         None,
         vec![crate::model::prepared_prompt::ModelMessageV1 {
@@ -2980,13 +2961,66 @@ async fn query_loop_persistence_failure_prevents_provider_call() {
         live_content_prefix: String::new(),
     };
 
-    let error = driver
-        .generate_next_async(&request)
-        .await
-        .expect_err("durability failure must stop generation");
-
-    assert_eq!(error.message, "session log unavailable");
-    assert_eq!(model_client.request_count.load(Ordering::SeqCst), 0);
+    for (reject_dispatch, reject_output) in [(true, false), (false, true), (false, false)] {
+        let model_client = OutputLimitRecoveryModelClient {
+            request_count: AtomicUsize::new(0),
+            succeed_at_request: Some(0),
+            emit_truncated_tool_call: false,
+            emit_incomplete_tool_identity: false,
+            request_messages: Mutex::new(Vec::new()),
+        };
+        let output_released = AtomicBool::new(false);
+        let mut commit = |safe_point| match safe_point {
+            ToolSafePoint::ModelRequestStarted(_) if reject_dispatch => {
+                Err("session log unavailable".into())
+            }
+            ToolSafePoint::ModelOutputReady => {
+                assert_eq!(model_client.request_count.load(Ordering::SeqCst), 1);
+                if reject_output {
+                    return Err("checkpoint unavailable".into());
+                }
+                output_released.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            _ => Ok(()),
+        };
+        let safe_point = ToolSafePointDispatcher {
+            sink: Mutex::new(&mut commit),
+        };
+        let driver = ModelClientGenerateDriver::new_with_tool_safe_point(
+            &model_client,
+            &config_store,
+            &safe_point,
+            &composition_environment,
+            Some("test-agent-run"),
+        );
+        let mut text = String::new();
+        let result = driver
+            .generate_next_with_sink_async(&request, &mut |event| {
+                if let TurnUpdate::Token { content, .. } = event {
+                    assert!(output_released.load(Ordering::SeqCst));
+                    text.push_str(&content);
+                }
+            })
+            .await;
+        match (reject_dispatch, reject_output) {
+            (true, _) => assert_eq!(result.unwrap_err().message, "session log unavailable"),
+            (_, true) => assert_eq!(result.unwrap_err().message, "checkpoint unavailable"),
+            _ => assert!(result.is_ok()),
+        }
+        assert_eq!(
+            model_client.request_count.load(Ordering::SeqCst),
+            usize::from(!reject_dispatch)
+        );
+        assert_eq!(
+            text,
+            if reject_dispatch || reject_output {
+                ""
+            } else {
+                "done"
+            }
+        );
+    }
 }
 
 #[derive(Debug)]

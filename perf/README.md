@@ -361,6 +361,11 @@ Interpret the measurements independently:
   is captured at HTTP-attempt start; retries are separate attempts. Existing
   `firstModelTextMs` is Run submission to
   first observed assistant text and may occur after tools; it is not model TTFT.
+- For the first model request with parallel checkpoint preparation,
+  `model_output_ready_safe_point` ends after the checkpoint and current lease
+  are confirmed. Its duration includes any wait after model output arrives.
+  Compare the end marker with request-local first-event timing and report
+  client-observed assistant text separately.
 - Startup components and child spans can overlap. `runtimeCoveredMs` is only
   the union of recorded Runtime intervals, never their sum or a reconstructed
   causal critical path. Wall-clock end markers place approximate intervals;

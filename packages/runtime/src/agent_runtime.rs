@@ -2107,7 +2107,7 @@ pub(crate) fn persist_agent_tool_safe_point(
             )?;
             Ok(())
         }
-        ToolSafePoint::CompletedTurn(_) => Ok(()),
+        ToolSafePoint::ModelOutputReady | ToolSafePoint::CompletedTurn(_) => Ok(()),
     }
 }
 

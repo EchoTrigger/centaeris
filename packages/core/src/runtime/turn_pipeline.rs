@@ -246,12 +246,30 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
             });
             let mut visible_stream_content = String::new();
             let mut reasoning = ReasoningAttempt::new(self.tool_safe_point, req, request_id);
-            let mut reasoning_error = None;
+            let mut safe_point_error = None;
+            let mut output_fence = self.tool_safe_point;
             let response = self
                 .model_client
                 .generate_stream(&request, &mut |event| {
-                    if reasoning_error.is_some() {
+                    if safe_point_error.is_some() {
                         return;
+                    }
+                    let has_output = match &event {
+                        ModelClientStreamEvent::Reasoning { text } => !text.is_empty(),
+                        ModelClientStreamEvent::Token { content } => !content.is_empty(),
+                        ModelClientStreamEvent::ToolCallPreparing { .. }
+                        | ModelClientStreamEvent::ToolCallReady { .. }
+                        | ModelClientStreamEvent::Done { .. } => true,
+                        ModelClientStreamEvent::ReplaceContent { content } => !content.is_empty(),
+                        _ => false,
+                    };
+                    if has_output {
+                        if let Some(fence) = output_fence.take() {
+                            if let Err(error) = fence.commit(ToolSafePoint::ModelOutputReady) {
+                                safe_point_error = Some(error);
+                                return;
+                            }
+                        }
                     }
                     if let ModelClientStreamEvent::Reasoning { text } = &event {
                         if text.is_empty() {
@@ -268,7 +286,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                                     reasoning = ReasoningAttempt::new(self.tool_safe_point, req, id)
                                 }
                                 Err(error) => {
-                                    reasoning_error = Some(error);
+                                    safe_point_error = Some(error);
                                     return;
                                 }
                             }
@@ -296,7 +314,7 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                     forward_model_client_stream_event(req, sink, event);
                 })
                 .await;
-            if let Some(error) = reasoning_error {
+            if let Some(error) = safe_point_error {
                 return Err(error.into());
             }
             if response.is_err() {
@@ -339,6 +357,9 @@ impl<'a, M: ModelClient, S: ModelSessionConfigStore> AsyncGenerateDriver
                 }
                 error
             })?;
+            if let Some(fence) = output_fence {
+                fence.commit(ToolSafePoint::ModelOutputReady)?;
+            }
             if let Some(text) = response
                 .generate_result
                 .reasoning_content

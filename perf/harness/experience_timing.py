@@ -20,7 +20,7 @@ RUNTIME_PHASES = frozenset({
     "preparationInventory", "preparationReconcileReserve", "physicalConfirm",
     "controllerTakeover", "workspacePreparation", "dockerCreatePermitWait",
     "dockerCreate", "dockerEnsureCreated", "dockerDaemonStart", "dockerStart",
-    "sandboxEnsure", "model_request_safe_point", "tool_call_safe_point",
+    "sandboxEnsure", "model_request_safe_point", "model_output_ready_safe_point", "tool_call_safe_point",
     "tool_receipt_safe_point", "other_safe_point", "workspaceSnapshotInspect",
     "workspaceRecoverySnapshotHold", "workspaceFinalSnapshotHold",
     "recoveryUploadFence", "recoveryPostCaptureGeneration", "modelHttp", "modelFirstEvent", "modelFirstText",
