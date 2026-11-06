@@ -84,7 +84,7 @@ export default function WorkspaceProfileSettings({ workspace, onClose }) {
           </div>
         </div>
       </div>
-      <input hidden ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp" disabled={busy || reading} onChange={selectAvatar} />
+      <input hidden ref={inputRef} type="file" aria-label={t("workspaceProfile.upload")} accept="image/png,image/jpeg,image/webp" disabled={busy || reading} onChange={selectAvatar} />
       <label>{t("workspaceProfile.name")}<input value={name} onChange={event => { setName(event.target.value); setError(""); setNotice(""); }} maxLength={160} required disabled={busy} /></label>
       {error ? <p className="accountSecurityError" role="alert">{error}</p> : null}
       {notice ? <p className="accountSecurityNotice" role="status">{notice}</p> : null}
