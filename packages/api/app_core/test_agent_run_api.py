@@ -1,6 +1,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+import hashlib
 import json
 import time
 from unittest.mock import patch
@@ -16,7 +17,7 @@ from django.utils import timezone
 
 from .http.agent_run_api import CreateRunRequest
 from .migration_testing import isolated_migration_database
-from .models import AgentRun, AgentRunApiConversation, AgentRunApiCredential, AgentRunApiOperation, Session, Workspace, WorkspaceMembership, ModelConfig
+from .models import AgentRun, AgentRunApiConversation, AgentRunApiCredential, AgentRunApiOperation, AgentRunEnvironmentRelease, Session, SessionEnvironment, Workspace, WorkspaceMembership, ModelConfig
 from .agent_run_api_cleanup import collect_agent_run_api_cleanup
 from .agent_run_api_credentials import create_credential
 from .agent_run_api_runs import accept_run
@@ -65,12 +66,26 @@ class AgentRunApiApiTests(TransactionTestCase):
         return self.client.post(f"/api/v1/agent/conversations/{conversation_id}/close", data=b"",
             content_type="application/json", HTTP_AUTHORIZATION=f"Bearer {token or self.token}")
 
-    def settle_message(self, operation):
+    def settle_message(self, operation, *, released=False):
         now = timezone.now()
-        AgentRun.objects.filter(pk=operation.agentRunId).update(
-            status="cancelled", completedAt=now, preAdmissionCancelledAt=now,
+        run = AgentRun.objects.get(pk=operation.agentRunId)
+        AgentRun.objects.filter(pk=run.pk).update(
+            status="completed" if released else "cancelled", completedAt=now,
+            preAdmissionCancelledAt=None if released else now,
         )
         AgentRunApiOperation.objects.filter(pk=operation.pk).update(deliveryClosedAt=now)
+        if released:
+            epoch = run.environment.controller_epoch + 1
+            lease = "fixture-cleanup"
+            SessionEnvironment.objects.filter(pk=run.environment_id).update(
+                controller_epoch=epoch, controller_run=run, controller_lease_owner=lease,
+                controller_released=True, controller_purpose="cleanup",
+            )
+            AgentRunEnvironmentRelease.objects.create(
+                agent_run=run, environment=run.environment, authorization_digest=run.authorization.digest,
+                controller_epoch=epoch,
+                controller_lease_digest="sha256:" + hashlib.sha256(b"workspace:environment-controller-lease:v1\0fixture-cleanup").hexdigest(),
+            )
 
     def test_message_reuses_private_session_and_receipt_and_rejects_concurrent_turn(self):
         _, first = self.message(key=self.operation_id)
@@ -143,7 +158,7 @@ class AgentRunApiApiTests(TransactionTestCase):
 
     def test_cleanup_waits_for_all_deliveries_and_retirement_then_keeps_receipts(self):
         _, first = self.message()
-        self.settle_message(first)
+        self.settle_message(first, released=True)
         _, second = self.message(first.conversationId)
         with patch("app_core.agent_run_api_cleanup._purge_runtime") as purge, patch("app_core.agent_run_api_cleanup.redis.Redis.from_url"):
             self.assertEqual(collect_agent_run_api_cleanup().cleaned, [])
@@ -153,13 +168,14 @@ class AgentRunApiApiTests(TransactionTestCase):
             _, replacement = self.message(first.conversationId)
             self.assertEqual(collect_agent_run_api_cleanup().cleaned, [])
             purge.assert_not_called()
-            self.settle_message(second)
+            self.settle_message(second, released=True)
             report = collect_agent_run_api_cleanup()
             self.assertEqual(report.failures, [])
             self.assertEqual(report.cleaned, [second.agentRunId])
         self.assertFalse(Session.objects.filter(pk=first.sessionId).exists())
         self.assertTrue(Session.objects.filter(pk=replacement.sessionId).exists())
         self.assertEqual(AgentRunApiOperation.objects.filter(sessionId=first.sessionId, cleanupStatus="completed").count(), 2)
+        self.assertFalse(AgentRunEnvironmentRelease.objects.filter(agent_run_id__in=[first.agentRunId, second.agentRunId]).exists())
 
     def test_acceptance_has_signed_private_runtime_and_receipt(self):
         operation, run = accept_run(self.credential, self.operation_id, CreateRunRequest(**self.body))
