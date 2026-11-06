@@ -438,10 +438,15 @@ fn materialize_block(
                     return TranscriptLine::RunBoundary {
                         run_id: run_id.clone(),
                         state: super::runs::RunState::from_source(&facts.source_type),
-                        reason: content
-                            .inline_content
-                            .clone()
-                            .unwrap_or_else(|| "Loading error details…".into()),
+                        reason: if content.source_ref.is_some() {
+                            "Loading error details…"
+                        } else {
+                            super::run_errors::detail(
+                                content.inline_content.as_deref().unwrap_or_default(),
+                                facts.reason_type.as_deref(),
+                            )
+                        }
+                        .into(),
                     };
                 }
             }

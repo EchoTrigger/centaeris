@@ -5394,10 +5394,20 @@ fn run_event(app: &mut App, run: &str, id: &str, kind: &str, payload: Value) {
 
 #[test]
 fn run_terminal_states_keep_results_and_do_not_require_final() {
-    for (kind, label, reason) in [
-        ("AgentRunCompleted", "└", ""),
-        ("AgentRunFailed", "! ", "Provider unavailable"),
-        ("AgentRunInterrupted", "! ", "Stopped by user"),
+    for (kind, label, reason, expected) in [
+        ("AgentRunCompleted", "└", "", ""),
+        (
+            "AgentRunFailed",
+            "! ",
+            "provider_unavailable",
+            "The model service is temporarily unavailable.",
+        ),
+        (
+            "AgentRunInterrupted",
+            "! ",
+            "Stopped by user",
+            "The request could not be completed.",
+        ),
     ] {
         for final_first in [true, false] {
             let path = PathBuf::from("D:/presentation-test");
@@ -5425,7 +5435,7 @@ fn run_terminal_states_keep_results_and_do_not_require_final() {
             assert!(before.contains(label), "{before}");
             assert!(!before.contains("Working"), "{before}");
             assert!(before.contains("Inspecting source"));
-            assert!(before.contains(reason));
+            assert!(before.contains(expected));
             assert_eq!(before.contains("Useful result"), final_first);
             if !final_first {
                 run_event(
@@ -5534,7 +5544,7 @@ fn history_run_page(terminal: Option<&str>) -> TranscriptPageV1 {
                 notice_type: "run_boundary".into(),
                 content: TranscriptTextContentV1::inline(
                     if source == "agent_run_failed" {
-                        "Provider unavailable"
+                        "provider_unavailable"
                     } else {
                         ""
                     }
@@ -5561,7 +5571,9 @@ fn historical_runs_use_authoritative_terminal_state_and_preserve_user_disclosure
         assert!(text.contains("Inspecting source"));
         match terminal {
             None => assert!(!text.contains('─')),
-            Some("agent_run_failed") => assert!(text.contains("! Provider unavailable")),
+            Some("agent_run_failed") => {
+                assert!(text.contains("! The model service is temporarily unavailable."))
+            }
             _ => {
                 assert!(text.contains('─'));
                 for _ in 0..2 {
@@ -5630,8 +5642,7 @@ fn run_failure_live_replay_and_history_patch_show_one_reason() {
         }
         let before = rendered_lines_text(&build_transcript_view(&app, 240).lines);
         assert_eq!(before.matches("! ").count(), 1);
-        assert!(before
-            .contains("The model took too long to respond. Retry the request. · provider_timeout"));
+        assert!(before.contains("The model took too long to respond. Retry the request."));
         run_event(
             &mut app,
             "run",
@@ -5653,7 +5664,7 @@ fn run_failure_live_replay_and_history_patch_show_one_reason() {
         sync_materialized_transcript_history(&mut app);
         let after = rendered_lines_text(&build_transcript_view(&app, 240).lines);
         assert_eq!(after.matches("! ").count(), 1);
-        assert!(after.contains("provider_timeout"));
+        assert!(after.contains("The model took too long to respond. Retry the request."));
     }
 }
 

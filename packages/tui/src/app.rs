@@ -4849,11 +4849,14 @@ fn apply_session_event_inner(app: &mut App, event: &Value, agent_run_id: Option<
                     "AgentRunFailed" => runs::RunState::Failed,
                     _ => runs::RunState::Interrupted,
                 },
-                reason: event
-                    .pointer("/payload/message")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .into(),
+                reason: run_errors::detail(
+                    event
+                        .pointer("/payload/message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    event.pointer("/payload/reasonType").and_then(Value::as_str),
+                )
+                .into(),
             });
         } else {
             app.transcript.push(TranscriptLine::Error(format!(
