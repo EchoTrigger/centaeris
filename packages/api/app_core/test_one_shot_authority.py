@@ -3,10 +3,11 @@
 import hashlib
 import json
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TransactionTestCase
+from django.test import SimpleTestCase, TransactionTestCase
 from django.utils import timezone
 
 from .models import (
@@ -30,7 +31,56 @@ from .one_shot_credentials import (
     plugin_activation_for_run,
     source_object_allowed,
 )
+from .plugin_catalog import PLUGIN_ACTIVATION_SCHEMA, activation_digest
 from .workspace_access import agent_run_membership_is_current
+
+
+class OneShotPluginScopeTests(SimpleTestCase):
+    def setUp(self):
+        self.run = SimpleNamespace(workspace=object(), session=SimpleNamespace(purpose="oneShot"))
+        self.credential = self.enterContext(patch(
+            "app_core.one_shot_credentials.credential_for_run",
+            return_value=SimpleNamespace(pluginNames=[]),
+        ))
+        self.catalog = self.enterContext(patch(
+            "app_core.one_shot_credentials.plugin_activation_for_workspace",
+            side_effect=ValueError("plugin_package_missing:unrelated"),
+        ))
+
+    def test_empty_scope_does_not_load_unrelated_plugins(self):
+        self.assertEqual(plugin_activation_for_run(self.run), {
+            "schema": PLUGIN_ACTIVATION_SCHEMA,
+            "digest": activation_digest([]),
+            "packages": [],
+        })
+        self.catalog.assert_not_called()
+
+    def test_invalid_binding_is_rejected_before_loading_plugins(self):
+        self.credential.return_value = None
+        with self.assertRaisesRegex(CredentialRejected, "api_credential_binding_invalid"):
+            plugin_activation_for_run(self.run)
+        self.catalog.assert_not_called()
+
+    def test_nonempty_scope_keeps_filtering_available_plugins(self):
+        self.credential.return_value.pluginNames = ["allowed", "unavailable"]
+        self.catalog.side_effect = None
+        self.catalog.return_value = {
+            "schema": PLUGIN_ACTIVATION_SCHEMA,
+            "packages": [{"name": "allowed"}, {"name": "private"}],
+        }
+        self.assertEqual(plugin_activation_for_run(self.run), {
+            "schema": PLUGIN_ACTIVATION_SCHEMA,
+            "digest": activation_digest([{"name": "allowed"}]),
+            "packages": [{"name": "allowed"}],
+        })
+        self.catalog.assert_called_once_with(self.run.workspace)
+
+    def test_interactive_run_still_uses_workspace_plugins(self):
+        self.run.session.purpose = "interactive"
+        with self.assertRaisesRegex(ValueError, "plugin_package_missing:unrelated"):
+            plugin_activation_for_run(self.run)
+        self.catalog.assert_called_once_with(self.run.workspace)
+        self.credential.assert_not_called()
 
 
 class OneShotCredentialAuthorityTests(TransactionTestCase):

@@ -14,6 +14,34 @@ function toggleSelection(values, value) {
   return values.includes(value) ? values.filter(item => item !== value) : [...values, value];
 }
 
+function useCredentialCatalog(path, collection) {
+  const [items, setItems] = useState(null);
+  const [failed, setFailed] = useState(false);
+  const [revision, setRevision] = useState(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Retry fetches only this catalog again.
+  useEffect(() => {
+    const controller = new AbortController();
+    apiJson(path, { signal: controller.signal })
+      .then(result => { if (!controller.signal.aborted) setItems(result[collection]); })
+      .catch(() => { if (!controller.signal.aborted) setFailed(true); });
+    return () => controller.abort();
+  }, [path, collection, revision]);
+
+  function retry() {
+    setItems(null);
+    setFailed(false);
+    setRevision(value => value + 1);
+  }
+  return { items, failed, retry };
+}
+
+function CatalogError({ message, onRetry }) {
+  const { t } = useTranslation();
+  return <p role="alert">{t(message)}{" "}
+    <button className="secondary" type="button" onClick={onRetry}>{t("agentChat.retry")}</button>
+  </p>;
+}
+
 function SourceFiles({ workspacePath, sourceId, selected, onToggle }) {
   const { t } = useTranslation();
   const [files, setFiles] = useState(null);
@@ -42,35 +70,55 @@ function SourceFiles({ workspacePath, sourceId, selected, onToggle }) {
   </label>)}</div>;
 }
 
+function CredentialScopes({ workspacePath, pluginNames, setPlugins, sourceObjectRefs, setSourceObjects }) {
+  const { t } = useTranslation();
+  const plugins = useCredentialCatalog(workspacePath + "/plugins", "plugins");
+  const sources = useCredentialCatalog(workspacePath + "/sources", "sources");
+  const [sourceId, setSource] = useState("");
+  const enabledPlugins = plugins.items?.filter(item => item.enabled);
+  const readySources = sources.items?.filter(item => item.status === "ready");
+
+  return <>
+    <fieldset>
+      <legend>{t("developer.plugins")}</legend>
+      {plugins.failed ? <CatalogError message="developer.pluginsLoadFailed" onRetry={plugins.retry} />
+        : !enabledPlugins ? <p role="status">{t("agentChat.loading")}</p>
+        : enabledPlugins.length ? <div className="developerScopeOptions">{enabledPlugins.map(plugin => <label key={plugin.name}>
+          <input type="checkbox" checked={pluginNames.includes(plugin.name)} disabled={!pluginNames.includes(plugin.name) && pluginNames.length >= MAX_SCOPE_ITEMS}
+            onChange={() => setPlugins(values => toggleSelection(values, plugin.name))} />{plugin.displayName}
+        </label>)}</div> : <p>{t("developer.noPlugins")}</p>}
+    </fieldset>
+    <fieldset>
+      <legend>{t("developer.materials")}</legend>
+      {sources.failed ? <CatalogError message="developer.sourcesLoadFailed" onRetry={sources.retry} />
+        : !readySources ? <p role="status">{t("agentChat.loading")}</p>
+        : readySources.length ? <>
+          <label className="field">{t("developer.source")}
+            <select value={sourceId} onChange={event => setSource(event.target.value)}>
+              <option value="">{t("developer.chooseSource")}</option>
+              {readySources.map(source => <option key={source.id} value={source.id}>{source.name}</option>)}
+            </select>
+          </label>
+          {sourceId ? <SourceFiles key={sourceId} workspacePath={workspacePath} sourceId={sourceId}
+            selected={sourceObjectRefs} onToggle={id => setSourceObjects(values => toggleSelection(values, id))} /> : null}
+          <p>{t("developer.filesSelected", { count: sourceObjectRefs.length })}{" "}
+            {sourceObjectRefs.length ? <button type="button" className="secondary" onClick={() => setSourceObjects([])}>{t("developer.clearFiles")}</button> : null}
+          </p>
+        </> : <p>{t("developer.noSources")}</p>}
+    </fieldset>
+  </>;
+}
+
 function CredentialForm({ workspaceId, workspacePath, busy, onCreate, onClose }) {
   const { t } = useTranslation();
-  const [options, setOptions] = useState(null);
-  const [revision, setRevision] = useState(0);
+  const models = useCredentialCatalog("/api/models?" + new URLSearchParams({ workspaceId }), "models");
   const [name, setName] = useState("");
   const [modelConfigRef, setModel] = useState("");
   const [pluginNames, setPlugins] = useState([]);
-  const [sourceId, setSource] = useState("");
   const [sourceObjectRefs, setSourceObjects] = useState([]);
+  const [scopesRequested, setScopesRequested] = useState(false);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: Retry fetches the same catalog again.
-  useEffect(() => {
-    const controller = new AbortController();
-    const { signal } = controller;
-    Promise.allSettled([
-      apiJson("/api/models?" + new URLSearchParams({ workspaceId }), { signal }),
-      apiJson(workspacePath + "/plugins", { signal }),
-      apiJson(workspacePath + "/sources", { signal }),
-    ]).then(([models, plugins, sources]) => {
-      if (!signal.aborted) setOptions({
-        models: models.status === "fulfilled" ? models.value.models : null,
-        plugins: plugins.status === "fulfilled" ? plugins.value.plugins.filter(item => item.enabled) : null,
-        sources: sources.status === "fulfilled" ? sources.value.sources.filter(item => item.status === "ready") : null,
-      });
-    });
-    return () => controller.abort();
-  }, [workspaceId, workspacePath, revision]);
-
-  const validModel = options?.models?.some(item => item.id === modelConfigRef);
+  const validModel = models.items?.some(item => item.id === modelConfigRef);
   return <form className="developerCredentialForm" onSubmit={event => {
     event.preventDefault();
     if (validModel && name.trim() && !busy) void onCreate({ name: name.trim(), modelConfigRef, pluginNames, sourceObjectRefs });
@@ -81,47 +129,24 @@ function CredentialForm({ workspaceId, workspacePath, busy, onCreate, onClose })
         <input ref={focusNewInput} required maxLength={120} value={name} onChange={event => setName(event.target.value)} />
       </label>
       <label className="field">{t("developer.model")}
-        <select required value={validModel ? modelConfigRef : ""} disabled={!options?.models?.length}
+        <select required value={validModel ? modelConfigRef : ""} disabled={!models.items?.length}
           onChange={event => setModel(event.target.value)}>
           <option value="">{t("developer.chooseModel")}</option>
-          {options?.models?.map(model => <option key={model.id} value={model.id}>
+          {models.items?.map(model => <option key={model.id} value={model.id}>
             {model.providerDisplayName ? model.providerDisplayName + " / " : ""}{model.displayName}
           </option>)}
         </select>
       </label>
-      {!options ? <p role="status">{t("agentChat.loading")}</p> : <>
-        {options.models?.length === 0 ? <p>{t("developer.noModels")}</p> : null}
-        {options.models === null || options.plugins === null || options.sources === null
-          ? <p role="alert">{t(options.models === null ? "developer.modelsLoadFailed" : "developer.scopesLoadFailed")}{" "}
-            <button type="button" className="secondary" onClick={() => { setOptions(null); setRevision(value => value + 1); }}>{t("agentChat.retry")}</button>
-          </p> : null}
-        <details className="developerOptionalScopes">
-          <summary>{t("developer.optionalScopes")}</summary>
-          <fieldset>
-            <legend>{t("developer.plugins")}</legend>
-            {options.plugins?.length ? <div className="developerScopeOptions">{options.plugins.map(plugin => <label key={plugin.name}>
-              <input type="checkbox" checked={pluginNames.includes(plugin.name)} disabled={!pluginNames.includes(plugin.name) && pluginNames.length >= MAX_SCOPE_ITEMS}
-                onChange={() => setPlugins(values => toggleSelection(values, plugin.name))} />{plugin.displayName}
-            </label>)}</div> : <p>{t("developer.noPlugins")}</p>}
-          </fieldset>
-          <fieldset>
-            <legend>{t("developer.materials")}</legend>
-            {options.sources?.length ? <>
-              <label className="field">{t("developer.source")}
-                <select value={sourceId} onChange={event => setSource(event.target.value)}>
-                  <option value="">{t("developer.chooseSource")}</option>
-                  {options.sources.map(source => <option key={source.id} value={source.id}>{source.name}</option>)}
-                </select>
-              </label>
-              {sourceId ? <SourceFiles key={sourceId} workspacePath={workspacePath} sourceId={sourceId}
-                selected={sourceObjectRefs} onToggle={id => setSourceObjects(values => toggleSelection(values, id))} /> : null}
-              <p>{t("developer.filesSelected", { count: sourceObjectRefs.length })}{" "}
-                {sourceObjectRefs.length ? <button type="button" className="secondary" onClick={() => setSourceObjects([])}>{t("developer.clearFiles")}</button> : null}
-              </p>
-            </> : <p>{t("developer.noSources")}</p>}
-          </fieldset>
-        </details>
-      </>}
+      {models.failed ? <CatalogError message="developer.modelsLoadFailed" onRetry={models.retry} />
+        : !models.items ? <p role="status">{t("agentChat.loading")}</p>
+        : models.items.length === 0 ? <p>{t("developer.noModels")}</p> : null}
+      <details className="developerOptionalScopes" onToggle={event => {
+        if (event.currentTarget.open) setScopesRequested(true);
+      }}>
+        <summary>{t("developer.optionalScopes")}</summary>
+        {scopesRequested ? <CredentialScopes workspacePath={workspacePath} pluginNames={pluginNames} setPlugins={setPlugins}
+          sourceObjectRefs={sourceObjectRefs} setSourceObjects={setSourceObjects} /> : null}
+      </details>
       <div className="developerActions">
         <button type="button" className="secondary" onClick={onClose}>{t("agentRunRow.cancel")}</button>
         <button type="submit" className="primary" disabled={!name.trim() || !validModel}>{t("developer.createCredential")}</button>

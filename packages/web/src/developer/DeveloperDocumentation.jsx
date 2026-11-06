@@ -1,6 +1,6 @@
 import { MarkdownContent } from "../chat/MarkdownContent";
 import { useTranslation } from "../i18n";
-import { DeveloperExample } from "./DeveloperExample";
+import { DeveloperExample, DeveloperStatusExample } from "./DeveloperExample";
 import { developerGuides } from "./guides";
 import reference from "./oneShotReference.json";
 
@@ -48,9 +48,11 @@ function ReferenceTables() {
       <p><code className="developerMethod">{operation.method}</code>{" "}<code>{operation.path}</code></p>
       {operation.headers?.length ? <><h4>{t("developer.requestHeaders")}</h4><FieldTable fields={operation.headers} /></> : null}
       {operation.requestSchema ? <><h4>{t("developer.requestBody")}</h4><SchemaFields name={operation.requestSchema} /></> : null}
+      {operation.emptyBody ? <p>{t("developer.emptyRequestBody")}</p> : null}
       <ul>{operation.responses.map(response => <li key={response.status + ":" + response.contentType}>
         <code>{response.status} {response.contentType}</code>
         {response.schema ? <> · <code>{response.schema}</code></> : null}
+        {response.condition ? <> — {t("developer.response." + response.condition)}</> : null}
       </li>)}</ul>
     </section>)}
     <h2>{t("developer.jsonResponses")}</h2>
@@ -72,7 +74,9 @@ export function DeveloperDocumentation({ topic }) {
     <div className="developerProse"><MarkdownContent text={guides[topic]} /></div>
     {topic === "quickstart" ? <>
       <DeveloperExample />
-      <div className="developerProse"><MarkdownContent text={guides.wordExample} /></div>
+      <div className="developerProse"><MarkdownContent text={guides.firstResult} /></div>
+      <DeveloperStatusExample />
+      <div className="developerProse"><MarkdownContent text={guides.recovery} /></div>
     </> : null}
     {topic === "events" ? <ReferenceTables /> : null}
   </article>;

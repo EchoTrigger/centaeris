@@ -77,12 +77,14 @@ def source_object_allowed(credential, item) -> bool:
 
 
 def plugin_activation_for_run(run):
-    available = plugin_activation_for_workspace(run.workspace)
     if run.session.purpose != "oneShot":
-        return available
+        return plugin_activation_for_workspace(run.workspace)
     credential = credential_for_run(run)
     if credential is None:
         raise CredentialRejected("api_credential_binding_invalid")
+    if not credential.pluginNames:
+        return selected_plugin_activation(run.workspace, [])
+    available = plugin_activation_for_workspace(run.workspace)
     packages = [package for package in available["packages"] if package["name"] in credential.pluginNames]
     return {"schema": available["schema"], "digest": activation_digest(packages), "packages": packages}
 
