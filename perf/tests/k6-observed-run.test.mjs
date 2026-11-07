@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
-function observe({ foreign = false, failed = false, truncated = false, transportError = false, non200 = false, prefix = [], assistant = false, eventsOverride = null, observedTimes = null, frameCreatedAtMs } = {}) {
+function observe({ foreign = false, failed = false, truncated = false, transportError = false, non200 = false, prefix = [], assistant = false, eventsOverride = null, observedTimes = null, frameCreatedAtMs, onFirstText } = {}) {
   let clock = 1000, closed = false; const handlers = {};
   const events = (eventsOverride || [
     { type: 'tool_call', payload: { callId: 'call', toolName: 'bash' } },
@@ -33,7 +33,7 @@ function observe({ foreign = false, failed = false, truncated = false, transport
     .replace(/^import .*;\r?\n/gm, '').replace(/export /g, '');
   vm.runInContext(source, context);
   const subject = context.waitForTerminalObserved || context.waitForTerminal;
-  return { result: subject({ sessionid: 'owned' }, '', 'session', 'run', 120), closed };
+  return { result: subject({ sessionid: 'owned' }, '', 'session', 'run', 120, { onFirstText }), closed };
 }
 
 test('first successful tool result is timestamped at its callback before terminal/response end', () => {
@@ -61,6 +61,15 @@ test('first model text uses the receive callback of nonempty live text, not reas
   assert.equal(result.firstModelTextObservedAtMs, 1300);
   assert.equal(result.firstModelTextSource, 'live');
   assert.equal(result.firstCommittedEventObservedAtMs, 1400);
+});
+
+test('first-text observer runs once at receive time so an immediate next-input probe cannot use terminal time', () => {
+  const observed = [];
+  const { result } = observe({ prefix: [live({ text: 'first' }), live({ revision: 2, text: 'more' })],
+    assistant: true, onFirstText: at => observed.push(at) });
+  assert.deepEqual(observed, [1200]);
+  assert.equal(result.firstModelTextObservedAtMs, observed[0]);
+  assert.ok(result.terminalObservedAtMs > observed[0]);
 });
 
 test('committed assistant text is an explicit fallback, while no text remains unobserved', () => {

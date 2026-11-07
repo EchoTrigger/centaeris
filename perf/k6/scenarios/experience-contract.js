@@ -98,4 +98,3 @@ export function verifiedToolTimings(result, expectedCount) {
       serverTimingState: serverState, clientTimingState: clientState, contractState: 'verified' };
   });
 }
-

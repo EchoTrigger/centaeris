@@ -154,7 +154,7 @@ export function waitForTerminal(store, csrf, sessionId, agentRunId, timeoutSecon
 }
 
 // Receive-time measurements use live callbacks; buffered terminal responses cannot provide them.
-export function waitForTerminalObserved(store, csrf, sessionId, agentRunId, timeoutSeconds = 120) {
+export function waitForTerminalObserved(store, csrf, sessionId, agentRunId, timeoutSeconds = 120, observers = {}) {
   const started = Date.now(), events = [], calls = new Map();
   // Server event.createdAtMs and client callback Date.now() belong to separate clocks.
   // Event creation is not a database commit timestamp; never subtract across clocks.
@@ -193,6 +193,7 @@ export function waitForTerminalObserved(store, csrf, sessionId, agentRunId, time
         if (firstModelTextObservedAtMs === null && typeof text === 'string' && text.trim()) {
           firstModelTextObservedAtMs = observed;
           firstModelTextSource = event ? 'committedAssistantMessage' : 'live';
+          observers.onFirstText?.(observed);
         }
         if (!event) return;
         previousSequence = event.sequence; eventIds.add(event.eventId);
