@@ -385,6 +385,15 @@ fn decode_workspace_generation(bytes: &[u8]) -> Result<SandboxWorkspaceGeneratio
     Ok(generation)
 }
 
+fn decode_input_inventory(bytes: &[u8]) -> Result<SandboxInputInventory, String> {
+    let inventory: SandboxInputInventory = serde_json::from_slice(bytes)
+        .map_err(|error| format!("decode sandbox input inventory failed: {error}"))?;
+    if inventory.schema != SANDBOX_INPUT_INVENTORY_SCHEMA {
+        return Err("sandbox input inventory schema mismatch".to_string());
+    }
+    Ok(inventory)
+}
+
 pub struct DockerExecutionHostRequest<'a> {
     pub network: ExecutionNetwork,
     pub environment_profile: Option<EnvironmentProfile>,
@@ -575,6 +584,10 @@ impl DockerExecutionHostRunner {
         if !retained || environment_profile.is_none() {
             return Err("environment_profile_and_controller_required".into());
         }
+        // A new per-Run execution has no old processes to quiesce before reading its inputs.
+        let read_input_inventory_during_prepare =
+            environment_binding.execution_mode == "perRun" && !has_execution_fact;
+        let mut prepared_input_inventory = None;
         let benchmark_helper = environment_profile
             .as_ref()
             .map(|_| environment_container::helper_path())
@@ -676,15 +689,22 @@ impl DockerExecutionHostRunner {
                         .ok_or("retained container unconfirmed")?;
                     let fence =
                         retained::fence(&environment_authorization, &allocation.instance_id)?;
-                    retained::takeover(&physical, id, &fence, || {
-                        output_consumption::recover_before_prepare(
-                            resident_store.as_ref(),
-                            &environment_authorization.payload.session_id,
-                            &agent_run_id,
-                            &fence,
-                            |request| retained::relay(&physical, id, request),
-                        )
-                    })
+                    prepared_input_inventory = retained::takeover(
+                        &physical,
+                        id,
+                        &fence,
+                        read_input_inventory_during_prepare,
+                        || {
+                            output_consumption::recover_before_prepare(
+                                resident_store.as_ref(),
+                                &environment_authorization.payload.session_id,
+                                &agent_run_id,
+                                &fence,
+                                |request| retained::relay(&physical, id, request),
+                            )
+                        },
+                    )?;
+                    Ok(())
                 },
             )?;
             instance_id = allocation.instance_id.clone();
@@ -740,7 +760,10 @@ impl DockerExecutionHostRunner {
         if has_execution_fact {
             runner.quiesce_existing_execution()?;
         }
-        let inventory = runner.input_inventory()?;
+        let inventory = match prepared_input_inventory {
+            Some(inventory) => inventory,
+            None => runner.input_inventory()?,
+        };
         *runner
             .materialized_inputs
             .lock()
@@ -2051,12 +2074,7 @@ impl DockerExecutionHostRunner {
 
     fn input_inventory(&self) -> Result<SandboxInputInventory, String> {
         let output = self.helper("input-inventory", None, &[], HELPER_JSON_LIMIT)?;
-        let inventory = serde_json::from_slice::<SandboxInputInventory>(output.as_slice())
-            .map_err(|error| format!("decode sandbox input inventory failed: {error}"))?;
-        if inventory.schema != SANDBOX_INPUT_INVENTORY_SCHEMA {
-            return Err("sandbox input inventory schema mismatch".to_string());
-        }
-        Ok(inventory)
+        decode_input_inventory(&output)
     }
 
     fn refresh_materialized_inputs(

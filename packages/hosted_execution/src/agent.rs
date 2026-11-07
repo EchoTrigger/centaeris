@@ -61,6 +61,11 @@ pub fn run_prepare_workspace_once() -> Result<(), String> {
     secure_roots()
 }
 
+pub fn run_prepare_workspace_with_input_inventory_once() -> Result<(), String> {
+    run_prepare_workspace_once()?;
+    write_input_inventory(&load_inventory()?)
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AgentProcessState {
@@ -266,7 +271,11 @@ pub fn run_input_inventory_once() -> Result<(), String> {
         }
         inventory = requested_input_inventory(inventory, &requested);
     }
-    serde_json::to_writer(std::io::stdout(), &inventory)
+    write_input_inventory(&inventory)
+}
+
+fn write_input_inventory(inventory: &SandboxInputInventory) -> Result<(), String> {
+    serde_json::to_writer(std::io::stdout(), inventory)
         .map_err(|error| format!("encode input inventory failed: {error}"))
 }
 
