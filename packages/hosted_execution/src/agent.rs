@@ -44,7 +44,6 @@ const PLUGIN_ROOT: &str = "/opt/centaeris/plugins";
 const SYSTEM_SKILL_ROOT: &str = "/opt/centaeris/system-skills";
 const SNAPSHOT_PATH_MAX_BYTES: usize = 4 * 1024;
 const SNAPSHOT_PATH_MAX_DEPTH: usize = 64;
-#[cfg(any(target_os = "linux", test))]
 const SNAPSHOT_IO_BUFFER_BYTES: usize = 64 * 1024;
 #[cfg(all(target_os = "linux", test))]
 const AGENT_UID: u32 = 10_001;
@@ -495,8 +494,15 @@ pub fn run_snapshot_restore_once() -> Result<(), String> {
     require_root()?;
     secure_roots()?;
     let mut stdin = std::io::stdin().lock();
+    restore_snapshot_frame(&mut stdin, &load_inventory()?)
+}
+
+fn restore_snapshot_frame(
+    input: &mut impl Read,
+    inputs: &SandboxInputInventory,
+) -> Result<(), String> {
     let mut length = [0_u8; 4];
-    stdin
+    input
         .read_exact(&mut length)
         .map_err(|error| format!("read snapshot manifest length failed: {error}"))?;
     let manifest_length = u32::from_be_bytes(length) as usize;
@@ -504,7 +510,7 @@ pub fn run_snapshot_restore_once() -> Result<(), String> {
         return Err("snapshot manifest length is invalid".to_string());
     }
     let mut manifest_bytes = vec![0_u8; manifest_length];
-    stdin
+    input
         .read_exact(manifest_bytes.as_mut_slice())
         .map_err(|error| format!("read snapshot manifest failed: {error}"))?;
     let manifest =
@@ -513,26 +519,52 @@ pub fn run_snapshot_restore_once() -> Result<(), String> {
     if canonical_snapshot_manifest_bytes(&manifest)? != manifest_bytes {
         return Err("snapshot manifest is not canonical".to_string());
     }
-    let inputs = load_inventory()?;
+    let mut created_directories = BTreeSet::new();
     for file in &manifest.files {
         if inputs
             .inputs
             .iter()
             .any(|input| snapshot_paths_conflict(file.path.as_str(), input.virtual_path.as_str()))
         {
-            return Err("snapshot path conflicts with a materialized input".to_string());
+            restore_snapshot_contents(input, &mut std::io::sink(), file)?;
+            continue;
         }
-        restore_snapshot_file(&mut stdin, file)?;
+        restore_snapshot_file(input, file, &mut created_directories)?;
     }
     let mut trailing = [0_u8; 1];
-    if stdin
+    if input
         .read(&mut trailing)
         .map_err(|error| format!("read snapshot trailing bytes failed: {error}"))?
         != 0
     {
         return Err("snapshot frame has trailing bytes".to_string());
     }
-    seal_snapshot_directories(&manifest)?;
+    seal_snapshot_directories(&created_directories)?;
+    Ok(())
+}
+
+fn restore_snapshot_contents(
+    input: &mut impl Read,
+    output: &mut impl Write,
+    expected: &SandboxWorkspaceSnapshotFile,
+) -> Result<(), String> {
+    let mut digest = Sha256::new();
+    let mut remaining = expected.size_bytes;
+    let mut buffer = [0_u8; SNAPSHOT_IO_BUFFER_BYTES];
+    while remaining != 0 {
+        let wanted = buffer.len().min(remaining as usize);
+        input
+            .read_exact(&mut buffer[..wanted])
+            .map_err(|error| format!("read snapshot file bytes failed: {error}"))?;
+        output
+            .write_all(&buffer[..wanted])
+            .map_err(|error| format!("write snapshot restore target failed: {error}"))?;
+        digest.update(&buffer[..wanted]);
+        remaining -= wanted as u64;
+    }
+    if format!("sha256:{:x}", digest.finalize()) != expected.sha256 {
+        return Err("snapshot restore file integrity mismatch".to_string());
+    }
     Ok(())
 }
 
@@ -955,6 +987,7 @@ fn snapshot_paths_conflict(left: &str, right: &str) -> bool {
 fn restore_snapshot_file(
     input: &mut impl Read,
     expected: &SandboxWorkspaceSnapshotFile,
+    created_directories: &mut BTreeSet<PathBuf>,
 ) -> Result<(), String> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::MetadataExt;
@@ -963,7 +996,7 @@ fn restore_snapshot_file(
     let parent = target
         .parent()
         .ok_or_else(|| "snapshot target has no parent".to_string())?;
-    create_snapshot_directories(parent)?;
+    create_snapshot_directories(parent, created_directories)?;
     match fs::symlink_metadata(target.as_path()) {
         Ok(_) => return Err("snapshot restore target already exists".to_string()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -988,20 +1021,7 @@ fn restore_snapshot_file(
             std::io::Error::last_os_error()
         ));
     }
-    let mut digest = Sha256::new();
-    let mut remaining = expected.size_bytes;
-    let mut buffer = [0_u8; SNAPSHOT_IO_BUFFER_BYTES];
-    while remaining != 0 {
-        let wanted = buffer.len().min(remaining as usize);
-        input
-            .read_exact(&mut buffer[..wanted])
-            .map_err(|error| format!("read snapshot file bytes failed: {error}"))?;
-        output
-            .write_all(&buffer[..wanted])
-            .map_err(|error| format!("write snapshot restore target failed: {error}"))?;
-        digest.update(&buffer[..wanted]);
-        remaining -= wanted as u64;
-    }
+    restore_snapshot_contents(input, &mut output, expected)?;
     output
         .sync_all()
         .map_err(|error| format!("sync snapshot restore target failed: {error}"))?;
@@ -1014,7 +1034,6 @@ fn restore_snapshot_file(
         || metadata.nlink() != 1
         || metadata.size() != expected.size_bytes
         || (metadata.mode() & 0o111 != 0) != expected.executable
-        || format!("sha256:{:x}", digest.finalize()) != expected.sha256
     {
         return Err("snapshot restore file integrity mismatch".to_string());
     }
@@ -1027,12 +1046,16 @@ fn restore_snapshot_file(
 fn restore_snapshot_file(
     _input: &mut impl Read,
     _expected: &SandboxWorkspaceSnapshotFile,
+    _created_directories: &mut BTreeSet<PathBuf>,
 ) -> Result<(), String> {
     Err("sandbox helper requires Linux".to_string())
 }
 
 #[cfg(target_os = "linux")]
-fn create_snapshot_directories(target: &Path) -> Result<(), String> {
+fn create_snapshot_directories(
+    target: &Path,
+    created_directories: &mut BTreeSet<PathBuf>,
+) -> Result<(), String> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let root = workspace_root()?;
@@ -1064,6 +1087,7 @@ fn create_snapshot_directories(target: &Path) -> Result<(), String> {
                 if metadata.uid() != 0 || metadata.gid() != 0 {
                     return Err("snapshot restore parent initial ownership is invalid".to_string());
                 }
+                created_directories.insert(current.clone());
             }
             Err(error) => return Err(format!("inspect snapshot restore parent failed: {error}")),
         }
@@ -1072,21 +1096,14 @@ fn create_snapshot_directories(target: &Path) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn seal_snapshot_directories(manifest: &SandboxWorkspaceSnapshotManifest) -> Result<(), String> {
+fn seal_snapshot_directories(directories: &BTreeSet<PathBuf>) -> Result<(), String> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::MetadataExt;
 
-    let root = workspace_root()?;
     let identity = workspace::context()?;
-    let mut directories = BTreeSet::new();
-    for file in &manifest.files {
-        let mut parent = Path::new(file.path.as_str()).parent();
-        while let Some(relative) = parent.filter(|path| !path.as_os_str().is_empty()) {
-            directories.insert(root.join(relative));
-            parent = relative.parent();
-        }
-    }
-    for path in directories.into_iter().rev() {
+    // Existing directories can contain protected inputs even when an ordinary
+    // restored output shares their parent. Only seal directories we created.
+    for path in directories.iter().rev() {
         let metadata = fs::symlink_metadata(path.as_path())
             .map_err(|error| format!("inspect snapshot restore parent failed: {error}"))?;
         if !metadata.is_dir()
@@ -1122,7 +1139,7 @@ fn seal_snapshot_directories(manifest: &SandboxWorkspaceSnapshotManifest) -> Res
 }
 
 #[cfg(not(target_os = "linux"))]
-fn seal_snapshot_directories(_manifest: &SandboxWorkspaceSnapshotManifest) -> Result<(), String> {
+fn seal_snapshot_directories(_directories: &BTreeSet<PathBuf>) -> Result<(), String> {
     Err("sandbox helper requires Linux".to_string())
 }
 
@@ -2375,6 +2392,215 @@ mod tests {
             "Plugin",
         )
         .is_err());
+    }
+
+    #[test]
+    fn snapshot_restore_consumes_skipped_file_bytes_without_losing_alignment() {
+        let file = SandboxWorkspaceSnapshotFile {
+            path: "inputs/original.txt".into(),
+            size_bytes: 3,
+            sha256: format!("sha256:{:x}", Sha256::digest(b"one")),
+            executable: false,
+        };
+        let mut stream = std::io::Cursor::new(b"onefollowing output");
+        restore_snapshot_contents(&mut stream, &mut std::io::sink(), &file).unwrap();
+        let mut remaining = Vec::new();
+        stream.read_to_end(&mut remaining).unwrap();
+        assert_eq!(remaining, b"following output");
+        assert!(restore_snapshot_contents(&mut &b"on"[..], &mut std::io::sink(), &file).is_err());
+        assert_eq!(
+            restore_snapshot_contents(&mut &b"two"[..], &mut std::io::sink(), &file),
+            Err("snapshot restore file integrity mismatch".into())
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn snapshot_restore_preserves_inputs_and_recovers_other_files() {
+        use centaeris_core::execution::ExecutionInputState;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        if std::env::var("CENTAERIS_SNAPSHOT_RESTORE_FIXTURE").as_deref() == Ok("1") {
+            let root = workspace_root().unwrap();
+            fs::create_dir(root).unwrap();
+            fs::set_permissions(root, fs::Permissions::from_mode(0o755)).unwrap();
+            let directory = File::open(root).unwrap();
+            // SAFETY: this is the test's newly created and opened workspace.
+            assert_eq!(
+                unsafe { libc::fchown(directory.as_raw_fd(), AGENT_UID, AGENT_GID) },
+                0
+            );
+            let originals = [
+                (
+                    "branch",
+                    "inputs/branch/original.txt",
+                    b"branch original".as_slice(),
+                ),
+                ("exact", "inputs/exact.txt", b"current original".as_slice()),
+                (
+                    "revoked",
+                    "inputs/revoked.txt",
+                    b"revoked original".as_slice(),
+                ),
+            ];
+            let inventory = SandboxInputInventory {
+                schema: SANDBOX_INPUT_INVENTORY_SCHEMA.into(),
+                inputs: originals
+                    .iter()
+                    .map(|(name, path, bytes)| {
+                        let target = root.join(path);
+                        install_protected_input(&target, bytes).unwrap();
+                        let state = if *name == "revoked" {
+                            install_tombstone(&target).unwrap();
+                            Some(ExecutionInputState::AccessRevoked)
+                        } else {
+                            None
+                        };
+                        SandboxMaterializedInput {
+                            input_ref: (*name).into(),
+                            virtual_path: (*path).into(),
+                            size_bytes: bytes.len() as u64,
+                            sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+                            source_version: "1".into(),
+                            state,
+                        }
+                    })
+                    .collect(),
+            };
+            let before = originals.map(|(_, path, _)| fs::metadata(root.join(path)).unwrap());
+            let frame = |files: &[(&str, &[u8], bool)]| {
+                let manifest = SandboxWorkspaceSnapshotManifest {
+                    schema: SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA.into(),
+                    files: files
+                        .iter()
+                        .map(|(path, bytes, executable)| SandboxWorkspaceSnapshotFile {
+                            path: (*path).into(),
+                            size_bytes: bytes.len() as u64,
+                            sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+                            executable: *executable,
+                        })
+                        .collect(),
+                };
+                let metadata = canonical_snapshot_manifest_bytes(&manifest).unwrap();
+                let mut frame = (metadata.len() as u32).to_be_bytes().to_vec();
+                frame.extend_from_slice(&metadata);
+                for (_, bytes, _) in files {
+                    frame.extend_from_slice(bytes);
+                }
+                frame
+            };
+            let files: &[(&str, &[u8], bool)] = &[
+                ("a-output.bin", b"\0first output\xff", false),
+                ("inputs/branch", b"old ancestor content", false),
+                ("inputs/exact.txt", b"current original", false),
+                (
+                    "inputs/ordinary.txt",
+                    b"ordinary output under inputs",
+                    false,
+                ),
+                ("inputs/revoked.txt", b"revoked original", false),
+                ("reports/result.txt", b"report output", true),
+                ("z-output.txt", b"last output after skipped bytes", false),
+            ];
+            restore_snapshot_frame(&mut std::io::Cursor::new(frame(files)), &inventory).unwrap();
+            for index in [0, 3, 5, 6] {
+                let (path, bytes, executable) = files[index];
+                let target = root.join(path);
+                assert_eq!(fs::read(&target).unwrap(), bytes, "restored {path}");
+                let metadata = fs::metadata(target).unwrap();
+                assert_eq!(metadata.uid(), AGENT_UID, "restored {path}");
+                assert_eq!(metadata.gid(), AGENT_GID, "restored {path}");
+                assert_eq!(metadata.mode() & 0o111 != 0, executable, "restored {path}");
+            }
+            // A stale version at the same protected path is still consumed and
+            // checked; it does not replace current authority or revive a tombstone.
+            restore_snapshot_frame(
+                &mut std::io::Cursor::new(frame(&[
+                    ("inputs/exact.txt", b"different older content", false),
+                    ("inputs/revoked.txt", b"revoked original", false),
+                ])),
+                &inventory,
+            )
+            .unwrap();
+            restore_snapshot_frame(
+                &mut std::io::Cursor::new(frame(&[(
+                    "inputs/exact.txt/child.txt",
+                    b"old descendant content",
+                    false,
+                )])),
+                &inventory,
+            )
+            .unwrap();
+            for (index, (name, path, bytes)) in originals.iter().enumerate() {
+                let target = root.join(path);
+                let metadata = fs::metadata(&target).unwrap();
+                assert_eq!(metadata.ino(), before[index].ino(), "protected {name}");
+                assert_eq!(metadata.uid(), 0, "protected {name}");
+                assert_eq!(metadata.gid(), 0, "protected {name}");
+                assert_eq!(metadata.mode(), before[index].mode(), "protected {name}");
+                let expected = if *name == "revoked" {
+                    b"".as_slice()
+                } else {
+                    *bytes
+                };
+                assert_eq!(fs::read(target).unwrap(), expected, "protected {name}");
+            }
+            for parent in ["inputs", "inputs/branch"] {
+                let metadata = fs::metadata(root.join(parent)).unwrap();
+                assert_eq!(metadata.uid(), 0, "protected parent {parent}");
+                assert_eq!(metadata.gid(), 0, "protected parent {parent}");
+            }
+            assert_eq!(fs::metadata(root.join("reports")).unwrap().uid(), AGENT_UID);
+            let repaired =
+                collect_snapshot_manifest(&inventory, &mut SnapshotObservation::default()).unwrap();
+            assert_eq!(
+                repaired
+                    .files
+                    .iter()
+                    .map(|file| file.path.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "a-output.bin",
+                    "inputs/ordinary.txt",
+                    "reports/result.txt",
+                    "z-output.txt"
+                ]
+            );
+            return;
+        }
+        // The production helper and this filesystem fixture both require root.
+        // Non-root runs retain the portable stream-integrity regression above.
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let parent = std::env::temp_dir().join(format!(
+            "centaeris-snapshot-restore-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&parent).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agent::tests::snapshot_restore_preserves_inputs_and_recovers_other_files",
+                "--nocapture",
+            ])
+            .env("CENTAERIS_SNAPSHOT_RESTORE_FIXTURE", "1")
+            .env("CENTAERIS_WORKSPACE_ROOT", parent.join("workspace"))
+            .env("CENTAERIS_WORKSPACE_USER", "10001:10001")
+            .output()
+            .unwrap();
+        fs::remove_dir_all(parent).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
