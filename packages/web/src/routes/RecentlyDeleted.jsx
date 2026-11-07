@@ -202,6 +202,6 @@ export function RecentlyDeleted({ workspace }) {
         {empty ? <div className="shTrashAllEmpty" role="status"><Trash2 aria-hidden="true" /><p>{t(search || location || deletedByUserId ? "trashPopover.noMatchingItems" : "trashPopover.trashIsEmpty")}</p></div> : null}
       </div>
       <footer>{t("trashPopover.itemsStayInTrashFor30DaysBeforeBeing")}</footer>
-      <ConfirmDialog open={Boolean(purgeTarget)} title={t("trashPopover.deleteThisMaterial")} message={actionError?.message} busy={Boolean(busyKey)} onCancel={() => setPurgeTarget(null)} onConfirm={() => void purge()} />
+      <ConfirmDialog open={Boolean(purgeTarget)} title={t("trashPopover.deleteThisMaterial")} popupClassName="settingsArchiveConfirm" message={actionError?.message} busy={Boolean(busyKey)} onCancel={() => setPurgeTarget(null)} onConfirm={() => void purge()} />
   </section>;
 }
