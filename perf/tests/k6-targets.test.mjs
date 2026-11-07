@@ -45,3 +45,13 @@ test('rolling workload reuses the specified session and pre-generated operation 
   assert.ok(submitted.url.endsWith('/sessions/retained-session/messages'));
   assert.equal(submitted.payload.operationId, 'a'.repeat(32));
 });
+
+test('observed admission records rejected HTTP responses without inventing a Run or exposing error prose', () => {
+  const { context } = common(configured);
+  context.http.request = () => ({ status: 409, json: () => 'session_workspace_preservation_pending' });
+  const result = context.startRunObserved({}, 'csrf', 'workspace-owned', 'model-tools', 'fixed work');
+  assert.equal(result.httpStatus, 409); assert.equal(result.errorCode, 'session_workspace_preservation_pending');
+  assert.equal(result.agentRunId, undefined); assert.ok(result.admissionMs >= 0);
+  context.http.request = () => ({ status: 503, json: () => 'private provider error prose' });
+  assert.equal(context.startRunObserved({}, '', 'workspace-owned', 'model-tools').errorCode, 'other');
+});

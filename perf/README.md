@@ -296,6 +296,42 @@ stdout-byte measurements do not estimate physical disk or complete API cost.
 
 ## Lightweight tool latency
 
+Use `k6/scenarios/session-latency.js` for bounded end-to-end arrival or rolling
+Session measurements. The fixture owns authentication, target model IDs and a
+loopback `PERF_LATENCY_CONTROL` HTTP endpoint. `GET /admission` returns
+`{"allowed":true}` while the declared load budget is open; `GET /release/{runId}`
+returns `{"released":true}` only after that original Run's environment release
+and lifecycle Job completion. These endpoints belong to an isolated test owner,
+not the product API. They must not query or mutate another deployment.
+
+Set `PERF_LATENCY_PLAN` to an exact JSON object, for example:
+
+```json
+{"mode":"arrival","task":"workspace","sessionPolicy":"rolling","vus":16,"iterations":2,"rate":12,"durationSeconds":180,"timeoutSeconds":120}
+```
+
+`mode` is `arrival` or `iterations`; `sessionPolicy` is `fresh`, `pairs` or
+`rolling`; `task` is `text`, `single-tool` or `workspace`. A workspace first Run
+writes a distinct random 4 MiB file and SHA-256 sidecar. A followup validates its
+size and digest after restoration. Each iteration submits one Run, observes and
+verifies its SSE results, then waits for release. That wait occupies a VU and is
+reported independently; submission-to-text starts immediately before the message
+POST. A new Session is created by that same POST, not an earlier setup request.
+
+Arrival plans preallocate the complete fixed VU budget; record k6
+`dropped_iterations` separately from HTTP rejections and fixture-stopped
+submissions. Plans admit at most 200 scheduled iterations and use bounded stream
+and release deadlines. The fixture owner must enforce the cumulative budget
+across windows and collect every accepted Run through drain, including failed
+client observations. Do not automatically retry rejected messages.
+
+For dispatch attribution, `experience_timing.py` additionally separates first
+claim, first Worker step-request start and first Runtime startup-profile start.
+Cross-process intervals require `--shared-wall-clock`; absent or reversed
+intervals stay null. `stepRequestToRuntimeStartupMs` includes transport and server
+work before startup and does not by itself establish a queue. Use
+`--model-kind delayedMock` for a deliberately delayed synthetic model.
+
 Use `k6/scenarios/light-experience.js` with `perf-light-experience` for the
 model-independent tool comparison. `single-tool` runs the first real Bash command;
 `multi-step` measures two real commands and file continuity in one Run. Keep

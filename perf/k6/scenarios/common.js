@@ -78,21 +78,40 @@ export function configuredTarget(profile) {
 
 // 发消息（sessionId=new 即创建会话并启动 run），返回 {sessionId, agentRunId}
 export function startRun(store, csrf, workspaceId, modelId, text, options = {}) {
+  const result = startRunObserved(store, csrf, workspaceId, modelId, text, options);
+  if (result.httpStatus !== 202) throw new Error(`message failed: ${result.httpStatus}`);
+  return { sessionId: result.sessionId, agentRunId: result.agentRunId,
+    operationId: result.operationId, sampleId: options.sampleId };
+}
+
+// Admission failures remain observations, including responses without a Run.
+export function startRunObserved(store, csrf, workspaceId, modelId, text, options = {}) {
   const operationId = options.operationId === undefined ? Array.from(new Uint8Array(crypto.randomBytes(16)),
     (byte) => byte.toString(16).padStart(2, '0')).join('') : options.operationId;
   const sessionId = options.sessionId === undefined ? 'new' : options.sessionId;
   const validId = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value);
   if (!validId(operationId) || !validId(sessionId)) throw new Error('explicit Run operation/session invalid');
+  const submittedAtMs = Date.now();
   const res = request('POST',
     `/api/workspaces/${workspaceId}/sessions/${encodeURIComponent(sessionId)}/messages`, store,
     { operationId,
       text: text || 'Perf load.', attachmentRefs: [], modelConfigRef: modelId },
     csrf, { type: 'post_message' });
-  if (res.status !== 202) throw new Error(`message failed: ${res.status}`);
+  const admissionMs = Date.now() - submittedAtMs;
+  if (res.status !== 202) {
+    let errorCode = 'other';
+    try {
+      const code = res.json('error');
+      if (['session_has_active_agent_run', 'session_workspace_preservation_pending',
+        'agent_run_admission_unavailable', 'workspace_capacity_exceeded'].includes(code)) errorCode = code;
+    } catch (_) { /* Non-JSON transport and proxy failures still retain their HTTP status. */ }
+    return { httpStatus: res.status, errorCode, operationId, submittedAtMs, admissionMs };
+  }
   const body = res.json();
   if (!validId(body.sessionId) || !validId(body.agentRunId)
       || (sessionId !== 'new' && body.sessionId !== sessionId)) throw new Error('admitted Run binding invalid');
-  return { sessionId: body.sessionId, agentRunId: body.agentRunId, operationId, sampleId: options.sampleId };
+  return { sessionId: body.sessionId, agentRunId: body.agentRunId, operationId,
+    sampleId: options.sampleId, httpStatus: res.status, submittedAtMs, admissionMs };
 }
 
 export function committedEvent(item, sessionId, agentRunId) {

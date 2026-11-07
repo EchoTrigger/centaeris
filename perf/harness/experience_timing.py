@@ -234,7 +234,7 @@ def _model_rows(intervals):
     return list(groups.values())
 
 
-def _startup_metrics(binding, intervals, worker, shared_wall_clock):
+def _startup_metrics(binding, intervals, worker, shared_wall_clock, startup=()):
     requests = [row for row in intervals if row["phase"] == "modelHttp"]
     first = min(requests, key=lambda row: row["atUnixMs"] - row["elapsedMs"], default=None)
     dispatch = first["atUnixMs"] - first["elapsedMs"] if first else None
@@ -248,6 +248,14 @@ def _startup_metrics(binding, intervals, worker, shared_wall_clock):
     if shared_wall_clock and dispatch is not None:
         claims = [timestamp for timestamp in claims if timestamp <= dispatch]
     rpc = [row for row in worker if row["phase"] == "rpc"]
+    steps = [row for row in rpc if row.get("route") == "/agent-runs/step"
+             and _duration(row.get("elapsedMs")) and _time(row.get("atUnixMs"))]
+    step_sent = min((row["atUnixMs"] - row["elapsedMs"] for row in steps), default=None)
+    runtime_start = min((row["atUnixMs"] - row["startupTotalMs"] for row in startup), default=None)
+    first_claim = min(claims, default=None)
+
+    def gap(start, end):
+        return round(end - start, 3) if shared_wall_clock and start is not None and end is not None and end >= start else None
     probes = [row for row in intervals if row["phase"] == "recoveryPostCaptureGeneration"
               and row["outcome"] == "ok"]
     overlap = None
@@ -266,6 +274,14 @@ def _startup_metrics(binding, intervals, worker, shared_wall_clock):
                     and row["atUnixMs"] <= dispatch]
     return {
         "firstModelHttpStartAtMs": dispatch,
+        "firstClaimAtMs": first_claim,
+        "firstStepRequestSentAtMs": step_sent,
+        "firstRuntimeStartupAtMs": runtime_start,
+        "submitToFirstClaimMs": gap(submitted, first_claim),
+        "firstClaimToStepRequestMs": gap(first_claim, step_sent),
+        # This includes transport/server work before startup; it is not a queue attribution.
+        "stepRequestToRuntimeStartupMs": gap(step_sent, runtime_start),
+        "submitToRuntimeStartupMs": gap(submitted, runtime_start),
         "submitToFirstModelHttpMs": round(dispatch - submitted, 3)
         if shared_wall_clock and dispatch is not None and submitted is not None and dispatch >= submitted else None,
         "firstModelSafePointMs": safe_point["elapsedMs"] if safe_point else None,
@@ -282,7 +298,7 @@ def _startup_metrics(binding, intervals, worker, shared_wall_clock):
 def build_report(client_records, observations, *, execution_mode="perRun", model_kind="immediateMock",
                  shared_wall_clock=False):
     """Project an experiment's timing facts without deciding product acceptance."""
-    if execution_mode not in {"perRun", "retained"} or model_kind not in {"immediateMock", "real"}:
+    if execution_mode not in {"perRun", "retained"} or model_kind not in {"immediateMock", "delayedMock", "real"}:
         raise ValueError("explicit supported timing plan required")
     records, observations = list(client_records), list(observations)
     if len(records) > MAX_RECORDS or len(observations) > MAX_RECORDS:
@@ -332,7 +348,7 @@ def build_report(client_records, observations, *, execution_mode="perRun", model
                    ("toolServiceTiming", any(row["phase"] == "toolService" for row in intervals)),
                    ("hostCommandTiming", bool(commands)), ("clientToolTiming", bool(tools))] if not present]
         rows.append({**binding, "jobId": job, "client": client, "startupProfiles": startup,
-                     "startupMetrics": _startup_metrics(binding, intervals, worker.get(job, ()), shared_wall_clock),
+                     "startupMetrics": _startup_metrics(binding, intervals, worker.get(job, ()), shared_wall_clock, startup),
                      "intervals": intervals, "runtimeCoveredMs": _covered(intervals) if intervals else None,
                      "criticalPath": "notObserved", "modelRequests": model, "tools": tools,
                      "hostCommands": commands,
@@ -356,7 +372,7 @@ def main():
     parser.add_argument("--shared-wall-clock", action="store_true",
                         help="Client, Worker and Runtime use the same host wall clock")
     parser.add_argument("--execution-mode", choices=("perRun", "retained"), required=True)
-    parser.add_argument("--model-kind", choices=("immediateMock", "real"), required=True)
+    parser.add_argument("--model-kind", choices=("immediateMock", "delayedMock", "real"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     observations = read_records(args.runtime_observations)

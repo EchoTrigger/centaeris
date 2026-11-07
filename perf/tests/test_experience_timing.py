@@ -120,6 +120,27 @@ class ExperienceTimingTests(unittest.TestCase):
         self.assertIsNone(separate["submitToFirstModelHttpMs"])
         self.assertIsNone(separate["firstToLastObservedClaimMs"])
 
+    def test_worker_dispatch_gap_is_distinct_from_runtime_startup_and_requires_shared_clock(self):
+        startup = span("startupProfile", 0, 5000)
+        startup.pop("elapsedMs")
+        startup.update(runtimePreludeMs=20, sandboxEnsureMs=1800, mcpCredentialResolveMs=0,
+                       mcpDiscoveryMs=0, workspaceRestoreMs=0, sessionStartCommitMs=10,
+                       startupTotalMs=2000, serverCount=0, credentialCount=0, mcpConnectionCount=0)
+        observations = [startup,
+            span("claimResult", 0, 1100, source="worker", outcome="claimed"),
+            span("rpc", 5000, 6500, source="worker", route="/agent-runs/step"),
+            span("rpc", 100, 6500, source="worker", route="/internal/jobs/heartbeat")]
+        metrics = self.report(observations, shared_wall_clock=True)["runs"][0]["startupMetrics"]
+        self.assertEqual(metrics["submitToFirstClaimMs"], 100)
+        self.assertEqual(metrics["firstClaimToStepRequestMs"], 400)
+        self.assertEqual(metrics["stepRequestToRuntimeStartupMs"], 1500)
+        self.assertEqual(metrics["submitToRuntimeStartupMs"], 2000)
+        separate = self.report(observations)["runs"][0]["startupMetrics"]
+        for key in ("submitToFirstClaimMs", "firstClaimToStepRequestMs", "stepRequestToRuntimeStartupMs"):
+            self.assertIsNone(separate[key])
+        missing = self.report()["runs"][0]["startupMetrics"]
+        self.assertIsNone(missing["stepRequestToRuntimeStartupMs"])
+
     def test_host_clocks_are_joined_by_task_identity_without_cross_clock_subtraction(self):
         host=lambda phase,elapsed,end,task="task-a":{
             "schema":"workspace.perf.v1","source":"host","phase":phase,
