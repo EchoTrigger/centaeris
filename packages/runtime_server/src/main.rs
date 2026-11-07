@@ -3226,9 +3226,11 @@ fn execute_agent_run(
                         return Err(reason);
                     }
                 }
-                let current_generation = observed_workspace_generation(docker_execution.as_ref());
                 let generation_stable = uploaded.generation.token().is_none()
-                    || workspace_generations_match(&uploaded.generation, &current_generation);
+                    || workspace_generations_match(
+                        &uploaded.generation,
+                        &observed_workspace_generation(docker_execution.as_ref()),
+                    );
                 if generation_stable
                     && docker_execution.accept_captured_recovery_workspace(uploaded.evidence)?
                 {
