@@ -799,12 +799,26 @@ impl OutputLog {
         }))
     }
     fn append(&mut self, stream: EnvironmentTaskStream, bytes: &[u8]) -> Result<(), String> {
+        // Ordinary commands keep publishing one durable record at a time.
         for data in bytes.chunks(CHUNK) {
-            if data.is_empty() {
-                continue;
-            }
+            self.append_batch(stream.clone(), data)?;
+        }
+        Ok(())
+    }
+    fn append_batch(&mut self, stream: EnvironmentTaskStream, bytes: &[u8]) -> Result<(), String> {
+        self.append_batch_with_sync(stream, bytes, File::sync_data)
+    }
+    fn append_batch_with_sync(
+        &mut self,
+        stream: EnvironmentTaskStream,
+        bytes: &[u8],
+        sync: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Result<(), String> {
+        let mut next = self.next;
+        for data in bytes.chunks(CHUNK) {
+            let following = next.checked_add(1).ok_or("task_output_cursor_exhausted")?;
             let mut header = [0; HEADER];
-            header[..8].copy_from_slice(&self.next.to_le_bytes());
+            header[..8].copy_from_slice(&next.to_le_bytes());
             header[8..10].copy_from_slice(&(data.len() as u16).to_le_bytes());
             header[10] = if stream == EnvironmentTaskStream::Stdout {
                 0
@@ -817,18 +831,20 @@ impl OutputLog {
             header[11..].copy_from_slice(&h.finalize());
             self.file
                 .seek(SeekFrom::Start(
-                    ((self.next % self.slots as u64) as usize * (HEADER + CHUNK)) as u64,
+                    ((next % self.slots as u64) as usize * (HEADER + CHUNK)) as u64,
                 ))
                 .map_err(|_| "task_output_write_failed")?;
             self.file
                 .write_all(&header)
                 .and_then(|_| self.file.write_all(data))
-                .and_then(|_| self.file.sync_data())
                 .map_err(|_| "task_output_write_failed")?;
-            self.next = self
-                .next
-                .checked_add(1)
-                .ok_or("task_output_cursor_exhausted")?;
+            next = following;
+        }
+        if next != self.next {
+            sync(&self.file).map_err(|_| "task_output_write_failed")?;
+            // Queries hold the same log mutex, so none of this batch is published
+            // before its sync succeeds. Disk records retain their existing format.
+            self.next = next;
         }
         Ok(())
     }

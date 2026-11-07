@@ -563,6 +563,115 @@ mod tests {
         elf
     }
 
+    struct InspectEof {
+        bytes: std::io::Cursor<Vec<u8>>,
+        log: Arc<Mutex<OutputLog>>,
+        published_before_eof: u64,
+    }
+
+    impl Read for InspectEof {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            if self.bytes.position() == self.bytes.get_ref().len() as u64 {
+                assert_eq!(self.log.lock().unwrap().next, self.published_before_eof);
+            }
+            self.bytes.read(bytes)
+        }
+    }
+
+    #[test]
+    fn helper_stdout_batches_full_results_and_flushes_the_eof_tail() {
+        for (trusted, stream, size, published_before_eof) in [
+            (
+                true,
+                EnvironmentTaskStream::Stdout,
+                HELPER_STDOUT_BATCH_BYTES + CHUNK + 17,
+                (HELPER_STDOUT_BATCH_BYTES / CHUNK) as u64,
+            ),
+            (false, EnvironmentTaskStream::Stdout, CHUNK + 17, 2),
+            (true, EnvironmentTaskStream::Stderr, CHUNK + 17, 2),
+        ] {
+            let fixture = BinaryFixture::new();
+            let capture = trusted.then(|| {
+                Arc::new(Mutex::new(
+                    HelperCapture::open(&fixture.0, "task-batch", 4 * 1024 * 1024, false).unwrap(),
+                ))
+            });
+            let log = Arc::new(Mutex::new(
+                OutputLog::open(
+                    &fixture.0.join("output"),
+                    ENVIRONMENT_TASK_OUTPUT_BYTES / CHUNK,
+                )
+                .unwrap(),
+            ));
+            let bytes = vec![42; size];
+            let workers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            assert!(drain(DrainWork {
+                reader: Box::new(InspectEof {
+                    bytes: std::io::Cursor::new(bytes.clone()),
+                    log: log.clone(),
+                    published_before_eof,
+                }),
+                log: log.clone(),
+                stream: stream.clone(),
+                capture: capture.clone(),
+                _lease: DrainLease::new(&workers),
+            }));
+            let mut output = log.lock().unwrap();
+            assert_eq!(output.next, size.div_ceil(CHUNK) as u64);
+            let cursor = output.next - 1;
+            let (tail, _, _, gap, more) = output.read(cursor, ENVIRONMENT_TASK_READ_BYTES).unwrap();
+            assert!(!gap && !more);
+            assert_eq!(tail[0].data, bytes[(size / CHUNK) * CHUNK..]);
+            drop(output);
+            if let Some(capture) = capture {
+                let other = if stream == EnvironmentTaskStream::Stdout {
+                    EnvironmentTaskStream::Stderr
+                } else {
+                    EnvironmentTaskStream::Stdout
+                };
+                assert!(drain(DrainWork {
+                    reader: Box::new(std::io::empty()),
+                    log: log.clone(),
+                    stream: other,
+                    capture: Some(capture.clone()),
+                    _lease: DrainLease::new(&workers),
+                }));
+                let suffix = if stream == EnvironmentTaskStream::Stdout {
+                    "stdout"
+                } else {
+                    "stderr"
+                };
+                assert_eq!(
+                    fs::read(fixture.0.join(format!("task-batch.{suffix}"))).unwrap(),
+                    bytes
+                );
+            }
+            assert_eq!(workers.load(std::sync::atomic::Ordering::Acquire), 0);
+        }
+    }
+
+    #[test]
+    fn helper_stdout_failed_tail_persistence_cannot_report_successful_drain() {
+        let fixture = BinaryFixture::new();
+        let capture = Arc::new(Mutex::new(
+            HelperCapture::open(&fixture.0, "task-failed", 128, false).unwrap(),
+        ));
+        let path = fixture.0.join("output");
+        let mut output = OutputLog::open(&path, 1).unwrap();
+        output.file = File::open(&path).unwrap();
+        let log = Arc::new(Mutex::new(output));
+        let workers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        assert!(!drain(DrainWork {
+            reader: Box::new(std::io::Cursor::new(b"partial result".to_vec())),
+            log: log.clone(),
+            stream: EnvironmentTaskStream::Stdout,
+            capture: Some(capture),
+            _lease: DrainLease::new(&workers),
+        }));
+        assert_eq!(log.lock().unwrap().next, 0);
+        assert_eq!(workers.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
     #[test]
     fn helper_digest_and_sealed_bytes_survive_source_replacement() {
         let fixture = BinaryFixture::new();
