@@ -13,7 +13,7 @@ function subject(plan = {}, status = 202, broken = false) {
     Date: { now: () => clock++ }, Trend: Metric, Rate: Metric, Counter: Metric,
     crypto: { randomBytes: () => new Uint8Array(16).fill(submissions.length + 1) }, sleep() {},
     console: { log(line) { records.push(JSON.parse(line.slice('PERF_EXPERIENCE '.length))); } },
-    http: { get() { return { status: 200, json: field => field === 'allowed' || field === 'released' }; } },
+    http: { get() { return { status: 200, json: field => ['allowed', 'released', 'ready'].includes(field) }; } },
     configuredTarget: profile => ({ workspaceId: 'workspace', modelId: profile }), login: () => ({ store: {}, csrf: 'csrf' }),
     startRunObserved(...args) {
       submissions.push(args);
@@ -75,4 +75,13 @@ test('pair policy returns to a fresh Session and unbounded plans fail before req
   assert.deepEqual(s.submissions.map(args => args[5].sessionId), ['new', 'owned-session', 'new', 'owned-session']);
   for (const bad of [{ mode: 'unknown' }, { rate: 121 }, { vus: 0 }, { durationSeconds: 181 },
     { rate: 120, durationSeconds: 180 }, { unknown: 1 }]) assert.throws(() => subject(bad));
+});
+
+test('fixed cohorts withhold the next turn when the other environments have not released', () => {
+  const s = subject({ mode: 'iterations', vus: 2, iterations: 2 });
+  s.context.http.get = url => ({ status: url.includes('/barrier/') ? 503 : 200, json: () => true });
+  const data = s.context.setup(); s.context.iteration(data); s.context.iteration(data);
+  assert.equal(s.submissions.length, 1);
+  assert.equal(s.records.find(r => r.phase === 'failed').errorCode, 'latency_barrier_failed');
+  assert.deepEqual(s.metrics.get('latency_not_submitted'), [1]);
 });

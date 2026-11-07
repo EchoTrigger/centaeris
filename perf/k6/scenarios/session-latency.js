@@ -110,6 +110,20 @@ export default function (data) {
       if (Date.now() >= deadline) throw new Error('environment release deadline');
       sleep(0.25);
     }
+    // Fixed-concurrency cohorts start the next turn together after all releases.
+    // This pacing is outside submission latency and is never used for arrivals.
+    if (plan.mode === 'iterations' && plan.vus > 1 && sequence < plan.iterations) {
+      stage = 'barrier';
+      const barrierDeadline = Date.now() + plan.timeoutSeconds * 1000;
+      while (true) {
+        const response = http.get(control + '/barrier/' + sequence + '/' + encodeURIComponent(admitted.agentRunId),
+          { tags: { name: 'fixture_barrier' }, timeout: '5s' });
+        if (response.status !== 200) throw new Error('fixture cohort observation failed');
+        if (response.json('ready')) break;
+        if (Date.now() >= barrierDeadline) throw new Error('cohort release deadline');
+        sleep(0.25);
+      }
+    }
     failed.add(0);
   } catch (_) {
     blocked = true; failed.add(1); record('failed', data, sampleId, admitted, { turn, errorCode: 'latency_' + stage + '_failed' });

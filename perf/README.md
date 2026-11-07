@@ -301,7 +301,10 @@ Session measurements. The fixture owns authentication, target model IDs and a
 loopback `PERF_LATENCY_CONTROL` HTTP endpoint. `GET /admission` returns
 `{"allowed":true}` while the declared load budget is open; `GET /release/{runId}`
 returns `{"released":true}` only after that original Run's environment release
-and lifecycle Job completion. These endpoints belong to an isolated test owner,
+and lifecycle Job completion. Fixed multi-VU cohorts additionally poll
+`GET /barrier/{turnNumber}/{runId}` for `{"ready":true}` after every environment
+in that cohort releases, keeping the following turn a simultaneous burst.
+Arrival scenarios never use this barrier. These endpoints belong to an isolated test owner,
 not the product API. They must not query or mutate another deployment.
 
 Set `PERF_LATENCY_PLAN` to an exact JSON object, for example:
