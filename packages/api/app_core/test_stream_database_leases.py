@@ -29,6 +29,8 @@ from .http.security import ProductSessionAuth
 from .http import streaming
 from .models import AgentRun, ModelConfig, Workspace
 from .test_model_database_leases import database_probe
+from .test_workspace_file_http import WorkspaceFileHttpFixture, document, file_descriptor
+from .workspace_file_objects import FileSequence
 
 from .agent_run_stream import _load_terminal_sequence
 from .http.streaming import _prepare_agent_run_stream
@@ -129,33 +131,14 @@ class StreamDatabaseLeaseTests(TransactionTestCase):
         self._other_request_can_query_while_stream_waits(query)
 
 
-@override_settings(ROOT_URLCONF=__name__, ALLOWED_HOSTS=["127.0.0.1"])
-class PublicStreamHttpDatabaseLeaseTests(TransactionTestCase):
+class HttpDatabaseLeaseFixture:
     """Exercise real transport closure through public auth and the product handler."""
 
     serialized_rollback = True
 
     def setUp(self):
-        user = get_user_model().objects.create_user(username="http-stream-lease", password="test")
-        workspace = Workspace.objects.create(name="HTTP stream leases", createdBy=user)
-        workspace.members.add(user)
-        model = ModelConfig.objects.create(displayName="HTTP stream leases")
-        self.runs = {}
-        for mode in ("normal", "terminal-disconnect", "orm-disconnect", "session-save-disconnect"):
-            self.runs[mode] = []
-            for _ in range(5):
-                session = fixtures.create_session(workspace=workspace, owner=user)
-                run = AgentRun.objects.create(
-                    workspace=workspace, session=session, user=user,
-                    modelConfig=model, prompt="HTTP stream lease", status="running",
-                )
-                fixtures.create_agent_run_authorization(run)
-                fixtures.append_started(run)
-                if mode != "orm-disconnect":
-                    fixtures.append_completed(run)
-                self.runs[mode].append((session.id, run.id))
-        self.client.force_login(user)
-        self.cookie = f"{settings.SESSION_COOKIE_NAME}={self.client.cookies[settings.SESSION_COOKIE_NAME].value}"
+        super().setUp()
+        self._prepare_http_fixtures()
         self.observer = psycopg.connect(**(connections["default"].get_connection_params() | {
             "application_name": "centaeris-stream-lease-observer", "connect_timeout": 2,
         }), autocommit=True)
@@ -189,6 +172,28 @@ class PublicStreamHttpDatabaseLeaseTests(TransactionTestCase):
         self._observe_pool()
         self._observe_database_stages()
         self._start_http_server()
+
+    def _prepare_http_fixtures(self):
+        user = get_user_model().objects.create_user(username="http-stream-lease", password="test")
+        workspace = Workspace.objects.create(name="HTTP stream leases", createdBy=user)
+        workspace.members.add(user)
+        model = ModelConfig.objects.create(displayName="HTTP stream leases")
+        self.runs = {}
+        for mode in ("normal", "terminal-disconnect", "orm-disconnect", "session-save-disconnect"):
+            self.runs[mode] = []
+            for _ in range(5):
+                session = fixtures.create_session(workspace=workspace, owner=user)
+                run = AgentRun.objects.create(
+                    workspace=workspace, session=session, user=user,
+                    modelConfig=model, prompt="HTTP stream lease", status="running",
+                )
+                fixtures.create_agent_run_authorization(run)
+                fixtures.append_started(run)
+                if mode != "orm-disconnect":
+                    fixtures.append_completed(run)
+                self.runs[mode].append((session.id, run.id))
+        self.client.force_login(user)
+        self.cookie = f"{settings.SESSION_COOKIE_NAME}={self.client.cookies[settings.SESSION_COOKIE_NAME].value}"
 
     def _record(self, event, **details):
         with self.trace_lock:
@@ -287,6 +292,22 @@ class PublicStreamHttpDatabaseLeaseTests(TransactionTestCase):
             result = original_cursor(wrapper, *args, **kwargs)
             owner._record("cursor", wrapper=id(wrapper), pool=id(wrapper.pool),
                 connection=id(wrapper.connection))
+            state = owner.requests.get(_lease_request.get())
+            if state and state["mode"] == "workspace-file-open-disconnect" and not state.get("pauseInstalled"):
+                state["pauseInstalled"] = True
+
+                def pause(execute, sql, params, many, context):
+                    try:
+                        value = execute(sql, params, many, context)
+                        owner._record("ormEntered", connection=id(context["connection"].connection))
+                        state["ormEntered"].set()
+                        if not state["ormRelease"].wait(8):
+                            raise TimeoutError("HTTP disconnect did not release authorized file opening SQL")
+                        return value
+                    finally:
+                        context["connection"].execute_wrappers.remove(pause)
+
+                wrapper.execute_wrappers.append(pause)
             return result
 
         def poll(*args, **kwargs):
@@ -323,7 +344,10 @@ class PublicStreamHttpDatabaseLeaseTests(TransactionTestCase):
         self.addCleanup(signals.request_finished.disconnect, finished)
 
     def _start_http_server(self):
-        from api.asgi import application
+        from api.asgi import WorkspaceApplication, application
+        full_lifespan = getattr(self, "full_lifespan", False)
+        if full_lifespan:
+            application = WorkspaceApplication()
         owner = self
 
         async def observed(scope, receive, send):
@@ -360,7 +384,7 @@ class PublicStreamHttpDatabaseLeaseTests(TransactionTestCase):
         self.port = listener.getsockname()[1]
         self.server = uvicorn.Server(uvicorn.Config(
             observed, host="127.0.0.1", port=self.port, loop="asyncio", http="h11",
-            lifespan="off", log_level="critical", access_log=False,
+            lifespan="on" if full_lifespan else "off", log_level="critical", access_log=False,
             timeout_graceful_shutdown=5,
         ))
         self.server_thread = threading.Thread(
@@ -371,6 +395,8 @@ class PublicStreamHttpDatabaseLeaseTests(TransactionTestCase):
         def stop_server():
             for state in self.requests.values():
                 state["ormRelease"].set()
+                if "readRelease" in state:
+                    state["readRelease"].set()
             self.server.should_exit = True
             self.server_thread.join(8)
             listener.close()
@@ -486,6 +512,9 @@ class PublicStreamHttpDatabaseLeaseTests(TransactionTestCase):
                 self.assertIn("streamPreparation", stages)
                 self.assertIn("sessionSave", stages)
 
+
+@override_settings(ROOT_URLCONF=__name__, ALLOWED_HOSTS=["127.0.0.1"])
+class PublicStreamHttpDatabaseLeaseTests(HttpDatabaseLeaseFixture, TransactionTestCase):
     def test_public_http_normal_terminal_returns_the_single_pool_lease(self):
         self._exercise("normal")
 
@@ -534,3 +563,207 @@ class PublicStreamHttpDatabaseLeaseTests(TransactionTestCase):
                     queries = [event for event in self.events if event["request"] == request_id and event["event"] == "cursor"]
                 self.assertEqual({event["pool"] for event in queries}, {id(self.pool)})
                 self.assertIn("sessionSave", {event["stage"] for event in queries})
+
+
+@override_settings(ROOT_URLCONF=__name__, ALLOWED_HOSTS=["127.0.0.1", "testserver"])
+class WorkspaceFileHttpDatabaseLeaseTests(HttpDatabaseLeaseFixture, WorkspaceFileHttpFixture, TransactionTestCase):
+    """Authorized file opening must not strand a different thread's database lease."""
+
+    full_lifespan = True
+
+    def _prepare_http_fixtures(self):
+        self.download_content = b"w" * (4 * 1024 * 1024)
+        self.store_files([self.download_content])
+        committed, snapshot, _encoded = self.snapshot_upload(document([
+            ("lease.txt", self.download_content, False),
+        ]))
+        self.assertEqual(committed.status_code, 201, committed.content)
+        reader = self.new_reader()
+        self.download_body = {
+            "schema": "runtime.workspace_files.download.v1", **reader,
+            "checkpointId": None, "snapshot": snapshot,
+            "files": [file_descriptor(self.download_content)],
+        }
+        self.file_read_state = None
+        original_read = FileSequence.read
+
+        def read(sequence, *args, **kwargs):
+            value = original_read(sequence, *args, **kwargs)
+            state = self.file_read_state
+            if state is not None:
+                state["reads"] += 1
+                pause = ((state["boundary"] == "partial" and state["reads"] == 2)
+                    or (state["boundary"] == "content-length" and not value))
+                if pause and not state["readEntered"].is_set():
+                    state["readEntered"].set()
+                    if not state["readRelease"].wait(8):
+                        raise TimeoutError("HTTP disconnect did not release the file-read test barrier")
+            return value
+
+        self.enterContext(patch.object(FileSequence, "read", read))
+
+    def test_internal_workspace_file_download_returns_the_single_pool_lease(self):
+        self.assertEqual(self.pool.max_size, 1)
+        self._probe()
+        self._assert_pool_idle()
+        for number in range(5):
+            request_id = f"workspace-file-download:{number}"
+            state = {name: threading.Event() for name in (
+                "disconnected", "finished", "terminalSent", "ormEntered", "ormRelease",
+            )}
+            state["mode"] = "workspace-file-download"
+            self.requests[request_id] = state
+            client = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            response = None
+            try:
+                client.request("POST", "/internal/agent-runs/workspace-files/download",
+                    body=json.dumps(self.download_body).encode(), headers={
+                        "Content-Type": "application/json",
+                        "X-Internal-Token": settings.INTERNAL_API_TOKEN,
+                        "X-Lease-Test-Request": request_id, "Connection": "close",
+                    })
+                response = client.getresponse()
+                content = bytearray()
+                while chunk := response.read(4096):
+                    content.extend(chunk)
+                self.assertEqual(response.status, 200, content[:300])
+                self.assertEqual(bytes(content), self.download_content)
+            finally:
+                if response is not None:
+                    response.close()
+                client.close()
+            self.assertTrue(state["finished"].wait(5), "download HTTP lifecycle did not finish")
+            self._assert_pool_idle()
+            self._probe()
+            self._assert_pool_idle()
+            with self.trace_lock:
+                queries = [event for event in self.events if event["request"] == request_id and event["event"] == "cursor"]
+            self.assertTrue(queries, "download did not execute its real authorization ORM")
+            self.assertEqual({event["pool"] for event in queries}, {id(self.pool)})
+
+    def test_internal_workspace_file_open_disconnect_returns_the_single_pool_lease(self):
+        self._probe()
+        self._assert_pool_idle()
+        for number in range(5):
+            request_id = f"workspace-file-open-disconnect:{number}"
+            state = {name: threading.Event() for name in (
+                "disconnected", "finished", "terminalSent", "ormEntered", "ormRelease",
+            )}
+            state["mode"] = "workspace-file-open-disconnect"
+            self.requests[request_id] = state
+            client = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+            body = json.dumps(self.download_body).encode()
+            try:
+                client.sendall((
+                    "POST /internal/agent-runs/workspace-files/download HTTP/1.1\r\n"
+                    f"Host: 127.0.0.1:{self.port}\r\nContent-Type: application/json\r\n"
+                    f"X-Internal-Token: {settings.INTERNAL_API_TOKEN}\r\n"
+                    f"X-Lease-Test-Request: {request_id}\r\nContent-Length: {len(body)}\r\n\r\n"
+                ).encode() + body)
+                self.assertTrue(state["ormEntered"].wait(5), "authorized file opening SQL was not reached")
+                self._record("clientTransportClose", target=request_id)
+                client.shutdown(socket.SHUT_RDWR)
+                client.close()
+                self.assertTrue(state["disconnected"].wait(3), "server did not observe download socket disconnect")
+            finally:
+                client.close()
+                state["ormRelease"].set()
+            self.assertTrue(state["finished"].wait(5), "download HTTP lifecycle did not finish")
+            self._assert_pool_idle()
+            self._probe()
+            self._assert_pool_idle()
+
+    def test_internal_workspace_file_body_disconnect_returns_the_single_pool_lease(self):
+        self._probe()
+        self._assert_pool_idle()
+        for boundary in ("partial", "content-length"):
+            for number in range(5):
+                request_id = f"workspace-file-body-disconnect:{boundary}:{number}"
+                state = {name: threading.Event() for name in (
+                    "disconnected", "finished", "terminalSent", "ormEntered", "ormRelease",
+                    "readEntered", "readRelease",
+                )}
+                state.update(mode="workspace-file-body-disconnect", boundary=boundary, reads=0)
+                self.requests[request_id] = state
+                self.file_read_state = state
+                client = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+                response = None
+                try:
+                    client.request("POST", "/internal/agent-runs/workspace-files/download",
+                        body=json.dumps(self.download_body).encode(), headers={
+                            "Content-Type": "application/json", "X-Internal-Token": settings.INTERNAL_API_TOKEN,
+                            "X-Lease-Test-Request": request_id,
+                        })
+                    transport = client.sock
+                    response = client.getresponse()
+                    self.assertEqual(response.status, 200, response.read(300) if response.status != 200 else b"")
+                    self.assertEqual(int(response.getheader("Content-Length")), len(self.download_content))
+                    length = settings.STORAGE_STREAM_CHUNK_BYTES if boundary == "partial" else len(self.download_content)
+                    self.assertEqual(response.read(length), self.download_content[:length])
+                    self.assertTrue(state["readEntered"].wait(5), "non-ORM file-read boundary was not reached")
+                    self._record("clientTransportClose", target=request_id, consumedBytes=length)
+                    transport.shutdown(socket.SHUT_RDWR)
+                    client.close()
+                    self.assertTrue(state["disconnected"].wait(3), "server did not observe actual download disconnect")
+                finally:
+                    if response is not None:
+                        response.close()
+                    client.close()
+                    state["readRelease"].set()
+                self.assertTrue(state["finished"].wait(5), "download HTTP lifecycle did not finish")
+                self.file_read_state = None
+                self._assert_pool_idle()
+                self._probe()
+                self._assert_pool_idle()
+
+    def test_internal_workspace_file_read_wait_releases_the_single_pool_lease(self):
+        self._probe()
+        self._assert_pool_idle()
+        request_id = "workspace-file-read-wait"
+        state = {name: threading.Event() for name in (
+            "disconnected", "finished", "terminalSent", "ormEntered", "ormRelease",
+            "readEntered", "readRelease",
+        )}
+        state.update(mode="workspace-file-read-wait", boundary="partial", reads=0)
+        self.requests[request_id] = state
+        self.file_read_state = state
+        client = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        response = None
+        transport = None
+        try:
+            client.request("POST", "/internal/agent-runs/workspace-files/download",
+                body=json.dumps(self.download_body).encode(), headers={
+                    "Content-Type": "application/json", "X-Internal-Token": settings.INTERNAL_API_TOKEN,
+                    "X-Lease-Test-Request": request_id,
+                })
+            transport = client.sock
+            response = client.getresponse()
+            self.assertEqual(response.status, 200, response.read(300) if response.status != 200 else b"")
+            self.assertEqual(response.read(settings.STORAGE_STREAM_CHUNK_BYTES),
+                self.download_content[:settings.STORAGE_STREAM_CHUNK_BYTES])
+            self.assertTrue(state["readEntered"].wait(5), "non-ORM file reading did not pause")
+            self.assertFalse(state["finished"].is_set(), "probe must run while the download is still open")
+            with self.trace_lock:
+                pids = [pid for reference, pid in self.physical.values() if reference() is not None]
+                borrowed = dict(self.borrowed)
+                events = self.events[-18:]
+            physical = self.observer.execute(
+                "SELECT pid,state,xact_start IS NOT NULL FROM pg_stat_activity WHERE pid=ANY(%s)", [pids],
+            ).fetchall()
+            facts = {"pool": self.pool.get_stats(), "borrowed": borrowed, "physical": physical,
+                "fileReadPaused": state["readEntered"].is_set(), "events": events}
+            try:
+                self._probe()
+            except AssertionError as error:
+                error.add_note(json.dumps(facts, default=str))
+                raise
+        finally:
+            if transport is not None:
+                transport.shutdown(socket.SHUT_RDWR)
+            if response is not None:
+                response.close()
+            client.close()
+            state["readRelease"].set()
+            self.file_read_state = None
+            self.assertTrue(state["finished"].wait(5), "download HTTP lifecycle did not finish")
+        self._assert_pool_idle()
