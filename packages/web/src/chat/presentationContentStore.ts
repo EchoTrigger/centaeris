@@ -108,6 +108,18 @@ export function createPresentationContentStore() {
   }
   function clear() { reset(); }
   return { reserve, retain, apply, ready, reset, clear,
+    capture() {
+      const saved = [...slots].map(([id, slot]) => [id, { ...slot, ranges: new Map(slot.ranges) }] as const);
+      const residentIds = [...residents.keys()];
+      const savedBytes = bytes, savedUnfinished = unfinished;
+      return () => {
+        slots.clear(); residents.clear();
+        for (const [id, slot] of saved) slots.set(id, { ...slot, ranges: new Map(slot.ranges) });
+        for (const id of residentIds) residents.set(id, slots.get(id)!);
+        bytes = savedBytes; unfinished = savedUnfinished;
+        notify();
+      };
+    },
     get: (reference: TranscriptContentRef): PresentationContentSnapshot | null => {
       const slot = slots.get(key(reference));
       return slot && !slot.evicted ? slot.snapshot : null;

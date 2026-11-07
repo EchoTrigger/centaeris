@@ -1,0 +1,140 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { dirname, basename, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { createServer } from 'vite';
+import { runBrowser, waitFor } from './browserHarness.mjs';
+
+test('Session switching keeps actual sidebar DOM, scroll, disclosure and focus while cached text restores', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'centaeris-navigation-'));
+  const server = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), server: { port: 0, strictPort: false, host: '127.0.0.1' } });
+  try {
+    await server.listen();
+    await runBrowser(`${server.resolvedUrls.local[0]}tests/browser/session-navigation-continuity.html`, { width: 1280, height: 900 }, profile, async ({ evaluate, frame, press, send }) => {
+      await waitFor(() => evaluate('window.sessionNavigationFixture?.ready()'), 'actual workspace route');
+      await evaluate("sessionNavigationFixture.hydrate('session-4')");
+      await waitFor(() => evaluate("document.body.textContent.includes('Readable session-4')"), 'first readable conversation');
+      await evaluate(`(() => {
+        const scroll = document.querySelector('.shScroll');
+        const project = document.querySelector('.shProjectDisclosure');
+        const row = document.querySelector('[data-session-id="session-20"]');
+        project.open = false; scroll.scrollTop = 210; row.focus({preventScroll:true});
+        window.retainedNavigation = {scroll, project, row, top:scroll.scrollTop, changes:0, blank:false};
+        const observer = new MutationObserver(records => { retainedNavigation.changes += records.filter(record=>record.type==='childList').length; });
+        observer.observe(scroll,{subtree:true,childList:true});
+        window.navigationObserver=observer;
+        window.observeNavigationFrame=()=> { retainedNavigation.blank ||= !document.querySelector('[data-session-id="session-20"]'); requestAnimationFrame(observeNavigationFrame); };
+        requestAnimationFrame(observeNavigationFrame);
+      })()`);
+      await evaluate("sessionNavigationFixture.navigate('session-5')");
+      await waitFor(() => evaluate("sessionNavigationFixture.connected('session-5')"), 'next Session transport');
+      await frame();
+      await evaluate("sessionNavigationFixture.hydrate('session-5')");
+      await waitFor(() => evaluate("document.body.textContent.includes('Readable session-5')"), 'next conversation');
+      await evaluate("sessionNavigationFixture.repeatNavigation('session-5'); sessionNavigationFixture.live('session-5')");
+      await frame();
+      const changesBefore = await evaluate('retainedNavigation.changes');
+      await evaluate("sessionNavigationFixture.navigate('session-4')");
+      await waitFor(() => evaluate("sessionNavigationFixture.connected('session-4')"), 'cached Session transport');
+      await frame();
+      const state = await evaluate(`({ sameScroll:retainedNavigation.scroll===document.querySelector('.shScroll'),
+        sameProject:retainedNavigation.project===document.querySelector('.shProjectDisclosure'),
+        sameRow:retainedNavigation.row===document.querySelector('[data-session-id="session-20"]'),
+        folded:!retainedNavigation.project.open, scroll:retainedNavigation.scroll.scrollTop, top:retainedNavigation.top,
+        focused:document.activeElement===retainedNavigation.row, blank:retainedNavigation.blank,
+        cached:document.body.textContent.includes('Readable session-4'), changes:retainedNavigation.changes,
+        listReads:sessionNavigationFixture.requests.filter(path=>path==='/api/workspaces/workspace/sessions').length,
+        projectReads:sessionNavigationFixture.requests.filter(path=>path.endsWith('/session-projects')).length,
+        failures:sessionNavigationFixture.failures })`);
+      assert.deepEqual({ ...state, changes:changesBefore, scroll:state.top }, { sameScroll:true,sameProject:true,sameRow:true,folded:true,
+        scroll:state.top,top:state.top,focused:true,blank:false,cached:true,changes:changesBefore,listReads:1,projectReads:1,failures:[] });
+      assert.equal(state.scroll,state.top); assert.equal(state.changes,changesBefore,'selection does not rebuild directory contents');
+
+      const switches = await evaluate(`(async () => {
+        const results = [];
+        for (let index=0; index<50; index++) {
+          const id = index%2===0 ? 'session-5' : 'session-4';
+          const other = index%2===0 ? 'session-4' : 'session-5';
+          const start = performance.now();
+          await sessionNavigationFixture.navigate(id);
+          // The second animation frame bounds a completed readable paint;
+          // this measures the rendered view rather than the navigation receipt.
+          await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+          results.push({milliseconds:performance.now()-start,
+            readable:document.body.textContent.includes('Readable '+id),
+            crossed:document.body.textContent.includes('Readable '+other),
+            same:retainedNavigation.scroll===document.querySelector('.shScroll') && retainedNavigation.row===document.querySelector('[data-session-id="session-20"]'),
+            scroll:retainedNavigation.scroll.scrollTop, folded:!retainedNavigation.project.open });
+        }
+        return {results,changes:retainedNavigation.changes,blank:retainedNavigation.blank,
+          reads:sessionNavigationFixture.requests.filter(path=>path==='/api/workspaces/workspace/sessions'||path.endsWith('/session-projects')).length};
+      })()`);
+      assert.equal(switches.results.length,50);
+      assert.ok(switches.results.every(item=>item.readable && !item.crossed && item.same && item.folded && item.scroll===state.top));
+      const timings = switches.results.map(item=>item.milliseconds).sort((left,right)=>left-right);
+      const p95 = timings[Math.ceil(timings.length*0.95)-1];
+      assert.ok(p95<=100,`cached first readable paint upper-bound p95 ${p95.toFixed(2)}ms exceeds 100ms`);
+      assert.equal(switches.changes,0); assert.equal(switches.blank,false); assert.equal(switches.reads,2);
+      console.info(JSON.stringify({cachedSwitches:50,firstReadablePaintUpperBoundP95Ms:p95,directoryChildListChanges:switches.changes}));
+      await evaluate('navigationObserver.disconnect()');
+
+      await evaluate('sessionNavigationFixture.trash()');
+      await waitFor(()=>evaluate("Boolean(document.querySelector('[aria-label=\"Permanently delete Deleted material\"]'))"),'Recently Deleted material');
+      await evaluate(`(() => { window.purgeOpener=document.querySelector('[aria-label="Permanently delete Deleted material"]'); purgeOpener.focus(); })()`);
+      await press('Enter');
+      await waitFor(()=>evaluate("Boolean(document.querySelector('[role=\"dialog\"]'))"),'permanent deletion confirmation');
+      const dialog = await evaluate(`(() => { const panel=document.querySelector('[role="dialog"]'), style=getComputedStyle(panel); return {
+        title:panel.querySelector('h2').textContent, focused:panel.contains(document.activeElement),
+        borders:[style.borderTopWidth,style.borderRightWidth,style.borderBottomWidth,style.borderLeftWidth] }; })()`);
+      assert.equal(dialog.title,'Delete this material?'); assert.equal(dialog.focused,true);
+      assert.ok(dialog.borders.every(width=>width==='0px'),'Recently Deleted confirmation has no panel outline');
+      if (process.env.NAVIGATION_SCREENSHOT_PATH) {
+        const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
+        await writeFile(process.env.NAVIGATION_SCREENSHOT_PATH,Buffer.from(shot.data,'base64'));
+      }
+      await press('Escape');
+      await waitFor(()=>evaluate("!document.querySelector('[role=\"dialog\"]')"),'cancelled confirmation');
+      assert.equal(await evaluate('document.activeElement===purgeOpener'),true,'cancel returns keyboard focus to the initiating action');
+      assert.deepEqual(await evaluate('sessionNavigationFixture.failures'),[]);
+    });
+  } finally {
+    await server.close();
+    const actual = await realpath(profile);
+    assert.equal(dirname(actual), await realpath(tmpdir())); assert.ok(basename(actual).startsWith('centaeris-navigation-'));
+    await rm(actual, { recursive:true, force:true });
+  }
+});
+
+test('Recently Deleted confirmation retains borderless styling and keyboard focus on a dark mobile viewport', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'centaeris-navigation-'));
+  const server = await createServer({ root:fileURLToPath(new URL('../..',import.meta.url)),server:{port:0,strictPort:false,host:'127.0.0.1'} });
+  try {
+    await server.listen();
+    await runBrowser(`${server.resolvedUrls.local[0]}tests/browser/session-navigation-continuity.html?theme=dark`,
+      {width:390,height:844,theme:'dark',reduced:true},profile,async({evaluate,press,send})=>{
+        await waitFor(()=>evaluate('window.sessionNavigationFixture?.ready()'),'mobile workspace route');
+        await evaluate('sessionNavigationFixture.trash()');
+        await waitFor(()=>evaluate("Boolean(document.querySelector('[aria-label=\"Permanently delete Deleted material\"]'))"),'deleted material action');
+        await evaluate(`(() => { window.purgeOpener=document.querySelector('[aria-label="Permanently delete Deleted material"]'); purgeOpener.focus(); })()`);
+        await press('Enter');
+        await waitFor(()=>evaluate("Boolean(document.querySelector('[role=\"dialog\"]'))"),'mobile deletion confirmation');
+        const result=await evaluate(`(() => { const panel=document.querySelector('[role="dialog"]'),style=getComputedStyle(panel),bounds=panel.getBoundingClientRect(); return {
+          theme:document.documentElement.dataset.theme,focused:panel.contains(document.activeElement),fits:bounds.left>=0&&bounds.right<=innerWidth,
+          borders:[style.borderTopWidth,style.borderRightWidth,style.borderBottomWidth,style.borderLeftWidth]}; })()`);
+        assert.equal(result.theme,'dark'); assert.equal(result.focused,true); assert.equal(result.fits,true);
+        assert.ok(result.borders.every(width=>width==='0px'));
+        if(process.env.NAVIGATION_SCREENSHOT_PATH){const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
+          await writeFile(process.env.NAVIGATION_SCREENSHOT_PATH,Buffer.from(shot.data,'base64'));}
+        await press('Escape');
+        await waitFor(()=>evaluate("!document.querySelector('[role=\"dialog\"]')"),'mobile cancellation');
+        assert.equal(await evaluate('document.activeElement===purgeOpener'),true);
+        assert.deepEqual(await evaluate('sessionNavigationFixture.failures'),[]);
+      });
+  } finally {
+    await server.close();const actual=await realpath(profile);
+    assert.equal(dirname(actual),await realpath(tmpdir()));assert.ok(basename(actual).startsWith('centaeris-navigation-'));
+    await rm(actual,{recursive:true,force:true});
+  }
+});

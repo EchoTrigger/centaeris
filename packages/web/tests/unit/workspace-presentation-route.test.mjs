@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { ApiError, environment, nodes, renderer, subjectLoader } from "./componentHarness.mjs";
+import { ApiError, deferred, environment, nodes, renderer, subjectLoader } from "./componentHarness.mjs";
 const harness = new URL("./componentHarness.mjs", import.meta.url).href;
 const stub = code => `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
 const loader = subjectLoader({ extraOverrides: [
@@ -104,6 +104,40 @@ test("the requested conversation opens directly while the startup HTTP list is s
 });
 
 const composer = f => nodes(f.subject.tree,n=>n.type.name==="WorkspaceComposer")[0].props;
+test('selecting a running Session keeps its known badge until current Run control resolves', async t => {
+  const currentRun = deferred();
+  const running = row({hasActiveAgentRun:true});
+  const f = await setup(t,false,null,{sessions:[running],activeRun:()=>currentRun.promise,
+    request:async path=>path==='/api/sessions/session'?{json:async()=>({session:running})}:undefined});
+  const selectedRow = () => { const sidebar=nodes(f.subject.tree,n=>n.type.name==='ShellSidebar')[0].props.sessionProps;
+    return sidebar.renderSessionRow(sidebar.sessions.find(session=>session.id==='session')); };
+  assert.equal(selectedRow().props.running,true,'the directory fact survives unknown local control');
+  currentRun.resolve({agentRun:null}); await tick(); await f.subject.settle();
+  assert.equal(selectedRow().props.running,false,'a fresh authoritative empty Run read clears the badge');
+});
+test('switching Sessions retains the directory and restores a checkpointed view before the new stream responds', async t => {
+  const f = await setup(t);
+  const original = { ...page, blocks: [{ blockId:'cached-answer', blockRevision:'1', orderKey:{sourceSequence:'10',ordinal:0},
+    body:{kind:'assistantText',status:'completed',content:{inlineContent:'Previously read answer',sourceRef:null}} }] };
+  await f.send('snapshot', { page: original });
+  await f.send('checkpoint', { projectionGeneration:'generation', sourceHighWater:'10', agentRun:null }, 'cached:10');
+  const directory = () => nodes(f.subject.tree,n=>n.type.name==='ShellSidebar')[0].props.sessionProps;
+  const previous = directory();
+  const listReads = () => f.calls.filter(([path])=>path==='/api/workspaces/workspace/sessions'||path.endsWith('/session-projects')).length;
+  const requests = listReads();
+  const old = f.getOptions();
+  f.props.initialSession = row({id:'other'}); await f.subject.settle();
+  assert.equal(directory().sessions, previous.sessions);
+  assert.equal(directory().projects, previous.projects);
+  assert.equal(listReads(), requests);
+  f.props.initialSession = row(); await f.subject.settle();
+  const transcript = nodes(f.subject.tree,n=>n.type.name==='TranscriptBlockList')[0].props;
+  assert.equal(transcript.store.getBlockSnapshot('cached-answer').body.content.inlineContent,'Previously read answer');
+  assert.equal(f.getOptions().controller.lastCursor, 'cached:10');
+  assert.equal(transcript.loadingHistory,true,'cached text is immediately readable while fresh synchronization is pending');
+  assert.equal(listReads(),requests);
+  assert.equal(old.signal.aborted,true);
+});
 const checkpoint = (agentRun, sourceHighWater="10") => ({projectionGeneration:"generation",sourceHighWater,agentRun});
 const run = (agentRunId="run-new",status="queued") => ({agentRunId,status,startedAt:null,completedAt:["completed","failed","cancelled"].includes(status)?"2026-10-23T00:00:01Z":null});
 const receipt = request => ({operationId:JSON.parse(request.body).operationId,command:"submitMessage",status:"accepted",sessionId:"session",agentRunId:"run-new",turnId:"turn-new"});

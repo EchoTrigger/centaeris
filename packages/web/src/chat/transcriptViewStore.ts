@@ -526,6 +526,27 @@ export function createTranscriptViewStore() {
   }
 
   return {
+    captureView() {
+      const saved = { identity, blocks: new Map(blocks), blockBytes: new Map(blockBytes), managedBytes,
+        tailBlockIds: new Set(tailBlockIds), postBaseOverrideIds: new Set(postBaseOverrideIds), tailOlderCursor,
+        revisions: new Map(revisions), orderOwners: new Map(orderOwners), noticeHighWater, blockIds, listSnapshot,
+        liveSnapshot, liveTextReplacementBlockId, restoreContent: presentationContent.capture() };
+      return () => {
+        const changed = new Set([...blockIds, ...saved.blockIds]);
+        viewEpoch++;
+        identity = saved.identity; blocks = new Map(saved.blocks); blockBytes = new Map(saved.blockBytes);
+        managedBytes = saved.managedBytes; tailBlockIds = new Set(saved.tailBlockIds);
+        postBaseOverrideIds = new Set(saved.postBaseOverrideIds); tailOlderCursor = saved.tailOlderCursor;
+        revisions = new Map(saved.revisions); orderOwners = new Map(saved.orderOwners);
+        noticeHighWater = saved.noticeHighWater; blockIds = saved.blockIds;
+        listSnapshot = Object.freeze({ ...saved.listSnapshot, viewEpoch });
+        liveTextReplacementBlockId = saved.liveTextReplacementBlockId;
+        liveSnapshot = saved.liveSnapshot;
+        saved.restoreContent();
+        notifyManagedContent(); notifyList(); notifyBlocks(changed);
+        liveListeners.forEach(listener => listener());
+      };
+    },
     async withPresentationSnapshot(rawPage: unknown, publish: () => number | Promise<number>) {
       const page = validateTranscriptTailPage(rawPage);
       if (presentationSnapshot !== null) throw new Error("presentation snapshot publication is already pending");

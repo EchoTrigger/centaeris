@@ -1,8 +1,9 @@
 export function sortSessionNavigation(sessions) {
-  return [...sessions].sort((left, right) => (
+  const sorted = [...sessions].sort((left, right) => (
     Number(Boolean(right.isPinned)) - Number(Boolean(left.isPinned))
     || String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""))
   ));
+  return sorted.every((record, index) => record === sessions[index]) ? sessions : sorted;
 }
 
 export function groupSessionNavigation(sessions, projects) {

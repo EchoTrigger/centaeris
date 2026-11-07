@@ -18,6 +18,10 @@ const loader = subjectLoader({ extraOverrides: [
 ] });
 const { AppPageContent } = await import(await loader(fileURLToPath(new URL("../../src/routes/AppRoute.jsx", import.meta.url))));
 const component = (tree, name) => nodes(tree, node => node.type.name === name)[0];
+function retryFeedback(subject, env) {
+  const feedback = component(subject.tree, 'ConversationReadFeedback');
+  return { feedback, retry: button(renderer(feedback.type, feedback.props, env).render(), 'appRoute.retryStream') };
+}
 const page = text => ({
   schema: "transcript.page.v1", sessionId: "session", projectionVersion: "transcript.projection.v1",
   projectionGeneration: "generation", sourceHighWater: "99", olderCursor: null, hasOlder: false,
@@ -25,7 +29,7 @@ const page = text => ({
     body: { kind: "assistantText", content: { inlineContent: text, sourceRef: null }, status: "completed" } }],
 });
 
-async function setup(context, tailPage = page("Retained authoritative answer"), idle = false, runRead) {
+async function setup(context, tailPage = page("Retained authoritative answer"), idle = false, runRead, bootstrap) {
   const oldStorage = globalThis.sessionStorage;
   const stored = new Map();
   globalThis.sessionStorage = { getItem:key=>stored.get(key)??null, setItem:(key,value)=>stored.set(key,value), removeItem:key=>stored.delete(key) };
@@ -36,7 +40,7 @@ async function setup(context, tailPage = page("Retained authoritative answer"), 
   const attempt = deferred();
   const session = { id: "session", workspaceId: "workspace", projectId: null, title: "Synthetic Session", origin: "user", status: "active", deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: true, updatedAt: "2026-10-05T00:00:00Z",  currentEnvironmentId: null, executionMode: "perRun", latestAttentionSequence: "0", readThroughSequence: "0", attentionRevision: "0", isManuallyUnread: false };
   const env = environment({ location: { search: "", state: null },
-    request: async path => ({ json: async () => path === "/api/models?workspaceId=workspace" ? { models: idle ? [{ id: "model", providerId: "provider", modelName: "synthetic", displayName: "Synthetic", thinkingModes: [] }] : [] }
+    request: async path => path === "/api/workspaces/workspace/sessions" && bootstrap ? bootstrap.promise : ({ json: async () => path === "/api/models?workspaceId=workspace" ? { models: idle ? [{ id: "model", providerId: "provider", modelName: "synthetic", displayName: "Synthetic", thinkingModes: [] }] : [] }
       : path.includes("session-projects") ? { projects: [] }
       : path.endsWith("/assets") ? { assets: [] }
       : path === "/api/sessions/session" ? { session } : { sessions: [session] } }),
@@ -258,10 +262,10 @@ for (const unavailable of ["snapshot", "checkpoint"]) test(`failed ${unavailable
   const stopped = new Error("presentation_stream_unavailable");
   attempt.reject(stopped); await subject.settle();
   preserved();
-  const retry = button(subject.tree, "appRoute.retryStream");
+  const { feedback, retry } = retryFeedback(subject, env);
   const conversation = nodes(subject.tree, node => node.type === "section" && node.props.className === "workspaceChatColumn")[0];
   assert.ok(retry, "exhausted recovery remains actionable");
-  assert.ok(nodes(conversation, node => node === retry).length, "retry belongs in the conversation");
+  assert.ok(nodes(conversation, node => node === feedback).length, "retry belongs in the conversation");
   assert.equal(nodes(subject.tree, node => node.props.className === "transcriptStreamStatus").length, 0);
   const before = store.getListSnapshot().viewEpoch;
   const next = deferred(); env.nextAttempt = next;
@@ -273,7 +277,7 @@ for (const unavailable of ["snapshot", "checkpoint"]) test(`failed ${unavailable
   next.reject(stopped); await subject.settle();
   preserved();
   assert.equal(store.getListSnapshot().viewEpoch, before, "failed replacement delivery does not publish a new view");
-  assert.ok(button(subject.tree, "appRoute.retryStream"));
+  assert.ok(retryFeedback(subject, env).retry);
 });
 
 
@@ -287,7 +291,7 @@ test("revoked selected delivery cannot be restored by late Session metadata", as
   env.request = path => path === "/api/sessions/session"
     ? (waiting = true, metadata.promise) : request(path);
   env.nextAttempt = retry;
-  button(subject.tree, "appRoute.retryStream").props.onClick(); await subject.settle();
+  retryFeedback(subject, env).retry.props.onClick(); await subject.settle();
   assert.equal(waiting, true);
   retry.reject(Object.assign(new Error("synthetic authority revoked"), { status: 403 })); await subject.settle();
   assert.equal(store.getListSnapshot().blockIds.length, 0);
@@ -298,15 +302,17 @@ test("revoked selected delivery cannot be restored by late Session metadata", as
 });
 
 test("revoked navigation-only delivery cannot be restored by late bootstrap HTTP", async context => {
-  const { subject, env } = await setup(context);
-  const request = env.request, bootstrap = deferred(), navigation = deferred();
+  const bootstrap = deferred(), navigation = deferred();
+  const { subject, env } = await setup(context, page('Retained authoritative answer'), false, undefined, bootstrap);
+  const request = env.request;
   const original = await (await request("/api/sessions/session")).json();
-  let waiting = false;
+  let additionalBootstrap = false;
   env.request = path => path === "/api/workspaces/workspace/sessions"
-    ? (waiting = true, bootstrap.promise) : request(path);
+    ? (additionalBootstrap = true, bootstrap.promise) : request(path);
   env.stream = options => { env.streamOptions = options; return navigation.promise; };
   env.location.search = "?new=1"; await subject.settle();
-  assert.equal(waiting, true); assert.equal(env.streamOptions.sessionId, null);
+  assert.equal(additionalBootstrap, false, 'opening a new draft does not reload the workspace directory');
+  assert.equal(env.streamOptions.sessionId, null);
   await env.streamOptions.controller.acceptWithBackpressure({ cursor: null, item: {
     schema: "workspace.presentation.v1", workspaceId: "workspace",  sessionId: null,
     kind: "navigation", snapshotId: "before-revocation", offset: 0, hasMore: false, sessions: [original.session],

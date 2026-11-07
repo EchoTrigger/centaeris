@@ -1,9 +1,10 @@
 import { Link } from "react-router";
+import { memo } from "react";
 import { Archive, Ellipsis, LoaderCircle, Mail, MailOpen, MessageSquare, Pencil, Pin, PinOff } from "lucide-react";
 import { useTranslation } from "../i18n";
 import { sessionChatPath } from "./sessionNavigation.mjs";
 
-export function SessionNavigationRow({ workspaceId, session, actions, active = false, running = session.hasActiveAgentRun, icon = false, nested = false, onSelect }) {
+export const SessionNavigationRow = memo(function SessionNavigationRow({ workspaceId, session, actions, active = false, running = session.hasActiveAgentRun, icon = false, nested = false, onSelect }) {
   const { t } = useTranslation();
   const isSaving = actions.savingSessionId === session.id;
   const menuOpen = actions.openSessionMenuId === session.id;
@@ -38,4 +39,4 @@ export function SessionNavigationRow({ workspaceId, session, actions, active = f
       </div> : null}
     </div>
   </div>{actionError ? <p className="shEmptyHint" role="alert">{actionError}</p> : null}</>;
-}
+});
