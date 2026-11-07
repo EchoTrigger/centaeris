@@ -1,4 +1,5 @@
 use super::driver::AsyncGenerateDriverPromptCompactionCandidateProducer;
+use super::request_preparation::RequestPreparationSpan;
 use super::*;
 use crate::execution::ExecutionFileSystemErrorKind;
 use crate::tool::layer::ExecutionModelInputImageError;
@@ -340,6 +341,11 @@ impl<
                     .unwrap_or_default(),
             ),
         };
+        let compaction_span = RequestPreparationSpan::new(
+            self.request_preparation_observer.as_ref(),
+            RequestPreparationStage::Compaction,
+            turn_id,
+        );
         let compaction_result = if pending_compaction.is_some() {
             PromptCompactionApplyResult {
                 stats_json: session
@@ -359,6 +365,7 @@ impl<
             )
             .await?
         };
+        compaction_span.complete();
         let tracked_resource_usage = candidate_producer
             .resource_usage
             .into_inner()
@@ -376,8 +383,14 @@ impl<
         )?;
         self.session_manager.save_session(&session)?;
         let prepared_inputs = if let Some(intake) = intake {
+            let intake_span = RequestPreparationSpan::new(
+                self.request_preparation_observer.as_ref(),
+                RequestPreparationStage::InputIntake,
+                turn_id,
+            );
             let prepared = intake(input)?;
             session = self.session_manager.load_or_create_session(session_id)?;
+            intake_span.complete();
             prepared
         } else {
             None
@@ -445,28 +458,38 @@ impl<
         input: &TurnInput,
         loop_index: u32,
     ) -> Result<u32, String> {
+        let estimate_span = RequestPreparationSpan::new(
+            self.request_preparation_observer.as_ref(),
+            RequestPreparationStage::Estimate,
+            turn_id,
+        );
         validate_model_input_budget_config(
             self.config.model_context_tokens,
             self.config.model_max_output_tokens,
         )?;
-        self.project_generate_driver_request_from_session(
-            session.clone(),
-            session_id,
-            turn_id,
-            input,
-            loop_index,
-            None,
-        )
-        .map(|(request, _)| {
-            let estimate = u64::from(request.context_token_estimate);
-            let scale = u64::from(self.config.prompt_token_estimate_scale_basis_points);
-            estimate
-                .saturating_mul(scale)
-                .saturating_add(9_999)
-                .checked_div(10_000)
-                .unwrap_or(estimate)
-                .min(u64::from(u32::MAX)) as u32
-        })
+        let result = self
+            .project_generate_driver_request_from_session(
+                session.clone(),
+                session_id,
+                turn_id,
+                input,
+                loop_index,
+                None,
+            )
+            .map(|(request, _)| {
+                let estimate = u64::from(request.context_token_estimate);
+                let scale = u64::from(self.config.prompt_token_estimate_scale_basis_points);
+                estimate
+                    .saturating_mul(scale)
+                    .saturating_add(9_999)
+                    .checked_div(10_000)
+                    .unwrap_or(estimate)
+                    .min(u64::from(u32::MAX)) as u32
+            });
+        if result.is_ok() {
+            estimate_span.complete();
+        }
+        result
     }
 
     fn project_generate_driver_request_from_session(
@@ -478,6 +501,11 @@ impl<
         loop_index: u32,
         compression_stats_json: Option<String>,
     ) -> Result<(GenerateDriverRequest, SessionStateSnapshot), String> {
+        let projection_span = RequestPreparationSpan::new(
+            self.request_preparation_observer.as_ref(),
+            RequestPreparationStage::Projection,
+            turn_id,
+        );
         let answer_now = input.answer_now_intervention().is_some();
         let (tool_definitions, _) = if answer_now {
             (Vec::new(), String::new())
@@ -567,10 +595,14 @@ impl<
         if let Some(message) = agent_instructions_message {
             runtime_context_messages.push(message);
         }
-        let agents_context_message = match (
-            self.tools_port.cwd(),
-            self.tools_port.read_agents_instructions()?,
-        ) {
+        let agents_read_span = RequestPreparationSpan::new(
+            self.request_preparation_observer.as_ref(),
+            RequestPreparationStage::AgentsInstructionsRead,
+            turn_id,
+        );
+        let agents_instructions = self.tools_port.read_agents_instructions()?;
+        agents_read_span.complete();
+        let agents_context_message = match (self.tools_port.cwd(), agents_instructions) {
             (Some(cwd), Some((instructions, _file_hash))) => {
                 Some(prompt_projection::build_agents_context_message(
                     session_id,
@@ -684,9 +716,11 @@ impl<
         if !tool_definitions.is_empty() {
             observations.push(ModelObservationV1::ToolCatalog { tool_definitions });
         }
+        let prompt_compaction = super::prompt_compaction_commit::active_commit(&session)?;
+        projection_span.complete();
         Ok((
             GenerateDriverRequest {
-                prompt_compaction: super::prompt_compaction_commit::active_commit(&session)?,
+                prompt_compaction,
                 session_id: session_id.to_string(),
                 turn_id: turn_id.to_string(),
                 loop_index,

@@ -2641,6 +2641,14 @@ fn execute_agent_run(
         agent_run_start.agent_run_id.clone(),
         agent_run_start.authorization_digest.clone(),
     )?));
+    let agent_runtime = if observations::enabled() {
+        let timings = run_timings.clone();
+        agent_runtime.with_request_preparation_observer(Arc::new(move |timing| {
+            timings.request_preparation(timing);
+        }))
+    } else {
+        agent_runtime
+    };
     let model_config_store = EmptyModelSessionConfigStore::new();
     let assistant_text = Arc::new(Mutex::new(AssistantTextProjection::default()));
     let workspace_lease = SessionWorkspaceLease {

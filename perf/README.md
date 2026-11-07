@@ -371,6 +371,11 @@ Interpret the measurements independently:
   causal critical path. Wall-clock end markers place approximate intervals;
   durations come from producer-local monotonic clocks. Do not subtract client,
   Runtime, Host, or event `createdAtMs` timestamps across clock domains.
+- Request preparation records `modelInputEstimate`, `promptCompaction`,
+  `modelInputIntake`, `modelInputProjection` and `agentsInstructionsRead` with
+  their original `turnId`. Reads and projections are nested intervals. Count
+  the reads for the first main request and compare their intervals with its HTTP
+  start rather than adding parent and child durations.
 
 The report is explicitly `latencyOnly`, with missing evidence listed as
 `notObserved`; neither the execution mode argument nor a fast command proves

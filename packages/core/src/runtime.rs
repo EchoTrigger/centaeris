@@ -24,6 +24,7 @@ mod provider_polling;
 pub mod query_loop;
 pub mod question;
 mod recovery;
+mod request_preparation;
 mod run_result;
 use run_result::RunResultCollector;
 mod status_events;
@@ -74,6 +75,9 @@ pub use self::lifecycle_hooks_runtime::{
 pub use self::loop_runtime::persist_answer_now_requested_fact;
 use self::prompt_compaction_metadata::*;
 use self::provider_polling::*;
+pub use self::request_preparation::{
+    RequestPreparationObserver, RequestPreparationStage, RequestPreparationTiming,
+};
 pub use self::subagent_projection::{
     persist_subagent_result_projection_from_scheduler_events,
     persist_subagent_result_projection_from_scheduler_events_async,
@@ -289,6 +293,7 @@ pub struct AgentRuntime<
     lifecycle_hooks: QueryLifecycleHookRuntime,
     model_input_image_resolver:
         Option<crate::model::prepared_prompt::SharedModelInputImageResolver>,
+    request_preparation_observer: Option<RequestPreparationObserver>,
     config: AgentRuntimeConfig,
 }
 
@@ -349,6 +354,7 @@ impl<
             active_agent_run_sessions: Mutex::new(HashSet::new()),
             lifecycle_hooks: QueryLifecycleHookRuntime::empty(),
             model_input_image_resolver: None,
+            request_preparation_observer: None,
             config,
         }
     }
@@ -491,6 +497,14 @@ impl<
 
     pub fn with_lifecycle_hooks(mut self, lifecycle_hooks: QueryLifecycleHookRuntime) -> Self {
         self.lifecycle_hooks = lifecycle_hooks;
+        self
+    }
+
+    pub fn with_request_preparation_observer(
+        mut self,
+        observer: RequestPreparationObserver,
+    ) -> Self {
+        self.request_preparation_observer = Some(observer);
         self
     }
 

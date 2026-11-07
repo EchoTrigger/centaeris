@@ -124,6 +124,26 @@ impl RunTimings {
         }
     }
 
+    pub fn request_preparation(&self, timing: &centaeris_core::runtime::RequestPreparationTiming) {
+        use centaeris_core::runtime::RequestPreparationStage;
+        if self.sink.is_none() || !safe_id(&timing.turn_id) {
+            return;
+        }
+        let phase = match timing.stage {
+            RequestPreparationStage::Estimate => "modelInputEstimate",
+            RequestPreparationStage::Compaction => "promptCompaction",
+            RequestPreparationStage::InputIntake => "modelInputIntake",
+            RequestPreparationStage::Projection => "modelInputProjection",
+            RequestPreparationStage::AgentsInstructionsRead => "agentsInstructionsRead",
+        };
+        self.emit(json!({
+            "phase": phase,
+            "turnId": timing.turn_id,
+            "elapsedMs": timing.elapsed.as_secs_f64() * 1000.0,
+            "outcome": if timing.completed { "ok" } else { "interrupted" },
+        }));
+    }
+
     pub fn model_http(&self, turn_id: &str, attempt: u32, streaming: bool) -> ModelHttp {
         let request_id = self.sink.as_ref().and_then(|_| {
             self.state

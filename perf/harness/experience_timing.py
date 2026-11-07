@@ -25,13 +25,15 @@ RUNTIME_PHASES = frozenset({
     "workspaceRecoverySnapshotHold", "workspaceFinalSnapshotHold",
     "recoveryUploadFence", "recoveryPostCaptureGeneration", "modelHttp", "modelFirstEvent", "modelFirstText",
     "toolService", "hostCommand",
+    "modelInputEstimate", "promptCompaction", "modelInputIntake",
+    "modelInputProjection", "agentsInstructionsRead",
 })
 HOST_PHASES = frozenset({"taskReady", "taskLeaderExited"})
 WORKER_PHASES = frozenset({"rpc", "claimResult"})
 STARTUP_DURATIONS = ("runtimePreludeMs", "sandboxEnsureMs", "mcpCredentialResolveMs",
                      "mcpDiscoveryMs", "workspaceRestoreMs", "sessionStartCommitMs", "startupTotalMs")
 STARTUP_COUNTS = ("serverCount", "credentialCount", "mcpConnectionCount")
-IDENTITY_FIELDS = ("runId", "requestId", "callId", "operationId", "taskId")
+IDENTITY_FIELDS = ("runId", "turnId", "requestId", "callId", "operationId", "taskId")
 
 
 def _identity(value):
@@ -256,11 +258,18 @@ def _startup_metrics(binding, intervals, worker, shared_wall_clock):
             if end > start:
                 clipped.append({"atUnixMs": end, "elapsedMs": end - start})
         overlap = _covered(clipped)
+    preparation = [row for row in intervals if row["phase"] == "modelInputEstimate"
+                   and dispatch is not None and row["atUnixMs"] <= dispatch]
+    agents_reads = [row for row in intervals if row["phase"] == "agentsInstructionsRead"
+                    and row["outcome"] == "ok" and dispatch is not None
+                    and row["atUnixMs"] <= dispatch]
     return {
         "firstModelHttpStartAtMs": dispatch,
         "submitToFirstModelHttpMs": round(dispatch - submitted, 3)
         if shared_wall_clock and dispatch is not None and submitted is not None and dispatch >= submitted else None,
         "firstModelSafePointMs": safe_point["elapsedMs"] if safe_point else None,
+        "firstModelAgentsReadCount": len(agents_reads) if preparation else None,
+        "firstModelAgentsReadCoveredMs": _covered(agents_reads) if preparation else None,
         "modelHttpRequests": len(requests) if requests else None,
         "workerRpcCount": len(rpc) if rpc else None,
         "workerYieldRpcCount": sum(row.get("route") == "/internal/jobs/yield" for row in rpc) if rpc else None,

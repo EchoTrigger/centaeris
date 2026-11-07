@@ -42,6 +42,26 @@ class ExperienceTimingTests(unittest.TestCase):
         self.assertEqual(row["modelRequests"],[])
         self.assertIn("modelRequestTiming",row["notObserved"])
 
+    def test_request_preparation_preserves_nested_reads_and_turn_identity(self):
+        observations = [
+            span("modelInputEstimate", 520, 1520, turnId="turn-a"),
+            span("modelInputProjection", 510, 1510, turnId="turn-a"),
+            span("agentsInstructionsRead", 500, 1500, turnId="turn-a"),
+            span("modelInputIntake", 10, 1530, turnId="turn-a"),
+            span("modelInputProjection", 510, 2040, turnId="turn-a"),
+            span("agentsInstructionsRead", 500, 2030, turnId="turn-a"),
+            span("modelHttp", 100, 2200, requestId="request-a", attempt=1, streaming=True),
+        ]
+        row = self.report(observations)["runs"][0]
+        self.assertEqual(row["runtimeCoveredMs"], 1140)
+        reads = [r for r in row["intervals"] if r["phase"] == "agentsInstructionsRead"]
+        self.assertEqual(len(reads), 2)
+        self.assertTrue(all(r["turnId"] == "turn-a" for r in reads))
+        self.assertEqual(row["startupMetrics"]["firstModelAgentsReadCount"], 2)
+        self.assertEqual(row["startupMetrics"]["firstModelAgentsReadCoveredMs"], 1000)
+        missing = self.report()["runs"][0]["startupMetrics"]
+        self.assertIsNone(missing["firstModelAgentsReadCount"])
+
     def test_nested_spans_and_parallel_startup_metrics_are_not_added(self):
         startup=span("startupProfile",250,1250)
         startup.pop("elapsedMs")
