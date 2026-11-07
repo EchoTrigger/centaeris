@@ -8,6 +8,7 @@ pub enum RequestPreparationStage {
     InputIntake,
     Projection,
     AgentsInstructionsRead,
+    AgentsInstructionsReuse,
 }
 
 pub struct RequestPreparationTiming {

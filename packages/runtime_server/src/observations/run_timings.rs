@@ -135,6 +135,7 @@ impl RunTimings {
             RequestPreparationStage::InputIntake => "modelInputIntake",
             RequestPreparationStage::Projection => "modelInputProjection",
             RequestPreparationStage::AgentsInstructionsRead => "agentsInstructionsRead",
+            RequestPreparationStage::AgentsInstructionsReuse => "agentsInstructionsReuse",
         };
         self.emit(json!({
             "phase": phase,

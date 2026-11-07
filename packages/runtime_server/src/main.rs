@@ -3129,6 +3129,7 @@ fn execute_agent_run(
         let safe_point_started = Instant::now();
         let observed_call = match &safe_point {
             ToolSafePoint::ModelRequestStarted(started) => {
+                docker_execution.close_initial_context();
                 run_timings.request_started(started.turn_id(), started.request_id());
                 None
             }

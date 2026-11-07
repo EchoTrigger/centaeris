@@ -124,6 +124,27 @@ fn rejects_any_suffix_other_than_one_closed_bash_receipt() {
 }
 
 #[test]
+fn initial_context_revision_requires_an_idle_host_without_dispatch_history() {
+    let witness = ExecutionActivityWitness::new(40);
+    assert_eq!(witness.initial_context_revision(), Some(40));
+    let dispatch = witness.begin_dispatch_activity().unwrap();
+    assert_eq!(witness.initial_context_revision(), None);
+    drop(dispatch);
+    assert_eq!(witness.initial_context_revision(), Some(40));
+    let capture = witness.try_snapshot_activity().unwrap().unwrap();
+    assert_eq!(witness.initial_context_revision(), None);
+    drop(capture);
+    let dispatch = witness.begin_dispatch_activity().unwrap();
+    dispatch.register_persistent_dispatch().unwrap();
+    drop(dispatch);
+    assert_eq!(witness.initial_context_revision(), None);
+
+    let witness = ExecutionActivityWitness::new(41);
+    witness.invalidate_before_dispatch().unwrap();
+    assert_eq!(witness.initial_context_revision(), None);
+}
+
+#[test]
 fn activity_witness_reuses_only_an_unchanged_quiesced_snapshot_epoch() {
     let witness = ExecutionActivityWitness::new(41);
     let token = witness.begin_snapshot_capture();

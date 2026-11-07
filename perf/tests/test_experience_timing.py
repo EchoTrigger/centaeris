@@ -59,6 +59,15 @@ class ExperienceTimingTests(unittest.TestCase):
         self.assertTrue(all(r["turnId"] == "turn-a" for r in reads))
         self.assertEqual(row["startupMetrics"]["firstModelAgentsReadCount"], 2)
         self.assertEqual(row["startupMetrics"]["firstModelAgentsReadCoveredMs"], 1000)
+        reused = self.report([
+            span("modelInputEstimate", 510, 1510, turnId="turn-a"),
+            span("agentsInstructionsRead", 500, 1500, turnId="turn-a"),
+            span("agentsInstructionsReuse", 0.01, 1530, turnId="turn-a"),
+            span("modelHttp", 3800, 5400, requestId="request-a", attempt=1, streaming=True),
+        ])["runs"][0]
+        self.assertEqual(reused["startupMetrics"]["firstModelAgentsReadCount"], 1)
+        self.assertEqual(reused["startupMetrics"]["firstModelAgentsReadCoveredMs"], 500)
+        self.assertEqual(len([r for r in reused["intervals"] if r["phase"] == "agentsInstructionsReuse"]), 1)
         missing = self.report()["runs"][0]["startupMetrics"]
         self.assertIsNone(missing["firstModelAgentsReadCount"])
 

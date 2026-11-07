@@ -27,6 +27,7 @@ RUNTIME_PHASES = frozenset({
     "toolService", "hostCommand",
     "modelInputEstimate", "promptCompaction", "modelInputIntake",
     "modelInputProjection", "agentsInstructionsRead",
+    "agentsInstructionsReuse",
 })
 HOST_PHASES = frozenset({"taskReady", "taskLeaderExited"})
 WORKER_PHASES = frozenset({"rpc", "claimResult"})

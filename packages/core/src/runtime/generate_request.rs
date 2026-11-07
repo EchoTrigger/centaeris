@@ -14,6 +14,11 @@ enum ResolvedImageSource {
     Unavailable(String),
 }
 
+pub(super) struct PreparedAgentsInstructions {
+    revision: u64,
+    instructions: Option<(String, String)>,
+}
+
 pub(super) struct PreparedRequestInputs {
     pub agent_run_id: String,
     pub input_ids: Vec<String>,
@@ -230,19 +235,26 @@ impl<
             clear_prompt_compaction_failure_metadata(&mut session);
         }
         refresh_session_context_window(&mut session);
+        let mut prepared_agents = None;
         let prompt_input_token_estimate = self.estimate_generate_prompt_input_tokens(
-            &session, session_id, turn_id, input, loop_index,
+            &session,
+            session_id,
+            turn_id,
+            input,
+            loop_index,
+            &mut prepared_agents,
         )?;
 
-        let compression_stats_json = self
-            .apply_prompt_compaction_for_generate_request(
-                &mut session,
-                turn_id,
-                runtime_scope,
-                Some(prompt_input_token_estimate),
-                None,
-            )?
-            .stats_json;
+        let compaction_result = self.apply_prompt_compaction_for_generate_request(
+            &mut session,
+            turn_id,
+            runtime_scope,
+            Some(prompt_input_token_estimate),
+            None,
+        )?;
+        if !compaction_result.runtime_events.is_empty() {
+            prepared_agents = None;
+        }
         self.session_manager.save_session(&session)?;
         self.build_generate_driver_request_from_session(
             session,
@@ -250,8 +262,9 @@ impl<
             turn_id,
             input,
             loop_index,
-            compression_stats_json,
+            compaction_result.stats_json,
             None,
+            &mut prepared_agents,
         )
     }
 
@@ -327,8 +340,14 @@ impl<
             .await?;
         }
         refresh_session_context_window(&mut session);
+        let mut prepared_agents = None;
         let prompt_input_token_estimate = self.estimate_generate_prompt_input_tokens(
-            &session, session_id, turn_id, input, loop_index,
+            &session,
+            session_id,
+            turn_id,
+            input,
+            loop_index,
+            &mut prepared_agents,
         )?;
 
         let candidate_producer = AsyncGenerateDriverPromptCompactionCandidateProducer {
@@ -366,6 +385,9 @@ impl<
             .await?
         };
         compaction_span.complete();
+        if !compaction_result.runtime_events.is_empty() {
+            prepared_agents = None;
+        }
         let tracked_resource_usage = candidate_producer
             .resource_usage
             .into_inner()
@@ -403,6 +425,7 @@ impl<
             loop_index,
             compaction_result.stats_json,
             prepared_inputs,
+            &mut prepared_agents,
         )
     }
 
@@ -419,6 +442,7 @@ impl<
         loop_index: u32,
         compression_stats_json: Option<String>,
         prepared_inputs: Option<PreparedRequestInputs>,
+        prepared_agents: &mut Option<PreparedAgentsInstructions>,
     ) -> Result<GenerateDriverRequest, String> {
         let (request, mut session) = self.project_generate_driver_request_from_session(
             session,
@@ -427,6 +451,7 @@ impl<
             input,
             loop_index,
             compression_stats_json,
+            prepared_agents,
         )?;
         validate_model_input_budget(
             request.context_token_estimate,
@@ -457,6 +482,7 @@ impl<
         turn_id: &str,
         input: &TurnInput,
         loop_index: u32,
+        prepared_agents: &mut Option<PreparedAgentsInstructions>,
     ) -> Result<u32, String> {
         let estimate_span = RequestPreparationSpan::new(
             self.request_preparation_observer.as_ref(),
@@ -475,6 +501,7 @@ impl<
                 input,
                 loop_index,
                 None,
+                prepared_agents,
             )
             .map(|(request, _)| {
                 let estimate = u64::from(request.context_token_estimate);
@@ -492,6 +519,10 @@ impl<
         result
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "projection carries request-local observations alongside explicit prompt inputs"
+    )]
     fn project_generate_driver_request_from_session(
         &self,
         mut session: SessionStateSnapshot,
@@ -500,6 +531,7 @@ impl<
         input: &TurnInput,
         loop_index: u32,
         compression_stats_json: Option<String>,
+        prepared_agents: &mut Option<PreparedAgentsInstructions>,
     ) -> Result<(GenerateDriverRequest, SessionStateSnapshot), String> {
         let projection_span = RequestPreparationSpan::new(
             self.request_preparation_observer.as_ref(),
@@ -595,13 +627,37 @@ impl<
         if let Some(message) = agent_instructions_message {
             runtime_context_messages.push(message);
         }
-        let agents_read_span = RequestPreparationSpan::new(
-            self.request_preparation_observer.as_ref(),
-            RequestPreparationStage::AgentsInstructionsRead,
-            turn_id,
-        );
-        let agents_instructions = self.tools_port.read_agents_instructions()?;
-        agents_read_span.complete();
+        let revision = self.tools_port.context_observation_revision();
+        let agents_instructions = if let Some(prepared) = prepared_agents
+            .as_ref()
+            .filter(|prepared| Some(prepared.revision) == revision)
+        {
+            let reuse_span = RequestPreparationSpan::new(
+                self.request_preparation_observer.as_ref(),
+                RequestPreparationStage::AgentsInstructionsReuse,
+                turn_id,
+            );
+            let instructions = prepared.instructions.clone();
+            reuse_span.complete();
+            instructions
+        } else {
+            let read_span = RequestPreparationSpan::new(
+                self.request_preparation_observer.as_ref(),
+                RequestPreparationStage::AgentsInstructionsRead,
+                turn_id,
+            );
+            let instructions = self.tools_port.read_agents_instructions()?;
+            read_span.complete();
+            *prepared_agents = revision
+                .filter(|revision| {
+                    Some(*revision) == self.tools_port.context_observation_revision()
+                })
+                .map(|revision| PreparedAgentsInstructions {
+                    revision,
+                    instructions: instructions.clone(),
+                });
+            instructions
+        };
         let agents_context_message = match (self.tools_port.cwd(), agents_instructions) {
             (Some(cwd), Some((instructions, _file_hash))) => {
                 Some(prompt_projection::build_agents_context_message(

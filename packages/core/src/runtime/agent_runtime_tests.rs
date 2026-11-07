@@ -46,6 +46,8 @@ mod prompt_compaction_recovery_tests;
 #[path = "agent_runtime_tests/question_tests.rs"]
 mod question_tests;
 mod recovery_tool_origin_tests;
+#[path = "agent_runtime_tests/request_preparation_tests.rs"]
+mod request_preparation_tests;
 mod wait_recovery_tests;
 
 #[tokio::test]

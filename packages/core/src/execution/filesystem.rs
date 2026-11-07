@@ -92,6 +92,10 @@ impl ExecutionHostBinding {
         &self.policy
     }
 
+    pub(crate) fn context_observation_revision(&self) -> Option<u64> {
+        self.runner.context_observation_revision()
+    }
+
     pub fn run_file_system_operation(
         &self,
         model_path: impl Into<String>,
