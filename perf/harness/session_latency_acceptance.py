@@ -10,6 +10,7 @@ RESOURCE_WAITS = {
 POOL_COUNTS = (
     "maxSize", "poolSize", "available", "borrowed", "waiting", "actualConnectionCount",
     "activeTransactions", "idleInTransaction", "lostWithoutPut", "activeWaiting", "expiredWaiting",
+    "unreturnedLeases", "closedWithoutPut", "returning",
 )
 
 
@@ -44,7 +45,8 @@ def pool_health(pool, baseline=None):
         for key in ("pid", "poolIdentity", "maxSize"):
             if pool[key] != baseline.get(key):
                 reasons.append("API pool changed during continuous load: " + key)
-    for key in ("borrowed", "waiting", "activeWaiting", "expiredWaiting", "activeTransactions", "idleInTransaction", "lostWithoutPut"):
+    for key in ("borrowed", "waiting", "activeWaiting", "expiredWaiting", "activeTransactions", "idleInTransaction",
+                "lostWithoutPut", "unreturnedLeases", "closedWithoutPut", "returning"):
         if pool[key] != 0:
             reasons.append("API pool has outstanding " + key)
     if pool["closed"] or pool["growing"]:

@@ -10,6 +10,7 @@ def pool(at=1000, size=1, **changes):
             "poolSize": size, "available": size, "actualConnectionCount": size,
             "borrowed": 0, "waiting": 0, "activeWaiting": 0, "expiredWaiting": 0,
             "lostWithoutPut": 0, "activeTransactions": 0, "idleInTransaction": 0,
+            "unreturnedLeases": 0, "closedWithoutPut": 0, "returning": 0,
             "closed": False, "growing": False, "backendPids": list(range(100, 100+size)), **changes}
 
 
@@ -55,6 +56,21 @@ class SessionLatencyAcceptanceTests(unittest.TestCase):
             self.assertEqual(pool_health(value)["state"], "notObserved")
         for change in ({"pid": 124}, {"poolIdentity": "recreated"}, {"maxSize": 20}):
             self.assertNotEqual(pool_health(pool(**change), pool())["state"], "ready")
+
+    def test_closed_or_in_progress_returns_cannot_hide_unreturned_connection_leases(self):
+        runs = [settled_run()]
+        for field in ("unreturnedLeases", "closedWithoutPut", "returning"):
+            with self.subTest(field=field):
+                incomplete = pool(1100, **{field: 1})
+                self.assertEqual(pool_health(incomplete, pool())["state"], "pending")
+                self.assertEqual(evaluate_drain([sample(1100, runs, apiPool=incomplete)],
+                                               1000, pool(), {"run"})["state"], "deadlineExceeded")
+                recovered = evaluate_drain([sample(1100, runs, apiPool=incomplete), sample(2000, runs)],
+                                           1000, pool(), {"run"})
+                self.assertEqual(recovered["state"], "drained")
+                self.assertEqual(recovered["conditionRecoveredAtMs"]["apiPoolIdle"], 2000)
+                del incomplete[field]
+                self.assertEqual(pool_health(incomplete, pool())["state"], "notObserved")
 
     def test_drain_waits_for_last_condition_and_uses_stop_not_generator_exit(self):
         runs = [settled_run()]
