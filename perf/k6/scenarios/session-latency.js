@@ -17,7 +17,7 @@ if (!plan || Object.keys(plan).sort().join(',') !== fields
     || !['text', 'single-tool', 'workspace'].includes(plan.task) || !integer(plan.vus, 1, 64)
     || !integer(plan.timeoutSeconds, 1, 120) || !integer(plan.iterations, 1, 60)
     || !integer(plan.rate, 1, 120) || !integer(plan.durationSeconds, 1, continuous ? 540 : 180)
-    || (continuous && (plan.durationSeconds !== 540 || plan.rate !== 18 || plan.vus !== 16
+    || (continuous && (plan.durationSeconds !== 540 || plan.rate !== 18 || plan.vus !== 32
       || plan.sessionPolicy !== 'rolling' || plan.task !== 'workspace'))
     || (plan.mode === 'iterations' ? plan.vus * plan.iterations : Math.ceil(plan.rate * plan.durationSeconds / 60)) > 200
     || !/^http:\/\/127\.0\.0\.1:[0-9]+$/.test(__ENV.PERF_LATENCY_CONTROL || '')) {

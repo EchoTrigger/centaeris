@@ -94,7 +94,7 @@ test('fixed cohorts withhold the next turn when the other environments have not 
   assert.deepEqual(s.metrics.get('latency_not_submitted'), [1]);
 });
 
-const continuousPlan = { mode: 'continuous', durationSeconds: 540, rate: 18, vus: 16 };
+const continuousPlan = { mode: 'continuous', durationSeconds: 540, rate: 18, vus: 32 };
 test('continuous windows share one arrival executor and preserve the Session across window boundaries', () => {
   const s = subject(continuousPlan); const data = s.context.setup();
   s.context.iteration(data);
@@ -103,6 +103,8 @@ test('continuous windows share one arrival executor and preserve the Session acr
   const options = s.context.subjectOptions;
   assert.equal(Object.keys(options.scenarios).length, 1);
   assert.equal(options.scenarios.latency.duration, '540s');
+  assert.equal(options.scenarios.latency.preAllocatedVUs, 32);
+  assert.equal(options.scenarios.latency.maxVUs, 32);
   assert.equal(options.scenarios.latency.gracefulStop, '120s');
   assert.deepEqual(s.submissions.map(args => args[5].sessionId), ['new', 'owned-session', 'owned-session']);
   assert.deepEqual(s.records.filter(r => r.phase === 'accepted').map(r => r.arrivalWindow), [1, 2, 3]);
@@ -120,7 +122,7 @@ test('continuous stop blocks late POSTs and counts the k6 scheduling boundary se
   assert.deepEqual(s.metrics.get('latency_not_submitted'), [1]);
 });
 test('continuous acceptance profile cannot quietly change rate, duration, task, or Session policy', () => {
-  for (const change of [{ rate: 19 }, { durationSeconds: 539 }, { task: 'text' }, { sessionPolicy: 'pairs' }, { vus: 32 }]) {
+  for (const change of [{ rate: 19 }, { durationSeconds: 539 }, { task: 'text' }, { sessionPolicy: 'pairs' }, { vus: 16 }]) {
     assert.throws(() => subject({ ...continuousPlan, ...change }));
   }
 });
