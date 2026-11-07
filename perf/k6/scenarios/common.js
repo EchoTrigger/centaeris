@@ -91,7 +91,14 @@ export function startRunObserved(store, csrf, workspaceId, modelId, text, option
   const sessionId = options.sessionId === undefined ? 'new' : options.sessionId;
   const validId = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value);
   if (!validId(operationId) || !validId(sessionId)) throw new Error('explicit Run operation/session invalid');
+  if (options.submitBeforeAtMs !== undefined && (!Number.isInteger(options.submitBeforeAtMs) || options.submitBeforeAtMs <= 0)) {
+    throw new Error('Run submission cutoff must be an absolute millisecond timestamp');
+  }
   const submittedAtMs = Date.now();
+  if (options.submitBeforeAtMs !== undefined && submittedAtMs >= options.submitBeforeAtMs) {
+    return { submitted: false, operationId, errorCode: 'arrival_window_closed', notSubmittedAtMs: submittedAtMs };
+  }
+  if (options.onSubmit !== undefined) options.onSubmit({ operationId, sessionId, submittedAtMs });
   const res = request('POST',
     `/api/workspaces/${workspaceId}/sessions/${encodeURIComponent(sessionId)}/messages`, store,
     { operationId,

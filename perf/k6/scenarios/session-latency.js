@@ -2,6 +2,7 @@
 // Arrival scheduling remains independent of completion; release occupies a VU.
 import http from 'k6/http';
 import crypto from 'k6/crypto';
+import execution from 'k6/execution';
 import { sleep } from 'k6';
 import { Trend, Counter, Rate } from 'k6/metrics';
 import { configuredTarget, login, startRunObserved, waitForTerminalObserved } from './common.js';
@@ -10,11 +11,14 @@ import { experienceTask, verifyExperienceRun, verifiedToolTimings } from './expe
 const plan = JSON.parse(__ENV.PERF_LATENCY_PLAN || 'null');
 const fields = 'durationSeconds,iterations,mode,rate,sessionPolicy,task,timeoutSeconds,vus';
 const integer = (n, low, high) => Number.isInteger(n) && n >= low && n <= high;
+const continuous = plan?.mode === 'continuous';
 if (!plan || Object.keys(plan).sort().join(',') !== fields
-    || !['iterations', 'arrival'].includes(plan.mode) || !['pairs', 'rolling', 'fresh'].includes(plan.sessionPolicy)
+    || !['iterations', 'arrival', 'continuous'].includes(plan.mode) || !['pairs', 'rolling', 'fresh'].includes(plan.sessionPolicy)
     || !['text', 'single-tool', 'workspace'].includes(plan.task) || !integer(plan.vus, 1, 64)
     || !integer(plan.timeoutSeconds, 1, 120) || !integer(plan.iterations, 1, 60)
-    || !integer(plan.rate, 1, 120) || !integer(plan.durationSeconds, 1, 180)
+    || !integer(plan.rate, 1, 120) || !integer(plan.durationSeconds, 1, continuous ? 540 : 180)
+    || (continuous && (plan.durationSeconds !== 540 || plan.rate !== 18 || plan.vus !== 16
+      || plan.sessionPolicy !== 'rolling' || plan.task !== 'workspace'))
     || (plan.mode === 'iterations' ? plan.vus * plan.iterations : Math.ceil(plan.rate * plan.durationSeconds / 60)) > 200
     || !/^http:\/\/127\.0\.0\.1:[0-9]+$/.test(__ENV.PERF_LATENCY_CONTROL || '')) {
   throw new Error('explicit bounded session latency plan and loopback fixture control required');
@@ -38,8 +42,9 @@ export const options = {
     ? { executor: 'per-vu-iterations', vus: plan.vus, iterations: plan.iterations,
       maxDuration: `${plan.iterations * (plan.timeoutSeconds * 2 + 10) + 30}s`, gracefulStop: '5s' }
     : { executor: 'constant-arrival-rate', rate: plan.rate, timeUnit: '1m', duration: `${plan.durationSeconds}s`,
-      preAllocatedVUs: plan.vus, maxVUs: plan.vus, gracefulStop: `${plan.timeoutSeconds * 2 + 10}s` } },
-  thresholds: { latency_observation_failed: ['rate==0'], dropped_iterations: ['count==0'] },
+      preAllocatedVUs: plan.vus, maxVUs: plan.vus, gracefulStop: `${continuous ? 120 : plan.timeoutSeconds * 2 + 10}s` } },
+  thresholds: { latency_observation_failed: ['rate==0'], dropped_iterations: ['count==0'],
+    ...(continuous ? { latency_rejected: ['count==0'], latency_not_submitted: ['count==0'] } : {}) },
   systemTags: ['status', 'name', 'scenario', 'expected_response'],
 };
 export function setup() {
@@ -47,13 +52,24 @@ export function setup() {
 }
 function identity() { return Array.from(new Uint8Array(crypto.randomBytes(16)), byte => byte.toString(16).padStart(2, '0')).join(''); }
 function record(phase, data, sampleId, admitted, extra = {}) {
+  const at = extra.submittedAtMs ?? admitted?.submittedAtMs ?? Date.now();
+  const start = continuous ? execution.scenario.startTime : null;
+  const window = continuous ? Math.floor((at - start) / 180000) + 1 : null;
   console.log('PERF_EXPERIENCE ' + JSON.stringify({ schema: 'workspace.perf.experience.v1', phase,
     task: plan.task, sampleId, operationId: sampleId, workspaceId: data.workspaceId,
-    modelConfigRef: data.modelId, sessionId: admitted?.sessionId, agentRunId: admitted?.agentRunId, ...extra }));
+    modelConfigRef: data.modelId, sessionId: admitted?.sessionId, agentRunId: admitted?.agentRunId,
+    ...(continuous ? { arrivalStartedAtMs: start, submissionsStoppedAtMs: start + 540000,
+      arrivalWindow: window >= 1 && window <= 3 ? window : null } : {}), ...extra }));
 }
-let sessionId = 'new', fixtureId, sequence = 0, blocked = false;
+let sessionId = 'new', fixtureId, sequence = 0, blocked = false, scheduleRecorded = false;
 export default function (data) {
   const sampleId = identity();
+  if (continuous && !scheduleRecorded) {
+    record('loadSchedule', data, sampleId, null); scheduleRecorded = true;
+  }
+  if (continuous && execution.scenario.iterationInTest >= planned) {
+    record('arrivalCutoff', data, sampleId, null, { errorCode: 'scheduled_iteration_boundary' }); return;
+  }
   const permit = http.get(control + '/admission', { tags: { name: 'fixture_admission' }, timeout: '5s' });
   if (permit.status !== 200) throw new Error('fixture admission observation failed');
   if (blocked || !permit.json('allowed')) {
@@ -65,9 +81,17 @@ export default function (data) {
   const contract = experienceTask(plan.task, sampleId, { fixtureId, turn });
   let admitted, stage = 'admission';
   try {
-    attempted.add(1, { turn });
     admitted = startRunObserved(data.store, data.csrf, data.workspaceId, data.modelId, contract.prompt,
-      { sessionId, operationId: sampleId, sampleId });
+      { sessionId, operationId: sampleId, sampleId,
+        ...(continuous ? { submitBeforeAtMs: execution.scenario.startTime + 540000 } : {}),
+        onSubmit(observation) {
+          attempted.add(1, { turn });
+          record('submitted', data, sampleId, null, { turn, ...observation });
+        } });
+    if (admitted.submitted === false) {
+      skipped.add(1); record('notSubmitted', data, sampleId, null, { turn, errorCode: admitted.errorCode,
+        notSubmittedAtMs: admitted.notSubmittedAtMs }); return;
+    }
     admission.add(admitted.admissionMs, { turn, status: String(admitted.httpStatus) });
     if (admitted.httpStatus !== 202) {
       rejected.add(1, { status: String(admitted.httpStatus), errorCode: admitted.errorCode });

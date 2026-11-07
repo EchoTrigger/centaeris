@@ -55,3 +55,24 @@ test('observed admission records rejected HTTP responses without inventing a Run
   context.http.request = () => ({ status: 503, json: () => 'private provider error prose' });
   assert.equal(context.startRunObserved({}, '', 'workspace-owned', 'model-tools').errorCode, 'other');
 });
+
+test('submission cutoff is checked at POST time without counting a late request as sent', () => {
+  const { context, calls } = common(configured); context.Date = { now: () => 2000 };
+  let submitted = false;
+  const result = context.startRunObserved({}, '', 'workspace-owned', 'model-tools', 'fixed work', {
+    submitBeforeAtMs: 2000, onSubmit() { submitted = true; },
+  });
+  assert.equal(result.submitted, false); assert.equal(result.errorCode, 'arrival_window_closed');
+  assert.equal(result.submittedAtMs, undefined); assert.equal(submitted, false); assert.deepEqual(calls, []);
+});
+
+test('actual POST identity is observed before transport or response-binding failure', () => {
+  const { context, calls } = common(configured); context.Date = { now: () => 2000 };
+  const observations = [];
+  assert.throws(() => context.startRunObserved({}, '', 'workspace-owned', 'model-tools', 'fixed work', {
+    sessionId: 'owned-session', operationId: 'known-operation', submitBeforeAtMs: 3000,
+    onSubmit(value) { observations.push(JSON.parse(JSON.stringify(value))); },
+  }), /unexpected request/);
+  assert.deepEqual(observations, [{ sessionId: 'owned-session', operationId: 'known-operation', submittedAtMs: 2000 }]);
+  assert.equal(calls.length, 1);
+});
