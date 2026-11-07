@@ -313,7 +313,7 @@ Set `PERF_LATENCY_PLAN` to an exact JSON object, for example:
 {"mode":"arrival","task":"workspace","sessionPolicy":"rolling","vus":16,"iterations":2,"rate":12,"durationSeconds":180,"timeoutSeconds":120}
 ```
 
-`mode` is `arrival` or `iterations`; `sessionPolicy` is `fresh`, `pairs` or
+`mode` is `arrival`, `iterations` or `continuous`; `sessionPolicy` is `fresh`, `pairs` or
 `rolling`; `task` is `text`, `single-tool` or `workspace`. A workspace first Run
 writes a distinct random 4 MiB file and SHA-256 sidecar. A followup validates its
 size and digest after restoration. Each iteration submits one Run, observes and
@@ -327,6 +327,43 @@ submissions. Plans admit at most 200 scheduled iterations and use bounded stream
 and release deadlines. The fixture owner must enforce the cumulative budget
 across windows and collect every accepted Run through drain, including failed
 client observations. Do not automatically retry rejected messages.
+
+Continuous stability acceptance uses this fixed profile:
+
+```json
+{"mode":"continuous","task":"workspace","sessionPolicy":"rolling","vus":32,"iterations":2,"rate":18,"durationSeconds":540,"timeoutSeconds":120}
+```
+
+This is one uninterrupted arrival stream with 162 planned message POSTs. Its
+three 180-second windows share the same Sessions, API process and pool; the
+collector groups observations without an intermediate restart or manual cleanup.
+The 32 VUs provide client observation capacity while sandbox admission follows
+the deployed resource policy. A dropped iteration or an unsubmitted input fails
+acceptance. Preserve failed experiments instead of extending them to fill a
+successful-sample target.
+
+`harness/session_latency_acceptance.py` checks original request/Run identity,
+at least 100 actually completed and verified followups, lifecycle completion and
+release. First turns, rejections, intentional disconnects and incomplete client
+observations do not contribute to those followups. Record resource waiting and
+rejection separately, with per-window outcomes.
+
+The fixture must supply observations from the actual API process and pool,
+including live connections, individual unreturned leases, active and expired
+waiters, and PostgreSQL transaction state. A separate observer connection can
+verify backend facts but cannot substitute for API pool observations. Legitimate
+idle pool growth is allowed when internal occupancy matches actual connections.
+Missing observations or a process/pool replacement fail acceptance. Record the
+native binary manifest, API source and service identities; image labels alone
+do not identify source supplied through a bind mount.
+
+The final drain deadline starts at the scenario's absolute end of new-input
+scheduling, including in-flight requests. Within 120 seconds, every original Run
+and Job must settle, all test sandboxes and resident responsibilities must be
+released, and pool ownership, waiting and transaction state must return to the
+declared idle baseline. Report each condition's recovery time and the final
+composite observation; k6 exit does not restart the deadline. Keep response-time
+measurements as a comparison with the existing baseline, separate from stability.
 
 For dispatch attribution, `experience_timing.py` additionally separates first
 claim, first Worker step-request start and first Runtime startup-profile start.
