@@ -464,9 +464,9 @@ fn postgres_retirement_pending_other_environment_does_not_block_healthy_run_clea
         .prepare_retained_instance(
             &b.request("execution-b", &profile),
             ResidentCapacity {
-                global: two,
-                tenant: two,
-                host: two,
+                global: two.into(),
+                tenant: two.into(),
+                host: two.into(),
             },
             || Ok(physical.lock().unwrap().clone()),
             |_, _| Ok(()),

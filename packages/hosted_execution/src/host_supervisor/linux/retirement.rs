@@ -406,7 +406,7 @@ pub(super) fn start_retries(host: &Arc<Host>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
     struct Fixture {
         root: PathBuf,

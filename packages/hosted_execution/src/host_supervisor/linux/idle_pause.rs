@@ -115,7 +115,7 @@ pub(super) fn confirmed_power(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
     #[test]
     fn physical_pause_requires_docker_and_runtime_agreement() {

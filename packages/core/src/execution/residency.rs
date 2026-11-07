@@ -12,6 +12,28 @@ pub struct ResidentResourceUsage {
     pub workspace_bytes: u64,
 }
 
+/// Admission budgets; an absent count ceiling leaves resource budgets in charge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResidentResourceLimits {
+    pub sandbox_count: Option<u64>,
+    pub memory_bytes: u64,
+    pub cpu_milli: u64,
+    pub pids: u64,
+    pub workspace_bytes: u64,
+}
+
+impl From<ResidentResourceUsage> for ResidentResourceLimits {
+    fn from(usage: ResidentResourceUsage) -> Self {
+        Self {
+            sandbox_count: Some(usage.sandbox_count),
+            memory_bytes: usage.memory_bytes,
+            cpu_milli: usage.cpu_milli,
+            pids: usage.pids,
+            workspace_bytes: usage.workspace_bytes,
+        }
+    }
+}
+
 impl ResidentResourceUsage {
     pub fn checked_add(self, other: Self) -> Result<Self, String> {
         let add = |left: u64, right: u64| {
@@ -27,8 +49,11 @@ impl ResidentResourceUsage {
         })
     }
 
-    pub fn fits(self, limit: Self) -> bool {
-        self.sandbox_count <= limit.sandbox_count
+    pub fn fits(self, limit: impl Into<ResidentResourceLimits>) -> bool {
+        let limit = limit.into();
+        limit
+            .sandbox_count
+            .is_none_or(|count| self.sandbox_count <= count)
             && self.memory_bytes <= limit.memory_bytes
             && self.cpu_milli <= limit.cpu_milli
             && self.pids <= limit.pids
@@ -40,8 +65,8 @@ pub fn admit_resident_resources(
     global_used: ResidentResourceUsage,
     tenant_used: ResidentResourceUsage,
     requested: ResidentResourceUsage,
-    global_limit: ResidentResourceUsage,
-    tenant_limit: ResidentResourceUsage,
+    global_limit: impl Into<ResidentResourceLimits>,
+    tenant_limit: impl Into<ResidentResourceLimits>,
 ) -> Result<bool, String> {
     if requested.sandbox_count != 1
         || requested.memory_bytes == 0
@@ -66,6 +91,45 @@ mod tests {
             cpu_milli: 1000,
             pids: 16,
             workspace_bytes: 512,
+        }
+    }
+
+    #[test]
+    fn optional_count_quota_preserves_resource_admission() {
+        let requested = box_usage();
+        let used = ResidentResourceUsage {
+            sandbox_count: 12,
+            ..requested
+        };
+        let limits = ResidentResourceLimits {
+            sandbox_count: None,
+            ..used.checked_add(requested).unwrap().into()
+        };
+        assert!(admit_resident_resources(used, used, requested, limits, limits).unwrap());
+        let counted = ResidentResourceLimits {
+            sandbox_count: Some(8),
+            ..limits
+        };
+        assert!(!admit_resident_resources(used, used, requested, counted, limits).unwrap());
+        for constrained in [
+            ResidentResourceLimits {
+                memory_bytes: used.memory_bytes,
+                ..limits
+            },
+            ResidentResourceLimits {
+                cpu_milli: used.cpu_milli,
+                ..limits
+            },
+            ResidentResourceLimits {
+                pids: used.pids,
+                ..limits
+            },
+            ResidentResourceLimits {
+                workspace_bytes: used.workspace_bytes,
+                ..limits
+            },
+        ] {
+            assert!(!admit_resident_resources(used, used, requested, constrained, limits).unwrap());
         }
     }
 

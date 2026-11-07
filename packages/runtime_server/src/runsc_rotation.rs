@@ -2,7 +2,7 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Config {
-    pub(crate) max_running: u32,
+    pub(crate) max_running: Option<u32>,
     pub(crate) idle_pause_ms: u64,
 }
 
@@ -24,22 +24,26 @@ impl Config {
         {
             return Err("runsc_rotation_backend_invalid".into());
         }
-        let running = running.ok_or("runsc_rotation_bounds_required")?;
         let idle = idle.ok_or("runsc_rotation_bounds_required")?;
-        if running.is_empty()
-            || idle.is_empty()
-            || !running.bytes().all(|v| v.is_ascii_digit())
+        if idle.is_empty()
+            || running
+                .as_ref()
+                .is_some_and(|value| !value.bytes().all(|v| v.is_ascii_digit()))
             || !idle.bytes().all(|v| v.is_ascii_digit())
         {
             return Err("runsc_rotation_bounds_invalid".into());
         }
         let max_running = running
-            .parse::<u32>()
-            .map_err(|_| "runsc_running_limit_invalid")?;
+            .map(|value| {
+                value
+                    .parse::<u32>()
+                    .map_err(|_| "runsc_running_limit_invalid")
+            })
+            .transpose()?;
         let idle_pause_ms = idle
             .parse::<u64>()
             .map_err(|_| "runsc_idle_pause_invalid")?;
-        if max_running == 0 || idle_pause_ms == 0 || idle_pause_ms > i64::MAX as u64 {
+        if max_running == Some(0) || idle_pause_ms == 0 || idle_pause_ms > i64::MAX as u64 {
             return Err("runsc_rotation_bounds_invalid".into());
         }
         Ok(Some(Self {
@@ -265,10 +269,9 @@ mod tests {
         assert_eq!(selected(&[]).unwrap(), None);
     }
     #[test]
-    fn native_rotation_requires_both_explicit_positive_bounds() {
+    fn native_rotation_requires_idle_pause_and_valid_optional_running_bound() {
         for values in [
             vec![("RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS", "1")],
-            vec![("RUNTIME_RUNSC_IDLE_PAUSE_MS", "3000")],
             vec![
                 ("RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS", "0"),
                 ("RUNTIME_RUNSC_IDLE_PAUSE_MS", "3000"),
@@ -300,6 +303,17 @@ mod tests {
         }
     }
     #[test]
+    fn idle_pause_remains_enabled_without_a_running_count_quota() {
+        assert_eq!(
+            selected(&[("RUNTIME_RUNSC_IDLE_PAUSE_MS", "3000")]).unwrap(),
+            Some(Config {
+                max_running: None,
+                idle_pause_ms: 3000
+            })
+        );
+    }
+
+    #[test]
     fn configured_rotation_preserves_running_and_resident_boundary() {
         assert_eq!(
             selected(&[
@@ -310,7 +324,7 @@ mod tests {
             ])
             .unwrap(),
             Some(Config {
-                max_running: 1,
+                max_running: Some(1),
                 idle_pause_ms: 3000
             })
         );

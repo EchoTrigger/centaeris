@@ -1,4 +1,4 @@
-use centaeris_core::execution::ResidentResourceUsage;
+use centaeris_core::execution::{ResidentResourceLimits, ResidentResourceUsage};
 
 use crate::agent_run_authorization::SandboxResources;
 
@@ -7,26 +7,26 @@ pub(crate) const HOST_PREPARATION_WAIT: &str = "execution_host_preparation_wait"
 
 #[derive(Clone, Copy)]
 pub(crate) struct ResidentCapacity {
-    pub global: ResidentResourceUsage,
-    pub tenant: ResidentResourceUsage,
-    pub host: ResidentResourceUsage,
+    pub global: ResidentResourceLimits,
+    pub tenant: ResidentResourceLimits,
+    pub host: ResidentResourceLimits,
 }
 
 impl Default for ResidentCapacity {
     fn default() -> Self {
-        let vector = |count: u64, gib: u64, cpu: u64, pids: u64| ResidentResourceUsage {
-            sandbox_count: count,
+        let vector = |gib: u64, cpu: u64, pids: u64| ResidentResourceLimits {
+            sandbox_count: None,
             memory_bytes: gib * 1024 * 1024 * 1024,
             cpu_milli: cpu,
             pids,
             workspace_bytes: gib * 1024 * 1024 * 1024,
         };
-        let global = vector(16, 32, 16_000, 8192);
+        let global = vector(32, 16_000, 8192);
         Self {
             global,
-            tenant: ResidentResourceUsage {
+            tenant: ResidentResourceLimits {
                 workspace_bytes: 16 * 1024 * 1024 * 1024,
-                ..vector(4, 8, 4_000, 2048)
+                ..vector(8, 4_000, 2048)
             },
             host: global,
         }
@@ -35,15 +35,18 @@ impl Default for ResidentCapacity {
 
 impl ResidentCapacity {
     pub fn from_env() -> Result<Self, String> {
+        Self::from_lookup(|name| std::env::var(name))
+    }
+
+    fn from_lookup(
+        get: impl Fn(&str) -> Result<String, std::env::VarError>,
+    ) -> Result<Self, String> {
         let defaults = Self::default();
         let limits = |prefix: &str,
-                      defaults: ResidentResourceUsage|
-         -> Result<ResidentResourceUsage, String> {
-            Ok(ResidentResourceUsage {
-                sandbox_count: crate::positive_u64_env(
-                    &format!("{prefix}_COUNT"),
-                    defaults.sandbox_count,
-                )?,
+                      defaults: ResidentResourceLimits|
+         -> Result<ResidentResourceLimits, String> {
+            Ok(ResidentResourceLimits {
+                sandbox_count: optional_count(&format!("{prefix}_COUNT"), &get)?,
                 memory_bytes: crate::positive_u64_env(
                     &format!("{prefix}_MEMORY_BYTES"),
                     defaults.memory_bytes,
@@ -60,12 +63,15 @@ impl ResidentCapacity {
             })
         };
         let global = limits("RESIDENT_GLOBAL", defaults.global)?;
-        let host_count = crate::positive_u64_env("RESIDENT_HOST_COUNT", global.sandbox_count)?;
+        let host_count = optional_count("RESIDENT_HOST_COUNT", &get)?;
         Ok(Self {
             global,
             tenant: limits("RESIDENT_TENANT", defaults.tenant)?,
-            host: ResidentResourceUsage {
-                sandbox_count: host_count.min(global.sandbox_count),
+            host: ResidentResourceLimits {
+                sandbox_count: match (host_count, global.sandbox_count) {
+                    (Some(host), Some(global)) => Some(host.min(global)),
+                    (host, global) => host.or(global),
+                },
                 ..global
             },
         })
@@ -88,7 +94,7 @@ impl ResidentCapacity {
             .filter(|value| *value > 0)
             .ok_or("resident host CPU headroom leaves no sandbox capacity")?;
         Ok(Self {
-            host: ResidentResourceUsage {
+            host: ResidentResourceLimits {
                 memory_bytes: self.host.memory_bytes.min(memory_available),
                 cpu_milli: self.host.cpu_milli.min(cpu_available),
                 // Native workspace storage is independent of host RAM. Unknown
@@ -99,6 +105,21 @@ impl ResidentCapacity {
             global: self.global,
             tenant: self.tenant,
         })
+    }
+}
+
+fn optional_count(
+    name: &str,
+    get: &impl Fn(&str) -> Result<String, std::env::VarError>,
+) -> Result<Option<u64>, String> {
+    match get(name) {
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        value => value
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0 && *value <= i64::MAX as u64)
+            .map(Some)
+            .ok_or_else(|| format!("{name} must be a positive integer")),
     }
 }
 
@@ -248,29 +269,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn count_quotas_are_optional_and_explicit_values_remain_strict() {
+        let defaults = ResidentCapacity::default();
+        assert_eq!(defaults.global.sandbox_count, None);
+        assert_eq!(defaults.tenant.sandbox_count, None);
+        assert_eq!(defaults.host.sandbox_count, None);
+        let configured = ResidentCapacity::from_lookup(|name| match name {
+            "RESIDENT_GLOBAL_COUNT" => Ok("12".into()),
+            "RESIDENT_TENANT_COUNT" => Ok("6".into()),
+            "RESIDENT_HOST_COUNT" => Ok("20".into()),
+            _ => Err(std::env::VarError::NotPresent),
+        })
+        .unwrap();
+        assert_eq!(configured.global.sandbox_count, Some(12));
+        assert_eq!(configured.tenant.sandbox_count, Some(6));
+        assert_eq!(configured.host.sandbox_count, Some(12));
+        for value in ["", "0", "-1", "1.5", "unknown", "18446744073709551615"] {
+            assert!(optional_count("COUNT", &|_| Ok(value.into())).is_err());
+        }
+    }
+
+    #[test]
     fn configured_resident_limits_cannot_overbook_a_smaller_daemon() {
         let configured = ResidentCapacity {
-            global: ResidentResourceUsage {
+            global: (ResidentResourceUsage {
                 sandbox_count: 16,
                 memory_bytes: 32 * 1024,
                 cpu_milli: 16_000,
                 pids: 8192,
                 workspace_bytes: 32 * 1024,
-            },
-            tenant: ResidentResourceUsage {
+            })
+            .into(),
+            tenant: (ResidentResourceUsage {
                 sandbox_count: 4,
                 memory_bytes: 8 * 1024,
                 cpu_milli: 4_000,
                 pids: 2048,
                 workspace_bytes: 8 * 1024,
-            },
-            host: ResidentResourceUsage {
+            })
+            .into(),
+            host: (ResidentResourceUsage {
                 sandbox_count: 16,
                 memory_bytes: 32 * 1024,
                 cpu_milli: 16_000,
                 pids: 8192,
                 workspace_bytes: 32 * 1024,
-            },
+            })
+            .into(),
         };
         let effective = configured.bound_to_host(4 * 1024, 2, 1024, 200).unwrap();
         assert_eq!(effective.host.memory_bytes, 3 * 1024);

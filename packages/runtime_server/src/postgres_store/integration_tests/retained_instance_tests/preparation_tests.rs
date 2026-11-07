@@ -96,9 +96,9 @@ fn postgres_confirmed_resident_initialization_does_not_hold_global_preparation()
     );
     let two = one.checked_add(one).unwrap();
     let capacity = ResidentCapacity {
-        global: two,
-        tenant: two,
-        host: two,
+        global: two.into(),
+        tenant: two.into(),
+        host: two.into(),
     };
     let physical = Arc::new(Mutex::new(Vec::new()));
     let (entered_tx, entered_rx) = mpsc::sync_channel(1);
@@ -247,9 +247,9 @@ fn postgres_four_environment_initializations_overlap_with_shared_authority() {
     // This test isolates preparation locks with four declared resource charges.
     // The measured-resource admission tests independently protect shared budgets.
     let capacity = ResidentCapacity {
-        global: four,
-        tenant: four,
-        host: four,
+        global: four.into(),
+        tenant: four.into(),
+        host: four.into(),
     };
     let stores: Vec<_> = (0..4)
         .map(|_| PostgresRuntimeStore::new(&url).unwrap())
@@ -673,12 +673,18 @@ fn postgres_environment_unlock_closes_registration_after_global_unlock_wake() {
         "environment-unlock-waiter",
         current.original.environment_profile.clone(),
     ));
-    let one = limits(&current).global;
+    let one = declared_usage(
+        current
+            .original
+            .environment_profile
+            .resources
+            .sandbox_resources(),
+    );
     let two = one.checked_add(one).unwrap();
     let capacity = ResidentCapacity {
-        global: two,
-        tenant: two,
-        host: two,
+        global: two.into(),
+        tenant: two.into(),
+        host: two.into(),
     };
     let physical = Arc::new(Mutex::new(Vec::new()));
     let generation_before: i64 = db

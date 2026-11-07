@@ -118,9 +118,9 @@ fn independent_runs(
         Arc::new(first),
         second,
         ResidentCapacity {
-            global: two,
-            tenant: two,
-            host: two,
+            global: two.into(),
+            tenant: two.into(),
+            host: two.into(),
         },
     )
 }

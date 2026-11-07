@@ -11,7 +11,7 @@ use super::PostgresRuntimeStore;
 
 pub(super) struct DispatchHost {
     id: String,
-    sandbox_limit: i64,
+    sandbox_limit: Option<i64>,
 }
 
 // A live or unresolved resident can only be advanced on its owning host.
@@ -33,24 +33,27 @@ pub(super) fn local_resident(host: &str) -> String {
 }
 
 pub(super) fn host_start_slots(host: &str, limit: &str, now: &str) -> String {
-    format!("SELECT GREATEST({limit}::bigint -
+    format!("SELECT CASE WHEN {limit}::bigint IS NULL THEN NULL ELSE GREATEST({limit}::bigint -
     (SELECT count(*) FROM runtime.resident_sandboxes WHERE host_id={host}) -
     (SELECT count(*) FROM runtime.runtime_jobs active
      JOIN public.app_core_agentrun r ON active.job_id='agent_run.lifecycle:'||r.id AND active.session_id=r.session_id
      WHERE active.lease_host_id={host} AND active.lease_purpose='execute'
        AND active.status IN('leased','running') AND active.lease_expires_at_ms>{now}
        AND NOT EXISTS(SELECT 1 FROM runtime.resident_sandboxes s WHERE s.environment_id=r.environment_id OR s.agent_run_id=r.id)
-    ),0) AS available")
+    ),0) END AS available")
 }
 
 impl PostgresRuntimeStore {
     pub(crate) fn with_dispatch_host(
         mut self,
         id: String,
-        sandbox_limit: u64,
+        sandbox_limit: Option<u64>,
     ) -> Result<Self, String> {
-        let sandbox_limit = i64::try_from(sandbox_limit).map_err(|e| e.to_string())?;
-        if id.trim().is_empty() || sandbox_limit == 0 {
+        let sandbox_limit = sandbox_limit
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        if id.trim().is_empty() || sandbox_limit.is_some_and(|limit| limit <= 0) {
             return Err("worker dispatch host or sandbox limit invalid".into());
         }
         self.dispatch_host = Some(Arc::new(DispatchHost { id, sandbox_limit }));
@@ -62,7 +65,9 @@ impl PostgresRuntimeStore {
     }
 
     pub(super) fn dispatch_sandbox_limit(&self) -> Option<i64> {
-        self.dispatch_host.as_deref().map(|host| host.sandbox_limit)
+        self.dispatch_host
+            .as_deref()
+            .and_then(|host| host.sandbox_limit)
     }
 
     pub(crate) fn schedule_worker_job(
@@ -130,8 +135,8 @@ impl PostgresRuntimeStore {
             let mut tx = client.transaction().map_err(|error| error.to_string())?;
             let host = self.dispatch_host_id();
             let sandbox_limit = self.dispatch_sandbox_limit();
-            // Serialize new start reservations only among claimers on this host.
-            let Some(clock) = tx.query_opt("SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE $1::text IS NULL OR pg_try_advisory_xact_lock(731950,hashtext($1))", &[&host])
+            // A configured count quota serializes new start reservations on this host.
+            let Some(clock) = tx.query_opt("SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint WHERE $1::text IS NULL OR $2::bigint IS NULL OR pg_try_advisory_xact_lock(731950,hashtext($1))", &[&host, &sandbox_limit])
                 .map_err(|error| error.to_string())? else { return Ok(Vec::new()) };
             let now = clock.get::<_, i64>(0);
             let due=super::capacity_wait::DUE_AT;
@@ -148,7 +153,7 @@ impl PostgresRuntimeStore {
                 WHERE j.status='queued' AND j.job_kind='agent_run.lifecycle' AND {due}<=$1
                 AND COALESCE(j.lease_reclaim_not_before_ms,{due})<=$1
                 AND ($2::text IS NULL OR j.job_id=$2) AND ($3::text IS NULL OR j.session_id=$3)
-                AND {affinity} AND ($5::text IS NULL OR resident.local OR host_slots.available>0)
+                AND {affinity} AND ($5::text IS NULL OR resident.local OR host_slots.available IS NULL OR host_slots.available>0)
                 AND NOT({})
                 ORDER BY {due},j.created_at_ms,j.job_id FOR UPDATE OF j SKIP LOCKED LIMIT $4", super::lifecycle_control::PENDING),
                 &[&now, &req.job_id, &req.session_id, &(req.limit as i64), &host, &sandbox_limit])
@@ -162,12 +167,12 @@ impl PostgresRuntimeStore {
             let until = now.checked_add(i64::try_from(req.lease_ms).map_err(|error| error.to_string())?)
                 .ok_or("execution lease deadline overflow")?;
             let mut jobs = Vec::new();
-            let mut slots = candidates[0].get::<_, i64>(3);
+            let mut slots = candidates[0].get::<_, Option<i64>>(3);
             for row in candidates {
                 let id: String = row.get(0);
                 let generation: Option<i64> = row.get(1);
                 let needs_start = host.is_some() && !row.get::<_, bool>(2);
-                if needs_start && slots == 0 {
+                if needs_start && slots == Some(0) {
                     continue;
                 }
                 // The fact is committed with the lease and survives the waiter
@@ -190,7 +195,7 @@ impl PostgresRuntimeStore {
                     &[&until, &now, &id, &generation, &host],
                 ).map_err(|error| error.to_string())?;
                 if changed == 1 {
-                    if needs_start { slots -= 1; }
+                    if needs_start { if let Some(remaining) = slots.as_mut() { *remaining -= 1; } }
                     jobs.push(load_job(&mut tx, &id)?.ok_or("claimed execution job missing")?);
                 }
             }
