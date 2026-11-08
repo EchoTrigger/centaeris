@@ -474,21 +474,30 @@ request and return `Cache-Control: no-store`. The Python API authorizes, binds,
 and transports these contracts; it does not implement display projection.
 Runtime reads the PostgreSQL display index through the public Core transcript
 store port. A page or patch is returned only after the requested high-water is
-fully projected. A bounded catch-up pass normally handles at most 128 source
-events and 256 KiB. To guarantee cursor progress, one source event may exceed
-the byte budget; Runtime processes that one event, records an explicit
+fully projected. A bounded catch-up batch normally handles at most 128 source
+events and 256 KiB, committing its patches, waterline and recovery together in
+one transaction. The row limit applies before payload encoding and byte-window
+calculation, so each query processes the bounded candidates rather than the
+remaining history. Tokio drives successive blocking batches within a read request;
+database wait time does not truncate a batch to a single event. To guarantee
+cursor progress, one source event may exceed the byte budget; Runtime processes
+that one event, records an explicit
 `transcript projection progress exception` diagnostic with its byte size, and
-then yields rather than looping on the same event. If more work remains, HTTP 409
-`transcript_projection_not_ready` reports both `sourceHighWater` and
-`projectedHighWater`, and a frozen-water retry advances another bounded pass.
+then yields rather than looping on the same event. Between completed batches,
+Runtime may return HTTP 409 `transcript_projection_not_ready`, reporting both
+`sourceHighWater` and `projectedHighWater`; a frozen-water retry continues from
+committed progress.
+The presentation feed bounds each read independently and allows catch-up to
+continue while that progress advances. Thirty seconds without advancement ends
+the attempt; successful advancement does not incur a fixed polling delay.
 An invalid generation fails explicitly rather than mixing pages. Empty Sessions
 return a valid high-water-zero empty page without creating synthetic facts.
-Runtime atomically overwrites one current-head recovery frontier with each
-normal projection commit. Historical patch commits exclude that recovery
-payload, so open-tool state is not copied into every retained patch. This
-current recovery slot is not the periodic historical checkpoint policy owned by
-Core; normal page and patch reads do not depend on a historical checkpoint
-archive.
+Runtime atomically publishes the batch's final head and one current-head
+recovery frontier together with its event commits. Historical patch commits
+exclude that recovery payload, so open-tool state is not copied into every
+retained patch. This current recovery slot is not the periodic historical
+checkpoint policy owned by Core; normal page and patch reads do not depend on a
+historical checkpoint archive.
 
 ## Workspace citation presentation
 
