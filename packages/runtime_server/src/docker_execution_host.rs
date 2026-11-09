@@ -2317,7 +2317,6 @@ impl DockerExecutionHostRunner {
         let kind = match mode {
             "filesystem-once" => TrustedHelperKind::FileSystem,
             "input-inventory" => TrustedHelperKind::InputInventory,
-            "materialize-input" => TrustedHelperKind::MaterializeInput,
             "revoke-input" => TrustedHelperKind::RevokeInput,
             "read-artifact" => TrustedHelperKind::ReadArtifact,
             "snapshot-collect" => TrustedHelperKind::SnapshotCollect,

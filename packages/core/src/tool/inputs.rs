@@ -363,17 +363,7 @@ impl ResolvedInputState {
         &self,
         input_ref: &str,
     ) -> Result<ResolvedInput, DeferredInputResolutionError> {
-        let reference = self
-            .declared_inputs()
-            .iter()
-            .find(|reference| reference.input_ref == input_ref)
-            .cloned()
-            .ok_or_else(|| {
-                DeferredInputResolutionError::new(
-                    DeferredInputResolutionFailureKind::AssetUnavailable,
-                    "requested input is not declared for this AgentRun",
-                )
-            })?;
+        let reference = self.require_declared_input(input_ref)?;
         let existing = self.input_by_ref(input_ref).map_err(|error| {
             DeferredInputResolutionError::new(
                 DeferredInputResolutionFailureKind::HostUnavailable,
@@ -389,6 +379,37 @@ impl ResolvedInputState {
             });
         };
         let resolved = resolver.resolve_deferred_input(&reference)?;
+        self.record_resolution(&reference, resolved)
+    }
+
+    /// Record a resolution already confirmed by the authority for this Run.
+    /// Future calls to `resolve_input` still consult the configured resolver.
+    pub fn accept_authorized_resolution(
+        &self,
+        resolved: ResolvedInput,
+    ) -> Result<(), DeferredInputResolutionError> {
+        let reference = self.require_declared_input(&resolved.input_ref)?;
+        self.record_resolution(&reference, resolved)?;
+        Ok(())
+    }
+
+    fn require_declared_input(
+        &self,
+        input_ref: &str,
+    ) -> Result<DeclaredInput, DeferredInputResolutionError> {
+        self.declared_input_by_ref(input_ref).ok_or_else(|| {
+            DeferredInputResolutionError::new(
+                DeferredInputResolutionFailureKind::AssetUnavailable,
+                "requested input is not declared for this AgentRun",
+            )
+        })
+    }
+
+    fn record_resolution(
+        &self,
+        reference: &DeclaredInput,
+        resolved: ResolvedInput,
+    ) -> Result<ResolvedInput, DeferredInputResolutionError> {
         if resolved.input_ref != reference.input_ref
             || resolved.display_name != reference.display_name
             || resolved.content_type != reference.content_type
@@ -415,7 +436,7 @@ impl ResolvedInputState {
                 "resolved input manifest lock poisoned",
             )
         })?;
-        if let Some(existing) = manifest.input_by_ref(input_ref) {
+        if let Some(existing) = manifest.input_by_ref(&resolved.input_ref) {
             if existing != &resolved {
                 return Err(DeferredInputResolutionError::new(
                     DeferredInputResolutionFailureKind::HostUnavailable,
@@ -707,5 +728,51 @@ mod tests {
             1
         );
         assert!(state.declared_input_by_ref("unaccepted-input").is_none());
+    }
+
+    #[test]
+    fn host_confirmation_records_only_declared_identity_and_future_access_is_rechecked() {
+        struct RevokedResolver;
+        impl DeferredInputResolverPort for RevokedResolver {
+            fn resolve_deferred_input(
+                &self,
+                _reference: &DeclaredInput,
+            ) -> Result<ResolvedInput, DeferredInputResolutionError> {
+                Err(DeferredInputResolutionError::new(
+                    DeferredInputResolutionFailureKind::AccessRevoked,
+                    "input access revoked",
+                ))
+            }
+        }
+
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let state = ResolvedInputState::new(
+            "agent_run_1".into(),
+            digest.clone(),
+            vec![declared_input()],
+            ResolvedInputManifest {
+                schema: RESOLVED_INPUT_MANIFEST_SCHEMA.into(),
+                agent_run_id: "agent_run_1".into(),
+                authorization_digest: digest,
+                inputs: vec![],
+            },
+            Some(Arc::new(RevokedResolver)),
+        )
+        .unwrap();
+        let mut changed = resolved_input();
+        changed.size_bytes += 1;
+        assert!(state.accept_authorized_resolution(changed).is_err());
+        assert!(state.input_by_ref("input_1").unwrap().is_none());
+        state
+            .accept_authorized_resolution(resolved_input())
+            .unwrap();
+        assert_eq!(
+            state.input_by_ref("input_1").unwrap(),
+            Some(resolved_input())
+        );
+        assert_eq!(
+            state.resolve_input("input_1").unwrap_err().kind,
+            DeferredInputResolutionFailureKind::AccessRevoked
+        );
     }
 }

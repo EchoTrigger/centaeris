@@ -55,9 +55,9 @@ def check_original_budget(run):
         raise KnowledgeError("material_execution_input_budget_exceeded", 409)
 
 
-def _current_record(run, record):
+def _current_record(run, record, *, include_content=False):
     if record.resolved["ownerKind"] == "userLibraryObject":
-        library = resolve_library_input(run, record.input_ref, include_content=False)
+        library = resolve_library_input(run, record.input_ref, include_content=include_content)
         if library is None:
             raise DeferredInputResolutionError("asset_unavailable")
         return library[0]
@@ -133,7 +133,7 @@ def confirm_original(run_id, digest, ref, version, sha256, call_id):
         record = admission.material_input
         if record.resolved["ownerKind"] == "userLibraryObject":
             UserLibraryObject.objects.select_for_update(of=("self",)).filter(pk=record.resolved["objectRef"]).first()
-        current = _current_record(run, record)
+        current = _current_record(run, record, include_content=True)
         if current != record.resolved or current["sourceVersion"] != version or current["sha256"] != sha256:
             raise KnowledgeError("stale_generation", 409)
         admission.confirmed = True

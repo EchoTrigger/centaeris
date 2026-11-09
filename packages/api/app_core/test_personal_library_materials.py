@@ -1,6 +1,7 @@
 """Run authority, Session original identity, and Host delivery lifecycle contracts."""
 import copy
 import json
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from uuid import uuid4
 from unittest.mock import patch
@@ -9,13 +10,14 @@ from threading import Barrier
 
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.core.files.storage import default_storage
 from django.db import transaction, close_old_connections
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.db.migrations.executor import MigrationExecutor
 from asgiref.sync import async_to_sync
 
 from .agent_run_authorization_factory import create_agent_run_authorization
-from .assets import captured_input_fields, DeferredInputResolutionError, tombstone_stored_object
+from .assets import captured_input_fields, DeferredInputResolutionError, store_bytes, tombstone_stored_object
 from .deferred_input import resolved_input_storage
 from .library_materials import library_descriptor
 from .library_notes import create_note, save_note
@@ -23,7 +25,7 @@ from .material_contract import KnowledgeError
 from .material_discovery import list_materials
 from .material_files import material_context, prepare_original, confirm_original, reserved_original_bytes
 from .material_identity import processing_spec_digest
-from .models import (AgentRun, ModelConfig, RunMaterialAdmission,
+from .models import (AgentRun, LibraryNoteRevision, ModelConfig, RunMaterialAdmission,
                      SessionAssetLink, SessionEvent, SessionMaterialInput, Workspace, WorkspaceMembership, UserLibraryObject)
 from .test_platform_mcp import processing_specification
 from .testing import create_session, leased_lifecycle_job_fixture
@@ -220,6 +222,50 @@ class PersonalLibraryMaterialTests(PersonalLibraryMaterialFixture, TestCase):
         from .models import MaterialEvidenceReceipt, SessionCitationProjection
         self.assertFalse(MaterialEvidenceReceipt.objects.exists())
         self.assertFalse(SessionCitationProjection.objects.exists())
+
+    def test_confirmation_checks_backing_file_after_prepare(self):
+        storage = self.enterContext(TemporaryDirectory(prefix="material-confirmation-"))
+        self.enterContext(override_settings(MEDIA_ROOT=storage))
+        metadata = store_bytes(b"fixture body", "library", "original.txt", "text/plain")
+        metadata.pop("safeFilename")
+        owner = UserLibraryObject.objects.create(
+            owner=self.user, objectKind="file", status="ready", contentGeneration=1, **metadata,
+        )
+        link = self.attach(owner)
+        run = self.new_run(personal=False, message_refs=[link.pk])
+        original, call_id = self.prepare(run, owner)
+        self.assertEqual(original["inputRef"], link.pk)
+        default_storage.delete(owner.storageKey)
+
+        context = material_context(run.pk, run.authorization.digest)
+        self.assertEqual(context["pendingInputs"][0]["state"], "active")
+        with self.assertRaisesMessage(DeferredInputResolutionError, "asset_unavailable"):
+            confirm_original(run.pk, run.authorization.digest, original["inputRef"],
+                             original["sourceVersion"], original["sha256"], call_id)
+        self.assertFalse(RunMaterialAdmission.objects.get().confirmed)
+        self.assertFalse(SessionMaterialInput.objects.get().confirmed)
+
+    def test_confirmation_checks_current_note_body_after_prepare(self):
+        run = self.new_run()
+        original, call_id = self.prepare(run)
+        head = self.note.noteHead
+        # Recreate a malformed fixture revision without bypassing its update trigger.
+        UserLibraryObject.objects.filter(pk=self.note.pk).update(noteHead=None)
+        head.delete()
+        corrupt = LibraryNoteRevision.objects.create(
+            note=self.note, generation=head.generation, displayName=head.displayName,
+            markdown=head.markdown.replace("exact", "wrong"), sha256=head.sha256,
+            sizeBytes=head.sizeBytes, createdBy=self.user,
+        )
+        UserLibraryObject.objects.filter(pk=self.note.pk).update(noteHead=corrupt)
+
+        context = material_context(run.pk, run.authorization.digest)
+        self.assertEqual(context["pendingInputs"][0]["state"], "active")
+        with self.assertRaisesMessage(ValueError, "note_revision_identity_mismatch"):
+            confirm_original(run.pk, run.authorization.digest, original["inputRef"],
+                             original["sourceVersion"], original["sha256"], call_id)
+        self.assertFalse(RunMaterialAdmission.objects.get().confirmed)
+        self.assertFalse(SessionMaterialInput.objects.get().confirmed)
 
     def test_deleted_and_restored_library_object_does_not_revive_an_old_input_version(self):
         run = self.new_run()
