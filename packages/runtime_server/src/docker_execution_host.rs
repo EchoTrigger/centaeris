@@ -1,10 +1,12 @@
 mod admission_wait;
+mod artifact;
 mod environment;
 mod environment_container;
 mod execution_inputs;
 mod maintenance;
 mod network;
 mod output_consumption;
+mod projected_input_authority;
 mod retained;
 mod retained_commands;
 pub(crate) mod runsc_power;
@@ -14,7 +16,9 @@ mod stopped_preservation;
 pub(crate) mod stopped_recovery;
 mod stopped_workspace;
 mod workspace_files;
+mod workspace_resolution;
 mod workspace_restore;
+pub(crate) use artifact::PreparedArtifact;
 pub(crate) use maintenance::{
     maintenance_helper, maintenance_task, observe_environment, provision_environment,
     remove_cleaned_environment,
@@ -25,6 +29,7 @@ use crate::execution_recovery_policy::{
     ExecutionActivityWitness, HostFailureEvidence, SnapshotActivityGuard, SnapshotCaptureError,
     WorkspaceReuseEvidence,
 };
+use crate::native_run_execution_authority::NativeRunExecutionAuthority;
 use crate::observations::{
     MeasuredWriter, ProtectionMetric, ProtectionTrigger, WorkspaceProtection,
 };
@@ -52,8 +57,7 @@ use centaeris_core::execution::{
     ExecutionFileSystemOperation, ExecutionFileSystemOutput, ExecutionFileSystemRequest,
     ExecutionHostCommandOutput, ExecutionHostCommandRecovery, ExecutionHostHealth,
     ExecutionHostRunner, ExecutionHostStatus, ExecutionInputState, ExecutionInputStateChange,
-    ExecutionWorkspaceGeneration, MAX_PUBLISHED_ARTIFACT_BYTES, WORKSPACE_DATA_ROOT,
-    WORKSPACE_HOME,
+    ExecutionWorkspaceGeneration, WORKSPACE_DATA_ROOT, WORKSPACE_HOME,
 };
 use centaeris_core::execution::{
     ExecutionCommandRequest, ExecutionError, ExecutionPolicy, ExecutionPolicySummary,
@@ -70,10 +74,10 @@ use hosted_execution::memory::{is_memory_uri, MemoryPath};
 #[cfg(test)]
 use hosted_execution::protocol::SandboxFileSystemResult;
 use hosted_execution::protocol::{
-    SandboxArtifactMetadata, SandboxArtifactRequest, SandboxFileSystemRequest,
-    SandboxInputInventory, SandboxInputRevokeRequest, SandboxMaterializedInput,
-    SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile, SandboxWorkspaceSnapshotManifest,
-    SANDBOX_INPUT_INVENTORY_SCHEMA, SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
+    SandboxFileSystemRequest, SandboxInputInventory, SandboxInputRevokeRequest,
+    SandboxMaterializedInput, SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile,
+    SandboxWorkspaceSnapshotManifest, SANDBOX_INPUT_INVENTORY_SCHEMA,
+    SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -371,6 +375,7 @@ pub struct DockerExecutionHostRunner {
     api_token: String,
     api_client: reqwest::blocking::Client,
     materialized_inputs: Mutex<BTreeMap<String, SandboxMaterializedInput>>,
+    native_run_authority: Option<Arc<NativeRunExecutionAuthority>>,
     resident_store: Option<Arc<PostgresRuntimeStore>>,
     resident_lease: Option<centaeris_core::session::RuntimeJobLeaseFence>,
     retained_allocation:
@@ -413,6 +418,7 @@ pub struct DockerExecutionHostRequest<'a> {
     pub api_url: String,
     pub api_token: String,
     pub plugin_activation: &'a PluginActivationSnapshotV1,
+    pub native_run_authority: Option<Arc<NativeRunExecutionAuthority>>,
 }
 
 #[derive(Clone, Copy)]
@@ -545,6 +551,7 @@ impl DockerExecutionHostRunner {
             runner.api_token = request.api_token;
             runner.environment_profile = request.environment_profile;
             runner.environment_authorization = Some(request.environment_authorization);
+            runner.native_run_authority = request.native_run_authority;
             runner.resident_store = Some(request.resident_store);
             runner.resident_lease = Some(centaeris_core::session::RuntimeJobLeaseFence {
                 job_id: request.lifecycle_job_id,
@@ -573,6 +580,7 @@ impl DockerExecutionHostRunner {
             api_url,
             api_token,
             plugin_activation,
+            native_run_authority,
         } = request;
         if agent_run_id.trim().is_empty()
             || execution_id.trim().is_empty()
@@ -758,6 +766,7 @@ impl DockerExecutionHostRunner {
                 .build()
                 .map_err(|error| format!("build Docker sandbox API client failed: {error}"))?,
             materialized_inputs: Mutex::new(BTreeMap::new()),
+            native_run_authority,
             resident_store: Some(resident_store),
             resident_lease: Some(centaeris_core::session::RuntimeJobLeaseFence {
                 job_id: lifecycle_job_id,
@@ -1144,28 +1153,6 @@ impl DockerExecutionHostRunner {
         Ok(())
     }
 
-    pub fn read_artifact(&self, path: &str) -> Result<(SandboxArtifactMetadata, Vec<u8>), String> {
-        let request = serde_json::to_vec(&SandboxArtifactRequest {
-            path: path.to_string(),
-            max_bytes: MAX_PUBLISHED_ARTIFACT_BYTES,
-        })
-        .map_err(|error| format!("encode artifact helper request failed: {error}"))?;
-        let output = self.helper(
-            "read-artifact",
-            None,
-            request.as_slice(),
-            MAX_PUBLISHED_ARTIFACT_BYTES as usize + HELPER_JSON_LIMIT + 4,
-        )?;
-        let (metadata, bytes) = decode_frame::<SandboxArtifactMetadata>(output.as_slice())?;
-        if metadata.size_bytes != bytes.len() as u64
-            || metadata.size_bytes > MAX_PUBLISHED_ARTIFACT_BYTES
-            || format!("sha256:{:x}", Sha256::digest(bytes)) != metadata.sha256
-        {
-            return Err("artifact helper result integrity mismatch".to_string());
-        }
-        Ok((metadata, bytes.to_vec()))
-    }
-
     pub(crate) fn resolve_session_workspace(
         &self,
         lease: &SessionWorkspaceLease,
@@ -1212,6 +1199,17 @@ impl DockerExecutionHostRunner {
         resolved_resolution(&resolved, frozen)
     }
 
+    fn resolve_workspace_restore_baseline(
+        &self,
+        lease: &SessionWorkspaceLease,
+        frozen: &SessionWorkspace,
+    ) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
+        match workspace_resolution::resolve(self.native_run_authority.as_deref(), lease, frozen)? {
+            Some(resolution) => Ok(resolution),
+            None => self.resolve_session_workspace(lease, frozen),
+        }
+    }
+
     pub(crate) fn restore_session_workspace(
         &self,
         lease: &SessionWorkspaceLease,
@@ -1221,7 +1219,7 @@ impl DockerExecutionHostRunner {
         if self.is_hot_reuse() {
             return Ok(SessionWorkspaceResolution::RetainedLive);
         }
-        let resolution = self.resolve_session_workspace(lease, frozen)?;
+        let resolution = self.resolve_workspace_restore_baseline(lease, frozen)?;
         #[cfg(test)]
         if self.container_name.starts_with("native-consume-test:") {
             assert_eq!(resolution, SessionWorkspaceResolution::Empty);
@@ -1238,7 +1236,7 @@ impl DockerExecutionHostRunner {
         let capture = self.restore_activity()?;
         // Admission into the exclusive phase can race an API workspace advance.
         // Reobserve the restore decision after exclusion, before overwriting data.
-        let resolution = self.resolve_session_workspace(lease, frozen)?;
+        let resolution = self.resolve_workspace_restore_baseline(lease, frozen)?;
         if resolution != SessionWorkspaceResolution::Download {
             return Ok(resolution);
         }
@@ -2089,7 +2087,7 @@ impl DockerExecutionHostRunner {
         decode_input_inventory(&output)
     }
 
-    fn refresh_materialized_inputs(
+    pub(crate) fn refresh_materialized_inputs(
         &self,
     ) -> Result<Vec<ExecutionInputStateChange>, ExecutionError> {
         if self
@@ -2132,6 +2130,37 @@ impl DockerExecutionHostRunner {
             .iter()
             .map(ProjectedInputValidation::from)
             .collect::<Vec<_>>();
+        let native_states = match &self.native_run_authority {
+            Some(authority) => projected_input_authority::validate(authority, &expected)
+                .map_err(|error| self.unavailable(error))?,
+            None => None,
+        };
+        let validation = match native_states {
+            Some(states) => states,
+            None => self.validate_platform_inputs(&expected)?,
+        };
+        let mut changes = Vec::new();
+        for (current, validated) in active.iter().zip(validation) {
+            let state = match validated {
+                ProjectedInputState::Active => continue,
+                ProjectedInputState::AssetRemoved => ExecutionInputState::AssetRemoved,
+                ProjectedInputState::AccessRevoked => ExecutionInputState::AccessRevoked,
+                ProjectedInputState::SourceDeleted => ExecutionInputState::SourceDeleted,
+                ProjectedInputState::StaleGeneration => ExecutionInputState::StaleGeneration,
+            };
+            self.revoke_input(current, state)?;
+            changes.push(ExecutionInputStateChange {
+                input_ref: current.input_ref.clone(),
+                state,
+            });
+        }
+        Ok(changes)
+    }
+
+    fn validate_platform_inputs(
+        &self,
+        expected: &[ProjectedInputValidation<'_>],
+    ) -> Result<Vec<ProjectedInputState>, ExecutionError> {
         let response = self
             .api_client
             .post(format!(
@@ -2143,7 +2172,7 @@ impl DockerExecutionHostRunner {
                 schema: VALIDATE_INPUTS_SCHEMA,
                 agent_run_id: self.agent_run_id.as_str(),
                 authorization_digest: self.authorization_digest.as_str(),
-                inputs: expected.as_slice(),
+                inputs: expected,
             })
             .timeout(Duration::from_secs(10))
             .send()
@@ -2159,28 +2188,20 @@ impl DockerExecutionHostRunner {
         let validation = response.json::<ValidateInputsResponse>().map_err(|error| {
             self.unavailable(format!("decode input validation failed: {error}"))
         })?;
-        if validation.schema != VALIDATE_INPUTS_SCHEMA || validation.inputs.len() != active.len() {
+        if validation.schema != VALIDATE_INPUTS_SCHEMA || validation.inputs.len() != expected.len()
+        {
             return Err(self.unavailable("input validation response mismatch"));
         }
-        let mut changes = Vec::new();
-        for (current, validated) in active.iter().zip(validation.inputs) {
-            if validated.input_ref != current.input_ref {
-                return Err(self.unavailable("input validation response binding mismatch"));
-            }
-            let state = match validated.state {
-                ProjectedInputState::Active => continue,
-                ProjectedInputState::AssetRemoved => ExecutionInputState::AssetRemoved,
-                ProjectedInputState::AccessRevoked => ExecutionInputState::AccessRevoked,
-                ProjectedInputState::SourceDeleted => ExecutionInputState::SourceDeleted,
-                ProjectedInputState::StaleGeneration => ExecutionInputState::StaleGeneration,
-            };
-            self.revoke_input(current, state)?;
-            changes.push(ExecutionInputStateChange {
-                input_ref: current.input_ref.clone(),
-                state,
-            });
-        }
-        Ok(changes)
+        expected
+            .iter()
+            .zip(validation.inputs)
+            .map(|(expected, actual)| {
+                if actual.input_ref != expected.input_ref {
+                    return Err(self.unavailable("input validation response binding mismatch"));
+                }
+                Ok(actual.state)
+            })
+            .collect()
     }
 
     fn revoke_input(
@@ -2276,9 +2297,7 @@ impl DockerExecutionHostRunner {
         let kind = match mode {
             "filesystem-once" => TrustedHelperKind::FileSystem,
             "input-inventory" => TrustedHelperKind::InputInventory,
-            "materialize-input" => TrustedHelperKind::MaterializeInput,
             "revoke-input" => TrustedHelperKind::RevokeInput,
-            "read-artifact" => TrustedHelperKind::ReadArtifact,
             "snapshot-collect" => TrustedHelperKind::SnapshotCollect,
             "snapshot-capture" => TrustedHelperKind::SnapshotCapture,
             "snapshot-restore" => TrustedHelperKind::SnapshotRestore,
@@ -3369,23 +3388,6 @@ fn encode_frame<T: Serialize>(metadata: &T, bytes: &[u8]) -> Result<Vec<u8>, Str
     Ok(frame)
 }
 
-fn decode_frame<T: serde::de::DeserializeOwned>(frame: &[u8]) -> Result<(T, &[u8]), String> {
-    if frame.len() < 4 {
-        return Err("sandbox helper frame is truncated".to_string());
-    }
-    let metadata_len = u32::from_be_bytes(
-        frame[..4]
-            .try_into()
-            .map_err(|_| "sandbox helper frame is invalid".to_string())?,
-    ) as usize;
-    if metadata_len == 0 || metadata_len > HELPER_JSON_LIMIT || frame.len() < 4 + metadata_len {
-        return Err("sandbox helper frame metadata is invalid".to_string());
-    }
-    let metadata = serde_json::from_slice(&frame[4..4 + metadata_len])
-        .map_err(|error| format!("decode sandbox helper frame failed: {error}"))?;
-    Ok((metadata, &frame[4 + metadata_len..]))
-}
-
 #[cfg(test)]
 fn normalize_model_path(
     path: &str,
@@ -4198,6 +4200,46 @@ pub(crate) fn material_delivery_test_host() -> DockerExecutionHostRunner {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn background_task_start_stops_before_dispatch_when_input_refresh_fails() {
+        use crate::retained_tasks::{retained_task_contracts, RetainedTaskToolProvider};
+        use centaeris_core::tool::layer::{DynamicToolProvider, DynamicToolProviderRequest};
+        use centaeris_core::tool::DynamicToolRegistry;
+
+        let mut runner = retained_test_runner();
+        // Keep a valid controller fence, but leave the Host allocation unavailable.
+        runner.retained_allocation = None;
+        runner.materialized_inputs.lock().unwrap().insert(
+            "input_test".into(),
+            SandboxMaterializedInput {
+                input_ref: "input_test".into(),
+                virtual_path: "inputs/note.md".into(),
+                size_bytes: 1,
+                sha256: format!("sha256:{}", "a".repeat(64)),
+                source_version: "1".into(),
+                state: None,
+            },
+        );
+        let registry = DynamicToolRegistry::from_contracts(retained_task_contracts()).unwrap();
+        let provider = RetainedTaskToolProvider::new(Arc::new(runner));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let response = runtime
+            .block_on(provider.execute(DynamicToolProviderRequest {
+                tool_name: "background_task_start".into(),
+                tool_call_id: "start-with-protected-input".into(),
+                args_json: r#"{"program":"cat","args":["/mnt/data/inputs/note.md"]}"#.into(),
+                contract: registry.find_contract("background_task_start").unwrap(),
+                cancellation_probe: None,
+            }))
+            .unwrap();
+        assert!(response.is_error);
+        assert_eq!(response.details["errorCode"], "background_task_unavailable");
+        assert!(response.details.get("state").is_none());
+    }
+
+    #[test]
     fn input_refresh_keeps_capacity_codes_without_exposing_private_host_reasons() {
         for error in [
             ExecutionError::PolicyUnavailable {
@@ -4603,6 +4645,7 @@ mod tests {
                         api_url: api_url.clone(),
                         api_token: "centaeris-recovery-test-token".into(),
                         plugin_activation: &activation,
+                        native_run_authority: None,
                     },
                     before,
                 )
@@ -5334,20 +5377,6 @@ mod tests {
 
         assert_eq!(output.bytes, expected);
         assert_eq!(output.total_bytes, 1024 * 1024 + 17);
-    }
-
-    #[test]
-    fn helper_frames_round_trip_exactly() {
-        let metadata = SandboxArtifactMetadata {
-            filename: "report.txt".to_string(),
-            size_bytes: 3,
-            sha256: format!("sha256:{}", "a".repeat(64)),
-        };
-        let frame = encode_frame(&metadata, b"abc").expect("frame");
-        let (decoded, bytes) =
-            decode_frame::<SandboxArtifactMetadata>(frame.as_slice()).expect("decode");
-        assert_eq!(decoded.filename, "report.txt");
-        assert_eq!(bytes, b"abc");
     }
 
     #[test]
@@ -7060,6 +7089,7 @@ mod tests {
             api_token: "token".to_string(),
             api_client: reqwest::blocking::Client::new(),
             materialized_inputs: Mutex::new(BTreeMap::new()),
+            native_run_authority: None,
             resident_store: None,
             resident_lease: None,
             retained_allocation: None,

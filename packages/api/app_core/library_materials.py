@@ -63,7 +63,7 @@ def library_descriptor(run, owner):
                           path, owner.sizeBytes, owner.sha256, str(owner.contentGeneration), "userProvided")
 
 
-def resolve_library_input(run, ref, *, require_admission=False, include_content=True):
+def resolve_library_input(run, ref, *, require_admission=False, include_content=True, include_note_body=True):
     declared = next((item for item in run.authorization.payload["assetRefs"] if item["inputRef"] == ref), None)
     if declared is not None and declared["inputIdentity"]["ownerKind"] != "userLibraryObject":
         return None
@@ -90,6 +90,8 @@ def resolve_library_input(run, ref, *, require_admission=False, include_content=
         return None
     try:
         query = UserLibraryObject.objects.select_related("noteHead") if include_content else UserLibraryObject.objects
+        if include_content and not include_note_body:
+            query = query.defer("noteHead__markdown")
         owner = query.get(pk=owner_id, owner_id=run.user_id)
     except UserLibraryObject.DoesNotExist:
         raise DeferredInputResolutionError("asset_unavailable") from None
@@ -111,7 +113,7 @@ def resolve_library_input(run, ref, *, require_admission=False, include_content=
     source = None
     if include_content:
         try:
-            source = content_source(owner)
+            source = content_source(owner, include_note_body=include_note_body)
         except FileNotFoundError:
             raise DeferredInputResolutionError("asset_unavailable") from None
     return resolved, source, owner

@@ -4148,6 +4148,56 @@ async fn openai_responses_stream_output_limit_preserves_complete_tool_identity_w
 }
 
 #[tokio::test]
+async fn openai_responses_content_filter_rejects_complete_looking_tools() {
+    let payload = json!({
+        "id": "resp-filtered",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "content_filter"},
+        "output": [{
+            "type": "function_call",
+            "call_id": "call-filtered",
+            "name": "read",
+            "arguments": r#"{"path":"example.txt"}"#,
+        }],
+    });
+    std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+    let request = build_model_request("openai.default");
+    let response = || JsonHttpResponse {
+        timings: None,
+        status_code: 200,
+        headers: HashMap::new(),
+        body_json: payload.to_string(),
+    };
+    let client = OpenAiResponsesModelClient::new(
+        ModelProviderRegistry::new(),
+        MockJsonHttpTransport::with_response(Ok(response())),
+    );
+    let error = client
+        .generate(&request)
+        .await
+        .expect_err("filtered response must not return a tool call");
+    assert_eq!(error.provider_code.as_deref(), Some("incomplete_response"));
+    assert!(!error.retryable);
+
+    let terminal = json!({"type": "response.incomplete", "response": payload}).to_string();
+    let client = OpenAiResponsesModelClient::new(
+        ModelProviderRegistry::new(),
+        MockJsonHttpTransport::with_sse(Ok(response()), vec![terminal.as_str()]),
+    );
+    let mut events = Vec::new();
+    let error = client
+        .generate_stream(&request, &mut |event| events.push(event))
+        .await
+        .expect_err("filtered stream must not return a tool call");
+    assert_eq!(error.provider_code.as_deref(), Some("incomplete_response"));
+    assert!(!error.retryable);
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ModelClientStreamEvent::ToolCallReady { .. } | ModelClientStreamEvent::Done { .. }
+    )));
+}
+
+#[tokio::test]
 async fn openai_responses_client_projects_completed_tool_call_only() {
     let transport = MockJsonHttpTransport::with_sse(
         Ok(JsonHttpResponse {

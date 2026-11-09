@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import json
+import re
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -138,8 +140,8 @@ async def stream_open_ai_responses(
     encode_event,
 ):
     text_parts = []
-    tool_calls = []
-    completed_response = None
+    tool_items = []
+    terminal = None
     reasoning_parts = {}
     client = await async_open_ai_responses_client(model, request_body)
     try:
@@ -168,10 +170,17 @@ async def stream_open_ai_responses(
             elif event_type == "response.output_item.done":
                 item = event.get("item")
                 if isinstance(item, dict) and item.get("type") == "function_call":
-                    tool_calls.append(parse_response_tool_call(item))
+                    tool_items.append(item)
+            elif event_type == "response.incomplete":
+                response = event.get("response")
+                _reject_incomplete_response(
+                    response if isinstance(response, dict) else {},
+                    incomplete_event=True,
+                    streamed_tool_items=tool_items,
+                )
             elif event_type == "response.completed":
-                completed_response = event.get("response")
-                text = parse_open_ai_responses_response(completed_response)["reasoningContent"]
+                terminal = parse_open_ai_responses_response(event.get("response"))
+                text = terminal["reasoningContent"]
                 if text:
                     yield encode_event("reasoning", {"text": text})
     except asyncio.CancelledError:
@@ -183,18 +192,18 @@ async def stream_open_ai_responses(
         raise
     finally:
         await client.close()
-    if not isinstance(completed_response, dict):
+    if terminal is None:
         raise ModelProviderError("provider_stream_interrupted")
-    terminal = parse_open_ai_responses_response(completed_response)
     result_holder["result"] = {
         "text": "".join(text_parts) if text_parts else terminal["text"],
         "reasoningContent": terminal["reasoningContent"],
-        "toolCalls": tool_calls or terminal["toolCalls"],
+        "toolCalls": [parse_response_tool_call(item) for item in tool_items] or terminal["toolCalls"],
         "usage": terminal["usage"],
     }
 
 
 def parse_open_ai_responses_response(payload: dict) -> dict:
+    _reject_incomplete_response(payload)
     text_parts = []
     reasoning_parts = []
     tool_calls = []
@@ -228,6 +237,41 @@ def parse_open_ai_responses_response(payload: dict) -> dict:
         "reasoningContent": "\n".join(reasoning_parts) or None,
         "toolCalls": tool_calls,
         "usage": response_usage(payload.get("usage")),
+    }
+
+
+def _reject_incomplete_response(payload: dict, *, incomplete_event=False, streamed_tool_items=()):
+    details = payload.get("incomplete_details")
+    reason = details.get("reason") if isinstance(details, dict) else None
+    if reason == "max_output_tokens":
+        output = payload.get("output")
+        terminal_tool_items = [
+            item for item in output if isinstance(item, dict) and item.get("type") == "function_call"
+        ] if isinstance(output, list) else []
+        rejected = [
+            _truncated_tool_call(item) for item in (terminal_tool_items or streamed_tool_items)
+        ]
+        raise ModelProviderError("incomplete_output_token_limit", truncated_tool_calls=rejected)
+    if incomplete_event or payload.get("status") == "incomplete":
+        raise ModelProviderError("incomplete_response")
+
+
+def _truncated_tool_call(item: dict) -> dict:
+    arguments = item.get("arguments")
+    if "arguments" not in item:
+        args = ""
+    elif isinstance(arguments, str):
+        args = arguments.strip() or "{}"
+    else:
+        args = json.dumps(arguments if arguments is not None else {}, ensure_ascii=False, separators=(",", ":"))
+    args_bytes = args.encode("utf-8")
+    call_id, name = item.get("call_id"), item.get("name")
+    return {
+        "callId": call_id if isinstance(call_id, str) and call_id and call_id == call_id.strip() else None,
+        "toolName": name if isinstance(name, str) and len(name) <= 128
+            and re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", name) else None,
+        "argsBytes": len(args_bytes),
+        "argsSha256": "sha256:" + hashlib.sha256(args_bytes).hexdigest(),
     }
 
 

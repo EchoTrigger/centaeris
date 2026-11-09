@@ -32,6 +32,16 @@ class ScopeTests(unittest.TestCase):
         self.assertTrue(result["web"] and result["docker"])
         self.assertFalse(result["coreRust"] or result["localNode"] or result["workspaceRust"])
 
+    def test_model_http_checks_both_rust_consumers_and_hosted_integration(self):
+        selected = select_products(["packages/model-http/src/lib.rs"])
+        self.assertEqual({key for key, value in selected.items() if value},
+                         {"coreRust", "workspaceRust", "workspacePython", "docker"})
+
+    def test_api_test_only_changes_use_the_python_gate(self):
+        for path in ("packages/api/app_core/test_native_model_grant.py", "packages/api/app_core/tests.py"):
+            selected = select_products([path])
+            self.assertEqual({key for key, value in selected.items() if value}, {"workspacePython"})
+
     def test_api_and_ui_changes_include_their_contract_consumers(self):
         api = select_products(["packages/api/app_core/http/messages.py"])
         self.assertTrue(api["workspacePython"] and api["workspaceRust"] and api["docker"])
@@ -61,6 +71,7 @@ class ScopeTests(unittest.TestCase):
                 needs = {"scope": {"result": "success", "outputs": {
                     key: str(value).lower() for key, value in selected.items()}}}
                 needs.update({job: {"result": "skipped"} for job in JOBS.values()})
+                needs["rust-format"] = {"result": "success"}
                 self.assertFalse(aggregate_result(needs))
                 needs["core-rust"]["result"] = "success"
                 self.assertTrue(aggregate_result(needs))
@@ -70,12 +81,26 @@ class ScopeTests(unittest.TestCase):
         selected["web"] = True
         needs = {"scope": {"result": "success", "outputs": {key: str(value).lower() for key, value in selected.items()}}}
         needs.update({job: {"result": "success" if selected[product] else "skipped"} for product, job in JOBS.items()})
+        needs["rust-format"] = {"result": "skipped"}
         self.assertTrue(aggregate_result(needs))
         for result in ("skipped", "failure", "cancelled"):
             altered = {**needs, "web": {"result": result}}
             self.assertFalse(aggregate_result(altered))
         self.assertFalse(aggregate_result({key: value for key, value in needs.items() if key != "web"}))
         self.assertFalse(aggregate_result({**needs, "scope": {"result": "failure"}}))
+
+    def test_rust_format_is_required_when_either_rust_product_is_selected(self):
+        for product in ("coreRust", "workspaceRust"):
+            with self.subTest(product=product):
+                selected = dict.fromkeys(PRODUCTS, "false")
+                selected[product] = "true"
+                needs = {"scope": {"result": "success", "outputs": selected}}
+                needs.update({job: {"result": "success" if key == product else "skipped"}
+                              for key, job in JOBS.items()})
+                self.assertFalse(aggregate_result(needs))
+                for result in ("skipped", "failure", "cancelled"):
+                    self.assertFalse(aggregate_result({**needs, "rust-format": {"result": result}}))
+                self.assertTrue(aggregate_result({**needs, "rust-format": {"result": "success"}}))
 
 
 if __name__ == "__main__":

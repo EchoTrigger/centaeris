@@ -5,9 +5,6 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-#[cfg(target_os = "linux")]
-use std::io::{Seek, SeekFrom};
-
 use centaeris_core::execution::{
     run_direct_execution_file_system_operation, run_policy_scoped_execution_file_system_operation,
     ExecutionFileSystemError, ExecutionFileSystemErrorKind, ExecutionFileSystemOperation,
@@ -28,11 +25,16 @@ use crate::memory::{is_memory_uri, run_memory_file_system_operation};
 #[cfg(any(target_os = "linux", test))]
 use crate::protocol::SANDBOX_WORKSPACE_GENERATION_SCHEMA;
 use crate::protocol::{
-    SandboxArtifactMetadata, SandboxArtifactRequest, SandboxFileSystemRequest,
-    SandboxFileSystemResult, SandboxInputInventory, SandboxInputRevokeRequest,
-    SandboxMaterializedInput, SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile,
-    SandboxWorkspaceSnapshotManifest, SANDBOX_INPUT_INVENTORY_SCHEMA,
-    SANDBOX_WORKSPACE_GENERATION_QUERY_LINE, SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
+    SandboxArtifactRequest, SandboxFileSystemRequest, SandboxFileSystemResult,
+    SandboxInputInventory, SandboxInputRevokeRequest, SandboxMaterializedInput,
+    SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile, SandboxWorkspaceSnapshotManifest,
+    SANDBOX_INPUT_INVENTORY_SCHEMA, SANDBOX_WORKSPACE_GENERATION_QUERY_LINE,
+    SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
+};
+#[cfg(target_os = "linux")]
+use crate::protocol::{
+    SandboxArtifactStreamHeader, SANDBOX_ARTIFACT_STREAM_HEADER_LIMIT,
+    SANDBOX_ARTIFACT_STREAM_SCHEMA,
 };
 
 const STATE_ROOT: &str = "/run/centaeris";
@@ -293,11 +295,20 @@ fn recover_protected_input(
     target: &Path,
     expected: &SandboxMaterializedInput,
 ) -> Result<bool, String> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     create_symlink_free_directories(
         workspace_root()?,
         target.parent().ok_or("input inspection path invalid")?,
     )?;
+    inspect_protected_input(target, expected)
+}
+
+#[cfg(unix)]
+fn inspect_protected_input(
+    target: &Path,
+    expected: &SandboxMaterializedInput,
+) -> Result<bool, String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
     let metadata = match fs::symlink_metadata(target) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -305,14 +316,27 @@ fn recover_protected_input(
     };
     if !metadata.is_file()
         || metadata.uid() != 0
-        || metadata.permissions().mode() & 0o777 != 0o444
+        || metadata.mode() & 0o7777 != 0o444
         || metadata.len() != expected.size_bytes
     {
         return Err("input inspection protected identity mismatch".into());
     }
-    let bytes = fs::read(target).map_err(|_| "input inspection read failed")?;
-    if format!("sha256:{:x}", Sha256::digest(&bytes)) != expected.sha256 {
-        return Err("input inspection content mismatch".into());
+    let mut file = File::options()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(target)
+        .map_err(|_| "input inspection read failed")?;
+    let before = file
+        .metadata()
+        .map_err(|_| "input inspection unavailable")?;
+    if file_version(&metadata) != file_version(&before) {
+        return Err("input inspection protected identity changed".into());
+    }
+    copy_verified_input(&mut file, &mut std::io::sink(), expected)
+        .map_err(|_| "input inspection content mismatch")?;
+    let after = fs::symlink_metadata(target).map_err(|_| "input inspection unavailable")?;
+    if file_version(&before) != file_version(&after) {
+        return Err("input inspection protected identity changed".into());
     }
     Ok(true)
 }
@@ -328,32 +352,29 @@ fn recover_protected_input(
 pub fn run_materialize_input_once() -> Result<(), String> {
     require_root()?;
     secure_roots()?;
-    let frame = read_stdin(MAX_EXECUTION_INPUT_BYTES as usize + MAX_JSON_BYTES + 4)?;
-    let (input, bytes) = decode_frame::<SandboxMaterializedInput>(frame.as_slice())?;
+    let mut source = std::io::stdin().lock();
+    let input: SandboxMaterializedInput = read_frame_metadata(&mut source)?;
     validate_materialized_input(&input)?;
     if input.state.is_some() {
         return Err("materialized input request must be active".to_string());
     }
-    if bytes.len() as u64 != input.size_bytes
-        || format!("sha256:{:x}", Sha256::digest(bytes)) != input.sha256
-    {
-        return Err("materialized input integrity mismatch".to_string());
-    }
-
     let mut inventory = load_inventory()?;
+    let target = data_target(input.virtual_path.as_str())?;
     if let Some(existing) = inventory
         .inputs
         .iter()
         .find(|existing| existing.input_ref == input.input_ref)
     {
-        return if existing == &input && existing.state.is_none() {
-            Ok(())
-        } else {
-            Err("materialized input identity conflict".to_string())
-        };
+        if existing != &input {
+            return Err("materialized input identity conflict".to_string());
+        }
+        copy_verified_input(&mut source, &mut std::io::sink(), &input)?;
+        if !recover_protected_input(&target, &input)? {
+            return Err("input inventory protected file missing".into());
+        }
+        return Ok(());
     }
-    let target = data_target(input.virtual_path.as_str())?;
-    install_protected_input(target.as_path(), bytes)?;
+    install_protected_input(&target, &input, &mut source)?;
     inventory.inputs.push(input);
     inventory
         .inputs
@@ -406,13 +427,12 @@ pub fn run_read_artifact_once() -> Result<(), String> {
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "artifact filename is invalid".to_string())?
         .to_string();
-    let (bytes, sha256) = read_artifact(relative.as_str(), request.max_bytes)?;
-    let metadata = SandboxArtifactMetadata {
+    stream_artifact(
+        relative.as_str(),
         filename,
-        size_bytes: bytes.len() as u64,
-        sha256,
-    };
-    write_frame(&metadata, bytes.as_slice())
+        request.max_bytes,
+        &mut std::io::stdout().lock(),
+    )
 }
 
 #[derive(Default)]
@@ -1631,34 +1651,21 @@ fn read_stdin(max_bytes: usize) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn decode_frame<T: DeserializeOwned>(frame: &[u8]) -> Result<(T, &[u8]), String> {
-    if frame.len() < 4 {
-        return Err("sandbox helper frame is truncated".to_string());
-    }
-    let metadata_len = u32::from_be_bytes(
-        frame[..4]
-            .try_into()
-            .map_err(|_| "sandbox helper frame is invalid".to_string())?,
-    ) as usize;
-    if metadata_len == 0 || metadata_len > MAX_JSON_BYTES || frame.len() < 4 + metadata_len {
+fn read_frame_metadata<T: DeserializeOwned>(source: &mut impl Read) -> Result<T, String> {
+    let mut length = [0; 4];
+    source
+        .read_exact(&mut length)
+        .map_err(|_| "sandbox helper frame is truncated")?;
+    let metadata_len = u32::from_be_bytes(length) as usize;
+    if metadata_len == 0 || metadata_len > MAX_JSON_BYTES {
         return Err("sandbox helper frame metadata is invalid".to_string());
     }
-    let metadata = serde_json::from_slice(&frame[4..4 + metadata_len])
-        .map_err(|error| format!("decode sandbox helper frame failed: {error}"))?;
-    Ok((metadata, &frame[4 + metadata_len..]))
-}
-
-fn write_frame<T: serde::Serialize>(metadata: &T, bytes: &[u8]) -> Result<(), String> {
-    let metadata = serde_json::to_vec(metadata)
-        .map_err(|error| format!("encode sandbox helper frame failed: {error}"))?;
-    let metadata_len = u32::try_from(metadata.len())
-        .map_err(|_| "sandbox helper frame metadata is too large".to_string())?;
-    let mut stdout = std::io::stdout().lock();
-    stdout
-        .write_all(&metadata_len.to_be_bytes())
-        .and_then(|_| stdout.write_all(metadata.as_slice()))
-        .and_then(|_| stdout.write_all(bytes))
-        .map_err(|error| format!("write sandbox helper frame failed: {error}"))
+    let mut metadata = vec![0; metadata_len];
+    source
+        .read_exact(&mut metadata)
+        .map_err(|_| "sandbox helper frame metadata is invalid")?;
+    serde_json::from_slice(&metadata)
+        .map_err(|error| format!("decode sandbox helper frame failed: {error}"))
 }
 
 fn load_inventory() -> Result<SandboxInputInventory, String> {
@@ -1801,43 +1808,37 @@ fn secure_roots() -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn install_protected_input(target: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+fn install_protected_input(
+    target: &Path,
+    input: &SandboxMaterializedInput,
+    source: &mut impl Read,
+) -> Result<(), String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     let parent = target
         .parent()
         .ok_or_else(|| "sandbox input target has no parent".to_string())?;
     create_symlink_free_directories(workspace_root()?, parent)?;
-    match fs::symlink_metadata(target) {
-        Ok(metadata) => {
-            // An interrupted install can seal the original before its inventory
-            // rename. Adopt only that exact root-owned immutable file on replay.
-            if metadata.is_file()
-                && metadata.uid() == 0
-                && metadata.permissions().mode() & 0o777 == 0o444
-                && metadata.len() == bytes.len() as u64
-                && fs::read(target).map_err(|_| "inspect existing sandbox input failed")? == bytes
-            {
-                return Ok(());
-            }
-            return Err("sandbox input target already exists".to_string());
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("inspect sandbox input target failed: {error}")),
+    // A lost reply can leave a sealed original before inventory publication.
+    // Replay still verifies both the existing file and the entire wire payload.
+    if inspect_protected_input(target, input)? {
+        return copy_verified_input(source, &mut std::io::sink(), input);
     }
     let staging = parent.join(format!(".centaeris-input-{}.tmp", std::process::id()));
     let mut file = File::options()
         .write(true)
         .create_new(true)
+        .mode(0o600)
         .open(staging.as_path())
         .map_err(|error| format!("create sandbox input failed: {error}"))?;
     let result = (|| {
-        file.write_all(bytes)
-            .map_err(|error| format!("write sandbox input failed: {error}"))?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("protect sandbox input staging failed: {error}"))?;
+        copy_verified_input(source, &mut file, input)?;
+        file.set_permissions(fs::Permissions::from_mode(0o444))
+            .map_err(|error| format!("seal sandbox input failed: {error}"))?;
         file.sync_all()
             .map_err(|error| format!("sync sandbox input failed: {error}"))?;
-        fs::set_permissions(staging.as_path(), fs::Permissions::from_mode(0o444))
-            .map_err(|error| format!("seal sandbox input failed: {error}"))?;
         rename_noreplace(staging.as_path(), target)?;
         File::open(parent)
             .and_then(|directory| directory.sync_all())
@@ -1850,8 +1851,42 @@ fn install_protected_input(target: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(not(unix))]
-fn install_protected_input(_target: &Path, _bytes: &[u8]) -> Result<(), String> {
+fn install_protected_input(
+    _target: &Path,
+    _input: &SandboxMaterializedInput,
+    _source: &mut impl Read,
+) -> Result<(), String> {
     Err("sandbox helper requires Linux".to_string())
+}
+
+fn copy_verified_input(
+    source: &mut impl Read,
+    target: &mut impl Write,
+    input: &SandboxMaterializedInput,
+) -> Result<(), String> {
+    let mut digest = Sha256::new();
+    let mut remaining = input.size_bytes;
+    let mut buffer = [0_u8; 64 * 1024];
+    while remaining != 0 {
+        let chunk = remaining.min(buffer.len() as u64) as usize;
+        let bytes = &mut buffer[..chunk];
+        source
+            .read_exact(bytes)
+            .map_err(|_| "materialized input integrity mismatch")?;
+        target
+            .write_all(bytes)
+            .map_err(|error| format!("write sandbox input failed: {error}"))?;
+        digest.update(bytes);
+        remaining -= chunk as u64;
+    }
+    match source.read_exact(&mut buffer[..1]) {
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {}
+        _ => return Err("materialized input integrity mismatch".into()),
+    }
+    if format!("sha256:{:x}", digest.finalize()) != input.sha256 {
+        return Err("materialized input integrity mismatch".into());
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1959,7 +1994,12 @@ fn install_tombstone(_target: &Path) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn read_artifact(relative_path: &str, max_bytes: u64) -> Result<(Vec<u8>, String), String> {
+fn stream_artifact(
+    relative_path: &str,
+    filename: String,
+    max_bytes: u64,
+    output: &mut impl Write,
+) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
 
     let mut file = open_artifact_beneath(relative_path)?;
@@ -1972,28 +2012,70 @@ fn read_artifact(relative_path: &str, max_bytes: u64) -> Result<(Vec<u8>, String
     if before.size() > max_bytes {
         return Err("artifact is too large".to_string());
     }
-    // Publication content is buffered in memory with a 64 MiB ceiling.
-    let mut bytes = Vec::with_capacity(before.size() as usize);
-    Read::take(&mut file, max_bytes + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("read artifact failed: {error}"))?;
-    if bytes.len() as u64 > max_bytes {
-        return Err("artifact is too large".to_string());
+    write_artifact_stream(&mut file, &before, filename, output)
+}
+
+#[cfg(target_os = "linux")]
+fn write_artifact_stream(
+    file: &mut File,
+    before: &fs::Metadata,
+    filename: String,
+    output: &mut impl Write,
+) -> Result<(), String> {
+    let header = serde_json::to_vec(&SandboxArtifactStreamHeader {
+        schema: SANDBOX_ARTIFACT_STREAM_SCHEMA.into(),
+        filename,
+        size_bytes: before.len(),
+    })
+    .map_err(|error| format!("encode artifact stream header failed: {error}"))?;
+    if header.len() > SANDBOX_ARTIFACT_STREAM_HEADER_LIMIT {
+        return Err("artifact stream header is too large".into());
     }
-    file.seek(SeekFrom::Start(0))
-        .map_err(|error| format!("rewind artifact failed: {error}"))?;
+    output
+        .write_all(&(header.len() as u32).to_be_bytes())
+        .and_then(|_| output.write_all(&header))
+        .map_err(|error| format!("write artifact stream header failed: {error}"))?;
+
+    let mut digest = Sha256::new();
+    let mut remaining = before.len();
+    let mut buffer = [0_u8; 64 * 1024];
+    while remaining > 0 {
+        let wanted = remaining.min(buffer.len() as u64) as usize;
+        file.read_exact(&mut buffer[..wanted]).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                "artifact source changed".to_string()
+            } else {
+                format!("read artifact failed: {error}")
+            }
+        })?;
+        output
+            .write_all(&buffer[..wanted])
+            .map_err(|error| format!("write artifact stream body failed: {error}"))?;
+        digest.update(&buffer[..wanted]);
+        remaining -= wanted as u64;
+    }
+    let extra = file
+        .read(&mut buffer[..1])
+        .map_err(|error| format!("read artifact failed: {error}"))?;
     let after = file
         .metadata()
         .map_err(|_| "artifact source changed".to_string())?;
-    if file_version(&before) != file_version(&after) || bytes.len() as u64 != before.size() {
+    if extra != 0 || file_version(before) != file_version(&after) {
         return Err("artifact source changed".to_string());
     }
-    let sha256 = format!("sha256:{:x}", Sha256::digest(&bytes));
-    Ok((bytes, sha256))
+    output
+        .write_all(&digest.finalize())
+        .and_then(|_| output.flush())
+        .map_err(|error| format!("write artifact stream digest failed: {error}"))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn read_artifact(_relative_path: &str, _max_bytes: u64) -> Result<(Vec<u8>, String), String> {
+fn stream_artifact(
+    _relative_path: &str,
+    _filename: String,
+    _max_bytes: u64,
+    _output: &mut impl Write,
+) -> Result<(), String> {
     Err("sandbox helper requires Linux".to_string())
 }
 
@@ -2053,7 +2135,7 @@ fn open_artifact_beneath(relative_path: &str) -> Result<File, String> {
     Ok(unsafe { File::from_raw_fd(descriptor) })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn file_version(metadata: &fs::Metadata) -> (u64, u64, u64, u64, i64, i64, i64, i64) {
     use std::os::unix::fs::MetadataExt;
     (
@@ -2101,14 +2183,29 @@ mod tests {
     #[test]
     fn interrupted_protected_input_recovers_only_the_exact_original() {
         if std::env::var("CENTAERIS_INPUT_RECOVERY_FIXTURE").as_deref() == Ok("1") {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+            struct CheckPrivateStaging<'a> {
+                target: &'a Path,
+                bytes: &'a [u8],
+            }
+
+            impl Read for CheckPrivateStaging<'_> {
+                fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                    assert!(!self.target.exists());
+                    let mut entries = fs::read_dir(self.target.parent().unwrap())?;
+                    let metadata = entries.next().unwrap()?.metadata()?;
+                    assert!(entries.next().is_none());
+                    assert_eq!(metadata.uid(), 0);
+                    assert_eq!(metadata.mode() & 0o7777, 0o600);
+                    let chunk = output.len().min(3);
+                    self.bytes.read(&mut output[..chunk])
+                }
+            }
+
             let root = workspace_root().unwrap();
             let target = root.join("inputs/original.zip");
-            let bytes = b"original zip bytes";
-            install_protected_input(&target, bytes).unwrap();
-            // Replaying after installation but before inventory persistence must
-            // preserve the sealed original rather than replace or reject it.
-            install_protected_input(&target, bytes).unwrap();
-            assert!(install_protected_input(&target, b"different bytes").is_err());
+            let bytes = b"original zip bytes".as_slice();
             let expected = SandboxMaterializedInput {
                 input_ref: "original".into(),
                 virtual_path: "inputs/original.zip".into(),
@@ -2117,11 +2214,46 @@ mod tests {
                 source_version: "1".into(),
                 state: None,
             };
+            for mut invalid in [
+                &bytes[..bytes.len() - 1],
+                b"original zip bytes!".as_slice(),
+                b"changed! zip bytes".as_slice(),
+            ] {
+                assert!(install_protected_input(&target, &expected, &mut invalid).is_err());
+                assert!(!target.exists());
+                assert_eq!(fs::read_dir(target.parent().unwrap()).unwrap().count(), 0);
+            }
+            let metadata = serde_json::to_vec(&expected).unwrap();
+            let prefix = (metadata.len() as u32).to_be_bytes();
+            let mut frame =
+                prefix
+                    .as_slice()
+                    .chain(metadata.as_slice())
+                    .chain(CheckPrivateStaging {
+                        target: &target,
+                        bytes,
+                    });
+            let input = read_frame_metadata::<SandboxMaterializedInput>(&mut frame).unwrap();
+            assert_eq!(input, expected);
+            install_protected_input(&target, &input, &mut frame).unwrap();
+            let installed = fs::metadata(&target).unwrap();
+            assert_eq!(installed.uid(), 0);
+            assert_eq!(installed.mode() & 0o7777, 0o444);
+            // Replaying after installation but before inventory persistence must
+            // preserve the sealed original rather than replace or reject it.
+            let mut replay = bytes;
+            install_protected_input(&target, &expected, &mut replay).unwrap();
+            assert_eq!(installed.ino(), fs::metadata(&target).unwrap().ino());
+            assert!(
+                install_protected_input(&target, &expected, &mut &b"different bytes"[..]).is_err()
+            );
             assert!(recover_protected_input(&target, &expected).unwrap());
             assert!(!recover_protected_input(&root.join("inputs/absent.zip"), &expected).unwrap());
-            let mut changed = expected;
+            let mut changed = expected.clone();
             changed.sha256 = format!("sha256:{}", "0".repeat(64));
             assert!(recover_protected_input(&target, &changed).is_err());
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o4444)).unwrap();
+            assert!(recover_protected_input(&target, &expected).is_err());
             return;
         }
         if unsafe { libc::geteuid() } != 0 {
@@ -2450,21 +2582,21 @@ mod tests {
                     .iter()
                     .map(|(name, path, bytes)| {
                         let target = root.join(path);
-                        install_protected_input(&target, bytes).unwrap();
-                        let state = if *name == "revoked" {
-                            install_tombstone(&target).unwrap();
-                            Some(ExecutionInputState::AccessRevoked)
-                        } else {
-                            None
-                        };
-                        SandboxMaterializedInput {
+                        let mut input = SandboxMaterializedInput {
                             input_ref: (*name).into(),
                             virtual_path: (*path).into(),
                             size_bytes: bytes.len() as u64,
                             sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
                             source_version: "1".into(),
-                            state,
+                            state: None,
+                        };
+                        let mut source = *bytes;
+                        install_protected_input(&target, &input, &mut source).unwrap();
+                        if *name == "revoked" {
+                            install_tombstone(&target).unwrap();
+                            input.state = Some(ExecutionInputState::AccessRevoked);
                         }
+                        input
                     })
                     .collect(),
             };
@@ -2639,6 +2771,104 @@ mod tests {
 
         assert!(manifest.files.is_empty());
         assert!(canonical_snapshot_manifest_bytes(&manifest).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn artifact_test_file(bytes: &[u8]) -> File {
+        use std::io::Seek;
+
+        let path = std::env::temp_dir().join(format!(
+            "artifact-stream-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut file = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        fs::remove_file(path).unwrap();
+        file.write_all(bytes).unwrap();
+        file.rewind().unwrap();
+        file
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn artifact_stream_writes_exact_header_body_and_raw_digest() {
+        let binary = (0..=u8::MAX).cycle().take(70 * 1024).collect::<Vec<_>>();
+        for bytes in [&[][..], binary.as_slice()] {
+            let mut file = artifact_test_file(bytes);
+            let before = file.metadata().unwrap();
+            let mut output = Vec::new();
+            write_artifact_stream(&mut file, &before, "报告.bin".into(), &mut output).unwrap();
+
+            let header_len = u32::from_be_bytes(output[..4].try_into().unwrap()) as usize;
+            let (header, rest) = output[4..].split_at(header_len);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(header).unwrap(),
+                serde_json::json!({
+                    "schema": "sandbox.artifact.stream.v1",
+                    "filename": "报告.bin",
+                    "sizeBytes": bytes.len(),
+                })
+            );
+            let (body, digest) = rest.split_at(bytes.len());
+            assert_eq!(body, bytes);
+            assert_eq!(digest, &Sha256::digest(bytes)[..]);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn artifact_stream_never_certifies_a_changed_file_or_failed_write() {
+        use std::os::unix::fs::FileExt;
+
+        struct MutateOnBody {
+            file: File,
+            bytes: Vec<u8>,
+        }
+        impl Write for MutateOnBody {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.bytes.len() > 4 {
+                    self.file.write_all_at(b"!", 0)?;
+                    self.file
+                        .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))?;
+                }
+                self.bytes.write(bytes)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let bytes = b"original";
+        let mut file = artifact_test_file(bytes);
+        let before = file.metadata().unwrap();
+        let mut output = MutateOnBody {
+            file: file.try_clone().unwrap(),
+            bytes: Vec::new(),
+        };
+        assert_eq!(
+            write_artifact_stream(&mut file, &before, "report.bin".into(), &mut output),
+            Err("artifact source changed".into())
+        );
+        let header_len = u32::from_be_bytes(output.bytes[..4].try_into().unwrap()) as usize;
+        assert_eq!(&output.bytes[4 + header_len..], bytes);
+        assert_eq!(file.metadata().unwrap().len(), before.len());
+
+        let mut file = artifact_test_file(bytes);
+        let before = file.metadata().unwrap();
+        let mut short = vec![0; 4 + header_len + 2];
+        let mut output = std::io::Cursor::new(short.as_mut_slice());
+        assert!(
+            write_artifact_stream(&mut file, &before, "report.bin".into(), &mut output).is_err()
+        );
+        assert_eq!(&short[4 + header_len..], &bytes[..2]);
     }
 
     #[test]

@@ -23,6 +23,8 @@ mod job_protocol;
 mod lifecycle_hooks;
 mod material_execution;
 mod mcp;
+mod native_model;
+mod native_run_execution_authority;
 mod observations;
 mod platform_materials;
 mod postgres_store;
@@ -80,6 +82,7 @@ use centaeris_core::model::provider_polling::{
     ProviderPollingToolLayerResolution, ProviderPollingToolLayerResolver,
     StoreBackedProviderPollingScheduler,
 };
+#[cfg(test)]
 use centaeris_core::model::EmptyModelSessionConfigStore;
 use centaeris_core::model::ToolCallEnvelope;
 use centaeris_core::runtime::contracts::{
@@ -409,6 +412,7 @@ fn fresh_execution_control_reason(
 }
 
 fn main() -> Result<(), String> {
+    let native_model = native_model::NativeModelGateway::from_env()?;
     DockerExecutionHostRunner::validate_host()?;
     let execution_profile = Arc::new(RuntimeExecutionProfile {
         schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
@@ -490,6 +494,7 @@ fn main() -> Result<(), String> {
         ),
         execution_profile,
         request_policy: request_policy::RequestPolicy::from_env()?,
+        native_model,
     };
     runtime.block_on(serve_http(listener, state))
 }
@@ -1011,11 +1016,11 @@ impl HostedSubagentRunner {
                 safe_point,
             )
         }) as ToolSafePointCommitPort;
-        let model_config_store = EmptyModelSessionConfigStore::new();
+        let model_config_store = &self.context.model_client;
         let runner = ModelClientSubagentRunner::new(
             &runtime,
             &self.context.model_client,
-            &model_config_store,
+            model_config_store,
             AgentRuntimeSubagentRunnerConfig {
                 auto_continue_after_resume_wait: Some(false),
                 agent_run_identity: Some(agent_run_identity),
@@ -1119,6 +1124,7 @@ struct HttpServerState {
     tool_concurrency_registry: Arc<centaeris_core::runtime::ToolConcurrencyRegistry>,
     execution_profile: Arc<RuntimeExecutionProfile>,
     request_policy: request_policy::RequestPolicy,
+    native_model: Option<native_model::NativeModelGateway>,
 }
 
 const RUNTIME_EXECUTION_PROFILE_SCHEMA: &str = "runtime.execution_profile.v1";
@@ -1802,6 +1808,7 @@ fn execute_agent_run(
     lifecycle_lease_owner: String,
     tool_layers: ToolLayerRegistry,
     tool_concurrency_registry: Arc<centaeris_core::runtime::ToolConcurrencyRegistry>,
+    native_model: Option<native_model::NativeModelGateway>,
 ) -> Result<AgentRunStepOutcome, String> {
     let startup_started = Instant::now();
     let redis_url = env::var("REDIS_URL").map_err(|_| "REDIS_URL is required".to_string())?;
@@ -1847,17 +1854,6 @@ fn execute_agent_run(
     let run_timings =
         observations::RunTimings::new(&lifecycle_job_id, &agent_run_start.agent_run_id);
     let _unpaired_timings = run_timings.unpaired_guard();
-    let model_client = ApiModelClient::new(ApiModelClientConfig {
-        api_internal_url: api_url.clone(),
-        internal_api_token: token.clone(),
-        agent_run_id: agent_run_start.agent_run_id.clone(),
-        model_config_ref: agent_run_start.authorization.model_config_ref.clone(),
-        authorization_ref: agent_run_start.authorization.id.clone(),
-        authorization_digest: agent_run_start.authorization_digest.clone(),
-        thinking_mode: agent_run_start.authorization.thinking_mode.clone(),
-        model_max_output_tokens: agent_run_start.model_max_output_tokens,
-    })
-    .with_timings(run_timings.clone());
     let session_log = job_store
         .session_log(
             agent_run_start.authorization.workspace_id.clone(),
@@ -1950,22 +1946,22 @@ fn execute_agent_run(
             },
         )
     });
-    match cancellation_probe.as_ref()()?.as_deref() {
-        Some("agent_run_cancel_requested") => {
-            return commit_cancelled_agent_run(
-                runtime.as_ref(),
-                &session_log,
-                &agent_run_start,
-                &mut *sequence_guard(&session_record_sequence)?,
-                &mut *session_stream_guard(&session_stream)?,
-                &AssistantTextProjection::default(),
-                &terminal_lease_fence,
-            );
-        }
-        Some("agent_run_lifecycle_lease_lost") => {
-            return Err("agent_run_lifecycle_lease_lost".to_string());
-        }
-        _ => {}
+    let finish_execution_control = |reason: Option<&str>| match reason {
+        Some("agent_run_cancel_requested") => commit_cancelled_agent_run(
+            runtime.as_ref(),
+            &session_log,
+            &agent_run_start,
+            &mut *sequence_guard(&session_record_sequence)?,
+            &mut *session_stream_guard(&session_stream)?,
+            &AssistantTextProjection::default(),
+            &terminal_lease_fence,
+        )
+        .map(Some),
+        Some("agent_run_lifecycle_lease_lost") => Err("agent_run_lifecycle_lease_lost".to_string()),
+        _ => Ok(None),
+    };
+    if let Some(outcome) = finish_execution_control(cancellation_probe.as_ref()()?.as_deref())? {
+        return Ok(outcome);
     }
     if has_execution_fact
         && agent_run_start
@@ -1990,6 +1986,39 @@ fn execute_agent_run(
             &terminal_lease_fence,
         );
     }
+    let native_client = match native_model {
+        Some(gateway) => match runtime.block_on(gateway.authorize(
+            &api_url,
+            &token,
+            &agent_run_start,
+            &lifecycle_lease_owner,
+            job_store.clone(),
+        )) {
+            Ok(client) => client,
+            Err(error) => {
+                let reason = fresh_execution_control_reason(&cancellation_probe_cache, || {
+                    cancellation_probe.as_ref()()
+                })?;
+                if let Some(outcome) = finish_execution_control(reason.as_deref())? {
+                    return Ok(outcome);
+                }
+                return Err(error);
+            }
+        },
+        None => None,
+    };
+    let model_client = ApiModelClient::new(ApiModelClientConfig {
+        api_internal_url: api_url.clone(),
+        internal_api_token: token.clone(),
+        agent_run_id: agent_run_start.agent_run_id.clone(),
+        model_config_ref: agent_run_start.authorization.model_config_ref.clone(),
+        authorization_ref: agent_run_start.authorization.id.clone(),
+        authorization_digest: agent_run_start.authorization_digest.clone(),
+        thinking_mode: agent_run_start.authorization.thinking_mode.clone(),
+        model_max_output_tokens: agent_run_start.model_max_output_tokens,
+    })
+    .with_timings(run_timings.clone())
+    .with_native(native_client);
     let recovery_schedule = execution_recovery_schedule::ExecutionRecoverySchedule::from_env()?;
     if let Some((_, checkpoint)) = recovery_checkpoint.as_ref() {
         let mut sequence = sequence_guard(&session_record_sequence)?.clone();
@@ -2018,6 +2047,12 @@ fn execute_agent_run(
     }
     let workspace_skill_catalog_config =
         workspace_skill_catalog_config(&agent_run_start.authorization.plugin_activation)?;
+    let native_run_authority =
+        native_run_execution_authority::NativeRunExecutionAuthority::from_verified_start(
+            &agent_run_start,
+            job_store.clone(),
+            lifecycle_lease_owner.clone(),
+        )?;
     let mcp_credential_resolver = match McpCredentialResolver::new(
         api_url.clone(),
         token.clone(),
@@ -2025,7 +2060,7 @@ fn execute_agent_run(
         agent_run_start.authorization.id.clone(),
         agent_run_start.authorization_digest.clone(),
     ) {
-        Ok(resolver) => resolver,
+        Ok(resolver) => resolver.with_native_run_authority(native_run_authority.clone()),
         Err(error) => {
             return commit_failed_agent_run(
                 runtime.as_ref(),
@@ -2274,6 +2309,7 @@ fn execute_agent_run(
                     api_url: api_url.clone(),
                     api_token: token.clone(),
                     plugin_activation: &agent_run_start.authorization.plugin_activation,
+                    native_run_authority: native_run_authority.clone(),
                 },
                 &mut |client| admitted(Some(client)),
             )
@@ -2649,7 +2685,7 @@ fn execute_agent_run(
     } else {
         agent_runtime
     };
-    let model_config_store = EmptyModelSessionConfigStore::new();
+    let model_config_store = &model_client;
     let assistant_text = Arc::new(Mutex::new(AssistantTextProjection::default()));
     let workspace_lease = SessionWorkspaceLease {
         job_id: lifecycle_job_id.clone(),
@@ -3738,7 +3774,7 @@ fn execute_agent_run(
                     auto_continue_after_resume_wait: Some(false),
                 },
                 &model_client,
-                &model_config_store,
+                model_config_store,
                 &mut |event| {
                     if let Err(error) = persist_model_process_state(
                         &session_log,
@@ -4044,7 +4080,7 @@ fn execute_agent_run(
                                 auto_continue_after_resume_wait: Some(false),
                             },
                             &model_client,
-                            &model_config_store,
+                            model_config_store,
                             &mut |_| {},
                             cancellation_probe.as_ref(),
                             &mut commit_tool_safe_point,

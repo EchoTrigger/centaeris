@@ -165,6 +165,7 @@ dependencies = [
     { name = "django-cors-headers" },
     { name = "django-ninja" },
     { name = "docker" },
+    { name = "httpx" },
     { name = "jsonschema" },
     { name = "mcp" },
     { name = "openai" },
@@ -176,11 +177,6 @@ dependencies = [
     { name = "requests" },
     { name = "starlette" },
     { name = "uvicorn" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "httpx" },
 ]
 
 [package.metadata]
@@ -196,6 +192,7 @@ requires-dist = [
     { name = "django-cors-headers", specifier = "==4.9.0" },
     { name = "django-ninja", specifier = "==1.6.2" },
     { name = "docker", specifier = "==7.2.0" },
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "jsonschema", specifier = "==4.26.0" },
     { name = "mcp", specifier = "==2.2.0" },
     { name = "openai", specifier = "==2.45.0" },
@@ -208,9 +205,6 @@ requires-dist = [
     { name = "starlette", specifier = "==1.6.0" },
     { name = "uvicorn", specifier = "==0.51.0" },
 ]
-
-[package.metadata.requires-dev]
-dev = [{ name = "httpx", specifier = "==0.28.1" }]
 
 [[package]]
 name = "argon2-cffi"

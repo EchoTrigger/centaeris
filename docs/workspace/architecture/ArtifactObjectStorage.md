@@ -1,8 +1,24 @@
 # Artifact storage contract and isolated validation
 
-Status: Contract and isolated validation completed on 2026-09-29. This is a proposed application storage
-boundary, not a deployed backend. Production code, schema, Core pin, Hosted transcript
-capture and deployment configuration are unchanged.
+The object-store contract and isolated experiment below describe a proposed backend.
+Hosted publication currently uses local file storage.
+
+## Hosted publication
+
+Runtime checks the existing publication receipt using the Run and tool-call
+identity. When a new extraction is needed, the Guest reads the source in bounded
+chunks and emits a versioned header, the bytes and a SHA-256 trailer. Runtime
+verifies the successful Host result into a private temporary file and streams
+that same file to Django. An uncertain upload response triggers a lookup under
+the original publication identity before any retransmission.
+
+Django reserves publication metadata and validates incoming bytes in an unnamed
+file on the same Linux filesystem as the final artifact. The filesystem must
+support `O_TMPFILE` and hard links, and the API container uses `/proc/self/fd`
+to install the verified inode at its exact storage key. Process exit before
+installation releases the unlinked bytes. Installation never replaces a
+concurrent winner. Django commits the published state under current authority.
+The interactive Library copy has its own storage key and deletion lifecycle.
 
 ## Existing ownership and coupling
 
@@ -10,21 +26,18 @@ Paths below are relative to `packages/api/`.
 
 | Path / symbol | Current behavior | Artifact slice consequence |
 | --- | --- | --- |
-| `app_core/artifact_publish.py::publish_artifact` | `default_storage.exists/save/open`, bounded hashing (64 MiB maximum), durable publication identity and transactional eligibility | Keep publication authority in Django; put byte operations behind an explicit resource backend |
+| `app_core/artifact_publish.py::publish_artifact` | Bounded hashing (64 MiB maximum), atomic local installation and transactional publication under a durable identity | Keep publication authority in Django and preserve create-or-verify when introducing another backend |
 | `artifact_publish.py::_ingest_artifact_library_copy` | Copies the published Artifact into the user's library through local storage | Include this copy in backend integration; uploading an object alone does not complete publication |
 | `app_core/http/downloads.py::_select_artifact_download` | Resolves published Artifact and rechecks user/Session access | Authorize before opening bytes; bucket prefixes do not confer access |
 | `app_core/http/storage_stream.py` | Bounded lanes, 64 KiB chunks, cancellation closes handles, missing storage currently returns 409 | Preserve streaming and cleanup; existing public download does **not** implement HTTP Range |
 | `app_core/deleted_resource_gc.py` | Ownership/generation/lease checks before deletion; library orphan cleanup also lists directories | Delete recorded resources only after eligibility checks; bucket listing is not a business-fact reconstruction mechanism |
-| `app_core/assets.py::store_immutable_bytes_at_key` | Local path, temporary file, fsync and exclusive hard link | Protects evidence/snapshot writes; Artifact publication does not use this helper. An S3 settings swap cannot reproduce these filesystem operations |
+| `app_core/assets.py::store_immutable_bytes_at_key` | Local path, temporary file, fsync and exclusive hard link | Evidence and snapshots use this helper. Artifact publication uses a streaming local stage with the same exclusive installation semantics |
 | `app_core/http/internal.py` | Snapshot local paths and hard links | Outside the Artifact slice |
 | Plugin installation | Filesystem paths and rename/replace | Executable installation remains a filesystem concern |
 | Hosted transcript captures/chunks | Fixed event association and bytes in PostgreSQL | No object-store migration or fallback in Contract and isolated validation |
 
-Five characterization tests in `app_core/test_artifact_storage_contract.py` cover
-concurrent immutable-helper writes, conflicting bytes, Django alternate-name
-save behavior, missing/corrupt/idempotent deletion, and truncated/hash-invalid
-uploads. They do not imply that Artifact already uses the immutable helper or
-that its HTTP endpoint supports Range.
+`app_core/test_artifact_storage_contract.py` covers concurrent writers,
+conflicting bytes, storage identity, and truncated or hash-invalid uploads.
 
 ## Proposed contract
 

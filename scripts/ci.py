@@ -26,7 +26,7 @@ def run_command(args, capture=False):
     return result.stdout or ""
 
 
-def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False):
+def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False, format_checked=False):
     if stage not in ("Rust", "Node", "Source"):
         raise ValueError(f"Unknown source gate: {stage}")
     run([sys.executable, "-B", "scripts/test_product_licensing.py"])
@@ -35,8 +35,9 @@ def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False
     if stage in ("Rust", "Source"):
         run([sys.executable, "-B", "-m", "unittest", "discover", "-s",
              "scripts/harbor", "-p", "test_runner.py"])
+        if not format_checked:
+            run(["cargo", "fmt", "--all", "--", "--check"])
         for args in (
-            ["fmt", "--all", "--", "--check"],
             ["check", "--locked", *package_flags()],
             ["clippy", "--all-targets", "--locked", *package_flags(), "--", "-D", "warnings"],
             ["run", "--locked", "-p", "centaeris-runtime", "--bin", "centaeris-runtime-protocol-docs", "--", "--check"],
@@ -71,6 +72,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", nargs="?", choices=("Rust", "Node", "Source"), default="Source")
     parser.add_argument("--frontend-tests", action="store_true")
+    parser.add_argument("--format-checked", action="store_true",
+                        help="Use the required formatting result from the same CI checkout")
     args = parser.parse_args()
     run_command([sys.executable, "-B", "scripts/test_ci.py"])
-    run_gate(args.stage, frontend_tests=args.frontend_tests)
+    run_gate(args.stage, frontend_tests=args.frontend_tests, format_checked=args.format_checked)

@@ -5,6 +5,7 @@ import hashlib
 from io import BytesIO
 
 from django.core.files.storage import default_storage
+from django.db import connection
 
 from .models import UserLibraryObject
 
@@ -29,12 +30,27 @@ class NoteRevision:
 ContentSource = StoredObject | NoteRevision
 
 
-def content_source(owner) -> ContentSource:
+def note_revision_body_identity_is_enforced() -> bool:
+    """An installed but unvalidated constraint still allows legacy mismatches."""
+    if connection.vendor != "postgresql":
+        return False
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint "
+            "WHERE conrelid = 'public.app_core_librarynoterevision'::pg_catalog.regclass "
+            "AND conname = 'note_revision_body_identity' AND contype = 'c' AND convalidated)"
+        )
+        return cursor.fetchone()[0]
+
+
+def content_source(owner, *, include_note_body=True) -> ContentSource | None:
     if isinstance(owner, UserLibraryObject) and owner.objectKind == "note" and owner.noteHead_id:
         revision = owner.noteHead
         if (revision.note_id != owner.id or revision.generation != owner.contentGeneration or revision.sha256 != owner.sha256
                 or revision.sizeBytes != owner.sizeBytes or revision.displayName != owner.displayName):
             raise ValueError("note_head_identity_mismatch")
+        if not include_note_body:
+            return None
         body = revision.markdown.encode("utf-8")
         if len(body) != revision.sizeBytes or "sha256:" + hashlib.sha256(body).hexdigest() != revision.sha256:
             raise ValueError("note_revision_identity_mismatch")

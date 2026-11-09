@@ -6,7 +6,6 @@ use hosted_execution::host_supervisor::{
     HostLaunchTarget, HostSupervisorEnvelope, HostSupervisorRequest, HostSupervisorResponse,
     HostSupervisorResult, HOST_SUPERVISOR_SCHEMA,
 };
-use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Read, Write};
 
 const REQUEST_LIMIT: usize = 128 * 1024;
@@ -155,7 +154,8 @@ fn write_helper_input<S: Read + Write>(
         _ => return Err("environment_host_helper_admission_unconfirmed".into()),
     }
     let mut remaining = helper.input_length;
-    let mut hash = Sha256::new();
+    // The request already binds the frame digest. The Supervisor verifies the
+    // bytes it receives before issuing a task receipt.
     let mut buffer = [0u8; 64 * 1024];
     while remaining > 0 {
         let size =
@@ -166,7 +166,6 @@ fn write_helper_input<S: Read + Write>(
         if n == 0 {
             return Err("environment_host_input_incomplete".into());
         }
-        hash.update(&buffer[..n]);
         reader
             .get_mut()
             .write_all(&buffer[..n])
@@ -177,7 +176,6 @@ fn write_helper_input<S: Read + Write>(
         .read(&mut buffer[..1])
         .map_err(|_| "environment_host_input_unavailable")?
         != 0
-        || format!("sha256:{:x}", hash.finalize()) != helper.input_digest
     {
         return Err("environment_host_input_rejected".into());
     }
@@ -314,20 +312,39 @@ pub(crate) struct HelperOutput {
 }
 impl HelperOutput {
     pub(crate) fn copy_to(
-        mut self,
+        self,
         stdout: &mut impl Write,
         stderr: &mut impl Write,
     ) -> Result<(), String> {
-        for (length, writer) in [
-            (self.stdout_length, stdout as &mut dyn Write),
-            (self.stderr_length, stderr as &mut dyn Write),
-        ] {
-            if std::io::copy(&mut self.reader.by_ref().take(length), writer)
+        self.read_output(
+            |source| {
+                std::io::copy(source, stdout).map_err(|_| "environment_host_output_unavailable")?;
+                Ok(())
+            },
+            stderr,
+        )
+    }
+
+    pub(crate) fn read_stdout<T>(
+        self,
+        read: impl FnOnce(&mut dyn Read) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.read_output(read, &mut std::io::sink())
+    }
+
+    fn read_output<T>(
+        mut self,
+        read: impl FnOnce(&mut dyn Read) -> Result<T, String>,
+        stderr: &mut impl Write,
+    ) -> Result<T, String> {
+        let mut stdout = self.reader.by_ref().take(self.stdout_length);
+        let result = read(&mut stdout)?;
+        if stdout.limit() != 0
+            || std::io::copy(&mut self.reader.by_ref().take(self.stderr_length), stderr)
                 .map_err(|_| "environment_host_output_unavailable")?
-                != length
-            {
-                return Err("environment_host_output_incomplete".into());
-            }
+                != self.stderr_length
+        {
+            return Err("environment_host_output_incomplete".into());
         }
         let mut extra = [0u8; 1];
         if self
@@ -338,7 +355,7 @@ impl HelperOutput {
         {
             return Err("environment_host_output_invalid".into());
         }
-        Ok(())
+        Ok(result)
     }
 }
 pub(crate) fn prepare_helper_output(
@@ -527,6 +544,7 @@ fn task_with(
 mod tests {
     use super::*;
     use centaeris_core::execution::*;
+    use sha2::{Digest, Sha256};
     struct Wire {
         read: std::io::Cursor<Vec<u8>>,
         written: Vec<u8>,

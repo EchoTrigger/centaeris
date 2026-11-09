@@ -1,3 +1,4 @@
+use crate::native_model::NativeResponsesClient;
 use centaeris_core::model::prepared_prompt::PreparedPromptV1;
 use centaeris_core::model::TruncatedToolCall;
 use centaeris_core::model::{
@@ -79,6 +80,7 @@ pub struct ApiModelClient {
     client: reqwest::Client,
     stream_idle_timeout: std::time::Duration,
     timings: crate::observations::RunTimings,
+    native: Option<NativeResponsesClient>,
 }
 
 pub struct ApiModelClientConfig {
@@ -112,6 +114,20 @@ impl ApiModelClient {
                 centaeris_core::model::DEFAULT_MODEL_SSE_IDLE_TIMEOUT_MS,
             ),
             timings,
+            native: None,
+        }
+    }
+
+    pub(crate) fn with_native(mut self, native: Option<NativeResponsesClient>) -> Self {
+        self.native = native;
+        self
+    }
+
+    fn retry_limit(&self, request: &ModelClientRequest) -> u32 {
+        if self.native.is_some() {
+            centaeris_core::model::DEFAULT_MODEL_MAX_RETRIES
+        } else {
+            request.session_config.max_retries
         }
     }
 
@@ -243,9 +259,13 @@ impl ApiModelClient {
         &self,
         request: &ModelClientRequest,
     ) -> Result<ModelClientResponse, ModelClientError> {
-        let max_retries = request.session_config.max_retries;
+        let max_retries = self.retry_limit(request);
         for retry in 0..=max_retries {
-            match self.call_api(request, retry.saturating_add(1)).await {
+            let result = match &self.native {
+                Some(client) => client.generate(request).await,
+                None => self.call_api(request, retry.saturating_add(1)).await,
+            };
+            match result {
                 Ok(mut response) => {
                     response.provider_attempts = retry.saturating_add(1);
                     return Ok(response);
@@ -518,7 +538,7 @@ impl ApiModelClient {
         request: &ModelClientRequest,
         sink: &mut (dyn FnMut(ModelClientStreamEvent) + Send),
     ) -> Result<ModelClientResponse, ModelClientError> {
-        let max_retries = request.session_config.max_retries;
+        let max_retries = self.retry_limit(request);
         for retry in 0..=max_retries {
             let mut attempt_has_visible_content = false;
             let mut attempt_has_reasoning = false;
@@ -534,8 +554,13 @@ impl ApiModelClient {
                     }
                     sink(event);
                 };
-                self.call_api_stream(request, &mut attempt_sink, retry.saturating_add(1))
-                    .await
+                match &self.native {
+                    Some(client) => client.generate_stream(request, &mut attempt_sink).await,
+                    None => {
+                        self.call_api_stream(request, &mut attempt_sink, retry.saturating_add(1))
+                            .await
+                    }
+                }
             };
             match result {
                 Ok(mut response) => {
@@ -578,6 +603,15 @@ impl ApiModelClient {
     }
 }
 
+impl centaeris_core::model::ModelSessionConfigStore for ApiModelClient {
+    fn get_session_config(
+        &self,
+        _session_id: &str,
+    ) -> Result<Option<centaeris_core::model::ModelSessionConfig>, String> {
+        Ok(self.native.as_ref().map(|client| client.config().clone()))
+    }
+}
+
 impl ModelClient for ApiModelClient {
     fn generate<'a>(
         &'a self,
@@ -593,9 +627,11 @@ impl ModelClient for ApiModelClient {
     ) -> ModelClientFuture<'a, ModelClientResponse> {
         Box::pin(async move {
             let response = self.call_api_stream_with_retries(request, sink).await?;
-            sink(ModelClientStreamEvent::Done {
-                finish_reason: Some("stop".to_string()),
-            });
+            if self.native.is_none() {
+                sink(ModelClientStreamEvent::Done {
+                    finish_reason: Some("stop".to_string()),
+                });
+            }
             Ok(response)
         })
     }
@@ -774,6 +810,18 @@ pub(super) fn hosted_model_failure(error: &str) -> Option<HostedModelFailure> {
     .then_some(failure)
 }
 
+pub(super) fn set_native_failure(error: &mut ModelClientError, reason: &str, status: Option<u16>) {
+    error.message = HostedModelFailure {
+        schema: "hosted.model.failure.v1".into(),
+        reason_type: reason.to_owned(),
+        http_status: status,
+        provider_attempts: 1,
+        retry_exhausted: false,
+    }
+    .encoded();
+    error.provider_code = Some(reason.to_owned());
+}
+
 fn finish_hosted_failure(error: &mut ModelClientError, reached_limit: bool) {
     let failure = hosted_model_failure(&error.message).or_else(|| {
         if error.provider_code.is_some() {
@@ -844,7 +892,7 @@ fn hosted_model_error(failure: ModelStreamFailure) -> Result<ModelClientError, M
         ));
     }
     let (kind, retryable) = match failure.reason_type.as_str() {
-        "incomplete_output_token_limit" => {
+        "incomplete_output_token_limit" | "incomplete_response" => {
             (ModelClientErrorKind::ProviderResponseInterrupted, false)
         }
         "provider_stream_interrupted" | "provider_response_invalid" | "empty_final_response" => {
@@ -1857,6 +1905,12 @@ mod tests {
                 Some(503),
                 ModelClientErrorKind::ProviderUnavailable,
                 true,
+            ),
+            (
+                "incomplete_response",
+                None,
+                ModelClientErrorKind::ProviderResponseInterrupted,
+                false,
             ),
             (
                 "provider_stream_interrupted",

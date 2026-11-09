@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createChatViewStore } from "../../src/chat/chatViewStore.ts";
 import {
   applyStreamEntry,
   createTranscriptProjectionWork,
   validateHistoryPage,
 } from "../../src/chat/sessionEvents.ts";
-import { WorkspaceChatController } from "../../src/chat/workspaceChatController.ts";
 import {
   buildAgentRunSections,
   createAgentRunPresentationWork,
@@ -80,7 +78,7 @@ function liveEntry(revision, text, cursor = `${revision}-0`) {
   };
 }
 
-test("Workspace Web transcript baseline scale and cursor baseline", async () => {
+test("Workspace Web transcript projection baseline", () => {
   const samples = [100, 1_000, 10_000].map((size) => {
     const historyWork = createTranscriptProjectionWork();
     const historyStartedAt = performance.now();
@@ -117,43 +115,8 @@ test("Workspace Web transcript baseline scale and cursor baseline", async () => 
     };
   });
 
-  const store = createChatViewStore();
-  store.replaceAll(validateHistoryPage(historyPage([])).agentRuns);
-  const frames = [];
-  const controller = new WorkspaceChatController({
-    store,
-    workspaceId: "workspace:baseline",
-    sessionId,
-    agentRunId,
-    initialCursor: "1-0",
-    scheduleFrame: (callback) => (frames.push(callback), frames.length),
-    cancelFrame: () => {},
-  });
-  const queued = {
-    cursor: "2-0",
-    item: {
-      schema: "session.stream.item.v1",
-      kind: "committed",
-      agentRunId,
-      sourceSequence: 1,
-      event: event("agent_run_started", 1, { userObjective: "cursor" }).event,
-    },
-  };
-  controller.accept(queued);
-  const cursorObservation = {
-    receivedCursor: controller.receivedCursor,
-    resumeCursorBeforeDrain: controller.lastCursor,
-    appliedBeforeDrain: store.getAgentRunSnapshot(agentRunId).lastSourceSequence,
-    targetResumeCursorBeforeDrain: "1-0",
-  };
-  frames.shift()();
-  await controller.whenIdle();
-  cursorObservation.resumeCursorAfterDrain = controller.lastCursor;
-  cursorObservation.appliedAfterDrain = store.getAgentRunSnapshot(agentRunId).lastSourceSequence;
-
   console.log(JSON.stringify({
     schema: "transcript.baseline.workspace_web.v1",
     samples,
-    cursorObservation,
   }));
 });

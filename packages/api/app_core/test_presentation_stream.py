@@ -3,17 +3,53 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 from asgiref.sync import async_to_sync
+from django.conf import settings
 from django.test import SimpleTestCase, TransactionTestCase
 
-from .presentation_stream import PresentationScope, _projection_read, encode_cursor, stream_presentation
+from .presentation_stream import CONTENT_DISPLAY_BYTES, PROJECTION_VERSION, PresentationScope, _projection_read, encode_cursor, stream_presentation
 from .test_hosted_operations import OperationFixture
+from .transcript_content_relay import COMPLETE, MAX_LINE_BYTES, MEDIA_TYPE, REQUEST_SCHEMA, stream_transcript_content
 
 
 def data(frame):
     return json.loads(next(line[6:] for line in frame.splitlines() if line.startswith("data: ")))
+
+
+def content_range(reference, start, end, content):
+    return {"schema": "transcript.content.range.v1", "sessionId": "session",
+            "projectionVersion": PROJECTION_VERSION, "projectionGeneration": "generation",
+            **reference, "startOffset": str(start), "endOffset": str(end), "content": content,
+            "hasMore": end < int(reference["byteLength"])}
+
+
+def ndjson(item):
+    return json.dumps(item, ensure_ascii=False).encode("utf-8") + b"\n"
+
+
+class RuntimeContentBody(httpx.AsyncByteStream):
+    def __init__(self, chunks, *, block=False):
+        self.chunks = chunks
+        self.block = block
+        self.waiting = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.closed = False
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            yield chunk
+        if self.block:
+            self.waiting.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled.set()
+
+    async def aclose(self):
+        self.closed = True
 
 
 def create_question_authority_tables():
@@ -47,7 +83,7 @@ class PresentationStreamTests(SimpleTestCase):
             "sessionId": "session", "projectionVersion": "transcript.projection.v1",
             "projectionGeneration": "generation", "throughSourceHighWater": "2",
             "patches": [], "nextSourceHighWater": "2", "hasMore": False})
-        self.loader.content = AsyncMock()
+        self.loader.content_stream = Mock()
         self.loader.operations = AsyncMock(return_value=[])
         self.loader.live = AsyncMock(return_value=None)
         self.loader.revisions = AsyncMock(return_value=dict(navigation=0, state=0, context=0, history=0, work=0, live=0))
@@ -55,9 +91,23 @@ class PresentationStreamTests(SimpleTestCase):
             await asyncio.Event().wait()
         self.loader.wait_for_change = AsyncMock(side_effect=wait_for_change)
 
-    async def until(self, source, predicate):
+    def relay_content(self, body):
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(200, headers={"Content-Type": MEDIA_TYPE}, stream=body)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        self.enterContext(patch("app_core.transcript_content_relay.httpx.AsyncClient", return_value=client))
+        self.loader.content_stream.side_effect = lambda generation, refs, cap: stream_transcript_content(
+            self.scope.session_id, PROJECTION_VERSION, generation, refs, cap,
+        )
+        return requests
+
+    async def until(self, source, predicate, max_frames=20):
         frames = []
-        for _ in range(20):
+        for _ in range(max_frames):
             frame = await asyncio.wait_for(anext(source), .5)
             frames.append(frame)
             if frame.startswith("data:") or "\ndata:" in frame:
@@ -230,24 +280,38 @@ class PresentationStreamTests(SimpleTestCase):
         self.assertEqual(resets[0]["reason"], "cursorInvalid")
         self.assertTrue(any(data(frame)["kind"] == "snapshot" for frame in frames))
 
-    async def test_reference_content_is_delivered_before_cursor_ack_and_tool_detail_is_not_loaded(self):
-        ref = {"refId": "session-event:event", "revision": "1", "byteLength": "6"}
+    async def test_one_mib_of_reference_content_uses_one_request_before_cursor_ack(self):
+        size, chunk_size = 1024 * 1024, 64 * 1024
+        ref = {"refId": "session-event:event", "revision": "1", "byteLength": str(size)}
+        second = {"refId": "session-event:next", "revision": "1", "byteLength": "4"}
         self.page["blocks"] = [{"body": {"kind": "assistantText", "content": {"inlineContent": None, "sourceRef": ref}}},
+            {"body": {"kind": "assistantText", "content": {"inlineContent": None, "sourceRef": second}}},
+            {"body": {"kind": "assistantText", "content": {"inlineContent": None, "sourceRef": ref}}},
             {"body": {"kind": "tool", "callId": "call", "summary": "read", "summaryRef": None,
                        "outputRef": {**ref, "refId": "tool-output:call"}}}]
-        self.loader.content.side_effect = [
-            {"schema": "transcript.content.range.v1", "sessionId": "session", "projectionVersion": "transcript.projection.v1",
-             "projectionGeneration": "generation", **ref, "startOffset": "0", "endOffset": "3", "content": "one", "hasMore": True},
-            {"schema": "transcript.content.range.v1", "sessionId": "session", "projectionVersion": "transcript.projection.v1",
-             "projectionGeneration": "generation", **ref, "startOffset": "3", "endOffset": "6", "content": "two", "hasMore": False}]
+        chunk = "x" * chunk_size
+        body = RuntimeContentBody([
+            ndjson(content_range(ref, offset, offset + chunk_size, chunk))
+            for offset in range(0, size, chunk_size)
+        ] + [ndjson(content_range(second, 0, 4, "next")) + ndjson(COMPLETE)])
+        requests = self.relay_content(body)
         source = stream_presentation(self.scope, self.loader)
         try:
-            frames = await self.until(source, lambda item, frame: item["kind"] == "checkpoint" and frame.startswith("id:"))
+            frames = await self.until(
+                source, lambda item, frame: item["kind"] == "checkpoint" and frame.startswith("id:"), max_frames=32,
+            )
         finally:
             await source.aclose()
         content = [data(frame)["range"]["content"] for frame in frames if data(frame)["kind"] == "content"]
-        self.assertEqual(content, ["one", "two"])
-        self.assertEqual(self.loader.content.await_count, 2)
+        self.assertEqual(content, [chunk] * (size // chunk_size) + ["next"])
+        self.assertTrue(body.closed)
+        [request] = requests
+        self.assertEqual((request.method, request.url.path), ("POST", "/internal/transcript/content-stream"))
+        self.assertEqual(request.headers["X-Internal-Token"], settings.INTERNAL_API_TOKEN)
+        self.assertEqual(json.loads(request.content), {
+            "schema": REQUEST_SCHEMA, "sessionId": "session", "projectionVersion": PROJECTION_VERSION,
+            "projectionGeneration": "generation", "references": [ref, second], "maxDisplayBytes": CONTENT_DISPLAY_BYTES,
+        })
 
     async def test_hung_projection_does_not_hide_terminal_and_emits_heartbeat_then_closes(self):
         stopped = asyncio.Event()
@@ -357,17 +421,104 @@ class PresentationStreamTests(SimpleTestCase):
         self.assertEqual(data(frames[-1])["agentRun"]["status"], "completed")
         self.loader.patches.assert_awaited_once_with("generation", "2", "2")
 
-    async def test_missing_content_never_acknowledges_received_projection(self):
+    async def test_missing_completion_never_acknowledges_received_projection(self):
+        ref = {"refId": "session-event:event", "revision": "1", "byteLength": "6"}
         self.page["blocks"] = [{"body": {"kind": "assistantText", "content": {"inlineContent": None,
-            "sourceRef": {"refId": "session-event:event", "revision": "1", "byteLength": "6"}}}}]
-        self.loader.content.side_effect = RuntimeError("synthetic_content_failure")
+            "sourceRef": ref}}}]
+        body = RuntimeContentBody([ndjson(content_range(ref, 0, 6, "onetwo"))])
+        self.relay_content(body)
         source = stream_presentation(self.scope, self.loader)
         frames = []
-        with self.assertRaisesRegex(RuntimeError, "synthetic_content_failure"):
+        with self.assertRaisesRegex(RuntimeError, "transcript_content_stream_invalid"):
             async for frame in source:
                 frames.append(frame)
         self.assertFalse(any(frame.startswith("id:") for frame in frames))
+        self.assertEqual(data(frames[-1])["range"]["content"], "onetwo")
         self.assertEqual(data(frames[1])["agentRun"]["status"], "completed")
+        self.assertTrue(body.closed)
+
+    async def test_revocation_cancels_and_closes_pending_content_read_without_ack(self):
+        ref = {"refId": "session-event:event", "revision": "1", "byteLength": "6"}
+        self.page["blocks"] = [{"body": {"kind": "assistantText", "content": {"inlineContent": None, "sourceRef": ref}}}]
+        body = RuntimeContentBody([ndjson(content_range(ref, 0, 3, "one"))], block=True)
+        self.relay_content(body)
+        source = stream_presentation(self.scope, self.loader, heartbeat_seconds=.005, authority_seconds=.005)
+
+        async def consume():
+            return [frame async for frame in source]
+
+        task = asyncio.create_task(consume())
+        try:
+            await asyncio.wait_for(body.waiting.wait(), 1)
+            self.loader.authorized.return_value = False
+            frames = await asyncio.wait_for(task, 1)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await source.aclose()
+        self.assertTrue(body.cancelled.is_set())
+        self.assertTrue(body.closed)
+        self.assertFalse(any(frame.startswith("id:") for frame in frames))
+
+    async def test_disconnect_closes_content_stream_paused_after_a_frame(self):
+        ref = {"refId": "session-event:event", "revision": "1", "byteLength": "6"}
+        self.page["blocks"] = [{"body": {"kind": "assistantText", "content": {"inlineContent": None, "sourceRef": ref}}}]
+        body = RuntimeContentBody([ndjson(content_range(ref, 0, 3, "one"))], block=True)
+        self.relay_content(body)
+        source = stream_presentation(self.scope, self.loader)
+        try:
+            await self.until(source, lambda item, _frame: item["kind"] == "content")
+            self.assertFalse(body.closed)
+            self.assertFalse(body.waiting.is_set())
+        finally:
+            await source.aclose()
+        self.assertTrue(body.closed)
+
+    async def test_content_stream_rejects_incomplete_oversized_or_unordered_records(self):
+        first = {"refId": "session-event:first", "revision": "1", "byteLength": "3"}
+        second = {"refId": "session-event:second", "revision": "1", "byteLength": "3"}
+        line = ndjson(content_range(first, 0, 3, "one"))
+        next_line = ndjson(content_range(second, 0, 3, "two"))
+        marker = ndjson(COMPLETE)
+        for name, chunks in {
+            "missing reference": [line, marker],
+            "truncated marker": [line, next_line, marker[:-1]],
+            "trailing record": [line, next_line, marker, next_line],
+            "unrequested order": [next_line, line, marker],
+            "noncontiguous range": [ndjson(content_range(first, 1, 3, "ne")), next_line, marker],
+            "oversized line": [b"x" * MAX_LINE_BYTES, b"\n"],
+        }.items():
+            with self.subTest(name=name):
+                body = RuntimeContentBody(chunks)
+                client = httpx.AsyncClient(transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(200, headers={"Content-Type": MEDIA_TYPE}, stream=body)
+                ))
+                with patch("app_core.transcript_content_relay.httpx.AsyncClient", return_value=client):
+                    with self.assertRaises(RuntimeError):
+                        async for _ in stream_transcript_content(
+                            "session", PROJECTION_VERSION, "generation", [first, second], 8,
+                        ):
+                            pass
+                self.assertTrue(body.closed)
+
+    async def test_cancelled_content_response_leaves_borrowed_client_open_for_the_next_batch(self):
+        reference = {"refId": "session-event:shared", "revision": "1", "byteLength": "3"}
+        frames = [ndjson(content_range(reference, 0, 3, "one")), ndjson(COMPLETE)]
+        first, second = RuntimeContentBody(frames, block=True), RuntimeContentBody(frames)
+        bodies = iter((first, second))
+        transport = httpx.MockTransport(lambda _request: httpx.Response(
+            200, headers={"Content-Type": MEDIA_TYPE}, stream=next(bodies),
+        ))
+        async with httpx.AsyncClient(transport=transport) as client:
+            batches = ("session", PROJECTION_VERSION, "generation", [reference], 8)
+            interrupted = stream_transcript_content(*batches, client=client)
+            self.assertEqual((await anext(interrupted))["content"], "one")
+            await interrupted.aclose()
+            self.assertTrue(first.closed)
+            self.assertFalse(client.is_closed)
+            result = [item["content"] async for item in stream_transcript_content(*batches, client=client)]
+            self.assertEqual(result, ["one"])
+            self.assertTrue(second.closed)
 
     async def test_slow_consumer_leaves_only_one_pending_frame_and_does_not_load_ahead(self):
         source = stream_presentation(self.scope, self.loader, heartbeat_seconds=.005)
@@ -380,9 +531,10 @@ class PresentationStreamTests(SimpleTestCase):
     async def test_display_budget_stops_at_a_whole_utf8_prefix_and_acknowledges_without_retrying(self):
         ref = {"refId": "session-event:event", "revision": "1", "byteLength": "9"}
         self.page["blocks"] = [{"body": {"kind": "assistantText", "content": {"inlineContent": None, "sourceRef": ref}}}]
-        self.loader.content.return_value = {"schema": "transcript.content.range.v1", "sessionId": "session",
-            "projectionVersion": "transcript.projection.v1", "projectionGeneration": "generation", **ref,
-            "startOffset": "0", "endOffset": "9", "content": "中中中", "hasMore": False}
+        raw = ndjson(content_range(ref, 0, 3, "中")) + ndjson(COMPLETE)
+        unicode_offset = raw.index("中".encode())
+        body = RuntimeContentBody([raw[:unicode_offset + 1], raw[unicode_offset + 1:]])
+        requests = self.relay_content(body)
         with patch("app_core.presentation_stream.CONTENT_DISPLAY_BYTES", 5):
             source = stream_presentation(self.scope, self.loader)
             try:
@@ -391,7 +543,8 @@ class PresentationStreamTests(SimpleTestCase):
                 await source.aclose()
         ranges = [data(frame)["range"] for frame in frames if data(frame)["kind"] == "content"]
         self.assertEqual([(item["content"], item["endOffset"], item["hasMore"]) for item in ranges], [("中", "3", True)])
-        self.loader.content.assert_awaited_once()
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(json.loads(requests[0].content)["maxDisplayBytes"], 5)
 
     async def test_navigation_chunks_are_contiguous_and_final_frame_commits_one_snapshot(self):
         self.loader.navigation.return_value = [{"id": str(index), "title": "x" * 30} for index in range(5)]

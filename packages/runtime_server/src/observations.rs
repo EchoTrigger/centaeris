@@ -644,6 +644,7 @@ pub fn route(path: &str) -> &'static str {
     match path {
         "/agent-runs/step" => "/agent-runs/step",
         "/agent-runs/teardown" => "/agent-runs/teardown",
+        "/agent-runs/finalize" => "/agent-runs/finalize",
         "/agent-runs/cancel" => "/agent-runs/cancel",
         "/internal/jobs/claim" => "/internal/jobs/claim",
         "/internal/jobs/complete" => "/internal/jobs/complete",
@@ -653,6 +654,8 @@ pub fn route(path: &str) -> &'static str {
         "/internal/jobs/fail" => "/internal/jobs/fail",
         "/internal/jobs/yield" => "/internal/jobs/yield",
         "/internal/jobs/reconcile" => "/internal/jobs/reconcile",
+        "/internal/transcript/content" => "/internal/transcript/content",
+        "/internal/transcript/content-stream" => "/internal/transcript/content-stream",
         _ => "other",
     }
 }

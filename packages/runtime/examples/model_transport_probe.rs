@@ -1,14 +1,6 @@
 //! Bounded synthetic loopback measurements of the actual runtime HTTP transport.
-#[expect(
-    dead_code,
-    reason = "probe supplies a no_proxy client rather than calling the production client factory"
-)]
-#[rustfmt::skip]
-#[path = "../src/http_transport.rs"]
-mod http_transport;
-
 use centaeris_core::model::{JsonHttpRequest, JsonHttpTransport};
-use http_transport::ReqwestJsonHttpTransport;
+use centaeris_model_http::ReqwestJsonHttpTransport;
 use serde_json::json;
 use std::collections::HashMap;
 use std::hint::black_box;

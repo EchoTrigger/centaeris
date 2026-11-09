@@ -9,9 +9,6 @@ import {
 } from "../../src/chat/transcriptViewStore.ts";
 import { ApiError } from "../../src/api.ts";
 import { createWorkspaceTranscriptTransport } from "../../src/chat/transcriptTransport.ts";
-import { WorkspaceTranscriptController } from "../../src/chat/workspaceTranscriptController.ts";
-import { streamWorkspaceAgentRun } from "../../src/chat/workspaceWebTransport.ts";
-import { readSse } from "../../src/chat/sessionStreamProtocol.ts";
 
 const sessionId = "session_1";
 const projectionVersion = "transcript.projection.v1";
@@ -38,111 +35,6 @@ test("presentation facts retain strict keys and reject invalid durations", () =>
     assert.throws(() => validateTranscriptPage(page({ blocks: [{ ...sample, presentation }] }), { sessionId }));
   }
   assert.throws(() => validateTranscriptPage(page({ blocks: [{ ...sample, presentation: facts, extra: true }] }), { sessionId }));
-});
-
-function terminalResponse() {
-  return new Response(`id: cursor:11\ndata: ${JSON.stringify({
-    schema: "session.stream.item.v1", kind: "committed", agentRunId: "run:1", sourceSequence: 11,
-    event: { schemaVersion: "session.event.v1", eventVersion: 1, eventId: "event:11",
-      sessionId, agentRunId: "run:1", turnId: "turn:1", sequence: 11, createdAtMs: 1,
-      type: "agent_run_completed", payload: {} },
-  })}\n\n`);
-}
-
-test("a failed patch preserves visible content and can resume with a fresh controller", async () => {
-  const store = createTranscriptViewStore();
-  const epoch = store.openTail(page({ blocks: [block("tail", 1, 10)] }));
-  const problem = new Error("conflicting transcript block revision");
-  let patches = 0;
-  let recoveries = 0;
-  let requests = 0;
-  let failedStreamCancelled = false;
-  const createController = () => new WorkspaceTranscriptController({
-    store, viewEpoch: epoch, identity: { sessionId, projectionVersion, projectionGeneration },
-    agentRunId: "run:1", initialCursor: "cursor:10",
-    scheduleFrame: (callback) => (queueMicrotask(callback), 1), cancelFrame: () => {},
-    transport: { loadPatches: async (_identity, _signal, apply) => {
-      if (++patches === 1) throw problem;
-      apply(patchPage({ patches: [{ sourceHighWater: "11", upserts: [block("next", 1, 11)] }], through: "11" }));
-      return "11";
-    } },
-  });
-  const controller = createController();
-  await streamWorkspaceAgentRun({
-    controller, signal: new AbortController().signal, onConnection() {},
-    request: async () => {
-      if (++requests > 1) return terminalResponse();
-      const data = new TextEncoder().encode(await terminalResponse().text());
-      return new Response(new ReadableStream({
-        start(reader) { reader.enqueue(data); },
-        cancel() { failedStreamCancelled = true; },
-      }));
-    }, wait: async () => {},
-    recover: async (error) => {
-      assert.equal(error, problem);
-      assert.equal(store.getBlockSnapshot("tail").body.content.inlineContent, "tail");
-      assert.equal(controller.lastCursor, "cursor:10");
-      recoveries++;
-      controller.dispose();
-      return createController();
-    },
-  });
-  assert.equal(recoveries, 1);
-  assert.equal(failedStreamCancelled, true);
-  assert.equal(store.getBlockSnapshot("next").body.content.inlineContent, "next");
-});
-
-test("SSE cancellation releases a pending reader without waiting for another token", async () => {
-  let cancelled = false;
-  const response = new Response(new ReadableStream({ cancel() { cancelled = true; } }));
-  const abort = new AbortController();
-  const reading = readSse(response, "run:1", () => {}, { signal: abort.signal });
-  abort.abort();
-  await assert.rejects(Promise.race([reading, new Promise((_, reject) => {
-    setTimeout(() => reject(new Error("reader remained blocked")), 100);
-  })]), { name: "AbortError" });
-  assert.equal(cancelled, true);
-});
-
-test("transient HTTP failures retry with bounded backoff and authorization failures do not", async () => {
-  const controller = { sessionId, agentRunId: "run:1", lastCursor: "cursor:10",
-    acceptWithBackpressure: async () => {}, whenIdle: async () => {}, setCursor() {} };
-  const delays = [];
-  let requests = 0;
-  await streamWorkspaceAgentRun({ controller, signal: new AbortController().signal,
-    onConnection() {},
-    request: async () => {
-      if (++requests <= 2) throw new ApiError("temporarily unavailable", requests === 1 ? 503 : 429);
-      return terminalResponse();
-    }, wait: async (ms) => { delays.push(ms); },
-  });
-  assert.deepEqual(delays, [500, 1000]);
-  requests = 0;
-  await assert.rejects(streamWorkspaceAgentRun({ controller, signal: new AbortController().signal,
-    onConnection() {},
-    request: async () => { requests++; throw new ApiError("forbidden", 403); },
-    wait: async () => { throw new Error("must not retry"); },
-  }), /forbidden/);
-  assert.equal(requests, 1);
-});
-
-test("failed recovery is bounded and reports its actual error", async () => {
-  const failureAbort = new AbortController();
-  failureAbort.abort(new Error("original projection failure"));
-  const controller = { sessionId, agentRunId: "run:1", lastCursor: "cursor:10",
-    failureSignal: failureAbort.signal,
-    acceptWithBackpressure: async () => {}, whenIdle: async () => {}, setCursor() {} };
-  const unavailable = new ApiError("snapshot unavailable", 503);
-  const delays = [];
-  let recoveries = 0;
-  await assert.rejects(streamWorkspaceAgentRun({ controller, signal: new AbortController().signal,
-    onConnection() {},
-    request: async () => { throw new DOMException("Aborted", "AbortError"); },
-    recover: async () => { recoveries++; throw unavailable; },
-    wait: async (delay) => { delays.push(delay); },
-  }), (error) => error === unavailable);
-  assert.equal(recoveries, 5);
-  assert.deepEqual(delays, [500, 1000, 2000, 4000, 8000]);
 });
 
 function content(text) {
@@ -498,62 +390,4 @@ test("current queued Run discovery works before a transcript page is available",
   assert.equal(result.agentRun.agentRunId,"queued-run");
   assert.equal(result.agentRun.status,"queued");
   assert.deepEqual(paths,[`/api/sessions/${sessionId}/transcript/active-agent-run?sourceHighWater=0`]);
-});
-
-test("optional tool detail failures do not block committed text or advance the cursor before patches", async () => {
-  const store = createTranscriptViewStore();
-  const epoch = store.openTail(page({ blocks: [block("tail", 1, 10)] }));
-  const frames = [];
-  const detailErrors = [];
-  const controller = new WorkspaceTranscriptController({
-    store,
-    viewEpoch: epoch,
-    identity: {
-      sessionId,
-      projectionVersion,
-      projectionGeneration,
-    },
-    agentRunId: "run:1",
-    initialCursor: "cursor:10",
-    onCommittedEvent: () => { throw new Error("tool operation call binding mismatch"); },
-    onDetailError: (error) => detailErrors.push(error.message),
-    transport: {
-      loadPatches: async (_identity, _signal, apply) => {
-        apply(patchPage({
-          patches: [{ sourceHighWater: "11", upserts: [block("next", 1, 11)] }],
-          through: "11",
-        }));
-        return "11";
-      },
-    },
-    scheduleFrame: (callback) => (frames.push(callback), frames.length),
-    cancelFrame: () => {},
-  });
-  controller.accept({
-    cursor: "cursor:11",
-    item: {
-      schema: "session.stream.item.v1",
-      kind: "committed",
-      agentRunId: "run:1",
-      sourceSequence: 11,
-      event: { type: "tool_result" },
-    },
-  });
-  assert.equal(controller.lastCursor, "cursor:10");
-  await frames.shift()();
-  await controller.whenIdle();
-  assert.equal(controller.lastCursor, "cursor:11");
-  assert.equal(store.getBlockSnapshot("next").blockRevision, "1");
-  assert.deepEqual(detailErrors, ["tool operation call binding mismatch"]);
-});
-
-
-test("admission failure restores control to the caller without recovery swallowing it", async () => {
-  const controller = { sessionId, agentRunId: "run:1", lastCursor: "0-0",
-    acceptWithBackpressure: async () => {}, whenIdle: async () => {}, setCursor() {} };
-  await assert.rejects(streamWorkspaceAgentRun({ controller, signal: new AbortController().signal,
-    onConnection() {}, request: async () => { throw new ApiError("agent_run_not_admitted", 409); },
-    recover: async () => { throw new Error("must not recover an unadmitted run"); },
-    wait: async () => { throw new Error("must not wait"); },
-  }), /agent_run_not_admitted/);
 });

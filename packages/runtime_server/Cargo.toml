@@ -22,13 +22,15 @@ tempfile = "=3.27.0"
 futures.workspace = true
 centaeris-core.workspace = true
 centaeris-model-catalog.workspace = true
+centaeris-model-http.workspace = true
 centaeris-mcp.workspace = true
 hosted_execution = { path = "../hosted_execution" }
 hmac.workspace = true
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["service", "tokio"] }
-reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls", "stream"] }
+reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls", "rustls-tls-native-roots", "stream"] }
 rmcp.workspace = true
+ring = "=0.17.14"
 redis.workspace = true
 postgres.workspace = true
 serde.workspace = true

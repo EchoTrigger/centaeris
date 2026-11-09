@@ -1,19 +1,21 @@
 use centaeris_core::session::transcript::{
     assemble_transcript_page_from_newest, parse_transcript_projection_source_envelope,
     parse_transcript_rebuild_ledger_fact, rebuild_transcript_generation_v1,
-    transcript_page_before_order, transcript_patch_read_result_serialized_bytes,
-    validate_transcript_resume_cursor_read, TranscriptBlockV1, TranscriptCheckpointRefsV1,
-    TranscriptGenerationRebuildRequestV1, TranscriptGenerationRebuildSourcePortV1,
-    TranscriptPageReadRequestV1, TranscriptPageReadResultV1, TranscriptPatchReadRequestV1,
-    TranscriptPatchReadResultV1, TranscriptPatchV1, TranscriptPersistentPageQueryWorkV1,
-    TranscriptPersistentPatchQueryWorkV1, TranscriptProjectionCheckpointV1,
-    TranscriptProjectionCommitDispositionV1, TranscriptProjectionCommitV1,
-    TranscriptProjectionCurrentGenerationV1, TranscriptProjectionFrontierV1,
-    TranscriptProjectionGenerationRotationDispositionV1, TranscriptProjectionGenerationRotationV1,
-    TranscriptProjectionGenerationStorePortV1, TranscriptProjectionHeadV1,
-    TranscriptProjectionPayloadRequirementV1, TranscriptProjectionRecoveryV1,
-    TranscriptProjectionSourceEnvelopeV1, TranscriptProjectionStorePort, TranscriptProjectorV1,
-    TranscriptRebuildLedgerFactV1, TranscriptRebuildProjectionFactV1, TranscriptResumeCursorV1,
+    transcript_event_content_prefix, transcript_event_content_range, transcript_page_before_order,
+    transcript_patch_read_result_serialized_bytes, validate_transcript_resume_cursor_read,
+    TranscriptBlockV1, TranscriptCheckpointRefsV1, TranscriptContentRangeReadRequestV1,
+    TranscriptContentRangeV1, TranscriptGenerationRebuildRequestV1,
+    TranscriptGenerationRebuildSourcePortV1, TranscriptPageReadRequestV1,
+    TranscriptPageReadResultV1, TranscriptPatchReadRequestV1, TranscriptPatchReadResultV1,
+    TranscriptPatchV1, TranscriptPersistentPageQueryWorkV1, TranscriptPersistentPatchQueryWorkV1,
+    TranscriptProjectionCheckpointV1, TranscriptProjectionCommitDispositionV1,
+    TranscriptProjectionCommitV1, TranscriptProjectionCurrentGenerationV1,
+    TranscriptProjectionFrontierV1, TranscriptProjectionGenerationRotationDispositionV1,
+    TranscriptProjectionGenerationRotationV1, TranscriptProjectionGenerationStorePortV1,
+    TranscriptProjectionHeadV1, TranscriptProjectionPayloadRequirementV1,
+    TranscriptProjectionRecoveryV1, TranscriptProjectionSourceEnvelopeV1,
+    TranscriptProjectionStorePort, TranscriptProjectorV1, TranscriptRebuildLedgerFactV1,
+    TranscriptRebuildProjectionFactV1, TranscriptResumeCursorV1,
     TRANSCRIPT_PAGE_RESUME_CURSOR_MAX_COUNT, TRANSCRIPT_PATCH_READ_MAX_PATCHES,
     TRANSCRIPT_PATCH_READ_SERIALIZED_MAX_BYTES, TRANSCRIPT_PATCH_SCHEMA_V1,
     TRANSCRIPT_PROJECTION_SLICE_MAX_BYTES, TRANSCRIPT_PROJECTION_SLICE_MAX_EVENTS,
@@ -67,25 +69,89 @@ pub struct TranscriptCatchUpProgress {
 
 type TranscriptCatchUpSnapshot = (Option<TranscriptProjectionHeadV1>, Option<(String, String)>);
 
+// The payload and tuple witness must come from the same visible row, and the
+// metadata-only recheck must use exactly the same published source selector.
+macro_rules! transcript_content_source_sql {
+    ($($payload:literal)?) => {
+        concat!(
+            "SELECT ", $($payload, ", ",)? "e.xmin::text || ':' || e.ctid::text AS revision_witness",
+            r#" FROM public.app_core_sessionevent e
+            JOIN runtime.transcript_projection_current_generations g ON g.session_id=e.session_id
+            JOIN runtime.transcript_projection_heads h ON h.session_id=g.session_id
+                AND h.projection_version=g.projection_version AND h.projection_generation=g.projection_generation
+            WHERE e.session_id=$1 AND e."eventId"=$2 AND g.projection_generation=$3
+                AND g.projection_version=$4 AND e.sequence<=h.source_high_water AND h.invalidation_reason IS NULL"#,
+        )
+    };
+}
+
+fn decode_transcript_content_source(row: &Row) -> Result<serde_json::Value, String> {
+    let mut wire = serde_json::from_str::<serde_json::Value>(row.get::<_, &str>(0))
+        .map_err(|error| format!("decode transcript source failed: {error}"))?;
+    super::session_payload::decode(&mut wire)?;
+    Ok(wire)
+}
+
 impl PostgresRuntimeStore {
     pub fn read_transcript_event_content(
         &self,
-        request: &centaeris_core::session::transcript::TranscriptContentRangeReadRequestV1,
-    ) -> Result<centaeris_core::session::transcript::TranscriptContentRangeV1, String> {
+        request: &TranscriptContentRangeReadRequestV1,
+    ) -> Result<TranscriptContentRangeV1, String> {
+        let row = self
+            .read_transcript_content_source(
+                request,
+                transcript_content_source_sql!("e.payload::text"),
+            )?
+            .ok_or_else(|| "transcript content source or generation is unavailable".to_string())?;
+        let wire = decode_transcript_content_source(&row)?;
+        let record = parse_wire_record(&wire).map_err(|error| error.to_string())?;
+        transcript_event_content_range(request, &record.event)
+    }
+
+    pub(crate) fn open_transcript_display_content(
+        &self,
+        request: &TranscriptContentRangeReadRequestV1,
+        max_display_bytes: usize,
+    ) -> Result<(String, String), String> {
+        let row = self
+            .read_transcript_content_source(
+                request,
+                transcript_content_source_sql!("e.payload::text"),
+            )?
+            .ok_or_else(|| "transcript content source or generation is unavailable".to_string())?;
+        let wire = decode_transcript_content_source(&row)?;
+        let prefix = transcript_event_content_prefix(request, &wire, max_display_bytes)?;
+        Ok((prefix, row.get("revision_witness")))
+    }
+
+    pub(crate) fn transcript_display_source_is_current(
+        &self,
+        request: &TranscriptContentRangeReadRequestV1,
+        witness: &str,
+    ) -> Result<bool, String> {
+        let row = self.read_transcript_content_source(request, transcript_content_source_sql!())?;
+        Ok(row.is_some_and(|row| row.get::<_, &str>("revision_witness") == witness))
+    }
+
+    fn read_transcript_content_source(
+        &self,
+        request: &TranscriptContentRangeReadRequestV1,
+        query: &str,
+    ) -> Result<Option<Row>, String> {
         request.validate()?;
         let (event_id, _) = request.event_reference()?;
         self.with_client(|client| {
-            // Bind the source lookup to the currently published generation in one query.
-            let row = client.query_opt(
-                "SELECT e.payload::text FROM public.app_core_sessionevent e JOIN runtime.transcript_projection_current_generations g ON g.session_id=e.session_id JOIN runtime.transcript_projection_heads h ON h.session_id=g.session_id AND h.projection_version=g.projection_version AND h.projection_generation=g.projection_generation WHERE e.session_id=$1 AND e.\"eventId\"=$2 AND g.projection_generation=$3 AND g.projection_version=$4 AND e.sequence<=h.source_high_water AND h.invalidation_reason IS NULL",
-                &[&request.session_id, &event_id, &request.projection_generation, &request.projection_version],
-            ).map_err(|error| format!("read transcript source failed: {error}"))?
-                .ok_or_else(|| "transcript content source or generation is unavailable".to_string())?;
-            let mut value = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(0))
-                .map_err(|error| format!("decode transcript source failed: {error}"))?;
-            super::session_payload::decode(&mut value)?;
-            let record = parse_wire_record(&value).map_err(|error| error.to_string())?;
-            centaeris_core::session::transcript::transcript_event_content_range(request, &record.event)
+            client
+                .query_opt(
+                    query,
+                    &[
+                        &request.session_id,
+                        &event_id,
+                        &request.projection_generation,
+                        &request.projection_version,
+                    ],
+                )
+                .map_err(|error| format!("read transcript source failed: {error}"))
         })
     }
 

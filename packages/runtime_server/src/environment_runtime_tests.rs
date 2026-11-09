@@ -66,6 +66,7 @@ fn environment_runtime_server() {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
             image_digest: format!("sha256:{}", "a".repeat(64)),
         }),
+        native_model: None,
         request_policy: request_policy::RequestPolicy::from_env().unwrap(),
     };
     let server = runtime.spawn(serve_http(listener, state));

@@ -17,7 +17,7 @@ _HTTP_ERROR_CODES = {
 }
 
 _DIAGNOSTIC_ROUTES = {
-    "/agent-runs/control", "/agent-runs/step", "/agent-runs/teardown",
+    "/agent-runs/control", "/agent-runs/step", "/agent-runs/teardown", "/agent-runs/finalize",
     "/internal/jobs/:id", "/internal/jobs/claim", "/internal/jobs/wait",
     "/internal/jobs/start", "/internal/jobs/heartbeat", "/internal/jobs/yield",
     "/internal/jobs/complete", "/internal/jobs/fail", "/internal/jobs/reconcile",

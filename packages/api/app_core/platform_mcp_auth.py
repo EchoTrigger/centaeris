@@ -12,10 +12,13 @@ from django.core.exceptions import ObjectDoesNotExist
 
 from .material_access import MaterialAccessContext, authorize_material_access
 from .material_contract import KnowledgeError
+from .material_tool_catalog import MATERIAL_TOOL_CATALOG_DIGEST
 from .runtime_contract import _verify_authorization_digest_signature, agent_run_binding_matches
 
 
-SALT = "centaeris.workspace.platform-mcp.credential.v1"
+# Bind opaque credentials to the catalog published by the serving instance.
+# A credential issued across a rolling catalog change fails authentication.
+SALT = f"centaeris.workspace.platform-mcp.credential.v1:{MATERIAL_TOOL_CATALOG_DIGEST}"
 TTL_SECONDS = 300
 MAX_TOKEN_BYTES = 16 * 1024
 FIELDS = {"schema", "agentRunId", "authorizationDigest", "processingSpecification", "specDigest", "issuedAt", "expiresAt"}

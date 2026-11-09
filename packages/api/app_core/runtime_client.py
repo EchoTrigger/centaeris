@@ -527,7 +527,10 @@ WORKSPACE_TRANSCRIPT_STREAM_ID = "workspace-transcript.v1"
 
 
 def request_transcript_content(body: dict) -> dict:
-    result = _request_transcript_read("/internal/transcript/content", body)
+    return validate_transcript_content_range(_request_transcript_read("/internal/transcript/content", body), body)
+
+
+def validate_transcript_content_range(result: dict, body: dict) -> dict:
     if (not valid_transcript_structure("content", result)
         or result.get("schema") != "transcript.content.range.v1"
         or any(result.get(key) != body.get(key) for key in

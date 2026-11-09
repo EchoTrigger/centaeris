@@ -48,10 +48,12 @@ class EnvironmentRuntimeFixture:
             "REDIS_URL": "redis://127.0.0.1:1/15", "RUNTIME_STREAM_TTL_SECONDS": "3600",
             "RUNTIME_LIVE_STATE_TTL_SECONDS": "3600",
             "NO_PROXY": "127.0.0.1,localhost," + os.environ.get("NO_PROXY", "")}
-        self.runtime_process = subprocess.Popen([
-            "cargo", "test", "--locked", "-p", "runtime_server",
-            "environment_runtime_tests::environment_runtime_server", "--",
-            "--ignored", "--exact", "--nocapture"], cwd=Path(__file__).resolve().parents[3],
+        fixture_name = "environment_runtime_tests::environment_runtime_server"
+        executable = os.environ.get("CENTAERIS_TEST_RUNTIME_EXECUTABLE")
+        command = ([executable, fixture_name] if executable else
+                   ["cargo", "test", "--locked", "-p", "runtime_server", fixture_name, "--"])
+        self.runtime_process = subprocess.Popen(
+            [*command, "--ignored", "--exact", "--nocapture"], cwd=Path(__file__).resolve().parents[3],
             env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8")
         self.addCleanup(self.stop_runtime)
@@ -65,7 +67,7 @@ class EnvironmentRuntimeFixture:
 
         self.runtime_reader = threading.Thread(target=collect, daemon=True)
         self.runtime_reader.start()
-        # An isolated Cargo target must also finish its first dependency build.
+        # Direct Django invocations may still build the fixture on first use.
         ready = self.runtime_markers.get(timeout=900)
         self.assertTrue(ready.startswith("environment-runtime-ready:"), "".join(self.runtime_lines))
         return ready.removeprefix("environment-runtime-ready:")

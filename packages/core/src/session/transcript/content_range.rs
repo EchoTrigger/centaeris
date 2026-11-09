@@ -90,9 +90,52 @@ pub fn transcript_event_content_range(
     request: &TranscriptContentRangeReadRequestV1,
     event: &crate::session::SessionLogRecord,
 ) -> Result<TranscriptContentRangeV1, String> {
-    use crate::session::SessionRecordType;
     request.validate()?;
     crate::session::validate_event_shape(event)?;
+    let text = transcript_event_content_text(request, event)?;
+    let offset = request
+        .offset
+        .parse::<usize>()
+        .map_err(|_| "transcript offset exceeds usize")?;
+    let (end, content) = transcript_utf8_range(text, offset, request.max_bytes as usize)?;
+    let response = TranscriptContentRangeV1 {
+        schema: TRANSCRIPT_CONTENT_RANGE_SCHEMA_V1.to_string(),
+        session_id: request.session_id.clone(),
+        projection_version: request.projection_version.clone(),
+        projection_generation: request.projection_generation.clone(),
+        ref_id: request.ref_id.clone(),
+        revision: request.revision.clone(),
+        byte_length: request.byte_length.clone(),
+        start_offset: request.offset.clone(),
+        end_offset: end.to_string(),
+        content: content.to_string(),
+        has_more: end < text.len(),
+    };
+    response.validate()?;
+    Ok(response)
+}
+
+/// Validates the canonical event wire and returns only the display prefix. The
+/// display budget is independent of the per-frame `maxBytes` in the request.
+pub fn transcript_event_content_prefix(
+    request: &TranscriptContentRangeReadRequestV1,
+    wire: &serde_json::Value,
+    max_display_bytes: usize,
+) -> Result<String, String> {
+    request.validate()?;
+    if request.offset != "0" {
+        return Err("transcript content prefix requires a zero offset".to_string());
+    }
+    let record = crate::session::parse_wire_record(wire).map_err(|error| error.to_string())?;
+    let text = transcript_event_content_text(request, &record.event)?;
+    Ok(text[..text.floor_char_boundary(max_display_bytes)].to_owned())
+}
+
+fn transcript_event_content_text<'event>(
+    request: &TranscriptContentRangeReadRequestV1,
+    event: &'event crate::session::SessionLogRecord,
+) -> Result<&'event str, String> {
+    use crate::session::SessionRecordType;
     let (event_id, field) = request.event_reference()?;
     let expected_field = match event.event_type {
         SessionRecordType::UserMessage | SessionRecordType::ReasoningBlock => "text",
@@ -119,26 +162,7 @@ pub fn transcript_event_content_range(
     if text.len().to_string() != request.byte_length {
         return Err("transcript content reference is stale".to_string());
     }
-    let offset = request
-        .offset
-        .parse::<usize>()
-        .map_err(|_| "transcript offset exceeds usize")?;
-    let (end, content) = transcript_utf8_range(text, offset, request.max_bytes as usize)?;
-    let response = TranscriptContentRangeV1 {
-        schema: TRANSCRIPT_CONTENT_RANGE_SCHEMA_V1.to_string(),
-        session_id: request.session_id.clone(),
-        projection_version: request.projection_version.clone(),
-        projection_generation: request.projection_generation.clone(),
-        ref_id: request.ref_id.clone(),
-        revision: request.revision.clone(),
-        byte_length: request.byte_length.clone(),
-        start_offset: request.offset.clone(),
-        end_offset: end.to_string(),
-        content: content.to_string(),
-        has_more: end < text.len(),
-    };
-    response.validate()?;
-    Ok(response)
+    Ok(text)
 }
 
 #[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]
@@ -286,5 +310,51 @@ mod tests {
         request
             .validate()
             .expect("projected answer reference must be readable");
+    }
+
+    #[test]
+    fn content_prefix_preserves_utf8_and_requires_the_exact_visible_source() {
+        let wire = serde_json::json!({
+            "schemaVersion": "session.event.v1",
+            "eventVersion": 1,
+            "sequence": 3,
+            "type": "assistant_message",
+            "eventId": "answer",
+            "sessionId": "session-1",
+            "turnId": "turn-1",
+            "agentRunId": "run-1",
+            "createdAtMs": 3,
+            "payload": {
+                "messageId": "message:turn-1:assistant",
+                "modelMarkdown": "a\0界z",
+                "artifactRefs": [],
+                "status": "done",
+            },
+        });
+        let request = TranscriptContentRangeReadRequestV1 {
+            schema: TRANSCRIPT_CONTENT_RANGE_REQUEST_SCHEMA_V1.to_string(),
+            session_id: "session-1".to_string(),
+            projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.to_string(),
+            projection_generation: "generation-1".to_string(),
+            ref_id: "session-event:answer:modelMarkdown".to_string(),
+            revision: "1".to_string(),
+            byte_length: "6".to_string(),
+            offset: "0".to_string(),
+            max_bytes: 1,
+        };
+        assert_eq!(
+            transcript_event_content_prefix(&request, &wire, 4).unwrap(),
+            "a\0"
+        );
+        assert_eq!(
+            transcript_event_content_prefix(&request, &wire, 5).unwrap(),
+            "a\0界"
+        );
+        let mut stale = request.clone();
+        stale.byte_length = "7".to_string();
+        assert!(transcript_event_content_prefix(&stale, &wire, 5).is_err());
+        let mut wrong_field = request;
+        wrong_field.ref_id = "session-event:answer:text".to_string();
+        assert!(transcript_event_content_prefix(&wrong_field, &wire, 5).is_err());
     }
 }

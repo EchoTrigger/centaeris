@@ -1,4 +1,5 @@
 use super::*;
+use crate::host_supervisor::linux::helpers::VerifiedHelperInput;
 use crate::host_supervisor::{HostHelperRequest, TrustedHelperKind, HELPER_STREAM_LIMIT};
 use std::os::fd::FromRawFd;
 
@@ -355,11 +356,9 @@ impl NativeManager {
     }
     pub(crate) fn start_helper(
         &self,
-        request: &HostHelperRequest,
-        mut input: File,
-        input_guard: Option<Arc<dyn Send + Sync>>,
+        verified_input: VerifiedHelperInput<'_>,
     ) -> Result<EnvironmentTaskResult, String> {
-        request.validate()?;
+        let (request, input, input_guard) = verified_input.into_parts();
         // Serialize each instance's capacity check and reservation through the
         // persistent start boundary. Tasks and completion polling stay independent.
         let _admission = self
@@ -371,34 +370,6 @@ impl NativeManager {
             .as_ref()
             .ok_or("host_helper_not_configured")?
             .clone();
-        if input
-            .metadata()
-            .map_err(|_| "host_helper_input_incomplete")?
-            .len()
-            != request.input_length
-        {
-            return Err("host_helper_input_incomplete".into());
-        }
-        input
-            .seek(SeekFrom::Start(0))
-            .map_err(|_| "host_helper_input_incomplete")?;
-        let mut hash = Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            let count = input
-                .read(&mut buffer)
-                .map_err(|_| "host_helper_input_incomplete")?;
-            if count == 0 {
-                break;
-            }
-            hash.update(&buffer[..count]);
-        }
-        if format!("sha256:{:x}", hash.finalize()) != request.input_digest {
-            return Err("host_helper_input_digest_mismatch".into());
-        }
-        input
-            .seek(SeekFrom::Start(0))
-            .map_err(|_| "host_helper_input_incomplete")?;
         let task_id = task_identity(&request.fence, &request.operation_id)?;
         let existing = {
             let mut manager = self.manager.lock().map_err(|_| "task_service_failed")?;
@@ -434,7 +405,7 @@ impl NativeManager {
             binary,
             input,
             capture,
-            input_guard,
+            input_guard: Some(input_guard),
         };
         Manager::handle_with_helper(
             &self.manager,

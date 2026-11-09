@@ -36,7 +36,8 @@ class CleanupResponsibilityTests(unittest.TestCase):
                 @contextmanager
                 def heartbeats(*_args):
                     yield lambda: None
-                with patch.object(worker, "start_job"), patch.object(worker, "lease_heartbeats", heartbeats), \
+                with patch.object(worker, "AGENT_RUN_EXECUTION_MODE", "retained"), \
+                        patch.object(worker, "start_job"), patch.object(worker, "lease_heartbeats", heartbeats), \
                         patch.object(worker, "resolve_agent_run_lifecycle", return_value=terminal), \
                         patch.object(worker, "runtime_teardown_request", return_value=teardown), \
                         patch.object(worker, "api_request", return_value=release,
@@ -82,7 +83,7 @@ class CleanupResponsibilityTests(unittest.TestCase):
             finally:
                 active = False
 
-        def teardown(*_args):
+        def cleanup(*_args):
             nonlocal cleanup_attempted
             cleanup_attempted = True
             raise teardown_error or OSError("lost teardown acknowledgement")
@@ -98,7 +99,8 @@ class CleanupResponsibilityTests(unittest.TestCase):
                 patch.object(worker, "AGENT_RUN_EXECUTION_MODE", mode), \
                 patch.object(worker, "start_job"), patch.object(worker, "lease_heartbeats", heartbeats), \
                 patch.object(worker, "resolve_agent_run_lifecycle", return_value=terminal), \
-                patch.object(worker, "runtime_teardown_request", side_effect=teardown), \
+                patch.object(worker, "runtime_finalize_request" if mode == "perRun" else "runtime_teardown_request",
+                    side_effect=cleanup), \
                 patch.object(worker, "now_ms", return_value=1000), \
                 patch.object(worker, "yield_job", side_effect=handoff) as yielded, \
                 patch.object(worker, "fail_job") as failed, patch.object(worker, "complete_job") as complete, \

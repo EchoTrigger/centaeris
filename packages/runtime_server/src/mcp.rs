@@ -1,13 +1,15 @@
+mod native_dispatch;
+
 use std::collections::HashSet;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use centaeris_core::extension::{
-    load_mcp_servers_file, McpServerDeclarationV1, McpToolDeclarationV1, McpTransportV1,
-    PluginActivationSnapshotV1,
+    load_mcp_servers_file, load_verified_mcp_servers_file, McpServerDeclarationV1,
+    McpToolDeclarationV1, McpTransportV1, PluginActivationSnapshotV1,
 };
 use centaeris_core::tool::layer::{
     DynamicToolProvider, DynamicToolProviderRequest, DynamicToolProviderResponse,
@@ -21,7 +23,10 @@ use centaeris_mcp::{
 use serde::{Deserialize, Serialize};
 
 use crate::docker_execution_host::DockerExecutionHostRunner;
-use crate::skill_projection::{verified_plugin_package_roots_at, PLUGIN_CATALOG_ROOT};
+use crate::native_run_execution_authority::NativeRunExecutionAuthority;
+use crate::skill_projection::{
+    plugin_package_roots_at, verified_plugin_package_roots_at, PLUGIN_CATALOG_ROOT,
+};
 
 pub(crate) struct McpBindings {
     pub contracts: Vec<DynamicToolContract>,
@@ -37,8 +42,10 @@ pub(crate) struct PreparedMcpServers {
 struct McpConnectorIdentity {
     plugin_name: String,
     server_id: String,
+    package_root: PathBuf,
     resource_path: String,
     resource_digest: String,
+    native_credential_ref: Option<String>,
 }
 
 struct McpDispatchAuthorization {
@@ -67,6 +74,31 @@ impl McpDispatchAuthorization {
             *binding_digest = Some(authorized.binding_digest.clone());
         }
         Ok(authorized)
+    }
+
+    async fn authorize_dispatch(&self) -> Result<(), String> {
+        let Some((authority, credential_ref)) = self
+            .resolver
+            .native_run_authority
+            .as_ref()
+            .zip(self.identity.native_credential_ref.as_ref())
+        else {
+            return self.check("dispatch").await.map(|_| ());
+        };
+        let binding = self
+            .binding_digest
+            .lock()
+            .await
+            .clone()
+            .ok_or("MCP connector binding unavailable")?;
+        let authority = authority.clone();
+        let identity = self.identity.clone();
+        let credential_ref = credential_ref.clone();
+        tokio::task::spawn_blocking(move || {
+            native_dispatch::verify(&authority, &identity, &credential_ref, &binding)
+        })
+        .await
+        .map_err(|_| "authorize MCP connector request failed".to_string())?
     }
 
     async fn connect_token(
@@ -104,7 +136,7 @@ impl DynamicToolProvider for AuthorizedMcpProvider {
     ) -> Pin<Box<dyn Future<Output = Result<DynamicToolProviderResponse, String>> + Send + 'a>>
     {
         Box::pin(async move {
-            self.authorization.check("dispatch").await?;
+            self.authorization.authorize_dispatch().await?;
             self.inner.execute(req).await
         })
     }
@@ -116,7 +148,7 @@ impl DynamicToolProvider for AuthorizedMcpProvider {
     {
         Box::pin(async move {
             self.authorization
-                .check("dispatch")
+                .authorize_dispatch()
                 .await
                 .map_err(ToolErrorInfo::from_unstructured_error)?;
             self.inner.execute_with_error_info(req).await
@@ -252,6 +284,7 @@ pub(crate) struct McpCredentialResolver {
     agent_run_id: String,
     authorization_ref: String,
     authorization_digest: String,
+    native_run_authority: Option<Arc<NativeRunExecutionAuthority>>,
     client: reqwest::Client,
 }
 
@@ -269,6 +302,7 @@ impl McpCredentialResolver {
             agent_run_id,
             authorization_ref,
             authorization_digest,
+            native_run_authority: None,
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(3))
@@ -276,6 +310,14 @@ impl McpCredentialResolver {
                 .build()
                 .map_err(|error| format!("build MCP credential client failed: {error}"))?,
         })
+    }
+
+    pub(crate) fn with_native_run_authority(
+        mut self,
+        authority: Option<Arc<NativeRunExecutionAuthority>>,
+    ) -> Self {
+        self.native_run_authority = authority;
+        self
     }
 
     async fn authorize(
@@ -516,24 +558,32 @@ fn prepare_mcp_servers_at(
     credential_resolver: McpCredentialResolver,
     catalog_root: &Path,
 ) -> Result<PreparedMcpServers, String> {
+    let package_roots = plugin_package_roots_at(&activation, catalog_root)?;
     let mut servers = Vec::new();
     let mut declaration_budget = ToolContractBudget::default();
-    for package in &activation.packages {
+    for (package, package_root) in activation.packages.iter().zip(package_roots) {
         for resource in &package.mcp_servers {
-            let declaration = load_mcp_servers_file(
-                catalog_root
-                    .join(package.name.as_str())
-                    .join(resource.path.as_str())
-                    .as_path(),
-            )?;
+            let declaration =
+                load_verified_mcp_servers_file(&package_root, &resource.path, &resource.digest)?;
             declaration_budget.add(&declaration)?;
             servers.extend(declaration.servers.into_iter().map(|server| {
+                let native_credential_ref = match &server.transport {
+                    McpTransportV1::StreamableHttp {
+                        bearer_credential_ref,
+                        ..
+                    } if package.mcp_servers.len() == 1 && resource.path.is_ascii() => {
+                        bearer_credential_ref.clone()
+                    }
+                    _ => None,
+                };
                 (
                     McpConnectorIdentity {
                         plugin_name: package.name.clone(),
                         server_id: server.id.clone(),
+                        package_root: package_root.clone(),
                         resource_path: resource.path.clone(),
                         resource_digest: resource.digest.clone(),
+                        native_credential_ref,
                     },
                     server,
                 )
@@ -599,19 +649,21 @@ pub(crate) async fn connect_mcp_servers(
 mod tests {
     use super::*;
     use centaeris_core::extension::{
-        mcp_model_contract_digest, McpLifecycleV1, McpServersFileV1, MCP_SERVERS_SCHEMA_V1,
+        mcp_model_contract_digest, verify_mcp_declaration_file, McpLifecycleV1, McpServersFileV1,
+        MCP_SERVERS_SCHEMA_V1,
     };
     use serde_json::json;
     use std::fs;
-    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_identity() -> McpConnectorIdentity {
         McpConnectorIdentity {
             plugin_name: "banana".into(),
             server_id: "banana-source".into(),
+            package_root: PathBuf::new(),
             resource_path: "mcp/banana.json".into(),
             resource_digest: format!("sha256:{}", "c".repeat(64)),
+            native_credential_ref: None,
         }
     }
 
@@ -1036,8 +1088,10 @@ mod tests {
             identity: McpConnectorIdentity {
                 plugin_name: "banana".into(),
                 server_id: "ledger".into(),
+                package_root: PathBuf::new(),
                 resource_path: field("resourcePath"),
                 resource_digest: field("resourceDigest"),
+                native_credential_ref: None,
             },
             resolver: Arc::new(resolver),
             binding_digest: tokio::sync::Mutex::new(None),
@@ -1634,8 +1688,31 @@ mod tests {
     }
 
     #[test]
-    fn agent_run_preparation_loads_static_contract_without_credentials_or_network() {
+    fn agent_run_preparation_uses_the_signed_package_despite_a_global_shadow() {
         let (catalog_root, activation) = banana_package();
+        let package_digest = activation.packages[0]
+            .package_digest
+            .strip_prefix("sha256:")
+            .unwrap();
+        let installed_root = catalog_root
+            .join(".packages")
+            .join(package_digest)
+            .join("banana");
+        let global_root = catalog_root.join("banana");
+        fs::create_dir_all(installed_root.parent().unwrap()).unwrap();
+        fs::rename(&global_root, &installed_root).unwrap();
+        let declaration_path = installed_root.join("mcp/banana.json");
+        let mut shadow = load_mcp_servers_file(&declaration_path).unwrap();
+        shadow.servers[0].transport = McpTransportV1::StreamableHttp {
+            url: "https://shadow.invalid/mcp".into(),
+            bearer_credential_ref: None,
+        };
+        fs::create_dir_all(global_root.join("mcp")).unwrap();
+        fs::write(
+            global_root.join("mcp/banana.json"),
+            serde_json::to_vec(&shadow).unwrap(),
+        )
+        .unwrap();
         let prepared = prepare_mcp_servers_at(
             activation,
             McpCredentialResolver::new(
@@ -1651,9 +1728,33 @@ mod tests {
         .expect("static preparation");
         assert_eq!(prepared.servers.len(), 1);
         let (identity, server) = &prepared.servers[0];
+        assert_eq!(
+            identity.package_root,
+            installed_root.canonicalize().unwrap()
+        );
+        assert_eq!(
+            server.transport,
+            McpTransportV1::StreamableHttp {
+                url: "https://banana.invalid/mcp".into(),
+                bearer_credential_ref: Some("banana-token".into()),
+            }
+        );
         let contracts = server
             .dynamic_tool_contracts(identity.plugin_name.as_str())
             .expect("static contract");
         assert_eq!(contracts[0].provider_id, "mcp:banana:banana-source");
+        let verify = || {
+            verify_mcp_declaration_file(
+                &identity.package_root,
+                &identity.resource_path,
+                &identity.resource_digest,
+            )
+        };
+        verify().expect("prepared declaration remains current");
+        let mut bytes = fs::read(&declaration_path).unwrap();
+        bytes.push(b'\n');
+        fs::write(declaration_path, bytes).unwrap();
+        assert!(verify().unwrap_err().contains("resource digest mismatch"));
+        fs::remove_dir_all(catalog_root).unwrap();
     }
 }

@@ -1,4 +1,5 @@
-use super::manifest::validate_relative_resource_path;
+use super::activation::plugin_file_digest;
+use super::manifest::{resolve_plugin_resource_path, validate_relative_resource_path};
 use crate::runtime::canonical_json;
 use crate::tool::limits::{
     json_size_with_limit, read_tool_contract_file, validate_tool_description, ToolContractBudget,
@@ -81,13 +82,63 @@ pub struct McpToolDeclarationV1 {
 }
 
 pub fn load_mcp_servers_file(path: &Path) -> Result<McpServersFileV1, String> {
-    let raw = read_tool_contract_file(path).map_err(|error| {
+    let raw = read_mcp_declaration_file(path)?;
+    parse_mcp_declaration_file(path, &raw)
+}
+
+/// Loads the exact bytes bound to the signed declaration digest.
+/// The caller supplies the canonical package root.
+pub fn load_verified_mcp_servers_file(
+    package_root: &Path,
+    resource_path: &str,
+    resource_digest: &str,
+) -> Result<McpServersFileV1, String> {
+    let (path, raw) =
+        read_verified_mcp_declaration_file(package_root, resource_path, resource_digest)?;
+    parse_mcp_declaration_file(&path, &raw)
+}
+
+/// Rechecks a declaration's signed identity without parsing its contract again.
+/// The caller supplies the canonical package root.
+pub fn verify_mcp_declaration_file(
+    package_root: &Path,
+    resource_path: &str,
+    resource_digest: &str,
+) -> Result<(), String> {
+    read_verified_mcp_declaration_file(package_root, resource_path, resource_digest).map(|_| ())
+}
+
+fn read_verified_mcp_declaration_file(
+    package_root: &Path,
+    resource_path: &str,
+    resource_digest: &str,
+) -> Result<(std::path::PathBuf, String), String> {
+    let path = resolve_plugin_resource_path(package_root, resource_path)?;
+    if path != package_root.join(resource_path) || !path.is_file() {
+        return Err(format!(
+            "MCP declaration is not the signed package file: {resource_path}"
+        ));
+    }
+    let raw = read_mcp_declaration_file(&path)?;
+    if plugin_file_digest(resource_path, raw.as_bytes()) != resource_digest {
+        return Err(format!(
+            "MCP declaration resource digest mismatch: {resource_path}"
+        ));
+    }
+    Ok((path, raw))
+}
+
+fn read_mcp_declaration_file(path: &Path) -> Result<String, String> {
+    read_tool_contract_file(path).map_err(|error| {
         format!(
             "read MCP server declaration failed {}: {error}",
             path.display()
         )
-    })?;
-    let declaration = serde_json::from_str::<McpServersFileV1>(raw.as_str()).map_err(|error| {
+    })
+}
+
+fn parse_mcp_declaration_file(path: &Path, raw: &str) -> Result<McpServersFileV1, String> {
+    let declaration = serde_json::from_str::<McpServersFileV1>(raw).map_err(|error| {
         format!(
             "parse MCP server declaration failed {}: {error}",
             path.display()

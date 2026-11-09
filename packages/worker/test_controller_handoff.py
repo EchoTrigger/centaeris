@@ -36,7 +36,8 @@ class ControllerHandoffTests(unittest.TestCase):
                     @contextmanager
                     def heartbeats(*_args):
                         yield lambda: None
-                    with patch.object(worker, 'start_job'), patch.object(worker, 'lease_heartbeats', heartbeats), \
+                    with patch.object(worker, 'AGENT_RUN_EXECUTION_MODE', 'retained'), \
+                            patch.object(worker, 'start_job'), patch.object(worker, 'lease_heartbeats', heartbeats), \
                             patch.object(worker, 'api_request', side_effect=api), \
                             patch.object(worker, 'transition_agent_run') as transition, \
                             patch.object(worker, 'agent_run_step_request', return_value=step_result) as step, \
@@ -312,8 +313,9 @@ class ControllerHandoffTests(unittest.TestCase):
         terminal = test_retained_lifecycle.RetainedLifecycleTests().terminal()
         for error in (rejection('environment_controller_owned', 403), RuntimeError('environment_controller_owned'),
                       rejection('environment_controller_lease_rejected')):
-            with self.subTest(error=str(error)), patch.object(worker, 'resolve_agent_run_lifecycle', return_value=terminal), \
-                    patch.object(worker, 'runtime_teardown_request', side_effect=error), patch.object(worker, 'yield_job') as yielded:
+            with self.subTest(error=str(error)), patch.object(worker, 'AGENT_RUN_EXECUTION_MODE', 'perRun'), \
+                    patch.object(worker, 'resolve_agent_run_lifecycle', return_value=terminal), \
+                    patch.object(worker, 'runtime_finalize_request', side_effect=error), patch.object(worker, 'yield_job') as yielded:
                 self.assertFalse(worker.execute_agent_run_lifecycle_job(job, 'worker:fixture-owner', lambda: None))
                 self.assertEqual(yielded.call_args.args[-1], 'retained_cleanup_pending')
 

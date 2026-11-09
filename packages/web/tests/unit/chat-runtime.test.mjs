@@ -2,7 +2,6 @@ import { coreFile } from '../../../../scripts/workspace/core-source.mjs';
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { WorkspaceChatController } from "../../src/chat/workspaceChatController.ts";
 
 import { createChatViewStore } from "../../src/chat/chatViewStore.ts";
 import { isAgentRunActive, validateHistoryPage, applyStreamEntry } from "../../src/chat/sessionEvents.ts";
@@ -405,40 +404,6 @@ test("live text is a replace-only overlay and disappears at terminal commit", ()
   assert.equal(terminal.messages.at(-1).text, "最终正文");
 });
 
-test("controller batches entries and rejects post-terminal data", async () => {
-  let citationRefreshes = 0;
-  const store = createChatViewStore();
-  store.replaceAll([validateHistoryPage(page(historyAgentRun([]))).agentRuns[0]]);
-  const frames = [];
-  const controller = new WorkspaceChatController({
-    store,
-    workspaceId: "workspace_1",
-    sessionId,
-    agentRunId,
-    scheduleFrame: (callback) => (frames.push(callback), frames.length),
-    cancelFrame: () => {},
-    now: () => 0,
-    onCitationsChanged: () => { citationRefreshes += 1; },
-  });
-  controller.accept(liveEntry(1, "正文"));
-  const terminal = {
-    cursor: "2-0",
-    item: {
-      schema: "session.stream.item.v1",
-      kind: "committed",
-      agentRunId,
-      sourceSequence: 1,
-      event: event("agent_run_failed", 1, { reasonType: "runtime_error", message: "失败" }).event,
-    },
-  };
-  controller.accept(terminal);
-  assert.throws(() => controller.accept(liveEntry(2, "banana")), /after terminal/);
-  frames.shift()();
-  await controller.whenIdle();
-  assert.equal(store.getAgentRunSnapshot(agentRunId).status, "failed");
-  assert.equal(citationRefreshes, 1);
-});
-
 test("committed phase atomically supersedes its older live overlay", () => {
   const store = createChatViewStore();
   store.replaceAll([validateHistoryPage(page(historyAgentRun([
@@ -618,12 +583,10 @@ test("phase elapsed text uses a fake wall clock and interruption creates no tran
   assert.equal(Object.hasOwn(interrupted, "cancellationMessage"), false);
 });
 
-test("stream render telemetry keeps the last coalesced entry and waits for a paint opportunity", () => {
+test("stream render telemetry waits for a paint opportunity", () => {
   let clock = 1;
   let nextFrameId = 0;
-  const reducerFrames = [];
   const paintFrames = [];
-  const cancelledReducerFrames = [];
   const cancelledPaintFrames = [];
   const metrics = [];
   const schedule = (frames) => (callback) => {
@@ -638,23 +601,11 @@ test("stream render telemetry keeps the last coalesced entry and waits for a pai
     onRenderTelemetry: (metric) => metrics.push(metric),
   });
   store.replaceAll([validateHistoryPage(page(historyAgentRun([]))).agentRuns[0]]);
-  const controller = new WorkspaceChatController({
-    store,
-    workspaceId: "workspace_1",
-    sessionId,
-    agentRunId,
-    scheduleFrame: schedule(reducerFrames),
-    cancelFrame: (frameId) => cancelledReducerFrames.push(frameId),
-    now: () => clock,
-  });
-
-  controller.accept(liveEntry(1, "旧正文"));
   clock = 2;
-  controller.accept(liveEntry(2, "最后正文"));
-  assert.equal(controller.queuedItemCount(), 1);
-
+  const visible = liveEntry(2, "最后正文");
+  const visibleTelemetry = store.beginStreamTelemetry(visible, 2);
   clock = 3;
-  reducerFrames.shift().callback();
+  store.applyStreamEntries([visible], [visibleTelemetry]);
   const projected = store.getAgentRunSnapshot(agentRunId);
   assert.equal(projected.messages.at(-1).text, "最后正文");
 
@@ -684,9 +635,10 @@ test("stream render telemetry keeps the last coalesced entry and waits for a pai
   cleanup();
 
   clock = 7;
-  controller.accept(liveEntry(3, "提交后卸载"));
+  const pending = liveEntry(3, "提交后卸载");
+  const pendingTelemetry = store.beginStreamTelemetry(pending, 3);
   clock = 8;
-  reducerFrames.shift().callback();
+  store.applyStreamEntries([pending], [pendingTelemetry]);
   clock = 9;
   const cancelPendingPaint = store.markDomCommit(
     agentRunId,
@@ -698,81 +650,6 @@ test("stream render telemetry keeps the last coalesced entry and waits for a pai
   cancelPendingPaint();
   assert.deepEqual(cancelledPaintFrames, [scheduledPaintFrame]);
   assert.equal(metrics.length, 1);
-
-  clock = 11;
-  controller.accept(liveEntry(4, "不会应用"));
-  const scheduledReducerFrame = reducerFrames.at(-1).frameId;
-  controller.dispose();
-  assert.deepEqual(cancelledReducerFrames, [scheduledReducerFrame]);
-});
-
-test("live SSE without an id does not advance the durable cursor", () => {
-  const store = createChatViewStore();
-  store.replaceAll([validateHistoryPage(page(historyAgentRun([]))).agentRuns[0]]);
-  const controller = new WorkspaceChatController({
-    store,
-    workspaceId: "workspace_1",
-    sessionId,
-    agentRunId,
-    initialCursor: "v1.durable",
-    scheduleFrame: () => 1,
-    cancelFrame: () => {},
-  });
-
-  controller.accept({ ...liveEntry(1, "正文"), cursor: null });
-
-  assert.equal(controller.lastCursor, "v1.durable");
-});
-
-test("controller exposes only the last successfully applied durable cursor", async () => {
-  const store = createChatViewStore();
-  store.replaceAll([validateHistoryPage(page(historyAgentRun([]))).agentRuns[0]]);
-  const frames = [];
-  const controller = new WorkspaceChatController({
-    store,
-    workspaceId: "workspace_1",
-    sessionId,
-    agentRunId,
-    initialCursor: "1-0",
-    scheduleFrame: (callback) => (frames.push(callback), frames.length),
-    cancelFrame: () => {},
-  });
-
-  controller.accept(committedEntry(event("agent_run_started", 1, { userObjective: "cursor" }), "2-0"));
-  assert.equal(controller.receivedCursor, "2-0");
-  assert.equal(controller.lastCursor, "1-0", "reconnect must stay on the applied cursor while an entry is queued");
-
-  frames.shift()();
-  await controller.whenIdle();
-  assert.equal(controller.lastCursor, "2-0");
-});
-
-test("controller keeps the applied cursor when an atomic reducer batch fails", async () => {
-  const baseStore = createChatViewStore();
-  baseStore.replaceAll([validateHistoryPage(page(historyAgentRun([]))).agentRuns[0]]);
-  const store = {
-    ...baseStore,
-    applyStreamEntries() {
-      throw new Error("projection failed");
-    },
-  };
-  const frames = [];
-  const controller = new WorkspaceChatController({
-    store,
-    workspaceId: "workspace_1",
-    sessionId,
-    agentRunId,
-    initialCursor: "1-0",
-    scheduleFrame: (callback) => (frames.push(callback), frames.length),
-    cancelFrame: () => {},
-  });
-
-  controller.accept(committedEntry(event("agent_run_started", 1, { userObjective: "cursor" }), "2-0"));
-  frames.shift()();
-
-  await assert.rejects(controller.whenIdle(), /projection failed/);
-  assert.equal(controller.receivedCursor, "2-0");
-  assert.equal(controller.lastCursor, "1-0");
 });
 
 test("history schema and global event order loud-fail", () => {

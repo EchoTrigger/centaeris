@@ -15,8 +15,6 @@ import {
   validateSessionEvent,
 } from "./sessionStreamProtocol.ts";
 
-export { readSse, readSseBlock } from "./sessionStreamProtocol.ts";
-
 // Frontend view data, separate from model-visible messages and wire schemas.
 export type ReasoningBlockView = {
   id: string;

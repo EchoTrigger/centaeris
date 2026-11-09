@@ -42,6 +42,7 @@ futures.workspace = true
 getrandom.workspace = true
 centaeris-core.workspace = true
 centaeris-model-catalog.workspace = true
+centaeris-model-http.workspace = true
 centaeris-mcp.workspace = true
 centaeris-runtime-sqlite.workspace = true
 rusqlite.workspace = true

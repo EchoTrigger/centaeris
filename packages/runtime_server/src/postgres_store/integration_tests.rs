@@ -648,8 +648,9 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
         "session_transcript".to_string(),
         "hello".to_string(),
     );
-    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let runtime = std::sync::Arc::new(tokio::runtime::Runtime::new().expect("runtime"));
     let run = "agent_run_transcript";
+    let answer = format!("done{}界\0end", "x".repeat(65_531));
     let records = vec![
         session_record(
             run,
@@ -672,7 +673,7 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
             "session_transcript",
             3,
             SessionRecordType::AssistantMessage,
-            serde_json::json!({"messageId":"message:turn_pg_fenced_terminal:assistant","modelMarkdown":"done","artifactRefs":[],"status":"done"}),
+            serde_json::json!({"messageId":"message:turn_pg_fenced_terminal:assistant","modelMarkdown":answer,"artifactRefs":[],"status":"done"}),
             3,
         ),
         session_record(
@@ -756,7 +757,7 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
         "schema":"transcript.content.range.read.v1", "sessionId":"session_transcript",
         "projectionVersion":"transcript.projection.v1", "projectionGeneration":generation,
         "refId":format!("session-event:{}:modelMarkdown", records[2].event.event_id),
-        "revision":"1", "byteLength":"4", "offset":"0", "maxBytes":2
+        "revision":"1", "byteLength":answer.len().to_string(), "offset":"0", "maxBytes":2
     });
     let (status, body) = crate::runtime_http_tests::stored_request(
         store.clone(),
@@ -784,6 +785,59 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
         assert_eq!(status, 409);
     }
 
+    let stream_request = serde_json::json!({
+        "schema":"runtime.transcript.content_stream.read.v1", "sessionId":"session_transcript",
+        "projectionVersion":"transcript.projection.v1", "projectionGeneration":generation,
+        "references":[
+            {"refId":format!("session-event:{}:text",records[1].event.event_id),"revision":"1","byteLength":"5"},
+            {"refId":content_request["refId"],"revision":"1","byteLength":answer.len().to_string()}
+        ],
+        "maxDisplayBytes": 16 * 1024 * 1024
+    });
+    let (status, body) = crate::runtime_http_tests::stored_request(
+        store.clone(),
+        "POST",
+        "/internal/transcript/content-stream",
+        &serde_json::to_vec(&stream_request).unwrap(),
+    );
+    assert_eq!(status, 200);
+    let lines = body
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 4);
+    assert_eq!(lines[0]["content"], "hello");
+    assert_eq!(lines[1]["endOffset"], "65535");
+    assert_eq!(lines[2]["startOffset"], "65535");
+    assert_eq!(lines[2]["content"], "界\0end");
+    assert_eq!(lines[2]["hasMore"], false);
+    assert_eq!(
+        lines[3],
+        serde_json::json!({"schema":"runtime.transcript.content_stream.complete.v1"})
+    );
+    let mut prefix_request = stream_request.clone();
+    prefix_request["maxDisplayBytes"] = 65_537.into();
+    let (status, body) = crate::runtime_http_tests::stored_request(
+        store.clone(),
+        "POST",
+        "/internal/transcript/content-stream",
+        &serde_json::to_vec(&prefix_request).unwrap(),
+    );
+    assert_eq!(status, 200);
+    let lines = body
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[1]["endOffset"], "65535");
+    assert_eq!(lines[1]["hasMore"], true);
+    assert_eq!(
+        lines[2],
+        serde_json::json!({"schema":"runtime.transcript.content_stream.complete.v1"})
+    );
+
     let patches = store
         .load_transcript_patches(TranscriptPatchReadRequestV1 {
             session_id: "session_transcript".to_string(),
@@ -797,6 +851,46 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
     assert_eq!(patches.next_source_high_water, "4");
 
     let mut storage = Client::connect(&url, NoTls).expect("inspect transcript storage");
+    {
+        use futures::StreamExt;
+        let mut request = stream_request.clone();
+        request["references"] = serde_json::json!([stream_request["references"][1]]);
+        for invalidate_projection in [true, false] {
+            let response = runtime.block_on(crate::runtime_http_tests::stored_response(
+                runtime.clone(),
+                store.clone(),
+                "POST",
+                "/internal/transcript/content-stream",
+                &serde_json::to_vec(&request).unwrap(),
+            ));
+            assert_eq!(response.headers()["content-type"], "application/x-ndjson");
+            let mut body = response.into_body().into_data_stream();
+            let first = runtime.block_on(body.next()).unwrap().unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&first).unwrap()["endOffset"],
+                "65535"
+            );
+            if invalidate_projection {
+                storage.execute(
+                    "UPDATE runtime.transcript_projection_heads SET invalidation_reason='fixture' WHERE session_id='session_transcript'",
+                    &[],
+                ).unwrap();
+            } else {
+                storage.execute(
+                    "UPDATE public.app_core_sessionevent SET projects_to_agent_run_stream=false WHERE \"eventId\"=$1",
+                    &[&records[2].event.event_id],
+                ).unwrap();
+            }
+            assert!(runtime.block_on(body.next()).unwrap().is_err());
+            assert!(runtime.block_on(body.next()).is_none());
+            if invalidate_projection {
+                storage.execute(
+                    "UPDATE runtime.transcript_projection_heads SET invalidation_reason=NULL WHERE session_id='session_transcript'",
+                    &[],
+                ).unwrap();
+            }
+        }
+    }
     let recovery_count = storage
         .query_one(
             "SELECT count(*) FROM runtime.transcript_projection_current_recoveries WHERE session_id='session_transcript' AND projection_generation=$1",

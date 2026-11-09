@@ -1,4 +1,5 @@
 //! First-party original-file delivery into the current Session execution host.
+use std::fs::File;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,15 +7,99 @@ use centaeris_core::execution::MAX_EXECUTION_INPUT_BYTES;
 use centaeris_core::tool::inputs::{
     DeclaredInput, InputIdentityV1, ResolvedInput, ResolvedInputState, DECLARED_INPUT_SCHEMA,
 };
+use hosted_execution::protocol::SandboxMaterializedInput;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
 
 use crate::docker_execution_host::DockerExecutionHostRunner;
 
 // Matches the API's protected-input admission and validate-inputs batch limit.
 const MAX_SESSION_MATERIAL_INPUTS: usize = 128;
+
+/// A verified, rewindable frame for the Host helper. The temporary file stays
+/// private and can be streamed again if Host admission asks us to wait.
+#[derive(Debug)]
+pub(crate) struct VerifiedMaterialInputFrame {
+    input: ResolvedInput,
+    file: File,
+    descriptor: SandboxMaterializedInput,
+    length: u64,
+    digest: String,
+}
+
+impl VerifiedMaterialInputFrame {
+    pub(crate) fn into_parts(self) -> (ResolvedInput, SandboxMaterializedInput, File, u64, String) {
+        (
+            self.input,
+            self.descriptor,
+            self.file,
+            self.length,
+            self.digest,
+        )
+    }
+
+    async fn read(input: &ResolvedInput, response: &mut reqwest::Response) -> Result<Self, String> {
+        let descriptor = SandboxMaterializedInput {
+            input_ref: input.input_ref.clone(),
+            virtual_path: input.virtual_path.clone(),
+            size_bytes: input.size_bytes,
+            sha256: input.sha256.clone(),
+            source_version: input.source_version.clone(),
+            state: None,
+        };
+        let metadata =
+            serde_json::to_vec(&descriptor).map_err(|_| "execution input metadata invalid")?;
+        let metadata_length =
+            u32::try_from(metadata.len()).map_err(|_| "execution input metadata oversized")?;
+        let header = metadata_length.to_be_bytes();
+        let file = tokio::task::spawn_blocking(tempfile::tempfile)
+            .await
+            .map_err(|_| "material input spool interrupted")?
+            .map_err(|_| "material input spool unavailable")?;
+        let mut file = tokio::fs::File::from_std(file);
+        let mut frame_hash = Sha256::new();
+        for prefix in [header.as_slice(), metadata.as_slice()] {
+            file.write_all(prefix)
+                .await
+                .map_err(|_| "material input spool write failed")?;
+            frame_hash.update(prefix);
+        }
+        let mut body_hash = Sha256::new();
+        let mut size = 0_u64;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| "material original read failed")?
+        {
+            size = size.saturating_add(chunk.len() as u64);
+            if size > input.size_bytes {
+                return Err("material original size mismatch".into());
+            }
+            body_hash.update(&chunk);
+            frame_hash.update(&chunk);
+            file.write_all(&chunk)
+                .await
+                .map_err(|_| "material input spool write failed")?;
+        }
+        if size != input.size_bytes || format!("sha256:{:x}", body_hash.finalize()) != input.sha256
+        {
+            return Err("material original identity mismatch".into());
+        }
+        file.flush()
+            .await
+            .map_err(|_| "material input spool write failed")?;
+        Ok(Self {
+            input: input.clone(),
+            file: file.into_std().await,
+            descriptor,
+            length: header.len() as u64 + u64::from(metadata_length) + size,
+            digest: format!("sha256:{:x}", frame_hash.finalize()),
+        })
+    }
+}
 
 pub(crate) struct MaterialExecutionDelivery {
     api_url: String,
@@ -144,7 +229,18 @@ impl MaterialExecutionDelivery {
             }
         }
         for input in context.inputs {
-            self.deliver(input.clone()).await?;
+            self.deliver(&input).await?;
+            // Context describes retained bindings; resolve still checks current
+            // authority and storage before registering one in this Run.
+            let inputs = self.inputs.clone();
+            let input_ref = input.input_ref.clone();
+            let resolved = tokio::task::spawn_blocking(move || inputs.resolve_input(&input_ref))
+                .await
+                .map_err(|_| "material admission interrupted")?
+                .map_err(|_| "material admission rejected")?;
+            if resolved != input {
+                return Err("material admission binding mismatch".into());
+            }
             self.confirm_outputs(input).await?;
         }
         Ok(context.personal_library)
@@ -163,7 +259,7 @@ impl MaterialExecutionDelivery {
             return Err("material preparation invalid".into());
         }
         let input = prepared.resolved_input;
-        let path = self.deliver(input.clone()).await?;
+        let path = self.deliver(&input).await?;
         let confirmed: Binding = self
             .post(
                 "materials/confirm",
@@ -178,6 +274,9 @@ impl MaterialExecutionDelivery {
         {
             return Err("material confirmation binding mismatch".into());
         }
+        self.inputs
+            .accept_authorized_resolution(confirmed.resolved_input)
+            .map_err(|_| "material admission rejected")?;
         self.confirm_outputs(input.clone()).await?;
         Ok(
             json!({"kind":"execution_file","delivery":"execution_file","inputRef":input.input_ref,
@@ -193,12 +292,12 @@ impl MaterialExecutionDelivery {
             .map_err(|_| "material output confirmation interrupted".into())
     }
 
-    async fn deliver(&self, input: ResolvedInput) -> Result<String, String> {
+    async fn deliver(&self, input: &ResolvedInput) -> Result<String, String> {
         input.validate()?;
         if input.size_bytes > MAX_EXECUTION_INPUT_BYTES {
             return Err("material exceeds execution input limit".into());
         }
-        let declared = declared_input(&input)?;
+        let declared = declared_input(input)?;
         let host = self.host.clone();
         let lookup = input.clone();
         let existing = tokio::task::spawn_blocking(move || host.execution_input_path(&lookup))
@@ -207,31 +306,20 @@ impl MaterialExecutionDelivery {
         let path = if let Some(path) = existing {
             path
         } else {
-            let bytes = self.read_bytes(&input).await?;
+            let frame = self.read_frame(input).await?;
             let host = self.host.clone();
-            let materialized = input.clone();
-            tokio::task::spawn_blocking(move || {
-                host.materialize_execution_input(&materialized, &bytes)
-            })
-            .await
-            .map_err(|_| "material installation interrupted")??
+            tokio::task::spawn_blocking(move || host.materialize_execution_input(frame))
+                .await
+                .map_err(|_| "material installation interrupted")??
         };
         self.inputs.admit_declared_inputs(&[declared])?;
-        // Existing resolver rechecks current authorization and the immutable version.
-        let inputs = self.inputs.clone();
-        let expected = input.clone();
-        let resolved =
-            tokio::task::spawn_blocking(move || inputs.resolve_input(&expected.input_ref))
-                .await
-                .map_err(|_| "material admission interrupted")?
-                .map_err(|_| "material admission rejected")?;
-        if resolved != input {
-            return Err("material admission binding mismatch".into());
-        }
         Ok(path)
     }
 
-    async fn read_bytes(&self, input: &ResolvedInput) -> Result<Vec<u8>, String> {
+    async fn read_frame(
+        &self,
+        input: &ResolvedInput,
+    ) -> Result<VerifiedMaterialInputFrame, String> {
         let mut response = self.http.post(format!("{}/internal/agent-runs/read-input", self.api_url.trim_end_matches('/')))
             .header("X-Internal-Token", &self.token).json(&json!({"schema":"runtime.deferred_input.read.v1",
                 "agentRunId":self.run_id,"authorizationDigest":self.digest,"inputRef":input.input_ref,
@@ -251,23 +339,7 @@ impl MaterialExecutionDelivery {
         {
             return Err("material original binding rejected".into());
         }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| "material original read failed")?
-        {
-            if (bytes.len() as u64).saturating_add(chunk.len() as u64) > input.size_bytes {
-                return Err("material original size mismatch".into());
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        if bytes.len() as u64 != input.size_bytes
-            || format!("sha256:{:x}", Sha256::digest(&bytes)) != input.sha256
-        {
-            return Err("material original identity mismatch".into());
-        }
-        Ok(bytes)
+        VerifiedMaterialInputFrame::read(input, &mut response).await
     }
 }
 
@@ -296,7 +368,7 @@ fn declared_input(input: &ResolvedInput) -> Result<DeclaredInput, String> {
 mod tests {
     use super::*;
     use centaeris_core::tool::inputs::ResolvedInputManifest;
-    use std::io::{Read, Write};
+    use std::io::{Read, Seek, Write};
 
     fn input() -> ResolvedInput {
         serde_json::from_value(json!({"schema":"runtime.resolved_input.v1","inputRef":"library-file",
@@ -405,15 +477,29 @@ mod tests {
     }
 
     #[test]
-    fn original_download_rejects_changed_version_digest_and_length() {
+    fn original_download_produces_a_verified_frame_or_rejects_changed_content() {
         for (version, bytes, expected) in [
-            ("2", b"zip".as_slice(), "material original binding rejected"),
+            ("1", b"zip".as_slice(), None),
+            (
+                "2",
+                b"zip".as_slice(),
+                Some("material original binding rejected"),
+            ),
             (
                 "1",
                 b"bad".as_slice(),
-                "material original identity mismatch",
+                Some("material original identity mismatch"),
             ),
-            ("1", b"zips".as_slice(), "material original size mismatch"),
+            (
+                "1",
+                b"zi".as_slice(),
+                Some("material original identity mismatch"),
+            ),
+            (
+                "1",
+                b"zips".as_slice(),
+                Some("material original size mismatch"),
+            ),
         ] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
@@ -449,10 +535,23 @@ mod tests {
             });
             let runtime = tokio::runtime::Runtime::new().unwrap();
             let reader = delivery(url);
-            assert_eq!(
-                runtime.block_on(reader.read_bytes(&input())).unwrap_err(),
-                expected
-            );
+            let result = runtime.block_on(reader.read_frame(&input()));
+            if let Some(error) = expected {
+                assert_eq!(result.unwrap_err(), error);
+            } else {
+                let (binding, descriptor, mut file, length, digest) = result.unwrap().into_parts();
+                assert_eq!(binding, input());
+                file.rewind().unwrap();
+                let mut frame = Vec::new();
+                file.read_to_end(&mut frame).unwrap();
+                assert_eq!(length, frame.len() as u64);
+                assert_eq!(digest, format!("sha256:{:x}", Sha256::digest(&frame)));
+                let header_len = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
+                let decoded: SandboxMaterializedInput =
+                    serde_json::from_slice(&frame[4..4 + header_len]).unwrap();
+                assert_eq!(decoded, descriptor);
+                assert_eq!(&frame[4 + header_len..], bytes);
+            }
             server.join().unwrap();
         }
     }
@@ -464,7 +563,7 @@ mod tests {
         let mut original = input();
         original.size_bytes = MAX_EXECUTION_INPUT_BYTES + 1;
         assert_eq!(
-            runtime.block_on(reader.deliver(original)).unwrap_err(),
+            runtime.block_on(reader.deliver(&original)).unwrap_err(),
             "material exceeds execution input limit"
         );
     }

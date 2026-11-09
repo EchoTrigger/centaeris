@@ -212,8 +212,7 @@ fn tree_digest(package_root: &Path, resource: &Path) -> Result<String, String> {
     let mut files = Vec::new();
     collect_files(package_root, resource, &mut files)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut digest = Sha256::new();
-    digest.update(b"centaeris.plugin.tree.v1\0");
+    let mut digest = plugin_tree_hasher();
     let mut buffer = [0; 64 * 1024];
     for (path, native_path) in files {
         let mut file = fs::File::open(native_path.as_path())
@@ -244,6 +243,19 @@ fn tree_digest(package_root: &Path, resource: &Path) -> Result<String, String> {
         }
     }
     Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+pub(super) fn plugin_file_digest(relative_path: &str, bytes: &[u8]) -> String {
+    let mut digest = plugin_tree_hasher();
+    update_len_prefixed(&mut digest, relative_path.as_bytes());
+    update_len_prefixed(&mut digest, bytes);
+    format!("sha256:{:x}", digest.finalize())
+}
+
+fn plugin_tree_hasher() -> Sha256 {
+    let mut digest = Sha256::new();
+    digest.update(b"centaeris.plugin.tree.v1\0");
+    digest
 }
 
 fn collect_files(

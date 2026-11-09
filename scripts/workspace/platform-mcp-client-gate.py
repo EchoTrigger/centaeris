@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import Counter
 
 
 def main():
@@ -73,12 +74,47 @@ def main():
                 canonicalTextSha256=item.sha256, manifest={"pages": [{"pageText": {"page": 1, "route": "nativeText"},
                     "canonicalStartByte": 0, "canonicalEndByte": len(content)}]})
             requests = []
+            methods = []
+            call_ids = []
+            rejected_input_seen = False
             application = WorkspaceApplication()
 
             async def counted(scope, receive, send):
-                if scope["type"] == "http":
-                    requests.append(scope["path"])
-                await application(scope, receive, send)
+                nonlocal rejected_input_seen
+                if scope["type"] != "http":
+                    return await application(scope, receive, send)
+                path = scope["path"]
+                requests.append(path)
+                body = bytearray()
+
+                async def observe_request():
+                    nonlocal rejected_input_seen
+                    message = await receive()
+                    if path == "/internal/mcp" and scope["method"] == "POST" and message["type"] == "http.request":
+                        body.extend(message.get("body", b""))
+                        if not message.get("more_body"):
+                            payload = json.loads(body)
+                            methods.append(payload["method"])
+                            if payload["method"] == "tools/call":
+                                headers = dict(scope["headers"])
+                                call_ids.append(headers[b"x-workspace-tool-call-id"].decode("ascii"))
+                                if payload["params"]["arguments"].get("input_ref") == "not-authorized":
+                                    rejected_input_seen = True
+                    return message
+
+                async def observe_response(message):
+                    if path == "/internal/mcp/credential" and rejected_input_seen and message["type"] == "http.response.start":
+                        from app_core.material_tool_catalog import MATERIAL_TOOL_CATALOG_HEADER
+                        header = MATERIAL_TOOL_CATALOG_HEADER.lower().encode("ascii")
+                        original = message["headers"]
+                        assert any(key.lower() == header for key, _ in original)
+                        message = {**message, "headers": [
+                            (key, b"sha256:" + b"0" * 64 if key.lower() == header else value)
+                            for key, value in original
+                        ]}
+                    await send(message)
+
+                await application(scope, observe_request, observe_response)
 
             listener = socket.socket()
             listener.bind(("127.0.0.1", 0))
@@ -103,7 +139,12 @@ def main():
                 "platform_materials::tests::python_http_interoperability", "--", "--ignored", "--exact", "--nocapture"],
                 cwd=root, env=environment, check=True, timeout=180)
             count = MaterialEvidenceReceipt.objects.count()
-            assert requests.count("/internal/mcp/credential") == count + 2, requests
+            assert requests.count("/internal/mcp/credential") == count + 3, requests
+            method_counts = Counter(methods)
+            assert method_counts["server/discover"] + method_counts["initialize"] == 1, method_counts
+            assert method_counts["tools/list"] == 1, method_counts
+            assert method_counts["tools/call"] == count + 1, method_counts
+            assert call_ids == [f"material-client-{index}" for index in range(count + 1)], call_ids
             assert count > 1
             projected = rebuild_agent_run_citation_projection(run)
             assert len(projected) == count
@@ -123,7 +164,7 @@ def main():
             assert preview.status_code == 200, (preview.status_code, preview.content)
             from app_core.tests import streaming_response_bytes
             assert streaming_response_bytes(preview) == content
-            print("Platform MCP client gate: real Rust calls, credential refresh, durable receipts and preview passed")
+            print(f"Platform MCP client gate: {dict(method_counts)}, fresh credentials, catalog drift rejection, durable receipts and preview passed")
         finally:
             if server is not None:
                 server.should_exit = True

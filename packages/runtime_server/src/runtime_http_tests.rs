@@ -16,6 +16,7 @@ fn http_state(runtime: Arc<tokio::runtime::Runtime>) -> HttpServerState {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
             image_digest: "sha256:synthetic-http-fixture".into(),
         }),
+        native_model: None,
         request_policy: request_policy::RequestPolicy::for_http_tests(Duration::from_secs(2)),
     }
 }
@@ -96,27 +97,9 @@ pub(crate) fn stored_request(
     path: &str,
     body: &[u8],
 ) -> (u16, Vec<u8>) {
-    use hyper::service::Service;
     let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
     runtime.block_on(async {
-        let mut state = http_state(runtime.clone());
-        state.store = Arc::new(RuntimeStoreActor::start(store.clone()).unwrap());
-        state.job_store = Arc::new(store);
-        state.request_policy = request_policy::RequestPolicy::from_env().unwrap();
-        let response = TowerToHyperService::new(http_router(state))
-            .call(
-                Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .header(
-                        "x-internal-token",
-                        env::var("INTERNAL_API_TOKEN").expect("isolated fixture token"),
-                    )
-                    .body(Body::from(body.to_vec()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = stored_response(runtime.clone(), store, method, path, body).await;
         (
             response.status().as_u16(),
             to_bytes(response.into_body(), usize::MAX)
@@ -125,6 +108,34 @@ pub(crate) fn stored_request(
                 .to_vec(),
         )
     })
+}
+
+pub(crate) async fn stored_response(
+    runtime: Arc<tokio::runtime::Runtime>,
+    store: PostgresRuntimeStore,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Response<Body> {
+    use hyper::service::Service;
+    let mut state = http_state(runtime);
+    state.store = Arc::new(RuntimeStoreActor::start(store.clone()).unwrap());
+    state.job_store = Arc::new(store);
+    state.request_policy = request_policy::RequestPolicy::from_env().unwrap();
+    TowerToHyperService::new(http_router(state))
+        .call(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header(
+                    "x-internal-token",
+                    env::var("INTERNAL_API_TOKEN").expect("isolated fixture token"),
+                )
+                .body(Body::from(body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
 }
 
 #[test]

@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 pub(crate) const RETAINED_TASK_PROVIDER_ID: &str = "centaeris.background_task";
+const START_INPUT_AUTHORITY_UNAVAILABLE: &str = "task_start_input_authority_unavailable";
 
 /// Every RPC must verify the current controller authority, including a stop after its query.
 pub(crate) trait EnvironmentTaskPort: Send + Sync {
@@ -36,6 +37,10 @@ impl EnvironmentTaskPort for crate::docker_execution_host::DockerExecutionHostRu
         &self,
         request: EnvironmentTaskRequest,
     ) -> Result<EnvironmentTaskResult, String> {
+        if matches!(&request, EnvironmentTaskRequest::Start { .. }) {
+            self.refresh_materialized_inputs()
+                .map_err(|_| START_INPUT_AUTHORITY_UNAVAILABLE.to_owned())?;
+        }
         Self::environment_task_rpc(self, request)
     }
 }
@@ -306,6 +311,7 @@ fn host_failure(error: &str, mutation: bool) -> DynamicToolProviderResponse {
         | "task_journal_capacity" => "background_task_capacity",
         "task_operation_conflict" => "background_task_conflict",
         "task_invalid_start" | "task_invalid_cwd" => "background_task_invalid",
+        START_INPUT_AUTHORITY_UNAVAILABLE => "background_task_unavailable",
         _ if mutation => "background_task_unknown",
         _ => "background_task_unavailable",
     })

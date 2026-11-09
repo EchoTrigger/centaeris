@@ -12,6 +12,9 @@ pub use filesystem_frame::{
 };
 
 pub const SANDBOX_INPUT_INVENTORY_SCHEMA: &str = "sandbox.input_inventory.v1";
+pub const SANDBOX_ARTIFACT_STREAM_SCHEMA: &str = "sandbox.artifact.stream.v1";
+pub const SANDBOX_ARTIFACT_STREAM_HEADER_LIMIT: usize = 1024 * 1024;
+pub const SANDBOX_ARTIFACT_STREAM_DIGEST_BYTES: usize = 32;
 pub const SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA: &str = "workspace.snapshot.v1";
 pub const SANDBOX_SNAPSHOT_CAPTURE_SCHEMA: &str = "workspace.snapshot.capture.v1";
 pub const SANDBOX_WORKSPACE_GENERATION_SCHEMA: &str = "workspace.generation.v1";
@@ -122,6 +125,15 @@ pub struct SandboxInputRevokeRequest {
 pub struct SandboxArtifactRequest {
     pub path: String,
     pub max_bytes: u64,
+}
+
+/// The artifact bytes and raw SHA-256 digest follow this length-prefixed header.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SandboxArtifactStreamHeader {
+    pub schema: String,
+    pub filename: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

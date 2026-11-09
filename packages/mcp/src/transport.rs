@@ -1,7 +1,8 @@
+use crate::http_client::ScopedHttpRequest;
 use centaeris_core::tool::limits::MAX_TOOL_CONTRACT_BYTES;
 use futures::{stream::BoxStream, StreamExt};
 use reqwest::header::{HeaderName, HeaderValue};
-use rmcp::model::{ClientJsonRpcMessage, JsonRpcMessage, ServerJsonRpcMessage};
+use rmcp::model::{ClientJsonRpcMessage, ClientRequest, JsonRpcMessage, ServerJsonRpcMessage};
 use rmcp::service::{RxJsonRpcMessage, TxJsonRpcMessage};
 use rmcp::transport::async_rw::AsyncRwTransport;
 use rmcp::transport::streamable_http_client::{
@@ -190,7 +191,16 @@ impl StreamableHttpClient for BoundedHttpClient {
             .0
             .post(uri.as_ref())
             .header("accept", "application/json, text/event-stream");
-        if let Some(token) = auth_header {
+        let scope = match &message {
+            ClientJsonRpcMessage::Request(request) => match &request.request {
+                ClientRequest::CallToolRequest(tool) => tool.extensions.get::<ScopedHttpRequest>(),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(scope) = scope {
+            request = request.headers(scope.headers.clone());
+        } else if let Some(token) = auth_header {
             request = request.bearer_auth(token);
         }
         let session_attached = session_id.is_some();
@@ -205,11 +215,26 @@ impl StreamableHttpClient for BoundedHttpClient {
             }
             request = request.header(name, value);
         }
-        let response = request
-            .json(&message)
-            .send()
-            .await
-            .map_err(StreamableHttpError::Client)?;
+        let request = request.json(&message);
+        let response = if let Some(scope) = scope {
+            // The SDK owns a send queue. A dropped invocation must not start
+            // later, and its request still needs a bounded body deadline.
+            let remaining = scope
+                .deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .filter(|duration| !duration.is_zero())
+                .ok_or_else(|| StreamableHttpError::UnexpectedServerResponse("MCP request expired".into()))?;
+            let mut finished = scope.invocation_finished.clone();
+            tokio::select! {
+                biased;
+                _ = finished.changed() => {
+                    return Err(StreamableHttpError::UnexpectedServerResponse("MCP request cancelled".into()));
+                }
+                response = request.timeout(remaining).send() => response,
+            }
+        } else {
+            request.send().await
+        }.map_err(StreamableHttpError::Client)?;
         let status = response.status();
         if matches!(
             status,
@@ -292,6 +317,33 @@ impl StreamableHttpClient for BoundedHttpClient {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn dropped_scoped_invocation_does_not_send_queued_tool_call() {
+        use rmcp::model::{CallToolRequest, CallToolRequestParams, JsonRpcRequest, RequestId};
+
+        let (invocation, invocation_finished) = tokio::sync::watch::channel(());
+        drop(invocation);
+        let mut request = CallToolRequest::new(CallToolRequestParams::new("list_materials"));
+        request.extensions.insert(ScopedHttpRequest {
+            headers: Default::default(),
+            deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+            invocation_finished,
+        });
+        let message = ClientJsonRpcMessage::Request(JsonRpcRequest::new(
+            RequestId::Number(1),
+            ClientRequest::CallToolRequest(request),
+        ));
+        let client = BoundedHttpClient(reqwest::Client::new());
+        let result = client
+            .post_message("invalid-url".into(), message, None, None, HashMap::new())
+            .await;
+        assert!(matches!(
+            result,
+            Err(StreamableHttpError::UnexpectedServerResponse(error))
+                if error == "MCP request cancelled"
+        ));
+    }
 
     #[tokio::test]
     async fn mcp_http_client_routes_socks5h_proxy_scheme_to_connector() {

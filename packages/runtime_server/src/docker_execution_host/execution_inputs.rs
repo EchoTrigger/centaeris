@@ -1,7 +1,8 @@
 //! Host delivery of independently authorized immutable inputs.
 use super::*;
-use centaeris_core::execution::MAX_EXECUTION_INPUT_BYTES;
+use crate::material_execution::VerifiedMaterialInputFrame;
 use centaeris_core::tool::inputs::ResolvedInput;
+use hosted_execution::host_supervisor::TrustedHelperKind;
 use std::collections::BTreeSet;
 
 fn material_input_consumer(input: &ResolvedInput) -> String {
@@ -305,16 +306,9 @@ impl DockerExecutionHostRunner {
 
     pub(crate) fn materialize_execution_input(
         &self,
-        input: &ResolvedInput,
-        bytes: &[u8],
+        frame: VerifiedMaterialInputFrame,
     ) -> Result<String, String> {
-        input.validate()?;
-        if input.size_bytes > MAX_EXECUTION_INPUT_BYTES
-            || bytes.len() as u64 != input.size_bytes
-            || format!("sha256:{:x}", Sha256::digest(bytes)) != input.sha256
-        {
-            return Err("execution input integrity mismatch".into());
-        }
+        let (input, projected, mut file, length, digest) = frame.into_parts();
         // Enter dispatch before the input writer lock: a checkpoint never waits
         // for an input writer that is itself waiting for snapshot admission.
         let _activity = self.recovery_activity.begin_dispatch_activity()?;
@@ -323,16 +317,8 @@ impl DockerExecutionHostRunner {
             .input_operations()
             .lock()
             .map_err(|_| "sandbox input operation lock poisoned")?;
-        let consumer = material_input_consumer(input);
-        self.inspect_material_input(input, &consumer)?;
-        let projected = SandboxMaterializedInput {
-            input_ref: input.input_ref.clone(),
-            virtual_path: input.virtual_path.clone(),
-            size_bytes: input.size_bytes,
-            sha256: input.sha256.clone(),
-            source_version: input.source_version.clone(),
-            state: None,
-        };
+        let consumer = material_input_consumer(&input);
+        self.inspect_material_input(&input, &consumer)?;
         let total = {
             let registry = self
                 .materialized_inputs
@@ -363,22 +349,17 @@ impl DockerExecutionHostRunner {
             return Err("execution inputs exceed half of workspaceBytes".into());
         }
         self.require_workspace_capacity(0, total)?;
-        let metadata =
-            serde_json::to_vec(&projected).map_err(|_| "execution input metadata invalid")?;
-        let length =
-            u32::try_from(metadata.len()).map_err(|_| "execution input metadata oversized")?;
-        let mut frame = Vec::with_capacity(4 + metadata.len() + bytes.len());
-        frame.extend_from_slice(&length.to_be_bytes());
-        frame.extend_from_slice(&metadata);
-        frame.extend_from_slice(bytes);
         self.recovery_activity.invalidate_before_dispatch()?;
-        self.helper_for_consumer(
-            "materialize-input",
-            None,
-            &frame,
-            HELPER_JSON_LIMIT,
+        let (_, _, exit) = self.supervised_helper_file_for_consumer(
+            TrustedHelperKind::MaterializeInput,
+            &mut file,
+            length,
+            &digest,
             Some(&consumer),
         )?;
+        if exit != Some(0) {
+            return Err("environment_helper_failed".into());
+        }
         self.materialized_inputs
             .lock()
             .map_err(|_| "sandbox input registry lock poisoned")?

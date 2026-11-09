@@ -1,16 +1,35 @@
 use super::*;
+use std::sync::Arc;
+
+type OutputTokensObserver = dyn Fn(i64) + Send + Sync;
 
 pub struct OpenAiResponsesModelClient<T: JsonHttpTransport> {
-    registry: ModelProviderRegistry,
+    registry: Arc<ModelProviderRegistry>,
     pub(super) transport: T,
+    output_tokens_observer: Option<Arc<OutputTokensObserver>>,
 }
 
 impl<T: JsonHttpTransport> OpenAiResponsesModelClient<T> {
     pub fn new(registry: ModelProviderRegistry, transport: T) -> Self {
+        Self::with_shared_registry(Arc::new(registry), transport)
+    }
+
+    /// Reuses a provider registry with an attempt-scoped transport.
+    pub fn with_shared_registry(registry: Arc<ModelProviderRegistry>, transport: T) -> Self {
         Self {
             registry,
             transport,
+            output_tokens_observer: None,
         }
+    }
+
+    /// Observes the provider-reported output count for an accepted response.
+    pub fn with_output_tokens_observer(
+        mut self,
+        observer: impl Fn(i64) + Send + Sync + 'static,
+    ) -> Self {
+        self.output_tokens_observer = Some(Arc::new(observer));
+        self
     }
 
     fn build_http_request(
@@ -124,39 +143,41 @@ impl<T: JsonHttpTransport> OpenAiResponsesModelClient<T> {
                     false,
                 )
             })?;
-        let raw_truncated_tool_calls = parsed
-            .output
-            .as_deref()
-            .map(truncated_openai_responses_tool_calls)
-            .unwrap_or_default();
-        if parsed
+        let incomplete_reason = parsed
             .incomplete_details
             .as_ref()
-            .and_then(|details| details.reason.as_deref())
-            == Some("max_output_tokens")
-        {
-            return Err(reject_openai_responses_finish_reason(
-                parsed
-                    .incomplete_details
-                    .as_ref()
-                    .and_then(|details| details.reason.as_deref()),
-            )
-            .expect_err("max_output_tokens must be rejected")
-            .with_truncated_tool_calls(raw_truncated_tool_calls));
+            .and_then(|details| details.reason.as_deref());
+        let finish_reason = if incomplete_reason == Some("max_output_tokens") {
+            incomplete_reason
+        } else {
+            parsed.status.as_deref()
+        };
+        if let Err(error) = reject_openai_responses_finish_reason(finish_reason) {
+            return Err(if finish_reason == Some("max_output_tokens") {
+                error.with_truncated_tool_calls(
+                    parsed
+                        .output
+                        .as_deref()
+                        .map(truncated_openai_responses_tool_calls)
+                        .unwrap_or_default(),
+                )
+            } else {
+                error
+            });
         }
-        reject_openai_responses_finish_reason(
-            parsed
-                .incomplete_details
-                .as_ref()
-                .and_then(|details| details.reason.as_deref())
-                .or(parsed.status.as_deref()),
-        )?;
         let provider_request_id = parsed
             .id
             .clone()
             .or_else(|| response.headers.get("x-request-id").cloned());
         let tool_calls = extract_openai_responses_tool_calls(parsed.output.as_deref())?;
         validate_provider_tool_call_arguments("openai-responses", &tool_calls)?;
+        let reasoning = extract_openai_responses_reasoning(parsed.output.as_deref())?;
+        if let (Some(observer), Some(output_tokens)) = (
+            &self.output_tokens_observer,
+            parsed.usage.as_ref().and_then(|usage| usage.output_tokens),
+        ) {
+            observer(output_tokens);
+        }
         Ok(ModelClientResponse {
             request_timings: None,
             generate_result: GenerateResult {
@@ -166,14 +187,14 @@ impl<T: JsonHttpTransport> OpenAiResponsesModelClient<T> {
                 ),
                 tool_calls,
                 continuation_reasoning_content: None,
-                reasoning_content: extract_openai_responses_reasoning(parsed.output.as_deref())?,
+                reasoning_content: reasoning,
                 input_tokens: parsed.usage.as_ref().and_then(|usage| usage.input_tokens),
                 total_tokens: parsed.usage.as_ref().and_then(|usage| {
                     usage
                         .total_tokens
                         .or_else(|| match (usage.input_tokens, usage.output_tokens) {
                             (Some(input_tokens), Some(output_tokens)) => {
-                                Some(input_tokens + output_tokens)
+                                input_tokens.checked_add(output_tokens)
                             }
                             _ => None,
                         })
@@ -998,6 +1019,7 @@ impl OpenAiResponsesStreamState {
                     .and_then(|response| response.get("incomplete_details"))
                     .and_then(|details| details.get("reason"))
                     .and_then(Value::as_str)
+                    .filter(|reason| *reason == "max_output_tokens")
                     .unwrap_or("incomplete")
                     .to_string();
                 if let Some(response) = response {

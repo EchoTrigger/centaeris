@@ -106,30 +106,36 @@ pub(crate) fn verified_plugin_package_roots_at(
     activation: &PluginActivationSnapshotV1,
     catalog_root: &Path,
 ) -> Result<Vec<PathBuf>, String> {
-    validate_plugin_activation_snapshot(activation)?;
-    let package_roots = if activation.packages.is_empty() {
-        Vec::new()
-    } else {
-        let catalog_root = catalog_root
-            .canonicalize()
-            .map_err(|error| format!("canonicalize Plugin catalog root failed: {error}"))?;
-        activation
-            .packages
-            .iter()
-            .map(|package| {
-                package_root(
-                    catalog_root.as_path(),
-                    package.name.as_str(),
-                    package.package_digest.as_str(),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    };
+    let package_roots = plugin_package_roots_at(activation, catalog_root)?;
     let actual = build_plugin_activation_snapshot(package_roots.as_slice())?;
     if &actual != activation {
         return Err("plugin_activation_package_mismatch".to_string());
     }
     Ok(package_roots)
+}
+
+pub(crate) fn plugin_package_roots_at(
+    activation: &PluginActivationSnapshotV1,
+    catalog_root: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    validate_plugin_activation_snapshot(activation)?;
+    if activation.packages.is_empty() {
+        return Ok(Vec::new());
+    }
+    let catalog_root = catalog_root
+        .canonicalize()
+        .map_err(|error| format!("canonicalize Plugin catalog root failed: {error}"))?;
+    activation
+        .packages
+        .iter()
+        .map(|package| {
+            package_root(
+                catalog_root.as_path(),
+                package.name.as_str(),
+                package.package_digest.as_str(),
+            )
+        })
+        .collect()
 }
 
 fn package_root(

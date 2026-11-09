@@ -7,11 +7,17 @@ COPY packages/runtime/src/lib.rs packages/runtime/src/lib.rs
 COPY packages/tui/Cargo.toml packages/tui/Cargo.toml
 COPY packages/core packages/core
 COPY packages/model-catalog packages/model-catalog
+COPY packages/model-http packages/model-http
 COPY packages/mcp packages/mcp
 COPY packages/runtime_sqlite packages/runtime_sqlite
 COPY packages/hosted_execution packages/hosted_execution
 COPY packages/runtime_server packages/runtime_server
 COPY packages/api/app_core/contracts packages/api/app_core/contracts
+COPY packages/api/app_core/native_model_authority.sql packages/api/app_core/native_model_authority.sql
+COPY packages/api/app_core/native_projected_input_authority.sql packages/api/app_core/native_projected_input_authority.sql
+COPY packages/api/app_core/native_run_execution_authority.sql packages/api/app_core/native_run_execution_authority.sql
+COPY packages/api/app_core/native_session_workspace_resolution.sql packages/api/app_core/native_session_workspace_resolution.sql
+COPY packages/api/app_core/native_mcp_dispatch_authority.sql packages/api/app_core/native_mcp_dispatch_authority.sql
 COPY packages/api/app_core/workspace_snapshot_gc_witness.sql packages/api/app_core/workspace_snapshot_gc_witness.sql
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked cargo build --release --locked -p runtime_server
 
