@@ -4,6 +4,8 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 from threading import Barrier, Event
 from types import SimpleNamespace
@@ -147,6 +149,46 @@ class ArtifactLocalStorageContractTests(SimpleTestCase):
                 self.fail("conflicting winner was accepted")
         self.assertEqual(path.read_bytes(), b"bad")
         self.assertEqual(list(self.root.rglob("*.tmp")), [])
+
+    def test_process_exit_reclaims_unpublished_bytes_and_preserves_an_installed_artifact(self):
+        data = b"crash fixture" * 5000
+        program = """
+import os
+import sys
+from io import BytesIO
+from types import SimpleNamespace
+
+import django
+from django.test import override_settings
+
+django.setup()
+from app_core.artifact_publish import _install_staged_artifact, _stage_artifact
+
+root, storage_key, sha256, phase = sys.argv[1:]
+data = b"crash fixture" * 5000
+artifact = SimpleNamespace(storageKey=storage_key, status="staging", sizeBytes=len(data), sha256=sha256)
+with override_settings(MEDIA_ROOT=root):
+    with _stage_artifact(BytesIO(data), artifact) as (key, temporary):
+        if phase == "installed":
+            _install_staged_artifact(artifact, key, temporary)
+        os._exit(73)
+"""
+        for phase in ("staged", "installed"):
+            with self.subTest(phase=phase):
+                artifact = self.artifact(data)
+                artifact.storageKey = f"artifacts/{phase}/result.bin"
+                final_path = self.root / artifact.storageKey
+                outcome = subprocess.run(
+                    [sys.executable, "-B", "-c", program, str(self.root), artifact.storageKey, artifact.sha256, phase],
+                    cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=20,
+                )
+                self.assertEqual(outcome.returncode, 73, outcome.stderr)
+                self.assertEqual(list(final_path.parent.iterdir()), [final_path] if phase == "installed" else [])
+
+                with _stage_artifact(BytesIO(data), artifact) as (key, temporary):
+                    _install_staged_artifact(artifact, key, temporary)
+                self.assertEqual(final_path.read_bytes(), data)
+                self.assertEqual(list(final_path.parent.iterdir()), [final_path])
 
 
 class ArtifactPublicationAuthorityTests(TransactionTestCase):

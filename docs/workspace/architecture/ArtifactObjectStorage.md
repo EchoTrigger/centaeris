@@ -12,10 +12,13 @@ verifies the successful Host result into a private temporary file and streams
 that same file to Django. An uncertain upload response triggers a lookup under
 the original publication identity before any retransmission.
 
-Django reserves publication metadata and validates incoming bytes in a private
-local stage. It atomically installs the verified file without replacing a
-concurrent winner and commits the published state under current authority. The
-interactive Library copy has its own storage key and deletion lifecycle.
+Django reserves publication metadata and validates incoming bytes in an unnamed
+file on the same Linux filesystem as the final artifact. The filesystem must
+support `O_TMPFILE` and hard links, and the API container uses `/proc/self/fd`
+to install the verified inode at its exact storage key. Process exit before
+installation releases the unlinked bytes. Installation never replaces a
+concurrent winner. Django commits the published state under current authority.
+The interactive Library copy has its own storage key and deletion lifecycle.
 
 ## Existing ownership and coupling
 

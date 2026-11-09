@@ -2,7 +2,6 @@ import hashlib
 import json
 import mimetypes
 import os
-import tempfile
 import unicodedata
 from contextlib import contextmanager
 
@@ -127,7 +126,7 @@ def publish_artifact(request) -> tuple[ArtifactPublication, Artifact]:
 
     artifact_id = artifact.id
     storage_key = artifact.storageKey
-    with _stage_artifact(request, artifact) as (final_path, temporary_path):
+    with _stage_artifact(request, artifact) as (final_path, temporary):
         with transaction.atomic():
             membership = shared_submission_membership_for(agent_run.user, agent_run.workspace_id)
             if membership is None or membership.pk != agent_run.membership_ref:
@@ -149,7 +148,7 @@ def publish_artifact(request) -> tuple[ArtifactPublication, Artifact]:
             if artifact.status not in {"staging", "published"}:
                 raise ArtifactPublishError("artifact_publish_state_conflict")
             _require_agent_run_api_authority(agent_run)
-            _install_staged_artifact(artifact, final_path, temporary_path)
+            _install_staged_artifact(artifact, final_path, temporary)
             if publication.status == "published":
                 return publication, artifact
             if artifact.status == "staging":
@@ -176,30 +175,32 @@ def _stage_artifact(request, artifact):
         return
     parent = os.path.dirname(final_path)
     os.makedirs(parent, exist_ok=True)
-    temporary_path = None
+    # Closing the unnamed inode also reclaims bytes on abrupt process exit.
+    descriptor = os.open(parent, os.O_TMPFILE | os.O_WRONLY, 0o600)
+    with os.fdopen(descriptor, "wb") as temporary:
+        reader = _HashingReader(request, artifact.sizeBytes)
+        while chunk := reader.read(64 * 1024):
+            temporary.write(chunk)
+        reader.require_complete(artifact.sha256)
+        temporary.flush()
+        os.fsync(temporary.fileno())
+        yield final_path, temporary
+
+
+def _link_artifact_stage(temporary, final_path):
+    parent = os.open(os.path.dirname(final_path), os.O_RDONLY | os.O_DIRECTORY)
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb", dir=parent, prefix=".centaeris-artifact-", suffix=".tmp", delete=False,
-        ) as temporary:
-            temporary_path = temporary.name
-            reader = _HashingReader(request, artifact.sizeBytes)
-            while chunk := reader.read(64 * 1024):
-                temporary.write(chunk)
-            reader.require_complete(artifact.sha256)
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        yield final_path, temporary_path
+        # A directory fd selects linkat. Follow the procfs descriptor link to
+        # publish the still-open inode, with exclusive destination semantics.
+        os.link(f"/proc/self/fd/{temporary.fileno()}", os.path.basename(final_path),
+                dst_dir_fd=parent, follow_symlinks=True)
     finally:
-        if temporary_path is not None:
-            try:
-                os.unlink(temporary_path)
-            except FileNotFoundError:
-                pass
+        os.close(parent)
 
 
-def _install_staged_artifact(artifact, final_path, temporary_path):
+def _install_staged_artifact(artifact, final_path, temporary):
     """Install verified bytes without replacing a winner, under the state locks."""
-    if temporary_path is None:
+    if temporary is None:
         # Existing bytes were already verified outside these locks. Deletion can
         # race that read, so check their exact bound key is still present.
         if not default_storage.exists(artifact.storageKey):
@@ -208,7 +209,7 @@ def _install_staged_artifact(artifact, final_path, temporary_path):
         installed = False
         if artifact.status == "staging":
             try:
-                os.link(temporary_path, final_path)
+                _link_artifact_stage(temporary, final_path)
                 installed = True
             except FileExistsError:
                 pass
