@@ -18,21 +18,21 @@ mod stopped_workspace;
 mod workspace_files;
 mod workspace_resolution;
 mod workspace_restore;
+pub(crate) use artifact::PreparedArtifact;
 pub(crate) use maintenance::{
     maintenance_helper, maintenance_task, observe_environment, provision_environment,
     remove_cleaned_environment,
 };
-pub(crate) use artifact::PreparedArtifact;
 
 use crate::execution_recovery_coordinator::OwnedExecutionContinuity;
 use crate::execution_recovery_policy::{
     ExecutionActivityWitness, HostFailureEvidence, SnapshotActivityGuard, SnapshotCaptureError,
     WorkspaceReuseEvidence,
 };
+use crate::native_run_execution_authority::NativeRunExecutionAuthority;
 use crate::observations::{
     MeasuredWriter, ProtectionMetric, ProtectionTrigger, WorkspaceProtection,
 };
-use crate::native_run_execution_authority::NativeRunExecutionAuthority;
 use snapshot_capture::{SnapshotCaptureCache, SnapshotCaptureResult};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
@@ -57,8 +57,7 @@ use centaeris_core::execution::{
     ExecutionFileSystemOperation, ExecutionFileSystemOutput, ExecutionFileSystemRequest,
     ExecutionHostCommandOutput, ExecutionHostCommandRecovery, ExecutionHostHealth,
     ExecutionHostRunner, ExecutionHostStatus, ExecutionInputState, ExecutionInputStateChange,
-    ExecutionWorkspaceGeneration, WORKSPACE_DATA_ROOT,
-    WORKSPACE_HOME,
+    ExecutionWorkspaceGeneration, WORKSPACE_DATA_ROOT, WORKSPACE_HOME,
 };
 use centaeris_core::execution::{
     ExecutionCommandRequest, ExecutionError, ExecutionPolicy, ExecutionPolicySummary,
@@ -75,10 +74,10 @@ use hosted_execution::memory::{is_memory_uri, MemoryPath};
 #[cfg(test)]
 use hosted_execution::protocol::SandboxFileSystemResult;
 use hosted_execution::protocol::{
-    SandboxFileSystemRequest,
-    SandboxInputInventory, SandboxInputRevokeRequest, SandboxMaterializedInput,
-    SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile, SandboxWorkspaceSnapshotManifest,
-    SANDBOX_INPUT_INVENTORY_SCHEMA, SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
+    SandboxFileSystemRequest, SandboxInputInventory, SandboxInputRevokeRequest,
+    SandboxMaterializedInput, SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile,
+    SandboxWorkspaceSnapshotManifest, SANDBOX_INPUT_INVENTORY_SCHEMA,
+    SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -2189,7 +2188,8 @@ impl DockerExecutionHostRunner {
         let validation = response.json::<ValidateInputsResponse>().map_err(|error| {
             self.unavailable(format!("decode input validation failed: {error}"))
         })?;
-        if validation.schema != VALIDATE_INPUTS_SCHEMA || validation.inputs.len() != expected.len() {
+        if validation.schema != VALIDATE_INPUTS_SCHEMA || validation.inputs.len() != expected.len()
+        {
             return Err(self.unavailable("input validation response mismatch"));
         }
         expected
