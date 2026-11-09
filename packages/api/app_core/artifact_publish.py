@@ -1,14 +1,17 @@
 import hashlib
 import json
 import mimetypes
+import os
+import tempfile
 import unicodedata
+from contextlib import contextmanager
 
 from django.core.files import File
 from django.core.files.storage import default_storage
 from django.db import transaction
 from django.utils import timezone
 
-from .assets import delete_stored_object, safe_filename
+from .assets import _sync_directory, delete_stored_object, safe_filename
 from .models import (
     Artifact,
     ArtifactPublication,
@@ -21,7 +24,7 @@ from .models import (
     new_library_object_id,
 )
 from .runtime_contract import authorization_digest
-from .workspace_access import agent_run_membership_is_current
+from .workspace_access import agent_run_membership_is_current, shared_submission_membership_for
 
 
 ARTIFACT_PUBLICATION_SCHEMA = "artifact.publication.v1"
@@ -122,54 +125,96 @@ def publish_artifact(request) -> tuple[ArtifactPublication, Artifact]:
         verify_stored_object(artifact.storageKey, artifact.sizeBytes, artifact.sha256)
         return publication, artifact
 
-    reader = _HashingReader(request, metadata["sizeBytes"])
+    artifact_id = artifact.id
     storage_key = artifact.storageKey
-    try:
-        if default_storage.exists(storage_key):
-            verify_stored_object(storage_key, metadata["sizeBytes"], metadata["sha256"])
-        else:
-            stored_key = default_storage.save(
-                storage_key,
-                File(reader, name=artifact.safeFilename),
+    with _stage_artifact(request, artifact) as (final_path, temporary_path):
+        with transaction.atomic():
+            membership = shared_submission_membership_for(agent_run.user, agent_run.workspace_id)
+            if membership is None or membership.pk != agent_run.membership_ref:
+                raise ArtifactPublishError("artifact_scope_mismatch", 403)
+            if agent_run.session.purpose == "agentRunApi":
+                Session.objects.select_for_update().get(pk=agent_run.session_id)
+            publication = ArtifactPublication.objects.select_for_update().get(
+                publicationId=metadata["publicationId"]
             )
-            if stored_key != storage_key:
-                delete_stored_object(stored_key)
-                raise ArtifactPublishError("artifact_storage_key_conflict")
-            reader.require_complete(metadata["sha256"])
-    except Exception:
-        if default_storage.exists(storage_key):
-            try:
-                verify_stored_object(storage_key, metadata["sizeBytes"], metadata["sha256"])
-            except ArtifactPublishError:
-                delete_stored_object(storage_key)
-        raise
-
-    with transaction.atomic():
-        publication = ArtifactPublication.objects.select_for_update(of=("self",)).select_related("artifact").get(
-            publicationId=metadata["publicationId"]
-        )
-        artifact = Artifact.objects.select_for_update().get(id=publication.artifact_id)
-        _require_idempotent_publication(publication, agent_run, metadata)
-        _require_artifact_bytes(artifact, metadata)
-        if publication.status == "published":
-            verify_stored_object(artifact.storageKey, artifact.sizeBytes, artifact.sha256)
-            return publication, artifact
-        if publication.status != "staging":
-            raise ArtifactPublishError("artifact_publication_state_conflict")
-        if artifact.status == "staging":
+            _require_idempotent_publication(publication, agent_run, metadata)
+            if publication.artifact_id != artifact_id:
+                raise ArtifactPublishError("artifact_publication_state_conflict")
+            artifact = Artifact.objects.select_for_update().get(id=artifact_id)
+            if artifact.storageKey != storage_key:
+                raise ArtifactPublishError("artifact_publication_state_conflict")
+            _require_artifact_bytes(artifact, metadata)
+            if publication.status not in {"staging", "published"}:
+                raise ArtifactPublishError("artifact_publication_state_conflict")
+            if artifact.status not in {"staging", "published"}:
+                raise ArtifactPublishError("artifact_publish_state_conflict")
             _require_agent_run_api_authority(agent_run)
-            if agent_run.session.purpose != "agentRunApi":
-                _ingest_artifact_library_copy(artifact, agent_run.user)
-            artifact.status = "published"
-            artifact.publishedAt = timezone.now()
-            artifact.failureReason = ""
-            artifact.save(update_fields=["status", "publishedAt", "failureReason"])
-        elif artifact.status != "published":
-            raise ArtifactPublishError("artifact_publish_state_conflict")
-        publication.status = "published"
-        publication.publishedAt = timezone.now()
-        publication.save(update_fields=["status", "publishedAt"])
+            _install_staged_artifact(artifact, final_path, temporary_path)
+            if publication.status == "published":
+                return publication, artifact
+            if artifact.status == "staging":
+                if agent_run.session.purpose != "agentRunApi":
+                    _ingest_artifact_library_copy(artifact, agent_run.user)
+                artifact.status = "published"
+                artifact.publishedAt = timezone.now()
+                artifact.failureReason = ""
+                artifact.save(update_fields=["status", "publishedAt", "failureReason"])
+            publication.status = "published"
+            publication.publishedAt = timezone.now()
+            publication.save(update_fields=["status", "publishedAt"])
     return publication, artifact
+
+
+@contextmanager
+def _stage_artifact(request, artifact):
+    """Check the exact stored winner or hash an exclusively owned local stage."""
+    storage_key = artifact.storageKey
+    final_path = default_storage.path(storage_key)
+    if artifact.status == "published" or default_storage.exists(storage_key):
+        verify_stored_object(storage_key, artifact.sizeBytes, artifact.sha256, durable=True)
+        yield final_path, None
+        return
+    parent = os.path.dirname(final_path)
+    os.makedirs(parent, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=parent, prefix=".centaeris-artifact-", suffix=".tmp", delete=False,
+        ) as temporary:
+            temporary_path = temporary.name
+            reader = _HashingReader(request, artifact.sizeBytes)
+            while chunk := reader.read(64 * 1024):
+                temporary.write(chunk)
+            reader.require_complete(artifact.sha256)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        yield final_path, temporary_path
+    finally:
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+
+
+def _install_staged_artifact(artifact, final_path, temporary_path):
+    """Install verified bytes without replacing a winner, under the state locks."""
+    if temporary_path is None:
+        # Existing bytes were already verified outside these locks. Deletion can
+        # race that read, so check their exact bound key is still present.
+        if not default_storage.exists(artifact.storageKey):
+            raise ArtifactPublishError("artifact_storage_missing")
+    else:
+        installed = False
+        if artifact.status == "staging":
+            try:
+                os.link(temporary_path, final_path)
+                installed = True
+            except FileExistsError:
+                pass
+        if not installed:
+            verify_stored_object(artifact.storageKey, artifact.sizeBytes, artifact.sha256, durable=True)
+    _sync_directory(os.path.dirname(final_path))
 
 
 def published_artifact(body: dict) -> tuple[ArtifactPublication, Artifact] | None:
@@ -404,9 +449,7 @@ def _prepare_publication(
             filename=metadata["filename"],
             sizeBytes=metadata["sizeBytes"],
             sha256=metadata["sha256"],
-            status="published" if artifact.status == "published" else "staging",
             artifact=artifact,
-            publishedAt=timezone.now() if artifact.status == "published" else None,
         )
         return publication, artifact
 
@@ -467,6 +510,8 @@ class _HashingReader:
         chunk = self.source.read(requested)
         if not chunk:
             raise ArtifactPublishError("artifact_publication_body_truncated", 400)
+        if len(chunk) > requested:
+            raise ArtifactPublishError("artifact_publication_content_length_mismatch", 400)
         self.remaining -= len(chunk)
         self.digest.update(chunk)
         return chunk
@@ -474,18 +519,22 @@ class _HashingReader:
     def require_complete(self, expected_hash: str) -> None:
         if self.remaining != 0 or f"sha256:{self.digest.hexdigest()}" != expected_hash:
             raise ArtifactPublishError("artifact_integrity_mismatch")
+        if self.source.read(1):
+            raise ArtifactPublishError("artifact_publication_content_length_mismatch", 400)
 
 
-def verify_stored_object(storage_key: str, expected_size: int, expected_hash: str) -> None:
+def verify_stored_object(storage_key: str, expected_size: int, expected_hash: str, *, durable=False) -> None:
     if not storage_key or not default_storage.exists(storage_key):
         raise ArtifactPublishError("artifact_storage_missing")
     digest = hashlib.sha256()
     size = 0
-    with default_storage.open(storage_key, "rb") as source:
+    with default_storage.open(storage_key, "r+b" if durable else "rb") as source:
         while chunk := source.read(64 * 1024):
             size += len(chunk)
-            if size > MAX_ARTIFACT_BYTES:
+            if size > min(expected_size, MAX_ARTIFACT_BYTES):
                 raise ArtifactPublishError("artifact_storage_integrity_mismatch")
             digest.update(chunk)
-    if size != expected_size or f"sha256:{digest.hexdigest()}" != expected_hash:
-        raise ArtifactPublishError("artifact_storage_integrity_mismatch")
+        if size != expected_size or f"sha256:{digest.hexdigest()}" != expected_hash:
+            raise ArtifactPublishError("artifact_storage_integrity_mismatch")
+        if durable:
+            os.fsync(source.fileno())

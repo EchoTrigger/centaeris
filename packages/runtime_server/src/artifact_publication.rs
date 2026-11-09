@@ -1,10 +1,11 @@
+use std::io::{Cursor, Read};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::docker_execution_host::DockerExecutionHostRunner;
+use crate::docker_execution_host::{DockerExecutionHostRunner, PreparedArtifact};
 
 const API_STATUS_SCHEMA: &str = "artifact.publication.status.v1";
 const API_METADATA_SCHEMA: &str = "artifact.publication.v1";
@@ -59,6 +60,7 @@ impl WorkspaceArtifactPublicationPort {
             authorization_digest,
             client: reqwest::blocking::Client::builder()
                 .connect_timeout(Duration::from_secs(3))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|error| format!("build artifact publisher failed: {error}"))?,
         })
@@ -68,6 +70,7 @@ impl WorkspaceArtifactPublicationPort {
         &self,
         publication_id: &str,
         tool_call_id: &str,
+        expected: Option<&ApiPublicationMetadata<'_>>,
     ) -> Result<Option<ArtifactPublicationReceipt>, String> {
         let query = ApiPublicationStatusQuery {
             schema: API_STATUS_SCHEMA,
@@ -92,7 +95,7 @@ impl WorkspaceArtifactPublicationPort {
                 Ok(response) if response.status().is_success() => {
                     match response.json::<ApiPublicationResult>() {
                         Ok(value) => {
-                            return receipt_from_api(value, publication_id, None).map(Some)
+                            return receipt_from_api(value, publication_id, expected).map(Some)
                         }
                         Err(error) => {
                             last_error = Some(format!("decode artifact status failed: {error}"));
@@ -112,35 +115,36 @@ impl WorkspaceArtifactPublicationPort {
     fn upload(
         &self,
         metadata: &ApiPublicationMetadata,
-        bytes: &[u8],
+        artifact: &PreparedArtifact,
     ) -> Result<ArtifactPublicationReceipt, String> {
         let metadata_bytes = serde_json::to_vec(metadata)
             .map_err(|error| format!("encode artifact metadata failed: {error}"))?;
         let metadata_len = u32::try_from(metadata_bytes.len())
             .map_err(|_| "artifact metadata is too large".to_string())?;
-        let mut body = Vec::with_capacity(4 + metadata_bytes.len() + bytes.len());
-        body.extend_from_slice(&metadata_len.to_be_bytes());
-        body.extend_from_slice(metadata_bytes.as_slice());
-        body.extend_from_slice(bytes);
+        let mut prefix = Vec::with_capacity(4 + metadata_bytes.len());
+        prefix.extend_from_slice(&metadata_len.to_be_bytes());
+        prefix.extend_from_slice(&metadata_bytes);
+        let length = prefix.len() as u64 + metadata.size_bytes;
 
         let mut last_error = None;
         for _ in 0..MAX_ATTEMPTS {
-            if let Some(receipt) = self.published(metadata.publication_id, metadata.tool_call_id)? {
-                return Ok(receipt);
-            }
+            let body = Cursor::new(prefix.clone()).chain(artifact.reader()?);
             match self
                 .client
                 .post(format!("{}/internal/artifacts/publish", self.api_url))
                 .header("X-Internal-Token", self.api_token.as_str())
                 .header("Content-Type", "application/octet-stream")
-                .body(body.clone())
+                .body(reqwest::blocking::Body::sized(body, length))
                 .timeout(Duration::from_secs(45))
                 .send()
             {
                 Ok(response) if response.status().is_success() => {
                     match response.json::<ApiPublicationResult>() {
                         Ok(value) => {
-                            return receipt_from_api(value, metadata.publication_id, Some(metadata))
+                            match receipt_from_api(value, metadata.publication_id, Some(metadata)) {
+                                Ok(receipt) => return Ok(receipt),
+                                Err(error) => last_error = Some(error),
+                            }
                         }
                         Err(error) => {
                             last_error =
@@ -156,6 +160,15 @@ impl WorkspaceArtifactPublicationPort {
                     last_error = Some(format!("artifact publication unavailable: {error}"));
                 }
             }
+            // The server may have committed before losing its reply. Recover
+            // that exact receipt before resending any bytes or reporting failure.
+            if let Some(receipt) = self.published(
+                metadata.publication_id,
+                metadata.tool_call_id,
+                Some(metadata),
+            )? {
+                return Ok(receipt);
+            }
         }
         Err(last_error.unwrap_or_else(|| "artifact publication unavailable".to_string()))
     }
@@ -169,22 +182,22 @@ impl WorkspaceArtifactPublicationPort {
             request.tool_call_id.as_str(),
         );
         if let Some(receipt) =
-            self.published(publication_id.as_str(), request.tool_call_id.as_str())?
+            self.published(publication_id.as_str(), request.tool_call_id.as_str(), None)?
         {
             return Ok(receipt);
         }
-        let (artifact, bytes) = self.sandbox.read_artifact(request.path.as_str())?;
+        let artifact = self.sandbox.read_artifact(request.path.as_str())?;
         let metadata = ApiPublicationMetadata {
             schema: API_METADATA_SCHEMA,
             publication_id: publication_id.as_str(),
             agent_run_id: self.agent_run_id.as_str(),
             authorization_digest: self.authorization_digest.as_str(),
             tool_call_id: request.tool_call_id.as_str(),
-            filename: artifact.filename.as_str(),
-            size_bytes: artifact.size_bytes,
-            sha256: artifact.sha256.as_str(),
+            filename: artifact.metadata.filename.as_str(),
+            size_bytes: artifact.metadata.size_bytes,
+            sha256: artifact.metadata.sha256.as_str(),
         };
-        self.upload(&metadata, bytes.as_slice())
+        self.upload(&metadata, &artifact)
     }
 }
 

@@ -1,4 +1,5 @@
 mod admission_wait;
+mod artifact;
 mod environment;
 mod environment_container;
 mod execution_inputs;
@@ -21,6 +22,7 @@ pub(crate) use maintenance::{
     maintenance_helper, maintenance_task, observe_environment, provision_environment,
     remove_cleaned_environment,
 };
+pub(crate) use artifact::PreparedArtifact;
 
 use crate::execution_recovery_coordinator::OwnedExecutionContinuity;
 use crate::execution_recovery_policy::{
@@ -55,7 +57,7 @@ use centaeris_core::execution::{
     ExecutionFileSystemOperation, ExecutionFileSystemOutput, ExecutionFileSystemRequest,
     ExecutionHostCommandOutput, ExecutionHostCommandRecovery, ExecutionHostHealth,
     ExecutionHostRunner, ExecutionHostStatus, ExecutionInputState, ExecutionInputStateChange,
-    ExecutionWorkspaceGeneration, MAX_PUBLISHED_ARTIFACT_BYTES, WORKSPACE_DATA_ROOT,
+    ExecutionWorkspaceGeneration, WORKSPACE_DATA_ROOT,
     WORKSPACE_HOME,
 };
 use centaeris_core::execution::{
@@ -73,7 +75,7 @@ use hosted_execution::memory::{is_memory_uri, MemoryPath};
 #[cfg(test)]
 use hosted_execution::protocol::SandboxFileSystemResult;
 use hosted_execution::protocol::{
-    SandboxArtifactMetadata, SandboxArtifactRequest, SandboxFileSystemRequest,
+    SandboxFileSystemRequest,
     SandboxInputInventory, SandboxInputRevokeRequest, SandboxMaterializedInput,
     SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile, SandboxWorkspaceSnapshotManifest,
     SANDBOX_INPUT_INVENTORY_SCHEMA, SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
@@ -1150,28 +1152,6 @@ impl DockerExecutionHostRunner {
             }
         }
         Ok(())
-    }
-
-    pub fn read_artifact(&self, path: &str) -> Result<(SandboxArtifactMetadata, Vec<u8>), String> {
-        let request = serde_json::to_vec(&SandboxArtifactRequest {
-            path: path.to_string(),
-            max_bytes: MAX_PUBLISHED_ARTIFACT_BYTES,
-        })
-        .map_err(|error| format!("encode artifact helper request failed: {error}"))?;
-        let output = self.helper(
-            "read-artifact",
-            None,
-            request.as_slice(),
-            MAX_PUBLISHED_ARTIFACT_BYTES as usize + HELPER_JSON_LIMIT + 4,
-        )?;
-        let (metadata, bytes) = decode_frame::<SandboxArtifactMetadata>(output.as_slice())?;
-        if metadata.size_bytes != bytes.len() as u64
-            || metadata.size_bytes > MAX_PUBLISHED_ARTIFACT_BYTES
-            || format!("sha256:{:x}", Sha256::digest(bytes)) != metadata.sha256
-        {
-            return Err("artifact helper result integrity mismatch".to_string());
-        }
-        Ok((metadata, bytes.to_vec()))
     }
 
     pub(crate) fn resolve_session_workspace(
@@ -2318,7 +2298,6 @@ impl DockerExecutionHostRunner {
             "filesystem-once" => TrustedHelperKind::FileSystem,
             "input-inventory" => TrustedHelperKind::InputInventory,
             "revoke-input" => TrustedHelperKind::RevokeInput,
-            "read-artifact" => TrustedHelperKind::ReadArtifact,
             "snapshot-collect" => TrustedHelperKind::SnapshotCollect,
             "snapshot-capture" => TrustedHelperKind::SnapshotCapture,
             "snapshot-restore" => TrustedHelperKind::SnapshotRestore,
@@ -3407,23 +3386,6 @@ fn encode_frame<T: Serialize>(metadata: &T, bytes: &[u8]) -> Result<Vec<u8>, Str
     frame.extend_from_slice(metadata.as_slice());
     frame.extend_from_slice(bytes);
     Ok(frame)
-}
-
-fn decode_frame<T: serde::de::DeserializeOwned>(frame: &[u8]) -> Result<(T, &[u8]), String> {
-    if frame.len() < 4 {
-        return Err("sandbox helper frame is truncated".to_string());
-    }
-    let metadata_len = u32::from_be_bytes(
-        frame[..4]
-            .try_into()
-            .map_err(|_| "sandbox helper frame is invalid".to_string())?,
-    ) as usize;
-    if metadata_len == 0 || metadata_len > HELPER_JSON_LIMIT || frame.len() < 4 + metadata_len {
-        return Err("sandbox helper frame metadata is invalid".to_string());
-    }
-    let metadata = serde_json::from_slice(&frame[4..4 + metadata_len])
-        .map_err(|error| format!("decode sandbox helper frame failed: {error}"))?;
-    Ok((metadata, &frame[4 + metadata_len..]))
 }
 
 #[cfg(test)]
@@ -5415,20 +5377,6 @@ mod tests {
 
         assert_eq!(output.bytes, expected);
         assert_eq!(output.total_bytes, 1024 * 1024 + 17);
-    }
-
-    #[test]
-    fn helper_frames_round_trip_exactly() {
-        let metadata = SandboxArtifactMetadata {
-            filename: "report.txt".to_string(),
-            size_bytes: 3,
-            sha256: format!("sha256:{}", "a".repeat(64)),
-        };
-        let frame = encode_frame(&metadata, b"abc").expect("frame");
-        let (decoded, bytes) =
-            decode_frame::<SandboxArtifactMetadata>(frame.as_slice()).expect("decode");
-        assert_eq!(decoded.filename, "report.txt");
-        assert_eq!(bytes, b"abc");
     }
 
     #[test]

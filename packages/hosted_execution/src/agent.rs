@@ -5,9 +5,6 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-#[cfg(target_os = "linux")]
-use std::io::{Seek, SeekFrom};
-
 use centaeris_core::execution::{
     run_direct_execution_file_system_operation, run_policy_scoped_execution_file_system_operation,
     ExecutionFileSystemError, ExecutionFileSystemErrorKind, ExecutionFileSystemOperation,
@@ -28,11 +25,16 @@ use crate::memory::{is_memory_uri, run_memory_file_system_operation};
 #[cfg(any(target_os = "linux", test))]
 use crate::protocol::SANDBOX_WORKSPACE_GENERATION_SCHEMA;
 use crate::protocol::{
-    SandboxArtifactMetadata, SandboxArtifactRequest, SandboxFileSystemRequest,
-    SandboxFileSystemResult, SandboxInputInventory, SandboxInputRevokeRequest,
-    SandboxMaterializedInput, SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile,
-    SandboxWorkspaceSnapshotManifest, SANDBOX_INPUT_INVENTORY_SCHEMA,
-    SANDBOX_WORKSPACE_GENERATION_QUERY_LINE, SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
+    SandboxArtifactRequest, SandboxFileSystemRequest, SandboxFileSystemResult,
+    SandboxInputInventory, SandboxInputRevokeRequest, SandboxMaterializedInput,
+    SandboxWorkspaceGeneration, SandboxWorkspaceSnapshotFile, SandboxWorkspaceSnapshotManifest,
+    SANDBOX_INPUT_INVENTORY_SCHEMA, SANDBOX_WORKSPACE_GENERATION_QUERY_LINE,
+    SANDBOX_WORKSPACE_SNAPSHOT_SCHEMA,
+};
+#[cfg(target_os = "linux")]
+use crate::protocol::{
+    SandboxArtifactStreamHeader, SANDBOX_ARTIFACT_STREAM_HEADER_LIMIT,
+    SANDBOX_ARTIFACT_STREAM_SCHEMA,
 };
 
 const STATE_ROOT: &str = "/run/centaeris";
@@ -425,13 +427,12 @@ pub fn run_read_artifact_once() -> Result<(), String> {
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "artifact filename is invalid".to_string())?
         .to_string();
-    let (bytes, sha256) = read_artifact(relative.as_str(), request.max_bytes)?;
-    let metadata = SandboxArtifactMetadata {
+    stream_artifact(
+        relative.as_str(),
         filename,
-        size_bytes: bytes.len() as u64,
-        sha256,
-    };
-    write_frame(&metadata, bytes.as_slice())
+        request.max_bytes,
+        &mut std::io::stdout().lock(),
+    )
 }
 
 #[derive(Default)]
@@ -1667,19 +1668,6 @@ fn read_frame_metadata<T: DeserializeOwned>(source: &mut impl Read) -> Result<T,
         .map_err(|error| format!("decode sandbox helper frame failed: {error}"))
 }
 
-fn write_frame<T: serde::Serialize>(metadata: &T, bytes: &[u8]) -> Result<(), String> {
-    let metadata = serde_json::to_vec(metadata)
-        .map_err(|error| format!("encode sandbox helper frame failed: {error}"))?;
-    let metadata_len = u32::try_from(metadata.len())
-        .map_err(|_| "sandbox helper frame metadata is too large".to_string())?;
-    let mut stdout = std::io::stdout().lock();
-    stdout
-        .write_all(&metadata_len.to_be_bytes())
-        .and_then(|_| stdout.write_all(metadata.as_slice()))
-        .and_then(|_| stdout.write_all(bytes))
-        .map_err(|error| format!("write sandbox helper frame failed: {error}"))
-}
-
 fn load_inventory() -> Result<SandboxInputInventory, String> {
     let bytes = match fs::read(INPUT_INVENTORY_PATH) {
         Ok(bytes) => bytes,
@@ -2006,7 +1994,12 @@ fn install_tombstone(_target: &Path) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn read_artifact(relative_path: &str, max_bytes: u64) -> Result<(Vec<u8>, String), String> {
+fn stream_artifact(
+    relative_path: &str,
+    filename: String,
+    max_bytes: u64,
+    output: &mut impl Write,
+) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
 
     let mut file = open_artifact_beneath(relative_path)?;
@@ -2019,28 +2012,70 @@ fn read_artifact(relative_path: &str, max_bytes: u64) -> Result<(Vec<u8>, String
     if before.size() > max_bytes {
         return Err("artifact is too large".to_string());
     }
-    // Publication content is buffered in memory with a 64 MiB ceiling.
-    let mut bytes = Vec::with_capacity(before.size() as usize);
-    Read::take(&mut file, max_bytes + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("read artifact failed: {error}"))?;
-    if bytes.len() as u64 > max_bytes {
-        return Err("artifact is too large".to_string());
+    write_artifact_stream(&mut file, &before, filename, output)
+}
+
+#[cfg(target_os = "linux")]
+fn write_artifact_stream(
+    file: &mut File,
+    before: &fs::Metadata,
+    filename: String,
+    output: &mut impl Write,
+) -> Result<(), String> {
+    let header = serde_json::to_vec(&SandboxArtifactStreamHeader {
+        schema: SANDBOX_ARTIFACT_STREAM_SCHEMA.into(),
+        filename,
+        size_bytes: before.len(),
+    })
+    .map_err(|error| format!("encode artifact stream header failed: {error}"))?;
+    if header.len() > SANDBOX_ARTIFACT_STREAM_HEADER_LIMIT {
+        return Err("artifact stream header is too large".into());
     }
-    file.seek(SeekFrom::Start(0))
-        .map_err(|error| format!("rewind artifact failed: {error}"))?;
+    output
+        .write_all(&(header.len() as u32).to_be_bytes())
+        .and_then(|_| output.write_all(&header))
+        .map_err(|error| format!("write artifact stream header failed: {error}"))?;
+
+    let mut digest = Sha256::new();
+    let mut remaining = before.len();
+    let mut buffer = [0_u8; 64 * 1024];
+    while remaining > 0 {
+        let wanted = remaining.min(buffer.len() as u64) as usize;
+        file.read_exact(&mut buffer[..wanted]).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                "artifact source changed".to_string()
+            } else {
+                format!("read artifact failed: {error}")
+            }
+        })?;
+        output
+            .write_all(&buffer[..wanted])
+            .map_err(|error| format!("write artifact stream body failed: {error}"))?;
+        digest.update(&buffer[..wanted]);
+        remaining -= wanted as u64;
+    }
+    let extra = file
+        .read(&mut buffer[..1])
+        .map_err(|error| format!("read artifact failed: {error}"))?;
     let after = file
         .metadata()
         .map_err(|_| "artifact source changed".to_string())?;
-    if file_version(&before) != file_version(&after) || bytes.len() as u64 != before.size() {
+    if extra != 0 || file_version(before) != file_version(&after) {
         return Err("artifact source changed".to_string());
     }
-    let sha256 = format!("sha256:{:x}", Sha256::digest(&bytes));
-    Ok((bytes, sha256))
+    output
+        .write_all(&digest.finalize())
+        .and_then(|_| output.flush())
+        .map_err(|error| format!("write artifact stream digest failed: {error}"))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn read_artifact(_relative_path: &str, _max_bytes: u64) -> Result<(Vec<u8>, String), String> {
+fn stream_artifact(
+    _relative_path: &str,
+    _filename: String,
+    _max_bytes: u64,
+    _output: &mut impl Write,
+) -> Result<(), String> {
     Err("sandbox helper requires Linux".to_string())
 }
 
@@ -2736,6 +2771,104 @@ mod tests {
 
         assert!(manifest.files.is_empty());
         assert!(canonical_snapshot_manifest_bytes(&manifest).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn artifact_test_file(bytes: &[u8]) -> File {
+        use std::io::Seek;
+
+        let path = std::env::temp_dir().join(format!(
+            "artifact-stream-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut file = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        fs::remove_file(path).unwrap();
+        file.write_all(bytes).unwrap();
+        file.rewind().unwrap();
+        file
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn artifact_stream_writes_exact_header_body_and_raw_digest() {
+        let binary = (0..=u8::MAX).cycle().take(70 * 1024).collect::<Vec<_>>();
+        for bytes in [&[][..], binary.as_slice()] {
+            let mut file = artifact_test_file(bytes);
+            let before = file.metadata().unwrap();
+            let mut output = Vec::new();
+            write_artifact_stream(&mut file, &before, "报告.bin".into(), &mut output).unwrap();
+
+            let header_len = u32::from_be_bytes(output[..4].try_into().unwrap()) as usize;
+            let (header, rest) = output[4..].split_at(header_len);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(header).unwrap(),
+                serde_json::json!({
+                    "schema": "sandbox.artifact.stream.v1",
+                    "filename": "报告.bin",
+                    "sizeBytes": bytes.len(),
+                })
+            );
+            let (body, digest) = rest.split_at(bytes.len());
+            assert_eq!(body, bytes);
+            assert_eq!(digest, &Sha256::digest(bytes)[..]);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn artifact_stream_never_certifies_a_changed_file_or_failed_write() {
+        use std::os::unix::fs::FileExt;
+
+        struct MutateOnBody {
+            file: File,
+            bytes: Vec<u8>,
+        }
+        impl Write for MutateOnBody {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.bytes.len() > 4 {
+                    self.file.write_all_at(b"!", 0)?;
+                    self.file
+                        .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))?;
+                }
+                self.bytes.write(bytes)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let bytes = b"original";
+        let mut file = artifact_test_file(bytes);
+        let before = file.metadata().unwrap();
+        let mut output = MutateOnBody {
+            file: file.try_clone().unwrap(),
+            bytes: Vec::new(),
+        };
+        assert_eq!(
+            write_artifact_stream(&mut file, &before, "report.bin".into(), &mut output),
+            Err("artifact source changed".into())
+        );
+        let header_len = u32::from_be_bytes(output.bytes[..4].try_into().unwrap()) as usize;
+        assert_eq!(&output.bytes[4 + header_len..], bytes);
+        assert_eq!(file.metadata().unwrap().len(), before.len());
+
+        let mut file = artifact_test_file(bytes);
+        let before = file.metadata().unwrap();
+        let mut short = vec![0; 4 + header_len + 2];
+        let mut output = std::io::Cursor::new(short.as_mut_slice());
+        assert!(
+            write_artifact_stream(&mut file, &before, "report.bin".into(), &mut output).is_err()
+        );
+        assert_eq!(&short[4 + header_len..], &bytes[..2]);
     }
 
     #[test]

@@ -312,20 +312,39 @@ pub(crate) struct HelperOutput {
 }
 impl HelperOutput {
     pub(crate) fn copy_to(
-        mut self,
+        self,
         stdout: &mut impl Write,
         stderr: &mut impl Write,
     ) -> Result<(), String> {
-        for (length, writer) in [
-            (self.stdout_length, stdout as &mut dyn Write),
-            (self.stderr_length, stderr as &mut dyn Write),
-        ] {
-            if std::io::copy(&mut self.reader.by_ref().take(length), writer)
+        self.read_output(
+            |source| {
+                std::io::copy(source, stdout).map_err(|_| "environment_host_output_unavailable")?;
+                Ok(())
+            },
+            stderr,
+        )
+    }
+
+    pub(crate) fn read_stdout<T>(
+        self,
+        read: impl FnOnce(&mut dyn Read) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.read_output(read, &mut std::io::sink())
+    }
+
+    fn read_output<T>(
+        mut self,
+        read: impl FnOnce(&mut dyn Read) -> Result<T, String>,
+        stderr: &mut impl Write,
+    ) -> Result<T, String> {
+        let mut stdout = self.reader.by_ref().take(self.stdout_length);
+        let result = read(&mut stdout)?;
+        if stdout.limit() != 0
+            || std::io::copy(&mut self.reader.by_ref().take(self.stderr_length), stderr)
                 .map_err(|_| "environment_host_output_unavailable")?
-                != length
-            {
-                return Err("environment_host_output_incomplete".into());
-            }
+                != self.stderr_length
+        {
+            return Err("environment_host_output_incomplete".into());
         }
         let mut extra = [0u8; 1];
         if self
@@ -336,7 +355,7 @@ impl HelperOutput {
         {
             return Err("environment_host_output_invalid".into());
         }
-        Ok(())
+        Ok(result)
     }
 }
 pub(crate) fn prepare_helper_output(

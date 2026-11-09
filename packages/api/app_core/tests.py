@@ -3450,7 +3450,9 @@ class ApiVerticalSliceTests(TransactionTestCase):
         )
         self.assertEqual(corrupt.status_code, 409, corrupt.content)
         self.assertEqual(corrupt.json()["error"], "artifact_integrity_mismatch")
-        self.assertEqual(Artifact.objects.get().status, "staging")
+        staging = Artifact.objects.get()
+        self.assertEqual(staging.status, "staging")
+        self.assertFalse(default_storage.exists(staging.storageKey))
         self.assertFalse(UserLibraryObject.objects.exists())
 
         # Fresh publication only reads stored bytes to make the durable library copy.
@@ -3683,7 +3685,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         encoded = json.dumps(metadata, separators=(",", ":")).encode()
         body = len(encoded).to_bytes(4, "big") + encoded + content
         with patch(
-            "app_core.artifact_publish.default_storage.save",
+            "app_core.artifact_publish.os.fsync",
             side_effect=OSError("disk failed"),
         ):
             response = self.client.post(
@@ -3695,6 +3697,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(response.status_code, 500)
         artifact = Artifact.objects.get(agent_run=agent_run)
         self.assertEqual(artifact.status, "staging")
+        self.assertFalse(default_storage.exists(artifact.storageKey))
         self.assertEqual(
             ArtifactPublication.objects.get(publicationId=publicationId).status,
             "staging",
@@ -3756,18 +3759,9 @@ class ApiVerticalSliceTests(TransactionTestCase):
         }
         encoded = json.dumps(metadata, separators=(",", ":")).encode()
         body = len(encoded).to_bytes(4, "big") + encoded + content
-        save_calls = {"count": 0}
-        original_save = default_storage.save
-
-        def failing_second_save(name, *args, **kwargs):
-            save_calls["count"] += 1
-            if save_calls["count"] == 2:
-                raise OSError("library disk failed")
-            return original_save(name, *args, **kwargs)
-
         with patch(
             "app_core.artifact_publish.default_storage.save",
-            side_effect=failing_second_save,
+            side_effect=OSError("library disk failed"),
         ):
             response = self.client.post(
                 "/internal/artifacts/publish",
@@ -3778,6 +3772,7 @@ class ApiVerticalSliceTests(TransactionTestCase):
         self.assertEqual(response.status_code, 500)
         artifact = Artifact.objects.get(agent_run=agent_run)
         self.assertEqual(artifact.status, "staging")
+        self.assertTrue(default_storage.exists(artifact.storageKey))
         self.assertEqual(
             ArtifactPublication.objects.get(publicationId=publicationId).status,
             "staging",

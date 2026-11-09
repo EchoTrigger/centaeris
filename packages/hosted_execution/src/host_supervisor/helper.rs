@@ -5,6 +5,8 @@ use centaeris_core::execution::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::protocol::{SANDBOX_ARTIFACT_STREAM_DIGEST_BYTES, SANDBOX_ARTIFACT_STREAM_HEADER_LIMIT};
+
 const JSON_LIMIT: u64 = 1024 * 1024;
 pub const HELPER_STREAM_LIMIT: u64 = 1024 * 1024 * 1024;
 
@@ -70,7 +72,13 @@ impl TrustedHelperKind {
 
     pub fn output_limit(self) -> u64 {
         match self {
-            Self::FileSystem | Self::ReadArtifact => MAX_PUBLISHED_ARTIFACT_BYTES + JSON_LIMIT + 4,
+            Self::FileSystem => MAX_PUBLISHED_ARTIFACT_BYTES + JSON_LIMIT + 4,
+            Self::ReadArtifact => {
+                MAX_PUBLISHED_ARTIFACT_BYTES
+                    + SANDBOX_ARTIFACT_STREAM_HEADER_LIMIT as u64
+                    + 4
+                    + SANDBOX_ARTIFACT_STREAM_DIGEST_BYTES as u64
+            }
             Self::SnapshotCollect | Self::SnapshotCapture => HELPER_STREAM_LIMIT,
             _ => JSON_LIMIT,
         }

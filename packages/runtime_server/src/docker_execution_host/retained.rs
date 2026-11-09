@@ -433,6 +433,22 @@ impl DockerExecutionHostRunner {
         if output_limit as u64 > kind.output_limit() {
             return Err("environment_helper_budget_invalid".into());
         }
+        let output = self.supervised_helper_output(kind, input, consumer_id)?;
+        let mut stdout = Vec::new();
+        let mut stderr = BoundedDiagnosticWriter(Vec::new());
+        output.copy_to(&mut stdout, &mut stderr)?;
+        if stdout.len() > output_limit {
+            return Err("environment_helper_output_too_large".into());
+        }
+        Ok(stdout)
+    }
+
+    pub(super) fn supervised_helper_output(
+        &self,
+        kind: hosted_execution::host_supervisor::TrustedHelperKind,
+        input: &[u8],
+        consumer_id: Option<&str>,
+    ) -> Result<crate::environment_supervisor::HelperOutput, String> {
         let request = self.helper_request(
             kind,
             input.len() as u64,
@@ -445,13 +461,7 @@ impl DockerExecutionHostRunner {
         if output.task.exit_code != Some(0) {
             return Err("environment_helper_failed".into());
         }
-        let mut stdout = Vec::new();
-        let mut stderr = BoundedDiagnosticWriter(Vec::new());
-        output.copy_to(&mut stdout, &mut stderr)?;
-        if stdout.len() > output_limit {
-            return Err("environment_helper_output_too_large".into());
-        }
-        Ok(stdout)
+        Ok(output)
     }
     pub(super) fn supervised_helper_file(
         &self,
