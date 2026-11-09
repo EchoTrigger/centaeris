@@ -10,7 +10,7 @@ from django.test import SimpleTestCase
 from .http import internal_model
 from .http.internal_model import _model_stream_response
 from .model_adapter import encode_model_stream_event
-from .model_adapter import openai_completions
+from .model_adapter import openai_completions, openai_responses
 from .model_adapter.common import ModelProviderError
 
 
@@ -122,3 +122,67 @@ class ModelOutputRecoveryTests(SimpleTestCase):
         self.assertEqual(raised.exception.truncatedToolCalls[0]["callId"], None)
         self.assertEqual(raised.exception.truncatedToolCalls[0]["toolName"], None)
         self.assertEqual(raised.exception.truncatedToolCalls[0]["argsBytes"], 7)
+
+
+class ResponsesOutputRecoveryTests(SimpleTestCase):
+    async def stream(self, events):
+        async def source():
+            for event in events:
+                yield event
+
+        client = Mock()
+        client.responses.create = AsyncMock(return_value=source())
+        client.close = AsyncMock()
+        holder = {}
+        with (
+            patch.object(openai_responses, "async_open_ai_responses_client", new=AsyncMock(return_value=client)),
+            patch.object(openai_responses, "build_open_ai_responses_request", return_value={}),
+        ):
+            chunks = [part async for part in _model_stream_response(openai_responses.stream_open_ai_responses(
+                Mock(), {}, holder, encode_model_stream_event,
+            ))]
+        client.close.assert_awaited_once()
+        return [json.loads(part.decode().split("data: ", 1)[1]) for part in chunks], holder
+
+    async def test_output_limit_rejects_tool_calls_and_preserves_only_recovery_metadata(self):
+        for args in ('{"command":"private"}', '{"command":"private unfinished'):
+            with self.subTest(args=args):
+                item = {"type": "function_call", "call_id": "original-call", "name": "bash", "arguments": args}
+                response = {
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "output": [item],
+                    "usage": {"input_tokens": 10, "output_tokens": 40, "total_tokens": 50},
+                }
+                rejected = [{
+                    "callId": "original-call", "toolName": "bash", "argsBytes": len(args.encode()),
+                    "argsSha256": "sha256:" + hashlib.sha256(args.encode()).hexdigest(),
+                }]
+                with self.assertRaises(ModelProviderError) as raised:
+                    openai_responses.parse_open_ai_responses_response(response)
+                self.assertEqual(raised.exception.reasonType, "incomplete_output_token_limit")
+                self.assertEqual(raised.exception.truncatedToolCalls, rejected)
+
+                frames, holder = await self.stream([
+                    {"type": "response.output_text.delta", "delta": "partial answer"},
+                    {"type": "response.output_item.done", "item": item},
+                    {"type": "response.incomplete", "response": {**response, "output": []}},
+                ])
+                self.assertEqual(frames[0]["delta"], "partial answer")
+                self.assertEqual(frames[-1]["reasonType"], "incomplete_output_token_limit")
+                self.assertEqual(frames[-1]["truncatedToolCalls"], rejected)
+                self.assertNotIn("private", json.dumps(frames))
+                self.assertNotIn("result", holder)
+
+    async def test_other_incomplete_response_is_a_terminal_failure(self):
+        response = {
+            "status": "incomplete", "incomplete_details": {"reason": "content_filter"},
+            "output_text": "partial answer", "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
+        }
+        with self.assertRaises(ModelProviderError) as raised:
+            openai_responses.parse_open_ai_responses_response(response)
+        self.assertEqual(raised.exception.reasonType, "incomplete_response")
+        frames, holder = await self.stream([{"type": "response.incomplete", "response": response}])
+        self.assertEqual(frames[-1]["reasonType"], "incomplete_response")
+        self.assertNotIn("truncatedToolCalls", frames[-1])
+        self.assertNotIn("result", holder)

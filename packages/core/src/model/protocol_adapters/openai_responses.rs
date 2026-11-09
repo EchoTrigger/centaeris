@@ -124,33 +124,28 @@ impl<T: JsonHttpTransport> OpenAiResponsesModelClient<T> {
                     false,
                 )
             })?;
-        let raw_truncated_tool_calls = parsed
-            .output
-            .as_deref()
-            .map(truncated_openai_responses_tool_calls)
-            .unwrap_or_default();
-        if parsed
+        let incomplete_reason = parsed
             .incomplete_details
             .as_ref()
-            .and_then(|details| details.reason.as_deref())
-            == Some("max_output_tokens")
-        {
-            return Err(reject_openai_responses_finish_reason(
-                parsed
-                    .incomplete_details
-                    .as_ref()
-                    .and_then(|details| details.reason.as_deref()),
-            )
-            .expect_err("max_output_tokens must be rejected")
-            .with_truncated_tool_calls(raw_truncated_tool_calls));
+            .and_then(|details| details.reason.as_deref());
+        let finish_reason = if incomplete_reason == Some("max_output_tokens") {
+            incomplete_reason
+        } else {
+            parsed.status.as_deref()
+        };
+        if let Err(error) = reject_openai_responses_finish_reason(finish_reason) {
+            return Err(if finish_reason == Some("max_output_tokens") {
+                error.with_truncated_tool_calls(
+                    parsed
+                        .output
+                        .as_deref()
+                        .map(truncated_openai_responses_tool_calls)
+                        .unwrap_or_default(),
+                )
+            } else {
+                error
+            });
         }
-        reject_openai_responses_finish_reason(
-            parsed
-                .incomplete_details
-                .as_ref()
-                .and_then(|details| details.reason.as_deref())
-                .or(parsed.status.as_deref()),
-        )?;
         let provider_request_id = parsed
             .id
             .clone()
@@ -998,6 +993,7 @@ impl OpenAiResponsesStreamState {
                     .and_then(|response| response.get("incomplete_details"))
                     .and_then(|details| details.get("reason"))
                     .and_then(Value::as_str)
+                    .filter(|reason| *reason == "max_output_tokens")
                     .unwrap_or("incomplete")
                     .to_string();
                 if let Some(response) = response {

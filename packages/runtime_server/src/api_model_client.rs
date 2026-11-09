@@ -844,7 +844,7 @@ fn hosted_model_error(failure: ModelStreamFailure) -> Result<ModelClientError, M
         ));
     }
     let (kind, retryable) = match failure.reason_type.as_str() {
-        "incomplete_output_token_limit" => {
+        "incomplete_output_token_limit" | "incomplete_response" => {
             (ModelClientErrorKind::ProviderResponseInterrupted, false)
         }
         "provider_stream_interrupted" | "provider_response_invalid" | "empty_final_response" => {
@@ -1857,6 +1857,12 @@ mod tests {
                 Some(503),
                 ModelClientErrorKind::ProviderUnavailable,
                 true,
+            ),
+            (
+                "incomplete_response",
+                None,
+                ModelClientErrorKind::ProviderResponseInterrupted,
+                false,
             ),
             (
                 "provider_stream_interrupted",
