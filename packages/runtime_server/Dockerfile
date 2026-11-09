@@ -16,6 +16,7 @@ COPY packages/api/app_core/contracts packages/api/app_core/contracts
 COPY packages/api/app_core/native_model_authority.sql packages/api/app_core/native_model_authority.sql
 COPY packages/api/app_core/native_projected_input_authority.sql packages/api/app_core/native_projected_input_authority.sql
 COPY packages/api/app_core/native_run_execution_authority.sql packages/api/app_core/native_run_execution_authority.sql
+COPY packages/api/app_core/native_session_workspace_resolution.sql packages/api/app_core/native_session_workspace_resolution.sql
 COPY packages/api/app_core/native_mcp_dispatch_authority.sql packages/api/app_core/native_mcp_dispatch_authority.sql
 COPY packages/api/app_core/workspace_snapshot_gc_witness.sql packages/api/app_core/workspace_snapshot_gc_witness.sql
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked cargo build --release --locked -p runtime_server

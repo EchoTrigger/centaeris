@@ -1,7 +1,7 @@
 current_run AS (
     SELECT run.id, session.id AS session_id, run.user_id, run.workspace_id,
            session.status AS session_status, grant_row.payload AS authorization_payload,
-           run.acting_app_id, run.app_delegation_id
+           run.acting_app_id, run.app_delegation_id, job.status AS job_status
     FROM requested
     JOIN public.app_core_agentrun AS run ON run.id = requested.run_id
     JOIN public.app_core_agentrunauthorization AS grant_row

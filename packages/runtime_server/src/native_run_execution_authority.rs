@@ -77,6 +77,15 @@ impl NativeRunExecutionAuthority {
         })
     }
 
+    pub(crate) fn matches_lifecycle_lease(&self, job_id: &str, lease_owner: &str) -> bool {
+        job_id.split_once(':')
+            == Some((
+                centaeris_core::session::reliability::AGENT_RUN_LIFECYCLE_JOB_KIND,
+                self.run_id.as_str(),
+            ))
+            && lease_owner == self.lease_owner
+    }
+
     pub(crate) fn workspace_id(&self) -> &str {
         &self.workspace_id
     }

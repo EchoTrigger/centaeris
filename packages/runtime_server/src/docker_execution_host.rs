@@ -15,6 +15,7 @@ mod stopped_preservation;
 pub(crate) mod stopped_recovery;
 mod stopped_workspace;
 mod workspace_files;
+mod workspace_resolution;
 mod workspace_restore;
 pub(crate) use maintenance::{
     maintenance_helper, maintenance_task, observe_environment, provision_environment,
@@ -1219,6 +1220,17 @@ impl DockerExecutionHostRunner {
         resolved_resolution(&resolved, frozen)
     }
 
+    fn resolve_workspace_restore_baseline(
+        &self,
+        lease: &SessionWorkspaceLease,
+        frozen: &SessionWorkspace,
+    ) -> Result<SessionWorkspaceResolution, SessionWorkspaceApiError> {
+        match workspace_resolution::resolve(self.native_run_authority.as_deref(), lease, frozen)? {
+            Some(resolution) => Ok(resolution),
+            None => self.resolve_session_workspace(lease, frozen),
+        }
+    }
+
     pub(crate) fn restore_session_workspace(
         &self,
         lease: &SessionWorkspaceLease,
@@ -1228,7 +1240,7 @@ impl DockerExecutionHostRunner {
         if self.is_hot_reuse() {
             return Ok(SessionWorkspaceResolution::RetainedLive);
         }
-        let resolution = self.resolve_session_workspace(lease, frozen)?;
+        let resolution = self.resolve_workspace_restore_baseline(lease, frozen)?;
         #[cfg(test)]
         if self.container_name.starts_with("native-consume-test:") {
             assert_eq!(resolution, SessionWorkspaceResolution::Empty);
@@ -1245,7 +1257,7 @@ impl DockerExecutionHostRunner {
         let capture = self.restore_activity()?;
         // Admission into the exclusive phase can race an API workspace advance.
         // Reobserve the restore decision after exclusion, before overwriting data.
-        let resolution = self.resolve_session_workspace(lease, frozen)?;
+        let resolution = self.resolve_workspace_restore_baseline(lease, frozen)?;
         if resolution != SessionWorkspaceResolution::Download {
             return Ok(resolution);
         }
