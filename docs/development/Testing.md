@@ -39,9 +39,17 @@ schema drift is checked separately without a running database. Each gate reports
 its elapsed time.
 
 Runtime PostgreSQL tests compile one test executable and reuse it for discovery
-and execution. Contract and support checks report independent failures together
-and return a failing exit status. Migration tests use
+and execution. The API PostgreSQL gate builds its Rust lifecycle fixture once
+and starts a fresh process from that executable for each scenario. Contract and
+support checks report independent failures together and return a failing exit
+status. Migration tests use
 `isolated_migration_database` instead of recreating the runner's shared schema.
+
+PR CI checks Rust formatting once on Linux when either Rust product is selected.
+The required aggregate check verifies this result and every affected product
+result. Hosted builds and deployment tests run on Linux. Local product checks
+retain platform-specific build and behavior coverage, including macOS host
+sandbox and DNS contracts.
 
 Frontend visual design uses manual appearance acceptance rather than TDD.
 Frontend browser and Desktop window end-to-end checks are not CI or release

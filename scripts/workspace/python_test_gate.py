@@ -73,6 +73,8 @@ def main():
 
     # Use only the explicit TEST_POSTGRES_* endpoint, never the deployed database.
     # Each invocation owns a fresh database and a temporary storage directory.
+    from runtime_outbox_gate import build_test_executable
+
     with tempfile.TemporaryDirectory(prefix="centaeris-api-ci-") as storage:
         os.environ.update(
             DJANGO_SETTINGS_MODULE="api.test_settings",
@@ -80,6 +82,7 @@ def main():
             RUNTIME_URL="http://127.0.0.1:1",
             REDIS_URL="redis://127.0.0.1:1/15",
         )
+        os.environ["CENTAERIS_TEST_RUNTIME_EXECUTABLE"] = build_test_executable(root, dict(os.environ))
         import django
         django.setup()
         from django.conf import settings

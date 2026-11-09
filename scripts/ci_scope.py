@@ -17,6 +17,7 @@ def select_products(paths):
               "rust-toolchain.toml", ".node-version", ".python-version", ".gitignore", ".dockerignore", "biome.json"}
     rules = [
         (("packages/core/", "packages/model-catalog/", "packages/mcp/", "packages/runtime_sqlite/"), PRODUCTS),
+        (("packages/model-http/",), ("coreRust", "workspaceRust", "workspacePython", "docker")),
         (("scripts/harbor/workspace", "scripts/harbor/test_workspace", "scripts/harbor/benchmark-transport.json",
           "scripts/harbor/full-tasks.json"), ("coreRust", "localNode", "workspacePython")),
         (("packages/runtime/", "packages/tui/", "system-skills/", "scripts/harbor/"), ("coreRust", "localNode")),
@@ -43,6 +44,11 @@ def select_products(paths):
         if path in shared or path.startswith(".github/workflows/"):
             selected.update(PRODUCTS)
             continue
+        if path.startswith("packages/api/app_core/") and path.endswith(".py"):
+            filename = path.removeprefix("packages/api/app_core/")
+            if "/" not in filename and (filename == "tests.py" or filename.startswith("test_")):
+                selected.add("workspacePython")
+                continue
         for prefixes, products in rules:
             if path.startswith(prefixes):
                 selected.update(products)
@@ -61,8 +67,10 @@ def aggregate_result(needs):
     if scope.get("result") != "success":
         return False
     outputs = scope.get("outputs", {})
-    for product, job in JOBS.items():
-        selected = outputs.get(product)
+    checks = [(outputs.get(product), job) for product, job in JOBS.items()]
+    rust_selected = any(outputs.get(product) == "true" for product in ("coreRust", "workspaceRust"))
+    checks.append(("true" if rust_selected else "false", "rust-format"))
+    for selected, job in checks:
         result = needs.get(job, {}).get("result")
         if selected not in ("true", "false") or result is None:
             return False

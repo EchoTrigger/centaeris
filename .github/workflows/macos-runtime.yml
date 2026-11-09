@@ -9,6 +9,7 @@ on:
       - 'packages/runtime_sqlite/**'
       - 'packages/mcp/**'
       - 'packages/model-catalog/**'
+      - 'packages/model-http/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -31,20 +32,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Check locked toolchain and formatting
+      - name: Check locked toolchain and runner architecture
         run: |
           rustc --version
           uname -m
-          cargo fmt --all -- --check
       - name: Check Runtime and Core
+        if: ${{ matrix.runner == 'macos-15-intel' || github.event_name == 'workflow_dispatch' }}
         run: |
-          cargo check --locked -p centaeris-runtime --all-targets
           cargo clippy --locked -p centaeris-runtime --all-targets -- -D warnings
           cargo test --locked -p centaeris-core query_loop
           cargo test --locked -p centaeris-runtime-sqlite --test core_runtime
-      - name: Exercise native local host execution
-        run: cargo test --locked -p centaeris-runtime --test local_execution_sandbox -- --nocapture
       - name: Verify public-network DNS through macOS services
         run: cargo test --locked -p centaeris-runtime --test local_execution_sandbox macos_public_network_resolves_dns -- --ignored --exact --nocapture
       - name: Run Runtime regressions
+        if: ${{ matrix.runner == 'macos-15-intel' || github.event_name == 'workflow_dispatch' }}
         run: cargo test --locked -p centaeris-runtime

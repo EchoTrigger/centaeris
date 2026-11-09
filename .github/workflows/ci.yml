@@ -47,8 +47,18 @@ jobs:
       - id: scope
         run: python scripts/ci_scope.py
 
-  core-rust:
+  rust-format:
     needs: scope
+    if: ${{ needs.scope.outputs.coreRust == 'true' || needs.scope.outputs.workspaceRust == 'true' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: cargo fmt --all -- --check
+
+  core-rust:
+    needs: [scope, rust-format]
     if: ${{ needs.scope.outputs.coreRust == 'true' }}
     strategy:
       fail-fast: false
@@ -78,7 +88,7 @@ jobs:
           key: ${{ runner.os }}-rust-${{ hashFiles('rust-toolchain.toml') }}-core-rust-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-rust-${{ hashFiles('rust-toolchain.toml') }}-core-rust-
-      - run: python scripts/ci.py Rust
+      - run: python scripts/ci.py Rust --format-checked
 
   local-node:
     needs: scope
@@ -105,7 +115,7 @@ jobs:
       - run: python scripts/ci.py Node
 
   workspace-rust:
-    needs: scope
+    needs: [scope, rust-format]
     if: ${{ needs.scope.outputs.workspaceRust == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -265,7 +275,7 @@ jobs:
   required:
     name: Required gates
     if: ${{ always() }}
-    needs: [scope, core-rust, local-node, workspace-rust, workspace-python, web, docker-fresh-start]
+    needs: [scope, rust-format, core-rust, local-node, workspace-rust, workspace-python, web, docker-fresh-start]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
