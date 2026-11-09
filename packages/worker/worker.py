@@ -128,6 +128,22 @@ def runtime_teardown_request(body):
     )
 
 
+def runtime_finalize_request(body):
+    try:
+        return json_request(
+            f"{RUNTIME_INTERNAL_URL}/agent-runs/finalize",
+            body,
+            "X-Internal-Token",
+            INTERNAL_API_TOKEN,
+            "agent_run_finalize_unavailable",
+            timeout=50,  # Platform resolution, physical teardown, then platform release.
+        )
+    except RuntimeError as error:
+        if (getattr(error, "http_status", None) == 409
+                and getattr(error, "http_error_code", None) == "agent_run_lifecycle_lease_lost"):
+            raise RuntimeLeaseLost() from None
+        raise
+
 
 
 def api_request(path, body, default_reason, *, timeout=10):
@@ -655,7 +671,8 @@ def _execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
     resolved = resolve_agent_run_lifecycle(job, lease_owner, agent_run_id, digest)
     if resolved["disposition"] in {"terminal", "released"}:
         require_healthy_lease()
-        finish_environment_agent_run(job, lease_owner, agent_run_id, digest, resolved, require_healthy_lease)
+        finish_environment_agent_run(job, lease_owner, agent_run_id, digest, resolved, require_healthy_lease,
+            native_finalize=AGENT_RUN_EXECUTION_MODE == "perRun")
         return False
     agent_run_start = resolved.get("agentRunStart")
     if (
@@ -726,6 +743,10 @@ def _execute_agent_run_lifecycle_job(job, lease_owner, require_healthy_lease):
         return False
     if result["terminalState"] not in {"completed", "failed", "cancelled"}:
         raise RuntimeError("agent_run_step_response_invalid")
+    if AGENT_RUN_EXECUTION_MODE == "perRun":
+        finish_environment_agent_run(job, lease_owner, agent_run_id, digest, result, require_healthy_lease,
+            native_finalize=True)
+        return False
     require_healthy_lease()
     transition_agent_run(agent_run_id, result["terminalState"], "runtime_session_terminal_committed")
     resolved = resolve_agent_run_lifecycle(job, lease_owner, agent_run_id, digest)
@@ -784,31 +805,52 @@ class RetainedCleanupPending(RuntimeError):
         self.route = getattr(cause, "route", None)
 
 
-def finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, require_healthy_lease):
+def finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, require_healthy_lease, *,
+                                 native_finalize=False):
     try:
-        return _finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, require_healthy_lease)
+        return _finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, require_healthy_lease,
+            native_finalize=native_finalize)
     except (RuntimeError, urllib.error.URLError, OSError) as error:
-        if (isinstance(error, YieldHandoffUnknown) or environment_cleanup_wait_reason(error) is not None
-                or str(error) == "agent_run_lifecycle_lease_lost"):
+        if (isinstance(error, (RuntimeLeaseLost, YieldHandoffUnknown)) or environment_cleanup_wait_reason(error) is not None
+                or (not native_finalize and str(error) == "agent_run_lifecycle_lease_lost")):
             raise
         # Never include untrusted response bodies or transport credentials.
         reason = str(error) if isinstance(error, RuntimeError) else "retained_cleanup_unavailable"
         raise RetainedCleanupPending(reason, error) from error
 
 
-def _finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, require_healthy_lease):
-    if resolved["disposition"] == "terminal":
+def cleanup_controller_epoch(cleanup, run_id, digest):
+    if (not isinstance(cleanup, dict) or set(cleanup) != {"schema", "agentRunId", "authorizationDigest",
+            "authorizationSignature", "authorization", "environmentAuthorization"}
+            or cleanup["schema"] != "workspace.agent_run.cleanup.v1"
+            or cleanup["agentRunId"] != run_id or cleanup["authorizationDigest"] != digest
+            or not isinstance(cleanup["environmentAuthorization"], dict)):
+        raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
+    grant = cleanup["environmentAuthorization"].get("payload")
+    if (not isinstance(grant, dict) or grant.get("controllerPurpose") != "cleanup"
+            or type(grant.get("controllerEpoch")) is not int or not 1 <= grant["controllerEpoch"] <= 2**63 - 1):
+        raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
+    return grant["controllerEpoch"]
+
+
+def _finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, require_healthy_lease, *, native_finalize):
+    if resolved["disposition"] == "terminal" and native_finalize:
+        cleanup = resolved.get("agentRunCleanup")
+        if "agentRunCleanup" in resolved:
+            cleanup_controller_epoch(cleanup, run_id, digest)
+        require_healthy_lease()
+        result = runtime_finalize_request({
+            "schema": "runtime.agent_run.finalize.v1", "jobId": job["jobId"], "leaseOwner": lease_owner,
+            "agentRunId": run_id, "authorizationDigest": digest, "terminalState": resolved["terminalState"],
+            "agentRunCleanup": cleanup,
+        })
+        if (not isinstance(result, dict) or set(result) != {"schema", "agentRunId", "releaseReceiptId"}
+                or result["schema"] != "runtime.agent_run.finalize.result.v1" or result["agentRunId"] != run_id
+                or not valid_runtime_job_id(result["releaseReceiptId"])):
+            raise RuntimeError("runtime_finalize_response_invalid")
+    elif resolved["disposition"] == "terminal":
         cleanup = resolved["agentRunCleanup"]
-        if (not isinstance(cleanup, dict) or set(cleanup) != {"schema", "agentRunId", "authorizationDigest",
-                "authorizationSignature", "authorization", "environmentAuthorization"}
-                or cleanup["schema"] != "workspace.agent_run.cleanup.v1"
-                or cleanup["agentRunId"] != run_id or cleanup["authorizationDigest"] != digest
-                or not isinstance(cleanup["environmentAuthorization"], dict)):
-            raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
-        grant = cleanup["environmentAuthorization"].get("payload")
-        if (not isinstance(grant, dict) or grant.get("controllerPurpose") != "cleanup"
-                or type(grant.get("controllerEpoch")) is not int or not 1 <= grant["controllerEpoch"] <= 2**63 - 1):
-            raise RuntimeError("agent_run_lifecycle_resolve_response_invalid")
+        controller_epoch = cleanup_controller_epoch(cleanup, run_id, digest)
         require_healthy_lease()
         result = runtime_teardown_request({'schema': 'runtime.agent_run.teardown.v1',
             'jobId': job['jobId'], 'leaseOwner': lease_owner, 'agentRunCleanup': cleanup})
@@ -820,7 +862,7 @@ def _finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, re
         release = api_request('/internal/agent-run-lifecycle/release',
             {'schema': 'runtime.agent_run_lifecycle.release.v1', 'jobId': job['jobId'],
                 'leaseOwner': lease_owner, 'agentRunId': run_id, 'authorizationDigest': digest,
-                'controllerEpoch': grant['controllerEpoch'], 'cleanupReceiptId': result['cleanupReceiptId']},
+                'controllerEpoch': controller_epoch, 'cleanupReceiptId': result['cleanupReceiptId']},
             'agent_run_release_unavailable')
         if (not isinstance(release, dict) or set(release) != {'schema', 'agentRunId', 'releaseReceiptId'}
                 or release['schema'] != 'runtime.agent_run_lifecycle.released.v1' or release['agentRunId'] != run_id

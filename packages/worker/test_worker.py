@@ -676,35 +676,35 @@ class WorkerContractTests(unittest.TestCase):
             'authorizationSignature': 'signed', 'environmentAuthorization': {'payload': {
                 'controllerPurpose': 'cleanup', 'controllerEpoch': 2}}}
 
-    def test_terminal_projects_and_tears_down_before_completing_job(self):
+    def test_per_run_step_terminal_finalizes_before_completing_job(self):
         job, start = lifecycle_fixture('agent_run_terminal')
-        calls, resolves = [], 0
-        def api(path, *args):
-            nonlocal resolves
-            if path.endswith('/resolve'):
-                resolves += 1
-                if resolves == 1:
-                    return {'schema': 'runtime.agent_run_lifecycle.resolved.v1', 'disposition': 'ready', 'agentRunStart': start}
-                return {'schema': 'runtime.agent_run_lifecycle.resolved.v1', 'disposition': 'terminal',
-                    'terminalState': 'completed', 'agentRunCleanup': self.cleanup_fixture(start)}
-            self.assertTrue(path.endswith('/release'))
-            calls.append('release')
-            return {'schema': 'runtime.agent_run_lifecycle.released.v1', 'agentRunId': start['agentRunId'],
-                'releaseReceiptId': 'release-one'}
+        owner = 'worker:test-owner'
+        calls = []
+        ready = {'schema': 'runtime.agent_run_lifecycle.resolved.v1', 'disposition': 'ready', 'agentRunStart': start}
         step = {'schema': 'runtime.agent_run.step.result.v1', 'agentRunId': start['agentRunId'],
             'disposition': 'terminal', 'terminalState': 'completed', 'transitionReason': 'runtime_session_terminal_committed'}
-        def teardown(*args):
-            calls.append('teardown')
-            return {'schema': 'runtime.agent_run.teardown.result.v1', 'agentRunId': start['agentRunId'],
-                'status': 'cleanupConfirmed', 'cleanupReceiptId': 'cleanup-one'}
-        with patch.object(worker, 'api_request', side_effect=api), \
+        def finalize(body):
+            calls.append('finalize')
+            self.assertEqual(body, {'schema': 'runtime.agent_run.finalize.v1', 'jobId': job['jobId'],
+                'leaseOwner': owner, 'agentRunId': start['agentRunId'], 'authorizationDigest': start['authorizationDigest'],
+                'terminalState': 'completed', 'agentRunCleanup': None})
+            return {'schema': 'runtime.agent_run.finalize.result.v1', 'agentRunId': start['agentRunId'],
+                'releaseReceiptId': 'release-one'}
+        with patch.object(worker, 'AGENT_RUN_EXECUTION_MODE', 'perRun'), \
+                patch.object(worker, 'api_request', return_value=ready) as api, \
                 patch.object(worker, 'agent_run_step_request', return_value=step), \
-                patch.object(worker, 'transition_agent_run', side_effect=lambda *args: calls.append('transition')), \
-                patch.object(worker, 'runtime_teardown_request', side_effect=teardown), \
-                patch.object(worker, 'complete_job', side_effect=lambda *args: calls.append('complete')):
-            worker.execute_agent_run_lifecycle_job(job, 'worker:test-owner', lambda: None)
-        self.assertEqual(calls, ['transition', 'transition', 'teardown', 'release', 'complete'])
-        self.assertEqual(resolves, 2)
+                patch.object(worker, 'transition_agent_run') as transition, \
+                patch.object(worker, 'runtime_finalize_request', side_effect=finalize) as runtime, \
+                patch.object(worker, 'runtime_teardown_request') as teardown, \
+                patch.object(worker, 'complete_job', side_effect=lambda *args: calls.append('complete')) as complete:
+            self.assertFalse(worker.execute_agent_run_lifecycle_job(job, owner, lambda: None))
+        api.assert_called_once()
+        self.assertEqual(api.call_args.args[0], '/internal/agent-run-lifecycle/resolve')
+        transition.assert_called_once_with(start['agentRunId'], 'running', 'agent_run_lifecycle_step_started')
+        runtime.assert_called_once()
+        teardown.assert_not_called()
+        complete.assert_called_once_with(job['jobId'], owner, [])
+        self.assertEqual(calls, ['finalize', 'complete'])
 
     def test_committed_terminal_still_requires_teardown_before_job_completion(self):
         job, start = lifecycle_fixture('agent_run_recovered_terminal')
@@ -722,7 +722,8 @@ class WorkerContractTests(unittest.TestCase):
             calls.append('teardown')
             return {'schema': 'runtime.agent_run.teardown.result.v1', 'agentRunId': start['agentRunId'],
                 'status': 'cleanupConfirmed', 'cleanupReceiptId': 'cleanup-one'}
-        with patch.object(worker, 'api_request', side_effect=api), \
+        with patch.object(worker, 'AGENT_RUN_EXECUTION_MODE', 'retained'), \
+                patch.object(worker, 'api_request', side_effect=api), \
                 patch.object(worker, 'transition_agent_run') as transition, \
                 patch.object(worker, 'runtime_teardown_request', side_effect=teardown), \
                 patch.object(worker, 'complete_job', side_effect=lambda *args: calls.append('complete')):
@@ -734,7 +735,8 @@ class WorkerContractTests(unittest.TestCase):
         job, start = lifecycle_fixture('agent_run_teardown_retry')
         terminal = {'schema': 'runtime.agent_run_lifecycle.resolved.v1', 'disposition': 'terminal',
             'terminalState': 'completed', 'agentRunCleanup': self.cleanup_fixture(start)}
-        with patch.object(worker, 'api_request', return_value=terminal) as api, \
+        with patch.object(worker, 'AGENT_RUN_EXECUTION_MODE', 'retained'), \
+                patch.object(worker, 'api_request', return_value=terminal) as api, \
                 patch.object(worker, 'runtime_teardown_request', side_effect=worker.DependencyUnavailable('sandbox_teardown_failed')), \
                 patch.object(worker, 'complete_job') as complete, patch.object(worker, 'yield_job') as yielded:
             self.assertFalse(worker.execute_agent_run_lifecycle_job(job, 'worker:test-owner', lambda: None))

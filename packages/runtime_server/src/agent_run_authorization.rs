@@ -354,7 +354,7 @@ fn require_non_empty(name: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_sha256(name: &str, value: &str) -> Result<(), String> {
+pub(crate) fn validate_sha256(name: &str, value: &str) -> Result<(), String> {
     let Some(hex) = value.strip_prefix("sha256:") else {
         return Err(format!("{name} must use sha256:<hex>"));
     };

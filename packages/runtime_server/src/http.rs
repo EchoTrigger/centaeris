@@ -56,6 +56,10 @@ pub(super) fn router(state: HttpServerState) -> Router {
             on_blocking(MethodFilter::POST, agent_runs::supplement),
         )
         .route(
+            "/agent-runs/finalize",
+            on_blocking(MethodFilter::POST, agent_runs::finalization::advance),
+        )
+        .route(
             "/agent-runs/teardown",
             on_blocking(MethodFilter::POST, agent_runs::teardown),
         )

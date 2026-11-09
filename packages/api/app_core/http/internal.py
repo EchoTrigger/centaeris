@@ -57,6 +57,7 @@ from app_core.environment_lifecycle import (
     EnvironmentControllerBusy, EnvironmentControllerTerminal,
     acquire_environment_controller, acquire_environment_cleanup_controller,
     get_environment_release_receipt, release_environment_controller, read_control_authorization,
+    project_run_for_environment_cleanup,
 )
 from app_core.session_event import (
     committed_session_terminal_state,
@@ -75,6 +76,9 @@ logger = logging.getLogger(__name__)
 router = Router(tags=["internal"], by_alias=True)
 AGENT_RUN_LIFECYCLE_RECONCILE_LIMIT = 100
 AGENT_RUN_LIFECYCLE_DEAD_LETTER_REASON = "agent_run_lifecycle_dead_lettered"
+AGENT_RUN_POLICY_TRANSITION_REASONS = frozenset({
+    "execution_queue_expired", "agent_run_api_deadline_expired", "agent_run_api_authority_revoked",
+})
 SESSION_WORKSPACE_RESOLVE_SCHEMA = "runtime.session_workspace.resolve.v1"
 SESSION_WORKSPACE_RESOLVED_SCHEMA = "runtime.session_workspace.resolved.v1"
 SESSION_WORKSPACE_DOWNLOAD_SCHEMA = "runtime.session_workspace.download.v1"
@@ -1429,6 +1433,19 @@ def resolve_agent_run_lifecycle(request):
     return _resolve_agent_run(body)
 
 
+@_internal_post("/agent-run-lifecycle/finalize")
+def finalize_agent_run_lifecycle(request):
+    try:
+        body = decode_json_object(request)
+        _retained_lifecycle_binding(body, "runtime.agent_run_lifecycle.finalize.v1", ("terminalState",))
+        terminal = body["terminalState"]
+        if terminal not in ("completed", "failed", "cancelled"):
+            raise ValueError("agent_run_lifecycle_terminal_state_invalid")
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "agent_run_lifecycle_finalize_invalid"}, status=400)
+    return _resolve_agent_run(body, expected_terminal=terminal)
+
+
 def _retained_lifecycle_binding(body, schema, extra=()):
     if set(body) != {"schema", "jobId", "leaseOwner", "agentRunId", "authorizationDigest", *extra} or body["schema"] != schema:
         raise ValueError("agent_run_lifecycle_request_invalid")
@@ -1446,13 +1463,7 @@ def _retained_run_projection(run_id, digest):
         with transaction.atomic():
             Session.objects.select_for_update(of=("self",), nowait=True).get(pk=session_id)
             run = AgentRun.objects.select_for_update(of=("self",), nowait=True).select_related("authorization", "session", "environment").get(pk=run_id)
-            if run.authorization.digest != digest:
-                raise ValueError("agent_run_lifecycle_binding_mismatch")
-            terminal = committed_session_terminal_state(run)
-            if terminal is not None:
-                project_committed_agent_run(run, terminal)
-            elif run.status not in {"queued", "running"}:
-                raise ValueError("agent_run_semantic_terminal_missing")
+            run, terminal = _project_run_terminal_locked(run, digest)
     except DatabaseError as error:
         if getattr(error.__cause__, "sqlstate", None) == "55P03":
             raise EnvironmentControllerBusy("environment_controller_busy") from error
@@ -1461,36 +1472,66 @@ def _retained_run_projection(run_id, digest):
     return run, terminal
 
 
-def _resolve_agent_run(body):
+def _project_run_terminal_locked(run, digest, expected_terminal=None):
+    if run.authorization.digest != digest:
+        raise ValueError("agent_run_lifecycle_binding_mismatch")
+    terminal = committed_session_terminal_state(run)
+    if terminal is None:
+        if expected_terminal is not None or run.status not in {"queued", "running"}:
+            raise ValueError("agent_run_semantic_terminal_missing")
+        return run, terminal
+    if expected_terminal is not None and terminal != expected_terminal:
+        raise ValueError("agent_run_semantic_terminal_mismatch")
+    run = project_committed_agent_run(run, terminal)
+    if (expected_terminal is not None
+            and run.transitionReason not in AGENT_RUN_POLICY_TRANSITION_REASONS
+            and run.transitionReason != "runtime_session_terminal_committed"):
+        run.transitionReason = "runtime_session_terminal_committed"
+        run.save(update_fields=["transitionReason", "updatedAt"])
+    return run, terminal
+
+
+def _terminal_lifecycle_response(run, terminal, lease_owner, execution_mode, receipt):
+    if terminal is None:
+        raise ValueError("agent_run_semantic_terminal_missing")
+    common = {"schema": "runtime.agent_run_lifecycle.resolved.v1", "terminalState": terminal}
+    if receipt is not None:
+        return JsonResponse(common | {"disposition": "released", "releaseReceiptId": receipt["releaseReceiptId"]})
+    authority = acquire_environment_cleanup_controller(run.pk, lease_owner)
+    return JsonResponse(common | {"disposition": "terminal",
+        "agentRunCleanup": build_agent_run_cleanup(run, authority, execution_mode=execution_mode)})
+
+
+def _resolve_agent_run(body, *, expected_terminal=None):
+    if expected_terminal is None:
+        try:
+            _retained_lifecycle_binding(body, "runtime.agent_run_lifecycle.resolve.v1", ("executionMode",))
+            if body["executionMode"] not in ("perRun", "retained"):
+                raise ValueError("agent_run_lifecycle_execution_mode_invalid")
+        except (ValueError, TypeError):
+            return JsonResponse({"error": "agent_run_lifecycle_resolve_invalid"}, status=400)
     try:
-        _retained_lifecycle_binding(body, "runtime.agent_run_lifecycle.resolve.v1", ("executionMode",))
-        if body["executionMode"] not in ("perRun", "retained"):
-            raise ValueError("agent_run_lifecycle_execution_mode_invalid")
-    except (ValueError, TypeError):
-        return JsonResponse({"error": "agent_run_lifecycle_resolve_invalid"}, status=400)
-    try:
+        if expected_terminal is not None:
+            run, terminal = project_run_for_environment_cleanup(
+                body["agentRunId"], body["leaseOwner"],
+                lambda run: _project_run_terminal_locked(run, body["authorizationDigest"], expected_terminal),
+            )
+            receipt = get_environment_release_receipt(run.pk, body["leaseOwner"])
+            return _terminal_lifecycle_response(run, terminal, body["leaseOwner"], "perRun", receipt)
         # Final can race execute acquisition once; only the dedicated semantic
         # rejection permits resolving again. Other authority errors stay errors.
         for attempt in range(2):
             run, terminal = _retained_run_projection(body["agentRunId"], body["authorizationDigest"])
             receipt = get_environment_release_receipt(run.pk, body["leaseOwner"])
-            common = {"schema": "runtime.agent_run_lifecycle.resolved.v1"}
-            if receipt is not None:
-                if terminal is None:
-                    raise ValueError("agent_run_semantic_terminal_missing")
-                return JsonResponse(common | {"disposition": "released", "terminalState": terminal,
-                    "releaseReceiptId": receipt["releaseReceiptId"]})
-            if terminal is not None:
-                authority = acquire_environment_cleanup_controller(run.pk, body["leaseOwner"])
-                return JsonResponse(common | {"disposition": "terminal", "terminalState": terminal,
-                    "agentRunCleanup": build_agent_run_cleanup(run, authority, execution_mode=body["executionMode"])})
+            if receipt is not None or terminal is not None:
+                return _terminal_lifecycle_response(run, terminal, body["leaseOwner"], body["executionMode"], receipt)
             try:
                 authority = acquire_environment_controller(run.pk, body["leaseOwner"])
             except EnvironmentControllerTerminal:
                 if attempt == 0:
                     continue
                 raise
-            return JsonResponse(common | {"disposition": "ready",
+            return JsonResponse({"schema": "runtime.agent_run_lifecycle.resolved.v1", "disposition": "ready",
                 "agentRunStart": build_agent_run_start(run, controller_authority=authority, execution_mode=body["executionMode"])})
     except AgentRun.DoesNotExist:
         return JsonResponse({"error": "agent_run_not_found"}, status=404)
@@ -1793,7 +1834,7 @@ def transition_agent_run(request):
                     response = JsonResponse({"error": "execution_queue_expiry_unavailable"}, status=503)
                     response["Retry-After"] = "5"
                     return response
-            if agent_run.transitionReason in {"execution_queue_expired", "agent_run_api_deadline_expired", "agent_run_api_authority_revoked"}:
+            if agent_run.transitionReason in AGENT_RUN_POLICY_TRANSITION_REASONS:
                 reason = agent_run.transitionReason
             if state == "running":
                 if agent_run.status == "running":

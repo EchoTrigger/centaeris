@@ -1,5 +1,6 @@
 use super::*;
 mod control;
+pub(super) mod finalization;
 pub(crate) mod retained_cleanup;
 pub(super) use control::advance as advance_control;
 
@@ -274,6 +275,19 @@ pub(super) fn teardown(
         envelope.job_id,
         envelope.lease_owner,
         *envelope.agent_run_cleanup,
+        |run, receipt| {
+            Ok(http_response(
+                200,
+                "application/json",
+                serde_json::to_vec(&json!({
+                    "schema": "runtime.agent_run.teardown.result.v1",
+                    "agentRunId": run,
+                    "status": "cleanupConfirmed",
+                    "cleanupReceiptId": receipt,
+                }))
+                .map_err(|_| "cleanup response encoding failed")?,
+            ))
+        },
     )
 }
 
@@ -282,6 +296,7 @@ fn teardown_owned_tasks(
     job_id: String,
     lease_owner: String,
     cleanup: crate::contract::AgentRunCleanup,
+    confirmed: impl FnOnce(&str, &str) -> Result<Response<Body>, String>,
 ) -> Result<Response<Body>, String> {
     use crate::postgres_store::cleanup_receipts::{CleanupAuthorityRequest, CleanupTarget};
     use centaeris_core::execution::{
@@ -544,15 +559,8 @@ fn teardown_owned_tasks(
     {
         contexts.remove(session_id);
     }
-    Ok(http_response(
-        200,
-        "application/json",
-        serde_json::to_vec(&json!({
-            "schema":"runtime.agent_run.teardown.result.v1", "agentRunId":cleanup.agent_run_id,
-            "status":"cleanupConfirmed", "cleanupReceiptId":receipt.receipt_id,
-        }))
-        .map_err(|_| "cleanup response encoding failed")?,
-    ))
+    drop(contexts);
+    confirmed(&cleanup.agent_run_id, &receipt.receipt_id)
 }
 
 pub(super) fn step(

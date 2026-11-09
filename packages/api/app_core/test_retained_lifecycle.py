@@ -24,6 +24,19 @@ class RetainedLifecycleTests(ExecutionPublicationFixture, TransactionTestCase):
     def terminal(self):
         AgentRun.objects.filter(pk=self.run.pk).update(preAdmissionCancelledAt=timezone.now())
 
+    def finalize(self, state="completed", **changes):
+        return self.post("finalize", **({
+            "schema": "runtime.agent_run_lifecycle.finalize.v1", "terminalState": state,
+        } | changes))
+
+    def commit_completion(self):
+        now_ms = int(timezone.now().timestamp() * 1000)
+        SessionEvent.objects.create(eventId="terminal-event", workspace_id=self.run.workspace_id,
+            session_id=self.run.session_id, agent_run=self.run, sequence=1, agent_run_sequence=1,
+            projects_to_agent_run_stream=True, createdAtMs=now_ms,
+            payload={"type": "agent_run_completed", "createdAtMs": now_ms,
+                "payload": {"doneReason": "finalized"}})
+
     def test_both_modes_acquire_and_replay_the_same_persisted_controller(self):
         for mode in ('perRun', 'retained'):
             with self.subTest(mode=mode):
@@ -71,18 +84,81 @@ class RetainedLifecycleTests(ExecutionPublicationFixture, TransactionTestCase):
         self.assertEqual(self.session.current_environment.controller_epoch, 0)
 
     def test_core_terminal_event_overrides_running_projection(self):
-        now_ms = int(timezone.now().timestamp() * 1000)
-        SessionEvent.objects.create(eventId='terminal-event', workspace_id=self.run.workspace_id,
-            session_id=self.run.session_id, agent_run=self.run, sequence=1, agent_run_sequence=1,
-            projects_to_agent_run_stream=True, createdAtMs=now_ms,
-            payload={'type': 'agent_run_completed', 'createdAtMs': now_ms,
-                'payload': {'doneReason': 'finalized'}})
+        self.commit_completion()
         with patch('app_core.http.internal.build_agent_run_start', side_effect=AssertionError('execute builder called')):
             result = self.post()
         self.assertEqual(result.status_code, 200, result.content)
         self.assertEqual(result.json()['terminalState'], 'completed')
         self.run.refresh_from_db()
         self.assertEqual(self.run.status, 'completed')
+
+    def test_finalize_rejects_missing_or_conflicting_terminal_before_projection_or_control(self):
+        response = self.finalize()
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json(), {"error": "agent_run_semantic_terminal_missing"})
+        self.commit_completion()
+        response = self.finalize("failed")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json(), {"error": "agent_run_semantic_terminal_mismatch"})
+        self.assertEqual(self.finalize("running").status_code, 400)
+        self.assertEqual(self.finalize(executionMode="retained").status_code, 400)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, "running")
+        self.assertIsNone(self.run.completedAt)
+        self.assertEqual(self.run.environment.controller_epoch, 0)
+
+    def test_finalize_pins_live_lease_before_projecting_committed_terminal(self):
+        self.commit_completion()
+        response = self.finalize(leaseOwner="worker:foreign-owner")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json(), {"error": "environment_controller_lease_rejected"})
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE runtime.runtime_jobs SET lease_expires_at_ms=0 WHERE job_id=%s", [self.job_id])
+        response = self.finalize()
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json(), {"error": "environment_controller_lease_rejected"})
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, "running")
+        self.assertIsNone(self.run.completedAt)
+        self.assertEqual(self.run.environment.controller_epoch, 0)
+
+    def test_finalize_projects_terminal_and_replays_release_history(self):
+        from .environment_lifecycle import release_environment_controller
+
+        self.commit_completion()
+        response = self.finalize()
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(set(payload), {"schema", "disposition", "terminalState", "agentRunCleanup"})
+        self.assertEqual(payload["schema"], "runtime.agent_run_lifecycle.resolved.v1")
+        self.assertEqual(payload["disposition"], "terminal")
+        self.assertEqual(payload["terminalState"], "completed")
+        controller = payload["agentRunCleanup"]["environmentAuthorization"]["payload"]
+        self.assertEqual(controller["controllerPurpose"], "cleanup")
+        self.assertEqual(controller["executionMode"], "perRun")
+        self.assertEqual(self.finalize().json(), payload)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.status, "completed")
+        self.assertEqual(self.run.transitionReason, "runtime_session_terminal_committed")
+
+        receipt = release_environment_controller(self.run.pk, controller["controllerEpoch"], self.owner)
+        replay = self.finalize()
+        self.assertEqual(replay.status_code, 200, replay.content)
+        self.assertEqual(replay.json(), {
+            "schema": "runtime.agent_run_lifecycle.resolved.v1", "disposition": "released",
+            "terminalState": "completed", "releaseReceiptId": receipt["releaseReceiptId"],
+        })
+
+    def test_finalize_keeps_existing_expiry_and_revocation_reasons(self):
+        self.terminal()
+        for reason in ("execution_queue_expired", "agent_run_api_deadline_expired", "agent_run_api_authority_revoked"):
+            with self.subTest(reason=reason):
+                AgentRun.objects.filter(pk=self.run.pk).update(transitionReason=reason)
+                response = self.finalize("cancelled")
+                self.assertEqual(response.status_code, 200, response.content)
+                self.run.refresh_from_db()
+                self.assertEqual(self.run.status, "cancelled")
+                self.assertEqual(self.run.transitionReason, reason)
 
     def test_final_committed_during_acquire_resolves_cleanup_instead_of_execute(self):
         from .environment_lifecycle import acquire_environment_controller

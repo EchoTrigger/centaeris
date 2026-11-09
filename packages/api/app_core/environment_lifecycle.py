@@ -142,6 +142,14 @@ def acquire_environment_cleanup_controller(run_id, lease_owner):
     return _acquire_controller(run_id, lease_owner, "cleanup")
 
 
+def project_run_for_environment_cleanup(run_id, lease_owner, project):
+    """Pin current lifecycle authority through the short terminal projection."""
+    def apply_projection():
+        run, _ = _locked_binding(run_id, lease_owner, acquiring=False)
+        return project(run)
+    return _translate_contention(apply_projection)
+
+
 def _stored_release(run):
     receipt = AgentRunEnvironmentRelease.objects.filter(agent_run_id=run.pk).first()
     if receipt is not None and (receipt.environment_id != run.environment_id

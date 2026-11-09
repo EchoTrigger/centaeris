@@ -53,7 +53,8 @@ impl RequestPolicy {
             ))
             || (method == "GET" && path.starts_with("/internal/jobs/"));
         let listener = method == "POST" && path == "/internal/jobs/wait";
-        let cleanup = method == "POST" && path == "/agent-runs/teardown";
+        let cleanup =
+            method == "POST" && matches!(path, "/agent-runs/teardown" | "/agent-runs/finalize");
         // Long execution and cleanup retain their lease/cancellation lifetime.
         let execution =
             method == "POST" && matches!(path, "/agent-runs/step" | "/internal/benchmark/exec");
@@ -90,6 +91,7 @@ mod tests {
         for path in [
             "/agent-runs/step",
             "/agent-runs/teardown",
+            "/agent-runs/finalize",
             "/internal/benchmark/exec",
         ] {
             assert!(policy.lane("POST", path).deadline.is_none());
@@ -102,7 +104,9 @@ mod tests {
             policy.lane("POST", "/internal/jobs/wait").deadline,
             Some(Duration::from_secs(25))
         );
-        assert!(policy.lane("POST", "/agent-runs/teardown").cleanup);
+        for path in ["/agent-runs/teardown", "/agent-runs/finalize"] {
+            assert!(policy.lane("POST", path).cleanup);
+        }
         for path in [
             "/agent-runs/cancel",
             "/internal/jobs/heartbeat",
