@@ -23,6 +23,13 @@ impl RequestDeadline {
     pub(crate) fn enter(deadline: Option<Instant>) -> Self {
         Self(REQUEST_DEADLINE.with(|value| value.replace(deadline)))
     }
+
+    pub(crate) fn limit(timeout: Duration) -> Self {
+        let limit = Instant::now() + timeout;
+        let deadline =
+            REQUEST_DEADLINE.with(|value| value.get().map_or(limit, |current| current.min(limit)));
+        Self::enter(Some(deadline))
+    }
 }
 
 impl Drop for RequestDeadline {

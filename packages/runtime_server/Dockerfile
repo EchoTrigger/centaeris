@@ -14,6 +14,7 @@ COPY packages/hosted_execution packages/hosted_execution
 COPY packages/runtime_server packages/runtime_server
 COPY packages/api/app_core/contracts packages/api/app_core/contracts
 COPY packages/api/app_core/native_model_authority.sql packages/api/app_core/native_model_authority.sql
+COPY packages/api/app_core/native_projected_input_authority.sql packages/api/app_core/native_projected_input_authority.sql
 COPY packages/api/app_core/workspace_snapshot_gc_witness.sql packages/api/app_core/workspace_snapshot_gc_witness.sql
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked cargo build --release --locked -p runtime_server
 

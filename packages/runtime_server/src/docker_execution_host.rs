@@ -5,6 +5,7 @@ mod execution_inputs;
 mod maintenance;
 mod network;
 mod output_consumption;
+pub(crate) mod projected_input_authority;
 mod retained;
 mod retained_commands;
 pub(crate) mod runsc_power;
@@ -28,6 +29,7 @@ use crate::execution_recovery_policy::{
 use crate::observations::{
     MeasuredWriter, ProtectionMetric, ProtectionTrigger, WorkspaceProtection,
 };
+use projected_input_authority::ProjectedInputAuthority;
 use snapshot_capture::{SnapshotCaptureCache, SnapshotCaptureResult};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
@@ -371,6 +373,7 @@ pub struct DockerExecutionHostRunner {
     api_token: String,
     api_client: reqwest::blocking::Client,
     materialized_inputs: Mutex<BTreeMap<String, SandboxMaterializedInput>>,
+    projected_input_authority: Option<ProjectedInputAuthority>,
     resident_store: Option<Arc<PostgresRuntimeStore>>,
     resident_lease: Option<centaeris_core::session::RuntimeJobLeaseFence>,
     retained_allocation:
@@ -413,6 +416,7 @@ pub struct DockerExecutionHostRequest<'a> {
     pub api_url: String,
     pub api_token: String,
     pub plugin_activation: &'a PluginActivationSnapshotV1,
+    pub projected_input_authority: Option<ProjectedInputAuthority>,
 }
 
 #[derive(Clone, Copy)]
@@ -545,6 +549,7 @@ impl DockerExecutionHostRunner {
             runner.api_token = request.api_token;
             runner.environment_profile = request.environment_profile;
             runner.environment_authorization = Some(request.environment_authorization);
+            runner.projected_input_authority = request.projected_input_authority;
             runner.resident_store = Some(request.resident_store);
             runner.resident_lease = Some(centaeris_core::session::RuntimeJobLeaseFence {
                 job_id: request.lifecycle_job_id,
@@ -573,6 +578,7 @@ impl DockerExecutionHostRunner {
             api_url,
             api_token,
             plugin_activation,
+            projected_input_authority,
         } = request;
         if agent_run_id.trim().is_empty()
             || execution_id.trim().is_empty()
@@ -758,6 +764,7 @@ impl DockerExecutionHostRunner {
                 .build()
                 .map_err(|error| format!("build Docker sandbox API client failed: {error}"))?,
             materialized_inputs: Mutex::new(BTreeMap::new()),
+            projected_input_authority,
             resident_store: Some(resident_store),
             resident_lease: Some(centaeris_core::session::RuntimeJobLeaseFence {
                 job_id: lifecycle_job_id,
@@ -2132,6 +2139,38 @@ impl DockerExecutionHostRunner {
             .iter()
             .map(ProjectedInputValidation::from)
             .collect::<Vec<_>>();
+        let native_states = match &self.projected_input_authority {
+            Some(authority) => authority
+                .validate(self, &expected)
+                .map_err(|error| self.unavailable(error))?,
+            None => None,
+        };
+        let validation = match native_states {
+            Some(states) => states,
+            None => self.validate_platform_inputs(&expected)?,
+        };
+        let mut changes = Vec::new();
+        for (current, validated) in active.iter().zip(validation) {
+            let state = match validated {
+                ProjectedInputState::Active => continue,
+                ProjectedInputState::AssetRemoved => ExecutionInputState::AssetRemoved,
+                ProjectedInputState::AccessRevoked => ExecutionInputState::AccessRevoked,
+                ProjectedInputState::SourceDeleted => ExecutionInputState::SourceDeleted,
+                ProjectedInputState::StaleGeneration => ExecutionInputState::StaleGeneration,
+            };
+            self.revoke_input(current, state)?;
+            changes.push(ExecutionInputStateChange {
+                input_ref: current.input_ref.clone(),
+                state,
+            });
+        }
+        Ok(changes)
+    }
+
+    fn validate_platform_inputs(
+        &self,
+        expected: &[ProjectedInputValidation<'_>],
+    ) -> Result<Vec<ProjectedInputState>, ExecutionError> {
         let response = self
             .api_client
             .post(format!(
@@ -2143,7 +2182,7 @@ impl DockerExecutionHostRunner {
                 schema: VALIDATE_INPUTS_SCHEMA,
                 agent_run_id: self.agent_run_id.as_str(),
                 authorization_digest: self.authorization_digest.as_str(),
-                inputs: expected.as_slice(),
+                inputs: expected,
             })
             .timeout(Duration::from_secs(10))
             .send()
@@ -2159,28 +2198,19 @@ impl DockerExecutionHostRunner {
         let validation = response.json::<ValidateInputsResponse>().map_err(|error| {
             self.unavailable(format!("decode input validation failed: {error}"))
         })?;
-        if validation.schema != VALIDATE_INPUTS_SCHEMA || validation.inputs.len() != active.len() {
+        if validation.schema != VALIDATE_INPUTS_SCHEMA || validation.inputs.len() != expected.len() {
             return Err(self.unavailable("input validation response mismatch"));
         }
-        let mut changes = Vec::new();
-        for (current, validated) in active.iter().zip(validation.inputs) {
-            if validated.input_ref != current.input_ref {
-                return Err(self.unavailable("input validation response binding mismatch"));
-            }
-            let state = match validated.state {
-                ProjectedInputState::Active => continue,
-                ProjectedInputState::AssetRemoved => ExecutionInputState::AssetRemoved,
-                ProjectedInputState::AccessRevoked => ExecutionInputState::AccessRevoked,
-                ProjectedInputState::SourceDeleted => ExecutionInputState::SourceDeleted,
-                ProjectedInputState::StaleGeneration => ExecutionInputState::StaleGeneration,
-            };
-            self.revoke_input(current, state)?;
-            changes.push(ExecutionInputStateChange {
-                input_ref: current.input_ref.clone(),
-                state,
-            });
-        }
-        Ok(changes)
+        expected
+            .iter()
+            .zip(validation.inputs)
+            .map(|(expected, actual)| {
+                if actual.input_ref != expected.input_ref {
+                    return Err(self.unavailable("input validation response binding mismatch"));
+                }
+                Ok(actual.state)
+            })
+            .collect()
     }
 
     fn revoke_input(
@@ -4603,6 +4633,7 @@ mod tests {
                         api_url: api_url.clone(),
                         api_token: "centaeris-recovery-test-token".into(),
                         plugin_activation: &activation,
+                        projected_input_authority: None,
                     },
                     before,
                 )
@@ -7060,6 +7091,7 @@ mod tests {
             api_token: "token".to_string(),
             api_client: reqwest::blocking::Client::new(),
             materialized_inputs: Mutex::new(BTreeMap::new()),
+            projected_input_authority: None,
             resident_store: None,
             resident_lease: None,
             retained_allocation: None,

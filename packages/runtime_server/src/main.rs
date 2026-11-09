@@ -130,6 +130,7 @@ use contract::{
     AgentRunTailAction, HostEventInputRequest,
 };
 use deferred_input_resolver::{ApiDeferredInputResolver, ApiModelInputImageResolver};
+use docker_execution_host::projected_input_authority::ProjectedInputAuthority;
 use docker_execution_host::{
     resolve_workspace_image_digest, DockerExecutionHostRequest, DockerExecutionHostRunner,
     SessionWorkspaceApiError, SessionWorkspaceCommitOutcome, SessionWorkspaceLease,
@@ -2302,6 +2303,9 @@ fn execute_agent_run(
                     api_url: api_url.clone(),
                     api_token: token.clone(),
                     plugin_activation: &agent_run_start.authorization.plugin_activation,
+                    projected_input_authority: ProjectedInputAuthority::from_verified_start(
+                        &agent_run_start,
+                    )?,
                 },
                 &mut |client| admitted(Some(client)),
             )
