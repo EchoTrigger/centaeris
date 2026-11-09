@@ -1,5 +1,26 @@
 # Hosted model gateway boundary
 
+An optional native Responses route is selected by
+`RUNTIME_NATIVE_RESPONSES_PROVIDER_ID`, the ID of an enabled Workspace-owned
+provider. The pilot covers interactive Runs using that provider's
+OpenAI Responses route with standard request headers. Other routes use the
+existing gateway.
+
+At each lifecycle execution lease, Runtime requests a model grant from Django.
+The request proves Runtime signing-key possession and binds the Run, lease and
+provider. Django seals the matching bearer and route to that request using
+AES-256-GCM with a key derived from the shared Runtime signing key. Runtime
+retains the bearer in the scoped model client and compares the current
+PostgreSQL authority witness immediately before each provider dispatch, including
+retries. A stale grant or lease rejects the selected route. The provider must use
+HTTPS with a certificate trusted by Runtime. Redirects are disabled.
+
+The direct route reuses Core's Responses adapter and the bounded Rust HTTP
+transport. It writes sanitized per-attempt ModelRunLog outcomes, including token
+usage and cancellation, without calling the Django model execution endpoint.
+An ambiguous transport failure after dispatch closes the attempt without
+resending it.
+
 Core owns model and task semantics through `ModelClient`. Hosted Runtime calls
 Django `/internal/model-runs`; Django owns provider credentials, request
 validation and OpenAI/Anthropic SDK adaptation. The configured upstream may be a

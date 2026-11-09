@@ -566,6 +566,7 @@ pub(super) fn step(
         job_store,
         tool_layers,
         tool_concurrency_registry,
+        native_model,
         ..
     } = state;
     let agent_run_step = match serde_json::from_slice::<AgentRunStepRequest>(body.as_ref())
@@ -611,6 +612,7 @@ pub(super) fn step(
             agent_run_step.lease_owner,
             tool_layers.clone(),
             tool_concurrency_registry,
+            native_model,
         )
     });
     if let Ok(Err(error)) = &execution {
@@ -730,8 +732,8 @@ fn execution_control_failure_response(
     agent_run_id: &str,
     error: &str,
 ) -> Option<Result<Response<Body>, String>> {
-    error
-        .starts_with("run_execution_control_probe_failed:")
+    (error.starts_with("run_execution_control_probe_failed:")
+        || error == "native_model_grant_unavailable")
         .then(|| {
             agent_run_step_failure_response(
                 agent_run_id,

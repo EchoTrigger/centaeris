@@ -16,6 +16,7 @@ fn http_state(runtime: Arc<tokio::runtime::Runtime>) -> HttpServerState {
             schema: RUNTIME_EXECUTION_PROFILE_SCHEMA,
             image_digest: "sha256:synthetic-http-fixture".into(),
         }),
+        native_model: None,
         request_policy: request_policy::RequestPolicy::for_http_tests(Duration::from_secs(2)),
     }
 }
