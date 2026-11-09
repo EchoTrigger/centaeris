@@ -150,6 +150,8 @@ class ArtifactLocalStorageContractTests(SimpleTestCase):
 
 
 class ArtifactPublicationAuthorityTests(TransactionTestCase):
+    serialized_rollback = True
+
     def test_membership_revocation_during_upload_leaves_only_staging_reservation(self):
         directory = self.enterContext(tempfile.TemporaryDirectory(prefix="artifact-publication-authority-"))
         self.enterContext(override_settings(MEDIA_ROOT=directory))
