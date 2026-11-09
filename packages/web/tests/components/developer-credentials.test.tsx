@@ -299,7 +299,8 @@ test("the example selector copies the selected request and switches the quicksta
   expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("curl -N"));
 
   await user.click(screen.getByRole("link", { name: "Docs" }));
-  const quickstartExamples = within(await screen.findByRole("group", { name: "Example language" }));
+  await screen.findByRole("heading", { name: "Quickstart", level: 1 });
+  const quickstartExamples = within(screen.getByRole("group", { name: "Example language" }));
   await user.click(quickstartExamples.getByRole("button", { name: "Node.js" }));
   await user.click(screen.getByRole("button", { name: "Copy example" }));
   expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("centaeris-first-call"));
