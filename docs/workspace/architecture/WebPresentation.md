@@ -96,7 +96,9 @@ for Session deletion or a completed replay checkpoint.
 
 Normal referenced content is pushed in sequential ranges of at most 64 KiB.
 For each snapshot or patch page, Django groups up to 128 body references per
-internal Runtime NDJSON stream. Runtime loads each source event once and keeps
+internal Runtime NDJSON stream. Each ASGI worker reuses one upstream HTTP
+client for its lifetime. Closing a subscription closes its upstream response
+and returns the connection to the worker's pool. Runtime loads each source event once and keeps
 one bounded UTF-8 prefix per stream. Later ranges check the current projection
 generation, head and event row version using metadata, and return their
 database connection before sending bytes. Runtime budgets up to 256 MiB per

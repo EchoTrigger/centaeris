@@ -2,6 +2,7 @@ from contextlib import nullcontext
 from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+import httpx
 from django.test import SimpleTestCase
 
 
@@ -28,6 +29,8 @@ class PresentationApplicationTests(SimpleTestCase):
         module = import_module("api.asgi")
         order = []
         hub = SimpleNamespace(aclose=AsyncMock(side_effect=lambda: order.append("observer-close")))
+        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _request: httpx.Response(200)))
+        django_app = AsyncMock()
         messages = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
         async def receive():
             return next(messages)
@@ -38,15 +41,26 @@ class PresentationApplicationTests(SimpleTestCase):
             sample_task = owner.memory_observations._task
             self.assertIsNotNone(sample_task)
             self.assertFalse(sample_task.done())
+            await owner({"type": "http", "path": "/api/first"}, AsyncMock(), AsyncMock())
+            await owner({"type": "http", "path": "/api/second"}, AsyncMock(), AsyncMock())
+            self.assertEqual(django_app.await_count, 2)
+            for call in django_app.await_args_list:
+                self.assertIs(call.args[0]["centaeris.transcriptContentClient"], client)
+            self.assertFalse(client.is_closed)
             self.assertEqual((await read())["type"], "lifespan.shutdown")
             self.assertTrue(sample_task.done())
             self.assertIsNone(owner.memory_observations._task)
+            self.assertTrue(client.is_closed)
             order.append("mcp-shutdown")
             await send({"type": "lifespan.shutdown.complete"})
-        with patch.object(module, "create_presentation_hub", return_value=hub), patch.object(module, "create_mcp_app", return_value=mcp):
+        with (patch.object(module, "create_presentation_hub", return_value=hub),
+              patch.object(module, "create_mcp_app", return_value=mcp),
+              patch.object(module, "create_transcript_content_client", return_value=client) as create,
+              patch.object(module, "django_application", django_app)):
             owner = module.WorkspaceApplication()
             send = AsyncMock()
             await owner({"type": "lifespan"}, receive, send)
+            create.assert_called_once_with()
         self.assertEqual(order, ["mcp-startup", "observer-close", "mcp-shutdown"])
         self.assertEqual([call.args[0]["type"] for call in send.await_args_list], ["lifespan.startup.complete", "lifespan.shutdown.complete"])
 

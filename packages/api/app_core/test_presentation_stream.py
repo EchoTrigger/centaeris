@@ -497,6 +497,25 @@ class PresentationStreamTests(SimpleTestCase):
                             pass
                 self.assertTrue(body.closed)
 
+    async def test_cancelled_content_response_leaves_borrowed_client_open_for_the_next_batch(self):
+        reference = {"refId": "session-event:shared", "revision": "1", "byteLength": "3"}
+        frames = [ndjson(content_range(reference, 0, 3, "one")), ndjson(COMPLETE)]
+        first, second = RuntimeContentBody(frames, block=True), RuntimeContentBody(frames)
+        bodies = iter((first, second))
+        transport = httpx.MockTransport(lambda _request: httpx.Response(
+            200, headers={"Content-Type": MEDIA_TYPE}, stream=next(bodies),
+        ))
+        async with httpx.AsyncClient(transport=transport) as client:
+            batches = ("session", PROJECTION_VERSION, "generation", [reference], 8)
+            interrupted = stream_transcript_content(*batches, client=client)
+            self.assertEqual((await anext(interrupted))["content"], "one")
+            await interrupted.aclose()
+            self.assertTrue(first.closed)
+            self.assertFalse(client.is_closed)
+            result = [item["content"] async for item in stream_transcript_content(*batches, client=client)]
+            self.assertEqual(result, ["one"])
+            self.assertTrue(second.closed)
+
     async def test_slow_consumer_leaves_only_one_pending_frame_and_does_not_load_ahead(self):
         source = stream_presentation(self.scope, self.loader, heartbeat_seconds=.005)
         await anext(source)

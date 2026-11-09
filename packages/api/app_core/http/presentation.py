@@ -112,6 +112,7 @@ class PresentationLoader:
     def content_stream(self, generation, references, max_display_bytes):
         return stream_transcript_content(
             self.scope.session_id, PROJECTION_VERSION, generation, references, max_display_bytes,
+            client=getattr(self.request, "scope", {}).get("centaeris.transcriptContentClient"),
         )
 
     @stream_database_call

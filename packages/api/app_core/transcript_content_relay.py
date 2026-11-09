@@ -1,6 +1,6 @@
 """Bounded async transport for Runtime's presentation-only content batches."""
 import json
-from contextlib import aclosing
+from contextlib import aclosing, nullcontext
 
 import httpx
 from django.conf import settings
@@ -118,14 +118,23 @@ async def _ranges(response, body):
         raise _invalid()
 
 
-async def stream_transcript_content(session_id, projection_version, generation, references, max_display_bytes):
+def create_transcript_content_client():
+    return httpx.AsyncClient(
+        timeout=settings.RUNTIME_START_TIMEOUT_SECONDS, follow_redirects=False,
+        # Presentation admission bounds concurrent streams. Bound idle sockets
+        # separately so the pool adds no queue in front of the admitted streams.
+        limits=httpx.Limits(max_connections=None, max_keepalive_connections=20),
+    )
+
+
+async def stream_transcript_content(session_id, projection_version, generation, references, max_display_bytes, *, client=None):
     body = {
         "schema": REQUEST_SCHEMA, "sessionId": session_id, "projectionVersion": projection_version,
         "projectionGeneration": generation, "references": references, "maxDisplayBytes": max_display_bytes,
     }
     headers = {"X-Internal-Token": settings.INTERNAL_API_TOKEN, "Accept": MEDIA_TYPE, "Accept-Encoding": "identity"}
     try:
-        async with httpx.AsyncClient(timeout=settings.RUNTIME_START_TIMEOUT_SECONDS, follow_redirects=False) as client:
+        async with (nullcontext(client) if client is not None else create_transcript_content_client()) as client:
             async with client.stream(
                 "POST", f"{settings.RUNTIME_URL.rstrip('/')}/internal/transcript/content-stream", json=body, headers=headers,
             ) as response:
