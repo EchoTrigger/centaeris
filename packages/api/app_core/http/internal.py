@@ -1344,7 +1344,7 @@ def validate_projected_inputs(request):
                 .get(id=str(body["agentRunId"]))
             )
             states = []
-            resolve_storage = input_storage_batch(agent_run, str(body["authorizationDigest"]))
+            resolve_storage = input_storage_batch(agent_run, str(body["authorizationDigest"]), authority_only=True)
             for expected in body["inputs"]:
                 try:
                     current, _storage_key = resolve_storage(expected["inputRef"])

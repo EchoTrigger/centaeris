@@ -12,6 +12,11 @@ SELECT input.descriptor->>'inputRef' AS input_ref,
            WHEN record.id IS NULL OR note.id IS NULL OR note."objectKind" <> 'note'
              OR (declared.descriptor IS NOT NULL AND
                  declared.descriptor->'inputIdentity'->>'ownerKind' <> 'userLibraryObject') THEN 'legacy'
+           WHEN NOT EXISTS (
+               SELECT 1 FROM pg_catalog.pg_constraint
+               WHERE conrelid = 'public.app_core_librarynoterevision'::pg_catalog.regclass
+                 AND conname = 'note_revision_body_identity' AND contype = 'c' AND convalidated
+           ) THEN 'legacy'
            WHEN NOT (current_run.session_status = 'active' AND owner.is_active)
              OR (declared.descriptor IS NULL AND NOT COALESCE(material_scope.personal_library, false)) THEN 'access_revoked'
            WHEN note.status = 'deleted' THEN 'asset_removed'
@@ -31,8 +36,6 @@ SELECT input.descriptor->>'inputRef' AS input_ref,
              OR head.sha256 IS DISTINCT FROM note.sha256
              OR head."sizeBytes" IS DISTINCT FROM note."sizeBytes"
              OR head."displayName" IS DISTINCT FROM note."displayName"
-             OR octet_length(convert_to(head.markdown, 'UTF8')) IS DISTINCT FROM head."sizeBytes"
-             OR 'sha256:' || encode(sha256(convert_to(head.markdown, 'UTF8')), 'hex') IS DISTINCT FROM head.sha256
              THEN 'invalid'
            WHEN record.resolved->'inputRef' IS DISTINCT FROM input.descriptor->'inputRef'
              OR record.resolved->'virtualPath' IS DISTINCT FROM input.descriptor->'virtualPath'

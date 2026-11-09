@@ -8,7 +8,7 @@ from .assets import (
     resolved_input_for_link,
 )
 from .models import SessionAssetLink
-from .note_content import ContentSource
+from .note_content import ContentSource, note_revision_body_identity_is_enforced
 from .runtime_contract import (
     authorization_digest,
     _verify_authorization_digest_signature,
@@ -32,12 +32,16 @@ def resolved_input_storage(
     return current["resolvedInput"], current["contentSource"]
 
 
-def input_storage_batch(agent_run, expected_authorization_digest: str):
+def input_storage_batch(agent_run, expected_authorization_digest: str, *, authority_only=False):
     """A resolver owned by one request, never shared across tool calls."""
     verified = []
+    include_note_body = not authority_only or not note_revision_body_identity_is_enforced()
 
     def resolve(input_ref):
-        current = _current_input(agent_run, input_ref, expected_authorization_digest, verified)
+        current = _current_input(
+            agent_run, input_ref, expected_authorization_digest, verified,
+            include_note_body=include_note_body,
+        )
         return current["resolvedInput"], current["contentSource"]
 
     return resolve
@@ -71,10 +75,15 @@ def verify_input_run(agent_run, expected_authorization_digest: str, verified=Non
     return authorization
 
 
-def _current_input(agent_run, input_ref: str, expected_authorization_digest: str, verified=None) -> dict:
+def _current_input(
+    agent_run, input_ref: str, expected_authorization_digest: str, verified=None, *, include_note_body=True,
+) -> dict:
     authorization = verify_input_run(agent_run, expected_authorization_digest, verified)
     from .library_materials import resolve_library_input
-    library = resolve_library_input(agent_run, input_ref)
+    library = (
+        resolve_library_input(agent_run, input_ref) if include_note_body
+        else resolve_library_input(agent_run, input_ref, include_note_body=False)
+    )
     if library is not None:
         return {"resolvedInput": library[0], "contentSource": library[1]}
     declared = next(
@@ -87,12 +96,15 @@ def _current_input(agent_run, input_ref: str, expected_authorization_digest: str
     )
     if declared is None:
         raise DeferredInputResolutionError("asset_unavailable")
+    links = SessionAssetLink.objects.select_related(
+        "sourceObject__source",
+        "userLibraryObject__noteHead",
+        "artifact",
+    )
+    if not include_note_body:
+        links = links.defer("userLibraryObject__noteHead__markdown")
     try:
-        link = SessionAssetLink.objects.select_related(
-            "sourceObject__source",
-            "userLibraryObject__noteHead",
-            "artifact",
-        ).get(
+        link = links.get(
             id=input_ref,
             workspace_id=agent_run.workspace_id,
             session_id=agent_run.session_id,
@@ -129,7 +141,7 @@ def _current_input(agent_run, input_ref: str, expected_authorization_digest: str
     owner = link.sourceObject or link.userLibraryObject or link.artifact
     from .note_content import content_source
     try:
-        storage_key = content_source(owner)
+        storage_key = content_source(owner, include_note_body=include_note_body)
     except FileNotFoundError:
         raise DeferredInputResolutionError("asset_unavailable")
     return {"resolvedInput": resolved, "contentSource": storage_key}

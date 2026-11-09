@@ -1,17 +1,21 @@
+from importlib import import_module
 import json
 from pathlib import Path
 import re
+from unittest.mock import patch
 from uuid import uuid4
 
 from django.conf import settings
-from django.db import connection
+from django.db import connection, transaction
 from django.test import TransactionTestCase
 
 from .assets import tombstone_stored_object
+from .deferred_input import resolve_deferred_input
 from .environment_lifecycle import acquire_environment_controller
 from .library_notes import save_note
 from .material_files import confirm_original
-from .models import LibraryNoteRevision, UserLibraryObject, WorkspaceMembership
+from .models import UserLibraryObject, WorkspaceMembership
+from .note_content import NoteRevision
 from .test_personal_library_materials import PersonalLibraryMaterialFixture
 from .testing import leased_lifecycle_job_fixture
 
@@ -151,25 +155,62 @@ class NativeProjectedInputAuthorityTests(PersonalLibraryMaterialFixture, Transac
         self.assertEqual(self.grant.payload["messageAssetRefs"], [descriptor["inputRef"]])
         self.assert_state(descriptor, "active")
 
-    def test_corrupt_note_body_fails_closed_and_external_storage_is_legacy(self):
+    def test_mismatched_note_head_fails_closed_and_external_storage_is_legacy(self):
         run = self.new_run()
         self.activate(run)
         descriptor, call_id = self.prepared(run)
         self.confirm(run, descriptor, call_id)
-        head = self.note.noteHead
-        UserLibraryObject.objects.filter(pk=self.note.pk).update(noteHead=None)
+        foreign = self.new_note(self.note.displayName, self.note.noteHead.markdown)
+        UserLibraryObject.objects.filter(pk=self.note.pk).update(noteHead=None, storageKey="library/missing-original.md")
         self.assertEqual(self.native([descriptor]), [(descriptor["inputRef"], "legacy")])
-        # A persisted revision cannot be rewritten. Create a malformed row to
-        # exercise integrity handling without disabling the immutability trigger.
-        LibraryNoteRevision.objects.filter(pk=head.pk).delete()
-        corrupt = LibraryNoteRevision.objects.create(
-            note=self.note, generation=head.generation, displayName=head.displayName,
-            markdown=head.markdown.replace("exact", "wrong"), sha256=head.sha256,
-            sizeBytes=head.sizeBytes, createdBy=self.user,
-        )
-        UserLibraryObject.objects.filter(pk=self.note.pk).update(noteHead=corrupt)
+        fallback = self.legacy([descriptor])
+        self.assertEqual(fallback.status_code, 200, fallback.content)
+        self.assertEqual(fallback.json()["inputs"], [{"inputRef": descriptor["inputRef"], "state": "access_revoked"}])
+        UserLibraryObject.objects.filter(pk=self.note.pk).update(noteHead=foreign.noteHead)
         self.assertEqual(self.legacy([descriptor]).status_code, 400)
         self.assertEqual(self.native([descriptor]), [(descriptor["inputRef"], "invalid")])
+
+    def test_mixed_batch_authority_does_not_materialize_validated_note_bodies(self):
+        attached = self.new_note("Attachment", "original attachment")
+        link = self.attach(attached)
+        run = self.new_run(message_refs=[link.pk])
+        self.activate(run)
+        note, call_id = self.prepared(run)
+        self.confirm(run, note, call_id)
+        attachment = resolve_deferred_input(run, link.pk, run.authorization.digest)
+        descriptors = sorted(
+            [note, {field: attachment[field] for field in DESCRIPTOR_FIELDS}],
+            key=lambda descriptor: descriptor["inputRef"],
+        )
+        states = {note["inputRef"]: "active", link.pk: "legacy"}
+        self.assertEqual(self.native(descriptors), [
+            (item["inputRef"], states[item["inputRef"]]) for item in descriptors
+        ])
+        with patch("app_core.note_content.NoteRevision", side_effect=AssertionError("loaded a validated body")):
+            fallback = self.legacy(descriptors)
+        self.assertEqual(fallback.status_code, 200, fallback.content)
+        self.assertEqual(fallback.json()["inputs"], [
+            {"inputRef": item["inputRef"], "state": "active"} for item in descriptors
+        ])
+
+    def test_unvalidated_constraint_keeps_body_checks_in_the_legacy_resolver(self):
+        run = self.new_run()
+        self.activate(run)
+        descriptor, call_id = self.prepared(run)
+        self.confirm(run, descriptor, call_id)
+        addition = import_module("app_core.migrations.0052_library_note_body_constraint")
+        with transaction.atomic():
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "ALTER TABLE public.app_core_librarynoterevision DROP CONSTRAINT note_revision_body_identity"
+                )
+                cursor.execute(addition.ADD_CONSTRAINT)
+            self.assertEqual(self.native([descriptor]), [(descriptor["inputRef"], "legacy")])
+            with patch("app_core.note_content.NoteRevision", wraps=NoteRevision) as captured:
+                response = self.legacy([descriptor])
+            self.assertEqual(response.status_code, 200, response.content)
+            captured.assert_called_once()
+            transaction.set_rollback(True)
 
     def test_live_run_proof_and_membership_are_required(self):
         run = self.new_run()

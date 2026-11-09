@@ -11,7 +11,7 @@ from threading import Barrier
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.files.storage import default_storage
-from django.db import transaction, close_old_connections
+from django.db import IntegrityError, transaction, close_old_connections
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.db.migrations.executor import MigrationExecutor
 from asgiref.sync import async_to_sync
@@ -245,27 +245,24 @@ class PersonalLibraryMaterialTests(PersonalLibraryMaterialFixture, TestCase):
         self.assertFalse(RunMaterialAdmission.objects.get().confirmed)
         self.assertFalse(SessionMaterialInput.objects.get().confirmed)
 
-    def test_confirmation_checks_current_note_body_after_prepare(self):
+    def test_corrupt_replacement_cannot_change_note_before_confirmation(self):
         run = self.new_run()
         original, call_id = self.prepare(run)
         head = self.note.noteHead
-        # Recreate a malformed fixture revision without bypassing its update trigger.
-        UserLibraryObject.objects.filter(pk=self.note.pk).update(noteHead=None)
-        head.delete()
-        corrupt = LibraryNoteRevision.objects.create(
-            note=self.note, generation=head.generation, displayName=head.displayName,
-            markdown=head.markdown.replace("exact", "wrong"), sha256=head.sha256,
-            sizeBytes=head.sizeBytes, createdBy=self.user,
-        )
-        UserLibraryObject.objects.filter(pk=self.note.pk).update(noteHead=corrupt)
+        with self.assertRaisesMessage(IntegrityError, "note_revision_body_identity"), transaction.atomic():
+            UserLibraryObject.objects.filter(pk=self.note.pk).update(noteHead=None)
+            head.delete()
+            LibraryNoteRevision.objects.create(
+                note=self.note, generation=head.generation, displayName=head.displayName,
+                markdown=head.markdown.replace("exact", "wrong"), sha256=head.sha256,
+                sizeBytes=head.sizeBytes, createdBy=self.user,
+            )
 
         context = material_context(run.pk, run.authorization.digest)
         self.assertEqual(context["pendingInputs"][0]["state"], "active")
-        with self.assertRaisesMessage(ValueError, "note_revision_identity_mismatch"):
-            confirm_original(run.pk, run.authorization.digest, original["inputRef"],
-                             original["sourceVersion"], original["sha256"], call_id)
-        self.assertFalse(RunMaterialAdmission.objects.get().confirmed)
-        self.assertFalse(SessionMaterialInput.objects.get().confirmed)
+        confirmed = confirm_original(run.pk, run.authorization.digest, original["inputRef"],
+                                     original["sourceVersion"], original["sha256"], call_id)
+        self.assertEqual(confirmed["resolvedInput"], original)
 
     def test_deleted_and_restored_library_object_does_not_revive_an_old_input_version(self):
         run = self.new_run()

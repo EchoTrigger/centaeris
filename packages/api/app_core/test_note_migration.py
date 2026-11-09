@@ -1,5 +1,6 @@
 """Backfill preserves source bytes and never installs a stale file capture."""
 
+import hashlib
 import tempfile
 from io import StringIO
 from unittest.mock import patch
@@ -7,10 +8,57 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.core.files.storage import default_storage
 from django.core.management import call_command
+from django.db import IntegrityError, transaction
+from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase, override_settings
 
 from .assets import store_bytes
+from .migration_testing import isolated_migration_database
 from .models import LibraryNoteRevision, UserLibraryObject
+
+
+class NoteBodyConstraintMigrationTests(TransactionTestCase):
+    def test_constraint_validates_legacy_rows_and_rejects_invalid_new_bytes(self):
+        previous = [("app_core", "0051_agent_api_release_cleanup")]
+        added = [("app_core", "0052_library_note_body_constraint")]
+        validated = [("app_core", "0053_validate_library_note_body_constraint")]
+        with isolated_migration_database(previous) as isolated:
+            historical = MigrationExecutor(isolated).loader.project_state(previous).apps
+            alias = isolated.alias
+            user = historical.get_model("auth", "User").objects.using(alias).create(username="legacy-body-owner")
+            note = historical.get_model("app_core", "UserLibraryObject").objects.using(alias).create(
+                owner_id=user.pk, objectKind="note", displayName="Legacy", status="ready",
+            )
+            revisions = historical.get_model("app_core", "LibraryNoteRevision").objects.using(alias)
+            markdown = "legacy\r\n正文🌱"
+            body = markdown.encode("utf-8")
+            fields = {
+                "note_id": note.pk, "displayName": "Legacy", "markdown": markdown, "createdBy_id": user.pk,
+                "sizeBytes": len(body), "sha256": "sha256:" + hashlib.sha256(body).hexdigest(),
+            }
+            good = revisions.create(generation=1, **fields)
+            bad = revisions.create(generation=2, **(fields | {"sha256": "sha256:" + "0" * 64}))
+
+            MigrationExecutor(isolated).migrate(added)
+            for change in ({"sizeBytes": len(body) - 1}, {"sha256": "sha256:" + "0" * 64}):
+                with self.subTest(change=change):
+                    with self.assertRaisesMessage(IntegrityError, "note_revision_body_identity"), transaction.atomic(using=alias):
+                        revisions.create(generation=3, **(fields | change))
+
+            with self.assertRaisesMessage(IntegrityError, "note_revision_body_identity"):
+                MigrationExecutor(isolated).migrate(validated)
+            with isolated.cursor() as cursor:
+                cursor.execute(
+                    "SELECT convalidated FROM pg_catalog.pg_constraint "
+                    "WHERE conrelid = 'public.app_core_librarynoterevision'::pg_catalog.regclass "
+                    "AND conname = 'note_revision_body_identity'"
+                )
+                self.assertEqual(cursor.fetchone(), (False,))
+            self.assertTrue(revisions.filter(pk=bad.pk).exists())
+            bad.delete(using=alias)
+            MigrationExecutor(isolated).migrate(validated)
+            good.refresh_from_db(using=alias)
+            self.assertEqual(good.markdown.encode("utf-8"), body)
 
 
 class NoteMigrationTests(TransactionTestCase):
