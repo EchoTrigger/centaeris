@@ -58,6 +58,95 @@ async fn response_server(status: u16, content_type: &str, body: String, extra: S
 }
 
 #[tokio::test]
+async fn responses_adapter_streams_directly_over_the_shared_transport() {
+    use centaeris_core::model::prepared_prompt::{
+        ModelMessageRoleV1, ModelMessageV1, PreparedPromptV1,
+    };
+    use centaeris_core::model::{
+        AuthSpec, ModelClient, ModelClientRequest, ModelClientStreamEvent, ModelProviderRegistry,
+        ModelSessionConfig, OpenAiResponsesModelClient,
+    };
+    use centaeris_core::tool::ModelToolChoice;
+
+    let endpoint = response_server(
+        200,
+        "text/event-stream",
+        concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"direct-fixture\",",
+            "\"status\":\"completed\",\"output_text\":\"ok\",\"usage\":{\"input_tokens\":8,",
+            "\"output_tokens\":2,\"total_tokens\":10}}}\n\n",
+        )
+        .into(),
+        String::new(),
+    )
+    .await;
+    let mut providers = ModelProviderRegistry::new();
+    let mut fixture = providers.get("openai.default").unwrap().clone();
+    fixture.provider_key = "fixture.responses".into();
+    fixture.auth = AuthSpec::None;
+    fixture.env_http_headers.clear();
+    fixture.default_max_retries = Some(0);
+    let provider_id = fixture.provider_key.clone();
+    let provider_kind = fixture.provider_kind.clone();
+    providers.insert_user_defined(fixture);
+
+    let session_id = "direct-session";
+    let transport =
+        ReqwestJsonHttpTransport::for_session(session_id, &provider_id, build_model_http_client)
+            .expect("construct direct model transport");
+    let request = ModelClientRequest {
+        session_id: session_id.into(),
+        turn_id: "direct-turn".into(),
+        loop_index: 0,
+        provider_prompt_cache_key: None,
+        provider_prompt_cache_retention: None,
+        system_prompt_manifest_json: None,
+        compression_stats_json: None,
+        context_token_estimate: 8,
+        prepared_prompt: PreparedPromptV1::new(
+            None,
+            vec![ModelMessageV1 {
+                message_id: "message".into(),
+                role: ModelMessageRoleV1::User,
+                content: "Reply with ok.".into(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            Vec::new(),
+            ModelToolChoice::None,
+            64,
+        )
+        .expect("prepare fixture prompt"),
+        session_config: ModelSessionConfig {
+            provider_kind,
+            provider_id,
+            model: "fixture-model".into(),
+            api_base: Some(endpoint),
+            ..ModelSessionConfig::default()
+        },
+    };
+    let client = OpenAiResponsesModelClient::new(providers, transport);
+    let mut events = Vec::new();
+    let response = client
+        .generate_stream(&request, &mut |event| events.push(event))
+        .await
+        .expect("stream from the local provider fixture");
+
+    assert_eq!(
+        response.provider_request_id.as_deref(),
+        Some("direct-fixture")
+    );
+    assert_eq!(response.provider_attempts, 1);
+    assert_eq!(response.generate_result.content, "ok");
+    assert_eq!(response.generate_result.total_tokens, Some(10));
+    assert!(events.iter().any(
+        |event| matches!(event, ModelClientStreamEvent::Token { content } if content == "ok")
+    ));
+}
+
+#[tokio::test]
 async fn redirects_never_reach_another_server_with_model_credentials() {
     for status in [302, 307, 308] {
         for streaming in [false, true] {

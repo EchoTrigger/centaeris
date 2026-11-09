@@ -1,0 +1,22 @@
+[package]
+name = "centaeris-model-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bounded HTTP transport for Centaeris model requests"
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes.workspace = true
+centaeris-core.workspace = true
+futures.workspace = true
+reqwest = { workspace = true, features = ["rustls-tls", "socks"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "test-util"] }

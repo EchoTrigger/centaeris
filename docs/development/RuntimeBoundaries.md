@@ -32,7 +32,10 @@ Existing shutdown and active-action rules remain unchanged.
 
 ## Model HTTP Client ownership
 
-The Runtime Server hub owns the lazy model HTTP connection pool across runs;
+The shared model HTTP adapter owns bounded response reads and SSE framing.
+Each host supplies its connection pool and provider authorization.
+
+The Local Runtime hub owns the lazy model HTTP connection pool across runs;
 request transports retain their own session headers and cooldown. A new Runtime
 owner creates an independent pool. See [Model HTTP Client lifecycle](../reference/ModelHTTP.md#runtime-owned-connection-pool)
 for proxy sampling, validation order and failure/retry behavior.

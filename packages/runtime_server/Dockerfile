@@ -7,6 +7,7 @@ COPY packages/runtime/src/lib.rs packages/runtime/src/lib.rs
 COPY packages/tui/Cargo.toml packages/tui/Cargo.toml
 COPY packages/core packages/core
 COPY packages/model-catalog packages/model-catalog
+COPY packages/model-http packages/model-http
 COPY packages/mcp packages/mcp
 COPY packages/runtime_sqlite packages/runtime_sqlite
 COPY packages/hosted_execution packages/hosted_execution
