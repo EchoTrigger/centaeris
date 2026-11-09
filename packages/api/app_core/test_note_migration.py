@@ -18,6 +18,8 @@ from .models import LibraryNoteRevision, UserLibraryObject
 
 
 class NoteBodyConstraintMigrationTests(TransactionTestCase):
+    serialized_rollback = True
+
     def test_constraint_validates_legacy_rows_and_rejects_invalid_new_bytes(self):
         previous = [("app_core", "0051_agent_api_release_cleanup")]
         added = [("app_core", "0052_library_note_body_constraint")]

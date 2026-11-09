@@ -57,6 +57,8 @@ DESCRIPTOR_FIELDS = ("inputRef", "virtualPath", "sizeBytes", "sha256", "sourceVe
 
 
 class NativeProjectedInputAuthorityTests(PersonalLibraryMaterialFixture, TransactionTestCase):
+    serialized_rollback = True
+
     def activate(self, run):
         self.run = run
         self.grant = run.authorization

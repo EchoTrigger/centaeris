@@ -28,6 +28,8 @@ CREDENTIAL = "fixture-token"
 
 
 class NativeMcpDispatchAuthorityTests(TransactionTestCase):
+    serialized_rollback = True
+
     def setUp(self):
         catalog = Path(self.enterContext(TemporaryDirectory(prefix="centaeris-mcp-authority-")))
         self.enterContext(override_settings(PLUGIN_CATALOG_ROOT=str(catalog)))

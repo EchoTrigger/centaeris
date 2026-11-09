@@ -19,6 +19,8 @@ AUTHORITY_SQL = native_authority_sql("native_session_workspace_resolution.sql")
 
 
 class NativeSessionWorkspaceResolutionTests(TransactionTestCase):
+    serialized_rollback = True
+
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="native-workspace-owner")
         self.workspace = Workspace.objects.create(name="Workspace baseline fixture", createdBy=self.user)

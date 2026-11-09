@@ -84,6 +84,8 @@ class NativeModelGrantRequestTests(SimpleTestCase):
 
 @override_settings(MODEL_PROVIDER_TIMEOUT_SECONDS=17)
 class NativeModelGrantAuthorityTests(TransactionTestCase):
+    serialized_rollback = True
+
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="native-model-fixture")
         self.workspace = Workspace.objects.create(name="Native model fixture", createdBy=self.user)
