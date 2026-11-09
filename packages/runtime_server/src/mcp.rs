@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use centaeris_core::extension::{
-    load_mcp_servers_file, McpServerDeclarationV1, McpToolDeclarationV1, McpTransportV1,
-    PluginActivationSnapshotV1,
+    load_mcp_servers_file, load_verified_mcp_servers_file, McpServerDeclarationV1,
+    McpToolDeclarationV1, McpTransportV1, PluginActivationSnapshotV1,
 };
 use centaeris_core::tool::layer::{
     DynamicToolProvider, DynamicToolProviderRequest, DynamicToolProviderResponse,
@@ -21,7 +21,9 @@ use centaeris_mcp::{
 use serde::{Deserialize, Serialize};
 
 use crate::docker_execution_host::DockerExecutionHostRunner;
-use crate::skill_projection::{verified_plugin_package_roots_at, PLUGIN_CATALOG_ROOT};
+use crate::skill_projection::{
+    plugin_package_roots_at, verified_plugin_package_roots_at, PLUGIN_CATALOG_ROOT,
+};
 
 pub(crate) struct McpBindings {
     pub contracts: Vec<DynamicToolContract>,
@@ -37,6 +39,7 @@ pub(crate) struct PreparedMcpServers {
 struct McpConnectorIdentity {
     plugin_name: String,
     server_id: String,
+    package_root: PathBuf,
     resource_path: String,
     resource_digest: String,
 }
@@ -516,22 +519,20 @@ fn prepare_mcp_servers_at(
     credential_resolver: McpCredentialResolver,
     catalog_root: &Path,
 ) -> Result<PreparedMcpServers, String> {
+    let package_roots = plugin_package_roots_at(&activation, catalog_root)?;
     let mut servers = Vec::new();
     let mut declaration_budget = ToolContractBudget::default();
-    for package in &activation.packages {
+    for (package, package_root) in activation.packages.iter().zip(package_roots) {
         for resource in &package.mcp_servers {
-            let declaration = load_mcp_servers_file(
-                catalog_root
-                    .join(package.name.as_str())
-                    .join(resource.path.as_str())
-                    .as_path(),
-            )?;
+            let declaration =
+                load_verified_mcp_servers_file(&package_root, &resource.path, &resource.digest)?;
             declaration_budget.add(&declaration)?;
             servers.extend(declaration.servers.into_iter().map(|server| {
                 (
                     McpConnectorIdentity {
                         plugin_name: package.name.clone(),
                         server_id: server.id.clone(),
+                        package_root: package_root.clone(),
                         resource_path: resource.path.clone(),
                         resource_digest: resource.digest.clone(),
                     },
@@ -599,17 +600,18 @@ pub(crate) async fn connect_mcp_servers(
 mod tests {
     use super::*;
     use centaeris_core::extension::{
-        mcp_model_contract_digest, McpLifecycleV1, McpServersFileV1, MCP_SERVERS_SCHEMA_V1,
+        mcp_model_contract_digest, verify_mcp_declaration_file, McpLifecycleV1, McpServersFileV1,
+        MCP_SERVERS_SCHEMA_V1,
     };
     use serde_json::json;
     use std::fs;
-    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_identity() -> McpConnectorIdentity {
         McpConnectorIdentity {
             plugin_name: "banana".into(),
             server_id: "banana-source".into(),
+            package_root: PathBuf::new(),
             resource_path: "mcp/banana.json".into(),
             resource_digest: format!("sha256:{}", "c".repeat(64)),
         }
@@ -1036,6 +1038,7 @@ mod tests {
             identity: McpConnectorIdentity {
                 plugin_name: "banana".into(),
                 server_id: "ledger".into(),
+                package_root: PathBuf::new(),
                 resource_path: field("resourcePath"),
                 resource_digest: field("resourceDigest"),
             },
@@ -1634,8 +1637,31 @@ mod tests {
     }
 
     #[test]
-    fn agent_run_preparation_loads_static_contract_without_credentials_or_network() {
+    fn agent_run_preparation_uses_the_signed_package_despite_a_global_shadow() {
         let (catalog_root, activation) = banana_package();
+        let package_digest = activation.packages[0]
+            .package_digest
+            .strip_prefix("sha256:")
+            .unwrap();
+        let installed_root = catalog_root
+            .join(".packages")
+            .join(package_digest)
+            .join("banana");
+        let global_root = catalog_root.join("banana");
+        fs::create_dir_all(installed_root.parent().unwrap()).unwrap();
+        fs::rename(&global_root, &installed_root).unwrap();
+        let declaration_path = installed_root.join("mcp/banana.json");
+        let mut shadow = load_mcp_servers_file(&declaration_path).unwrap();
+        shadow.servers[0].transport = McpTransportV1::StreamableHttp {
+            url: "https://shadow.invalid/mcp".into(),
+            bearer_credential_ref: None,
+        };
+        fs::create_dir_all(global_root.join("mcp")).unwrap();
+        fs::write(
+            global_root.join("mcp/banana.json"),
+            serde_json::to_vec(&shadow).unwrap(),
+        )
+        .unwrap();
         let prepared = prepare_mcp_servers_at(
             activation,
             McpCredentialResolver::new(
@@ -1651,9 +1677,33 @@ mod tests {
         .expect("static preparation");
         assert_eq!(prepared.servers.len(), 1);
         let (identity, server) = &prepared.servers[0];
+        assert_eq!(
+            identity.package_root,
+            installed_root.canonicalize().unwrap()
+        );
+        assert_eq!(
+            server.transport,
+            McpTransportV1::StreamableHttp {
+                url: "https://banana.invalid/mcp".into(),
+                bearer_credential_ref: Some("banana-token".into()),
+            }
+        );
         let contracts = server
             .dynamic_tool_contracts(identity.plugin_name.as_str())
             .expect("static contract");
         assert_eq!(contracts[0].provider_id, "mcp:banana:banana-source");
+        let verify = || {
+            verify_mcp_declaration_file(
+                &identity.package_root,
+                &identity.resource_path,
+                &identity.resource_digest,
+            )
+        };
+        verify().expect("prepared declaration remains current");
+        let mut bytes = fs::read(&declaration_path).unwrap();
+        bytes.push(b'\n');
+        fs::write(declaration_path, bytes).unwrap();
+        assert!(verify().unwrap_err().contains("resource digest mismatch"));
+        fs::remove_dir_all(catalog_root).unwrap();
     }
 }

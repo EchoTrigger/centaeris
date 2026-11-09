@@ -23,9 +23,9 @@ pub use manifest::{
     PluginManifestV1, PluginRegistryV1, PluginTrustPolicyV1,
 };
 pub use mcp::{
-    load_mcp_servers_file, mcp_model_contract_digest, mcp_provider_id, McpLifecycleV1,
-    McpServerDeclarationV1, McpServersFileV1, McpToolDeclarationV1, McpTransportV1,
-    MCP_SERVERS_SCHEMA_V1,
+    load_mcp_servers_file, load_verified_mcp_servers_file, mcp_model_contract_digest,
+    mcp_provider_id, verify_mcp_declaration_file, McpLifecycleV1, McpServerDeclarationV1,
+    McpServersFileV1, McpToolDeclarationV1, McpTransportV1, MCP_SERVERS_SCHEMA_V1,
 };
 pub use types::{
     ActivatedPluginPackageV1, PluginActivationSnapshotV1, PluginCapabilitiesV1,
