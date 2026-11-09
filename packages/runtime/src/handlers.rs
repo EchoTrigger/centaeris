@@ -11,6 +11,7 @@ use crate::runtime_config;
 use crate::runtime_garbage;
 use crate::runtime_ops;
 use crate::runtime_rpc_transport::EventWriter;
+use crate::session_api::LocalSessionApi;
 use crate::sessions;
 use crate::sidecars;
 use crate::skills;
@@ -92,8 +93,7 @@ pub(crate) fn handle_request(
         }
         RuntimeHostCommand::SessionCreate => {
             let payload = runtime_bridge::deserialize_request(request.payload)?;
-            let response = sessions::create_command(payload)
-                .map_err(|error| RuntimeHostError::new(error.code(), error.message()))?;
+            let response = LocalSessionApi::new(event_writer).create(payload)?;
             serde_json::to_value(response).map_err(|error| {
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
@@ -361,8 +361,7 @@ pub(crate) fn handle_request(
         }
         RuntimeHostCommand::AgentInput => {
             let payload = runtime_bridge::deserialize_request(request.payload)?;
-            let response = agent_runtime::input(event_writer, payload)
-                .map_err(|error| RuntimeHostError::new(error.code(), error.message()))?;
+            let response = LocalSessionApi::new(event_writer).send(payload)?;
             serde_json::to_value(response).map_err(|error| {
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
@@ -404,13 +403,8 @@ pub(crate) fn handle_request(
             })
         }
         RuntimeHostCommand::AgentRunAttach => {
-            let payload: agent_runs::AgentRunAttachRequest =
-                runtime_bridge::deserialize_request(request.payload)?;
-            let viewer_id = payload.viewer_id.clone().unwrap_or_default();
-            let response = event_writer.with_registered_viewer(&viewer_id, || {
-                agent_runs::attach(payload)
-                    .map_err(|error| RuntimeHostError::new("agent_task_failed", error))
-            })?;
+            let payload = runtime_bridge::deserialize_request(request.payload)?;
+            let response = LocalSessionApi::new(event_writer).subscribe(payload)?;
             serde_json::to_value(response).map_err(|error| {
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })
@@ -441,8 +435,7 @@ pub(crate) fn handle_request(
         }
         RuntimeHostCommand::AgentRunCancel => {
             let payload = runtime_bridge::deserialize_request(request.payload)?;
-            let response = agent_runtime::cancel_agent_run(event_writer, payload)
-                .map_err(|error| RuntimeHostError::new("agent_task_failed", error))?;
+            let response = LocalSessionApi::new(event_writer).cancel(payload)?;
             serde_json::to_value(response).map_err(|error| {
                 RuntimeHostError::new("serialize_response_failed", error.to_string())
             })

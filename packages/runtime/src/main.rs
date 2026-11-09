@@ -34,6 +34,7 @@ mod runtime_server_transport;
 #[cfg(windows)]
 mod runtime_server_windows_security;
 mod schedules;
+mod session_api;
 mod session_catalog;
 mod session_files;
 mod sessions;

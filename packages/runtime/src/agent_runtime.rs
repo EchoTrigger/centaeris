@@ -3945,6 +3945,176 @@ mod tests {
     }
 
     #[test]
+    fn local_session_api_preserves_rpc_receipts_subscription_and_cancellation() {
+        use crate::handlers::{handle_request, RuntimeHostState};
+        use crate::protocol::HostCommandRequest;
+        use crate::session_api::LocalSessionApi;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let guard = message_log::test_env_mutex()
+            .lock()
+            .expect("test environment lock");
+        let environment = PromptTestEnvironment::new("local-session-api");
+        let runtime = tokio::runtime::Runtime::new().expect("local Session runtime");
+        let result = runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let (requested, request_received) = tokio::sync::oneshot::channel();
+            let model = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("fixture connection");
+                let mut request = Vec::new();
+                let mut buffer = [0; 4096];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).await.expect("fixture request");
+                    assert!(count > 0, "model request ended before its headers");
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let response = concat!(
+                    "HTTP/1.1 200 OK\r\n",
+                    "Content-Type: text/event-stream\r\n",
+                    "Connection: close\r\n\r\n",
+                    "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,",
+                    "\"delta\":{\"role\":\"assistant\",\"content\":\"fixture output\"},",
+                    "\"finish_reason\":null}]}\n\n",
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("fixture response");
+                let _ = requested.send(());
+                // Keep the response open so cancel must interrupt an active request.
+                std::future::pending::<()>().await;
+            });
+            let outcome = async {
+                runtime_config::set(serde_json::from_value(serde_json::json!({
+                    "customModelProviders": [{
+                        "providerId": "custom.session-api",
+                        "name": "Local fixture",
+                        "baseUrl": format!("http://{address}/v1"),
+                        "api": "openai-completions",
+                        "models": [{
+                            "model": "fixture-model",
+                            "contextTokens": "32k",
+                            "maxOutputTokens": "4k",
+                            "supportsVision": false
+                        }]
+                    }]
+                }))?)?;
+                runtime_config::set(serde_json::from_value(serde_json::json!({
+                    "modelProviderId": "custom.session-api",
+                    "modelApiKey": "synthetic-fixture-key",
+                }))?)?;
+                runtime_config::set(serde_json::from_value(serde_json::json!({
+                    "modelProviderId": "custom.session-api",
+                    "model": "fixture-model",
+                }))?)?;
+                let (clients, writer, _outbound) = prompt_event_writer("session-api-owner");
+                let api = LocalSessionApi::new(writer.clone());
+                let mut host = RuntimeHostState::default();
+                let create = serde_json::json!({
+                    "operationId": "session-api-create",
+                    "title": "Session API",
+                    "cwd": environment.workspace.to_string_lossy(),
+                });
+                let session = api.create(serde_json::from_value(create.clone())?)?;
+                let replay = handle_request(
+                    &mut host,
+                    HostCommandRequest {
+                        command: "session/new".into(),
+                        payload: serde_json::json!({"request": create}),
+                    },
+                    writer.clone(),
+                )?;
+                assert_eq!(
+                    replay["id"], session.id,
+                    "RPC must recover the API's Session"
+                );
+                let prompt = serde_json::json!({
+                    "operationId": "session-api-prompt",
+                    "sessionId": session.id,
+                    "message": "hello",
+                });
+                let response: AgentInputResponse = serde_json::from_value(handle_request(
+                    &mut host,
+                    HostCommandRequest {
+                        command: "session/prompt".into(),
+                        payload: serde_json::json!({"request": prompt.clone()}),
+                    },
+                    writer.clone(),
+                )?)?;
+                assert_eq!(
+                    api.send(serde_json::from_value(prompt)?)?,
+                    response,
+                    "API replay must preserve the RPC's Run and Turn"
+                );
+                tokio::time::timeout(Duration::from_secs(20), request_received).await??;
+
+                let (subscriber, mut updates) = clients.connect()?.expect("subscriber connection");
+                subscriber.register_client(
+                    crate::runtime_server::RuntimeClientKind::Tui,
+                    "session-api-observer",
+                )?;
+                let subscription = LocalSessionApi::new(subscriber.clone()).subscribe(
+                    agent_runs::AgentRunAttachRequest {
+                        agent_run_id: Some(response.agent_run_id.clone()),
+                        session_id: Some(session.id.clone()),
+                        viewer_id: Some("session-api-observer".into()),
+                    },
+                )?;
+                assert_eq!(subscription.viewer_id, "session-api-observer");
+                assert_eq!(
+                    subscription.agent_run.expect("attached Run").agent_run_id,
+                    response.agent_run_id
+                );
+                let cancelled = handle_request(
+                    &mut host,
+                    HostCommandRequest {
+                        command: "_centaeris/session/agent-runs/cancel".into(),
+                        payload: serde_json::json!({"request": {
+                            "agentRunId": response.agent_run_id,
+                            "sessionId": session.id,
+                            "reason": "user_cancelled",
+                        }}),
+                    },
+                    writer.clone(),
+                )?;
+                assert_eq!(cancelled["cancelAccepted"], true);
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while writer.active_agent_run(&response.agent_run_id)?.is_some() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Ok::<(), String>(())
+                })
+                .await??;
+                let notification = tokio::time::timeout(Duration::from_secs(5), updates.recv())
+                    .await?
+                    .ok_or("subscription closed before delivering a Session event")?;
+                let notification: Value = serde_json::from_str(&notification)?;
+                assert_eq!(notification["method"], "session/update");
+                assert_eq!(notification["params"]["sessionId"], session.id);
+                let run =
+                    message_log::project_agent_run(&response.agent_run_id)?.expect("durable Run");
+                assert_eq!(run.status, "cancelled");
+                assert_eq!(
+                    message_log::project_agent_runs_for_session(&session.id)?.len(),
+                    1
+                );
+                clients.disconnect(&subscriber)?;
+                clients.disconnect(&writer)?;
+                Ok::<(), Box<dyn std::error::Error>>(())
+            }
+            .await;
+            model.abort();
+            let _ = model.await;
+            outcome
+        });
+        drop(runtime);
+        drop(environment);
+        drop(guard);
+        result.expect("local Session API and RPC behavioral equivalence");
+    }
+
+    #[test]
     fn session_prompt_loop_preserves_model_retryability_metadata() {
         assert!(session_prompt_loop_failure_retryable(
             "model_client_error(kind=provider_response_interrupted,retryable=true): read SSE chunk failed"
