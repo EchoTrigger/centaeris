@@ -11,7 +11,6 @@ const loader = subjectLoader({ extraOverrides: [
   ["react", stub(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useLayoutEffect,useId} from ${JSON.stringify(harness)}; export const useEffectEvent=callback=>callback; export const useSyncExternalStore=(_subscribe,snapshot)=>snapshot();`)],
   ["../preferences", stub("export const useEnterStartsNewLine=()=>false; export const readModelThinkingMode=()=>''; export const readPreferredModelIdentity=()=>''; export const writeModelThinkingMode=()=>{}; export const writePreferredModelIdentity=()=>{};")],
   ["../chat/transcriptTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const createWorkspaceTranscriptTransport=()=>({loadTail:async()=>context.tail,loadPatches:async()=>{},loadActiveAgentRun:async(...args)=>context.activeRun?context.activeRun(...args):({agentRun:null})});`)],
-  ["../chat/workspaceWebTransport", stub("export const streamWorkspaceAgentRun=async()=>{};")],
   ["../chat/workspacePresentationTransport", stub(`import {context} from ${JSON.stringify(harness)}; export const streamWorkspacePresentation=options=>context.presentation(options);`)],
   ...["../chat/WorkspaceComposer", "../chat/TranscriptBlockList", "../shell/ShellSidebar"].map(s => [s, stub(`export const ${s.split("/").at(-1)}=()=>null;`)]),
   ["../shell/HomePlane", stub("export const HomePlane=()=>null; export const HomeQuickActions=()=>null;")],

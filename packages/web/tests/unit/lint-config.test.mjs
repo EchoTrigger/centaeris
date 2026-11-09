@@ -87,8 +87,6 @@ test("core chat implementations remain strict TypeScript", () => {
   for (const moduleName of [
     "sessionEvents",
     "chatViewStore",
-    "workspaceChatController",
-    "workspaceWebTransport",
   ]) {
     assert.equal(existsSync(resolve(chatRoot, `${moduleName}.ts`)), true);
     assert.equal(existsSync(resolve(chatRoot, `${moduleName}.mjs`)), false);

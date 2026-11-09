@@ -46,12 +46,11 @@ chat modules, so enabling it globally is not a safe one-line change.
 
 The focused migration keeps the normal TypeScript gate green:
 
-- `sessionEvents.ts`, `chatViewStore.ts`, `workspaceChatController.ts`, and
-  `workspaceWebTransport.ts` are now strict TypeScript;
+- `sessionEvents.ts` and `chatViewStore.ts` are strict TypeScript;
 - their stream boundary uses explicit `StreamEntry` types and `unknown` for
   unvalidated event payloads;
 - explicit `any` is a blocking lint diagnostic with a configuration test;
-- a configuration test requires all four core implementations to remain `.ts`
+- a configuration test requires those implementations to remain `.ts`
   and keeps `strict` plus `noEmit` enabled.
 
 Each conversion must preserve the existing unit and browser behavior tests. Do
