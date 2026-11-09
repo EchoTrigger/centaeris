@@ -1,7 +1,7 @@
 use super::*;
 use crate::task_service::linux::{launcher::OciTarget, HelperBinary, NativeManager};
 pub(crate) mod commands;
-mod helpers;
+pub(crate) mod helpers;
 mod idle_pause;
 pub(crate) mod probe;
 mod resource_sampler;
@@ -892,7 +892,7 @@ fn exchange(host: &Arc<Host>, mut stream: UnixStream, accepted_at: Instant) -> R
                 stream: &mut stream,
                 written: 0,
             };
-            let result = helpers::dispatch_helper(&manager, &helper, input, &mut writer);
+            let result = helpers::dispatch_helper(&manager, input, &mut writer);
             response_started = writer.written > 0;
             result?;
             Ok(None)

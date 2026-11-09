@@ -6,7 +6,6 @@ use hosted_execution::host_supervisor::{
     HostLaunchTarget, HostSupervisorEnvelope, HostSupervisorRequest, HostSupervisorResponse,
     HostSupervisorResult, HOST_SUPERVISOR_SCHEMA,
 };
-use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Read, Write};
 
 const REQUEST_LIMIT: usize = 128 * 1024;
@@ -155,7 +154,8 @@ fn write_helper_input<S: Read + Write>(
         _ => return Err("environment_host_helper_admission_unconfirmed".into()),
     }
     let mut remaining = helper.input_length;
-    let mut hash = Sha256::new();
+    // The request already binds the frame digest. The Supervisor verifies the
+    // bytes it receives before issuing a task receipt.
     let mut buffer = [0u8; 64 * 1024];
     while remaining > 0 {
         let size =
@@ -166,7 +166,6 @@ fn write_helper_input<S: Read + Write>(
         if n == 0 {
             return Err("environment_host_input_incomplete".into());
         }
-        hash.update(&buffer[..n]);
         reader
             .get_mut()
             .write_all(&buffer[..n])
@@ -177,7 +176,6 @@ fn write_helper_input<S: Read + Write>(
         .read(&mut buffer[..1])
         .map_err(|_| "environment_host_input_unavailable")?
         != 0
-        || format!("sha256:{:x}", hash.finalize()) != helper.input_digest
     {
         return Err("environment_host_input_rejected".into());
     }
@@ -527,6 +525,7 @@ fn task_with(
 mod tests {
     use super::*;
     use centaeris_core::execution::*;
+    use sha2::{Digest, Sha256};
     struct Wire {
         read: std::io::Cursor<Vec<u8>>,
         written: Vec<u8>,

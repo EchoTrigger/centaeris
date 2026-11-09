@@ -10,16 +10,28 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::OpenOptionsExt,
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 const INPUT_BUDGET: u64 = 2 * super::super::HELPER_STREAM_LIMIT;
 static RESERVED_INPUT: AtomicU64 = AtomicU64::new(0);
 
-pub(super) struct VerifiedInput {
+/// The exact request and its verified, unlinked spool travel together to launch.
+pub(crate) struct VerifiedHelperInput<'a> {
+    request: &'a HostHelperRequest,
     file: File,
-    permit: std::sync::Arc<InputReservation>,
+    permit: Arc<InputReservation>,
 }
+
+impl<'a> VerifiedHelperInput<'a> {
+    pub(crate) fn into_parts(self) -> (&'a HostHelperRequest, File, Arc<dyn Send + Sync>) {
+        (self.request, self.file, self.permit)
+    }
+}
+
 struct InputReservation(u64);
 impl Drop for InputReservation {
     fn drop(&mut self) {
@@ -50,11 +62,11 @@ fn reserve_input(root: &Path, bytes: u64) -> Result<u64, String> {
     Ok(bytes)
 }
 
-pub(super) fn receive_input(
+pub(crate) fn receive_input<'a>(
     root: &Path,
-    request: &HostHelperRequest,
+    request: &'a HostHelperRequest,
     reader: &mut impl Read,
-) -> Result<VerifiedInput, String> {
+) -> Result<VerifiedHelperInput<'a>, String> {
     request.validate()?;
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let path = root.join(format!(
@@ -72,9 +84,10 @@ pub(super) fn receive_input(
         .map_err(|_| "host_helper_buffer_unavailable")?;
     // Keep only a private descriptor. Interrupted uploads consume no persistent spool.
     fs::remove_file(&path).map_err(|_| "host_helper_buffer_unavailable")?;
-    let mut prepared = VerifiedInput {
+    let mut prepared = VerifiedHelperInput {
+        request,
         file,
-        permit: std::sync::Arc::new(InputReservation(reserve_input(root, request.input_length)?)),
+        permit: Arc::new(InputReservation(reserve_input(root, request.input_length)?)),
     };
     let file = &mut prepared.file;
     let mut remaining = request.input_length;
@@ -100,19 +113,12 @@ pub(super) fn receive_input(
 
 pub(super) fn dispatch_helper(
     manager: &crate::task_service::linux::NativeManager,
-    request: &HostHelperRequest,
-    input: VerifiedInput,
+    input: VerifiedHelperInput<'_>,
     writer: &mut impl Write,
 ) -> Result<(), String> {
     use centaeris_core::execution::EnvironmentTaskResult;
-    let result = manager.start_helper(
-        request,
-        input
-            .file
-            .try_clone()
-            .map_err(|_| "host_helper_buffer_unavailable")?,
-        Some(input.permit.clone()),
-    )?;
+    let request = input.request;
+    let result = manager.start_helper(input)?;
     let task = match &result {
         EnvironmentTaskResult::Task { task, .. }
         | EnvironmentTaskResult::OutputConsumed { task, .. } => task.clone(),

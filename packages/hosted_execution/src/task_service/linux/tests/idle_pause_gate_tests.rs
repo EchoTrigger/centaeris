@@ -1,5 +1,6 @@
 //! Pause must share the existing per-environment helper admission boundary.
 use super::*;
+use crate::host_supervisor::linux::helpers::receive_input;
 use std::sync::mpsc;
 
 fn native_view(f: &Fixture) -> NativeManager {
@@ -206,7 +207,6 @@ fn idle_callback_atomically_fences_start_and_helper_but_not_controls_or_other_in
         let native = native.clone();
         thread::spawn(move || start_send.send(native.handle(start_request)).unwrap())
     };
-    let input = File::create(f.root.join("helper-empty-input")).unwrap();
     let request = HostHelperRequest {
         fence: f.fence.clone(),
         operation_id: f.fence.operation_id("helper-after-idle"),
@@ -218,10 +218,10 @@ fn idle_callback_atomically_fences_start_and_helper_but_not_controls_or_other_in
     let (helper_send, helper_receive) = mpsc::channel();
     let helper = {
         let native = native.clone();
+        let root = f.root.clone();
         thread::spawn(move || {
-            helper_send
-                .send(native.start_helper(&request, input, None))
-                .unwrap()
+            let input = receive_input(&root, &request, &mut std::io::empty()).unwrap();
+            helper_send.send(native.start_helper(input)).unwrap()
         })
     };
     let early_start = start_receive.recv_timeout(Duration::from_millis(250));
