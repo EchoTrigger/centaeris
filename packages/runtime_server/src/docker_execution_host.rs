@@ -2096,7 +2096,7 @@ impl DockerExecutionHostRunner {
         decode_input_inventory(&output)
     }
 
-    fn refresh_materialized_inputs(
+    pub(crate) fn refresh_materialized_inputs(
         &self,
     ) -> Result<Vec<ExecutionInputStateChange>, ExecutionError> {
         if self
@@ -4226,6 +4226,46 @@ pub(crate) fn material_delivery_test_host() -> DockerExecutionHostRunner {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn background_task_start_stops_before_dispatch_when_input_refresh_fails() {
+        use crate::retained_tasks::{retained_task_contracts, RetainedTaskToolProvider};
+        use centaeris_core::tool::layer::{DynamicToolProvider, DynamicToolProviderRequest};
+        use centaeris_core::tool::DynamicToolRegistry;
+
+        let mut runner = retained_test_runner();
+        // Keep a valid controller fence, but leave the Host allocation unavailable.
+        runner.retained_allocation = None;
+        runner.materialized_inputs.lock().unwrap().insert(
+            "input_test".into(),
+            SandboxMaterializedInput {
+                input_ref: "input_test".into(),
+                virtual_path: "inputs/note.md".into(),
+                size_bytes: 1,
+                sha256: format!("sha256:{}", "a".repeat(64)),
+                source_version: "1".into(),
+                state: None,
+            },
+        );
+        let registry = DynamicToolRegistry::from_contracts(retained_task_contracts()).unwrap();
+        let provider = RetainedTaskToolProvider::new(Arc::new(runner));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let response = runtime
+            .block_on(provider.execute(DynamicToolProviderRequest {
+                tool_name: "background_task_start".into(),
+                tool_call_id: "start-with-protected-input".into(),
+                args_json: r#"{"program":"cat","args":["/mnt/data/inputs/note.md"]}"#.into(),
+                contract: registry.find_contract("background_task_start").unwrap(),
+                cancellation_probe: None,
+            }))
+            .unwrap();
+        assert!(response.is_error);
+        assert_eq!(response.details["errorCode"], "background_task_unavailable");
+        assert!(response.details.get("state").is_none());
+    }
+
     #[test]
     fn input_refresh_keeps_capacity_codes_without_exposing_private_host_reasons() {
         for error in [
