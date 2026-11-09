@@ -90,6 +90,7 @@ const PAGE_REQUEST_SCHEMA: &str = "runtime.transcript.page.read.v1";
 const PATCH_REQUEST_SCHEMA: &str = "runtime.transcript.patch.read.v1";
 const PATCH_PAGE_SCHEMA: &str = "transcript.patch.page.v1";
 
+pub(crate) mod content_stream;
 mod wire;
 use wire::*;
 

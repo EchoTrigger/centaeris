@@ -14,6 +14,9 @@ mod environment_retirement;
 type Operation = fn(HttpServerState, Request<Bytes>) -> Result<Response<Body>, String>;
 
 pub(super) fn router(state: HttpServerState) -> Router {
+    let transcript_stream_slots = Arc::new(tokio::sync::Semaphore::new(
+        transcript_protocol::content_stream::CONTENT_BUFFER_UNITS,
+    ));
     Router::new()
         .route(
             "/internal/environments/observe",
@@ -170,6 +173,12 @@ pub(super) fn router(state: HttpServerState) -> Router {
         .route(
             "/internal/transcript/content",
             post_transcript(transcript_protocol::content),
+        )
+        .route(
+            "/internal/transcript/content-stream",
+            any(fallback).on(MethodFilter::POST, move |state, request| {
+                dispatch_transcript_content_stream(state, request, transcript_stream_slots.clone())
+            }),
         )
         .fallback(fallback)
         .with_state(state)
@@ -428,31 +437,16 @@ async fn dispatch_transcript_read(
     request: Request<Body>,
     operation: transcript_protocol::ReadOperation,
 ) -> Response<Body> {
-    // Hosted API reads time out after five seconds. Only these read routes use
-    // the shorter deadline; ordinary, control and cleanup policies are unchanged.
-    let prepared = match prepare_http_operation(state, request, Some(Duration::from_secs(4))).await
-    {
-        Ok(prepared) => prepared,
-        Err(response) => return response,
-    };
     let PreparedHttpOperation {
         state,
         request,
         deadline,
         observed_request: _observed_request,
         ..
-    } = prepared;
-    if request.uri().query().is_some() {
-        return http_response(404, "text/plain", b"not_found".to_vec());
-    }
-    match authorize_internal_request(&request, false) {
-        Ok(Some(response)) => return response,
-        Ok(None) => {}
-        Err(error) => {
-            eprintln!("runtime request failed: {error}");
-            return bounded_json_error_response(500, "internal_error");
-        }
-    }
+    } = match prepare_transcript_read(state, request).await {
+        Ok(prepared) => prepared,
+        Err(response) => return response,
+    };
     match operation
         .read(request.into_body(), state.job_store, deadline)
         .await
@@ -464,6 +458,50 @@ async fn dispatch_transcript_read(
         Err(error) => {
             eprintln!("runtime request failed: {error}");
             bounded_json_error_response(500, "internal_error")
+        }
+    }
+}
+
+async fn dispatch_transcript_content_stream(
+    state: State<HttpServerState>,
+    request: Request<Body>,
+    slots: Arc<tokio::sync::Semaphore>,
+) -> Response<Body> {
+    use transcript_protocol::content_stream::{self, MAX_READ_TIMEOUT};
+    let read_timeout = state
+        .request_policy
+        .lane(request.method().as_str(), request.uri().path())
+        .deadline
+        .unwrap_or(MAX_READ_TIMEOUT)
+        .min(MAX_READ_TIMEOUT);
+    match prepare_transcript_read(state, request).await {
+        Ok(prepared) => content_stream::response(
+            prepared.request.body(),
+            prepared.state.job_store,
+            slots,
+            read_timeout,
+            prepared.observed_request,
+        ),
+        Err(response) => response,
+    }
+}
+
+async fn prepare_transcript_read(
+    state: State<HttpServerState>,
+    request: Request<Body>,
+) -> Result<PreparedHttpOperation, Response<Body>> {
+    // Hosted API reads time out after five seconds. Only these read routes use
+    // the shorter deadline; ordinary, control and cleanup policies are unchanged.
+    let prepared = prepare_http_operation(state, request, Some(Duration::from_secs(4))).await?;
+    if prepared.request.uri().query().is_some() {
+        return Err(http_response(404, "text/plain", b"not_found".to_vec()));
+    }
+    match authorize_internal_request(&prepared.request, false) {
+        Ok(Some(response)) => Err(response),
+        Ok(None) => Ok(prepared),
+        Err(error) => {
+            eprintln!("runtime request failed: {error}");
+            Err(bounded_json_error_response(500, "internal_error"))
         }
     }
 }

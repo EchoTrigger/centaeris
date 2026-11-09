@@ -9,15 +9,16 @@ import binascii
 import json
 import hashlib
 import time
+from contextlib import aclosing
 from dataclasses import dataclass
 
 from .runtime_client import TranscriptRuntimeError
+from .transcript_content_relay import MAX_CONTENT_REFERENCES
 
 
 SCHEMA = "workspace.presentation.v1"
 CURSOR_SCHEMA = "workspace.presentation.cursor.v1"
 PROJECTION_VERSION = "transcript.projection.v1"
-CONTENT_CHUNK_BYTES = 65536
 CONTENT_DISPLAY_BYTES = 16 * 1024 * 1024
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 NAVIGATION_CHUNK_BYTES = 65536
@@ -80,6 +81,23 @@ def _references(blocks):
             if not reference["refId"].startswith("session-event:"):
                 raise RuntimeError("presentation_body_reference_invalid")
             yield reference
+
+
+def _content_batches(blocks, generation, sent_references):
+    batch = {}
+    for reference in _references(blocks):
+        ref_id = reference["refId"]
+        identity = (generation, ref_id, reference["revision"], reference["byteLength"])
+        if identity in sent_references or reference["byteLength"] == "0":
+            continue
+        if ref_id in batch and batch[ref_id][0] == identity:
+            continue
+        if ref_id in batch or len(batch) == MAX_CONTENT_REFERENCES:
+            yield list(batch.values())
+            batch = {}
+        batch[ref_id] = (identity, reference)
+    if batch:
+        yield list(batch.values())
 
 
 def _navigation_frames(scope, sessions):
@@ -189,33 +207,20 @@ async def _produce(scope, loader, cursor, read_timeout):
                 sent_operations.add(identity)
 
     async def content_frames(blocks):
-        for reference in _references(blocks):
-            identity = (generation, reference["refId"], reference["revision"], reference["byteLength"])
-            if identity in sent_references:
-                continue
-            length = int(reference["byteLength"])
-            offset, limit = 0, min(length, CONTENT_DISPLAY_BYTES)
-            while offset < limit:
-                # A display prefix may finish at the preceding whole UTF-8
-                # codepoint (at most three bytes below the byte budget).
-                if length > limit and offset >= limit - 3:
-                    break
-                item = await _bounded(loader.content(generation, reference, str(offset)), read_timeout)
-                end = int(item["endOffset"])
-                if item["startOffset"] != str(offset) or not offset < end <= length or end - offset > CONTENT_CHUNK_BYTES:
-                    raise RuntimeError("presentation_content_range_invalid")
-                if end > limit:
-                    prefix = item["content"].encode()[:limit - offset].decode("utf-8", errors="ignore")
-                    end = offset + len(prefix.encode())
-                    if end <= offset:
-                        raise RuntimeError("presentation_content_utf8_boundary_invalid")
-                    item = {**item, "content": prefix, "endOffset": str(end), "hasMore": end < length}
-                yield _encode(scope, "content", range=item)
-                offset = end
-            # Bound bookkeeping as well as the individual streamed chunk.
-            if len(sent_references) >= 2048:
-                sent_references.clear()
-            sent_references.add(identity)
+        for batch in _content_batches(blocks, generation, sent_references):
+            references = [reference for _, reference in batch]
+            async with aclosing(loader.content_stream(generation, references, CONTENT_DISPLAY_BYTES)) as ranges:
+                while True:
+                    try:
+                        item = await _bounded(anext(ranges), read_timeout)
+                    except StopAsyncIteration:
+                        break
+                    yield _encode(scope, "content", range=item)
+            # A batch can only end cleanly after its completion marker and EOF.
+            for identity, _ in batch:
+                if len(sent_references) >= 2048:
+                    sent_references.clear()
+                sent_references.add(identity)
 
     while True:
         versions = await _bounded(loader.revisions(), read_timeout)
@@ -260,8 +265,9 @@ async def _produce(scope, loader, cursor, read_timeout):
                             page = await _projection_read(lambda: loader.patches(generation, after, target), read_timeout)
                             yield _encode(scope, "patches", page=page)
                             blocks = [block for item in page["patches"] for block in item["upserts"]]
-                            async for frame in content_frames(blocks):
-                                yield frame
+                            async with aclosing(content_frames(blocks)) as frames:
+                                async for frame in frames:
+                                    yield frame
                             async for frame in operation_frames(blocks, page["nextSourceHighWater"]):
                                 yield frame
                             water = page["nextSourceHighWater"]
@@ -286,8 +292,9 @@ async def _produce(scope, loader, cursor, read_timeout):
                     sent_references.clear()
                     sent_operations.clear()
                     yield _encode(scope, "snapshot", page=page)
-                    async for frame in content_frames(page["blocks"]):
-                        yield frame
+                    async with aclosing(content_frames(page["blocks"])) as frames:
+                        async for frame in frames:
+                            yield frame
                     async for frame in operation_frames(page["blocks"], water):
                         yield frame
                     yield _encode(scope, "checkpoint", cursor=encode_cursor(scope, generation, water),

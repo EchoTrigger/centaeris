@@ -654,6 +654,8 @@ pub fn route(path: &str) -> &'static str {
         "/internal/jobs/fail" => "/internal/jobs/fail",
         "/internal/jobs/yield" => "/internal/jobs/yield",
         "/internal/jobs/reconcile" => "/internal/jobs/reconcile",
+        "/internal/transcript/content" => "/internal/transcript/content",
+        "/internal/transcript/content-stream" => "/internal/transcript/content-stream",
         _ => "other",
     }
 }

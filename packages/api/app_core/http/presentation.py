@@ -3,7 +3,7 @@ import asyncio
 import copy
 import hashlib
 import json
-from contextlib import contextmanager
+from contextlib import aclosing, contextmanager
 
 import redis
 from django.contrib.auth import get_user_model
@@ -19,8 +19,9 @@ from app_core.operation_presentation import operation_records, operation_detail
 from app_core.presentation_activity import presentation_activity, presentation_question
 from app_core.presentation_stream import PresentationScope, PROJECTION_VERSION, stream_presentation
 from app_core.presentation_service import create_presentation_hub
-from app_core.runtime_client import request_transcript_page, request_transcript_patches, request_transcript_content
+from app_core.runtime_client import request_transcript_page, request_transcript_patches
 from app_core.session_event import committed_session_terminal_state, project_committed_agent_run
+from app_core.transcript_content_relay import stream_transcript_content
 from app_core.workspace_access import workspace_membership_for
 
 from .query import valid_query_fields
@@ -108,11 +109,10 @@ class PresentationLoader:
             "sessionId": self.scope.session_id, "projectionVersion": PROJECTION_VERSION,
             "projectionGeneration": generation, "afterSourceHighWater": after, "throughSourceHighWater": through})
 
-    @stream_database_call
-    def content(self, generation, reference, offset):
-        return request_transcript_content({"schema": "transcript.content.range.read.v1",
-            "sessionId": self.scope.session_id, "projectionVersion": PROJECTION_VERSION,
-            "projectionGeneration": generation, **reference, "offset": offset, "maxBytes": 65536})
+    def content_stream(self, generation, references, max_display_bytes):
+        return stream_transcript_content(
+            self.scope.session_id, PROJECTION_VERSION, generation, references, max_display_bytes,
+        )
 
     @stream_database_call
     def operations(self, call_id, through):
@@ -169,9 +169,10 @@ async def presentation_events(request, workspace_id: str):
     async def content():
         try:
             async with hub.observe(loader.observation_key, scope, loader) as observed:
-                async for frame in stream_presentation(scope, observed,
-                        request.headers.get("Last-Event-ID", ""), read_timeout_seconds=READ_TIMEOUT_SECONDS):
-                    yield frame
+                async with aclosing(stream_presentation(scope, observed,
+                        request.headers.get("Last-Event-ID", ""), read_timeout_seconds=READ_TIMEOUT_SECONDS)) as frames:
+                    async for frame in frames:
+                        yield frame
         finally:
             if owned_hub:
                 await hub.aclose()

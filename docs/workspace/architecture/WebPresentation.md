@@ -95,6 +95,15 @@ snapshot leaves the previous complete sidebar available; it cannot be mistaken
 for Session deletion or a completed replay checkpoint.
 
 Normal referenced content is pushed in sequential ranges of at most 64 KiB.
+For each snapshot or patch page, Django groups up to 128 body references per
+internal Runtime NDJSON stream. Runtime loads each source event once and keeps
+one bounded UTF-8 prefix per stream. Later ranges check the current projection
+generation, head and event row version using metadata, and return their
+database connection before sending bytes. Runtime budgets up to 256 MiB per
+server for active display prefixes and serialized ranges. Each database read
+has a deadline of at most four seconds. Django rechecks the viewer before
+forwarding each range and requires the upstream completion marker and EOF
+before acknowledging the page.
 Display prefixes and the browser content cache are bounded; very large content
 retains an explicit limited prefix and its original reference. Evicted historical
 content can use the existing demand reader. Full tool model output is not eagerly
