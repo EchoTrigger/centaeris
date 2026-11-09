@@ -841,7 +841,8 @@ def _finish_environment_agent_run(job, lease_owner, run_id, digest, resolved, re
         require_healthy_lease()
         result = runtime_finalize_request({
             "schema": "runtime.agent_run.finalize.v1", "jobId": job["jobId"], "leaseOwner": lease_owner,
-            "agentRunId": run_id, "authorizationDigest": digest, "terminalState": resolved["terminalState"],
+            "agentRunId": run_id, "authorizationDigest": digest,
+            "terminalState": resolved["terminalState"] if cleanup is None else None,
             "agentRunCleanup": cleanup,
         })
         if (not isinstance(result, dict) or set(result) != {"schema", "agentRunId", "releaseReceiptId"}

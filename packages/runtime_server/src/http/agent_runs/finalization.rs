@@ -32,9 +32,15 @@ struct FinalizeRequest {
     lease_owner: String,
     agent_run_id: String,
     authorization_digest: String,
-    terminal_state: TerminalState,
+    #[serde(deserialize_with = "Deserialize::deserialize")]
+    terminal_state: Option<TerminalState>,
     #[serde(deserialize_with = "Deserialize::deserialize")]
     agent_run_cleanup: Option<Box<crate::contract::AgentRunCleanup>>,
+}
+
+enum FinalizeIntent {
+    Resolve(TerminalState),
+    Cleanup(Box<crate::contract::AgentRunCleanup>),
 }
 
 #[derive(Deserialize)]
@@ -86,6 +92,14 @@ impl FinalizeRequest {
             )
             .is_ok()
     }
+
+    fn take_intent(&mut self) -> Option<FinalizeIntent> {
+        match (self.terminal_state, self.agent_run_cleanup.take()) {
+            (Some(terminal), None) => Some(FinalizeIntent::Resolve(terminal)),
+            (None, Some(cleanup)) => Some(FinalizeIntent::Cleanup(cleanup)),
+            _ => None,
+        }
+    }
 }
 
 pub(crate) fn advance(
@@ -99,6 +113,9 @@ pub(crate) fn advance(
     if !request.valid() {
         return json_error_response(400, "agent_run_finalize_request_invalid");
     }
+    let Some(intent) = request.take_intent() else {
+        return json_error_response(400, "agent_run_finalize_request_invalid");
+    };
     if let Err(error) = state
         .job_store
         .require_execute_lease(&request.job_id, &request.lease_owner)
@@ -113,32 +130,33 @@ pub(crate) fn advance(
         Ok(platform) => platform,
         Err(error) => return error.response(),
     };
-    let cleanup = if let Some(cleanup) = request.agent_run_cleanup.take() {
-        cleanup
-    } else {
-        let resolution = match platform.resolve(&request) {
-            Ok(resolution) => resolution,
-            Err(error) => return error.response(),
-        };
-        match resolution {
-            CleanupResolution::Terminal {
-                schema,
-                terminal_state,
-                agent_run_cleanup,
-            } if schema == RESOLVED_SCHEMA && terminal_state == request.terminal_state => {
-                agent_run_cleanup
+    let cleanup = match intent {
+        FinalizeIntent::Cleanup(cleanup) => cleanup,
+        FinalizeIntent::Resolve(expected_terminal) => {
+            let resolution = match platform.resolve(&request, expected_terminal) {
+                Ok(resolution) => resolution,
+                Err(error) => return error.response(),
+            };
+            match resolution {
+                CleanupResolution::Terminal {
+                    schema,
+                    terminal_state,
+                    agent_run_cleanup,
+                } if schema == RESOLVED_SCHEMA && terminal_state == expected_terminal => {
+                    agent_run_cleanup
+                }
+                CleanupResolution::Released {
+                    schema,
+                    terminal_state,
+                    release_receipt_id,
+                } if schema == RESOLVED_SCHEMA
+                    && terminal_state == expected_terminal
+                    && valid_identity(&release_receipt_id) =>
+                {
+                    return released(&request.agent_run_id, &release_receipt_id);
+                }
+                _ => return PlatformFailure::Invalid.response(),
             }
-            CleanupResolution::Released {
-                schema,
-                terminal_state,
-                release_receipt_id,
-            } if schema == RESOLVED_SCHEMA
-                && terminal_state == request.terminal_state
-                && valid_identity(&release_receipt_id) =>
-            {
-                return released(&request.agent_run_id, &release_receipt_id);
-            }
-            _ => return PlatformFailure::Invalid.response(),
         }
     };
     let environment = &cleanup.environment_authorization.payload;
@@ -219,7 +237,11 @@ impl Platform {
         })
     }
 
-    fn resolve(&self, request: &FinalizeRequest) -> Result<CleanupResolution, PlatformFailure> {
+    fn resolve(
+        &self,
+        request: &FinalizeRequest,
+        terminal: TerminalState,
+    ) -> Result<CleanupResolution, PlatformFailure> {
         self.post(
             "/internal/agent-run-lifecycle/finalize",
             json!({
@@ -228,7 +250,7 @@ impl Platform {
                 "leaseOwner": request.lease_owner,
                 "agentRunId": request.agent_run_id,
                 "authorizationDigest": request.authorization_digest,
-                "terminalState": request.terminal_state,
+                "terminalState": terminal,
             }),
         )
     }
@@ -321,8 +343,19 @@ mod tests {
             "terminalState": "completed",
             "agentRunCleanup": null,
         });
-        let request = serde_json::from_value::<FinalizeRequest>(body.clone()).unwrap();
+        let mut request = serde_json::from_value::<FinalizeRequest>(body.clone()).unwrap();
         assert!(request.valid());
+        assert!(matches!(
+            request.take_intent(),
+            Some(FinalizeIntent::Resolve(TerminalState::Completed))
+        ));
+
+        let mut no_intent = body.clone();
+        no_intent["terminalState"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<FinalizeRequest>(no_intent)
+            .unwrap()
+            .take_intent()
+            .is_none());
 
         body["jobId"] = json!("agent_run.lifecycle:another_run");
         assert!(!serde_json::from_value::<FinalizeRequest>(body.clone())

@@ -79,7 +79,7 @@ class UnifiedEnvironmentLifecycleTests(unittest.TestCase):
                     finalize.assert_called_once_with({'schema': 'runtime.agent_run.finalize.v1',
                         'jobId': job['jobId'], 'leaseOwner': 'worker:fixture-owner', 'agentRunCleanup': cleanup,
                         'agentRunId': start['agentRunId'], 'authorizationDigest': start['authorizationDigest'],
-                        'terminalState': 'completed'})
+                        'terminalState': None})
                     api.assert_called_once()
                     teardown_request.assert_not_called()
                 else:
