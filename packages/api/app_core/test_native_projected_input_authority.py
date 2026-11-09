@@ -16,10 +16,38 @@ from .test_personal_library_materials import PersonalLibraryMaterialFixture
 from .testing import leased_lifecycle_job_fixture
 
 
-AUTHORITY_SQL = re.sub(
-    r"\$[1-8]", "%s",
-    Path(__file__).with_name("native_projected_input_authority.sql").read_text(encoding="utf-8"),
-)
+def native_authority_sql(name):
+    path = Path(__file__).with_name(name)
+    fragment = path.with_name("native_run_execution_authority.sql").read_text(encoding="utf-8")
+    statement = path.read_text(encoding="utf-8").replace("/* native_run_execution_authority */", fragment)
+    return re.sub(r"\$[0-9]+", "%s", statement)
+
+
+def native_run_authority_fixture(test_case, run):
+    lease_owner = leased_lifecycle_job_fixture(test_case, run)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "CREATE TABLE runtime.runtime_events(event_id text PRIMARY KEY, session_id text, task_id text, "
+            "event_type text NOT NULL, visibility text, at_ms bigint, payload_json text)"
+        )
+        cursor.execute("CREATE TABLE runtime.execution_job_tenants(job_id text PRIMARY KEY, workspace_id text NOT NULL)")
+        cursor.execute(
+            "INSERT INTO runtime.execution_job_tenants VALUES (%s, %s)",
+            ["agent_run.lifecycle:" + run.id, run.workspace_id],
+        )
+    return lease_owner, acquire_environment_controller(run.id, lease_owner)
+
+
+def native_run_authority_params(run, lease_owner, controller):
+    grant = run.authorization
+    return {
+        "run_id": run.id, "digest": grant.digest, "signature": grant.signature,
+        "payload": json.dumps(grant.payload), "lease_owner": lease_owner,
+        "environment_id": controller["environmentId"], "controller_epoch": controller["controllerEpoch"],
+    }
+
+
+AUTHORITY_SQL = native_authority_sql("native_projected_input_authority.sql")
 VALIDATE_SCHEMA = "runtime.projected_input.validate.v1"
 DESCRIPTOR_FIELDS = ("inputRef", "virtualPath", "sizeBytes", "sha256", "sourceVersion")
 
@@ -28,18 +56,7 @@ class NativeProjectedInputAuthorityTests(PersonalLibraryMaterialFixture, Transac
     def activate(self, run):
         self.run = run
         self.grant = run.authorization
-        self.lease_owner = leased_lifecycle_job_fixture(self, run)
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "CREATE TABLE runtime.runtime_events(event_id text PRIMARY KEY, session_id text, task_id text, "
-                "event_type text NOT NULL, visibility text, at_ms bigint, payload_json text)"
-            )
-            cursor.execute("CREATE TABLE runtime.execution_job_tenants(job_id text PRIMARY KEY, workspace_id text NOT NULL)")
-            cursor.execute(
-                "INSERT INTO runtime.execution_job_tenants VALUES (%s, %s)",
-                ["agent_run.lifecycle:" + run.id, run.workspace_id],
-            )
-        self.controller = acquire_environment_controller(run.id, self.lease_owner)
+        self.lease_owner, self.controller = native_run_authority_fixture(self, run)
 
     def prepared(self, run, owner=None):
         original, call_id = self.prepare(run, owner)
@@ -50,11 +67,8 @@ class NativeProjectedInputAuthorityTests(PersonalLibraryMaterialFixture, Transac
                          descriptor["sourceVersion"], descriptor["sha256"], call_id)
 
     def native(self, inputs, **changes):
-        values = {
-            "run_id": self.run.id, "digest": self.grant.digest, "signature": self.grant.signature,
-            "payload": json.dumps(self.grant.payload), "lease_owner": self.lease_owner,
-            "inputs": json.dumps(inputs), "environment_id": self.controller["environmentId"],
-            "controller_epoch": self.controller["controllerEpoch"],
+        values = native_run_authority_params(self.run, self.lease_owner, self.controller) | {
+            "inputs": json.dumps(inputs),
         } | changes
         with connection.cursor() as cursor:
             cursor.execute(AUTHORITY_SQL, list(values.values()))

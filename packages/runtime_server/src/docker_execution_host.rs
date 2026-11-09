@@ -5,7 +5,7 @@ mod execution_inputs;
 mod maintenance;
 mod network;
 mod output_consumption;
-pub(crate) mod projected_input_authority;
+mod projected_input_authority;
 mod retained;
 mod retained_commands;
 pub(crate) mod runsc_power;
@@ -29,7 +29,7 @@ use crate::execution_recovery_policy::{
 use crate::observations::{
     MeasuredWriter, ProtectionMetric, ProtectionTrigger, WorkspaceProtection,
 };
-use projected_input_authority::ProjectedInputAuthority;
+use crate::native_run_execution_authority::NativeRunExecutionAuthority;
 use snapshot_capture::{SnapshotCaptureCache, SnapshotCaptureResult};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
@@ -373,7 +373,7 @@ pub struct DockerExecutionHostRunner {
     api_token: String,
     api_client: reqwest::blocking::Client,
     materialized_inputs: Mutex<BTreeMap<String, SandboxMaterializedInput>>,
-    projected_input_authority: Option<ProjectedInputAuthority>,
+    native_run_authority: Option<Arc<NativeRunExecutionAuthority>>,
     resident_store: Option<Arc<PostgresRuntimeStore>>,
     resident_lease: Option<centaeris_core::session::RuntimeJobLeaseFence>,
     retained_allocation:
@@ -416,7 +416,7 @@ pub struct DockerExecutionHostRequest<'a> {
     pub api_url: String,
     pub api_token: String,
     pub plugin_activation: &'a PluginActivationSnapshotV1,
-    pub projected_input_authority: Option<ProjectedInputAuthority>,
+    pub native_run_authority: Option<Arc<NativeRunExecutionAuthority>>,
 }
 
 #[derive(Clone, Copy)]
@@ -549,7 +549,7 @@ impl DockerExecutionHostRunner {
             runner.api_token = request.api_token;
             runner.environment_profile = request.environment_profile;
             runner.environment_authorization = Some(request.environment_authorization);
-            runner.projected_input_authority = request.projected_input_authority;
+            runner.native_run_authority = request.native_run_authority;
             runner.resident_store = Some(request.resident_store);
             runner.resident_lease = Some(centaeris_core::session::RuntimeJobLeaseFence {
                 job_id: request.lifecycle_job_id,
@@ -578,7 +578,7 @@ impl DockerExecutionHostRunner {
             api_url,
             api_token,
             plugin_activation,
-            projected_input_authority,
+            native_run_authority,
         } = request;
         if agent_run_id.trim().is_empty()
             || execution_id.trim().is_empty()
@@ -764,7 +764,7 @@ impl DockerExecutionHostRunner {
                 .build()
                 .map_err(|error| format!("build Docker sandbox API client failed: {error}"))?,
             materialized_inputs: Mutex::new(BTreeMap::new()),
-            projected_input_authority,
+            native_run_authority,
             resident_store: Some(resident_store),
             resident_lease: Some(centaeris_core::session::RuntimeJobLeaseFence {
                 job_id: lifecycle_job_id,
@@ -2139,9 +2139,8 @@ impl DockerExecutionHostRunner {
             .iter()
             .map(ProjectedInputValidation::from)
             .collect::<Vec<_>>();
-        let native_states = match &self.projected_input_authority {
-            Some(authority) => authority
-                .validate(self, &expected)
+        let native_states = match &self.native_run_authority {
+            Some(authority) => projected_input_authority::validate(authority, &expected)
                 .map_err(|error| self.unavailable(error))?,
             None => None,
         };
@@ -4633,7 +4632,7 @@ mod tests {
                         api_url: api_url.clone(),
                         api_token: "centaeris-recovery-test-token".into(),
                         plugin_activation: &activation,
-                        projected_input_authority: None,
+                        native_run_authority: None,
                     },
                     before,
                 )
@@ -7091,7 +7090,7 @@ mod tests {
             api_token: "token".to_string(),
             api_client: reqwest::blocking::Client::new(),
             materialized_inputs: Mutex::new(BTreeMap::new()),
-            projected_input_authority: None,
+            native_run_authority: None,
             resident_store: None,
             resident_lease: None,
             retained_allocation: None,

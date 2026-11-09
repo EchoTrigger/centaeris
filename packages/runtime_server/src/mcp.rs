@@ -1,3 +1,5 @@
+mod native_dispatch;
+
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -21,6 +23,7 @@ use centaeris_mcp::{
 use serde::{Deserialize, Serialize};
 
 use crate::docker_execution_host::DockerExecutionHostRunner;
+use crate::native_run_execution_authority::NativeRunExecutionAuthority;
 use crate::skill_projection::{
     plugin_package_roots_at, verified_plugin_package_roots_at, PLUGIN_CATALOG_ROOT,
 };
@@ -42,6 +45,7 @@ struct McpConnectorIdentity {
     package_root: PathBuf,
     resource_path: String,
     resource_digest: String,
+    native_credential_ref: Option<String>,
 }
 
 struct McpDispatchAuthorization {
@@ -70,6 +74,31 @@ impl McpDispatchAuthorization {
             *binding_digest = Some(authorized.binding_digest.clone());
         }
         Ok(authorized)
+    }
+
+    async fn authorize_dispatch(&self) -> Result<(), String> {
+        let Some((authority, credential_ref)) = self
+            .resolver
+            .native_run_authority
+            .as_ref()
+            .zip(self.identity.native_credential_ref.as_ref())
+        else {
+            return self.check("dispatch").await.map(|_| ());
+        };
+        let binding = self
+            .binding_digest
+            .lock()
+            .await
+            .clone()
+            .ok_or("MCP connector binding unavailable")?;
+        let authority = authority.clone();
+        let identity = self.identity.clone();
+        let credential_ref = credential_ref.clone();
+        tokio::task::spawn_blocking(move || {
+            native_dispatch::verify(&authority, &identity, &credential_ref, &binding)
+        })
+        .await
+        .map_err(|_| "authorize MCP connector request failed".to_string())?
     }
 
     async fn connect_token(
@@ -107,7 +136,7 @@ impl DynamicToolProvider for AuthorizedMcpProvider {
     ) -> Pin<Box<dyn Future<Output = Result<DynamicToolProviderResponse, String>> + Send + 'a>>
     {
         Box::pin(async move {
-            self.authorization.check("dispatch").await?;
+            self.authorization.authorize_dispatch().await?;
             self.inner.execute(req).await
         })
     }
@@ -119,7 +148,7 @@ impl DynamicToolProvider for AuthorizedMcpProvider {
     {
         Box::pin(async move {
             self.authorization
-                .check("dispatch")
+                .authorize_dispatch()
                 .await
                 .map_err(ToolErrorInfo::from_unstructured_error)?;
             self.inner.execute_with_error_info(req).await
@@ -255,6 +284,7 @@ pub(crate) struct McpCredentialResolver {
     agent_run_id: String,
     authorization_ref: String,
     authorization_digest: String,
+    native_run_authority: Option<Arc<NativeRunExecutionAuthority>>,
     client: reqwest::Client,
 }
 
@@ -272,6 +302,7 @@ impl McpCredentialResolver {
             agent_run_id,
             authorization_ref,
             authorization_digest,
+            native_run_authority: None,
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(3))
@@ -279,6 +310,14 @@ impl McpCredentialResolver {
                 .build()
                 .map_err(|error| format!("build MCP credential client failed: {error}"))?,
         })
+    }
+
+    pub(crate) fn with_native_run_authority(
+        mut self,
+        authority: Option<Arc<NativeRunExecutionAuthority>>,
+    ) -> Self {
+        self.native_run_authority = authority;
+        self
     }
 
     async fn authorize(
@@ -528,6 +567,15 @@ fn prepare_mcp_servers_at(
                 load_verified_mcp_servers_file(&package_root, &resource.path, &resource.digest)?;
             declaration_budget.add(&declaration)?;
             servers.extend(declaration.servers.into_iter().map(|server| {
+                let native_credential_ref = match &server.transport {
+                    McpTransportV1::StreamableHttp {
+                        bearer_credential_ref,
+                        ..
+                    } if package.mcp_servers.len() == 1 && resource.path.is_ascii() => {
+                        bearer_credential_ref.clone()
+                    }
+                    _ => None,
+                };
                 (
                     McpConnectorIdentity {
                         plugin_name: package.name.clone(),
@@ -535,6 +583,7 @@ fn prepare_mcp_servers_at(
                         package_root: package_root.clone(),
                         resource_path: resource.path.clone(),
                         resource_digest: resource.digest.clone(),
+                        native_credential_ref,
                     },
                     server,
                 )
@@ -614,6 +663,7 @@ mod tests {
             package_root: PathBuf::new(),
             resource_path: "mcp/banana.json".into(),
             resource_digest: format!("sha256:{}", "c".repeat(64)),
+            native_credential_ref: None,
         }
     }
 
@@ -1041,6 +1091,7 @@ mod tests {
                 package_root: PathBuf::new(),
                 resource_path: field("resourcePath"),
                 resource_digest: field("resourceDigest"),
+                native_credential_ref: None,
             },
             resolver: Arc::new(resolver),
             binding_digest: tokio::sync::Mutex::new(None),

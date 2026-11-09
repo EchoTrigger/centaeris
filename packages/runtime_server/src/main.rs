@@ -24,6 +24,7 @@ mod lifecycle_hooks;
 mod material_execution;
 mod mcp;
 mod native_model;
+mod native_run_execution_authority;
 mod observations;
 mod platform_materials;
 mod postgres_store;
@@ -130,7 +131,6 @@ use contract::{
     AgentRunTailAction, HostEventInputRequest,
 };
 use deferred_input_resolver::{ApiDeferredInputResolver, ApiModelInputImageResolver};
-use docker_execution_host::projected_input_authority::ProjectedInputAuthority;
 use docker_execution_host::{
     resolve_workspace_image_digest, DockerExecutionHostRequest, DockerExecutionHostRunner,
     SessionWorkspaceApiError, SessionWorkspaceCommitOutcome, SessionWorkspaceLease,
@@ -2047,6 +2047,12 @@ fn execute_agent_run(
     }
     let workspace_skill_catalog_config =
         workspace_skill_catalog_config(&agent_run_start.authorization.plugin_activation)?;
+    let native_run_authority =
+        native_run_execution_authority::NativeRunExecutionAuthority::from_verified_start(
+            &agent_run_start,
+            job_store.clone(),
+            lifecycle_lease_owner.clone(),
+        )?;
     let mcp_credential_resolver = match McpCredentialResolver::new(
         api_url.clone(),
         token.clone(),
@@ -2054,7 +2060,7 @@ fn execute_agent_run(
         agent_run_start.authorization.id.clone(),
         agent_run_start.authorization_digest.clone(),
     ) {
-        Ok(resolver) => resolver,
+        Ok(resolver) => resolver.with_native_run_authority(native_run_authority.clone()),
         Err(error) => {
             return commit_failed_agent_run(
                 runtime.as_ref(),
@@ -2303,9 +2309,7 @@ fn execute_agent_run(
                     api_url: api_url.clone(),
                     api_token: token.clone(),
                     plugin_activation: &agent_run_start.authorization.plugin_activation,
-                    projected_input_authority: ProjectedInputAuthority::from_verified_start(
-                        &agent_run_start,
-                    )?,
+                    native_run_authority: native_run_authority.clone(),
                 },
                 &mut |client| admitted(Some(client)),
             )
