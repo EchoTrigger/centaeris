@@ -61,16 +61,52 @@ fn queued_run(
 
 #[test]
 #[ignore = "requires owned disposable PostgreSQL"]
+fn postgres_dispatch_without_a_count_quota_keeps_host_leases_beyond_eight_starts() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (_url, store, mut db) = fixture::setup();
+    let host = store
+        .clone()
+        .with_dispatch_host("resource-host".into(), None)
+        .unwrap();
+    for index in 0..12 {
+        queued_run(
+            &store,
+            &mut db,
+            &format!("resource-run-{index}"),
+            &format!("resource-environment-{index}"),
+        );
+    }
+    for index in 0..12 {
+        assert!(
+            host.wait_for_runtime_jobs(&[LIFECYCLE.into()], Duration::ZERO)
+                .unwrap()
+                .ready
+        );
+        let jobs = claim(&host, &format!("worker-{index}"));
+        assert_eq!(jobs.len(), 1);
+        host.require_execute_lease(&jobs[0].job_id, jobs[0].lease_owner.as_deref().unwrap())
+            .unwrap();
+    }
+    assert!(
+        !host
+            .wait_for_runtime_jobs(&[LIFECYCLE.into()], Duration::ZERO)
+            .unwrap()
+            .ready
+    );
+}
+
+#[test]
+#[ignore = "requires owned disposable PostgreSQL"]
 fn postgres_dispatch_reserves_one_start_slot_and_another_host_claims_remaining_work() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_url, store, mut db) = fixture::setup();
     let host = store
         .clone()
-        .with_dispatch_host("first-host".into(), 1)
+        .with_dispatch_host("first-host".into(), Some(1))
         .unwrap();
     let other = store
         .clone()
-        .with_dispatch_host("second-host".into(), 1)
+        .with_dispatch_host("second-host".into(), Some(1))
         .unwrap();
     let first = queued_run(&store, &mut db, "dispatch-a", "environment-a");
     let second = queued_run(&store, &mut db, "dispatch-b", "environment-b");
@@ -129,10 +165,13 @@ fn postgres_dispatch_pins_existing_residency_and_control_to_its_owning_host() {
         &std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
     )
     .unwrap();
-    let host = store.clone().with_dispatch_host("host".into(), 1).unwrap();
+    let host = store
+        .clone()
+        .with_dispatch_host("host".into(), Some(1))
+        .unwrap();
     let other = store
         .clone()
-        .with_dispatch_host("other-host".into(), 1)
+        .with_dispatch_host("other-host".into(), Some(1))
         .unwrap();
     let job_id = queued_run(&store, &mut db, "resident-next", "environment");
     assert!(claim(&other, "other-host-worker").is_empty());

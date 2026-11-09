@@ -5,6 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createJsxSubjectLoader } from "./jsxSubject.mjs";
 import { renderer, nodes } from "./componentHarness.mjs";
+import { createTranscriptViewStore } from "../../src/chat/transcriptViewStore.ts";
 
 const stub = code => `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
 const loader = createJsxSubjectLoader(new Map([
@@ -16,8 +17,7 @@ const { TranscriptBlockList } = await import(await loader(fileURLToPath(new URL(
 
 function render(blocks, extra = {}) {
   const list = { blockIds: blocks.map(block => block.blockId), hasOlder: false };
-  const store = { subscribeList: () => () => {}, getListSnapshot: () => list,
-    subscribeLive: () => () => {}, getLiveSnapshot: () => null,
+  const store = { ...createTranscriptViewStore(), getListSnapshot: () => list,
     getBlockSnapshot: id => blocks.find(block => block.blockId === id) };
   return renderToStaticMarkup(createElement(TranscriptBlockList, { store, sessionId: "session",
     loadingHistory: false, loadingOlderHistory: false, onLoadOlderHistory: async () => {}, ...extra }));
@@ -50,8 +50,7 @@ test("admission preserves the timer reconciliation identity and start time, incl
   const { TranscriptBlockList: List } = await import(await lifecycleLoader(fileURLToPath(new URL("../../src/chat/TranscriptBlockList.tsx", import.meta.url))));
   let blocks = [];
   let snapshot = { blockIds: [], hasOlder: false, viewEpoch: 1 };
-  const store = { subscribeList: () => () => {}, getListSnapshot: () => snapshot,
-    subscribeLive: () => () => {}, getLiveSnapshot: () => null, subscribeManagedContent: () => () => {},
+  const store = { ...createTranscriptViewStore(), getListSnapshot: () => snapshot,
     getBlockSnapshot: id => blocks.find(block => block.blockId === id) };
   const props = { store, sessionId: null, pendingUserMessage: { ...pending, sessionId: null, agentRunId: null }, running: true, startedAtMs: pending.startedAtMs };
   const oldWindow = globalThis.window;

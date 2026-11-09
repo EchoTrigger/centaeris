@@ -157,11 +157,11 @@ pub(super) fn router(state: HttpServerState) -> Router {
         )
         .route(
             "/internal/transcript/page",
-            post_transcript(transcript_protocol::page),
+            post_transcript_read(transcript_protocol::ReadOperation::Page),
         )
         .route(
             "/internal/transcript/patches",
-            post_transcript(transcript_protocol::patches),
+            post_transcript_read(transcript_protocol::ReadOperation::Patches),
         )
         .route(
             "/internal/transcript/content",
@@ -232,18 +232,8 @@ where
         if !job_scope && !supported {
             return Ok(http_response(404, "text/plain", b"not_found".to_vec()));
         }
-        let token = match env::var("INTERNAL_API_TOKEN") {
-            Ok(token) if !job_scope || !token.is_empty() => token,
-            _ if job_scope => return json_error_response(500, "internal_token_unavailable"),
-            _ => return Err("INTERNAL_API_TOKEN is required".to_string()),
-        };
-        if request
-            .headers()
-            .get("x-internal-token")
-            .and_then(|value| value.to_str().ok())
-            != Some(token.as_str())
-        {
-            return json_error_response(401, "unauthorized");
+        if let Some(response) = authorize_internal_request(&request, job_scope)? {
+            return Ok(response);
         }
         if supported {
             return operation.expect("supported route")(state, request);
@@ -259,6 +249,26 @@ where
         json_error_response(404, "job_protocol_not_found")
     })
     .await
+}
+
+fn authorize_internal_request(
+    request: &Request<Bytes>,
+    job_scope: bool,
+) -> Result<Option<Response<Body>>, String> {
+    let token = match env::var("INTERNAL_API_TOKEN") {
+        Ok(token) if !job_scope || !token.is_empty() => token,
+        _ if job_scope => return json_error_response(500, "internal_token_unavailable").map(Some),
+        _ => return Err("INTERNAL_API_TOKEN is required".to_string()),
+    };
+    if request
+        .headers()
+        .get("x-internal-token")
+        .and_then(|value| value.to_str().ok())
+        != Some(token.as_str())
+    {
+        return json_error_response(401, "unauthorized").map(Some);
+    }
+    Ok(None)
 }
 
 fn target(request: &Request<Bytes>) -> &str {
@@ -287,36 +297,17 @@ pub(super) async fn dispatch_http_operation<F>(
 where
     F: FnOnce(HttpServerState, Request<Bytes>) -> Result<Response<Body>, String> + Send + 'static,
 {
-    let observed_route = observations::route(request.uri().path());
-    let observed_lane =
-        if request.method().as_str() == "POST" && request.uri().path() == "/internal/jobs/wait" {
-            2
-        } else {
-            0
-        };
-    let admission_started = Instant::now();
-    let lane = state
-        .request_policy
-        .lane(request.method().as_str(), request.uri().path());
-    let observed_lane = if lane.control { 1 } else { observed_lane };
-    let deadline = lane.deadline.map(|duration| Instant::now() + duration);
-    let observed_request =
-        observations::Request::admitted(observed_route, observed_lane, admission_started);
-    let read = read_axum_request(request);
-    let read_result = if let Some(deadline) = deadline {
-        match tokio::time::timeout_at(deadline.into(), read).await {
-            Ok(result) => result,
-            Err(_) => {
-                return bounded_json_error_response(408, "request_body_timeout");
-            }
-        }
-    } else {
-        read.await
-    };
-    let request = match read_result {
-        Ok(request) => request,
+    let prepared = match prepare_http_operation(State(state), request, None).await {
+        Ok(prepared) => prepared,
         Err(response) => return response,
     };
+    let PreparedHttpOperation {
+        state,
+        request,
+        deadline,
+        lane,
+        observed_request,
+    } = prepared;
     let task = tokio::task::spawn_blocking(move || {
         let _context = observations::Context::enter(request.body());
         let _observed_request = observed_request;
@@ -359,6 +350,115 @@ where
         }
         Err(error) => {
             eprintln!("runtime request task failed: {error}");
+            bounded_json_error_response(500, "internal_error")
+        }
+    }
+}
+
+struct PreparedHttpOperation {
+    state: HttpServerState,
+    request: Request<Bytes>,
+    deadline: Option<Instant>,
+    lane: request_policy::RequestLane,
+    observed_request: Option<observations::Request>,
+}
+
+async fn prepare_http_operation(
+    State(state): State<HttpServerState>,
+    request: Request<Body>,
+    maximum_duration: Option<Duration>,
+) -> Result<PreparedHttpOperation, Response<Body>> {
+    let observed_route = observations::route(request.uri().path());
+    let observed_lane =
+        if request.method().as_str() == "POST" && request.uri().path() == "/internal/jobs/wait" {
+            2
+        } else {
+            0
+        };
+    let admission_started = Instant::now();
+    let lane = state
+        .request_policy
+        .lane(request.method().as_str(), request.uri().path());
+    let observed_lane = if lane.control { 1 } else { observed_lane };
+    let duration = match (lane.deadline, maximum_duration) {
+        (Some(lane), Some(maximum)) => Some(lane.min(maximum)),
+        (lane, maximum) => lane.or(maximum),
+    };
+    let deadline = duration.map(|duration| Instant::now() + duration);
+    let observed_request =
+        observations::Request::admitted(observed_route, observed_lane, admission_started);
+    let read = read_axum_request(request);
+    let read_result = if let Some(deadline) = deadline {
+        match tokio::time::timeout_at(deadline.into(), read).await {
+            Ok(result) => result,
+            Err(_) => {
+                return Err(bounded_json_error_response(408, "request_body_timeout"));
+            }
+        }
+    } else {
+        read.await
+    };
+    let request = match read_result {
+        Ok(request) => request,
+        Err(response) => return Err(response),
+    };
+    Ok(PreparedHttpOperation {
+        state,
+        request,
+        deadline,
+        lane,
+        observed_request,
+    })
+}
+
+fn post_transcript_read(
+    operation: transcript_protocol::ReadOperation,
+) -> MethodRouter<HttpServerState> {
+    any(fallback).on(MethodFilter::POST, move |state, request| {
+        dispatch_transcript_read(state, request, operation)
+    })
+}
+
+async fn dispatch_transcript_read(
+    state: State<HttpServerState>,
+    request: Request<Body>,
+    operation: transcript_protocol::ReadOperation,
+) -> Response<Body> {
+    // Hosted API reads time out after five seconds. Only these read routes use
+    // the shorter deadline; ordinary, control and cleanup policies are unchanged.
+    let prepared = match prepare_http_operation(state, request, Some(Duration::from_secs(4))).await
+    {
+        Ok(prepared) => prepared,
+        Err(response) => return response,
+    };
+    let PreparedHttpOperation {
+        state,
+        request,
+        deadline,
+        observed_request: _observed_request,
+        ..
+    } = prepared;
+    if request.uri().query().is_some() {
+        return http_response(404, "text/plain", b"not_found".to_vec());
+    }
+    match authorize_internal_request(&request, false) {
+        Ok(Some(response)) => return response,
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("runtime request failed: {error}");
+            return bounded_json_error_response(500, "internal_error");
+        }
+    }
+    match operation
+        .read(request.into_body(), state.job_store, deadline)
+        .await
+    {
+        Ok((status, body)) => http_response(status, "application/json", body),
+        Err(error) if error == transcript_protocol::REQUEST_DEADLINE_EXCEEDED => {
+            bounded_json_error_response(504, "request_deadline_exceeded")
+        }
+        Err(error) => {
+            eprintln!("runtime request failed: {error}");
             bounded_json_error_response(500, "internal_error")
         }
     }

@@ -21,6 +21,7 @@ CONTENT_CHUNK_BYTES = 65536
 CONTENT_DISPLAY_BYTES = 16 * 1024 * 1024
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 NAVIGATION_CHUNK_BYTES = 65536
+PROJECTION_STALL_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -106,15 +107,28 @@ async def _bounded(operation, timeout):
 
 
 async def _projection_read(operation, timeout):
-    # Keep the originally frozen source water during projection catch-up.
-    async with asyncio.timeout(timeout):
-        while True:
-            try:
-                return await operation()
-            except TranscriptRuntimeError as error:
-                if error.payload.get("error") != "transcript_projection_not_ready":
-                    raise
-                await asyncio.sleep(.05)
+    # A read has its own deadline. Catch-up may take longer while committed
+    # projection water advances toward the originally frozen target.
+    stalled_until = time.monotonic() + PROJECTION_STALL_TIMEOUT_SECONDS
+    projected = -1
+    while True:
+        remaining = stalled_until - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("presentation_projection_stalled")
+        try:
+            return await _bounded(operation(), min(timeout, remaining))
+        except TranscriptRuntimeError as error:
+            if error.payload.get("error") != "transcript_projection_not_ready":
+                raise
+            # Runtime conflict payloads have already been validated against the
+            # request's generation and target by runtime_client.
+            next_projected = int(error.payload["projectedHighWater"])
+            if next_projected > projected:
+                projected = next_projected
+                stalled_until = time.monotonic() + PROJECTION_STALL_TIMEOUT_SECONDS
+                await asyncio.sleep(0)
+            else:
+                await asyncio.sleep(min(.05, max(0, stalled_until - time.monotonic())))
 
 
 async def _tail_read(loader, water, timeout):

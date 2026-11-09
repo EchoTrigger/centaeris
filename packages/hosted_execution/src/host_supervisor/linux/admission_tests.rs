@@ -1,12 +1,11 @@
 use super::*;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture {
     root: PathBuf,
     host: Arc<Host>,
-    admission: Arc<ClientAdmission>,
     workers: Vec<thread::JoinHandle<()>>,
     clients: Vec<UnixStream>,
 }
@@ -46,7 +45,6 @@ impl Fixture {
         Self {
             root,
             host,
-            admission: Arc::new(ClientAdmission::new()),
             workers: Vec::new(),
             clients: Vec::new(),
         }
@@ -65,16 +63,8 @@ impl Fixture {
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let worker = start_client(
-            self.host.clone(),
-            server,
-            Instant::now(),
-            self.admission.clone(),
-        )
-        .unwrap();
-        if let Some(worker) = worker {
-            self.workers.push(worker);
-        }
+        let worker = start_client(self.host.clone(), server, Instant::now()).unwrap();
+        self.workers.push(worker);
         let _ = client.write_all(bytes);
         client
     }
@@ -120,13 +110,10 @@ impl Fixture {
     fn reply(&self, client: UnixStream) -> serde_json::Value {
         let mut bytes = Vec::new();
         let result = BufReader::new(client).read_until(b'\n', &mut bytes);
-        assert!(
-            result.is_ok(),
-            "expected a framed rejection, got {result:?}"
-        );
+        assert!(result.is_ok(), "expected a framed response, got {result:?}");
         assert!(
             !bytes.is_empty(),
-            "ninth accepted connection was closed without a busy response"
+            "accepted connection was closed without a response"
         );
         serde_json::from_slice(&bytes).unwrap()
     }
@@ -145,70 +132,16 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn ninth_valid_request_gets_explicit_unaccepted_busy_while_eight_dispatches_are_blocked() {
+fn independent_request_progresses_while_other_host_operations_are_blocked() {
     let mut fixture = Fixture::new();
     fixture.saturate();
     let client = fixture.connect(HostSupervisorRequest::Inspect {
         environment_instance_id: fixture.target().environment_instance_id,
     });
-    assert_eq!(
-        fixture.reply(client),
-        serde_json::json!({"status":"error","schema":HOST_SUPERVISOR_SCHEMA,"error":"host_busy"})
-    );
+    assert_eq!(fixture.reply(client)["error"], "host_path_unavailable");
     assert!(
         fixture.host.managers.lock().unwrap().is_empty(),
-        "busy request reached registration side effects"
-    );
-}
-
-#[test]
-fn saturated_helper_is_rejected_without_waiting_for_or_spooling_binary_input() {
-    use centaeris_core::execution::{
-        EnvironmentTaskControllerPurpose, EnvironmentTaskFence, EnvironmentTaskOwner,
-        EnvironmentTaskScope,
-    };
-    let mut fixture = Fixture::new();
-    fixture.saturate();
-    let request = HostHelperRequest {
-        fence: EnvironmentTaskFence {
-            environment_instance_id: fixture.target().environment_instance_id,
-            controller_owner: EnvironmentTaskOwner::AgentRun {
-                run_id: "run-a".into(),
-            },
-            controller_epoch: 1,
-            controller_purpose: EnvironmentTaskControllerPurpose::Execute,
-        },
-        operation_id: "1:materialize".into(),
-        scope: EnvironmentTaskScope::Run {
-            run_id: "run-a".into(),
-        },
-        kind: TrustedHelperKind::MaterializeInput,
-        input_digest: format!("sha256:{:x}", Sha256::digest(b"private synthetic upload")),
-        input_length: 24,
-    };
-    let client = fixture.connect(HostSupervisorRequest::Helper { helper: request });
-    assert_eq!(fixture.reply(client)["error"], "host_busy");
-    assert_eq!(
-        fs::read_dir(&fixture.host.config.control_root)
-            .unwrap()
-            .count(),
-        0,
-        "busy helper created input spool or manager state"
-    );
-}
-
-#[test]
-fn released_execution_capacity_accepts_another_valid_request() {
-    let mut fixture = Fixture::new();
-    fixture.saturate();
-    fixture.release();
-    let client = fixture.connect(HostSupervisorRequest::Inspect {
-        environment_instance_id: fixture.target().environment_instance_id,
-    });
-    assert_eq!(
-        fixture.reply(client)["error"],
-        "host_path_unavailable",
-        "released slot did not dispatch the next valid request"
+        "inspection changed unrelated registration state"
     );
 }
 
@@ -220,11 +153,6 @@ fn malformed_and_unsupported_headers_are_never_classified_as_busy() {
         let client=fixture.connect_raw(bytes);
         assert_eq!(fixture.reply(client)["error"],expected);
     }
-    assert_eq!(
-        fixture.admission.executing.load(Ordering::Acquire),
-        8,
-        "invalid header changed execution capacity"
-    );
 }
 
 #[test]
@@ -243,30 +171,19 @@ fn untrusted_peer_cannot_obtain_an_unaccepted_busy_proof() {
         bytes.is_empty(),
         "unauthenticated peer received a protocol acceptance or busy response"
     );
-    assert_eq!(fixture.admission.executing.load(Ordering::Acquire), 0);
 }
 
 #[test]
-fn header_slots_are_bounded_without_claiming_unknown_sockets_are_busy() {
+fn incomplete_headers_do_not_block_an_independent_authenticated_request() {
     let mut fixture = Fixture::new();
     for _ in 0..8 {
         let client = fixture.connect_raw(b"");
         fixture.clients.push(client);
     }
-    let (server, mut peer) = UnixStream::pair().unwrap();
-    assert!(start_client(
-        fixture.host.clone(),
-        server,
-        Instant::now(),
-        fixture.admission.clone()
-    )
-    .unwrap()
-    .is_none());
-    let mut bytes = Vec::new();
-    peer.read_to_end(&mut bytes).unwrap();
-    assert!(bytes.is_empty());
-    assert_eq!(fixture.admission.headers.load(Ordering::Acquire), 8);
-    assert_eq!(fixture.admission.executing.load(Ordering::Acquire), 0);
+    let client = fixture.connect(HostSupervisorRequest::Inspect {
+        environment_instance_id: fixture.target().environment_instance_id,
+    });
+    assert_eq!(fixture.reply(client)["error"], "host_path_unavailable");
     for client in &fixture.clients {
         client.shutdown(std::net::Shutdown::Write).unwrap();
     }
@@ -298,12 +215,13 @@ fn slow_drip_header_cannot_extend_its_absolute_read_deadline() {
 }
 
 #[test]
-fn helper_upload_ready_binds_the_exact_request_before_binary_input_is_sent() {
+fn helper_upload_ready_binds_the_exact_request_while_other_operations_are_blocked() {
     use centaeris_core::execution::{
         EnvironmentTaskControllerPurpose, EnvironmentTaskFence, EnvironmentTaskOwner,
         EnvironmentTaskScope,
     };
     let mut fixture = Fixture::new();
+    fixture.saturate();
     let request = HostHelperRequest {
         fence: EnvironmentTaskFence {
             environment_instance_id: fixture.target().environment_instance_id,

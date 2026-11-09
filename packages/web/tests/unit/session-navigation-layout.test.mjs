@@ -41,7 +41,8 @@ test("ordinary Session rows retain running, unread and pin indicators and all me
   const subject = renderer(AppPageContent, { workspaceDraft: false, location: env.location, modelsVersion: 0 }, env);
   const row = () => {
     const value = component(subject.tree, "ShellSidebar").props.sessionProps.renderSessionRow(component(subject.tree, "ShellSidebar").props.sessionProps.sessions[0], { icon: true });
-    return typeof value.type === "function" ? renderer(value.type, value.props, env).render() : value;
+    const render = value.type.type ?? value.type;
+    return typeof render === "function" ? renderer(render, value.props, env).render() : value;
   };
   const openMenu = async () => { button(row(), "appRoute.conversationActionsForValue").props.onClick(); await subject.settle(); };
   try {

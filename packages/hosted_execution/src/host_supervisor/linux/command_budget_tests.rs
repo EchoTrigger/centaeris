@@ -1,5 +1,8 @@
 use super::*;
-use std::sync::{atomic::AtomicU64, mpsc};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    mpsc,
+};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn temporary() -> PathBuf {

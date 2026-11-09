@@ -26,18 +26,16 @@ REQUIRED_TEST_UPLOAD_LIMITS = {
     "WORK_RETURN_AUDIT_INTERVAL_SECONDS": "3600",
 }
 RESIDENT_LIMIT_DEFAULTS = {
-    "RESIDENT_GLOBAL_COUNT": "8",
-    "RESIDENT_HOST_COUNT": "8",
     "RESIDENT_GLOBAL_MEMORY_BYTES": "12884901888",
     "RESIDENT_GLOBAL_CPU_MILLI": "8000",
     "RESIDENT_GLOBAL_PIDS": "8192",
     "RESIDENT_GLOBAL_WORKSPACE_BYTES": "34359738368",
-    "RESIDENT_TENANT_COUNT": "8",
     "RESIDENT_TENANT_MEMORY_BYTES": "12884901888",
     "RESIDENT_TENANT_CPU_MILLI": "4000",
     "RESIDENT_TENANT_PIDS": "2048",
     "RESIDENT_TENANT_WORKSPACE_BYTES": "34359738368",
 }
+RESIDENT_COUNT_VARIABLES = ("RESIDENT_GLOBAL_COUNT", "RESIDENT_TENANT_COUNT", "RESIDENT_HOST_COUNT")
 RESIDENT_HEADROOM_VARIABLES = (
     "RESIDENT_HOST_MEMORY_HEADROOM_BYTES", "RESIDENT_HOST_CPU_HEADROOM_MILLI",
 )
@@ -52,7 +50,7 @@ def compose_config(**overrides):
     values["CENTAERIS_SOURCE_REVISION"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     values.update(overrides)
     env = {k: v for k, v in os.environ.items()
-           if k not in values and k not in RETIRED and k not in RESIDENT_HEADROOM_VARIABLES}
+           if k not in values and k not in RETIRED and k not in RESIDENT_HEADROOM_VARIABLES and k not in RESIDENT_COUNT_VARIABLES and k != "RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS"}
     with tempfile.TemporaryDirectory(prefix="centaeris-compose-contract-") as temp:
         path = Path(temp) / "synthetic.env"
         path.write_text("\n".join(f"{k}={v}" for k, v in values.items() if v is not None), encoding="utf-8")
@@ -331,7 +329,7 @@ sys.stdout.write(re.sub(pattern,replace,text))
             services = compose_config(**overrides)["services"]
             self.assertEqual(services["runtime"]["environment"]["RUNTIME_NATIVE_SHARED_ADMISSION"], "1")
             self.assertEqual(services["runtime"]["environment"]["DOCKER_CREATE_CONCURRENCY"], "4")
-            self.assertEqual(services["runtime"]["environment"]["RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS"], "8")
+            self.assertIsNone(services["runtime"]["environment"].get("RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS"))
             self.assertEqual(services["runtime"]["environment"]["RUNTIME_RUNSC_IDLE_PAUSE_MS"], "3000")
             self.assertEqual(services["worker"]["environment"]["AGENT_RUN_EXECUTION_MODE"], "perRun")
             for service in ("api", "api-init"):
@@ -363,8 +361,15 @@ sys.stdout.write(re.sub(pattern,replace,text))
                 with self.subTest(unset=bool(overrides), variable=name):
                     self.assertEqual(environment.get(name), expected)
 
+    def test_unset_counts_leave_resource_budgets_and_idle_pause_in_charge(self):
+        for overrides in ({}, dict.fromkeys(RESIDENT_COUNT_VARIABLES)):
+            environment = compose_config(**overrides)["services"]["runtime"]["environment"]
+            for name in (*RESIDENT_COUNT_VARIABLES, "RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS"):
+                self.assertIsNone(environment.get(name))
+            self.assertEqual(environment["RUNTIME_RUNSC_IDLE_PAUSE_MS"], "3000")
+
     def test_explicit_resident_limits_reach_runtime(self):
-        configured = {name: str(101 + index) for index, name in enumerate(RESIDENT_LIMIT_DEFAULTS)}
+        configured = {name: str(101 + index) for index, name in enumerate((*RESIDENT_LIMIT_DEFAULTS, *RESIDENT_COUNT_VARIABLES, "RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS"))}
         environment = compose_config(**configured)["services"]["runtime"]["environment"]
         for name, expected in configured.items():
             with self.subTest(variable=name):
@@ -389,7 +394,7 @@ sys.stdout.write(re.sub(pattern,replace,text))
                 self.assertIsNone(environment.get(name))
 
     def test_invalid_resident_values_reach_runtime_without_compose_fallback(self):
-        variables = (*RESIDENT_LIMIT_DEFAULTS, *RESIDENT_HEADROOM_VARIABLES)
+        variables = (*RESIDENT_LIMIT_DEFAULTS, *RESIDENT_COUNT_VARIABLES, *RESIDENT_HEADROOM_VARIABLES)
         for value in ("", "0", "-1", "not-an-integer"):
             environment = compose_config(**dict.fromkeys(variables, value))["services"]["runtime"]["environment"]
             for name in variables:

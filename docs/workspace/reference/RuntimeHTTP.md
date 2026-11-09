@@ -136,6 +136,7 @@ Request lifetimes are per operation. Deployment inputs and defaults remain owned
 | POST cancel, POST heartbeat, every GET path beginning `/internal/jobs/` | Control | Configured control deadline |
 | POST `/internal/jobs/wait` | Listener | 25 seconds; the validated job wait itself is at most 20 seconds |
 | POST `/agent-runs/step` | Ordinary | No short handler deadline; execution uses its lease and cancellation protocol |
+| POST `/internal/transcript/page` and `/internal/transcript/patches` | Ordinary | Smaller of the configured ordinary deadline and 4 seconds |
 | Other requests, including unknown paths | Ordinary | Configured ordinary deadline |
 
 Runtime HTTP requests have no application concurrency quota. The handler deadline
@@ -143,9 +144,14 @@ begins before body reading, not after it. Short requests retain their body and
 response deadlines; long execution and teardown retain the lease/cancellation
 lifetime. Request-body and header-size limits remain part of input validation.
 
-The blocking closure owns its observation lifetime and database request context
-until it exits. A response timeout or client disconnect does not cancel accepted
+Ordinary blocking handlers own their observation lifetime and database request
+context until they exit. A response timeout or client disconnect does not cancel accepted
 blocking work or prove that an uncertain write rolled back.
+
+Transcript page and patch reads schedule bounded database batches through Tokio.
+Each started batch retains the request's database deadline; cancelling the async
+reader prevents the next batch from starting. Progress responses report only
+completed batches, even when a timed-out batch is still finishing.
 
 The custom Hyper connection loop admits connections independently and limits headers to
 64 and the header buffer to 64 KiB, applies a 10-second header-read timeout and

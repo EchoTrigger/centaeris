@@ -18,6 +18,7 @@ type Options = PresentationIdentity & Readonly<{
   onCheckpoint?(checkpoint: PresentationCheckpoint): void;
   onApplied?(checkpoint: PresentationCheckpoint): void;
   onReset?(reason: 'cursorInvalid' | 'projectionInvalidated'): void;
+  cursor?: string | null;
 }>;
 
 // Delivery is deliberately serial: the fetch reader awaits each application.
@@ -34,6 +35,7 @@ export class WorkspacePresentationController {
   private disposed = false;
   private applying = false;
   private viewRevision: PresentationViewRevision | null = null;
+  private appliedCheckpoint: PresentationCheckpoint | null = null;
   constructor(options: Options) {
     if (!options.workspaceId) throw new Error('presentation identity is required');
     this.options = options;
@@ -41,6 +43,8 @@ export class WorkspacePresentationController {
     this.store = options.store;
     this.signal = options.signal ?? new AbortController().signal;
     this.viewEpoch = options.store.getListSnapshot().viewEpoch;
+    this.lastCursor = options.cursor ?? null;
+    this.acknowledgedSourceHighWater = options.store.getListSnapshot().appliedSourceHighWater;
   }
   private current() {
     return !this.disposed && !this.signal.aborted && (this.options.isCurrent?.() ?? true);
@@ -83,7 +87,7 @@ export class WorkspacePresentationController {
         case 'operation': this.options.onOperation?.(item.detail); break;
         case 'activity': this.options.onActivity?.(item); break;
         case 'question': this.options.onQuestion?.(item); break;
-        case 'reset': this.lastCursor = null; this.options.onReset?.(item.reason); break;
+        case 'reset': this.lastCursor = null; this.appliedCheckpoint = null; this.options.onReset?.(item.reason); break;
         case 'snapshot': {
           const epoch = await this.store.withPresentationSnapshot(item.page, () => this.options.applySnapshot
             ? this.options.applySnapshot(item.page, this.signal)
@@ -135,6 +139,7 @@ export class WorkspacePresentationController {
           }
           this.lastCursor = entry.cursor;
           this.acknowledgedSourceHighWater = item.sourceHighWater;
+          this.appliedCheckpoint = item;
           this.options.onApplied?.(item);
           break;
         }
@@ -142,5 +147,14 @@ export class WorkspacePresentationController {
     } finally { this.applying = false; }
   }
   whenIdle() { return Promise.resolve(); }
+  captureAppliedView() {
+    const snapshot = this.store.getListSnapshot();
+    if (!this.lastCursor || !this.appliedCheckpoint || this.navigation !== null
+      || snapshot.sessionId !== this.identity.sessionId
+      || snapshot.projectionGeneration !== this.appliedCheckpoint.projectionGeneration
+      || snapshot.appliedSourceHighWater !== this.appliedCheckpoint.sourceHighWater
+      || !this.store.presentationContentReady()) return null;
+    return { cursor: this.lastCursor, restore: this.store.captureView() };
+  }
   dispose() { this.disposed = true; }
 }

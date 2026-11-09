@@ -153,9 +153,9 @@ pub(super) fn limits(run: &Run) -> ResidentCapacity {
             .sandbox_resources(),
     );
     ResidentCapacity {
-        global: one,
-        tenant: one,
-        host: one,
+        global: one.into(),
+        tenant: one.into(),
+        host: one.into(),
     }
 }
 pub(super) fn prepare(

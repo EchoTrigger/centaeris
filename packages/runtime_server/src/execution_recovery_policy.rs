@@ -171,6 +171,17 @@ pub(crate) enum SnapshotCaptureError {
 }
 
 impl ExecutionActivityWitness {
+    /// Only a fresh, idle host can reuse initial read observations without another RPC.
+    pub(crate) fn initial_context_revision(&self) -> Option<u64> {
+        let state = self.gate.state.lock().ok()?;
+        (state.active == 0
+            && state.waiting == 0
+            && !state.capturing
+            && !state.persistent_dispatch
+            && self.gate.epoch.load(Ordering::SeqCst) == 0)
+            .then_some(self.host_instance)
+    }
+
     pub(crate) fn input_operations(&self) -> &Mutex<()> {
         &self.gate.input_operations
     }

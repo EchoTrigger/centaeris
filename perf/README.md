@@ -296,6 +296,82 @@ stdout-byte measurements do not estimate physical disk or complete API cost.
 
 ## Lightweight tool latency
 
+Use `k6/scenarios/session-latency.js` for bounded end-to-end arrival or rolling
+Session measurements. The fixture owns authentication, target model IDs and a
+loopback `PERF_LATENCY_CONTROL` HTTP endpoint. `GET /admission` returns
+`{"allowed":true}` while the declared load budget is open; `GET /release/{runId}`
+returns `{"released":true}` only after that original Run's environment release
+and lifecycle Job completion. Fixed multi-VU cohorts additionally poll
+`GET /barrier/{turnNumber}/{runId}` for `{"ready":true}` after every environment
+in that cohort releases, keeping the following turn a simultaneous burst.
+Arrival scenarios never use this barrier. These endpoints belong to an isolated test owner,
+not the product API. They must not query or mutate another deployment.
+
+Set `PERF_LATENCY_PLAN` to an exact JSON object, for example:
+
+```json
+{"mode":"arrival","task":"workspace","sessionPolicy":"rolling","vus":16,"iterations":2,"rate":12,"durationSeconds":180,"timeoutSeconds":120}
+```
+
+`mode` is `arrival`, `iterations` or `continuous`; `sessionPolicy` is `fresh`, `pairs` or
+`rolling`; `task` is `text`, `single-tool` or `workspace`. A workspace first Run
+writes a distinct random 4 MiB file and SHA-256 sidecar. A followup validates its
+size and digest after restoration. Each iteration submits one Run, observes and
+verifies its SSE results, then waits for release. That wait occupies a VU and is
+reported independently; submission-to-text starts immediately before the message
+POST. A new Session is created by that same POST, not an earlier setup request.
+
+Arrival plans preallocate the complete fixed VU budget; record k6
+`dropped_iterations` separately from HTTP rejections and fixture-stopped
+submissions. Plans admit at most 200 scheduled iterations and use bounded stream
+and release deadlines. The fixture owner must enforce the cumulative budget
+across windows and collect every accepted Run through drain, including failed
+client observations. Do not automatically retry rejected messages.
+
+Continuous stability acceptance uses this fixed profile:
+
+```json
+{"mode":"continuous","task":"workspace","sessionPolicy":"rolling","vus":32,"iterations":2,"rate":18,"durationSeconds":540,"timeoutSeconds":120}
+```
+
+This is one uninterrupted arrival stream with 162 planned message POSTs. Its
+three 180-second windows share the same Sessions, API process and pool; the
+collector groups observations without an intermediate restart or manual cleanup.
+The 32 VUs provide client observation capacity while sandbox admission follows
+the deployed resource policy. A dropped iteration or an unsubmitted input fails
+acceptance. Preserve failed experiments instead of extending them to fill a
+successful-sample target.
+
+`harness/session_latency_acceptance.py` checks original request/Run identity,
+at least 100 actually completed and verified followups, lifecycle completion and
+release. First turns, rejections, intentional disconnects and incomplete client
+observations do not contribute to those followups. Record resource waiting and
+rejection separately, with per-window outcomes.
+
+The fixture must supply observations from the actual API process and pool,
+including live connections, individual unreturned leases, active and expired
+waiters, and PostgreSQL transaction state. A separate observer connection can
+verify backend facts but cannot substitute for API pool observations. Legitimate
+idle pool growth is allowed when internal occupancy matches actual connections.
+Missing observations or a process/pool replacement fail acceptance. Record the
+native binary manifest, API source and service identities; image labels alone
+do not identify source supplied through a bind mount.
+
+The final drain deadline starts at the scenario's absolute end of new-input
+scheduling, including in-flight requests. Within 120 seconds, every original Run
+and Job must settle, all test sandboxes and resident responsibilities must be
+released, and pool ownership, waiting and transaction state must return to the
+declared idle baseline. Report each condition's recovery time and the final
+composite observation; k6 exit does not restart the deadline. Keep response-time
+measurements as a comparison with the existing baseline, separate from stability.
+
+For dispatch attribution, `experience_timing.py` additionally separates first
+claim, first Worker step-request start and first Runtime startup-profile start.
+Cross-process intervals require `--shared-wall-clock`; absent or reversed
+intervals stay null. `stepRequestToRuntimeStartupMs` includes transport and server
+work before startup and does not by itself establish a queue. Use
+`--model-kind delayedMock` for a deliberately delayed synthetic model.
+
 Use `k6/scenarios/light-experience.js` with `perf-light-experience` for the
 model-independent tool comparison. `single-tool` runs the first real Bash command;
 `multi-step` measures two real commands and file continuity in one Run. Keep
@@ -361,11 +437,29 @@ Interpret the measurements independently:
   is captured at HTTP-attempt start; retries are separate attempts. Existing
   `firstModelTextMs` is Run submission to
   first observed assistant text and may occur after tools; it is not model TTFT.
+- For the first model request with parallel checkpoint preparation,
+  `model_output_ready_safe_point` ends after the checkpoint and current lease
+  are confirmed. Its duration includes any wait after model output arrives.
+  Compare the end marker with request-local first-event timing and report
+  client-observed assistant text separately.
 - Startup components and child spans can overlap. `runtimeCoveredMs` is only
   the union of recorded Runtime intervals, never their sum or a reconstructed
   causal critical path. Wall-clock end markers place approximate intervals;
   durations come from producer-local monotonic clocks. Do not subtract client,
   Runtime, Host, or event `createdAtMs` timestamps across clock domains.
+- Request preparation records `modelInputEstimate`, `promptCompaction`,
+  `modelInputIntake`, `modelInputProjection`, `agentsInstructionsRead` and
+  `agentsInstructionsReuse` with
+  their original `turnId`. Reads and projections are nested intervals. Count
+  the reads for the first main request and compare their intervals with its HTTP
+  start rather than adding parent and child durations.
+  Core can reuse an AGENTS read, including an absent file, between the estimate
+  and final projection of one preparation when the host supplies the same trusted
+  observation revision. Compaction invalidates that observation. The Docker host
+  supplies it only for a fresh per-Run instance without plugin mounts, materialized
+  inputs, restore or dispatch history, and closes it before the first model request.
+  Retained and recovered instances continue reading. Every preparation starts
+  with a new observation, so this does not cache instructions across requests.
 
 The report is explicitly `latencyOnly`, with missing evidence listed as
 `notObserved`; neither the execution mode argument nor a fast command proves

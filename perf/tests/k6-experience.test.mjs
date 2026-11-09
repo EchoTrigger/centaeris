@@ -39,7 +39,8 @@ function subject(environment = {}, change = () => {}) {
   });
   const source = fs.readFileSync(new URL('../k6/scenarios/light-experience.js', import.meta.url), 'utf8')
     .replace(/^import .*;\r?\n/gm, '').replace('export default function (data)', 'function iteration(data)').replace(/export /g, '');
-  vm.runInContext(source + '\nglobalThis.subjectOptions = options;', context);
+  const contract = fs.readFileSync(new URL('../k6/scenarios/experience-contract.js', import.meta.url), 'utf8').replace(/export /g, '');
+  vm.runInContext(contract + '\n' + source + '\nglobalThis.subjectOptions = options;', context);
   return { context, metrics, admissions, records };
 }
 

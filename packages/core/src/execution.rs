@@ -14,7 +14,7 @@ mod policy;
 mod process;
 mod residency;
 
-pub use residency::{admit_resident_resources, ResidentResourceUsage};
+pub use residency::{admit_resident_resources, ResidentResourceLimits, ResidentResourceUsage};
 
 pub use policy::{ExecutionPolicy, FileSystemPolicy, NetworkPolicy};
 pub use process::{
@@ -190,6 +190,13 @@ pub trait ExecutionHostRunner: Send + Sync {
         ExecutionWorkspaceGeneration::Unknown {
             reason: "execution host does not provide a trusted workspace generation".to_string(),
         }
+    }
+
+    /// A host-local revision for reusing read observations within one request preparation.
+    /// Return None whenever a writer may exist or changes cannot invalidate the revision.
+    /// This grants no execution authority and is not a recovery snapshot generation.
+    fn context_observation_revision(&self) -> Option<u64> {
+        None
     }
 
     fn run_file_system_operation(

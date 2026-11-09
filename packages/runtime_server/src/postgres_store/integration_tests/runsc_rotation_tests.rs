@@ -88,7 +88,7 @@ fn postgres_runsc_completed_pause_releases_only_running_capacity() {
         .get::<_, i64>(0);
     assert_eq!(generation, seeded_generation + 1);
     let mut tx = db.transaction().unwrap();
-    runsc_rotation::reserve_running(&mut tx, &binding, 1).unwrap();
+    runsc_rotation::reserve_running(&mut tx, &binding, Some(1)).unwrap();
     assert_eq!(
         tx.query_one("SELECT state FROM runtime.runsc_environment_power", &[])
             .unwrap()
@@ -139,7 +139,7 @@ fn postgres_runsc_unknown_pause_keeps_running_charge_and_is_reconcilable() {
         .unwrap();
     assert_eq!(runsc_rotation::running_count(&mut db, "host").unwrap(), 0);
     let mut tx = db.transaction().unwrap();
-    runsc_rotation::reserve_running(&mut tx, &binding, 1).unwrap();
+    runsc_rotation::reserve_running(&mut tx, &binding, Some(1)).unwrap();
     runsc_rotation::observe_running(&mut tx, &binding, binding.container_id.as_deref().unwrap())
         .unwrap();
     tx.commit().unwrap();
@@ -196,12 +196,12 @@ fn postgres_runsc_unregistered_residency_and_uncertain_resume_are_charged() {
     };
     let mut tx = db.transaction().unwrap();
     assert_eq!(
-        runsc_rotation::reserve_running(&mut tx, &other, 1).unwrap_err(),
+        runsc_rotation::reserve_running(&mut tx, &other, Some(1)).unwrap_err(),
         RUNSC_CAPACITY_WAIT
     );
     tx.rollback().unwrap();
     let mut tx = db.transaction().unwrap();
-    runsc_rotation::reserve_running(&mut tx, &binding, 1).unwrap();
+    runsc_rotation::reserve_running(&mut tx, &binding, Some(1)).unwrap();
     tx.commit().unwrap();
     assert_eq!(runsc_rotation::running_count(&mut db, "host").unwrap(), 1);
 }
@@ -349,7 +349,7 @@ fn postgres_runsc_uncertain_pauses_cannot_bypass_single_running_slot_after_resta
     assert_eq!(runsc_rotation::running_count(&mut db, "host").unwrap(), 2);
     let mut tx = db.transaction().unwrap();
     assert_eq!(
-        runsc_rotation::reserve_running(&mut tx, &binding, 1).unwrap_err(),
+        runsc_rotation::reserve_running(&mut tx, &binding, Some(1)).unwrap_err(),
         RUNSC_CAPACITY_WAIT
     );
     tx.rollback().unwrap();
@@ -363,15 +363,28 @@ fn postgres_runsc_uncertain_pauses_cannot_bypass_single_running_slot_after_resta
         host_id: "host".into(),
     };
     let mut tx = db.transaction().unwrap();
-    runsc_rotation::reserve_running(&mut tx, &binding, 1).unwrap();
+    runsc_rotation::reserve_running(&mut tx, &binding, Some(1)).unwrap();
     tx.commit().unwrap();
     let mut tx = db.transaction().unwrap();
     assert_eq!(
-        runsc_rotation::reserve_running(&mut tx, &other, 1).unwrap_err(),
+        runsc_rotation::reserve_running(&mut tx, &other, Some(1)).unwrap_err(),
         RUNSC_CAPACITY_WAIT
     );
     tx.rollback().unwrap();
     assert_eq!(runsc_rotation::running_count(&mut db, "host").unwrap(), 1);
+    let mut tx = db.transaction().unwrap();
+    runsc_rotation::reserve_running(&mut tx, &other, None).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(runsc_rotation::running_count(&mut db, "host").unwrap(), 2);
+    assert_eq!(
+        db.query_one(
+            "SELECT state FROM runtime.runsc_environment_power WHERE environment_id=$1",
+            &[&other.environment_id],
+        )
+        .unwrap()
+        .get::<_, String>(0),
+        "resumePrepared"
+    );
 }
 
 #[test]
@@ -391,7 +404,7 @@ fn postgres_runsc_queued_demand_does_not_block_confirming_unknown_paused_slots()
         "physical pause confirmation must not depend on absence of queued demand"
     );
     let mut tx = db.transaction().unwrap();
-    runsc_rotation::reserve_running(&mut tx, &binding, 1).unwrap();
+    runsc_rotation::reserve_running(&mut tx, &binding, Some(1)).unwrap();
     tx.commit().unwrap();
     let other = RunscBinding {
         environment_id: "demand-environment".into(),
@@ -402,7 +415,7 @@ fn postgres_runsc_queued_demand_does_not_block_confirming_unknown_paused_slots()
     };
     let mut tx = db.transaction().unwrap();
     assert_eq!(
-        runsc_rotation::reserve_running(&mut tx, &other, 1).unwrap_err(),
+        runsc_rotation::reserve_running(&mut tx, &other, Some(1)).unwrap_err(),
         RUNSC_CAPACITY_WAIT
     );
     tx.rollback().unwrap();
@@ -520,7 +533,7 @@ fn postgres_runsc_yield_preserves_waiter_until_confirmed_pause_wakes_claim() {
                 instance_id: "waiting-instance".into(),
                 container_id: None,
             },
-            1
+            Some(1)
         )
         .unwrap_err(),
         RUNSC_CAPACITY_WAIT

@@ -452,7 +452,7 @@ fn runsc_reused_before_create_failure(
                 crate::postgres_store::runsc_rotation::reserve_running(
                     &mut tx,
                     &crate::postgres_store::runsc_rotation::RunscBinding::from(reused),
-                    1,
+                    Some(1),
                 )?;
                 tx.commit().map_err(|e| e.to_string())?;
                 Err("before_create_failed_without_resume".into())

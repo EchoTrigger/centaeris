@@ -27,17 +27,17 @@ do not remain as background services.
 
 The deployment template uses `perRun`, Docker/runsc and measured shared admission
 (`RUNTIME_NATIVE_SHARED_ADMISSION=1`). Run dispatch and HTTP handlers have no
-local concurrency quota. Global and Workspace environment counts are 8,
-memory budgets are 12 GiB, and
+local concurrency quota, including HostSupervisor RPC dispatch. Global, Workspace
+and host environment count quotas are unset by default; memory budgets are 12 GiB, and
 workspace byte budgets are 32 GiB. Each environment retains its 2-CPU/4-GiB
 ceiling. Host-derived memory headroom and conservative unknown-allocation charges
-remain active, so eight concurrent environments are not guaranteed on every host.
+remain active, so concurrency follows available resources rather than a fixed count.
 `DOCKER_CREATE_CONCURRENCY=4` bounds create calls per Runtime process.
 
 OverlayFS-backed Docker storage is required. Runtime refuses to start on `vfs`,
 a missing backend, or any unsupported storage driver. Use the matching
 HostSupervisor with cgroup v2, automatic idle pause, and demand resume enabled. The running limit
-is 8 and idle grace is 3000 ms, matching the accepted eight-environment profile.
+is optional and unset by default; idle grace remains 3000 ms.
 Pause eligibility requires released controller authority and no queued demand;
 it does not pause an active Run merely because the model is waiting. Pausing
 retains memory and all resident resource charges. Docker may report `overlayfs`
@@ -56,11 +56,12 @@ host's Runtime in `RUNTIME_INTERNAL_URL` for host-local operations.
 Execution claimers on each Runtime use its Docker host identity. Jobs with
 existing sandbox holdings stay on that host for execution and cleanup. For
 new sandboxes, claiming a job reserves one available position within the
-host's `RESIDENT_HOST_COUNT` until the lease ends or the resident ledger holds the
-sandbox. CPU, memory, storage and running limits are enforced by the existing
+host's explicitly configured `RESIDENT_HOST_COUNT`, when present, until the lease
+ends or the resident ledger holds the sandbox. Without a count quota, dispatch
+keeps host affinity and leases while preparation enforces resource admission. CPU, memory, storage and running limits are enforced by the existing
 preparation path. Control claims need no new sandbox position. Configure all
-Runtime replicas on a host with the same host count and size the global count
-for the combined capacity of the deployment.
+Runtime replicas on a host with the same count policy. Set a global count quota
+only when the deployment needs an additional administrative ceiling.
 
 For runsc, the registered Docker runtime must also contain exactly one explicit
 `--overlay2=none` argument in `runtimeArgs`. Keep its other required runtime
@@ -93,7 +94,8 @@ shared admission with `RUNTIME_NATIVE_SHARED_ADMISSION=0` and explicitly clear
 both `RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS` and `RUNTIME_RUNSC_IDLE_PAUSE_MS`.
 
 Existing private `.env` files are not overwritten by these defaults. Reconcile
-the listed variables explicitly and preserve secrets and existing signed
+the listed variables explicitly; remove old count values when adopting resource-only
+admission. Preserve secrets and existing signed
 environment profiles. `perRun` still destroys an instance after terminal cleanup;
 enabling rotation does not turn it into cross-Run retained execution. The
 dense-memory fixture separately overrides the Workspace memory budget to 8 GiB. See

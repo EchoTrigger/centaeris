@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 from asgiref.sync import async_to_sync
 from django.test import SimpleTestCase, TransactionTestCase
 
-from .presentation_stream import PresentationScope, encode_cursor, stream_presentation
+from .presentation_stream import PresentationScope, _projection_read, encode_cursor, stream_presentation
 from .test_hosted_operations import OperationFixture
 
 
@@ -450,6 +450,73 @@ class PresentationStreamTests(SimpleTestCase):
         finally:
             await source.aclose()
         self.assertEqual(requests, [("2", None), ("2", "generation")])
+
+    async def test_advancing_projection_can_outlive_the_read_timeout_without_polling_delays(self):
+        from .runtime_client import TranscriptRuntimeError
+        clock = SimpleNamespace(value=0.0)
+        calls = []
+        delays = []
+        sleep = asyncio.sleep
+
+        async def pause(delay):
+            delays.append(delay)
+            await sleep(0)
+
+        async def read():
+            calls.append(len(calls) + 1)
+            clock.value += 20
+            if len(calls) < 4:
+                raise TranscriptRuntimeError({"error": "transcript_projection_not_ready",
+                    "projectionGeneration": "generation", "sourceHighWater": "4",
+                    "projectedHighWater": str(len(calls))})
+            return self.page
+
+        with patch("app_core.presentation_stream.time", SimpleNamespace(monotonic=lambda: clock.value)), \
+                patch("app_core.presentation_stream.asyncio.sleep", side_effect=pause):
+            result = await _projection_read(read, 5)
+        self.assertIs(result, self.page)
+        self.assertEqual(calls, [1, 2, 3, 4])
+        self.assertEqual(delays, [0, 0, 0])
+
+    async def test_repeated_projection_water_does_not_extend_the_stall_deadline(self):
+        from .runtime_client import TranscriptRuntimeError
+        clock = SimpleNamespace(value=0.0)
+        calls = 0
+        sleep = asyncio.sleep
+
+        async def pause(_delay):
+            await sleep(0)
+
+        async def read():
+            nonlocal calls
+            calls += 1
+            clock.value += 10
+            raise TranscriptRuntimeError({"error": "transcript_projection_not_ready",
+                "projectionGeneration": "generation", "sourceHighWater": "2", "projectedHighWater": "1"})
+
+        with patch("app_core.presentation_stream.time", SimpleNamespace(monotonic=lambda: clock.value)), \
+                patch("app_core.presentation_stream.asyncio.sleep", side_effect=pause):
+            with self.assertRaisesRegex(TimeoutError, "presentation_projection_stalled"):
+                await _projection_read(read, 5)
+        self.assertEqual(calls, 4)
+
+    async def test_projection_read_cancellation_stops_the_pending_read(self):
+        entered = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def read():
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        task = asyncio.create_task(_projection_read(read, 5))
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(cancelled.is_set())
 
     async def test_large_live_snapshot_below_transport_budget_is_delivered(self):
         self.state["agentRun"]["status"] = "running"

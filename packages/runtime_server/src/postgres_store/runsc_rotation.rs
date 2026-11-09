@@ -90,10 +90,10 @@ fn power_state(db: &mut impl GenericClient, b: &RunscBinding) -> Result<Option<S
 pub(super) fn reserve_running(
     db: &mut impl GenericClient,
     b: &RunscBinding,
-    limit: u32,
+    limit: Option<u32>,
 ) -> Result<(), String> {
     b.validate()?;
-    if limit == 0 {
+    if limit == Some(0) {
         return Err("runsc_running_limit_invalid".into());
     }
     db.query_one(RUNNING_LOCK, &[]).map_err(|e| e.to_string())?;
@@ -107,12 +107,14 @@ pub(super) fn reserve_running(
         return Err("runsc_power_resident_binding_changed".into());
     }
     let already_charged = existing.is_some() && state.as_deref() != Some("paused");
-    let used = running_count(db, &b.host_id)?;
     let prior_running_reservation = matches!(state.as_deref(), Some("running" | "resumePrepared"));
-    if (!already_charged && used >= i64::from(limit))
-        || (already_charged && !prior_running_reservation && used > i64::from(limit))
-    {
-        return Err(RUNSC_CAPACITY_WAIT.into());
+    if let Some(limit) = limit {
+        let used = running_count(db, &b.host_id)?;
+        if (!already_charged && used >= i64::from(limit))
+            || (already_charged && !prior_running_reservation && used > i64::from(limit))
+        {
+            return Err(RUNSC_CAPACITY_WAIT.into());
+        }
     }
     db.execute("INSERT INTO runtime.runsc_environment_power(environment_id,host_id,allocation_execution_id,instance_id,container_id,state,controller_epoch,idle_since_ms,updated_at_ms) VALUES($1,$2,$3,$4,$5,'resumePrepared',0,NULL,(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint) ON CONFLICT(environment_id) DO UPDATE SET state=CASE WHEN runsc_environment_power.state='running' THEN 'running' ELSE 'resumePrepared' END,idle_since_ms=NULL,updated_at_ms=EXCLUDED.updated_at_ms",&[&b.environment_id,&b.host_id,&b.allocation_execution_id,&b.instance_id,&b.container_id]).map_err(|e|e.to_string())?;
     Ok(())

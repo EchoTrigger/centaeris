@@ -26,8 +26,8 @@ impl<T: Send + 'static> PendingRecoveryUpload<T> {
 
 impl<T> Drop for PendingRecoveryUpload<T> {
     fn drop(&mut self) {
-        // The HTTP upload has its own bounded timeout. Never detach a worker
-        // across terminal save, cancellation, or a failed Session commit.
+        // Drain workspace preparation before terminal save or teardown, including
+        // cancellation and failed Session commits.
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

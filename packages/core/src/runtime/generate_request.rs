@@ -1,4 +1,5 @@
 use super::driver::AsyncGenerateDriverPromptCompactionCandidateProducer;
+use super::request_preparation::RequestPreparationSpan;
 use super::*;
 use crate::execution::ExecutionFileSystemErrorKind;
 use crate::tool::layer::ExecutionModelInputImageError;
@@ -11,6 +12,11 @@ type ResolvedModelInputImages = (
 enum ResolvedImageSource {
     Available(String, String, Vec<u8>),
     Unavailable(String),
+}
+
+pub(super) struct PreparedAgentsInstructions {
+    revision: u64,
+    instructions: Option<(String, String)>,
 }
 
 pub(super) struct PreparedRequestInputs {
@@ -229,19 +235,26 @@ impl<
             clear_prompt_compaction_failure_metadata(&mut session);
         }
         refresh_session_context_window(&mut session);
+        let mut prepared_agents = None;
         let prompt_input_token_estimate = self.estimate_generate_prompt_input_tokens(
-            &session, session_id, turn_id, input, loop_index,
+            &session,
+            session_id,
+            turn_id,
+            input,
+            loop_index,
+            &mut prepared_agents,
         )?;
 
-        let compression_stats_json = self
-            .apply_prompt_compaction_for_generate_request(
-                &mut session,
-                turn_id,
-                runtime_scope,
-                Some(prompt_input_token_estimate),
-                None,
-            )?
-            .stats_json;
+        let compaction_result = self.apply_prompt_compaction_for_generate_request(
+            &mut session,
+            turn_id,
+            runtime_scope,
+            Some(prompt_input_token_estimate),
+            None,
+        )?;
+        if !compaction_result.runtime_events.is_empty() {
+            prepared_agents = None;
+        }
         self.session_manager.save_session(&session)?;
         self.build_generate_driver_request_from_session(
             session,
@@ -249,8 +262,9 @@ impl<
             turn_id,
             input,
             loop_index,
-            compression_stats_json,
+            compaction_result.stats_json,
             None,
+            &mut prepared_agents,
         )
     }
 
@@ -326,8 +340,14 @@ impl<
             .await?;
         }
         refresh_session_context_window(&mut session);
+        let mut prepared_agents = None;
         let prompt_input_token_estimate = self.estimate_generate_prompt_input_tokens(
-            &session, session_id, turn_id, input, loop_index,
+            &session,
+            session_id,
+            turn_id,
+            input,
+            loop_index,
+            &mut prepared_agents,
         )?;
 
         let candidate_producer = AsyncGenerateDriverPromptCompactionCandidateProducer {
@@ -340,6 +360,11 @@ impl<
                     .unwrap_or_default(),
             ),
         };
+        let compaction_span = RequestPreparationSpan::new(
+            self.request_preparation_observer.as_ref(),
+            RequestPreparationStage::Compaction,
+            turn_id,
+        );
         let compaction_result = if pending_compaction.is_some() {
             PromptCompactionApplyResult {
                 stats_json: session
@@ -359,6 +384,10 @@ impl<
             )
             .await?
         };
+        compaction_span.complete();
+        if !compaction_result.runtime_events.is_empty() {
+            prepared_agents = None;
+        }
         let tracked_resource_usage = candidate_producer
             .resource_usage
             .into_inner()
@@ -376,8 +405,14 @@ impl<
         )?;
         self.session_manager.save_session(&session)?;
         let prepared_inputs = if let Some(intake) = intake {
+            let intake_span = RequestPreparationSpan::new(
+                self.request_preparation_observer.as_ref(),
+                RequestPreparationStage::InputIntake,
+                turn_id,
+            );
             let prepared = intake(input)?;
             session = self.session_manager.load_or_create_session(session_id)?;
+            intake_span.complete();
             prepared
         } else {
             None
@@ -390,6 +425,7 @@ impl<
             loop_index,
             compaction_result.stats_json,
             prepared_inputs,
+            &mut prepared_agents,
         )
     }
 
@@ -406,6 +442,7 @@ impl<
         loop_index: u32,
         compression_stats_json: Option<String>,
         prepared_inputs: Option<PreparedRequestInputs>,
+        prepared_agents: &mut Option<PreparedAgentsInstructions>,
     ) -> Result<GenerateDriverRequest, String> {
         let (request, mut session) = self.project_generate_driver_request_from_session(
             session,
@@ -414,6 +451,7 @@ impl<
             input,
             loop_index,
             compression_stats_json,
+            prepared_agents,
         )?;
         validate_model_input_budget(
             request.context_token_estimate,
@@ -444,31 +482,47 @@ impl<
         turn_id: &str,
         input: &TurnInput,
         loop_index: u32,
+        prepared_agents: &mut Option<PreparedAgentsInstructions>,
     ) -> Result<u32, String> {
+        let estimate_span = RequestPreparationSpan::new(
+            self.request_preparation_observer.as_ref(),
+            RequestPreparationStage::Estimate,
+            turn_id,
+        );
         validate_model_input_budget_config(
             self.config.model_context_tokens,
             self.config.model_max_output_tokens,
         )?;
-        self.project_generate_driver_request_from_session(
-            session.clone(),
-            session_id,
-            turn_id,
-            input,
-            loop_index,
-            None,
-        )
-        .map(|(request, _)| {
-            let estimate = u64::from(request.context_token_estimate);
-            let scale = u64::from(self.config.prompt_token_estimate_scale_basis_points);
-            estimate
-                .saturating_mul(scale)
-                .saturating_add(9_999)
-                .checked_div(10_000)
-                .unwrap_or(estimate)
-                .min(u64::from(u32::MAX)) as u32
-        })
+        let result = self
+            .project_generate_driver_request_from_session(
+                session.clone(),
+                session_id,
+                turn_id,
+                input,
+                loop_index,
+                None,
+                prepared_agents,
+            )
+            .map(|(request, _)| {
+                let estimate = u64::from(request.context_token_estimate);
+                let scale = u64::from(self.config.prompt_token_estimate_scale_basis_points);
+                estimate
+                    .saturating_mul(scale)
+                    .saturating_add(9_999)
+                    .checked_div(10_000)
+                    .unwrap_or(estimate)
+                    .min(u64::from(u32::MAX)) as u32
+            });
+        if result.is_ok() {
+            estimate_span.complete();
+        }
+        result
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "projection carries request-local observations alongside explicit prompt inputs"
+    )]
     fn project_generate_driver_request_from_session(
         &self,
         mut session: SessionStateSnapshot,
@@ -477,7 +531,13 @@ impl<
         input: &TurnInput,
         loop_index: u32,
         compression_stats_json: Option<String>,
+        prepared_agents: &mut Option<PreparedAgentsInstructions>,
     ) -> Result<(GenerateDriverRequest, SessionStateSnapshot), String> {
+        let projection_span = RequestPreparationSpan::new(
+            self.request_preparation_observer.as_ref(),
+            RequestPreparationStage::Projection,
+            turn_id,
+        );
         let answer_now = input.answer_now_intervention().is_some();
         let (tool_definitions, _) = if answer_now {
             (Vec::new(), String::new())
@@ -567,10 +627,38 @@ impl<
         if let Some(message) = agent_instructions_message {
             runtime_context_messages.push(message);
         }
-        let agents_context_message = match (
-            self.tools_port.cwd(),
-            self.tools_port.read_agents_instructions()?,
-        ) {
+        let revision = self.tools_port.context_observation_revision();
+        let agents_instructions = if let Some(prepared) = prepared_agents
+            .as_ref()
+            .filter(|prepared| Some(prepared.revision) == revision)
+        {
+            let reuse_span = RequestPreparationSpan::new(
+                self.request_preparation_observer.as_ref(),
+                RequestPreparationStage::AgentsInstructionsReuse,
+                turn_id,
+            );
+            let instructions = prepared.instructions.clone();
+            reuse_span.complete();
+            instructions
+        } else {
+            let read_span = RequestPreparationSpan::new(
+                self.request_preparation_observer.as_ref(),
+                RequestPreparationStage::AgentsInstructionsRead,
+                turn_id,
+            );
+            let instructions = self.tools_port.read_agents_instructions()?;
+            read_span.complete();
+            *prepared_agents = revision
+                .filter(|revision| {
+                    Some(*revision) == self.tools_port.context_observation_revision()
+                })
+                .map(|revision| PreparedAgentsInstructions {
+                    revision,
+                    instructions: instructions.clone(),
+                });
+            instructions
+        };
+        let agents_context_message = match (self.tools_port.cwd(), agents_instructions) {
             (Some(cwd), Some((instructions, _file_hash))) => {
                 Some(prompt_projection::build_agents_context_message(
                     session_id,
@@ -684,9 +772,11 @@ impl<
         if !tool_definitions.is_empty() {
             observations.push(ModelObservationV1::ToolCatalog { tool_definitions });
         }
+        let prompt_compaction = super::prompt_compaction_commit::active_commit(&session)?;
+        projection_span.complete();
         Ok((
             GenerateDriverRequest {
-                prompt_compaction: super::prompt_compaction_commit::active_commit(&session)?,
+                prompt_compaction,
                 session_id: session_id.to_string(),
                 turn_id: turn_id.to_string(),
                 loop_index,

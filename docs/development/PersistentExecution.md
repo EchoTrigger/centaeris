@@ -157,6 +157,13 @@ reconstructs controlled input mounts. Existing bytes already read by a process
 cannot be recalled by unlinking a path; strong revocation may require stopping
 the affected execution scope.
 
+Current input materializations, including revocation tombstones, take precedence
+during workspace restoration. Overlapping snapshot entries are consumed and
+checked without writing those paths; ordinary working files continue to restore.
+Only output directories created by that restore take the workspace user's
+ownership. Subsequent capture omits protected inputs and publishes a new snapshot
+identity through the normal commit path.
+
 Persistent volume capacity must be enforced by the supported host backend.
 Replacing bounded tmpfs with an unbounded directory is prohibited. The backend
 must report its quota and consistency prerequisites, fail when they are absent,

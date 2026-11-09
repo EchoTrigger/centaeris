@@ -351,6 +351,7 @@ pub struct DockerExecutionHostRunner {
     snapshot_capture_cache: Mutex<Option<SnapshotCaptureCache>>,
     output_consumption: Mutex<output_consumption::OutputConsumption>,
     pre_dispatch_loss: AtomicBool,
+    initial_context_open: AtomicBool,
     deferred_extension_dispatch: AtomicBool,
     container_name: String,
     agent_run_id: String,
@@ -383,6 +384,15 @@ fn decode_workspace_generation(bytes: &[u8]) -> Result<SandboxWorkspaceGeneratio
         serde_json::from_slice(bytes).map_err(|_| "workspace_generation_invalid")?;
     generation.validate()?;
     Ok(generation)
+}
+
+fn decode_input_inventory(bytes: &[u8]) -> Result<SandboxInputInventory, String> {
+    let inventory: SandboxInputInventory = serde_json::from_slice(bytes)
+        .map_err(|error| format!("decode sandbox input inventory failed: {error}"))?;
+    if inventory.schema != SANDBOX_INPUT_INVENTORY_SCHEMA {
+        return Err("sandbox input inventory schema mismatch".to_string());
+    }
+    Ok(inventory)
 }
 
 pub struct DockerExecutionHostRequest<'a> {
@@ -426,6 +436,10 @@ struct ContainerExpectation<'a> {
 }
 
 impl DockerExecutionHostRunner {
+    pub(crate) fn close_initial_context(&self) {
+        self.initial_context_open.store(false, Ordering::SeqCst);
+    }
+
     pub(crate) fn keeps_instance(&self) -> bool {
         self.environment_authorization
             .as_ref()
@@ -575,6 +589,10 @@ impl DockerExecutionHostRunner {
         if !retained || environment_profile.is_none() {
             return Err("environment_profile_and_controller_required".into());
         }
+        // A new per-Run execution has no old processes to quiesce before reading its inputs.
+        let read_input_inventory_during_prepare =
+            environment_binding.execution_mode == "perRun" && !has_execution_fact;
+        let mut prepared_input_inventory = None;
         let benchmark_helper = environment_profile
             .as_ref()
             .map(|_| environment_container::helper_path())
@@ -676,21 +694,33 @@ impl DockerExecutionHostRunner {
                         .ok_or("retained container unconfirmed")?;
                     let fence =
                         retained::fence(&environment_authorization, &allocation.instance_id)?;
-                    retained::takeover(&physical, id, &fence, || {
-                        output_consumption::recover_before_prepare(
-                            resident_store.as_ref(),
-                            &environment_authorization.payload.session_id,
-                            &agent_run_id,
-                            &fence,
-                            |request| retained::relay(&physical, id, request),
-                        )
-                    })
+                    prepared_input_inventory = retained::takeover(
+                        &physical,
+                        id,
+                        &fence,
+                        read_input_inventory_during_prepare,
+                        || {
+                            output_consumption::recover_before_prepare(
+                                resident_store.as_ref(),
+                                &environment_authorization.payload.session_id,
+                                &agent_run_id,
+                                &fence,
+                                |request| retained::relay(&physical, id, request),
+                            )
+                        },
+                    )?;
+                    Ok(())
                 },
             )?;
             instance_id = allocation.instance_id.clone();
             container_name = self::container_name(&allocation.allocation_execution_id);
             Some(allocation)
         };
+        let initial_context_open = read_input_inventory_during_prepare
+            && plugin_mounts.is_empty()
+            && retained_allocation
+                .as_ref()
+                .is_some_and(|allocation| !allocation.reused);
         let runner = Self {
             network,
             environment_profile,
@@ -705,6 +735,7 @@ impl DockerExecutionHostRunner {
             snapshot_capture_cache: Mutex::new(None),
             output_consumption: Mutex::new(output_consumption::OutputConsumption::default()),
             pre_dispatch_loss: AtomicBool::new(false),
+            initial_context_open: AtomicBool::new(initial_context_open),
             deferred_extension_dispatch: AtomicBool::new(false),
             container_name,
             agent_run_id,
@@ -740,7 +771,10 @@ impl DockerExecutionHostRunner {
         if has_execution_fact {
             runner.quiesce_existing_execution()?;
         }
-        let inventory = runner.input_inventory()?;
+        let inventory = match prepared_input_inventory {
+            Some(inventory) => inventory,
+            None => runner.input_inventory()?,
+        };
         *runner
             .materialized_inputs
             .lock()
@@ -1928,6 +1962,7 @@ impl DockerExecutionHostRunner {
         artifact: &mut ImmutableWorkspaceSnapshot,
         capture: &SnapshotActivityGuard,
     ) -> Result<(), String> {
+        self.close_initial_context();
         let observation = artifact.observation.clone();
         observation.timed(ProtectionMetric::RestoreApplyElapsedMs, || {
             self.begin_snapshot_restore()?;
@@ -2051,12 +2086,7 @@ impl DockerExecutionHostRunner {
 
     fn input_inventory(&self) -> Result<SandboxInputInventory, String> {
         let output = self.helper("input-inventory", None, &[], HELPER_JSON_LIMIT)?;
-        let inventory = serde_json::from_slice::<SandboxInputInventory>(output.as_slice())
-            .map_err(|error| format!("decode sandbox input inventory failed: {error}"))?;
-        if inventory.schema != SANDBOX_INPUT_INVENTORY_SCHEMA {
-            return Err("sandbox input inventory schema mismatch".to_string());
-        }
-        Ok(inventory)
+        decode_input_inventory(&output)
     }
 
     fn refresh_materialized_inputs(
@@ -2334,6 +2364,16 @@ impl LifecycleHookRunner for DockerExecutionHostRunner {
 }
 
 impl ExecutionHostRunner for DockerExecutionHostRunner {
+    fn context_observation_revision(&self) -> Option<u64> {
+        if !self.initial_context_open.load(Ordering::SeqCst)
+            || self.pre_dispatch_loss.load(Ordering::SeqCst)
+            || !self.materialized_inputs.lock().ok()?.is_empty()
+        {
+            return None;
+        }
+        self.recovery_activity.initial_context_revision()
+    }
+
     fn status(&self, policy: &ExecutionPolicy) -> Result<ExecutionHostStatus, ExecutionError> {
         self.validate_policy(policy)?;
 
@@ -2398,6 +2438,13 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         request: ExecutionFileSystemRequest,
         consumer_id: Option<&str>,
     ) -> Result<ExecutionFileSystemOutput, ExecutionFileSystemError> {
+        if matches!(
+            request.operation,
+            ExecutionFileSystemOperation::WriteFile { .. }
+                | ExecutionFileSystemOperation::DeleteFile { .. }
+        ) {
+            self.close_initial_context();
+        }
         #[cfg(test)]
         if self.container_name.starts_with("native-consume-test:") {
             return Err(ExecutionFileSystemError::new(
@@ -2576,6 +2623,7 @@ impl ExecutionHostRunner for DockerExecutionHostRunner {
         request: ExecutionCommandRequest,
         cancellation_probe: Option<&ExecutionCancellationProbe>,
     ) -> Result<ExecutionHostCommandOutput, ExecutionError> {
+        self.close_initial_context();
         self.validate_policy(&request.policy)?;
         self.refresh_materialized_inputs()?;
         let operation_id = operation_id
@@ -6958,6 +7006,16 @@ mod tests {
             .is_some());
     }
 
+    #[test]
+    fn initial_context_revision_closes_before_the_first_model_request() {
+        let runner = test_docker_execution_host_runner();
+        assert_eq!(runner.context_observation_revision(), None);
+        runner.initial_context_open.store(true, Ordering::SeqCst);
+        assert!(runner.context_observation_revision().is_some());
+        runner.close_initial_context();
+        assert_eq!(runner.context_observation_revision(), None);
+    }
+
     pub(super) fn test_docker_execution_host_runner() -> DockerExecutionHostRunner {
         DockerExecutionHostRunner {
             network: ExecutionNetwork::Disabled,
@@ -6970,6 +7028,7 @@ mod tests {
             snapshot_capture_cache: Mutex::new(None),
             output_consumption: Mutex::new(output_consumption::OutputConsumption::default()),
             pre_dispatch_loss: AtomicBool::new(false),
+            initial_context_open: AtomicBool::new(false),
             deferred_extension_dispatch: AtomicBool::new(false),
             container_name: "centaeris-agent-run-test".to_string(),
             agent_run_id: "agent_run_test".to_string(),

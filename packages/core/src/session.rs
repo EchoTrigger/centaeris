@@ -539,6 +539,10 @@ impl AgentRunSessionState {
         self.latest_recovery_checkpoint_id.as_deref()
     }
 
+    pub fn has_model_request_without_recovery_checkpoint(&self) -> bool {
+        self.agent_composition_digest.is_some() && self.latest_recovery_checkpoint_id.is_none()
+    }
+
     /// Reserve an attempt before preparing a replacement environment. The host
     /// must durably append this record under its lease before doing that work.
     pub fn reserve_execution_recovery(

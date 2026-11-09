@@ -423,9 +423,9 @@ fn limits(global: u64, tenant: u64) -> ResidentCapacity {
         workspace_bytes: 512 * count,
     };
     ResidentCapacity {
-        global: multiply(global),
-        tenant: multiply(tenant),
-        host: multiply(global),
+        global: (multiply(global)).into(),
+        tenant: (multiply(tenant)).into(),
+        host: (multiply(global)).into(),
     }
 }
 

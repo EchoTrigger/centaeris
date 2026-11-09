@@ -95,8 +95,9 @@ pub(super) fn takeover(
     expected: &ContainerExpectation<'_>,
     id: &str,
     fence: &EnvironmentTaskFence,
+    read_input_inventory: bool,
     before_workspace: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<Option<SandboxInputInventory>, String> {
     crate::observations::timed("controllerTakeover", || {
         let result = relay(
             expected,
@@ -131,11 +132,16 @@ pub(super) fn takeover(
             }
         }
     };
+    let kind = if read_input_inventory {
+        TrustedHelperKind::PrepareWorkspaceWithInputInventory
+    } else {
+        TrustedHelperKind::PrepareWorkspace
+    };
     let request = HostHelperRequest {
         fence: fence.clone(),
-        operation_id: fence.operation_id("prepare-workspace"),
+        operation_id: fence.operation_id(kind.entrypoint()),
         scope,
-        kind: TrustedHelperKind::PrepareWorkspace,
+        kind,
         input_digest: format!("sha256:{:x}", Sha256::digest([])),
         input_length: 0,
     };
@@ -152,14 +158,21 @@ pub(super) fn takeover(
     crate::observations::timed("workspacePreparation", || {
         let mut error = "environment_workspace_preparation_unknown".to_owned();
         for _ in 0..2 {
+            let mut output = Vec::new();
             match crate::environment_supervisor::helper(
                 &target,
                 request.clone(),
                 &mut std::io::empty(),
-                &mut Vec::new(),
+                &mut output,
                 &mut Vec::new(),
             ) {
-                Ok(task) if task.exit_code == Some(0) => return Ok(()),
+                Ok(task) if task.exit_code == Some(0) => {
+                    return if read_input_inventory {
+                        decode_input_inventory(&output).map(Some)
+                    } else {
+                        Ok(None)
+                    };
+                }
                 Ok(_) => return Err("environment_workspace_preparation_failed".into()),
                 Err(e) => error = e,
             }

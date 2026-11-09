@@ -187,9 +187,9 @@ fn reserve_maintenance_running(
     client: &mut postgres::Client,
     auth: &MaintenanceAuthorization,
     key: &[u8],
-    limit: Option<u32>,
+    rotation: Option<crate::runsc_rotation::Config>,
 ) -> Result<Option<MaintenanceTarget>, String> {
-    let Some(limit) = limit else {
+    let Some(rotation) = rotation else {
         return Ok(None);
     };
     let mut tx = client
@@ -197,7 +197,11 @@ fn reserve_maintenance_running(
         .map_err(|_| "maintenance_store_unavailable")?;
     super::resource_commit::require_durable_resource_commit(&mut tx)?;
     let target = locked_target(&mut tx, auth, key)?;
-    super::runsc_rotation::reserve_running(&mut tx, &target.running_binding(&auth.payload), limit)?;
+    super::runsc_rotation::reserve_running(
+        &mut tx,
+        &target.running_binding(&auth.payload),
+        rotation.max_running,
+    )?;
     tx.commit()
         .map_err(|_| "maintenance_running_reservation_unavailable")?;
     Ok(Some(target))
@@ -211,8 +215,8 @@ impl PostgresRuntimeStore {
         key: &[u8],
         action: impl FnOnce(&MaintenanceTarget) -> Result<T, String> + Send,
     ) -> Result<T, String> {
-        let limit = crate::runsc_rotation::Config::from_env()?.map(|config| config.max_running);
-        self.with_current_maintenance_with_running_limit(auth, key, limit, action)
+        let rotation = crate::runsc_rotation::Config::from_env()?;
+        self.with_current_maintenance_with_rotation(auth, key, rotation, action)
     }
 
     pub(crate) fn with_maintenance_completion<T: Send>(
@@ -221,25 +225,25 @@ impl PostgresRuntimeStore {
         key: &[u8],
         action: impl FnOnce(&MaintenanceTarget) -> Result<(T, EnvironmentTaskResult), String> + Send,
     ) -> Result<T, String> {
-        let limit = crate::runsc_rotation::Config::from_env()?.map(|config| config.max_running);
-        self.with_maintenance_completion_with_running_limit(auth, key, limit, action)
+        let rotation = crate::runsc_rotation::Config::from_env()?;
+        self.with_maintenance_completion_with_rotation(auth, key, rotation, action)
     }
 
-    // Explicit limit is a narrow seam for owned-database behavior tests; production
+    // Explicit rotation policy is a narrow seam for owned-database behavior tests; production
     // uses the same validated startup configuration as execution admission.
-    pub(super) fn with_current_maintenance_with_running_limit<T: Send>(
+    pub(super) fn with_current_maintenance_with_rotation<T: Send>(
         &self,
         auth: &MaintenanceAuthorization,
         key: &[u8],
-        limit: Option<u32>,
+        rotation: Option<crate::runsc_rotation::Config>,
         action: impl FnOnce(&MaintenanceTarget) -> Result<T, String> + Send,
     ) -> Result<T, String> {
         self.with_client(|client| {
-            let reserved = reserve_maintenance_running(client, auth, key, limit)?;
+            let reserved = reserve_maintenance_running(client, auth, key, rotation)?;
             let mut tx = client
                 .transaction()
                 .map_err(|_| "maintenance_store_unavailable")?;
-            if limit.is_some() {
+            if rotation.is_some() {
                 super::resource_commit::require_durable_resource_commit(&mut tx)?;
             }
             let target = locked_target(&mut tx, auth, key)?;
@@ -250,7 +254,7 @@ impl PostgresRuntimeStore {
                 return Err("maintenance_running_target_changed".into());
             }
             let result = action(&target)?;
-            if limit.is_some() {
+            if rotation.is_some() {
                 super::runsc_rotation::observe_running(
                     &mut tx,
                     &target.running_binding(&auth.payload),
@@ -262,15 +266,15 @@ impl PostgresRuntimeStore {
         })
     }
 
-    pub(super) fn with_maintenance_completion_with_running_limit<T: Send>(
+    pub(super) fn with_maintenance_completion_with_rotation<T: Send>(
         &self,
         auth: &MaintenanceAuthorization,
         key: &[u8],
-        limit: Option<u32>,
+        rotation: Option<crate::runsc_rotation::Config>,
         action: impl FnOnce(&MaintenanceTarget) -> Result<(T, EnvironmentTaskResult), String> + Send,
     ) -> Result<T, String> {
         self.with_client(|client| {
-            let reserved = reserve_maintenance_running(client, auth, key, limit)?;
+            let reserved = reserve_maintenance_running(client, auth, key, rotation)?;
             let mut tx = client
                 .transaction()
                 .map_err(|_| "maintenance_store_unavailable")?;
@@ -283,7 +287,7 @@ impl PostgresRuntimeStore {
                 return Err("maintenance_running_target_changed".into());
             }
             let (output, result) = action(&target)?;
-            if limit.is_some() {
+            if rotation.is_some() {
                 super::runsc_rotation::observe_running(
                     &mut tx,
                     &target.running_binding(&auth.payload),

@@ -137,15 +137,16 @@ fn postgres_four_independent_live_environments_share_observed_resources() {
         workspace_bytes: 32 * GIB,
     };
     let limits = ResidentCapacity {
-        global,
-        host: global,
-        tenant: ResidentResourceUsage {
+        global: global.into(),
+        host: global.into(),
+        tenant: (ResidentResourceUsage {
             sandbox_count: 8,
             memory_bytes: 8 * GIB,
             cpu_milli: 4000,
             pids: 2048,
             workspace_bytes: 32 * GIB,
-        },
+        })
+        .into(),
     };
     let physical = Arc::new(Mutex::new(Vec::<ObservedResidentSandbox>::new()));
     for (index, run) in runs.iter().enumerate() {
@@ -227,15 +228,16 @@ fn shared_limits() -> ResidentCapacity {
         workspace_bytes: 32 * GIB,
     };
     ResidentCapacity {
-        global,
-        host: global,
-        tenant: ResidentResourceUsage {
+        global: global.into(),
+        host: global.into(),
+        tenant: (ResidentResourceUsage {
             sandbox_count: 8,
             memory_bytes: 8 * GIB,
             cpu_milli: 4000,
             pids: 2048,
             workspace_bytes: 32 * GIB,
-        },
+        })
+        .into(),
     }
 }
 

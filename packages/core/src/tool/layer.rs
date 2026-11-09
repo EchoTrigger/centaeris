@@ -1005,6 +1005,13 @@ impl ToolLayer {
         Ok(Some((content, read.file_hash)))
     }
 
+    pub(crate) fn context_observation_revision(&self) -> Option<u64> {
+        self.runtime_context
+            .execution_host_binding
+            .as_ref()?
+            .context_observation_revision()
+    }
+
     pub fn bash_description(&self) -> Result<&'static str, String> {
         self.runtime_context
             .execution_host_binding

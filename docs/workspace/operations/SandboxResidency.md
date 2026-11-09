@@ -3,8 +3,8 @@
 Execution leases limit active work, but waiting containers can retain processes,
 memory and workspaces after releasing those leases. Resident admission separately
 charges every managed sandbox, including lawful waits, against finite global,
-Workspace and Docker-host limits for count, memory, CPU, process count and tmpfs
-workspace space. Native subagents sharing an execution host do not reserve a
+Workspace and Docker-host resource limits for memory, CPU, process count and
+workspace space. Additional sandbox count quotas are optional and unset by default. Native subagents sharing an execution host do not reserve a
 second container. Independent Session Runs may wait until earlier owners
 release capacity. Workspace `dispatch_work` coordination is retired.
 

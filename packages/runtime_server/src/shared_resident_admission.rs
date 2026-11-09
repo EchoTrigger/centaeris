@@ -1,6 +1,8 @@
 //! Hosted shared-resource admission; durable declarations retain their original meaning.
 use crate::resident_capacity::ResidentCapacity;
-use centaeris_core::execution::{admit_resident_resources, ResidentResourceUsage};
+use centaeris_core::execution::{
+    admit_resident_resources, ResidentResourceLimits, ResidentResourceUsage,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MeasuredUsage {
@@ -65,7 +67,7 @@ pub(crate) fn admits(r: &Admission) -> Result<bool, String> {
         r.requested,
         r.requested,
     )?;
-    let fits_shared = |usage: ResidentResourceUsage, limit: ResidentResourceUsage| {
+    let fits_shared = |usage: ResidentResourceUsage, limit: ResidentResourceLimits| {
         // CPU remains a per-environment cgroup ceiling, not a reservation.
         ResidentResourceUsage {
             cpu_milli: 0,
@@ -158,9 +160,9 @@ mod tests {
             host_used: existing,
             requested: declaration(),
             limits: ResidentCapacity {
-                global: limit,
-                tenant,
-                host: limit,
+                global: limit.into(),
+                tenant: tenant.into(),
+                host: limit.into(),
             },
             host_available_bytes: 10 * GIB,
             host_headroom_bytes: 2 * GIB,

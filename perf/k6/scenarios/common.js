@@ -78,21 +78,47 @@ export function configuredTarget(profile) {
 
 // 发消息（sessionId=new 即创建会话并启动 run），返回 {sessionId, agentRunId}
 export function startRun(store, csrf, workspaceId, modelId, text, options = {}) {
+  const result = startRunObserved(store, csrf, workspaceId, modelId, text, options);
+  if (result.httpStatus !== 202) throw new Error(`message failed: ${result.httpStatus}`);
+  return { sessionId: result.sessionId, agentRunId: result.agentRunId,
+    operationId: result.operationId, sampleId: options.sampleId };
+}
+
+// Admission failures remain observations, including responses without a Run.
+export function startRunObserved(store, csrf, workspaceId, modelId, text, options = {}) {
   const operationId = options.operationId === undefined ? Array.from(new Uint8Array(crypto.randomBytes(16)),
     (byte) => byte.toString(16).padStart(2, '0')).join('') : options.operationId;
   const sessionId = options.sessionId === undefined ? 'new' : options.sessionId;
   const validId = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value);
   if (!validId(operationId) || !validId(sessionId)) throw new Error('explicit Run operation/session invalid');
+  if (options.submitBeforeAtMs !== undefined && (!Number.isInteger(options.submitBeforeAtMs) || options.submitBeforeAtMs <= 0)) {
+    throw new Error('Run submission cutoff must be an absolute millisecond timestamp');
+  }
+  const submittedAtMs = Date.now();
+  if (options.submitBeforeAtMs !== undefined && submittedAtMs >= options.submitBeforeAtMs) {
+    return { submitted: false, operationId, errorCode: 'arrival_window_closed', notSubmittedAtMs: submittedAtMs };
+  }
+  if (options.onSubmit !== undefined) options.onSubmit({ operationId, sessionId, submittedAtMs });
   const res = request('POST',
     `/api/workspaces/${workspaceId}/sessions/${encodeURIComponent(sessionId)}/messages`, store,
     { operationId,
       text: text || 'Perf load.', attachmentRefs: [], modelConfigRef: modelId },
     csrf, { type: 'post_message' });
-  if (res.status !== 202) throw new Error(`message failed: ${res.status}`);
+  const admissionMs = Date.now() - submittedAtMs;
+  if (res.status !== 202) {
+    let errorCode = 'other';
+    try {
+      const code = res.json('error');
+      if (['session_has_active_agent_run', 'session_workspace_preservation_pending',
+        'agent_run_admission_unavailable', 'workspace_capacity_exceeded'].includes(code)) errorCode = code;
+    } catch (_) { /* Non-JSON transport and proxy failures still retain their HTTP status. */ }
+    return { httpStatus: res.status, errorCode, operationId, submittedAtMs, admissionMs };
+  }
   const body = res.json();
   if (!validId(body.sessionId) || !validId(body.agentRunId)
       || (sessionId !== 'new' && body.sessionId !== sessionId)) throw new Error('admitted Run binding invalid');
-  return { sessionId: body.sessionId, agentRunId: body.agentRunId, operationId, sampleId: options.sampleId };
+  return { sessionId: body.sessionId, agentRunId: body.agentRunId, operationId,
+    sampleId: options.sampleId, httpStatus: res.status, submittedAtMs, admissionMs };
 }
 
 export function committedEvent(item, sessionId, agentRunId) {
@@ -135,7 +161,7 @@ export function waitForTerminal(store, csrf, sessionId, agentRunId, timeoutSecon
 }
 
 // Receive-time measurements use live callbacks; buffered terminal responses cannot provide them.
-export function waitForTerminalObserved(store, csrf, sessionId, agentRunId, timeoutSeconds = 120) {
+export function waitForTerminalObserved(store, csrf, sessionId, agentRunId, timeoutSeconds = 120, observers = {}) {
   const started = Date.now(), events = [], calls = new Map();
   // Server event.createdAtMs and client callback Date.now() belong to separate clocks.
   // Event creation is not a database commit timestamp; never subtract across clocks.
@@ -174,6 +200,7 @@ export function waitForTerminalObserved(store, csrf, sessionId, agentRunId, time
         if (firstModelTextObservedAtMs === null && typeof text === 'string' && text.trim()) {
           firstModelTextObservedAtMs = observed;
           firstModelTextSource = event ? 'committedAssistantMessage' : 'live';
+          observers.onFirstText?.(observed);
         }
         if (!event) return;
         previousSequence = event.sequence; eventIds.add(event.eventId);

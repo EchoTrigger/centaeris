@@ -46,6 +46,71 @@ pub(super) fn root() -> PathBuf {
 }
 
 #[test]
+fn output_batch_preserves_query_tail_and_reopen_after_wrapping_the_ring() {
+    let root = root();
+    let path = root.join("output");
+    let slots = ENVIRONMENT_TASK_OUTPUT_BYTES / CHUNK;
+    let bytes: Vec<_> = (0..2 * 1024 * 1024 + 17)
+        .map(|index| (index / CHUNK % 251) as u8)
+        .collect();
+    let mut log = OutputLog::open(&path, slots).unwrap();
+    let mut syncs = 0;
+    log.append_batch_with_sync(EnvironmentTaskStream::Stdout, &bytes, |file| {
+        syncs += 1;
+        file.sync_data()
+    })
+    .unwrap();
+    assert_eq!(syncs, 1);
+    let expected_next = bytes.len().div_ceil(CHUNK) as u64;
+    assert_eq!(log.next, expected_next);
+    drop(log);
+
+    let mut log = OutputLog::open(&path, slots).unwrap();
+    let mut cursor = 0;
+    let mut retained = Vec::new();
+    loop {
+        let (chunks, earliest, next, gap, more) =
+            log.read(cursor, ENVIRONMENT_TASK_READ_BYTES).unwrap();
+        assert_eq!(earliest, expected_next - slots as u64);
+        assert_eq!(gap, cursor == 0);
+        for chunk in chunks {
+            assert_eq!(chunk.stream, EnvironmentTaskStream::Stdout);
+            retained.extend(chunk.data);
+        }
+        cursor = next;
+        if !more {
+            break;
+        }
+    }
+    assert_eq!(cursor, expected_next);
+    assert_eq!(retained, bytes[(expected_next as usize - slots) * CHUNK..]);
+    drop(log);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn output_batch_does_not_publish_a_cursor_after_failed_sync() {
+    let root = root();
+    let mut log = OutputLog::open(&root.join("output"), 3).unwrap();
+    log.append(EnvironmentTaskStream::Stdout, b"committed")
+        .unwrap();
+    let mut syncs = 0;
+    let result =
+        log.append_batch_with_sync(EnvironmentTaskStream::Stdout, &[42; CHUNK + 17], |_| {
+            syncs += 1;
+            Err(std::io::Error::other("injected sync failure"))
+        });
+    assert_eq!(result.unwrap_err(), "task_output_write_failed");
+    assert_eq!(syncs, 1);
+    let (chunks, earliest, next, gap, more) = log.read(0, ENVIRONMENT_TASK_READ_BYTES).unwrap();
+    assert_eq!((earliest, next, gap, more), (0, 1, false, false));
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].data, b"committed");
+    drop(log);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn shared_core_query_budget_reads_real_output_log_and_small_budget_is_rejected() {
     let p = root();
     let mut log = OutputLog::open(&p.join("output"), 2).unwrap();

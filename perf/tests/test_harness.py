@@ -201,7 +201,7 @@ class IsolationTests(unittest.TestCase):
                 values = control.read_env(path)
                 self.assertEqual(values['OCI_RUNTIME'], expected)
                 self.assertEqual(values['RUNTIME_NATIVE_SHARED_ADMISSION'], '0' if expected == 'runc' else '1')
-                self.assertEqual(values['RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS'], '' if expected == 'runc' else '8')
+                self.assertEqual(values.get('RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS'), '' if expected == 'runc' else None)
                 self.assertEqual(values['RUNTIME_RUNSC_IDLE_PAUSE_MS'], '' if expected == 'runc' else '3000')
                 command, env = control.compose_command(control.ROOT, path, ['config', '--format', 'json'])
                 services = json.loads(control.run(command, env=env))['services']

@@ -1238,6 +1238,44 @@ impl Drop for ReservedWorkers {
         }
     }
 }
+const HELPER_STDOUT_BATCH_BYTES: usize = 2 * 1024 * 1024;
+
+// Trusted one-shot helpers expose their complete binary result after EOF.
+// Keep a bounded staging buffer for their query tail; commands and stderr
+// continue publishing each durable record as it arrives.
+struct HelperStdoutBatch(Vec<u8>);
+
+impl HelperStdoutBatch {
+    fn new() -> Self {
+        Self(Vec::with_capacity(HELPER_STDOUT_BATCH_BYTES))
+    }
+
+    fn append(&mut self, mut bytes: &[u8], log: &Mutex<OutputLog>) -> bool {
+        let mut okay = true;
+        while !bytes.is_empty() {
+            let count = bytes.len().min(HELPER_STDOUT_BATCH_BYTES - self.0.len());
+            self.0.extend_from_slice(&bytes[..count]);
+            bytes = &bytes[count..];
+            if self.0.len() == HELPER_STDOUT_BATCH_BYTES && !self.flush(log) {
+                okay = false;
+            }
+        }
+        okay
+    }
+
+    fn flush(&mut self, log: &Mutex<OutputLog>) -> bool {
+        if self.0.is_empty() {
+            return true;
+        }
+        let okay = log.lock().is_ok_and(|mut log| {
+            log.append_batch(EnvironmentTaskStream::Stdout, &self.0)
+                .is_ok()
+        });
+        self.0.clear();
+        okay
+    }
+}
+
 fn drain(work: DrainWork) -> bool {
     let DrainWork {
         mut reader,
@@ -1246,6 +1284,8 @@ fn drain(work: DrainWork) -> bool {
         capture,
         _lease,
     } = work;
+    let mut batch =
+        (capture.is_some() && stream == EnvironmentTaskStream::Stdout).then(HelperStdoutBatch::new);
     let mut buf = [0; CHUNK];
     let mut okay = true;
     loop {
@@ -1259,9 +1299,13 @@ fn drain(work: DrainWork) -> bool {
                         okay = false;
                     }
                 }
-                if log.lock().map_or(true, |mut log| {
-                    log.append(stream.clone(), &buf[..n]).is_err()
-                }) {
+                let logged = if let Some(batch) = &mut batch {
+                    batch.append(&buf[..n], &log)
+                } else {
+                    log.lock()
+                        .is_ok_and(|mut log| log.append(stream.clone(), &buf[..n]).is_ok())
+                };
+                if !logged {
                     okay = false;
                 }
             }
@@ -1270,6 +1314,11 @@ fn drain(work: DrainWork) -> bool {
                 okay = false;
                 break;
             }
+        }
+    }
+    if let Some(batch) = &mut batch {
+        if !batch.flush(&log) {
+            okay = false;
         }
     }
     if let Some(capture) = capture {

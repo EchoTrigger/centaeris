@@ -117,7 +117,7 @@ fn next_runtime_job(
                 WHERE j.status='queued' AND j.job_kind=ANY($1)
                 AND (j.job_kind<>'agent_run.lifecycle' OR
                     (t.job_id IS NOT NULL AND {affinity}
-                     AND ($2::text IS NULL OR host_slots.available>0 OR {local_resident}) AND NOT({})))",
+                     AND ($2::text IS NULL OR host_slots.available IS NULL OR host_slots.available>0 OR {local_resident}) AND NOT({})))",
                 super::lifecycle_control::PENDING),
             &[&job_kinds, &host, &sandbox_limit],
         )

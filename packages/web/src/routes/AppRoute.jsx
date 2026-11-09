@@ -20,11 +20,9 @@ import { TranscriptToolOperationRegistry } from "../chat/transcriptToolOperation
 import { createWorkspaceTranscriptTransport } from "../chat/transcriptTransport";
 import { WorkspacePresentationController } from "../chat/workspacePresentationController";
 import { TranscriptBlockList } from "../chat/TranscriptBlockList";
-import {
-  clearTranscriptContentRangeCache,
-  subscribeTranscriptContentRangeCache,
-  transcriptContentRangeCacheBytes,
-} from "../chat/transcriptContentRanges";
+import { clearTranscriptContentRangeCache } from "../chat/transcriptContentRanges";
+import { createSessionViewCache } from "../chat/sessionViewCache";
+import { ConversationReadFeedback } from "../chat/ConversationReadFeedback";
 import { WorkspaceComposer } from "../chat/WorkspaceComposer";
 import { SessionQuestionCard } from "../chat/SessionQuestionCard";
 import { SubmissionControl } from "../chat/submissionControl";
@@ -48,7 +46,9 @@ import { useWorkspaceSearch, WorkspaceSearch } from "../shell/WorkspaceSearch";
 import { isWorkspaceCatalogPath, sessionChatPath, groupSessionNavigation, sortSessionNavigation as sortSessions } from "../shell/sessionNavigation.mjs";
 import { SessionNavigationRow } from "../shell/SessionNavigationRow";
 import { useSessionNavigationActions } from "../shell/useSessionNavigationActions";
-import { SessionReadController, mergeSessionAttention, mergeSessionNavigation } from "../shell/sessionReadState";
+import { SessionReadController, mergeSessionAttention } from "../shell/sessionReadState";
+import { createSessionNavigationStore } from "../shell/sessionNavigationStore";
+import { useNavigationRowActions, useLatestCallback } from "../shell/useNavigationRowActions";
 import {
   Archive,
   Image as ImageIcon,
@@ -63,7 +63,6 @@ import {
 } from "lucide-react";
 
 const CLOSED_CONTEXT_PANEL = Object.freeze({ mode: "closed" });
-const TRANSCRIPT_MEMORY_WARNING_BYTES = 32 * 1024 * 1024;
 
 const ARTIFACT_PREVIEW_MAX_BYTES = 1024 * 1024;
 const ARTIFACT_PREVIEW_CONTENT_TYPES = new Set([
@@ -203,8 +202,16 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const requestScopeKey = JSON.stringify([workspace.id, workspaceDraft, requestedSessionId, startFresh, requestedProjectId]);
   const requestScopeRef = useRef({ key: requestScopeKey, active: true });
   if (requestScopeRef.current.key !== requestScopeKey) requestScopeRef.current = { key: requestScopeKey, active: true };
-  const navigationSnapshotRef = useRef({ scope: requestScopeKey, sessions: null });
-  if (navigationSnapshotRef.current.scope !== requestScopeKey) navigationSnapshotRef.current = { scope: requestScopeKey, sessions: null };
+  const navigationScopeKey = JSON.stringify([user.id, workspace.id]);
+  const navigationSnapshotRef = useRef({ scope: navigationScopeKey, sessions: null });
+  if (navigationSnapshotRef.current.scope !== navigationScopeKey) navigationSnapshotRef.current = { scope: navigationScopeKey, sessions: null };
+  const navigationOwner = useMemo(() => ({ scope: navigationScopeKey,
+    store: createSessionNavigationStore(), views: createSessionViewCache() }), [navigationScopeKey]);
+  const navigationStore = navigationOwner.store;
+  const { sessions, projects } = useSyncExternalStore(navigationStore.subscribe, navigationStore.getSnapshot, navigationStore.getSnapshot);
+  const { setSessions, setProjects } = navigationStore;
+  const sessionViewCache = navigationOwner.views;
+  const resumedViewRef = useRef(null);
   const streamAbortRef = useRef(null);
   const chatControllerRef = useRef(null);
   // A submit receipt can identify cancellable work before presentation catches up.
@@ -230,8 +237,6 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const modelsRef = useRef([]);
   const [modelId, setModelId] = useState("");
   const [thinkingMode, setThinkingMode] = useState("");
-  const [sessions, setSessions] = useState([]);
-  const [projects, setProjects] = useState([]);
   const [sessionId, setSessionId] = useState(() => workspaceDraft || startFresh ? "" : requestedSessionId);
   const [presentationAttempt, setPresentationAttempt] = useState(0);
   const [runControlAttempt, setRunControlAttempt] = useState(0);
@@ -267,8 +272,10 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [attachmentPreview, setAttachmentPreview] = useState(null);
   const sessionActions = useSessionNavigationActions({ scopeKey: JSON.stringify([workspace.id]), sessions, onChangeSessions: setSessions, onDeleted: onSessionDeleted });
+  const rowActions = useNavigationRowActions(sessionActions);
   const { deletingSessionId, deleteConfirmationSessionId, setDeleteConfirmationSessionId, setEditingSessionId, setOpenSessionMenuId, markSessionRead, deleteSession } = sessionActions;
   const [loadingHistory, setLoadingHistory] = useState(!workspaceDraft);
+  const [presentationReady, setPresentationReady] = useState(false);
   const [loadingOlderHistory, setLoadingOlderHistory] = useState(false);
   const [activeTranscriptRun, setActiveTranscriptRun] = useState(null);
   const [contextPanel, setContextPanel] = useState(CLOSED_CONTEXT_PANEL);
@@ -306,23 +313,6 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     setActiveTranscriptRun(next);
   }, []);
 
-  const transcriptList = useSyncExternalStore(
-    transcriptStore.subscribeList,
-    transcriptStore.getListSnapshot,
-    transcriptStore.getListSnapshot,
-  );
-  const transcriptBlockBytes = useSyncExternalStore(
-    transcriptStore.subscribeManagedContent,
-    transcriptStore.managedContentBytes,
-    transcriptStore.managedContentBytes,
-  );
-  const transcriptReferencedContentBytes = useSyncExternalStore(
-    subscribeTranscriptContentRangeCache,
-    transcriptContentRangeCacheBytes,
-    transcriptContentRangeCacheBytes,
-  );
-  const transcriptPushedContentBytes = useSyncExternalStore(transcriptStore.subscribePresentationContent, transcriptStore.presentationContentBytes, transcriptStore.presentationContentBytes);
-  const transcriptManagedBytes = transcriptBlockBytes + transcriptReferencedContentBytes + transcriptPushedContentBytes;
   const currentModel = useMemo(() => models.find((model) => model.id === modelId), [models, modelId]);
   const modelGroups = useMemo(() => {
     const groups = new Map();
@@ -539,54 +529,64 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     };
   }, [stopActiveStream]);
 
-  useEffect(() => {
+  // biome-ignore lint/correctness/useExhaustiveDependencies: changing route intent (including its project) starts a new conversation view scope.
+  useLayoutEffect(() => {
     if (!startFresh && requestedSessionId && acceptedRouteSessionIdRef.current === requestedSessionId) {
       acceptedRouteSessionIdRef.current = "";
       setLoadingHistory(false);
       return undefined;
     }
-    let active = true;
+    const previousController = chatControllerRef.current;
+    const previousView = previousController?.captureAppliedView();
+    if (previousView && previousController.identity.sessionId) sessionViewCache.set(previousController.identity.sessionId, previousView);
     setComposerError("");
-    setNavigationError(false);
-    const navigationScopeKey = requestScopeKey;
     setLoadingHistory(!workspaceDraft);
     clearRunControl();
     acceptedRouteSessionIdRef.current = "";
-    setSessions([]);
     setSessionId(workspaceDraft || startFresh ? "" : requestedSessionId);
     clearConversationProjection();
+    resumedViewRef.current = !workspaceDraft && !startFresh && requestedSessionId ? sessionViewCache.get(requestedSessionId) ?? null : null;
+    resumedViewRef.current?.restore();
+    setPresentationReady(Boolean(resumedViewRef.current));
+    setReadableThrough("0");
+    setReadingLatest(true);
     setDraft("");
     setSending(false);
     setEditingSessionId("");
     setOpenSessionMenuId("");
     clearContextPanel();
+  }, [workspaceDraft, requestedSessionId, requestScopeKey, startFresh, sessionViewCache, clearConversationProjection, clearContextPanel, clearRunControl, setEditingSessionId, setOpenSessionMenuId]);
+
+  const selectInitialDirectory = useEffectEvent(navigation => {
+    if (!workspaceDraft && !startFresh && !requestedSessionId && !activeSessionIdRef.current) {
+      setSessionId(navigation[0]?.id || "");
+      if (!navigation.length) setLoadingHistory(false);
+    }
+  });
+  useEffect(() => {
+    let active = true;
+    setNavigationError(false);
+    const scope = navigationSnapshotRef.current;
     Promise.all([
       apiResponse(`/api/workspaces/${workspace.id}/sessions`).then((response) => response.json()),
       apiResponse(`/api/workspaces/${workspace.id}/session-projects`).then((response) => response.json()),
     ])
       .then(([data, projectData]) => {
-        if (!active || !requestScopeRef.current.active || requestScopeRef.current.key !== navigationScopeKey) return;
+        if (!active || !requestScopeRef.current.active || navigationSnapshotRef.current !== scope) return;
         if (!Array.isArray(data.sessions) || !Array.isArray(projectData.projects)) throw new Error("session_navigation_response_invalid");
         const navigation = navigationSnapshotRef.current.sessions ?? data.sessions;
-        if (navigationSnapshotRef.current.sessions === null) setSessions(items => sortSessions(mergeSessionNavigation(items, navigation)));
+        if (navigationSnapshotRef.current.sessions === null) setSessions(navigation);
         setProjects(projectData.projects);
-        const selectedSession = workspaceDraft || startFresh
-          ? null
-          : navigation.find((session) => session.id === requestedSessionId)
-            || initialSession
-            || navigation[0]
-            || null;
-        const selectedSessionId = selectedSession?.id || "";
-        setSessionId(selectedSessionId);
-        if (!selectedSessionId) setLoadingHistory(false);
+        // Only an entry without an explicit Session chooses a first row.
+        // A late workspace response never changes an explicit current selection.
+        selectInitialDirectory(navigation);
       })
       .catch(() => {
-        if (!active || !requestScopeRef.current.active || requestScopeRef.current.key !== navigationScopeKey) return;
+        if (!active || !requestScopeRef.current.active || navigationSnapshotRef.current !== scope) return;
         setNavigationError(true);
-        setLoadingHistory(false);
       });
     return () => { active = false; };
-  }, [workspace.id, workspaceDraft, requestedSessionId, requestScopeKey, startFresh, initialSession, clearConversationProjection, clearContextPanel, clearRunControl, setEditingSessionId, setOpenSessionMenuId]);
+  }, [workspace.id, setSessions, setProjects]);
 
   useEffect(() => {
     if (requestedPrompt) setDraft(requestedPrompt);
@@ -641,6 +641,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       requestScopeRef.current.active = false;
       stopActiveStream();
       readController.dispose();
+      sessionViewCache.clear();
+      resumedViewRef.current = null;
+      setPresentationReady(false);
       navigationSnapshotRef.current.sessions = [];
       setSessions([]); setProjects([]); setReadableThrough("0");
       clearConversationProjection(); clearRunControl(); setStreamIssue(null); setWorkTime(null); setLoadingHistory(false);
@@ -649,7 +652,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     }
     setLoadingHistory(false);
     setStreamIssue({ sessionId: targetSessionId || "", error: errorValue, reconnecting: false });
-  }, [clearConversationProjection, clearRunControl, stopActiveStream, readController]);
+  }, [clearConversationProjection, clearRunControl, stopActiveStream, readController, sessionViewCache, setSessions, setProjects]);
 
   const restorePresentationSnapshot = useCallback(async (tail, signal, isCurrent) => {
     const previous = transcriptStore.getListSnapshot();
@@ -699,7 +702,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       setReadableThrough("0");
       setReadingLatest(true);
     }
-    setLoadingHistory(Boolean(selectedSessionId && current.sessionId !== selectedSessionId));
+    setLoadingHistory(Boolean(selectedSessionId && (current.sessionId !== selectedSessionId || resumedViewRef.current)));
     if (selectedSessionId) {
       const url = `/api/sessions/${encodeURIComponent(selectedSessionId)}`;
       const options = { signal: abortController.signal };
@@ -709,6 +712,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
         setSessions(items => sortSessions(upsertBy(items, "id", sessionData.session)));
         setConversationError(value => value === "appRoute.sessionDetailsUnavailable" ? "" : value);
       }).catch(errorValue => {
+        if (isCurrent() && [401, 403].includes(errorValue?.status)) { handlePresentationFailure(errorValue, selectedSessionId); return; }
         if (isCurrent() && errorValue?.name !== "AbortError") setConversationError("appRoute.sessionDetailsUnavailable");
       });
       apiResponse(`${url}/assets`, options).then(response => response.json()).then(assetData => {
@@ -719,20 +723,24 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
         if (isCurrent() && errorValue?.name !== "AbortError") setAssetsUnavailable(true);
       });
     }
+    const resumedCursor = resumedViewRef.current?.cursor ?? null;
+    resumedViewRef.current = null;
     const controller = new WorkspacePresentationController({
       workspaceId: workspace.id, sessionId: selectedSessionId,
       store: transcriptStore, signal: abortController.signal, isCurrent,
+      cursor: selectedSessionId ? resumedCursor : null,
       applySnapshot: (page, signal) => restorePresentationSnapshot(page, signal, isCurrent),
       onSnapshot: () => {
         if (!isCurrent()) return;
         setLoadingHistory(false);
+        if (hasCommittedPendingMessage(pendingUserMessageRef.current, selectedSessionId, transcriptStore.getListSnapshot().blockIds, transcriptStore.getBlockSnapshot)) setPendingUserMessage(null);
         const pending = operations.pending();
         if (pending?.receipt?.sessionId === selectedSessionId) operations.complete(pending.operationId);
       },
       onNavigation: next => {
         if (!isCurrent()) return;
         navigationSnapshotRef.current.sessions = next;
-        setSessions(items => sortSessions(mergeSessionNavigation(items, next)));
+        setSessions(next);
         setNavigationError(false);
         if (selectedSessionId === null && !workspaceDraft && !startFresh) {
           setSessionId(next.find(session => session.id === requestedSessionId)?.id || next[0]?.id || "");
@@ -793,10 +801,15 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       },
       onApplied: checkpoint => {
         if (!isCurrent()) return;
+        const view = controller.captureAppliedView();
+        if (view && selectedSessionId) sessionViewCache.set(selectedSessionId, view);
+        setPresentationReady(true);
+        if (hasCommittedPendingMessage(pendingUserMessageRef.current, selectedSessionId, transcriptStore.getListSnapshot().blockIds, transcriptStore.getBlockSnapshot)) setPendingUserMessage(null);
         setReadableThrough(checkpoint.sourceHighWater);
         setLoadingHistory(false);
         setStreamIssue(null);
       },
+      onReset: () => { if (selectedSessionId) sessionViewCache.delete(selectedSessionId); resumedViewRef.current = null; setPresentationReady(false); },
     });
     chatControllerRef.current = controller;
     void streamWorkspacePresentation({
@@ -808,7 +821,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       },
     }).catch(errorValue => { if (isCurrent()) handlePresentationFailure(errorValue, selectedSessionId); });
     return () => { active = false; abortController.abort(); controller.dispose(); };
-  }, [presentationScopeKey, presentationAttempt, sessionId, workspace.id, operations, transcriptStore, toolOperations, clearConversationProjection, stopActiveStream, updateActiveTranscriptRun, restorePresentationSnapshot, handlePresentationFailure, recordRunTerminal, workspaceDraft, startFresh, requestedSessionId]);
+  }, [presentationScopeKey, presentationAttempt, sessionId, workspace.id, operations, transcriptStore, toolOperations, clearConversationProjection, stopActiveStream, updateActiveTranscriptRun, restorePresentationSnapshot, handlePresentationFailure, recordRunTerminal, workspaceDraft, startFresh, requestedSessionId, sessionViewCache, setSessions]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: Route ownership, Retry, and conflicting Run metadata each require a fresh authoritative read.
   useEffect(() => {
@@ -1193,6 +1206,8 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       if (activeSessionIdRef.current !== requestedForSessionId
         || olderHistoryRequestRef.current?.key !== requestKey) return;
       transcriptStore.prependPage(page, current.viewEpoch);
+      const view = chatControllerRef.current?.captureAppliedView();
+      if (view) sessionViewCache.set(requestedForSessionId, view);
       setOlderHistoryError(false);
     } catch {
       if (!controller.signal.aborted) setOlderHistoryError(true);
@@ -1424,15 +1439,12 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
 
   const visiblePendingMessage = pendingUserMessage && (pendingUserMessage.sessionId === sessionId
     || (pendingUserMessage.sessionId === null && submissionOriginRef.current?.scope === requestScopeRef.current)) ? pendingUserMessage : null;
-  const isHome = !requestedSessionId && !sessionId && transcriptList.blockIds.length === 0 && !visiblePendingMessage;
+  const isHome = !requestedSessionId && !sessionId && !visiblePendingMessage;
   const streamPaused = streamIssue?.sessionId === sessionId && !streamIssue.reconnecting;
-  const readFeedbackInEmptyState = !isHome && transcriptList.blockIds.length === 0 && !visiblePendingMessage;
   const acceptedReadFailed = conversationError === "operations.acceptedReadFailed";
-  const readFeedback = conversationError || streamPaused ? <>
-    <span>{t(conversationError || "appRoute.streamPaused")}</span>
-    {acceptedReadFailed ? <button type="button" disabled={sending} onClick={() => void checkPendingOperation()}>{t("agentChat.retry")}</button> : null}
-    {streamPaused ? <button type="button" onClick={() => void retryTranscriptStream()}>{t("appRoute.retryStream")}</button> : null}
-  </> : null;
+  const readFeedbackProps = { store: transcriptStore, error: conversationError, paused: streamPaused,
+    reconnecting: streamIssue?.sessionId === sessionId && streamIssue.reconnecting, ready: presentationReady, loading: loadingHistory,
+    checking: sending, onCheck: () => void checkPendingOperation(), onRetry: () => void retryTranscriptStream() };
   useLayoutEffect(() => {
     const startRect = composerStartRectRef.current;
     if (isHome || !startRect) return;
@@ -1447,10 +1459,10 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   }, [isHome]);
   useEffect(() => {
     if (!pendingUserMessage) return;
-    if (hasCommittedPendingMessage(pendingUserMessage, sessionId || null, transcriptList.blockIds, transcriptStore.getBlockSnapshot)) {
+    if (hasCommittedPendingMessage(pendingUserMessage, sessionId || null, transcriptStore.getListSnapshot().blockIds, transcriptStore.getBlockSnapshot)) {
       setPendingUserMessage(null);
     }
-  }, [pendingUserMessage, sessionId, transcriptList.blockIds, transcriptStore]);
+  }, [pendingUserMessage, sessionId, transcriptStore]);
   const updateBrowserPanelWidth = useCallback((widthPx) => {
     transcriptRef.current?.preserveReadingPosition();
     const sidebarWidth = isSidebarOpen && window.innerWidth > 760
@@ -1474,9 +1486,16 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     });
   }
 
-  function renderSessionRow(session, options = {}) {
-    return <SessionNavigationRow key={session.id} workspaceId={workspace.id} session={session} actions={sessionActions} active={session.id === sessionId} running={session.id === sessionId ? hasActiveAgentRun : session.hasActiveAgentRun} onSelect={selectSession} {...options} />;
-  }
+  const selectNavigationSession = useLatestCallback(selectSession);
+  const startNavigationChat = useLatestCallback(startNewChat);
+  const createNavigationProject = useLatestCallback(createProject);
+  const collapseNavigation = useCallback(() => setDrawerFor(null), []);
+  const runControlUnknown = currentRunIdentityRef.current === undefined;
+  const renderSessionRow = useCallback((session, options = {}) => <SessionNavigationRow key={session.id} workspaceId={workspace.id} session={session} actions={rowActions} active={session.id === sessionId} running={session.id === sessionId ? hasActiveAgentRun || runControlUnknown && session.hasActiveAgentRun : session.hasActiveAgentRun} onSelect={selectNavigationSession} {...options} />,
+    [workspace.id, rowActions, sessionId, hasActiveAgentRun, runControlUnknown, selectNavigationSession]);
+  const sidebarSessions = useMemo(() => ({ sessions, projects, groupedSessions, renderSessionRow, onCreateProject: createNavigationProject }),
+    [sessions, projects, groupedSessions, renderSessionRow, createNavigationProject]);
+  const recentNavigation = useMemo(() => navigationError ? { error: true } : undefined, [navigationError]);
 
   async function answerQuestion(question, answer) {
     const scope = requestScopeRef.current;
@@ -1519,16 +1538,10 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           workspace={workspace}
           menuContainer={compactLayout ? sidebarRef : undefined}
           search={compactLayout ? undefined : search}
-          onCollapse={compactLayout ? () => setDrawerFor(null) : undefined}
-          onStartNewChat={startNewChat}
-          recentNavigation={navigationError ? { error: true } : undefined}
-          sessionProps={{
-            sessions,
-            projects,
-            groupedSessions,
-            renderSessionRow,
-            onCreateProject: createProject,
-          }}
+          onCollapse={compactLayout ? collapseNavigation : undefined}
+          onStartNewChat={startNavigationChat}
+          recentNavigation={recentNavigation}
+          sessionProps={sidebarSessions}
         />
       </SidebarContainer>
 
@@ -1566,14 +1579,11 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
             loadingOlderHistory={loadingOlderHistory}
             onLoadOlderHistory={loadOlderHistory}
             olderHistoryError={olderHistoryError}
-            emptyState={isHome ? <HomePlane /> : readFeedbackInEmptyState && readFeedback ? <div className="workspaceEmptyState" role="status">
-              <div className="workspaceToolOutputStatus">{readFeedback}</div>
-            </div> : null}
+            emptyState={isHome ? <HomePlane /> : <ConversationReadFeedback {...readFeedbackProps} placement="empty" />}
             onShowCitation={showCitation}
             onShowArtifact={showArtifact}
             pendingUserMessage={visiblePendingMessage}
             submissionRejected={rejectedSubmissionScopes.has(requestScopeKey)}
-            historyMemoryPressure={transcriptManagedBytes >= TRANSCRIPT_MEMORY_WARNING_BYTES}
             onReleaseLoadedHistory={releaseLoadedTranscriptHistory}
             running={hasActiveAgentRun || Boolean(sending && visiblePendingMessage && !["failed", "cancelled", "completed"].includes(visiblePendingMessage.status))}
             activity={controlApplies && controlSnapshot.stopRequested && controlPending ? "stopping" : workActivity?.sessionId === sessionId
@@ -1585,7 +1595,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           <div className="workspaceComposerDock">
           {(!isSidebarOpen || compactLayout && !drawerOpen) && sessionActions.actionError?.sessionId === sessionId && deleteConfirmationSessionId !== sessionId
             ? <div className="workspaceConversationFeedback workspaceToolOutputStatus isError" role="alert">{sessionActions.actionError.message}</div> : null}
-          {!readFeedbackInEmptyState && readFeedback ? <div className="workspaceConversationFeedback workspaceToolOutputStatus" role="status">{readFeedback}</div> : null}
+          <ConversationReadFeedback {...readFeedbackProps} placement="content" />
           {pendingQuestion?.sessionId === sessionId && pendingQuestion.agentRunId === activeAgentRunId ? <SessionQuestionCard
             key={pendingQuestion.continuationId}
             question={pendingQuestion} onAnswer={answer => answerQuestion(pendingQuestion, answer)}

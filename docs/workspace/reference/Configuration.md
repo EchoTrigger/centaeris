@@ -263,24 +263,24 @@ yielding an execution lease does not free its resident sandbox capacity.
 
 | Variable | Default | Scope |
 | --- | ---: | --- |
-| `RESIDENT_GLOBAL_COUNT` | 8 | Resident sandbox count across Runtime hosts sharing the database |
+| `RESIDENT_GLOBAL_COUNT` | Unset | Optional resident sandbox count quota across Runtime hosts sharing the database |
 | `RESIDENT_GLOBAL_MEMORY_BYTES` | 12884901888 | Global admission memory budget (12 GiB) |
 | `RESIDENT_GLOBAL_CPU_MILLI` | 8000 | Global CPU ceiling (8 cores); shared admission checks each request |
 | `RESIDENT_GLOBAL_PIDS` | 8192 | Global process budget |
 | `RESIDENT_GLOBAL_WORKSPACE_BYTES` | 34359738368 | Global workspace byte budget (32 GiB) |
-| `RESIDENT_TENANT_COUNT` | 8 | Resident sandbox count within one Workspace |
+| `RESIDENT_TENANT_COUNT` | Unset | Optional resident sandbox count quota within one Workspace |
 | `RESIDENT_TENANT_MEMORY_BYTES` | 12884901888 | Workspace admission memory budget (12 GiB) |
 | `RESIDENT_TENANT_CPU_MILLI` | 4000 | Workspace CPU ceiling (4 cores); shared admission checks each request |
 | `RESIDENT_TENANT_PIDS` | 2048 | Workspace process budget |
 | `RESIDENT_TENANT_WORKSPACE_BYTES` | 34359738368 | Workspace byte budget (32 GiB) |
 | `RESIDENT_STARTUP_MEMORY_BYTES` | 268435456 | Host memory allowance for a new preparation (256 MiB), capped by its cgroup ceiling |
-| `RESIDENT_HOST_COUNT` | 8 | Sandbox positions per Docker host, capped by the global count. A start awaiting a resident entry occupies a position for the duration of its execution lease |
+| `RESIDENT_HOST_COUNT` | Unset | Optional sandbox count quota per Docker host, capped by any global count quota. A start awaiting a resident entry occupies a position for the duration of its execution lease |
 | `RESIDENT_HOST_MEMORY_HEADROOM_BYTES` | Greater of 20% of Docker host RAM or 512 MiB | Memory reserved for host services |
 | `RESIDENT_HOST_CPU_HEADROOM_MILLI` | 100 per Docker host CPU core | CPU reserved for host services |
 
-These are Compose deployment defaults for the accepted eight-environment,
-12-GiB admission profile. Runtime also derives host capacity from Docker and
-retains host headroom; eight is a count ceiling, not guaranteed physical capacity.
+Compose defaults to resource-based admission without an extra environment count quota.
+Explicit global, Workspace and host count quotas remain available. Runtime also
+derives host capacity from Docker and retains host headroom.
 The shared policy charges fresh observed memory plus swap and PID usage for known
 residents. New preparations need host headroom plus `RESIDENT_STARTUP_MEMORY_BYTES`, not
 headroom plus the full cgroup ceiling. Aggregate global/Workspace declaration
@@ -289,12 +289,12 @@ workspace usage keeps the declared workspace byte budget. CPU remains a
 per-environment ceiling and is not summed as a reservation. Headroom that leaves
 no capacity fails rather than allowing overbooking.
 
-Compose supplies the ten finite global and Workspace defaults and passes explicit
+Compose supplies the eight finite global and Workspace resource budgets and passes explicit
 overrides to Runtime. All Runtime replicas sharing one database must use the same
 global and Workspace limits. Leave host headroom variables unset to use the
 Docker host-derived defaults; Compose renders unresolved pass-through entries as
-null and omits them from the container environment. Every explicit resident limit
-or headroom override must be a positive integer. Empty values, zero, negative
+null and omits them from the container environment. Leave count variables unset to omit the count quota; an empty value is invalid.
+Every explicit resident limit or headroom override must be a positive integer. Empty values, zero, negative
 values, and non-integers reach Runtime and
 fail validation instead of silently selecting a default.
 
@@ -451,10 +451,11 @@ docker compose --env-file .env -f docker-compose.yml -f docker-compose.prod.yml 
 ### Native retained-memory scheduling
 
 Compose and `.env.example` enable automatic idle pause and demand resume with
-`RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS=8` and `RUNTIME_RUNSC_IDLE_PAUSE_MS=3000`,
-matching the accepted eight-environment profile. Explicitly empty both values in
-Compose to disable it; direct Runtime launches can leave both unset. The
-running-environment limit applies per Docker host. Idle eligibility requires
+`RUNTIME_RUNSC_IDLE_PAUSE_MS=3000`, with no default running-environment count quota.
+An optional positive `RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS` applies per Docker host.
+Leave that count unset to retain pause/resume without a count quota. Explicitly
+empty both values in Compose to disable rotation; direct Runtime launches can
+leave both unset. Idle eligibility requires
 released controller authority and no queued demand. An active Run is not paused
 merely because it is waiting for a model response. `perRun` still removes its
 instance after terminal cleanup rather than retaining it between Runs. Pausing preserves the original
@@ -462,7 +463,9 @@ container, memory and files, and every resident memory/PID/storage/count debit.
 Only an exact observed pause releases its running slot. Unknown outcomes remain
 charged; restart reconciles persisted power state before admission starts.
 
-Run dispatch and Runtime HTTP handlers have no fixed concurrency quota. Hosted
+Run dispatch, Runtime HTTP handlers and HostSupervisor RPC operations have no
+fixed concurrency quota. Host RPC authentication, request-size bounds, absolute
+header deadlines and resource-observation admission remain active. Hosted
 tool concurrency is 64 while Core's existing default remains 16. Resident tenant
 limits remain physical resource budgets. Control and cleanup retain their
 dedicated PostgreSQL connection pools.

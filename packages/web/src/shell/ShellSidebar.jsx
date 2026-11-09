@@ -1,6 +1,6 @@
 import { Menu } from "@centaeris/frontend-foundations/primitives/menu";
 import { useTranslation } from "../i18n";
-import { useState } from "react";
+import { memo, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link, useLocation, useNavigate, useRouteLoaderData } from "react-router";
 import {
@@ -164,7 +164,7 @@ function ConversationSections({ base, sessionProps, recentNavigation, onStartNew
   );
 }
 
-export function ShellSidebar({ workspace, sessionProps, recentNavigation, onStartNewChat, onCollapse, search, menuContainer }) {
+export const ShellSidebar = memo(function ShellSidebar({ workspace, sessionProps, recentNavigation, onStartNewChat, onCollapse, search, menuContainer }) {
   const { t } = useTranslation();
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [logoutError, setLogoutError] = useState("");
@@ -232,4 +232,4 @@ export function ShellSidebar({ workspace, sessionProps, recentNavigation, onStar
       {projectCreateOpen ? <ProjectCreateDialog onClose={() => setProjectCreateOpen(false)} onCreate={sessionProps.onCreateProject} /> : null}
     </aside>
   );
-}
+});

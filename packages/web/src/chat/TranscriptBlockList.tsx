@@ -1,4 +1,5 @@
 import { useTranscriptCitations } from "./useTranscriptCitations";
+import { useTranscriptMemoryPressure } from "./useTranscriptMemoryPressure";
 import type { CitationSummary } from "./citationSnapshot";
 import { createMessageScroll } from "./messageScroll";
 import {
@@ -114,7 +115,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   emptyState,
   pendingUserMessage,
   submissionRejected = false,
-  historyMemoryPressure = false,
+  historyMemoryPressure: reportedMemoryPressure = false,
   onReleaseLoadedHistory,
   onReadingLatestChange,
   onShowArtifact,
@@ -125,6 +126,8 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   completedAtMs,
 }: Props) {
   const { t } = useTranslation();
+  const measuredMemoryPressure = useTranscriptMemoryPressure(store);
+  const historyMemoryPressure = reportedMemoryPressure || measuredMemoryPressure;
   const { blockIds, hasOlder, viewEpoch } = useTranscriptList(store);
   const live = useTranscriptLive(store);
   const citations = useTranscriptCitations(store, sessionId);
@@ -540,6 +543,8 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
         role="region"
         aria-label={t("virtualAgentRunList.conversationMessages")}
       >
+        {loadingHistory && blockIds.length === 0 && live === null && !pendingVisible
+          ? <div className="workspaceEmptyState" role="status">{t('appRoute.loadingConversation')}</div> : null}
         {!loadingHistory && blockIds.length === 0 && live === null && !pendingVisible ? (emptyState || null) : null}
         {citations.error ? <div role="status" className="workspaceToolOutputStatus">
           {t("appRoute.citationRefreshFailed")}

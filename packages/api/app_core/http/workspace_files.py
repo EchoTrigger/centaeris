@@ -1,7 +1,6 @@
 """Authenticated file content below immutable Session workspace manifests."""
 import json
 
-from asgiref.sync import sync_to_async
 from django.db import DatabaseError, transaction
 from django.http import JsonResponse
 
@@ -13,6 +12,7 @@ from app_core.workspace_snapshot_roots import (
 )
 from .json_body import decode_json_object
 from .storage_stream import stored_file_response
+from .stream_response import stream_database_call
 
 
 MISSING = "runtime.workspace_files.missing.v1"
@@ -115,6 +115,7 @@ def _selected_source(body):
     return roots
 
 
+@stream_database_call
 def _open_authorized(body):
     from . import internal
     roots = _selected_source(body)
@@ -145,7 +146,7 @@ async def download_file(request):
         if body["checkpointId"] is not None:
             require_opaque_ref("checkpointId", body["checkpointId"])
         async def authorized_open():
-            return await sync_to_async(_open_authorized, thread_sensitive=True)(body)
+            return await _open_authorized(body)
         return await stored_file_response("workspace-files", "application/octet-stream", "workspace.files",
             as_attachment=False, content_length=sum(file["sizeBytes"] for file in body["files"]),
             authorized_open=authorized_open)

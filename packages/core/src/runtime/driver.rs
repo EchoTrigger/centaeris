@@ -868,6 +868,8 @@ pub struct TurnStepResult {
 
 pub enum ToolSafePoint {
     ModelRequestStarted(ModelRequestStartedV1),
+    /// Before the first model output can reach the stream or drive a tool.
+    ModelOutputReady,
     ReasoningCompleted {
         session_id: String,
         turn_id: String,

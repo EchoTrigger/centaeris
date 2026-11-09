@@ -1,5 +1,5 @@
 import { FileText, MessageSquare, X } from "lucide-react";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { apiJson } from "../api";
 import { useTranslation } from "../i18n";
@@ -46,7 +46,7 @@ export function useWorkspaceSearch(navigationKey, enabled = true) {
     return () => window.removeEventListener("keydown", handleShortcut);
   }, [enabled, open, show, close]);
 
-  return { open, close, triggerRef, inputRef, toggle: open ? close : show };
+  return useMemo(() => ({ open, close, triggerRef, inputRef, toggle: open ? close : show }), [open, close, show]);
 }
 
 export function WorkspaceSearch({ sessions, workspaceId, onClose, inputRef }) {

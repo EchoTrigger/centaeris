@@ -48,7 +48,8 @@ export function createJsxSubjectLoader(overrides = new Map()) {
     }
     let code = result.code;
     for (const [specifier, target] of replacements) code = code.replaceAll(`"${specifier}"`, JSON.stringify(target)).replaceAll(`'${specifier}'`, JSON.stringify(target));
-    const url = dataUrl(code);
+    // Nested data URLs can make a single failing stack frame megabytes long.
+    const url = dataUrl(`${code}\n//# sourceURL=${pathToFileURL(file).href}\n`);
     cache.set(file, url);
     return url;
   }

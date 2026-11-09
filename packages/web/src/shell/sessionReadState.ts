@@ -18,22 +18,29 @@ export function mergeSessionAttention<T extends SessionAttention>(current: T, in
     || sequence(incoming.readThroughSequence) < sequence(current.readThroughSequence))) {
     throw new Error("session attention watermarks regressed");
   }
-  return { ...incoming,
+  const merged = { ...incoming,
     latestAttentionSequence: state.latestAttentionSequence,
     readThroughSequence: state.readThroughSequence,
     attentionRevision: state.attentionRevision,
     isManuallyUnread: state.isManuallyUnread,
     isUnread: state.isManuallyUnread || sequence(state.latestAttentionSequence) > sequence(state.readThroughSequence),
   };
+  return equalSessionRecord(current, merged) ? current : merged;
+}
+
+export function equalSessionRecord(left: object, right: object) {
+  const keys = Object.keys(left) as (keyof typeof left)[];
+  return keys.length === Object.keys(right).length && keys.every(key => Object.is(left[key], right[key]));
 }
 
 export function mergeSessionNavigation<T extends SessionAttention>(current: readonly T[], incoming: readonly T[]): T[] {
   const byId = new Map(current.map(record => [record.id, record]));
-  return incoming.map(record => {
+  const next = incoming.map(record => {
     validate(record);
     const previous = byId.get(record.id);
     return previous ? mergeSessionAttention(previous, record) : record;
   });
+  return next.length === current.length && next.every((record, index) => record === current[index]) ? current as T[] : next;
 }
 
 type Observation = Readonly<{
