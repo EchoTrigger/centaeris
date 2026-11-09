@@ -105,9 +105,9 @@ class PresentationStreamTests(SimpleTestCase):
         )
         return requests
 
-    async def until(self, source, predicate):
+    async def until(self, source, predicate, max_frames=20):
         frames = []
-        for _ in range(20):
+        for _ in range(max_frames):
             frame = await asyncio.wait_for(anext(source), .5)
             frames.append(frame)
             if frame.startswith("data:") or "\ndata:" in frame:
@@ -280,26 +280,30 @@ class PresentationStreamTests(SimpleTestCase):
         self.assertEqual(resets[0]["reason"], "cursorInvalid")
         self.assertTrue(any(data(frame)["kind"] == "snapshot" for frame in frames))
 
-    async def test_reference_content_is_delivered_before_cursor_ack_and_tool_detail_is_not_loaded(self):
-        ref = {"refId": "session-event:event", "revision": "1", "byteLength": "6"}
+    async def test_one_mib_of_reference_content_uses_one_request_before_cursor_ack(self):
+        size, chunk_size = 1024 * 1024, 64 * 1024
+        ref = {"refId": "session-event:event", "revision": "1", "byteLength": str(size)}
         second = {"refId": "session-event:next", "revision": "1", "byteLength": "4"}
         self.page["blocks"] = [{"body": {"kind": "assistantText", "content": {"inlineContent": None, "sourceRef": ref}}},
             {"body": {"kind": "assistantText", "content": {"inlineContent": None, "sourceRef": second}}},
             {"body": {"kind": "assistantText", "content": {"inlineContent": None, "sourceRef": ref}}},
             {"body": {"kind": "tool", "callId": "call", "summary": "read", "summaryRef": None,
                        "outputRef": {**ref, "refId": "tool-output:call"}}}]
+        chunk = "x" * chunk_size
         body = RuntimeContentBody([
-            ndjson(content_range(ref, 0, 3, "one")),
-            ndjson(content_range(ref, 3, 6, "two")) + ndjson(content_range(second, 0, 4, "next")) + ndjson(COMPLETE),
-        ])
+            ndjson(content_range(ref, offset, offset + chunk_size, chunk))
+            for offset in range(0, size, chunk_size)
+        ] + [ndjson(content_range(second, 0, 4, "next")) + ndjson(COMPLETE)])
         requests = self.relay_content(body)
         source = stream_presentation(self.scope, self.loader)
         try:
-            frames = await self.until(source, lambda item, frame: item["kind"] == "checkpoint" and frame.startswith("id:"))
+            frames = await self.until(
+                source, lambda item, frame: item["kind"] == "checkpoint" and frame.startswith("id:"), max_frames=32,
+            )
         finally:
             await source.aclose()
         content = [data(frame)["range"]["content"] for frame in frames if data(frame)["kind"] == "content"]
-        self.assertEqual(content, ["one", "two", "next"])
+        self.assertEqual(content, [chunk] * (size // chunk_size) + ["next"])
         self.assertTrue(body.closed)
         [request] = requests
         self.assertEqual((request.method, request.url.path), ("POST", "/internal/transcript/content-stream"))

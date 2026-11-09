@@ -67,6 +67,7 @@ def main(skip_frontend_tests=False, stage="All"):
         ("Retained acceptance fixture guards", [py, "-m", "unittest", "discover", "-s", "scripts/workspace/retained_acceptance", "-p", "test_*.py"]),
         ("Performance harness isolation", [py, "-m", "unittest", "discover", "-s", "perf/tests", "-v"]),
         ("Performance workload metrics", ["node", "--test", "perf/tests/k6-metrics.test.mjs"]),
+        ("Presentation delivery scenario", ["node", "--test", "perf/tests/presentation-delivery.test.mjs"]),
         ("Document processor tests", ["uv", "run", "--frozen", "--package", "centaeris-document-processor", "python", "scripts/workspace/python_test_gate.py", "document_processor"]),
         ("Django migration drift", [*api, "packages/api/manage.py", "makemigrations", "--check", "--dry-run", "--settings=api.migration_test_settings", "--skip-checks"]),
         ("Full Django PostgreSQL suite", [*api, "scripts/workspace/python_test_gate.py", "api"]),
@@ -98,6 +99,7 @@ def main(skip_frontend_tests=False, stage="All"):
         "ApiPostgres": {"Full Django PostgreSQL suite", "First-party MCP Rust/Python client"},
         "Support": {"Workspace Harbor adapter regressions", "Python discovery gate regressions", "Worker tests",
                     "Retained acceptance fixture guards", "Performance harness isolation", "Performance workload metrics",
+                    "Presentation delivery scenario",
                     "Document processor tests", "Performance artifact validation"},
     }
     if stage == "Rust":

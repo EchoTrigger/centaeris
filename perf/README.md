@@ -472,6 +472,38 @@ Use matched source/configuration/workspace sizes for comparisons and adequate
 repetitions for p50/p95. The 500 ms value is an investigation target, not an
 unmeasured pass threshold.
 
+## Presentation delivery comparison
+
+Run the browser transport and presentation controller against the current
+Workspace SSE endpoint on an isolated Linux stack. Prepare a stable synthetic
+Session whose initial snapshot includes the requested body reference. Supply
+the test account's `sessionid=...` cookie as `PERF_PRESENTATION_COOKIE` through
+the local test environment. The probe accepts only a loopback API origin,
+uses the existing Session, and prints timing data without emitting cookies or
+body text.
+
+```sh
+API_BASE=http://127.0.0.1:18000 \
+PERF_WORKSPACE_ID=fixture-workspace \
+PERF_PRESENTATION_SESSION_ID=fixture-session \
+PERF_PRESENTATION_REFERENCE='{"refId":"session-event:fixture:text","revision":"1","byteLength":"1048576"}' \
+node perf/harness/presentation_delivery.mjs
+```
+
+Use the exact reference from the fixture's snapshot. The probe measures request
+start to first applied range and to the applied checkpoint, then reconnects
+with that cursor and measures time to the resumed checkpoint. It requires the
+same generation and watermark on resume and rejects retransmission of the
+selected body. Use `PERF_PRESENTATION_SLOW_MS` to delay application of each
+range. The report gives p50 and p95 after three warmups, with 25 samples by
+default. Keep revision, history, fixture bytes, and host configuration fixed
+between variants. Use the stack sampler for service CPU and RSS.
+
+PR CI exercises the probe against a synthetic HTTP response and checks in
+Django that the 1 MiB body uses one Runtime request before the checkpoint.
+The existing presentation tests cover slow consumption, cancellation, and
+replay. The per-Run k6 event-stream scenarios still measure the per-Run API.
+
 ## Local processing comparisons
 
 These probes measure internal costs separately from the real-tool k6 gate:
