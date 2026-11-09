@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 pub(crate) const PROVIDER_ID: &str = "workspace.materials";
 const TIMEOUT: Duration = Duration::from_secs(30);
+const CATALOG_HEADER: &str = "x-workspace-material-catalog";
 
 pub(crate) struct PlatformMaterialsProvider {
     api_url: String,
@@ -23,7 +24,8 @@ pub(crate) struct PlatformMaterialsProvider {
     credential_request: Value,
     http: reqwest::Client,
     pub(crate) contracts: Vec<DynamicToolContract>,
-    discovered: Value,
+    client: HttpMcpClient,
+    catalog_digest: String,
     execution_delivery: Option<Arc<crate::material_execution::MaterialExecutionDelivery>>,
 }
 
@@ -109,21 +111,23 @@ impl PlatformMaterialsProvider {
         specification: Value,
         spec_digest: String,
     ) -> Result<Self, String> {
-        let mut provider = Self {
-            api_url,
-            internal_token,
-            credential_request: json!({"schema":"workspace.mcp.credential.issue.v1", "agentRunId":agent_run_id,
-                "authorizationDigest":authorization_digest,"processingSpecification":specification,"specDigest":spec_digest}),
-            http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(TIMEOUT)
-                .build()
-                .map_err(|_| "build platform credential client failed")?,
-            contracts: Vec::new(),
-            discovered: Value::Null,
-            execution_delivery: None,
-        };
-        let client = provider.client(None).await?;
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(TIMEOUT)
+            .build()
+            .map_err(|_| "build platform credential client failed")?;
+        let credential_request = json!({"schema":"workspace.mcp.credential.issue.v1", "agentRunId":agent_run_id,
+            "authorizationDigest":authorization_digest,"processingSpecification":specification,"specDigest":spec_digest});
+        let (credential, catalog_digest) =
+            Self::issue_credential(&http, &api_url, &internal_token, &credential_request).await?;
+        let client = HttpMcpClient::connect(
+            &format!("{}/internal/mcp", api_url.trim_end_matches('/')),
+            &credential.access_token,
+            &[],
+            TIMEOUT,
+        )
+        .await
+        .map_err(|_| "platform MCP connection failed".to_string())?;
         validate_tool_names(
             &client
                 .tools()
@@ -131,7 +135,7 @@ impl PlatformMaterialsProvider {
                 .map(|tool| tool.name.to_string())
                 .collect::<Vec<_>>(),
         )?;
-        provider.contracts = client
+        let contracts: Vec<_> = client
             .tools()
             .iter()
             .map(|tool| DynamicToolContract {
@@ -149,29 +153,50 @@ impl PlatformMaterialsProvider {
                 turn_behavior: ToolTurnBehavior::ContinueTurn,
             })
             .collect();
-        DynamicToolRegistry::from_contracts(provider.contracts.clone())?;
-        provider.discovered =
-            serde_json::to_value(client.tools()).map_err(|_| "invalid material catalog")?;
-        Ok(provider)
+        DynamicToolRegistry::from_contracts(contracts.clone())?;
+        Ok(Self {
+            api_url,
+            internal_token,
+            credential_request,
+            http,
+            contracts,
+            client,
+            catalog_digest,
+            execution_delivery: None,
+        })
     }
 
-    async fn client(&self, call_id: Option<&str>) -> Result<HttpMcpClient, String> {
-        // A new scoped credential for each invocation avoids caching a permission
-        // decision or reusing an expired bearer across a long-running AgentRun.
-        let mut response = self
-            .http
+    async fn issue_credential(
+        http: &reqwest::Client,
+        api_url: &str,
+        internal_token: &str,
+        credential_request: &Value,
+    ) -> Result<(Credential, String), String> {
+        let mut response = http
             .post(format!(
                 "{}/internal/mcp/credential",
-                self.api_url.trim_end_matches('/')
+                api_url.trim_end_matches('/')
             ))
-            .header("X-Internal-Token", &self.internal_token)
-            .json(&self.credential_request)
+            .header("X-Internal-Token", internal_token)
+            .json(credential_request)
             .send()
             .await
             .map_err(|_| "platform credential request failed")?;
         if !response.status().is_success() {
             return Err("platform credential rejected".into());
         }
+        let mut catalogs = response.headers().get_all(CATALOG_HEADER).iter();
+        let catalog = catalogs
+            .next()
+            .and_then(|value| value.to_str().ok())
+            .ok_or("platform material catalog binding missing")?;
+        if catalogs.next().is_some()
+            || crate::agent_run_authorization::validate_sha256("material catalog digest", catalog)
+                .is_err()
+        {
+            return Err("platform material catalog binding invalid".into());
+        }
+        let catalog = catalog.to_owned();
         let mut bytes = Vec::new();
         while let Some(chunk) = response
             .chunk()
@@ -195,17 +220,7 @@ impl PlatformMaterialsProvider {
         {
             return Err("platform credential response invalid".into());
         }
-        let headers = call_id
-            .map(|id| vec![("x-workspace-tool-call-id", id)])
-            .unwrap_or_default();
-        HttpMcpClient::connect(
-            &format!("{}/internal/mcp", self.api_url.trim_end_matches('/')),
-            &credential.access_token,
-            &headers,
-            TIMEOUT,
-        )
-        .await
-        .map_err(|_| "platform MCP connection failed".into())
+        Ok((credential, catalog))
     }
 
     async fn invoke(
@@ -223,10 +238,14 @@ impl PlatformMaterialsProvider {
         {
             return Err("platform material invocation binding invalid".into());
         }
-        let client = self.client(Some(&request.tool_call_id)).await?;
-        if serde_json::to_value(client.tools()).map_err(|_| "invalid material catalog")?
-            != self.discovered
-        {
+        let (credential, catalog) = Self::issue_credential(
+            &self.http,
+            &self.api_url,
+            &self.internal_token,
+            &self.credential_request,
+        )
+        .await?;
+        if catalog != self.catalog_digest {
             return Err("platform material catalog changed during run".into());
         }
         let arguments = serde_json::from_str::<Value>(&request.args_json)
@@ -258,7 +277,16 @@ impl PlatformMaterialsProvider {
                 transition_reason: Some("material_execution_delivery".into()),
             });
         }
-        let result = client.call(&request.tool_name, arguments, TIMEOUT).await?;
+        let result = self
+            .client
+            .call_scoped(
+                &request.tool_name,
+                arguments,
+                &credential.access_token,
+                &[("x-workspace-tool-call-id", &request.tool_call_id)],
+                TIMEOUT,
+            )
+            .await?;
         // Do not acknowledge a successful citable result that Core would clip.
         if result.content.len() > centaeris_core::tool::layer::MODEL_TOOL_RESULT_MAX_BYTES {
             return Err("material result exceeds model budget; retry with a smaller limit".into());
@@ -465,6 +493,12 @@ mod tests {
                     text("expectedTextSha256")
                 );
                 assert!(index > 1, "large fixture must require continuation");
+                let drift = runtime.block_on(layer.execute_async(ToolInvocationRequest {
+                    tool_call_id: "material-client-catalog-drift".into(),
+                    tool_name: "list_materials".into(),
+                    args_json: "{}".into(),
+                }));
+                assert_eq!(drift.status, "error");
                 return;
             }
         }

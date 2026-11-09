@@ -1150,6 +1150,7 @@ def artifact_status(request):
 @_internal_post("/mcp/credential")
 def issue_platform_mcp_credential(request):
     from app_core.material_access import MaterialAccessContext
+    from app_core.material_tool_catalog import MATERIAL_TOOL_CATALOG_DIGEST, MATERIAL_TOOL_CATALOG_HEADER
     from app_core.platform_mcp_auth import CredentialRejected, issue_credential
 
     response_headers = {"Cache-Control": "no-store"}
@@ -1163,6 +1164,7 @@ def issue_platform_mcp_credential(request):
         if not isinstance(body, dict) or set(body) != {"schema", "agentRunId", "authorizationDigest", "processingSpecification", "specDigest"} or body["schema"] != "workspace.mcp.credential.issue.v1":
             raise ValueError
         result = issue_credential(MaterialAccessContext(body["agentRunId"], body["authorizationDigest"], body["processingSpecification"], body["specDigest"]))
+        response_headers[MATERIAL_TOOL_CATALOG_HEADER] = MATERIAL_TOOL_CATALOG_DIGEST
         return JsonResponse(result, headers=response_headers)
     except CredentialRejected:
         return JsonResponse({"error": "unauthorized"}, status=401, headers=response_headers)

@@ -57,6 +57,12 @@ class PlatformMcpCredentialTests(SimpleTestCase):
         with self.assertRaises(auth.CredentialRejected):
             auth.verify_credential(token)
 
+    def test_credential_cannot_authenticate_against_a_different_catalog(self):
+        token = auth.issue_credential(self.context)["accessToken"]
+        with patch.object(auth, "SALT", "another-material-catalog"), self.assertRaises(auth.CredentialRejected):
+            auth.verify_credential(token)
+        self.authorize.assert_called_once_with(self.context)
+
     def test_signed_unknown_claims_and_future_timestamp_are_rejected(self):
         with patch.object(auth.time, "time", return_value=1000):
             token = auth.issue_credential(self.context)["accessToken"]

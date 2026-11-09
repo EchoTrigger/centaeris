@@ -57,13 +57,16 @@ generation. Credentials are not cached authorization decisions.
 `MaterialAccessContext` is trusted internal context, never a model-supplied
 credential. Request-local context is isolated and cleared after dispatch.
 
-Runtime owns the reserved provider identity `workspace.materials`. Each
-invocation obtains a fresh credential, opens a separate connection, checks the
-frozen catalog and supplies the actual tool-call ID. Catalog collisions and
-changes during a run fail closed. A whole-invocation timeout and cancellation
-cover connection, discovery and content reads; an original-file transfer that
-has begun admission finishes its bounded Host operation and confirmation before
-reporting cancellation. Ambiguous calls are not automatically replayed.
+Runtime owns the reserved provider identity `workspace.materials`. It
+initializes the MCP client and discovers the catalog once per Run. Each
+invocation obtains a fresh credential bound to that catalog and attaches the
+actual tool-call ID to its own request. A catalog change rejects dispatch,
+including when the issuer and MCP endpoint serve different catalog revisions.
+The original-file path uses the Host delivery operation after credential
+issuance. A whole-invocation deadline and cancellation cover queued and active
+content calls. An original-file transfer that has begun admission finishes its
+bounded Host operation and confirmation before reporting cancellation. Ambiguous
+calls require reconciliation under the original identity.
 Credentials and trusted headers do not enter model arguments or
 history. Credential and material responses use `Cache-Control: no-store`.
 

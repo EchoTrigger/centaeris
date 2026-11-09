@@ -540,6 +540,8 @@ issues one through `POST /internal/mcp/credential` with exact fields
 `authorizationDigest`, `processingSpecification`, and `specDigest`.
 The no-store response has `schema: "workspace.mcp.credential.result.v1"`,
 `accessToken`, and `expiresAt` (Unix seconds, five-minute lifetime).
+Its `X-Workspace-Material-Catalog` header carries the SHA-256 identity of the
+tool catalog bound to the signed credential.
 Both entries reject browser Origin headers. See
 [Platform materials and MCP](../architecture/PlatformMaterials.md#mcp-connection-and-authorization)
 for transport constraints and the platform processing lifecycle.
