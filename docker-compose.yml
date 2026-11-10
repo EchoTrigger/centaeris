@@ -2,7 +2,7 @@ name: centaeris-workspace
 
 x-api-build: &api-build
   context: .
-  dockerfile: packages/api/Dockerfile
+  dockerfile: packages/workspace/api/Dockerfile
   labels: &release-image-labels
     org.opencontainers.image.licenses: AGPL-3.0-only
     org.opencontainers.image.source: https://github.com/EchoTrigger/centaeris
@@ -95,7 +95,7 @@ services:
     image: *document-processor-image
     build:
       context: .
-      dockerfile: packages/document_processor/Dockerfile
+      dockerfile: packages/workspace/documents/Dockerfile
       labels: *release-image-labels
       args:
         PROCESSOR_DEVICE: *processor-device
@@ -115,7 +115,7 @@ services:
     restart: unless-stopped
     build:
       context: .
-      dockerfile: packages/runtime_server/Dockerfile
+      dockerfile: packages/workspace/runtime/Dockerfile
       labels: *release-image-labels
     environment:
       RUNTIME_NATIVE_SHARED_ADMISSION: ${RUNTIME_NATIVE_SHARED_ADMISSION-1}
@@ -196,7 +196,7 @@ services:
     restart: unless-stopped
     build:
       context: .
-      dockerfile: packages/worker/Dockerfile
+      dockerfile: packages/workspace/worker/Dockerfile
       labels: *release-image-labels
     command: ["python", "worker.py", "serve"]
     logging:
@@ -228,7 +228,7 @@ services:
     image: *workspace-general-image
     build:
       context: .
-      dockerfile: packages/hosted_execution/Dockerfile.agent
+      dockerfile: packages/workspace/executor/Dockerfile.agent
       labels: *release-image-labels
     command: ["/bin/sh", "-ec", "test -x /opt/centaeris/bin/execution_agent"]
     network_mode: none
@@ -243,7 +243,7 @@ services:
   api-init:
     image: centaeris-workspace-agent-api
     build: *api-build
-    entrypoint: ["sh", "/app/packages/api/init-entrypoint.sh"]
+    entrypoint: ["sh", "/app/packages/workspace/api/init-entrypoint.sh"]
     restart: "no"
     environment:
       <<: &api-environment
@@ -422,7 +422,7 @@ services:
 
   gc:
     image: centaeris-workspace-agent-api
-    entrypoint: ["sh", "/app/packages/api/gc-entrypoint.sh"]
+    entrypoint: ["sh", "/app/packages/workspace/api/gc-entrypoint.sh"]
     restart: unless-stopped
     environment:
       <<: *api-environment
@@ -444,7 +444,7 @@ services:
   web:
     build:
       context: .
-      dockerfile: packages/web/Dockerfile
+      dockerfile: packages/workspace/web/Dockerfile
       labels: *release-image-labels
     environment:
       API_BASE_URL: ${API_BASE_URL}

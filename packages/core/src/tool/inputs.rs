@@ -2,28 +2,26 @@ use std::collections::HashSet;
 use std::path::{Component, Path};
 use std::sync::{Arc, Mutex};
 
+use crate::source::SourceIdentityV1;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
-pub const RESOLVED_INPUT_SCHEMA: &str = "runtime.resolved_input.v1";
-pub const RESOLVED_INPUT_MANIFEST_SCHEMA: &str = "runtime.resolved_input_manifest.v1";
-pub const DECLARED_INPUT_SCHEMA: &str = "runtime.declared_input.v1";
+pub const RESOLVED_INPUT_SCHEMA: &str = "runtime.resolved_source.v1";
+pub const RESOLVED_INPUT_MANIFEST_SCHEMA: &str = "runtime.source_manifest.v1";
+pub const DECLARED_INPUT_SCHEMA: &str = "runtime.declared_source.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResolvedInput {
     pub schema: String,
     pub input_ref: String,
-    pub object_ref: String,
-    pub owner_kind: String,
+    pub source_ref: String,
     pub virtual_path: String,
     pub display_name: String,
     pub content_type: String,
     pub size_bytes: u64,
     pub sha256: String,
     pub source_version: String,
-    pub evidence_kind: String,
-    pub citation_allowed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,17 +31,8 @@ pub struct DeclaredInput {
     pub input_ref: String,
     pub display_name: String,
     pub content_type: String,
-    pub input_identity: InputIdentityV1,
+    pub input_identity: SourceIdentityV1,
     pub size_bytes: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct InputIdentityV1 {
-    pub owner_kind: String,
-    pub owner_id: String,
-    pub generation: u64,
-    pub sha256: String,
 }
 
 impl DeclaredInput {
@@ -55,22 +44,6 @@ impl DeclaredInput {
         require_non_empty("displayName", self.display_name.as_str())?;
         require_non_empty("contentType", self.content_type.as_str())?;
         self.input_identity.validate()
-    }
-}
-
-impl InputIdentityV1 {
-    pub fn validate(&self) -> Result<(), String> {
-        if !matches!(
-            self.owner_kind.as_str(),
-            "sourceObject" | "userLibraryObject" | "artifact"
-        ) {
-            return Err(format!("unsupported ownerKind: {}", self.owner_kind));
-        }
-        require_opaque_ref("ownerId", self.owner_id.as_str())?;
-        if self.generation == 0 {
-            return Err("input identity generation must be positive".to_string());
-        }
-        validate_sha256(self.sha256.as_str())
     }
 }
 
@@ -102,7 +75,7 @@ impl ResolvedInputManifest {
             return Err("resolved input manifest authorization binding mismatch".to_string());
         }
         let mut input_refs = HashSet::new();
-        let mut object_versions = HashSet::new();
+        let mut source_versions = HashSet::new();
         let mut virtual_paths = HashSet::new();
         let mut previous_input_ref: Option<&str> = None;
         for input in &self.inputs {
@@ -116,10 +89,10 @@ impl ResolvedInputManifest {
             if !input_refs.insert(input.input_ref.as_str()) {
                 return Err(format!("duplicate inputRef: {}", input.input_ref));
             }
-            if !object_versions.insert((input.object_ref.as_str(), input.source_version.as_str())) {
+            if !source_versions.insert((input.source_ref.as_str(), input.source_version.as_str())) {
                 return Err(format!(
-                    "duplicate objectRef/sourceVersion: {}/{}",
-                    input.object_ref, input.source_version
+                    "duplicate sourceRef/sourceVersion: {}/{}",
+                    input.source_ref, input.source_version
                 ));
             }
             if !virtual_paths.insert(input.virtual_path.as_str()) {
@@ -136,9 +109,8 @@ impl ResolvedInputManifest {
                 })?;
             if reference.display_name != input.display_name
                 || reference.content_type != input.content_type
-                || reference.input_identity.owner_kind != input.owner_kind
-                || reference.input_identity.owner_id != input.object_ref
-                || reference.input_identity.generation.to_string() != input.source_version
+                || reference.input_identity.source_ref != input.source_ref
+                || reference.input_identity.revision != input.source_version
                 || reference.input_identity.sha256 != input.sha256
                 || reference.size_bytes != input.size_bytes
             {
@@ -413,9 +385,8 @@ impl ResolvedInputState {
         if resolved.input_ref != reference.input_ref
             || resolved.display_name != reference.display_name
             || resolved.content_type != reference.content_type
-            || resolved.owner_kind != reference.input_identity.owner_kind
-            || resolved.object_ref != reference.input_identity.owner_id
-            || resolved.source_version != reference.input_identity.generation.to_string()
+            || resolved.source_ref != reference.input_identity.source_ref
+            || resolved.source_version != reference.input_identity.revision
             || resolved.sha256 != reference.input_identity.sha256
             || resolved.size_bytes != reference.size_bytes
         {
@@ -446,11 +417,11 @@ impl ResolvedInputState {
             return Ok(existing.clone());
         }
         if manifest.inputs.iter().any(|item| {
-            item.object_ref == resolved.object_ref && item.source_version == resolved.source_version
+            item.source_ref == resolved.source_ref && item.source_version == resolved.source_version
         }) {
             return Err(DeferredInputResolutionError::new(
                 DeferredInputResolutionFailureKind::HostUnavailable,
-                "deferred input resolver duplicated an object version",
+                "deferred input resolver duplicated a source revision",
             ));
         }
         if manifest
@@ -497,12 +468,10 @@ impl ResolvedInput {
             return Err("resolved_input_schema_mismatch".to_string());
         }
         require_opaque_ref("inputRef", self.input_ref.as_str())?;
-        require_opaque_ref("objectRef", self.object_ref.as_str())?;
-        require_non_empty("ownerKind", self.owner_kind.as_str())?;
+        require_opaque_ref("sourceRef", self.source_ref.as_str())?;
         require_non_empty("displayName", self.display_name.as_str())?;
         require_non_empty("contentType", self.content_type.as_str())?;
         require_non_empty("sourceVersion", self.source_version.as_str())?;
-        require_non_empty("evidenceKind", self.evidence_kind.as_str())?;
         validate_virtual_path(self.virtual_path.as_str())?;
         validate_sha256(self.sha256.as_str())?;
         Ok(())
@@ -585,10 +554,9 @@ mod tests {
             input_ref: "input_1".to_string(),
             display_name: "notice.pdf".to_string(),
             content_type: "application/pdf".to_string(),
-            input_identity: InputIdentityV1 {
-                owner_kind: "sourceObject".to_string(),
-                owner_id: "srcobj_1".to_string(),
-                generation: 1,
+            input_identity: SourceIdentityV1 {
+                source_ref: "file:srcobj_1".to_string(),
+                revision: "1".to_string(),
                 sha256: format!("sha256:{}", "a".repeat(64)),
             },
             size_bytes: 10,
@@ -599,16 +567,13 @@ mod tests {
         ResolvedInput {
             schema: RESOLVED_INPUT_SCHEMA.to_string(),
             input_ref: "input_1".to_string(),
-            object_ref: "srcobj_1".to_string(),
-            owner_kind: "sourceObject".to_string(),
+            source_ref: "file:srcobj_1".to_string(),
             virtual_path: "sources/srcobj_1/notice.pdf".to_string(),
             display_name: "notice.pdf".to_string(),
             content_type: "application/pdf".to_string(),
             size_bytes: 10,
             sha256: format!("sha256:{}", "a".repeat(64)),
             source_version: "1".to_string(),
-            evidence_kind: "workspaceSource".to_string(),
-            citation_allowed: true,
         }
     }
 
@@ -713,7 +678,7 @@ mod tests {
             .unwrap();
         assert_eq!(state.declared_inputs(), [initial.clone(), later.clone()]);
         assert_eq!(state.declared_input_by_ref("input_2"), Some(later.clone()));
-        later.input_identity.generation += 1;
+        later.input_identity.revision = "2".to_string();
         assert_eq!(
             state.admit_declared_inputs(&[later]).unwrap_err(),
             "admitted_input_identity_conflict"
@@ -724,8 +689,8 @@ mod tests {
                 .declared_input_by_ref("input_2")
                 .unwrap()
                 .input_identity
-                .generation,
-            1
+                .revision,
+            "1"
         );
         assert!(state.declared_input_by_ref("unaccepted-input").is_none());
     }

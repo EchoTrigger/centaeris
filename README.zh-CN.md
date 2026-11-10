@@ -27,19 +27,23 @@ Centaeris 是使用 Rust 编写、不依赖特定宿主的智能体运行时框�
 | 包 | 职责 |
 | --- | --- |
 | [`packages/core`](packages/core/README.md) | 运行时语义与契约 |
-| [`packages/runtime`](packages/runtime/README.md) | 共用的本地运行时宿主 |
-| [`packages/runtime_sqlite`](packages/runtime_sqlite/README.md) | SQLite RuntimeStore 适配器 |
+| [`packages/agent`](packages/agent/README.md) | Rust Agent SDK 与本地执行适配器 |
+| [`packages/sdk`](packages/sdk/README.md) | 类型化 TypeScript 会话客户端 |
+| [`packages/desktop/src/services`](packages/desktop/src/services/README.md) | Desktop 与 CLI 共用的产品服务 |
+| [`packages/sqlite`](packages/sqlite/README.md) | SQLite RuntimeStore 适配器 |
 | [`packages/mcp`](packages/mcp/README.md) | MCP 适配器 |
 | [`packages/model-catalog`](packages/model-catalog/README.md) | Rust 模型目录 |
+| [`packages/model-http`](packages/model-http/Cargo.toml) | 共享模型 HTTP 与流传输 |
 | [`packages/desktop`](packages/desktop/README.md) | Electron 宿主 |
-| [`packages/tui`](packages/tui/README.md) | 终端宿主 |
-| [`packages/ui`](packages/ui/README.md) | 共用桌面界面 |
-| [`packages/api`](packages/api/README.md) | 托管控制平面 |
-| [`packages/runtime_server`](packages/runtime_server/README.md) | 托管 Runtime 适配器 |
-| [`packages/hosted_execution`](packages/hosted_execution/README.md) | 托管执行代理与沙箱工具 |
-| [`packages/web`](packages/web/README.md) | 托管 Web 界面 |
-| [`packages/worker`](packages/worker/README.md) | 托管生命周期 Worker |
-| [`packages/document_processor`](packages/document_processor/README.md) | 材料处理服务 |
+| [`packages/cli`](packages/cli/README.md) | 交互终端、Print、JSON 和 RPC 入口 |
+| [`packages/ui`](packages/ui/README.md) | 共享前端基础 |
+| [`packages/visuals`](packages/visuals/package.json) | 共享可视化渲染 |
+| [`packages/workspace/api`](packages/workspace/api/README.md) | 托管控制平面 |
+| [`packages/workspace/runtime`](packages/workspace/runtime/README.md) | 托管 Runtime 适配器 |
+| [`packages/workspace/executor`](packages/workspace/executor/README.md) | 托管执行代理与沙箱工具 |
+| [`packages/workspace/web`](packages/workspace/web/README.md) | 托管 Web 界面 |
+| [`packages/workspace/worker`](packages/workspace/worker/README.md) | 托管生命周期 Worker |
+| [`packages/workspace/documents`](packages/workspace/documents/README.md) | 材料处理服务 |
 
 `system-skills/` 为本地产品内置 Skill，`skills/system/` 为托管产品内置 Skill，两者均不属于 workspace 包。各包 README 目前仅提供英文版本。
 
@@ -58,7 +62,7 @@ Centaeris 是使用 Rust 编写、不依赖特定宿主的智能体运行时框�
 
 ## 从源码构建
 
-环境要求：`rust-toolchain.toml` 指定的 Rust、Node.js 22.21.0、npm 10.9.4 和 Python 3.12。
+环境要求：`rust-toolchain.toml` 指定的 Rust、Node.js 22.21.0、pnpm 12.10.1 和 Python 3.12。
 
 ```sh
 python3 scripts/ci.py Source --frontend-tests
@@ -68,7 +72,7 @@ Windows 使用 `python`。跨平台源码检查见[开发指南](docs/developmen
 
 ## 界面语言
 
-桌面界面目前仅提供英文。`react-i18next` 基础和英文资源分别位于 `packages/ui/src/i18n.ts` 和 `packages/ui/src/locales/`，不展示尚未完成的语言选项。用户内容、模型回复、命令和协议标识保留原文。
+桌面界面目前仅提供英文。`react-i18next` 基础和英文资源分别位于 `packages/desktop/src/renderer/i18n.ts` 和 `packages/desktop/src/renderer/locales/`，不展示尚未完成的语言选项。用户内容、模型回复、命令和协议标识保留原文。
 
 ## 文档
 

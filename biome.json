@@ -2,15 +2,14 @@
   "$schema": "https://biomejs.dev/schemas/2.5.12/schema.json",
   "files": {
     "includes": [
-      "packages/frontend-foundations/src/**",
-      "packages/visualization-react/src/**",
+      "packages/sdk/src/**",
       "packages/ui/src/**",
-      "packages/ui/tests/**",
-      "packages/ui/scripts/**",
+      "packages/visuals/src/**",
       "packages/desktop/src/**",
+      "packages/desktop/tests/**",
       "packages/desktop/scripts/**",
-      "packages/web/src/**",
-      "packages/web/tests/**"
+      "packages/workspace/web/src/**",
+      "packages/workspace/web/tests/**"
     ]
   },
   "formatter": {
@@ -48,7 +47,7 @@
   "overrides": [
     {
       "includes": [
-        "packages/web/**"
+        "packages/workspace/web/**"
       ],
       "linter": {
         "enabled": true,

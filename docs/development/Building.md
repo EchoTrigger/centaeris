@@ -17,7 +17,7 @@ pnpm install --frozen-lockfile
 ```sh
 cargo check --locked
 pnpm run typecheck
-pnpm --filter centaeris-ui run dev
+pnpm --filter @centaeris/electron-host run dev:renderer
 pnpm --filter @centaeris/electron-host run dev
 ```
 

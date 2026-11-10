@@ -81,7 +81,7 @@ Close a running packaged Desktop before rebuilding its directory.
 For development:
 
 ```powershell
-pnpm --filter centaeris-ui run dev
+pnpm --filter @centaeris/electron-host run dev:renderer
 pnpm --filter @centaeris/electron-host run dev
 ```
 
@@ -94,7 +94,7 @@ Build the standalone TUI archive:
 ```
 
 The archive is written to
-`packages/tui/dist/centaeris-windows-x64.zip`. It contains `centa.exe`, the
+`packages/cli/dist/centaeris-windows-x64.zip`. It contains `centa.exe`, the
 matching native `centaeris-runtime.exe`, license material, and a file manifest
 verified by the installer.
 

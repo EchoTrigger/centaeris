@@ -44,7 +44,7 @@ dependency.
 Start the packaged TUI:
 
 ```powershell
-.\packages\tui\dist\centaeris\centa.exe --workspace C:\path\to\project
+.\packages\cli\dist\centaeris\centa.exe --workspace C:\path\to\project
 ```
 
 Without `--workspace`, the current directory is used. Client disconnection

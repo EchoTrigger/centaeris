@@ -16,7 +16,7 @@ Queued cancellation and physical resource settlement must continue independently
 | Workspace storage budget | The current container request carries the data budget label but no explicit Docker tmpfs or storage option. | Establish the actual writable backing and enforce the declared byte/inode contract at the physical boundary. |
 
 The database regressions are in
-[`resource_lifecycle_tests.rs`](../../packages/runtime_server/src/postgres_store/integration_tests/resource_lifecycle_tests.rs).
+[`resource_lifecycle_tests.rs`](../../packages/workspace/runtime/src/postgres_store/integration_tests/resource_lifecycle_tests.rs).
 The two capacity regressions check ordinary exclusion, control readiness/claim, persisted purpose and unchanged execution owners. Separate Runtime HTTP tests cover terminal history, receipt replay and completion gates; the service-chain measurement below covers a never-admitted queued Run. Physical cleanup remains a separate acceptance boundary.
 
 Existing unknown-create regressions continue to require charged resources and adoption of the exact late instance after reopening. Any settlement fix must preserve those protections. A known failure and an unknown physical outcome must never share an unconditional release path.

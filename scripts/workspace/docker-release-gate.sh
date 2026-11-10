@@ -127,7 +127,7 @@ done
 "${compose[@]}" config --format json | python3 scripts/workspace/verify-deployment-images.py
 # Reuse the workspace-general builder's cached compile, keeping host binaries out
 # of the final sandbox image. The supervisor must match the source under test.
-docker build --target build --tag "$supervisor_image" --file packages/hosted_execution/Dockerfile.agent .
+docker build --target build --tag "$supervisor_image" --file packages/workspace/executor/Dockerfile.agent .
 docker create --cidfile "$supervisor_container_id_file" "$supervisor_image" >/dev/null
 docker cp "$(cat "$supervisor_container_id_file"):/src/target/release/environment_host_supervisor" "$fixture_directory/environment_host_supervisor"
 # Extract the real helper without dispatching an AgentRun.

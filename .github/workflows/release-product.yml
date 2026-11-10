@@ -85,7 +85,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Desktop installer acceptance failed' }
             Compress-Archive -LiteralPath 'packages/desktop/dist/Centaeris Desktop' -DestinationPath dist/release-candidate/centaeris-desktop-windows-x64.zip
           } else {
-            Copy-Item -LiteralPath packages/tui/dist/centaeris-windows-x64.zip -Destination dist/release-candidate
+            Copy-Item -LiteralPath packages/cli/dist/centaeris-windows-x64.zip -Destination dist/release-candidate
           }
           git archive --format=zip --prefix=centaeris/ --output=dist/release-candidate/centaeris-source.zip HEAD
           if ($LASTEXITCODE -ne 0) { throw 'Source archive failed' }

@@ -1,0 +1,43 @@
+import { expect, test } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { buildCustomProvidersInput } from "../src/renderer/components/ModelsDialog.tsx";
+import { ModelsDialog } from "../src/renderer/components/ModelsDialog.tsx";
+
+test("provider catalog is not the Models landing page", () => {
+  const markup = renderToStaticMarkup(createElement(ModelsDialog, { onClose() {} }));
+
+  expect(markup).toContain("Model services");
+  expect(markup).toContain("Add service");
+  expect(markup).not.toContain("OAUTH SUBSCRIPTIONS");
+});
+
+test("model settings preserve incomplete provider and model drafts", () => {
+  const providers = [{
+    providerId: "custom.test",
+    name: "",
+    baseUrl: "banana",
+    api: "openai-completions",
+    models: [{
+      key: 1,
+      model: "",
+      displayName: "",
+      contextTokens: "banana",
+      maxOutputTokens: "",
+    }],
+  }];
+
+  expect(buildCustomProvidersInput(providers)).toEqual([{
+    providerId: "custom.test",
+    name: "",
+    baseUrl: "banana",
+    api: "openai-completions",
+    models: [{
+      model: "",
+      displayName: undefined,
+      contextTokens: "banana",
+      maxOutputTokens: "",
+      apiOverride: undefined,
+    }],
+  }]);
+});

@@ -58,7 +58,7 @@ for original physical cleanup, exact container absence and successful completion
 of the original canonical Job with zero failed retries before continuing.
 
 After the exact clean candidate has been built with `build.py`, use the existing
-isolated Linux root network-namespace launcher, with the same six pinned image
+isolated Linux root network-namespace launcher, with the same seven pinned image
 arguments as the shared gate:
 
 ```sh
@@ -69,6 +69,7 @@ unshare --net python3 "$SOURCE/scripts/workspace/runsc_acceptance/launch.py" \
   --k6-binary "$LINUX_K6" \
   --api-image "$API_IMAGE" --worker-image "$WORKER_IMAGE" \
   --runtime-image "$RUNTIME_IMAGE" --general-image "$GENERAL_IMAGE" \
+  --processor-image "$PROCESSOR_IMAGE" \
   --postgres-image "$POSTGRES_IMAGE" --redis-image "$REDIS_IMAGE"
 ```
 

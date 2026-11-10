@@ -51,7 +51,7 @@ routing. Record the tested commit, Windows version, display scale, and result.
   Referenced reasons show loading/read failure explicitly and do not expose
   another Session's cached content.
   The isolated browser fixture can be checked with
-  `pnpm --filter centaeris-ui run test:run-error-ui` after setting `CHROME_BIN` to
+  `pnpm --filter @centaeris/electron-host run test:run-error-ui` after setting `CHROME_BIN` to
   a local Chromium executable. It verifies first-line alignment, plain text,
   wrapping and containment in both themes and at increased zoom; it supplements
   the packaged-application checklist and is not part of remote CI.
@@ -140,7 +140,7 @@ routing. Record the tested commit, Windows version, display scale, and result.
   virtualized.
 
 Cross-client common typography tokens and font files are checked with
-`node packages/ui/scripts/check-typography-parity.mjs <web-src>`.
+`node packages/desktop/scripts/check-typography-parity.mjs <web-src>`.
 Host selector mappings and stream cadence remain client-specific; the Desktop
 stream-presentation tests protect its existing grapheme pacing and terminal drain.
 

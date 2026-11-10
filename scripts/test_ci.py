@@ -41,7 +41,7 @@ class PortableGateTests(unittest.TestCase):
             self.assertIn([ci.sys.executable, "-B", "-m", "unittest", "discover", "-s",
                            "scripts/harbor", "-p", "test_runner.py"], calls)
             self.assertIn(["cargo", "test", "--locked", "-p", "centaeris-runtime-sqlite", "--test", "core_runtime"], calls)
-            self.assertIn(["cargo", "run", "--locked", "-p", "centaeris-runtime", "--bin", "centaeris-runtime-protocol-docs", "--", "--check"], calls)
+            self.assertIn(["cargo", "run", "--locked", "-p", "centaeris-desktop-services", "--bin", "centaeris-runtime-protocol-docs", "--", "--check"], calls)
             self.assertEqual(calls[-1], ["cargo", "test", "--locked", *ci.package_flags()])
             self.assertFalse(any("pwsh" in c for c in calls))
             self.assertFalse(any("runtime_server" in c or "hosted_execution" in c for c in calls))
@@ -49,19 +49,21 @@ class PortableGateTests(unittest.TestCase):
     def test_node_source_gate_preserves_build_lint_host_parity_and_licenses(self):
         calls = []
         ci.run_gate("Node", lambda args, **kw: calls.append(args) or "", platform="linux")
-        for script in ("build", "lint:source", "check:syntax", "check:host-parity", "test:third-party-licenses"):
+        for script in ("build:renderer", "lint:source", "check:syntax", "check:host-parity", "test:third-party-licenses"):
             self.assertTrue(any(script in c for c in calls), script)
+        self.assertIn(["pnpm", "--filter", "@centaeris/sdk", "run", "typecheck"], calls)
+        self.assertIn(["pnpm", "--filter", "@centaeris/sdk", "run", "test"], calls)
         self.assertFalse(any("smoke:window" in c for c in calls))
 
     def test_node_gate_checks_shared_visualization_types(self):
         calls = []
         ci.run_gate("Node", lambda args, **kw: calls.append(args) or "", platform="linux")
-        self.assertIn(["pnpm", "--filter", "@centaeris/visualization-react", "run", "typecheck"], calls)
+        self.assertIn(["pnpm", "--filter", "@centaeris/visuals", "run", "typecheck"], calls)
 
     def test_node_gate_checks_shared_frontend_types(self):
         calls = []
         ci.run_gate("Node", lambda args, **kw: calls.append(args) or "", platform="linux")
-        self.assertIn(["pnpm", "--filter", "@centaeris/frontend-foundations", "run", "typecheck"], calls)
+        self.assertIn(["pnpm", "--filter", "@centaeris/ui", "run", "typecheck"], calls)
 
     def test_node_gate_uses_a_frozen_pnpm_install_on_every_platform(self):
         for platform, command in (("win32", "pnpm.cmd"), ("linux", "pnpm"), ("darwin", "pnpm")):

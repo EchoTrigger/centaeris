@@ -32,19 +32,23 @@ Choose System, Light, or Dark in Settings > Appearance. The preference persists 
 | Package | Responsibility |
 | --- | --- |
 | [`packages/core`](packages/core/README.md) | Runtime semantics and contracts |
-| [`packages/runtime`](packages/runtime/README.md) | Shared local Runtime host |
-| [`packages/runtime_sqlite`](packages/runtime_sqlite/README.md) | SQLite RuntimeStore adapter |
+| [`packages/agent`](packages/agent/README.md) | Rust Agent SDK and local execution adapters |
+| [`packages/sdk`](packages/sdk/README.md) | Typed TypeScript Session client |
+| [`packages/desktop/src/services`](packages/desktop/src/services/README.md) | Shared Desktop and CLI product services |
+| [`packages/sqlite`](packages/sqlite/README.md) | SQLite RuntimeStore adapter |
 | [`packages/mcp`](packages/mcp/README.md) | MCP adapter |
 | [`packages/model-catalog`](packages/model-catalog/README.md) | Rust model catalog |
+| [`packages/model-http`](packages/model-http/Cargo.toml) | Shared model HTTP and streaming transport |
 | [`packages/desktop`](packages/desktop/README.md) | Electron host |
-| [`packages/tui`](packages/tui/README.md) | Terminal host |
-| [`packages/ui`](packages/ui/README.md) | Shared desktop UI |
-| [`packages/api`](packages/api/README.md) | Hosted control plane |
-| [`packages/runtime_server`](packages/runtime_server/README.md) | Hosted Runtime adapter |
-| [`packages/hosted_execution`](packages/hosted_execution/README.md) | Hosted execution agent and sandbox tools |
-| [`packages/web`](packages/web/README.md) | Hosted Web interface |
-| [`packages/worker`](packages/worker/README.md) | Hosted lifecycle worker |
-| [`packages/document_processor`](packages/document_processor/README.md) | Material processing service |
+| [`packages/cli`](packages/cli/README.md) | Interactive, Print, JSON and RPC entry points |
+| [`packages/ui`](packages/ui/README.md) | Shared frontend foundations |
+| [`packages/visuals`](packages/visuals/package.json) | Shared visualization rendering |
+| [`packages/workspace/api`](packages/workspace/api/README.md) | Hosted control plane |
+| [`packages/workspace/runtime`](packages/workspace/runtime/README.md) | Hosted Runtime adapter |
+| [`packages/workspace/executor`](packages/workspace/executor/README.md) | Hosted execution agent and sandbox tools |
+| [`packages/workspace/web`](packages/workspace/web/README.md) | Hosted Web interface |
+| [`packages/workspace/worker`](packages/workspace/worker/README.md) | Hosted lifecycle worker |
+| [`packages/workspace/documents`](packages/workspace/documents/README.md) | Material processing service |
 
 `system-skills/` holds local-product built-in System Skills; `skills/system/`
 holds hosted-product built-in System Skills. Neither is a workspace package.
@@ -71,7 +75,7 @@ but that is not a release-platform claim.
 ## Build from source
 
 Requirements: the Rust toolchain in `rust-toolchain.toml`, Node.js 22.21.0,
-npm 10.9.4 and Python 3.12.
+pnpm 12.10.1 and Python 3.12.
 
 ```sh
 python3 scripts/ci.py Source --frontend-tests
@@ -86,7 +90,7 @@ other extensions are separate versioned assets.
 ## Interface language
 
 The Desktop UI currently ships in English. Its `react-i18next` foundation and
-English resources live in `packages/ui/src/i18n.ts` and `packages/ui/src/locales/`.
+English resources live in `packages/desktop/src/renderer/i18n.ts` and `packages/desktop/src/renderer/locales/`.
 No incomplete language option is exposed. User content, model responses, commands,
 and protocol identifiers retain their original text.
 

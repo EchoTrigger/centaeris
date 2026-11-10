@@ -5,8 +5,9 @@ on:
   pull_request:
     paths:
       - 'packages/core/**'
-      - 'packages/runtime/**'
-      - 'packages/runtime_sqlite/**'
+      - 'packages/agent/**'
+      - 'packages/desktop/src/services/**'
+      - 'packages/sqlite/**'
       - 'packages/mcp/**'
       - 'packages/model-catalog/**'
       - 'packages/model-http/**'
@@ -39,11 +40,11 @@ jobs:
       - name: Check Runtime and Core
         if: ${{ matrix.runner == 'macos-15-intel' || github.event_name == 'workflow_dispatch' }}
         run: |
-          cargo clippy --locked -p centaeris-runtime --all-targets -- -D warnings
+          cargo clippy --locked -p centaeris-agent -p centaeris-desktop-services --all-targets -- -D warnings
           cargo test --locked -p centaeris-core query_loop
           cargo test --locked -p centaeris-runtime-sqlite --test core_runtime
       - name: Verify public-network DNS through macOS services
-        run: cargo test --locked -p centaeris-runtime --test local_execution_sandbox macos_public_network_resolves_dns -- --ignored --exact --nocapture
+        run: cargo test --locked -p centaeris-desktop-services --test local_execution_sandbox macos_public_network_resolves_dns -- --ignored --exact --nocapture
       - name: Run Runtime regressions
         if: ${{ matrix.runner == 'macos-15-intel' || github.event_name == 'workflow_dispatch' }}
-        run: cargo test --locked -p centaeris-runtime
+        run: cargo test --locked -p centaeris-agent -p centaeris-desktop-services

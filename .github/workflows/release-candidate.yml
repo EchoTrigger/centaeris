@@ -56,7 +56,7 @@ jobs:
       - name: Run observation storage growth gate
         shell: pwsh
         run: >-
-          cargo test --locked -p centaeris-runtime
+          cargo test --locked -p centaeris-agent -p centaeris-desktop-services
           message_log::observation_cas::tests::observation_manifest_growth_is_linear_with_early_changes_through_4095_observations
           -- --ignored --exact --nocapture --test-threads=1
 
@@ -77,7 +77,7 @@ jobs:
           $desktopArchive = Join-Path $candidateDir "centaeris-desktop-windows-x64.zip"
           Compress-Archive -LiteralPath $desktopDist -DestinationPath $desktopArchive -CompressionLevel Optimal
 
-          Copy-Item -LiteralPath "packages/tui/dist/centaeris-windows-x64.zip" -Destination $candidateDir
+          Copy-Item -LiteralPath "packages/cli/dist/centaeris-windows-x64.zip" -Destination $candidateDir
           git archive --format=zip --prefix=centaeris/ --output="$candidateDir/centaeris-source.zip" HEAD
           if ($LASTEXITCODE -ne 0) {
             throw "Source archive failed"

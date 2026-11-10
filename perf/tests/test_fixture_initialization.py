@@ -58,7 +58,7 @@ class FixtureInitializationTests(unittest.TestCase):
             "import django,json; django.setup(); "
             "from django.core.management import get_commands; "
             "print(json.dumps(sorted(get_commands())))"],
-            cwd=ROOT / "packages" / "api", check=True, capture_output=True, text=True,
+            cwd=ROOT / "packages" / "workspace" / "api", check=True, capture_output=True, text=True,
             env={**os.environ, "DJANGO_SETTINGS_MODULE": "api.migration_test_settings"}, timeout=60)
         cls.commands = set(json.loads(result.stdout))
 

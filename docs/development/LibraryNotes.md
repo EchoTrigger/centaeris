@@ -155,7 +155,7 @@ the viewed server generation. No automatic merge or blind overwrite is performed
 
 Run `pnpm --filter web test:notes` for controller and rendered callback behavior.
 With `CHROME_BIN` set, run `node --test tests/browser/library-notes.test.mjs` from
-`packages/web`: real Chromium/IndexedDB tests edit offline, reload, recover the
+`packages/workspace/web`: real Chromium/IndexedDB tests edit offline, reload, recover the
 same operation ID, reconnect and confirm the visible save control stays usable
 when narrow. The fixture owns its profile and API responses; no deployment is used.
 Real browser quota injection also checks blocked navigation and successful

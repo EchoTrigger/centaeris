@@ -40,7 +40,7 @@ def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False
         for args in (
             ["check", "--locked", *package_flags()],
             ["clippy", "--all-targets", "--locked", *package_flags(), "--", "-D", "warnings"],
-            ["run", "--locked", "-p", "centaeris-runtime", "--bin", "centaeris-runtime-protocol-docs", "--", "--check"],
+            ["run", "--locked", "-p", "centaeris-desktop-services", "--bin", "centaeris-runtime-protocol-docs", "--", "--check"],
         ):
             run(["cargo", *args])
         run(["node", "scripts/visualization-contract.mjs", "--check"])
@@ -53,16 +53,18 @@ def run_gate(stage, run=run_command, platform=sys.platform, frontend_tests=False
         run(["cargo", "test", "--locked", *package_flags()])
     if stage in ("Node", "Source"):
         run([sys.executable, "-B", "scripts/test_system_skills.py"])
-        run(["node", "--test", "packages/desktop/src/systemSkills.test.mjs"])
+        run(["node", "--test", "packages/desktop/src/main/services/systemSkills.test.mjs"])
         run([pnpm, "install", "--frozen-lockfile"])
-        run([pnpm, "--filter", "@centaeris/frontend-foundations", "run", "typecheck"])
-        run([pnpm, "--filter", "@centaeris/visualization-react", "run", "typecheck"])
+        run([pnpm, "--filter", "@centaeris/sdk", "run", "typecheck"])
+        run([pnpm, "--filter", "@centaeris/sdk", "run", "test"])
+        run([pnpm, "--filter", "@centaeris/ui", "run", "typecheck"])
+        run([pnpm, "--filter", "@centaeris/visuals", "run", "typecheck"])
         if frontend_tests:
-            run([pnpm, "--filter", "centaeris-ui", "run", "gate"])
+            run([pnpm, "--filter", "@centaeris/electron-host", "run", "gate:renderer"])
             run([pnpm, "--filter", "@centaeris/electron-host", "run", "check"])
         else:
-            for script in ("build", "lint:source"):
-                run([pnpm, "--filter", "centaeris-ui", "run", script])
+            for script in ("build:renderer", "lint:source"):
+                run([pnpm, "--filter", "@centaeris/electron-host", "run", script])
             for script in ("check:syntax", "check:host-parity"):
                 run([pnpm, "--filter", "@centaeris/electron-host", "run", script])
         run([pnpm, "--filter", "@centaeris/electron-host", "run", "test:third-party-licenses"])

@@ -1,9 +1,9 @@
 packages:
-  - packages/ui
+  - packages/sdk
   - packages/desktop
-  - packages/web
-  - packages/visualization-react
-  - packages/frontend-foundations
+  - packages/ui
+  - packages/visuals
+  - packages/workspace/web
 
 enablePrePostScripts: true
 storeDir: .cache/pnpm

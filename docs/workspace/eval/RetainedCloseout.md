@@ -61,7 +61,7 @@ testing; record the limitation without weakening admission checks.
 Focused ordinary Worker checks from the repository root:
 
 ```sh
-(cd packages/worker && python -m unittest test_retained_lifecycle test_worker)
+(cd packages/workspace/worker && python -m unittest test_retained_lifecycle test_worker)
 ```
 
 Focused Linux task tests, only after the fixture owner supplies its exact

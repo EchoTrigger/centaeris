@@ -11,7 +11,7 @@ Rust types plus the actual catalog data and logos:
 
 This package only defines catalog shape and ships the frozen data; it does not
 perform provider HTTP calls, admission, or credential storage. Those live in
-`packages/runtime` (Local Runtime) and `packages/runtime_server` (hosted).
+`packages/desktop/src/services` (Local Runtime) and `packages/workspace/runtime` (hosted).
 
 See [Provider catalog](../../docs/reference/ProviderCatalog.md) for model
 identities, routing, and reasoning-effort preferences.

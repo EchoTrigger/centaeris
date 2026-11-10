@@ -10,8 +10,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const revision = process.argv[2];
 if (!revision) throw new Error('provide the baseline Git revision');
 const repository = fileURLToPath(new URL('../../', import.meta.url));
-const currentUrl = new URL('../../packages/web/src/chat/presentationContentStore.ts', import.meta.url);
-const contractUrl = new URL('../../packages/web/src/chat/transcriptContract.ts', import.meta.url);
+const currentUrl = new URL('../../packages/workspace/web/src/chat/presentationContentStore.ts', import.meta.url);
+const contractUrl = new URL('../../packages/workspace/web/src/chat/transcriptContract.ts', import.meta.url);
 const baseline = execFileSync('git', ['show', `${revision}:packages/web/src/chat/presentationContentStore.ts`], { cwd: repository, encoding: 'utf8' });
 const directory = await mkdtemp(join(tmpdir(), 'centaeris-presentation-store-'));
 

@@ -3,7 +3,6 @@ pub(crate) mod concurrency;
 mod dynamic;
 mod error;
 pub mod inputs;
-pub mod knowledge;
 pub mod layer;
 pub mod limits;
 pub mod permission;

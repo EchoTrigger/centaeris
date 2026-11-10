@@ -1,0 +1,6 @@
+@import "@centaeris/ui/theme.css";
+.themeToggle { display:flex; align-items:center; margin:0 8px; -webkit-app-region:no-drag; }
+.themeToggle button { border:0; background:transparent; color:var(--process-text); display:grid; place-items:center; width:28px; height:28px; border-radius:6px; cursor:pointer; }
+.themeToggle button:hover { color:var(--on-surface); }
+.themeToggle svg { width:16px; height:16px; }
+.themeToggle button:focus-visible { outline:2px solid var(--primary-color); outline-offset:2px; }

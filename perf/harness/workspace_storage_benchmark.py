@@ -518,14 +518,14 @@ def arguments():
             parser.error("source-sha must contain exactly 40 lowercase hexadecimal characters")
         if result.source_dirty is None:
             parser.error("explicit source-sha requires --source-dirty or --no-source-dirty")
-    if not (result.source_root / "packages/api/manage.py").is_file():
+    if not (result.source_root / "packages/workspace/api/manage.py").is_file():
         parser.error("source-root must name a Centaeris checkout")
     return result
 
 
 def run(options):
     sys.dont_write_bytecode = True
-    sys.path.insert(0, str(options.source_root / "packages/api"))
+    sys.path.insert(0, str(options.source_root / "packages/workspace/api"))
     os.environ["DJANGO_SETTINGS_MODULE"] = "api.test_settings"
     os.environ["TEST_POSTGRES_DB"] = "workspace_storage_" + uuid.uuid4().hex
     os.environ["TEST_POSTGRES_USER"] = options.db_user

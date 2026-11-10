@@ -4,7 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const CORE_PACKAGES = [
   ['centaeris-core', 'core'], ['centaeris-model-catalog', 'model-catalog'],
-  ['centaeris-mcp', 'mcp'], ['centaeris-runtime-sqlite', 'runtime_sqlite'],
+  ['centaeris-mcp', 'mcp'], ['centaeris-runtime-sqlite', 'sqlite'],
 ];
 export const workspaceRoot = fileURLToPath(new URL('../../', import.meta.url));
 

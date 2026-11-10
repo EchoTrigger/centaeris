@@ -31,7 +31,7 @@ use crate::runtime::{ContextTokenBreakdownV1, ModelObservationV1};
 use crate::session::state::{
     ChatMessage, MessageRole, ModelMessageSemanticsV1, ModelToolCallStateV1, SessionStateSnapshot,
 };
-use crate::tool::knowledge::KnowledgeLocatorV1;
+use crate::source::{SourceAssociationV1, SourceIdentityV1, SourceLineRangeV1};
 use crate::tool::layer::ToolResultState;
 use crate::tool::ModelToolChoice;
 
@@ -128,7 +128,7 @@ pub enum SessionRecordType {
     ProviderUsage,
     PhaseEvent,
     ExternalEvidenceRef,
-    CitationRecorded,
+    SourceAssociated,
     ArtifactPublished,
     Compaction,
     CheckpointRef,
@@ -163,7 +163,7 @@ impl SessionRecordType {
             "provider_usage",
             "phase_event",
             "external_evidence_ref",
-            "citation_recorded",
+            "source_associated",
             "artifact_published",
             "compaction",
             "checkpoint_ref",
@@ -194,7 +194,7 @@ impl SessionRecordType {
             Self::ProviderUsage => "provider_usage",
             Self::PhaseEvent => "phase_event",
             Self::ExternalEvidenceRef => "external_evidence_ref",
-            Self::CitationRecorded => "citation_recorded",
+            Self::SourceAssociated => "source_associated",
             Self::ArtifactPublished => "artifact_published",
             Self::Compaction => "compaction",
             Self::CheckpointRef => "checkpoint_ref",
@@ -348,8 +348,8 @@ pub struct AgentRunSessionState {
     host_event_inputs: HashMap<String, (String, host_event_input::HostEventInput)>,
     committed_checkpoint_ids: HashSet<String>,
     tool_ledger_checkpointed: bool,
-    citation_identities: HashMap<String, Value>,
-    citation_products: Vec<(u64, Value)>,
+    source_association_identities: HashMap<String, Value>,
+    source_associations: Vec<(u64, Value)>,
     external_evidence_identities: HashMap<String, Value>,
     file_fact_identities: HashSet<String>,
     artifact_publication_identities: HashMap<String, Value>,
@@ -395,8 +395,8 @@ impl AgentRunSessionState {
             host_event_inputs: HashMap::new(),
             committed_checkpoint_ids: HashSet::new(),
             tool_ledger_checkpointed: false,
-            citation_identities: HashMap::new(),
-            citation_products: Vec::new(),
+            source_association_identities: HashMap::new(),
+            source_associations: Vec::new(),
             external_evidence_identities: HashMap::new(),
             file_fact_identities: HashSet::new(),
             artifact_publication_identities: HashMap::new(),
@@ -681,8 +681,8 @@ impl AgentRunSessionState {
         self.final_assistant_message_ids.contains(message_id)
     }
 
-    pub fn citation_products(&self) -> &[(u64, Value)] {
-        self.citation_products.as_slice()
+    pub fn source_associations(&self) -> &[(u64, Value)] {
+        self.source_associations.as_slice()
     }
 
     pub fn artifact_refs(&self) -> Vec<String> {
@@ -710,17 +710,17 @@ impl AgentRunSessionState {
         )
     }
 
-    pub(crate) fn citation_fact_matches(&self, payload: &Value) -> Result<bool, String> {
-        let citation_id = state_payload_string(payload, "citationId")?;
+    pub(crate) fn source_association_fact_matches(&self, payload: &Value) -> Result<bool, String> {
+        let association_id = state_payload_string(payload, "associationId")?;
         let mut identity = payload.clone();
         identity
             .as_object_mut()
-            .ok_or_else(|| "citation payload must be an object".to_string())?
+            .ok_or_else(|| "source association payload must be an object".to_string())?
             .remove("sourceToolCallId");
-        match self.citation_identities.get(citation_id) {
+        match self.source_association_identities.get(association_id) {
             Some(existing) if existing == &identity => Ok(true),
             Some(_) => Err(format!(
-                "citation identity conflict for citationId {citation_id}"
+                "source association identity conflict for associationId {association_id}"
             )),
             None => Ok(false),
         }
@@ -1339,9 +1339,12 @@ impl AgentRunSessionState {
                 self.host_event_inputs
                     .insert(input.message_id.clone(), (turn_id, input));
             }
-            SessionRecordType::CitationRecorded => {
-                register_citation_identity(&mut self.citation_identities, &event.payload)?;
-                self.citation_products
+            SessionRecordType::SourceAssociated => {
+                register_source_association_identity(
+                    &mut self.source_association_identities,
+                    &event.payload,
+                )?;
+                self.source_associations
                     .push((sequence, event.payload.clone()));
             }
             SessionRecordType::ExternalEvidenceRef => {
@@ -1424,26 +1427,26 @@ fn session_payload_digest(payload: &Value) -> Result<String, String> {
         .map_err(|error| format!("serialize Session fact failed: {error}"))
 }
 
-fn register_citation_identity(
+fn register_source_association_identity(
     seen: &mut HashMap<String, Value>,
     payload: &Value,
 ) -> Result<bool, String> {
-    let citation_id = payload
-        .get("citationId")
+    let association_id = payload
+        .get("associationId")
         .and_then(Value::as_str)
-        .ok_or_else(|| "citation payload is missing citationId".to_string())?;
+        .ok_or_else(|| "source association payload is missing associationId".to_string())?;
     let mut identity = payload.clone();
     identity
         .as_object_mut()
-        .ok_or_else(|| "citation payload must be an object".to_string())?
+        .ok_or_else(|| "source association payload must be an object".to_string())?
         .remove("sourceToolCallId");
-    match seen.get(citation_id) {
+    match seen.get(association_id) {
         Some(existing) if existing == &identity => Ok(false),
         Some(_) => Err(format!(
-            "citation identity conflict for citationId {citation_id}"
+            "source association identity conflict for associationId {association_id}"
         )),
         None => {
-            seen.insert(citation_id.to_string(), identity);
+            seen.insert(association_id.to_string(), identity);
             Ok(true)
         }
     }
@@ -1836,7 +1839,7 @@ pub fn session_record_projects_to_agent_run_stream(event_type: SessionRecordType
         | SessionRecordType::ToolResult
         | SessionRecordType::PhaseEvent
         | SessionRecordType::ExternalEvidenceRef
-        | SessionRecordType::CitationRecorded
+        | SessionRecordType::SourceAssociated
         | SessionRecordType::ArtifactPublished
         | SessionRecordType::Compaction
         | SessionRecordType::Tombstone
@@ -1953,8 +1956,8 @@ fn committed_runtime_projection(
         SessionRecordType::ProviderUsage => {
             return Err("provider_usage has no AgentRun stream projection".to_string())
         }
-        SessionRecordType::CitationRecorded => (
-            "Citation",
+        SessionRecordType::SourceAssociated => (
+            "SourceAssociation",
             "done".to_string(),
             RuntimeEventVisibility::Internal,
             None,
@@ -2185,16 +2188,13 @@ pub struct ReducedAgentRunExecution {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReducedCitation {
-    pub citation_id: String,
+pub struct ReducedSourceAssociation {
+    pub association_id: String,
     pub input_ref: String,
-    pub owner_ref: String,
-    pub owner_kind: String,
-    pub display_name: String,
-    pub evidence_kind: String,
-    pub owner_sha256: String,
-    pub locator: Value,
+    pub source_identity: SourceIdentityV1,
+    pub source_tool_name: String,
     pub source_tool_call_id: String,
+    pub range: Option<SourceLineRangeV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2225,7 +2225,7 @@ pub struct SessionProjection {
     pub agent_runs: BTreeMap<String, ReducedAgentRun>,
     pub agent_run_executions: BTreeMap<String, ReducedAgentRunExecution>,
     recovery_attempts: BTreeMap<String, ExecutionRecoveryAttempt>,
-    pub citations: BTreeMap<String, ReducedCitation>,
+    pub source_associations: BTreeMap<String, ReducedSourceAssociation>,
     pub artifacts: BTreeMap<String, ReducedArtifact>,
     pub artifact_order: Vec<String>,
     pub tombstoned_event_ids: HashSet<String>,
@@ -2345,7 +2345,7 @@ pub fn validate_event_shape(event: &SessionLogRecord) -> Result<(), String> {
         SessionRecordType::PhaseEvent => validate_phase_event(event),
         SessionRecordType::ExternalEvidenceRef => validate_external_evidence_ref(event),
         SessionRecordType::FileFact => validate_file_fact(event),
-        SessionRecordType::CitationRecorded => validate_citation_recorded(event),
+        SessionRecordType::SourceAssociated => validate_source_associated(event),
         SessionRecordType::ArtifactPublished => validate_artifact_published(event),
         SessionRecordType::Compaction => validate_compaction(event),
         SessionRecordType::CheckpointRef => validate_checkpoint_ref(event),
@@ -2454,19 +2454,26 @@ fn restore_active_runtime_snapshot(
     sources: &HashMap<String, crate::runtime::prompt_compaction_commit::CompactionSourceRequest>,
     updated_at_ms: i64,
 ) -> Result<SessionStateSnapshot, String> {
-    let latest_request_index = active.iter().rposition(|event| {
+    let latest_context_index = active.iter().rposition(|event| {
         event.event_type == SessionRecordType::ModelRequestStarted
             && event.payload.get("purpose").and_then(Value::as_str) == Some("main")
+            || event.event_type == SessionRecordType::Compaction
+                && event.payload.get("contextObservations").is_some()
     });
     let mut snapshot = SessionStateSnapshot::new(expected_session_id.to_string(), updated_at_ms);
 
-    let tail_start = if let Some(request_index) = latest_request_index {
+    let tail_start = if let Some(request_index) = latest_context_index {
         let request = &active[request_index];
+        let field = if request.event_type == SessionRecordType::Compaction {
+            "contextObservations"
+        } else {
+            "observations"
+        };
         let observations = serde_json::from_value::<Vec<ModelObservationV1>>(
             request
                 .payload
-                .get("observations")
-                .expect("validated model request observations")
+                .get(field)
+                .expect("validated context observations")
                 .clone(),
         )
         .map_err(|error| format!("decode Session model observations failed: {error}"))?;
@@ -2724,7 +2731,11 @@ fn restore_active_runtime_snapshot(
                     kind.to_owned(),
                 );
             }
-            if !images.is_empty() {
+            if !images.is_empty()
+                && !message
+                    .metadata
+                    .contains_key(crate::runtime::keys::metadata::MODEL_INPUT_IMAGE_SOURCES)
+            {
                 message.metadata.insert(
                     crate::runtime::keys::metadata::MODEL_INPUT_IMAGES.to_string(),
                     serde_json::to_string(&images).map_err(|error| {
@@ -2739,10 +2750,14 @@ fn restore_active_runtime_snapshot(
         &projection.host_event_inputs,
         &projection.host_event_owning_runs,
     )?;
-    let current_request = latest_request_index.map(|index| &active[index]);
+    let current_request = latest_context_index
+        .map(|index| &active[index])
+        .filter(|event| event.event_type == SessionRecordType::ModelRequestStarted);
     controls.restore_into(&mut snapshot, current_request)?;
     snapshot.context_window = snapshot.messages.clone();
-    if let Some(main_index) = latest_request_index {
+    if let Some(main_index) = latest_context_index
+        .filter(|index| active[*index].event_type == SessionRecordType::ModelRequestStarted)
+    {
         let main = &active[main_index];
         let observations = main.payload["observations"]
             .as_array()
@@ -3268,7 +3283,7 @@ pub fn reduce_event(
             }
         }
         SessionRecordType::ProviderUsage => reduce_provider_usage(projection, event)?,
-        SessionRecordType::CitationRecorded => reduce_citation_recorded(projection, event)?,
+        SessionRecordType::SourceAssociated => reduce_source_associated(projection, event)?,
         SessionRecordType::ArtifactPublished => reduce_artifact_published(projection, event)?,
         SessionRecordType::Tombstone => reduce_tombstone(projection, event)?,
         SessionRecordType::AgentRunCompleted => {
@@ -3416,168 +3431,17 @@ fn reduce_artifact_published(
     }
 }
 
-fn validate_citation_recorded(event: &SessionLogRecord) -> Result<(), String> {
+fn validate_source_associated(event: &SessionLogRecord) -> Result<(), String> {
     required_event_turn_id(event)?;
-    let payload = payload_object(event)?;
-    for name in [
-        "citationId",
-        "inputRef",
-        "ownerRef",
-        "ownerKind",
-        "displayName",
-        "evidenceKind",
-        "ownerSha256",
-        "sourceToolCallId",
-        "sourceToolName",
-    ] {
-        required_payload_string(payload, name, event)?;
-    }
-    let owner_kind = required_payload_string(payload, "ownerKind", event)?;
-    if !matches!(
-        owner_kind.as_str(),
-        "sourceObject" | "userLibraryObject" | "artifact"
-    ) {
-        return Err(format!(
-            "session.event.v1 {} citation ownerKind is unsupported: {}",
-            event.event_id, owner_kind
-        ));
-    }
-    let evidence_kind = required_payload_string(payload, "evidenceKind", event)?;
-    if !matches!(
-        evidence_kind.as_str(),
-        "workspaceSource" | "userProvided" | "generatedArtifact"
-    ) {
-        return Err(format!(
-            "session.event.v1 {} citation evidenceKind is unsupported: {}",
-            event.event_id, evidence_kind
-        ));
-    }
-    let citation_id = required_payload_string(payload, "citationId", event)?;
-    let citation_hash = citation_id.strip_prefix("citation:").unwrap_or_default();
-    let owner_sha256 = required_payload_string(payload, "ownerSha256", event)?;
-    let owner_hash = owner_sha256.strip_prefix("sha256:").unwrap_or_default();
-    if citation_hash.len() != 64
-        || owner_hash.len() != 64
-        || citation_hash
-            .bytes()
-            .chain(owner_hash.bytes())
-            .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
-    {
-        return Err(format!(
-            "session.event.v1 {} citation hashes are invalid",
-            event.event_id
-        ));
-    }
-    let locator_value = payload.get("locator").ok_or_else(|| {
-        format!(
-            "session.event.v1 {} citation locator is required",
-            event.event_id
-        )
-    })?;
-    let has_knowledge_locator = locator_value.get("kind").is_some();
-    if has_knowledge_locator {
-        let locator = serde_json::from_value::<KnowledgeLocatorV1>(locator_value.clone()).map_err(
-            |error| {
-                format!(
-                    "session.event.v1 {} knowledge citation locator is invalid: {error}",
-                    event.event_id
-                )
-            },
-        )?;
-        locator.validate()?;
-    } else {
-        validate_direct_citation_locator(locator_value, event)?;
-    }
-    let derived_fields = [
-        "ownerGeneration",
-        "representationId",
-        "specDigest",
-        "evidenceSha256",
-    ];
-    if has_knowledge_locator
-        || derived_fields
-            .iter()
-            .any(|name| payload.contains_key(*name))
-    {
-        if !derived_fields
-            .iter()
-            .all(|name| payload.contains_key(*name))
-        {
-            return Err(format!(
-                "session.event.v1 {} knowledge citation identity is incomplete",
+    required_event_agent_run_id(event)?;
+    serde_json::from_value::<SourceAssociationV1>(event.payload.clone())
+        .map_err(|error| {
+            format!(
+                "session.event.v1 {} source association payload is invalid: {error}",
                 event.event_id
-            ));
-        }
-        if payload["ownerGeneration"]
-            .as_u64()
-            .is_none_or(|value| value == 0)
-        {
-            return Err(format!(
-                "session.event.v1 {} knowledge citation ownerGeneration is invalid",
-                event.event_id
-            ));
-        }
-        for (name, prefix) in [
-            ("representationId", "representation:sha256:"),
-            ("specDigest", "sha256:"),
-            ("evidenceSha256", "sha256:"),
-        ] {
-            let value = required_payload_string(payload, name, event)?;
-            let digest = value.strip_prefix(prefix).unwrap_or_default();
-            if digest.len() != 64
-                || digest
-                    .bytes()
-                    .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
-            {
-                return Err(format!(
-                    "session.event.v1 {} knowledge citation {name} is invalid",
-                    event.event_id
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_direct_citation_locator(
-    locator_value: &Value,
-    event: &SessionLogRecord,
-) -> Result<(), String> {
-    let locator = locator_value.as_object().ok_or_else(|| {
-        format!(
-            "session.event.v1 {} citation locator is required",
-            event.event_id
-        )
-    })?;
-    let range = if locator.len() == 2
-        && locator.contains_key("startLine")
-        && locator.contains_key("endLine")
-    {
-        (
-            locator.get("startLine").and_then(Value::as_u64),
-            locator.get("endLine").and_then(Value::as_u64),
-        )
-    } else if locator.len() == 2
-        && locator.contains_key("pageStart")
-        && locator.contains_key("pageEnd")
-    {
-        (
-            locator.get("pageStart").and_then(Value::as_u64),
-            locator.get("pageEnd").and_then(Value::as_u64),
-        )
-    } else {
-        return Err(format!(
-            "session.event.v1 {} citation locator must contain exactly one line/page range",
-            event.event_id
-        ));
-    };
-    if !matches!(range, (Some(start), Some(end)) if start > 0 && start <= end) {
-        return Err(format!(
-            "session.event.v1 {} citation locator range is invalid",
-            event.event_id
-        ));
-    }
-    Ok(())
+            )
+        })?
+        .validate()
 }
 
 fn validate_session_meta(event: &SessionLogRecord) -> Result<(), String> {
@@ -4382,21 +4246,56 @@ fn validate_provider_usage(event: &SessionLogRecord) -> Result<(), String> {
 fn validate_compaction(event: &SessionLogRecord) -> Result<(), String> {
     required_event_turn_id(event)?;
     let payload = payload_object(event)?;
-    require_exact_payload_fields(
-        payload,
-        &[
-            "compactionId",
-            "summaryMessageId",
-            "summaryMarkdown",
-            "firstKeptMessageId",
-            "createdReason",
-        ],
-        event,
-    )?;
+    let mut fields = vec![
+        "compactionId",
+        "summaryMessageId",
+        "summaryMarkdown",
+        "firstKeptMessageId",
+        "createdReason",
+    ];
+    if payload.contains_key("contextObservations") {
+        fields.push("contextObservations");
+    }
+    require_exact_payload_fields(payload, &fields, event)?;
     required_payload_string(payload, "compactionId", event)?;
     required_payload_string(payload, "summaryMessageId", event)?;
     required_payload_string(payload, "summaryMarkdown", event)?;
     required_payload_string(payload, "createdReason", event)?;
+    if let Some(value) = payload.get("contextObservations") {
+        let observations: Vec<ModelObservationV1> = serde_json::from_value(value.clone())
+            .map_err(|error| format!("manual compaction context observations invalid: {error}"))?;
+        let mut message_ids = HashSet::new();
+        let mut images_started = false;
+        let mut summary_matches = 0;
+        for observation in &observations {
+            validate_model_observation(observation, event)?;
+            match observation {
+                ModelObservationV1::ContextMessage { message } if !images_started => {
+                    if !message_ids.insert(message.message_id.as_str()) {
+                        return Err("manual compaction context message identity duplicated".into());
+                    }
+                    if Some(message.message_id.as_str())
+                        == payload.get("summaryMessageId").and_then(Value::as_str)
+                        && message.role == ModelMessageRoleV1::System
+                        && Some(message.content.as_str())
+                            == payload.get("summaryMarkdown").and_then(Value::as_str)
+                    {
+                        summary_matches += 1;
+                    }
+                }
+                ModelObservationV1::InputImage { image } => {
+                    images_started = true;
+                    if !message_ids.contains(image.message_id.as_str()) {
+                        return Err("manual compaction image context message missing".into());
+                    }
+                }
+                _ => return Err("manual compaction context observation kind/order invalid".into()),
+            }
+        }
+        if summary_matches != 1 {
+            return Err("manual compaction context summary binding mismatch".into());
+        }
+    }
     match payload.get("firstKeptMessageId") {
         Some(Value::Null) => Ok(()),
         Some(Value::String(value)) if !value.trim().is_empty() => Ok(()),
@@ -4941,19 +4840,18 @@ fn reduce_tombstone(
     Ok(())
 }
 
-fn reduce_citation_recorded(
+fn reduce_source_associated(
     projection: &mut SessionProjection,
     event: &SessionLogRecord,
 ) -> Result<(), String> {
-    let payload = payload_object(event)?;
-    let citation_id = required_payload_string(payload, "citationId", event)?;
-    let source_tool_call_id = required_payload_string(payload, "sourceToolCallId", event)?;
+    let association: SourceAssociationV1 = serde_json::from_value(event.payload.clone())
+        .map_err(|error| format!("decode source association failed: {error}"))?;
     let source_tool_call = projection
         .tool_calls
-        .get(source_tool_call_id.as_str())
+        .get(association.source_tool_call_id.as_str())
         .ok_or_else(|| {
             format!(
-                "session.event.v1 {} citation has no source tool call",
+                "session.event.v1 {} source association has no source tool call",
                 event.event_id
             )
         })?;
@@ -4961,44 +4859,38 @@ fn reduce_citation_recorded(
         || source_tool_call.agent_run_id != required_event_agent_run_id(event)?
     {
         return Err(format!(
-            "session.event.v1 {} citation source tool belongs to another turn/task",
+            "session.event.v1 {} source tool belongs to another turn/task",
             event.event_id
         ));
     }
-    let expected_tool_name = required_payload_string(payload, "sourceToolName", event)?;
-    if source_tool_call.tool_name != expected_tool_name
+    if source_tool_call.tool_name != association.source_tool_name
         || !source_tool_call
             .result_state
             .is_some_and(ToolResultState::is_success)
     {
         return Err(format!(
-            "session.event.v1 {} citation source must be a successful knowledge result",
+            "session.event.v1 {} source association requires a successful source tool result",
             event.event_id
         ));
     }
-    if projection.citations.contains_key(citation_id.as_str()) {
+    if projection
+        .source_associations
+        .contains_key(association.association_id.as_str())
+    {
         return Err(format!(
-            "session.event.v1 {} duplicates citationId {}",
-            event.event_id, citation_id
+            "session.event.v1 {} duplicates associationId {}",
+            event.event_id, association.association_id
         ));
     }
-    projection.citations.insert(
-        citation_id.clone(),
-        ReducedCitation {
-            citation_id,
-            input_ref: required_payload_string(payload, "inputRef", event)?,
-            owner_ref: required_payload_string(payload, "ownerRef", event)?,
-            owner_kind: required_payload_string(payload, "ownerKind", event)?,
-            display_name: required_payload_string(payload, "displayName", event)?,
-            evidence_kind: required_payload_string(payload, "evidenceKind", event)?,
-            owner_sha256: required_payload_string(payload, "ownerSha256", event)?,
-            locator: payload.get("locator").cloned().ok_or_else(|| {
-                format!(
-                    "session.event.v1 {} citation locator missing",
-                    event.event_id
-                )
-            })?,
-            source_tool_call_id,
+    projection.source_associations.insert(
+        association.association_id.clone(),
+        ReducedSourceAssociation {
+            association_id: association.association_id,
+            input_ref: association.input_ref,
+            source_identity: association.source_identity,
+            source_tool_name: association.source_tool_name,
+            source_tool_call_id: association.source_tool_call_id,
+            range: association.range,
         },
     );
     Ok(())
@@ -5663,19 +5555,19 @@ mod tests {
                 }),
             ),
             base_event(
-                "citation_recorded",
-                "evt-citation",
+                "source_associated",
+                "evt-source-association",
                 json!({
-                    "citationId": "citation:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "associationId": "source:association-1",
                     "inputRef": "input-1",
-                    "ownerRef": "source-object-1",
-                    "ownerKind": "sourceObject",
-                    "displayName": "notice.md",
-                    "evidenceKind": "workspaceSource",
-                    "ownerSha256": format!("sha256:{}", "a".repeat(64)),
+                    "sourceIdentity": {
+                        "sourceRef": "source-object-1",
+                        "revision": "1",
+                        "sha256": format!("sha256:{}", "a".repeat(64))
+                    },
                     "sourceToolName": "read",
                     "sourceToolCallId": "call-1",
-                    "locator": {"startLine": 1, "endLine": 8}
+                    "range": {"startLine": 1, "endLine": 8}
                 }),
             ),
             base_event(
@@ -6244,114 +6136,123 @@ mod tests {
         );
         assert_eq!(
             projection
-                .citations
-                .get("citation:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                .expect("citation")
-                .owner_ref,
+                .source_associations
+                .get("source:association-1")
+                .expect("source association")
+                .source_identity
+                .source_ref,
             "source-object-1"
         );
     }
 
     #[test]
-    fn citation_recorded_accepts_successful_read() {
-        let mut log = valid_log();
-        log[3]["payload"]["toolName"] = json!("read");
-        log[4]["payload"]["toolName"] = json!("read");
-
+    fn source_associated_accepts_successful_read() {
+        let log = valid_log();
         let projection = validate_event_log("session-1", log.as_slice())
-            .expect("document extraction citation should validate");
+            .expect("source association should validate");
+        let association = &projection.source_associations["source:association-1"];
+        assert_eq!(association.source_identity.source_ref, "source-object-1");
+        assert_eq!(association.source_identity.revision, "1");
         assert_eq!(
-            projection.citations
-                ["citation:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
-                .owner_ref,
-            "source-object-1"
+            association.range,
+            Some(SourceLineRangeV1 {
+                start_line: 1,
+                end_line: 8
+            })
         );
     }
 
     #[test]
-    fn citation_recorded_accepts_derived_knowledge_search() {
+    fn source_associated_accepts_whole_source_from_external_tool() {
         let mut log = valid_log();
         log[3]["payload"]["toolName"] = json!("external_search");
         log[4]["payload"]["toolName"] = json!("external_search");
         log[5]["payload"] = json!({
-            "citationId": format!("citation:{}", "c".repeat(64)),
+            "associationId": "external-result-1",
             "inputRef": "input-1",
-            "ownerRef": "source-object-1",
-            "ownerKind": "sourceObject",
-            "displayName": "notice.pdf",
-            "evidenceKind": "workspaceSource",
-            "ownerSha256": format!("sha256:{}", "a".repeat(64)),
-            "ownerGeneration": 1,
-            "representationId": format!("representation:sha256:{}", "d".repeat(64)),
-            "specDigest": format!("sha256:{}", "e".repeat(64)),
-            "evidenceSha256": format!("sha256:{}", "f".repeat(64)),
+            "sourceIdentity": {
+                "sourceRef": "external-resource-1",
+                "revision": "revision:opaque-v2",
+                "sha256": format!("sha256:{}", "a".repeat(64))
+            },
             "sourceToolName": "external_search",
-            "sourceToolCallId": "call-1",
-            "locator": {
-                "kind": "textSpan",
-                "pageStart": 2,
-                "pageEnd": 2,
-                "startByte": 10,
-                "endByte": 30,
-                "startLine": 4,
-                "endLine": 5
-            }
+            "sourceToolCallId": "call-1"
         });
-
         let projection = validate_event_log("session-1", log.as_slice())
-            .expect("derived knowledge citation should validate");
-        assert!(projection
-            .citations
-            .contains_key(format!("citation:{}", "c".repeat(64)).as_str()));
+            .expect("whole source association should validate");
+        assert!(projection.source_associations["external-result-1"]
+            .range
+            .is_none());
     }
 
     #[test]
-    fn citation_recorded_rejects_unknown_owner_kind() {
-        let error = parse_event(&base_event(
-            "citation_recorded",
-            "evt-bad-citation",
-            json!({
-                "citationId": "citation:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                "inputRef": "input-1",
-                "ownerRef": "unknown-owner-1",
-                "ownerKind": "banana",
-                "displayName": "unknown.txt",
-                "evidenceKind": "workspaceSource",
-                "ownerSha256": format!("sha256:{}", "a".repeat(64)),
-                "sourceToolName": "read",
-                "sourceToolCallId": "call-1",
-                "locator": {"startLine": 1, "endLine": 2}
-            }),
-        ))
-        .expect_err("unknown citation owner must fail");
-        assert!(error.contains("ownerKind is unsupported"));
+    fn source_associated_rejects_product_fields_and_invalid_ranges() {
+        let mut log = valid_log();
+        log[5]["payload"]["ownerKind"] = json!("sourceObject");
+        let error = parse_event(&log[5]).expect_err("product fields must fail");
+        assert!(error.contains("unknown field `ownerKind`"));
 
         let mut duplicate_log = valid_log();
         let mut duplicate = duplicate_log[5].clone();
-        duplicate["eventId"] = json!("evt-citation-duplicate");
+        duplicate["eventId"] = json!("evt-source-duplicate");
         duplicate_log.insert(6, duplicate);
         let error = validate_event_log("session-1", duplicate_log.as_slice())
-            .expect_err("duplicate citation id must fail");
-        assert!(error.contains("duplicates citationId"));
+            .expect_err("duplicate association id must fail");
+        assert!(error.contains("duplicates associationId"));
 
-        let error = parse_event(&base_event(
-            "citation_recorded",
-            "evt-bad-citation-range",
-            json!({
-                "citationId": "citation:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-                "inputRef": "input-1",
-                "ownerRef": "source-object-1",
-                "ownerKind": "sourceObject",
-                "displayName": "notice.md",
-                "evidenceKind": "workspaceSource",
-                "ownerSha256": format!("sha256:{}", "a".repeat(64)),
-                "sourceToolName": "read",
-                "sourceToolCallId": "call-1",
-                "locator": {"startLine": 8, "endLine": 1}
-            }),
-        ))
-        .expect_err("reversed citation range must fail");
-        assert!(error.contains("locator range is invalid"));
+        let mut log = valid_log();
+        log[5]["payload"]["range"] = json!({"startLine": 8, "endLine": 1});
+        let error = parse_event(&log[5]).expect_err("reversed source range must fail");
+        assert!(error.contains("source line range is invalid"));
+
+        for (field, value) in [
+            ("sourceRef", "path/to/source"),
+            ("sourceRef", "e\u{301}"),
+            ("revision", ""),
+            ("sha256", "sha256:invalid"),
+        ] {
+            let mut log = valid_log();
+            log[5]["payload"]["sourceIdentity"][field] = json!(value);
+            assert!(parse_event(&log[5]).is_err(), "invalid {field} {value:?}");
+        }
+
+        let mut log = valid_log();
+        log[5]["payload"]["sourceIdentity"]["ownerKind"] = json!("sourceObject");
+        assert!(parse_event(&log[5])
+            .expect_err("unknown identity field must fail")
+            .contains("unknown field `ownerKind`"));
+    }
+
+    #[test]
+    fn source_associated_rejects_unsuccessful_or_unrelated_tools() {
+        let mut log = valid_log();
+        log[4]["payload"]["resultState"] = json!("failed");
+        let error = validate_event_log("session-1", log.as_slice())
+            .expect_err("failed source tool must fail");
+        assert!(error.contains("successful source tool result"));
+
+        let mut log = valid_log();
+        log[5]["payload"]["sourceToolName"] = json!("other_tool");
+        let error = validate_event_log("session-1", log.as_slice())
+            .expect_err("different source tool name must fail");
+        assert!(error.contains("successful source tool result"));
+
+        let mut log = valid_log();
+        log[5]["payload"]["sourceToolCallId"] = json!("missing-call");
+        let error = validate_event_log("session-1", log.as_slice())
+            .expect_err("missing source tool must fail");
+        assert!(error.contains("no source tool call"));
+    }
+
+    #[test]
+    fn session_wire_rejects_retired_citation_event() {
+        let mut wire = valid_log()[5].clone();
+        wire["type"] = json!("citation_recorded");
+        wire["sequence"] = json!(6);
+        let error = parse_wire_record(&wire).expect_err("retired event type must fail");
+        assert!(error
+            .to_string()
+            .contains("unsupported event type: citation_recorded"));
     }
 
     #[test]
@@ -7254,7 +7155,7 @@ mod tests {
             name: "publish_artifact".to_string(),
             args_json: json!({"path": "/mnt/data/report.txt"}).to_string(),
         };
-        state
+        let call_record = state
             .record_tool_call(
                 "turn-1",
                 &call,
@@ -7270,14 +7171,27 @@ mod tests {
             status: "ok".to_string(),
             content: "published".to_string(),
             details: json!({"schema": "banana.result.v1"}),
-            facts: vec![ToolExecutionFact::ArtifactPublished(json!({
-                "publicationId": format!("pub_{}", "b".repeat(64)),
-                "artifactRef": "artifact:report",
-                "toolCallId": call.id,
-                "filename": "report.txt",
-                "sizeBytes": 1,
-                "sha256": format!("sha256:{}", "c".repeat(64)),
-            }))],
+            facts: vec![
+                ToolExecutionFact::ArtifactPublished(json!({
+                    "publicationId": format!("pub_{}", "b".repeat(64)),
+                    "artifactRef": "artifact:report",
+                    "toolCallId": call.id,
+                    "filename": "report.txt",
+                    "sizeBytes": 1,
+                    "sha256": format!("sha256:{}", "c".repeat(64)),
+                })),
+                ToolExecutionFact::SourceAssociated(json!({
+                    "associationId": "source:published-report",
+                    "inputRef": "input-report",
+                    "sourceIdentity": {
+                        "sourceRef": "report",
+                        "revision": "1",
+                        "sha256": format!("sha256:{}", "c".repeat(64))
+                    },
+                    "sourceToolName": call.name,
+                    "sourceToolCallId": call.id
+                })),
+            ],
             error: None,
             started_at_ms: 1,
             completed_at_ms: 2,
@@ -7288,15 +7202,43 @@ mod tests {
         let records = state
             .record_tool_result("turn-1", &call, &result, 2)
             .expect("tool result and fact");
-        assert_eq!(records.len(), 2);
+        assert_eq!(records.len(), 3);
         assert_eq!(records[0].event.event_type, SessionRecordType::ToolResult);
         assert_eq!(
             records[1].event.event_type,
             SessionRecordType::ArtifactPublished
         );
+        assert_eq!(
+            records[2].event.event_type,
+            SessionRecordType::SourceAssociated
+        );
         assert!(state
             .record_tool_result("turn-1", &call, &result, 2)
             .expect("idempotent facts")
             .is_empty());
+
+        let mut restored =
+            AgentRunSessionState::new("session-1", "agent-run-1").expect("restored state");
+        restored
+            .restore(call_record.expect("new tool call record"))
+            .expect("restore call");
+        for record in records {
+            restored.restore(record).expect("restore result and facts");
+        }
+        assert_eq!(restored.source_associations().len(), 1);
+        assert!(restored
+            .record_tool_result("turn-1", &call, &result, 2)
+            .expect("replayed facts remain idempotent")
+            .is_empty());
+
+        let mut conflict = result.clone();
+        let ToolExecutionFact::SourceAssociated(payload) = &mut conflict.facts[1] else {
+            panic!("source association fact expected");
+        };
+        payload["sourceIdentity"]["revision"] = json!("2");
+        assert!(restored
+            .record_tool_result("turn-1", &call, &conflict, 2)
+            .expect_err("conflicting association must fail")
+            .contains("source association identity conflict"));
     }
 }

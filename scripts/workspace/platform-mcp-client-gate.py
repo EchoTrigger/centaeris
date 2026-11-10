@@ -19,7 +19,7 @@ from collections import Counter
 
 def main():
     root = Path(__file__).resolve().parents[2]
-    sys.path.insert(0, str(root / "packages/api"))
+    sys.path.insert(0, str(root / "packages/workspace/api"))
     with tempfile.TemporaryDirectory(prefix="platform-mcp-client-") as storage:
         os.environ.update(DJANGO_SETTINGS_MODULE="api.test_settings", STORAGE_ROOT=storage,
                           RUNTIME_URL="http://127.0.0.1:1", REDIS_URL="redis://127.0.0.1:1/15")
@@ -157,7 +157,7 @@ def main():
             assert len(snapshot["citations"]) == count
             # Cross-language parity: the real Python response must pass the web validator.
             subprocess.run(["node", "--input-type=module", "-e",
-                "import {readFileSync} from 'node:fs'; import {validateCitationSnapshot} from './packages/web/src/chat/citationSnapshot.ts'; "
+                "import {readFileSync} from 'node:fs'; import {validateCitationSnapshot} from './packages/workspace/web/src/chat/citationSnapshot.ts'; "
                 "const s=JSON.parse(readFileSync(0,'utf8')); validateCitationSnapshot(s,s.sessionId,s.agentRunId);"],
                 cwd=root, input=json.dumps(snapshot), text=True, check=True, timeout=30)
             preview = browser.get(f"/api/citations/{projected[0].citationId}/preview")

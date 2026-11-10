@@ -3,6 +3,7 @@ pub mod extension;
 pub mod model;
 pub mod runtime;
 pub mod session;
+pub mod source;
 pub mod tool;
 
 #[cfg(test)]

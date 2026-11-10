@@ -1,6 +1,6 @@
 # Runtime HTTP
 
-This document inventories the HTTP surface owned by `packages/runtime_server`
+This document inventories the HTTP surface owned by `packages/workspace/runtime`
 and the behavior that a transport refactor must preserve. It describes the
 current implementation. Framework reuse does not establish a performance gain.
 
@@ -14,18 +14,18 @@ An `/internal` prefix alone does not identify which service owns an endpoint.
 
 | Concern | Current source |
 | --- | --- |
-| Connection serving, bounded request reading and response headers | [main.rs](../../../packages/runtime_server/src/main.rs): `serve_http`, `read_axum_request`, `http_response` |
-| Explicit routes, authentication, admission and blocking-task ownership | [http.rs](../../../packages/runtime_server/src/http.rs) |
-| AgentRun HTTP operations | [agent_runs.rs](../../../packages/runtime_server/src/http/agent_runs.rs) |
-| Catalog, package inspection and host-input HTTP operations | [catalogs.rs](../../../packages/runtime_server/src/http/catalogs.rs) |
-| HTTP transport characterization | [runtime_http_tests.rs](../../../packages/runtime_server/src/runtime_http_tests.rs) |
-| Request lifetimes and deadlines | [request_policy.rs](../../../packages/runtime_server/src/request_policy.rs) |
-| Job and outbox operations, wire types and validation | [job_protocol.rs](../../../packages/runtime_server/src/job_protocol.rs) |
-| Transcript reads and projection checks | [transcript_protocol.rs](../../../packages/runtime_server/src/transcript_protocol.rs) and [wire.rs](../../../packages/runtime_server/src/transcript_protocol/wire.rs) |
-| AgentRun request types and signed-start validation | [contract.rs](../../../packages/runtime_server/src/contract.rs) and [agent_run_authorization.rs](../../../packages/runtime_server/src/agent_run_authorization.rs) |
-| Bounded timing labels and request accounting | [observations.rs](../../../packages/runtime_server/src/observations.rs) |
-| Django callers | [runtime_client.py](../../../packages/api/app_core/runtime_client.py) and [runtime_job_client.py](../../../packages/api/app_core/runtime_job_client.py) |
-| Worker callers, terminal dispatch and waiter reconciliation | [worker.py](../../../packages/worker/worker.py) |
+| Connection serving, bounded request reading and response headers | [main.rs](../../../packages/workspace/runtime/src/main.rs): `serve_http`, `read_axum_request`, `http_response` |
+| Explicit routes, authentication, admission and blocking-task ownership | [http.rs](../../../packages/workspace/runtime/src/http.rs) |
+| AgentRun HTTP operations | [agent_runs.rs](../../../packages/workspace/runtime/src/http/agent_runs.rs) |
+| Catalog, package inspection and host-input HTTP operations | [catalogs.rs](../../../packages/workspace/runtime/src/http/catalogs.rs) |
+| HTTP transport characterization | [runtime_http_tests.rs](../../../packages/workspace/runtime/src/runtime_http_tests.rs) |
+| Request lifetimes and deadlines | [request_policy.rs](../../../packages/workspace/runtime/src/request_policy.rs) |
+| Job and outbox operations, wire types and validation | [job_protocol.rs](../../../packages/workspace/runtime/src/job_protocol.rs) |
+| Transcript reads and projection checks | [transcript_protocol.rs](../../../packages/workspace/runtime/src/transcript_protocol.rs) and [wire.rs](../../../packages/workspace/runtime/src/transcript_protocol/wire.rs) |
+| AgentRun request types and signed-start validation | [contract.rs](../../../packages/workspace/runtime/src/contract.rs) and [agent_run_authorization.rs](../../../packages/workspace/runtime/src/agent_run_authorization.rs) |
+| Bounded timing labels and request accounting | [observations.rs](../../../packages/workspace/runtime/src/observations.rs) |
+| Django callers | [runtime_client.py](../../../packages/workspace/api/app_core/runtime_client.py) and [runtime_job_client.py](../../../packages/workspace/api/app_core/runtime_job_client.py) |
+| Worker callers, terminal dispatch and waiter reconciliation | [worker.py](../../../packages/workspace/worker/worker.py) |
 
 The service uses axum with Hyper HTTP/1. Its Router registers each operation
 explicitly. Supported operations and fallback share admission, bounded body

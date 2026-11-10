@@ -20,7 +20,7 @@ boundaries, and release verification.
 - [Agent Run API](architecture/AgentRunAPI.md): first-call workflow,
   credential and timeout boundaries, bounded result-recovery proposal and migration
   requirements for PR #55.
-- [Generated transcript contract](../../packages/api/app_core/generated/README.md):
+- [Generated transcript contract](../../packages/workspace/api/app_core/generated/README.md):
   Core-derived wire structure and Python validation.
 - [Platform materials and MCP](architecture/PlatformMaterials.md): material
   access, durable processing, evidence receipts and citation presentation.

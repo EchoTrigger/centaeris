@@ -16,20 +16,20 @@ def select_products(paths):
     shared = {"Cargo.toml", "Cargo.lock", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "pyproject.toml", "uv.lock",
               "rust-toolchain.toml", ".node-version", ".python-version", ".gitignore", ".dockerignore", "biome.json"}
     rules = [
-        (("packages/core/", "packages/model-catalog/", "packages/mcp/", "packages/runtime_sqlite/"), PRODUCTS),
+        (("packages/core/", "packages/model-catalog/", "packages/mcp/", "packages/sqlite/"), PRODUCTS),
         (("packages/model-http/",), ("coreRust", "workspaceRust", "workspacePython", "docker")),
         (("scripts/harbor/workspace", "scripts/harbor/test_workspace", "scripts/harbor/benchmark-transport.json",
           "scripts/harbor/full-tasks.json"), ("coreRust", "localNode", "workspacePython")),
-        (("packages/runtime/", "packages/tui/", "system-skills/", "scripts/harbor/"), ("coreRust", "localNode")),
-        (("packages/visualization-react/",), ("localNode",)),
-        (("packages/frontend-foundations/",), ("localNode", "web", "docker")),
+        (("packages/agent/", "packages/desktop/src/services/", "packages/cli/", "system-skills/", "scripts/harbor/"), ("coreRust", "localNode")),
+        (("packages/visuals/",), ("localNode", "web", "docker")),
+        (("packages/ui/",), ("localNode", "web", "docker")),
         (("packages/desktop/",), ("localNode",)),
-        (("packages/ui/",), ("localNode", "web")),
-        (("packages/web/",), ("web", "docker")),
-        (("packages/api/",), ("workspaceRust", "workspacePython", "docker")),
-        (("packages/runtime_server/",), ("workspaceRust", "workspacePython", "web", "docker")),
-        (("packages/hosted_execution/",), ("workspaceRust", "workspacePython", "docker")),
-        (("packages/worker/", "packages/document_processor/"), ("workspacePython", "docker")),
+        (("packages/sdk/",), ("localNode",)),
+        (("packages/workspace/web/",), ("web", "docker")),
+        (("packages/workspace/api/",), ("workspaceRust", "workspacePython", "docker")),
+        (("packages/workspace/runtime/",), ("workspaceRust", "workspacePython", "web", "docker")),
+        (("packages/workspace/executor/",), ("workspaceRust", "workspacePython", "docker")),
+        (("packages/workspace/worker/", "packages/workspace/documents/"), ("workspacePython", "docker")),
         (("packages/code_preview_languages.json",), ("workspacePython", "web", "docker")),
         (("skills/system/",), ("workspaceRust", "workspacePython", "docker")),
         (("scripts/workspace/", "tests/workspace/", "perf/"), ("workspaceRust", "workspacePython", "web", "docker")),
@@ -44,8 +44,8 @@ def select_products(paths):
         if path in shared or path.startswith(".github/workflows/"):
             selected.update(PRODUCTS)
             continue
-        if path.startswith("packages/api/app_core/") and path.endswith(".py"):
-            filename = path.removeprefix("packages/api/app_core/")
+        if path.startswith("packages/workspace/api/app_core/") and path.endswith(".py"):
+            filename = path.removeprefix("packages/workspace/api/app_core/")
             if "/" not in filename and (filename == "tests.py" or filename.startswith("test_")):
                 selected.add("workspacePython")
                 continue

@@ -23,6 +23,7 @@ class DecimalCollectorTests(unittest.TestCase):
    def values_list(self,*args,**kwargs):return []
   modules={'django.conf':types.SimpleNamespace(settings=types.SimpleNamespace(DATABASES={'default':{'NAME':'retained_acceptance'}})),'django.db':types.SimpleNamespace(connection=types.SimpleNamespace(cursor=Cursor),transaction=types.SimpleNamespace(atomic=contextlib.nullcontext)),'app_core.models':types.SimpleNamespace(AgentRun=types.SimpleNamespace(objects=Query()),SessionEvent=types.SimpleNamespace(objects=Query()))}
   driver=rotation.FixtureDriver.__new__(rotation.FixtureDriver)
+  driver.oracle_owners={}
   def dc(*args):
    output=io.StringIO()
    with patch.dict(sys.modules,modules),contextlib.redirect_stdout(output):exec(args[-1],{})

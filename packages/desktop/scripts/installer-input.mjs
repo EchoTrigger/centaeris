@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { inspectSystemSkillsBundle } from "../src/systemSkills.mjs";
+import { inspectSystemSkillsBundle } from "../src/main/services/systemSkills.mjs";
 
 export async function validateInstallerInput(directory, expectedVersion) {
   const required = ["Centaeris Desktop.exe", "resources/bin/centaeris-runtime.exe",
@@ -13,7 +13,7 @@ export async function validateInstallerInput(directory, expectedVersion) {
   }
   await inspectSystemSkillsBundle(path.join(directory, "resources/system-skills"));
   const manifest = JSON.parse(await fs.readFile(path.join(directory, "resources/app/package.json"), "utf8"));
-  if (manifest.name !== "@centaeris/electron-host" || manifest.main !== "src/main.mjs") {
+  if (manifest.name !== "@centaeris/electron-host" || manifest.main !== "src/main/index.mjs") {
     throw new Error("Installer payload is not a Centaeris Desktop application");
   }
   if (manifest.version !== expectedVersion) throw new Error("Installer and packaged application version mismatch");

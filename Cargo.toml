@@ -3,15 +3,16 @@ resolver = "2"
 members = [
   "packages/core",
   "packages/mcp",
-  "packages/runtime_sqlite",
-  "packages/runtime",
-  "packages/tui",
+  "packages/sqlite",
+  "packages/agent",
+  "packages/desktop/src/services",
+  "packages/cli",
   "packages/model-catalog",
   "packages/model-http",
-  "packages/runtime_server",
-  "packages/hosted_execution",
+  "packages/workspace/runtime",
+  "packages/workspace/executor",
 ]
-default-members = ["packages/core", "packages/mcp", "packages/runtime_sqlite", "packages/runtime", "packages/tui", "packages/model-catalog", "packages/model-http"]
+default-members = ["packages/core", "packages/mcp", "packages/sqlite", "packages/agent", "packages/desktop/src/services", "packages/cli", "packages/model-catalog", "packages/model-http"]
 
 [workspace.package]
 version = "0.1.0"
@@ -85,8 +86,11 @@ path = "packages/model-http"
 [workspace.dependencies.centaeris-mcp]
 path = "packages/mcp"
 
+[workspace.dependencies.centaeris-desktop-services]
+path = "packages/desktop/src/services"
+
 [workspace.dependencies.centaeris-runtime-sqlite]
-path = "packages/runtime_sqlite"
+path = "packages/sqlite"
 
 [profile.tui-release]
 inherits = "release"

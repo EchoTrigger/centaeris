@@ -11,9 +11,9 @@ on:
       - Cargo.toml
       - rust-toolchain.toml
       - docs/workspace/eval/fixtures/performance-repair-v1.json
-      - packages/runtime_server/Cargo.toml
-      - packages/runtime_server/src/postgres_store.rs
-      - packages/runtime_server/src/postgres_store/**
+      - packages/workspace/runtime/Cargo.toml
+      - packages/workspace/runtime/src/postgres_store.rs
+      - packages/workspace/runtime/src/postgres_store/**
       - scripts/workspace/performance-eval*.mjs
   push:
     branches:
@@ -26,9 +26,9 @@ on:
       - Cargo.toml
       - rust-toolchain.toml
       - docs/workspace/eval/fixtures/performance-repair-v1.json
-      - packages/runtime_server/Cargo.toml
-      - packages/runtime_server/src/postgres_store.rs
-      - packages/runtime_server/src/postgres_store/**
+      - packages/workspace/runtime/Cargo.toml
+      - packages/workspace/runtime/src/postgres_store.rs
+      - packages/workspace/runtime/src/postgres_store/**
       - scripts/workspace/performance-eval*.mjs
 
 permissions:

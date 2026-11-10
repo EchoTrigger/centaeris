@@ -28,7 +28,7 @@ class ScopeTests(unittest.TestCase):
             self.assertTrue(all(select_products([path]).values()), path)
 
     def test_web_only_changes_keep_local_and_core_gates_out_of_scope(self):
-        result = select_products(["packages/web/src/routes/App.jsx"])
+        result = select_products(["packages/workspace/web/src/routes/App.jsx"])
         self.assertTrue(result["web"] and result["docker"])
         self.assertFalse(result["coreRust"] or result["localNode"] or result["workspaceRust"])
 
@@ -38,23 +38,26 @@ class ScopeTests(unittest.TestCase):
                          {"coreRust", "workspaceRust", "workspacePython", "docker"})
 
     def test_api_test_only_changes_use_the_python_gate(self):
-        for path in ("packages/api/app_core/test_native_model_grant.py", "packages/api/app_core/tests.py"):
+        for path in ("packages/workspace/api/app_core/test_native_model_grant.py", "packages/workspace/api/app_core/tests.py"):
             selected = select_products([path])
             self.assertEqual({key for key, value in selected.items() if value}, {"workspacePython"})
 
-    def test_api_and_ui_changes_include_their_contract_consumers(self):
-        api = select_products(["packages/api/app_core/http/messages.py"])
+    def test_api_and_desktop_changes_include_their_contract_consumers(self):
+        api = select_products(["packages/workspace/api/app_core/http/messages.py"])
         self.assertTrue(api["workspacePython"] and api["workspaceRust"] and api["docker"])
-        ui = select_products(["packages/ui/src/components/chat/messageScroll.ts"])
-        self.assertTrue(ui["localNode"] and ui["web"])
+        ui = select_products(["packages/desktop/src/renderer/components/chat/messageScroll.ts"])
+        self.assertEqual({key for key, value in ui.items() if value}, {"localNode"})
+        services = select_products(["packages/desktop/src/services/schedules.rs"])
+        self.assertEqual({key for key, value in services.items() if value}, {"coreRust", "localNode"})
 
-    def test_visualization_changes_run_the_current_desktop_consumer(self):
-        selected = select_products(["packages/visualization-react/src/Renderer.tsx"])
-        self.assertEqual({key for key, value in selected.items() if value}, {"localNode"})
+    def test_visualization_changes_check_both_consumers_and_web_image(self):
+        selected = select_products(["packages/visuals/src/Renderer.tsx"])
+        self.assertEqual({key for key, value in selected.items() if value},
+                         {"localNode", "web", "docker"})
 
-    def test_frontend_foundations_check_both_consumers_and_web_image(self):
-        for path in ("packages/frontend-foundations/src/theme-store.ts",
-                     "packages/frontend-foundations/src/components/dialog.tsx"):
+    def test_shared_ui_checks_both_consumers_and_web_image(self):
+        for path in ("packages/ui/src/theme-store.ts",
+                     "packages/ui/src/components/dialog.tsx"):
             selected = select_products([path])
             self.assertEqual({key for key, value in selected.items() if value},
                              {"localNode", "web", "docker"})

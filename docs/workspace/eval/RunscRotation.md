@@ -184,6 +184,7 @@ unshare --net -- python3 "$SOURCE/scripts/workspace/runsc_acceptance/launch.py" 
   --root "$NEW_ROOT" --source "$SOURCE" --execute --execution-mode retained \
   --api-image "$CACHED_API" --worker-image "$CACHED_WORKER" \
   --runtime-image "$CACHED_RUNTIME" --general-image "$CACHED_GENERAL_TOOLS" \
+  --processor-image "$CACHED_DOCUMENT_PROCESSOR" \
   --postgres-image "$CACHED_POSTGRES" --redis-image "$CACHED_REDIS"
 ```
 
@@ -231,9 +232,28 @@ A stopped/replaced process or failed raw probe prevents product admission.
 The product gate requires **six waves of two in-flight main Runs**, alternating
 A/B, for **12 completed main Runs** with one running slot:
 
-- The first Run in each environment starts its persistent memory oracle.
-  Later Runs only query that original process. File hashes are reread from the
-  actual file for each challenge, not cached in the oracle's memory.
+- The driver starts one fixture-owned memory oracle in each exact resident
+  container through its private Docker socket. It waits for the first setup
+  `bash` tool call to be durable after the initial checkpoint confirmation,
+  records the environment, instance, container and Docker exec IDs before
+  starting the exec, and preserves unknown creation/start outcomes without
+  resubmission. This infrastructure process witnesses RAM continuity. Model
+  background tasks retain the existing rule that a live task prevents idle
+  pause, covered separately by the native idle-gate tests.
+- The setup `bash` waits at most 180 seconds for an independent ready challenge.
+  The driver waits at most 30 seconds for its durable tool call, with a bounded
+  final SQL observation and 15-second Docker requests. The oracle inherits the
+  attested container user shared by normal model tasks, and its socket stays
+  mode `0600`. The mock model receives no Docker access.
+- Every main Run queries the original oracle process. File hashes are reread
+  from the actual file for each challenge. Docker exec PID observations and
+  guest PID/start-time observations remain separate identity domains. A Docker
+  PID of zero records an unknown host mapping. Exact exec/container ownership,
+  guest process identity, nonce and fresh challenge proofs remain required.
+- The first A Run completes and its own physical and durable pause is observed
+  before B's oracle is started. B may already hold the released running slot
+  while its setup command awaits that oracle. Final evidence for both Runs
+  still requires zero global running reservations.
 - Every idle state has matching physical Docker `Paused=true` and durable
   `paused` facts. Running reservations reach zero while resident charges remain.
 - Every wave starts A, observes a successful background-task response in the
@@ -250,7 +270,8 @@ A/B, for **12 completed main Runs** with one running slot:
   paused. Later
   product Runs prove the same in-memory oracles survived.
 - After wave six, product retirement confirms exact container absence, released
-  resident holdings and preserved execution history for both environments.
+  resident holdings, released fixture execs and preserved execution history for
+  both environments.
   Transient HTTP 503/504 or a matching pending 409 retain the same operation ID
   and use bounded readback of the exact durable request. An unmatched conflict
   fails; a timeout never refunds the resident charge.

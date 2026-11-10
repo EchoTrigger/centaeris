@@ -146,7 +146,7 @@ def main():
     parser.add_argument('--between-run-ms',type=between_run_delay,default=6000)
     parser.add_argument('--expected-working-environments',type=int)
     parser.add_argument('--k6-binary',type=Path)
-    for name in ('api','worker','runtime','general','postgres','redis'):parser.add_argument('--'+name+'-image',required=True)
+    for name in ('api','worker','runtime','general','processor','postgres','redis'):parser.add_argument('--'+name+'-image',required=True)
     args=parser.parse_args()
     if args.workspace_recovery and (not args.shared_workload or args.execution_mode!='perRun'):
         parser.error('workspace recovery requires explicit shared perRun fixture')
@@ -182,7 +182,7 @@ def main():
     docker=PrivateDocker(root,network=True,storage_driver=args.storage_driver);supervisor=None
     try:
         docker.start();print(json.dumps({'phase':'private-runtime-prerequisites'}),flush=True)
-        images={name:getattr(args,name+'_image') for name in ('api','worker','runtime','general','postgres','redis')}
+        images={name:getattr(args,name+'_image') for name in ('api','worker','runtime','general','processor','postgres','redis')}
         private_images={name:docker.load_image(image) for name,image in images.items()}
         probe=docker.probe(private_images['general'],12)
         verify_owner(root/'owner.json')
@@ -216,7 +216,11 @@ def main():
         while not (root/'host/control.sock').exists():
             if supervisor.poll() is not None or time.monotonic()>end:raise RuntimeError('owned supervisor readiness failed')
             time.sleep(.1)
-        call([*dc,'run','--rm','-T','api','/app/.venv/bin/python','manage.py','migrate','--noinput']);call([*dc,'run','--rm','-T','catalog-init']);call([*dc,'run','--rm','-T','api','/app/.venv/bin/python','manage.py','shell'],input=(tools/'seed.py').read_text());call([*dc,'up','-d','model','api','runtime','worker'])
+        call([*dc,'run','--rm','-T','api','/app/.venv/bin/python','manage.py','migrate','--noinput'])
+        call([*dc,'run','--rm','-T','catalog-init'])
+        call([*dc,'run','--rm','-T','processor-init'])
+        call([*dc,'run','--rm','-T','api','/app/.venv/bin/python','manage.py','shell'],input=(tools/'seed.py').read_text())
+        call([*dc,'up','-d','model','api','runtime','worker'])
         api=call([*dc,'ps','-q','api']).strip();call([*docker.argv,'cp',api+':/var/lib/centaeris-storage/acceptance-seed.json',str(fixture/'seed.json')]);(fixture/'seed.json').chmod(0o600)
         opener=urllib.request.build_opener(urllib.request.ProxyHandler({}));end=time.monotonic()+90
         while True:

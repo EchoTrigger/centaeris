@@ -108,7 +108,7 @@ its accepted Jobs. Missing or failed collection is `notObserved`; nested phase
 intervals must not be added together. These timings explain delays independently
 of the sustained physical-concurrency acceptance gate.
 
-The native [host supervisor](../../packages/hosted_execution/deploy/README.md)
+The native [host supervisor](../../packages/workspace/executor/deploy/README.md)
 owns process launch, task journals and output. It attests the Docker/runc target,
 runs commands with the profile's identity and security configuration, and
 loads fixed helpers from a protected root-owned installation path and seals

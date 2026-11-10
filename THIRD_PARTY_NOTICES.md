@@ -6,12 +6,12 @@ grant. Preserve [`the logo notice`](packages/model-catalog/centaeris_model_catal
 when distributing the catalog or products containing it. No provider trademark
 rights are granted by the software license.
 
-This repository bundles the following fonts in `packages/ui`:
+This repository bundles the following fonts in `packages/desktop/public`:
 
 | Font | Copyright and source | License text |
 | --- | --- | --- |
-| Google Sans Code | Copyright 2025 The Google Sans Code Project Authors; <https://github.com/googlefonts/googlesans-code> | [`packages/ui/public/licenses/OFL-GoogleSansCode.txt`](packages/ui/public/licenses/OFL-GoogleSansCode.txt) |
-| Noto Sans CJK | Copyright 2014–2021 Adobe (http://www.adobe.com/), with Reserved Font Name “Source”; Noto is a trademark of Google LLC; <https://github.com/notofonts/noto-cjk> | [`packages/ui/public/licenses/OFL-NotoSansCJK.txt`](packages/ui/public/licenses/OFL-NotoSansCJK.txt) |
+| Google Sans Code | Copyright 2025 The Google Sans Code Project Authors; <https://github.com/googlefonts/googlesans-code> | [`packages/desktop/public/licenses/OFL-GoogleSansCode.txt`](packages/desktop/public/licenses/OFL-GoogleSansCode.txt) |
+| Noto Sans CJK | Copyright 2014–2021 Adobe (http://www.adobe.com/), with Reserved Font Name “Source”; Noto is a trademark of Google LLC; <https://github.com/notofonts/noto-cjk> | [`packages/desktop/public/licenses/OFL-NotoSansCJK.txt`](packages/desktop/public/licenses/OFL-NotoSansCJK.txt) |
 
 The linked files contain the applicable SIL Open Font License notices. The exact upstream Noto Sans CJK revision was not preserved with the bundled subsets, so this index does not invent one.
 
@@ -29,7 +29,7 @@ covered by the project's AGPL-3.0-only license.
 
 ## shadcn/ui components
 
-Shared foundational components in `packages/frontend-foundations` (Button, Input, Textarea, Tooltip, Card, Badge,
+Shared foundational components in `packages/ui` (Button, Input, Textarea, Tooltip, Card, Badge,
 Separator, Dialog, Popover, Select, Dropdown Menu, Switch, Checkbox, Tabs and Scroll Area) are adapted from the official Base UI + Nova
 registry at https://ui.shadcn.com/r/styles/base-nova/.
 

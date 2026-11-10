@@ -6,12 +6,14 @@ result JSON. No global cleanup or daemon configuration is performed.
 """
 import argparse
 import hashlib
+import http.client
 import http.cookiejar
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import time
@@ -21,6 +23,7 @@ import uuid
 
 SCHEMA = 'runsc.rotation.acceptance.v1'
 ORACLE_SCHEMA = 'runsc.rotation.oracle.v1'
+ORACLE_READY_SECONDS = 180
 MARKER = re.compile(r'RUNSC_ROTATION ([a-f0-9]{32}) ([AB]) (\d{1,2})\Z')
 BLOCK = re.compile(r'RUNSC_ROTATION_BLOCK ([a-f0-9]{32}) ([AB])\Z')
 
@@ -65,12 +68,13 @@ while True:
     return ['python3', '-u', '-c', code, root]
 
 
-def memory_oracle_client(tag, label, index):
+def memory_oracle_client(tag, label, index, *, ready=False):
     root = oracle_root(tag, label)
-    challenge = f'{tag}-{label}-{index}'
-    code = r'''import json,socket,sys,time
+    challenge = f'{tag}-{label}-ready' if ready else f'{tag}-{label}-{index}'
+    marker = 'RUNSC_ROTATION_READY ' if ready else 'RUNSC_ROTATION_ORACLE '
+    code = f'timeout={ORACLE_READY_SECONDS if ready else 15}\nmarker={marker!r}\n' + r'''import json,socket,sys,time
 path,challenge=sys.argv[1:]
-end=time.monotonic()+15
+end=time.monotonic()+timeout
 while True:
  try:
   s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(3);s.connect(path);break
@@ -85,8 +89,8 @@ with s:
   if not part:break
   data+=part
  value=json.loads(data)
- if value['challenge']!=challenge:raise RuntimeError('oracle challenge mismatch')
- print('RUNSC_ROTATION_ORACLE '+json.dumps(value))
+ if value.get('schema')!='runsc.rotation.oracle.v1' or value.get('challenge')!=challenge:raise RuntimeError('oracle challenge mismatch')
+ print(marker+json.dumps(value))
 '''
     return shlex.join(['python3', '-c', code, root + '.sock', challenge])
 
@@ -100,12 +104,13 @@ def _text(message):
     return ''
 
 
-def extract_oracle(text):
+def extract_oracle(text, *, ready=False):
     decoder = json.JSONDecoder()
-    start = text.find('RUNSC_ROTATION_ORACLE ')
+    marker = 'RUNSC_ROTATION_READY ' if ready else 'RUNSC_ROTATION_ORACLE '
+    start = text.find(marker)
     if start < 0:
         raise RuntimeError('actual task result lacks memory oracle output')
-    value, _ = decoder.raw_decode(text[start + len('RUNSC_ROTATION_ORACLE '):])
+    value, _ = decoder.raw_decode(text[start + len(marker):])
     if not isinstance(value, dict) or value.get('schema') != ORACLE_SCHEMA:
         raise RuntimeError('memory oracle response schema invalid')
     return value
@@ -144,10 +149,12 @@ def next_rotation_call(request, progress=None):
         raise ValueError('rotation round identity invalid')
     setup = index < 2
     if setup and not replies:
-        argv = memory_oracle_server(tag, label)
-        return 'background_task_start', {'program': argv[0], 'args': argv[1:], 'cwd': '/mnt/data', 'timeout_ms': 14700000}
+        return 'bash', {'command': memory_oracle_client(tag, label, index, ready=True),
+                        'timeout_ms': (ORACLE_READY_SECONDS + 10) * 1000}
     if setup:
-        task_result(replies[0], running=True)
+        ready = extract_oracle(_text(replies[0]), ready=True)
+        if ready.get('challenge') != f'{tag}-{label}-ready':
+            raise RuntimeError('oracle readiness belongs to another environment')
     offset = int(setup)
     if label == 'A':
         if len(replies) == offset:
@@ -220,8 +227,16 @@ def validate_evidence(evidence):
                 raise RuntimeError('fresh in-memory process challenge was not preserved')
             challenges.add(oracle['challenge'])
             previous_counter[label] = oracle['counter']
+            owner = row['oracleOwner']
+            if (owner['label'] != label or owner['state'] != 'running'
+                    or any(owner[key] != row[key] for key in ('environmentId', 'instanceId', 'containerId'))
+                    or not re.fullmatch('[a-f0-9]{64}', owner['execId'])
+                    or type(owner['dockerPid']) is not int or owner['dockerPid'] < 0
+                    or not re.fullmatch(r'\d+:\d+', owner['user'])):
+                raise RuntimeError('fixture memory exec ownership was not preserved')
             identity = tuple(row[key] for key in ('sessionId', 'environmentId', 'instanceId', 'containerId'))
             identity += tuple(oracle[key] for key in ('nonce', 'pid', 'startTicks', 'fileSha256'))
+            identity += tuple(owner[key] for key in ('execId', 'dockerPid', 'user'))
             if label in baselines and baselines[label] != identity:
                 raise RuntimeError('resume replaced environment, process memory or file')
             baselines[label] = identity
@@ -265,6 +280,10 @@ def validate_evidence(evidence):
         if any(r['status'] != 'destroyed' or r['containerAbsent'] is not True or r['residentHoldingCount'] != 0
                or r['historyPreserved'] is not True for r in retired):
             raise RuntimeError('retirement physical absence or durable release not established')
+        for proof in retired:
+            original = next(row for row in runs if row['environmentId'] == proof['environmentId'])
+            if proof['oracleExecId'] != original['oracleOwner']['execId'] or proof['oracleExecReleased'] is not True:
+                raise RuntimeError('fixture memory exec release was not established')
         return {'schema': SCHEMA, 'status': 'passed', 'sourceRevision': evidence['sourceRevision'],
                 'completedRuns': 12, 'environments': 2, 'runningLimit': 1,
                 'memoryRetainedWhilePaused': True, 'hostMemoryReleased': False,
@@ -312,6 +331,8 @@ class FixtureDriver:
             raise RuntimeError('dedicated disposable Docker daemon required; default daemon is rejected')
         self.environment = {**os.environ, 'DOCKER_HOST': 'unix://' + socket}
         self.docker = ['docker', '--host', 'unix://' + socket]
+        self.docker_socket = socket
+        self.oracle_owners = {}
         managed = self.command(self.docker + ['ps', '-aq', '--filter', 'label=centaeris.managed=true'])
         if managed.strip():
             raise RuntimeError('managed sandboxes already exist on disposable daemon; preserve them')
@@ -345,6 +366,89 @@ class FixtureDriver:
 
     def dc(self, *args):
         return self.command(self.docker + ['compose', '-f', str(self.compose), *args])
+
+    def docker_api(self, method, path, payload=None):
+        connection = http.client.HTTPConnection('localhost', timeout=15)
+        try:
+            connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            connection.sock.settimeout(15)
+            connection.sock.connect(self.docker_socket)
+            connection.request(method, path, body=None if payload is None else json.dumps(payload),
+                               headers={'Content-Type': 'application/json'})
+            response = connection.getresponse()
+            body = response.read(1024 * 1024 + 1)
+            if len(body) > 1024 * 1024:
+                raise RuntimeError('fixture Docker response exceeded output bound')
+            return response.status, json.loads(body) if body else None
+        finally:
+            connection.close()
+
+    def persist_oracle_owners(self):
+        (self.result / 'oracle-owners.json').write_text(json.dumps(self.oracle_owners, indent=2))
+
+    def bootstrap_oracle(self, label, admitted):
+        if label in self.oracle_owners:
+            raise RuntimeError('fixture memory exec already has an owner; preserve its outcome')
+        expected = memory_oracle_client(self.tag, label, 0 if label == 'A' else 1, ready=True)
+        code = r'''import json
+from django.conf import settings
+from django.db import connection,transaction
+from app_core.models import AgentRun,SessionEvent
+assert settings.DATABASES['default']['NAME']=='retained_acceptance'
+with transaction.atomic():
+ with connection.cursor() as c:
+  c.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+  run=AgentRun.objects.get(pk=RUN)
+  if run.status in ('failed','cancelled','completed'):raise RuntimeError('oracle setup Run is no longer running')
+  calls=list(SessionEvent.objects.filter(agent_run=run,session_level=False,payload__type='tool_call').values_list('payload',flat=True))
+  ready=[event['payload'] for event in calls if event['payload'].get('toolName')=='bash' and event['payload'].get('normalizedInput',{}).get('command')==COMMAND]
+  if len(ready)>1:raise RuntimeError('ambiguous oracle setup tool call')
+  c.execute('SELECT container_id,instance_id FROM runtime.resident_sandboxes WHERE environment_id=%s',[run.environment_id])
+  residents=c.fetchall()
+  if len(residents)>1:raise RuntimeError('ambiguous oracle resident binding')
+  print(json.dumps({'ready':len(ready)==1 and len(residents)==1,'environmentId':run.environment_id,'containerId':residents[0][0] if residents else None,'instanceId':residents[0][1] if residents else None}))
+'''.replace('RUN', repr(admitted['agentRunId'])).replace('COMMAND', repr(expected))
+        binding = self.wait(lambda: self.sql(code), lambda row: row['ready'],
+                            'durable oracle setup tool call and exact resident', timeout=30)
+        status, physical = self.docker_api('GET', '/containers/' + binding['containerId'] + '/json')
+        labels = physical['Config']['Labels'] if status == 200 else {}
+        if (status != 200 or physical['Id'] != binding['containerId']
+                or physical['HostConfig']['Runtime'] != 'runsc'
+                or physical['State']['Running'] is not True or physical['State']['Paused'] is not False
+                or labels.get('centaeris.managed') != 'true'
+                or labels.get('centaeris.environment_id') != binding['environmentId']
+                or labels.get('centaeris.instance_id') != binding['instanceId']):
+            raise RuntimeError('oracle bootstrap physical identity rejected')
+        user = physical['Config']['User']
+        if (not isinstance(user, str) or not re.fullmatch(r'\d+:\d+', user)
+                or physical['Config']['Env'].count('CENTAERIS_WORKSPACE_USER=' + user) != 1):
+            raise RuntimeError('oracle bootstrap user differs from model task profile')
+        owner = {key: binding[key] for key in ('environmentId', 'instanceId', 'containerId')}
+        owner.update(label=label, user=user, state='createUnknown')
+        self.oracle_owners[label] = owner
+        self.persist_oracle_owners()
+        status, created = self.docker_api('POST', '/containers/' + owner['containerId'] + '/exec', {
+            'Cmd': memory_oracle_server(self.tag, label), 'WorkingDir': '/mnt/data',
+            'AttachStdin': False, 'AttachStdout': False, 'AttachStderr': False, 'Tty': False})
+        if status != 201 or not isinstance(created, dict) or not re.fullmatch('[a-f0-9]{64}', created.get('Id', '')):
+            raise RuntimeError('fixture memory exec creation unconfirmed')
+        owner.update(execId=created['Id'], state='startUnknown')
+        self.persist_oracle_owners()
+        status, _ = self.docker_api('POST', '/exec/' + owner['execId'] + '/start', {'Detach': True, 'Tty': False})
+        if status != 200:
+            raise RuntimeError('fixture memory exec start unconfirmed')
+        observation = self.observe_oracle_exec(owner)
+        owner.update(state='running', dockerPid=observation['Pid'])
+        self.persist_oracle_owners()
+
+    def observe_oracle_exec(self, owner):
+        status, observed = self.docker_api('GET', '/exec/' + owner['execId'] + '/json')
+        if (status != 200 or observed.get('ID') != owner['execId']
+                or observed.get('ContainerID') != owner['containerId'] or observed.get('Running') is not True
+                or type(observed.get('Pid')) is not int or observed['Pid'] < 0
+                or ('dockerPid' in owner and observed['Pid'] != owner['dockerPid'])):
+            raise RuntimeError('fixture memory exec identity is no longer running')
+        return observed
 
     def http(self, path, payload=None):
         headers = {'Origin': self.base, 'Referer': self.base + '/'}
@@ -443,6 +547,12 @@ with transaction.atomic():
         oracles = [extract_oracle(output) for output in row.pop('outputs') if 'RUNSC_ROTATION_ORACLE ' in output]
         row.update(label=label, agentRunId=admitted['agentRunId'], sessionId=admitted['sessionId'],
                    runtime=runtime, paused=physical['Paused'], running=physical['Running'])
+        if label in self.oracle_owners:
+            owner = self.oracle_owners[label]
+            if any(owner[key] != row[key] for key in ('environmentId', 'instanceId', 'containerId')):
+                raise RuntimeError('fixture memory exec belongs to another resident')
+            self.observe_oracle_exec(owner)
+            row['oracleOwner'] = dict(owner)
         if oracles:
             if len(oracles) != 1:
                 raise RuntimeError('Run has ambiguous memory oracle results')
@@ -603,8 +713,20 @@ with transaction.atomic():
   print(json.dumps({'residentHoldingCount':count,'historyPreserved':history}))
 '''.replace('ENV', repr(row['environmentId'])).replace('INSTANCE', repr(row['instanceId']))
         proof = self.sql(code)
-        return {'environmentId': row['environmentId'], 'status': result['status'],
-                'containerAbsent': row['containerId'] not in inventory, **proof}
+        released = {'environmentId': row['environmentId'], 'status': result['status'],
+                    'containerAbsent': row['containerId'] not in inventory, **proof}
+        if row['label'] in self.oracle_owners:
+            owner = self.oracle_owners[row['label']]
+            status, observed = self.docker_api('GET', '/exec/' + owner['execId'] + '/json')
+            absent = status == 404
+            exited = (status == 200 and observed.get('ID') == owner['execId']
+                      and observed.get('ContainerID') == row['containerId'] and observed.get('Running') is False)
+            if not released['containerAbsent'] or not (absent or exited):
+                raise RuntimeError('retired fixture memory exec release unconfirmed')
+            owner['state'] = 'released'
+            self.persist_oracle_owners()
+            released.update(oracleExecId=owner['execId'], oracleExecReleased=True)
+        return released
 
     def run(self):
         evidence = {'schema': SCHEMA, 'sourceRevision': self.manifest['sourceRevision'], 'runningLimit': 1,
@@ -622,7 +744,9 @@ with transaction.atomic():
             for wave_number in range(6):
                 index = wave_number * 2
                 holder = admit_main('A', index)
-                self.holder_started(holder, 2 if index == 0 else 1)
+                if index == 0:
+                    self.bootstrap_oracle('A', holder)
+                self.holder_started(holder, 1)
                 waiting_run = admit_main('B', index + 1)
                 waiting = self.queued_wait(waiting_run)
                 holder_status = self.status(holder)
@@ -639,6 +763,11 @@ with transaction.atomic():
                     # Keep each successful peer even when the other peer fails.
                     (self.result / f'completed-{number:02d}.json').write_text(json.dumps(status, indent=2))
                     persist()
+                    if number == 0:
+                        self.wait(lambda: self.observe(label, admitted),
+                                  lambda row: row['powerState'] == 'paused' and row['paused'] is True,
+                                  'first holder physical and durable pause')
+                        self.bootstrap_oracle('B', waiting_run)
                     row = {**self.paused(label, admitted), **status}
                     evidence['runs'].append(row)
                     evidence['mainRunCounts']['validated'] += 1

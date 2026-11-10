@@ -257,23 +257,9 @@ pub(super) struct FileReadOutcome {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner_ref: Option<String>,
+    pub source_identity: Option<crate::source::SourceIdentityV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner_kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub evidence_kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner_sha256: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub citation_ref: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub page_start: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub page_end: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub document_route: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub document_used_ocr: Option<bool>,
+    pub source_association_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -385,13 +371,13 @@ impl FileToolOutcome {
         tool_call_id: Option<&str>,
     ) -> Result<LocalToolOutput, String> {
         let facts = match &self {
-            Self::Read(outcome) => read_citation_fact(outcome, tool_call_id)?
+            Self::Read(outcome) => read_source_fact(outcome, tool_call_id)?
                 .into_iter()
                 .collect(),
             Self::ReadBatch(outcome) => outcome
                 .items
                 .iter()
-                .filter_map(|item| read_citation_fact(item, tool_call_id).transpose())
+                .filter_map(|item| read_source_fact(item, tool_call_id).transpose())
                 .collect::<Result<Vec<_>, _>>()?,
             _ => Vec::new(),
         };
@@ -513,58 +499,39 @@ impl FileToolOutcome {
     }
 }
 
-fn read_citation_fact(
+fn read_source_fact(
     outcome: &FileReadOutcome,
     tool_call_id: Option<&str>,
 ) -> Result<Option<ToolExecutionFact>, String> {
-    let Some(citation_id) = outcome.citation_ref.as_deref() else {
+    let Some(association_id) = outcome.source_association_ref.as_deref() else {
         return Ok(None);
     };
     let tool_call_id = tool_call_id
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "Read citation is missing toolCallId".to_string())?;
-    let locator = match (outcome.page_start, outcome.page_end) {
-        (Some(start), Some(end)) => json!({"pageStart": start, "pageEnd": end}),
-        _ => json!({
-            "startLine": outcome.start_line,
-            "endLine": outcome.end_line,
-        }),
-    };
-    Ok(Some(ToolExecutionFact::CitationRecorded(json!({
-        "citationId": citation_id,
-        "inputRef": required_read_citation_value(&outcome.input_ref, "inputRef")?,
-        "ownerRef": required_read_citation_value(&outcome.owner_ref, "ownerRef")?,
-        "ownerKind": required_read_citation_value(&outcome.owner_kind, "ownerKind")?,
-        "displayName": required_read_citation_value(&outcome.display_name, "displayName")?,
-        "evidenceKind": required_read_citation_value(&outcome.evidence_kind, "evidenceKind")?,
-        "ownerSha256": required_read_citation_value(&outcome.owner_sha256, "ownerSha256")?,
+        .ok_or_else(|| "read source association is missing toolCallId".to_string())?;
+    let input_ref = outcome
+        .input_ref
+        .as_deref()
+        .ok_or_else(|| "read source association is missing inputRef".to_string())?;
+    let source_identity = outcome
+        .source_identity
+        .as_ref()
+        .ok_or_else(|| "read source association is missing sourceIdentity".to_string())?;
+    Ok(Some(ToolExecutionFact::SourceAssociated(json!({
+        "associationId": association_id,
+        "inputRef": input_ref,
+        "sourceIdentity": source_identity,
         "sourceToolName": "read",
         "sourceToolCallId": tool_call_id,
-        "locator": locator,
+        "range": {"startLine": outcome.start_line, "endLine": outcome.end_line},
     }))))
 }
 
-fn required_read_citation_value<'a>(
-    value: &'a Option<String>,
-    name: &str,
-) -> Result<&'a str, String> {
-    value
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("Read citation is missing {name}"))
-}
-
 fn file_read_content(outcome: &FileReadOutcome) -> String {
-    let window = match (outcome.page_start, outcome.page_end) {
-        (Some(page_start), Some(page_end)) => format!(
-            "pages {page_start}-{page_end}; lines {}-{} of {}",
-            outcome.start_line, outcome.end_line, outcome.total_lines
-        ),
-        _ => format!(
-            "lines {}-{} of {}",
-            outcome.start_line, outcome.end_line, outcome.total_lines
-        ),
-    };
+    let window = format!(
+        "lines {}-{} of {}",
+        outcome.start_line, outcome.end_line, outcome.total_lines
+    );
     let continuation = outcome
         .next_offset
         .map(|next_offset| read_continuation_call(outcome, next_offset));
@@ -670,15 +637,8 @@ fn read_file_fact(outcome: &FileReadOutcome) -> Value {
         "nextOffset": outcome.next_offset,
         "inputRef": outcome.input_ref,
         "displayName": outcome.display_name,
-        "ownerRef": outcome.owner_ref,
-        "ownerKind": outcome.owner_kind,
-        "evidenceKind": outcome.evidence_kind,
-        "ownerSha256": outcome.owner_sha256,
-        "citationRef": outcome.citation_ref,
-        "pageStart": outcome.page_start,
-        "pageEnd": outcome.page_end,
-        "documentRoute": outcome.document_route,
-        "documentUsedOcr": outcome.document_used_ocr,
+        "sourceIdentity": outcome.source_identity,
+        "sourceAssociationRef": outcome.source_association_ref,
     })
 }
 
@@ -686,8 +646,7 @@ fn invalid_input_messages(raw_message: &str) -> (String, String) {
     let lower = raw_message.to_ascii_lowercase();
     if lower.contains("binary file not supported") {
         return (
-            "Read target contains unsupported binary data; use a supported document input or a text file"
-                .to_string(),
+            "Read target contains unsupported binary data; use a text file".to_string(),
             "Read target is unsupported binary data".to_string(),
         );
     }
@@ -737,10 +696,8 @@ fn actionable_io_model_message(raw_message: &str, model_path: Option<&str>) -> S
         "Edited file write"
     } else if lower.contains("write file") {
         "File write"
-    } else if lower.contains("read file") || lower.contains("document read") {
+    } else if lower.contains("read file") {
         "File read"
-    } else if lower.contains("document execution") {
-        "Document extraction"
     } else if lower.contains("resolve") {
         "Path resolution"
     } else if lower.contains("delete file") {
@@ -848,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_input_read_produces_a_typed_citation_fact() {
+    fn resolved_input_read_produces_a_typed_source_fact() {
         let output = FileToolOutcome::Read(Box::new(FileReadOutcome {
             path: "sources/object/report.pdf".to_string(),
             start_line: 4,
@@ -866,31 +823,28 @@ mod tests {
             content: "evidence".to_string(),
             input_ref: Some("input_1".to_string()),
             display_name: Some("report.pdf".to_string()),
-            owner_ref: Some("source_1".to_string()),
-            owner_kind: Some("sourceObject".to_string()),
-            evidence_kind: Some("workspaceSource".to_string()),
-            owner_sha256: Some(format!("sha256:{}", "b".repeat(64))),
-            citation_ref: Some(format!("citation:{}", "c".repeat(64))),
-            page_start: Some(2),
-            page_end: Some(2),
-            document_route: None,
-            document_used_ocr: None,
+            source_identity: Some(crate::source::SourceIdentityV1 {
+                source_ref: "file:source_1".to_string(),
+                revision: "1".to_string(),
+                sha256: format!("sha256:{}", "b".repeat(64)),
+            }),
+            source_association_ref: Some(format!("source:sha256:{}", "c".repeat(64))),
         }))
         .into_read_output(Some("call_read"))
         .expect("read output");
 
         assert!(output.content.lines().next().is_some_and(|line| {
-            line.contains("pages 2-2; lines 4-8 of 20")
+            line.contains("lines 4-8 of 20")
                 && line.ends_with("Continue with read(input_ref=\"input_1\", offset=8).")
         }));
         assert!(output
             .content
             .contains("Continuation: read(input_ref=\"input_1\", offset=8)."));
 
-        let [ToolExecutionFact::CitationRecorded(payload)] = output.facts.as_slice() else {
-            panic!("expected one citation fact")
+        let [ToolExecutionFact::SourceAssociated(payload)] = output.facts.as_slice() else {
+            panic!("expected one source fact")
         };
         assert_eq!(payload["sourceToolCallId"], "call_read");
-        assert_eq!(payload["locator"], json!({"pageStart": 2, "pageEnd": 2}));
+        assert_eq!(payload["range"], json!({"startLine": 4, "endLine": 8}));
     }
 }

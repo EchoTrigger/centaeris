@@ -6,16 +6,16 @@ import { spawnSync } from "node:child_process";
 import * as ResEdit from "resedit";
 import { writeThirdPartyLicenses } from "./third-party-licenses.mjs";
 import { writeProductLicenses } from "../../../scripts/product-licenses.mjs";
-import { inspectSystemSkillsBundle } from "../src/systemSkills.mjs";
-import { runtimeArtifactPath, DESKTOP_RUNTIME_TARGET } from "../src/runtimeArtifact.mjs";
+import { inspectSystemSkillsBundle } from "../src/main/services/systemSkills.mjs";
+import { runtimeArtifactPath, DESKTOP_RUNTIME_TARGET } from "../src/main/runtimeArtifact.mjs";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
 const electronDist = path.join(packageDirectory("electron", hostRoot), "dist");
-const uiDist = path.join(repoRoot, "packages", "ui", "dist");
+const uiDist = path.join(hostRoot, "renderer-dist");
 const runtimeExecutable = runtimeArtifactPath(repoRoot, "release");
-const trayIconIco = path.join(hostRoot, "assets", "icon.ico");
-const trayIconIcns = path.join(hostRoot, "assets", "icon.icns");
+const trayIconIco = path.join(hostRoot, "packaging", "assets", "icon.ico");
+const trayIconIcns = path.join(hostRoot, "packaging", "assets", "icon.icns");
 const externalOutput = process.env.CENTAERIS_DESKTOP_DIST_DIR;
 const outRoot = externalOutput
   ? await reserveDistributionOutput(externalOutput)
@@ -71,7 +71,7 @@ await fs.rm(path.join(appRoot, "resources", "default_app.asar"), {
 
 await writeProductLicenses(repoRoot, appRoot);
 const distNotices = (await fs.readFile(path.join(repoRoot, "THIRD_PARTY_NOTICES.md"), "utf8"))
-  .replaceAll("packages/ui/public/licenses/", "resources/ui-dist/licenses/")
+  .replaceAll("packages/desktop/public/licenses/", "resources/ui-dist/licenses/")
   .replaceAll("system-skills/", "resources/system-skills/");
 await fs.writeFile(path.join(appRoot, "THIRD_PARTY_NOTICES.md"), distNotices);
 const localesRoot = path.join(appRoot, "locales");
@@ -82,9 +82,11 @@ for (const entry of await fs.readdir(localesRoot)) {
   }
 }
 await fs.mkdir(packagedAppRoot, { recursive: true });
-await fs.cp(path.join(hostRoot, "src"), path.join(packagedAppRoot, "src"), {
-  recursive: true,
-});
+for (const entry of ["main", "preload"]) {
+  await fs.cp(path.join(hostRoot, "src", entry), path.join(packagedAppRoot, "src", entry), {
+    recursive: true,
+  });
+}
 await fs.copyFile(
   path.join(hostRoot, "package.json"),
   path.join(packagedAppRoot, "package.json"),
@@ -110,7 +112,7 @@ await writeThirdPartyLicenses(
   repoRoot,
   hostRoot,
   path.join(appRoot, "THIRD_PARTY_LICENSES"),
-  ["centaeris-runtime"],
+  ["centaeris-desktop-services"],
   true,
   DESKTOP_RUNTIME_TARGET,
 );

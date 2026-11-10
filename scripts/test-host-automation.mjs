@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 // Local transport acceptance: mock model and an OpenSSH argv fixture, no remote host.
-import {createRuntimeHostTransport} from '../packages/desktop/src/runtimeHostTransport.mjs';
+import {createRuntimeHostTransport} from '../packages/desktop/src/main/services/runtimeHostTransport.mjs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';

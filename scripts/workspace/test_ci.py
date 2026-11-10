@@ -113,7 +113,7 @@ class PortableCITests(unittest.TestCase):
             calls = []
             with patch.object(ci, "run", side_effect=lambda label, args, **kw: calls.append(args) or json.dumps(config)):
                 ci.main(skip, stage="Web")
-            self.assertTrue(any("@centaeris/frontend-foundations" in command and "typecheck" in command for command in calls))
+            self.assertTrue(any("@centaeris/ui" in command and "typecheck" in command for command in calls))
             self.assertEqual(any("test:components" in command for command in calls), not skip)
 
     def test_gate_preserves_backend_checks_and_frontend_skip_scope(self):

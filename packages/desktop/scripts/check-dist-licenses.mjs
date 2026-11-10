@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { collectThirdPartyLicenses } from "./third-party-licenses.mjs";
-import { inspectSystemSkillsBundle } from "../src/systemSkills.mjs";
-import { DESKTOP_RUNTIME_TARGET } from "../src/runtimeArtifact.mjs";
+import { inspectSystemSkillsBundle } from "../src/main/services/systemSkills.mjs";
+import { DESKTOP_RUNTIME_TARGET } from "../src/main/runtimeArtifact.mjs";
 import { checkProductLicenses } from "../../../scripts/product-licenses.mjs";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
@@ -25,7 +25,7 @@ const index = JSON.parse(await fs.readFile(path.join(licenseRoot, "index.json"),
 if (index.schema !== "centaeris_third_party_licenses_v1") {
   throw new Error("third-party license index schema mismatch");
 }
-const expected = await collectThirdPartyLicenses(repoRoot, hostRoot, ["centaeris-runtime"], true, distRoot ? DESKTOP_RUNTIME_TARGET : undefined);
+const expected = await collectThirdPartyLicenses(repoRoot, hostRoot, ["centaeris-desktop-services"], true, distRoot ? DESKTOP_RUNTIME_TARGET : undefined);
 const expectedKeys = expected.map((item) => `${item.ecosystem}:${item.name}@${item.version}`).sort();
 const actualKeys = index.packages
   .map((item) => `${item.ecosystem}:${item.name}@${item.version}`)

@@ -10,11 +10,13 @@ class NativeModelTests(unittest.TestCase):
  def request(self,payload):
   req=urllib.request.Request(self.url,data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
   return urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req,timeout=3)
- def test_initial_oracle_uses_advertised_background_tool(self):
-  payload={'messages':[{'role':'user','content':'RUNSC_ROTATION '+'a'*32+' A 0'}],'tools':[{'function':{'name':'background_task_start'}}],'stream':False}
+ def test_initial_oracle_probes_readiness_with_advertised_bash(self):
+  payload={'messages':[{'role':'user','content':'RUNSC_ROTATION '+'a'*32+' A 0'}],'tools':[{'function':{'name':'bash'}}],'stream':False}
   with self.request(payload) as response:value=json.load(response)
   call=value['choices'][0]['message']['tool_calls'][0]
-  self.assertEqual(call['function']['name'],'background_task_start');self.assertEqual(json.loads(call['function']['arguments'])['program'],'python3')
+  self.assertEqual(call['function']['name'],'bash')
+  command=json.loads(call['function']['arguments'])['command']
+  self.assertIn('RUNSC_ROTATION_READY',command);self.assertIn('a'*32+'-A-ready',command)
  def test_later_holder_run_streams_actual_task_start(self):
   payload={'messages':[{'role':'user','content':'RUNSC_ROTATION '+'a'*32+' A 2'}],'tools':[{'function':{'name':'background_task_start'}}],'stream':True}
   with self.request(payload) as response:body=response.read().decode()
@@ -25,7 +27,7 @@ class NativeModelTests(unittest.TestCase):
   with self.assertRaises(urllib.error.HTTPError) as context:self.request(payload)
   self.assertEqual(context.exception.code,422)
  def test_unadvertised_tool_is_rejected_before_response(self):
-  payload={'messages':[{'role':'user','content':'RUNSC_ROTATION '+'a'*32+' A 0'}],'tools':[{'function':{'name':'bash'}}]}
+  payload={'messages':[{'role':'user','content':'RUNSC_ROTATION '+'a'*32+' A 0'}],'tools':[{'function':{'name':'background_task_start'}}]}
   with self.assertRaises(urllib.error.HTTPError) as context:self.request(payload)
   self.assertEqual(context.exception.code,422)
 if __name__=='__main__':unittest.main()

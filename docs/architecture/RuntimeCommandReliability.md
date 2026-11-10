@@ -7,9 +7,9 @@ the current guarantees and the incremental work required to make that ambiguity
 machine-visible.
 
 The generated method inventory is
-`packages/runtime/generated/runtime-methods.json`. Method names and command
+`packages/desktop/src/services/generated/runtime-methods.json`. Method names and command
 scopes are generated from
-`packages/runtime/src/runtime_command_registry.rs`; this page does not duplicate
+`packages/desktop/src/services/runtime_command_registry.rs`; this page does not duplicate
 that list.
 
 ## Verified current behavior

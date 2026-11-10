@@ -1,0 +1,25 @@
+export default {
+  appId: "org.centaeris.desktop",
+  productName: "Centaeris Desktop",
+  artifactName: "Centaeris-Desktop-${version}-windows-${arch}-setup.${ext}",
+  directories: { buildResources: "packaging/installer" },
+  publish: null,
+  // Existing assembly owns the PE icon/version resources and Runtime payload.
+  win: { executableName: "Centaeris Desktop", signAndEditExecutable: false, target: [{ target: "nsis", arch: ["x64"] }] },
+  nsis: {
+    oneClick: false,
+    differentialPackage: false,
+    perMachine: false,
+    allowElevation: false,
+    allowToChangeInstallationDirectory: true,
+    createStartMenuShortcut: true,
+    uninstallDisplayName: "Centaeris Desktop",
+    createDesktopShortcut: false,
+    deleteAppDataOnUninstall: false,
+    runAfterFinish: true,
+    installerLanguages: ["en_US"],
+    installerIcon: "packaging/assets/icon.ico",
+    uninstallerIcon: "packaging/assets/icon.ico",
+    include: "packaging/installer/installer.nsh",
+  },
+};

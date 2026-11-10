@@ -44,8 +44,8 @@ consumers with Core rather than mixing versions. See the
 [execution contract decision](../architecture/ExecutionHostContract.md) for
 ownership and the remaining local isolation migration.
 
-`packages/runtime/src/host_protocol.rs` owns the local Host protocol identity,
-and `packages/runtime/src/runtime_command_registry.rs` owns its method registry.
+`packages/desktop/src/services/host_protocol.rs` owns the local Host protocol identity,
+and `packages/desktop/src/services/runtime_command_registry.rs` owns its method registry.
 See [Runtime protocol](RuntimeProtocol.md) for the stable boundary and
 [Session events](SessionEvents.md) for event projection.
 
@@ -61,7 +61,7 @@ JSON, event, host-protocol, and Electron bridge fields use exact `camelCase`. Bu
 | Runtime events and continuation | `packages/core/src/runtime/event.rs`, `packages/core/src/runtime/` |
 | Built-in model tools | `packages/core/src/tool/` |
 | Plugin, Skill, MCP, CLI, and Hook declarations | `packages/core/src/extension/` |
-| Local Host protocol | `packages/runtime/src/host_protocol.rs`, `packages/runtime/src/runtime_command_registry.rs` |
+| Local Host protocol | `packages/desktop/src/services/host_protocol.rs`, `packages/desktop/src/services/runtime_command_registry.rs` |
 | Electron bridge | `packages/desktop/src/hostContract.mjs` |
 
 ## Model input images
@@ -95,8 +95,8 @@ First-use diagnostics identify the provider and separate single-flight queue wai
 Publishers can synchronize declarations from complete, authorized JSON-RPC `tools/list` response snapshots and check the result offline:
 
 ```powershell
-cargo run --locked -p centaeris-runtime --bin centaeris-mcp-contract -- --sync <declaration.json> <server-id>=<tools-list.json>
-cargo run --locked -p centaeris-runtime --bin centaeris-mcp-contract -- --check <declaration.json>
+cargo run --locked -p centaeris-desktop-services --bin centaeris-mcp-contract -- --sync <declaration.json> <server-id>=<tools-list.json>
+cargo run --locked -p centaeris-desktop-services --bin centaeris-mcp-contract -- --check <declaration.json>
 ```
 
 Supply one snapshot binding per declared server. Paginated or incomplete snapshots fail; synchronization preserves exact description text (including surrounding whitespace) and schema array order and writes atomically. Descriptions must contain non-whitespace text and are preserved verbatim for hashing and model presentation. Live discovery comparison ignores leading/trailing whitespace and differences between whitespace runs (including indentation and line endings), while requiring the same non-whitespace words in order. Missing descriptions, changed words, tool identities, and input schemas still fail. `--write` only recomputes digests for an already complete declaration.

@@ -16,7 +16,7 @@ subdirectories are licensed under [Apache-2.0](LICENSE-APACHE):
 packages/core/
 packages/model-catalog/
 packages/mcp/
-packages/runtime_sqlite/
+packages/sqlite/
 system-skills/skill-creator/
 system-skills/skill-installer/
 ```
@@ -36,7 +36,7 @@ Third-party material remains under its stated license:
 
 - Provider logos in `packages/model-catalog/centaeris_model_catalog/logos/`
   retain their [original license and attribution notice](packages/model-catalog/centaeris_model_catalog/logos/LICENSE).
-- Bundled fonts in `packages/ui/public/` retain their SIL Open Font License
+- Bundled fonts in `packages/desktop/public/` retain their SIL Open Font License
   notices, indexed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 - Vendored license fallbacks in `packages/desktop/third_party_license_fallbacks/`
   retain their upstream notices. Dependencies retain their own licenses;

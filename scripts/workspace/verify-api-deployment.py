@@ -7,7 +7,7 @@ import sys
 from unittest.mock import patch
 import zipfile
 
-sys.path.insert(0, "/app/packages/api")
+sys.path.insert(0, "/app/packages/workspace/api")
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "api.settings")
 import django
 django.setup()

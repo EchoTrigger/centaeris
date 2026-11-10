@@ -97,7 +97,7 @@ class DeploymentContractTests(unittest.TestCase):
 
     def test_upload_settings_parse_explicit_inputs_and_reject_invalid_combinations(self):
         environment = {**os.environ, **compose_config()["services"]["api"]["environment"]}
-        environment["PYTHONPATH"] = str(ROOT / "packages/api")
+        environment["PYTHONPATH"] = str(ROOT / "packages/workspace/api")
         probe = (
             "import os,json; from cryptography.fernet import Fernet; "
             "os.environ['CREDENTIAL_ENCRYPTION_KEY']=Fernet.generate_key().decode(); "
@@ -143,9 +143,9 @@ sys.stdout.write(re.sub(pattern,replace,text))
             for tool in tools.iterdir():
                 tool.chmod(0o755)
             template = root / "nginx.template"
-            template.write_text((ROOT / "packages/web/nginx.conf").read_text(encoding="utf-8"), encoding="utf-8")
+            template.write_text((ROOT / "packages/workspace/web/nginx.conf").read_text(encoding="utf-8"), encoding="utf-8")
             output, config = root / "nginx.conf", root / "config.json"
-            source = (ROOT / "packages/web/entrypoint.sh").read_text(encoding="utf-8")
+            source = (ROOT / "packages/workspace/web/entrypoint.sh").read_text(encoding="utf-8")
             source = source.replace("/usr/share/nginx/html/config.json", shlex.quote(config.as_posix()))
             source = source.replace("/etc/nginx/upload-boundary.conf.template", shlex.quote(template.as_posix()))
             source = source.replace("/etc/nginx/conf.d/default.conf", shlex.quote(output.as_posix()))
@@ -173,7 +173,7 @@ sys.stdout.write(re.sub(pattern,replace,text))
                 environment.pop(name, None)
             else:
                 environment[name] = value
-        environment["PYTHONPATH"] = str(ROOT / "packages" / "api")
+        environment["PYTHONPATH"] = str(ROOT / "packages" / "workspace" / "api")
         probe = (
             "import json, os; from cryptography.fernet import Fernet; "
             "os.environ['CREDENTIAL_ENCRYPTION_KEY'] = Fernet.generate_key().decode(); "
@@ -452,7 +452,7 @@ sys.stdout.write(re.sub(pattern,replace,text))
                 environment["CREDENTIAL_ENCRYPTION_KEY"] = (
                     "z5wA0vTzQGNG2LkVbNqnd3CPnGds4M8Xqy9lXgkqfZI="
                 )
-                environment["PYTHONPATH"] = str(ROOT / "packages" / "api")
+                environment["PYTHONPATH"] = str(ROOT / "packages" / "workspace" / "api")
                 result = subprocess.run(
                     [os.sys.executable, "-c", probe],
                     cwd=ROOT, env=environment, capture_output=True, text=True,
@@ -460,7 +460,7 @@ sys.stdout.write(re.sub(pattern,replace,text))
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_processor_build_extra_follows_exact_device(self):
-        command = [os.sys.executable, str(ROOT / "packages/document_processor/processor_build_extra.py")]
+        command = [os.sys.executable, str(ROOT / "packages/workspace/documents/processor_build_extra.py")]
         for device, extra in (("cpu", "cpu"), ("gpu:0", "gpu")):
             result = subprocess.run([*command, device], capture_output=True, text=True, check=True)
             self.assertEqual(result.stdout.strip(), extra)

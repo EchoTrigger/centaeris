@@ -161,9 +161,9 @@ Session. `Stream` says whether the record is projected into AgentRun replay.
 | `provider_usage` | turn + run | no | `inputTokens`, `outputTokens`, `totalTokens`, `promptCacheHitTokens`, `promptCacheMissTokens` |
 | `phase_event` | turn + run | yes | `stage`, `message` |
 | `external_evidence_ref` | turn + run | yes | `objectRef`, `contentType`, `sha256`, `byteLength`, `sourceKind`, `locator` |
-| `citation_recorded` | turn + run | yes | base citation fields and the optional derived identity group defined below |
+| `source_associated` | turn + run | yes | `associationId`, `inputRef`, `sourceIdentity`, `sourceToolCallId`, `sourceToolName`, optional `range` |
 | `artifact_published` | turn + run | yes | `publicationId`, `artifactRef`, `toolCallId`, `filename`, `sizeBytes`, `sha256` |
-| `compaction` | turn + run | yes | `compactionId`, `summaryMessageId`, `summaryMarkdown`, `firstKeptMessageId`, `createdReason` |
+| `compaction` | turn + run | yes | `compactionId`, `summaryMessageId`, `summaryMarkdown`, `firstKeptMessageId`, `createdReason`, optional `contextObservations` |
 | `checkpoint_ref` | turn + run | no | `checkpointId`, `kind`, `objectRef`, `status`, `payloadSha256`, `payloadByteLength`, `updatedAtMs` |
 | `tombstone` | owning rewrite turn + run | yes | `tombstoneId`, `targetEventIds`, `reasonType` |
 | `file_fact` | turn + run | no | `schema`, `toolName`, `toolCallId`, `operation`, `path`, `targetPath`, `previousFileHash`, `readSnapshotHash`, `fileHash`, `bytesWritten`, `addedLines`, `removedLines`, `sessionId`, `executionOwner` |
@@ -352,29 +352,30 @@ only the fields the provider actually reported. `totalTokens`, when present,
 cannot be less than `inputTokens`. Cache fields are evidence only when supplied
 by the provider; zero or null is not proof of a cache hit.
 
-### Evidence, citations, and artifacts
+### Evidence, source associations, and artifacts
 
 All SHA-256 fields use `sha256:` plus 64 lowercase hexadecimal characters.
 `external_evidence_ref` identifies captured bytes and their source locator; it
 does not inline those bytes.
 
-A citation has these base fields:
+A source association binds an admitted input and immutable source revision to a
+successful tool call. Its fields are `associationId`, `inputRef`,
+`sourceIdentity`, `sourceToolCallId`, `sourceToolName`, and optional `range`.
+`sourceIdentity` contains an opaque `sourceRef`, a Host-defined `revision`, and
+`sha256`. Identity strings use NFC normalization and have no outer whitespace.
+`sourceRef` contains no path separators. `range`, when present, contains an
+inclusive one-based `startLine` and `endLine`.
 
-```text
-citationId, inputRef, ownerRef, ownerKind, displayName, evidenceKind,
-ownerSha256, sourceToolCallId, sourceToolName, locator
-```
-
-`ownerKind` is `sourceObject`, `userLibraryObject`, or `artifact`.
-`evidenceKind` is `workspaceSource`, `userProvided`, or `generatedArtifact`.
 The source tool call must exist, match the same turn and AgentRun, have the
-declared tool name, and have a successful result.
+declared tool name, and have a successful result. Repeated tool facts for the
+same `associationId` retain the original association when their source identity
+and range agree. Conflicting identities fail.
 
-`locator` is either an exact one-based line range (`startLine`, `endLine`), an
-exact one-based page range (`pageStart`, `pageEnd`), or a validated
-`KnowledgeLocatorV1`. A knowledge citation also carries all four derived
-identity fields: `ownerGeneration`, `representationId`, `specDigest`, and
-`evidenceSha256`. The group is all-or-none.
+Application services own material categories, document page, region and table
+locators, citation eligibility, and presentation metadata. Their projections
+join product records to the generic source association. Existing persisted
+product citation records require application-owned reconstruction before strict
+Core parsing.
 
 An artifact publication follows a successful source tool call. `publicationId`
 is `pub_` plus 64 lowercase hexadecimal characters; `artifactRef` starts with
@@ -387,6 +388,16 @@ bound into the sealed assistant message through `artifactRefs`.
 Compaction is additive. It records a summary and the first message retained
 after the compacted prefix; `firstKeptMessageId` is a non-empty string or null.
 It does not delete the underlying events and must preserve atomic tool groups.
+
+Manual compaction also commits `contextObservations`, the resulting active model
+messages and image source references. Recovery uses the latest committed main
+request or manual compaction context, then applies subsequent input and tool
+facts. The host commits this context before returning a successful compaction
+response. Automatic compaction records its context through the consuming main
+request.
+The host rejects a manual context commit when the Session advances during
+summary production. Conditional snapshot writes preserve a newer cache after
+the authoritative commit.
 
 A checkpoint reference never embeds a checkpoint, snapshot, message list, or
 state object. `kind` is `wait` or `recovery`; `status` is `paused_question`,

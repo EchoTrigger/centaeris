@@ -21,24 +21,35 @@ class PreparationTests(unittest.TestCase):
   manifest=root/'build.json';manifest.write_text(json.dumps({'sourceRevision':'a'*40,'sourceTree':'c'*40,'binarySha256':{n:hashlib.sha256(n.encode()).hexdigest() for n in ('runtime_server','execution_agent')},'hostSupervisorSha256':hashlib.sha256(b'environment_host_supervisor').hexdigest()}))
   tls=root/'tls';tls.mkdir()
   for name in ('model.key','model.crt','combined-ca.pem'):(tls/name).write_text('synthetic fixture certificate')
-  return ['prepare','--source',str(source),'--bins',str(bins),'--output',str(root/'result'),'--revision','a'*40,'--build-manifest',str(manifest),'--tls-dir',str(tls),'--isolation-owner',str(root/'owner.json'),'--runsc-rotation','--docker-socket','/run/owned/docker.sock','--host-socket-directory','/run/owned/host']+[v for n in ('api','worker','runtime','general','postgres','redis') for v in ('--'+n+'-image','cached-image')]
- def outputs(self):return [subprocess.CompletedProcess([],0,'','')]+[subprocess.CompletedProcess([],0,'sha256:'+'b'*64,'')]*6+[subprocess.CompletedProcess([],0,'a'*40,''),subprocess.CompletedProcess([],0,'',''),subprocess.CompletedProcess([],0,'c'*40,''),subprocess.CompletedProcess([],0,str(16*1024**3),'')]
+  return ['prepare','--source',str(source),'--bins',str(bins),'--output',str(root/'result'),'--revision','a'*40,'--build-manifest',str(manifest),'--tls-dir',str(tls),'--isolation-owner',str(root/'owner.json'),'--runsc-rotation','--docker-socket','/run/owned/docker.sock','--host-socket-directory','/run/owned/host']+[v for n in ('api','worker','runtime','general','processor','postgres','redis') for v in ('--'+n+'-image','cached-image')]
+ def outputs(self):return [subprocess.CompletedProcess([],0,'','')]+[subprocess.CompletedProcess([],0,'sha256:'+'b'*64,'')]*7+[subprocess.CompletedProcess([],0,'a'*40,''),subprocess.CompletedProcess([],0,'',''),subprocess.CompletedProcess([],0,'c'*40,''),subprocess.CompletedProcess([],0,str(16*1024**3),'')]
  def test_native_fixture_preserves_resource_charge_and_splits_maintenance_authority(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);argv=self.fixture(root)+['--execution-mode','retained']
    with patch.object(sys,'argv',argv),patch.object(prepare,'verify_owner',return_value={'root':'/run/owned'}) as owner,patch.object(prepare.subprocess,'run',side_effect=self.outputs()) as run,patch('builtins.print') as printed:prepare.main()
    config=json.loads((root/'result/compose.json').read_text());manifest=json.loads((root/'result/manifest.json').read_text());env=dict(v.split('=',1) for v in (root/'result/synthetic.env').read_text().splitlines())
    self.assertEqual(env['RUNTIME_NATIVE_SHARED_ADMISSION'],'0')
+   self.assertEqual(env['PLATFORM_MCP_ALLOWED_HOSTS'],'localhost,127.0.0.1,api')
    self.assertEqual(env['RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS'],'1');self.assertEqual(env['RUNTIME_RUNSC_IDLE_PAUSE_MS'],'3000');self.assertEqual(env['SANDBOX_PIDS_LIMIT'],'512');self.assertEqual(env['RESIDENT_GLOBAL_COUNT'],'2')
    self.assertEqual(config['services']['runtime']['user'],'0:0');self.assertIn('/run/owned/host:/run/centaeris-host:ro',config['services']['runtime']['volumes'])
    helper=str((root/'bins/execution_agent').resolve());self.assertIn(helper+':'+helper+':ro',config['services']['runtime']['volumes'])
    self.assertEqual((root/'result/general-image/execution_agent').read_bytes(),b'execution_agent')
-   for name in ('api','worker','catalog-init'):
+   for name in ('api','worker','catalog-init','processor-init'):
     effective={}
     for file in config['services'][name]['env_file']:effective.update(line.split('=',1) for line in Path(file).read_text().splitlines())
     self.assertNotIn('ENVIRONMENT_MAINTENANCE_TOKEN',effective)
    self.assertEqual(manifest['isolationOwner'],str((root/'owner.json').resolve()))
-   self.assertNotIn(env['INTERNAL_API_TOKEN'],str(printed.call_args_list));self.assertEqual(run.call_count,10);owner.assert_called_once()
+   processor=config['services']['processor-init']
+   self.assertEqual(processor['profiles'],['setup'])
+   self.assertEqual(processor['command'],['/app/.venv/bin/python','manage.py','shell','-c','from app_core.material_processor import MaterialWorker; MaterialWorker()'])
+   self.assertEqual(processor['environment']['MATERIAL_PROCESSOR_NAMESPACE'],config['name'])
+   self.assertEqual(processor['environment']['MATERIAL_PROCESSOR_IMAGE'],manifest['images']['processor']['id'])
+   self.assertEqual(processor['environment']['MATERIAL_PROCESSOR_RUNTIME'],'runsc')
+   self.assertEqual(processor['environment']['MATERIAL_PROCESSOR_DEVICE'],'cpu')
+   self.assertIn('/run/owned/docker.sock:/var/run/docker.sock',processor['volumes'])
+   self.assertNotIn('/run/owned/docker.sock:/var/run/docker.sock',config['services']['api']['volumes'])
+   self.assertNotIn('ports',processor)
+   self.assertNotIn(env['INTERNAL_API_TOKEN'],str(printed.call_args_list));self.assertEqual(run.call_count,11);owner.assert_called_once()
  def test_shared_workload_uses_default_caps_and_overlapping_slots_with_owned_model(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);argv=self.fixture(root)+['--shared-workload','--environment-count','4']

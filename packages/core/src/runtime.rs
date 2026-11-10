@@ -801,28 +801,29 @@ pub fn canonical_session_record_from_runtime_event(
                 .get("compaction")
                 .and_then(Value::as_object)
                 .ok_or_else(|| "PromptCompaction payload.compaction is required".to_string())?;
-            (
-                SessionRecordType::Compaction,
-                json!({
-                    "compactionId": compaction
-                        .get("compactionId")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| "PromptCompaction compactionId is required".to_string())?,
-                    "summaryMessageId": compaction
-                        .get("summaryMessageId")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| "PromptCompaction summaryMessageId is required".to_string())?,
-                    "summaryMarkdown": compaction
-                        .get("summaryMarkdown")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| "PromptCompaction summaryMarkdown is required".to_string())?,
-                    "firstKeptMessageId": compaction
-                        .get("firstKeptMessageId")
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                    "createdReason": "context_pressure_threshold_reached",
-                }),
-            )
+            let mut payload = json!({
+                "compactionId": compaction
+                    .get("compactionId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "PromptCompaction compactionId is required".to_string())?,
+                "summaryMessageId": compaction
+                    .get("summaryMessageId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "PromptCompaction summaryMessageId is required".to_string())?,
+                "summaryMarkdown": compaction
+                    .get("summaryMarkdown")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "PromptCompaction summaryMarkdown is required".to_string())?,
+                "firstKeptMessageId": compaction
+                    .get("firstKeptMessageId")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "createdReason": "context_pressure_threshold_reached",
+            });
+            if let Some(observations) = compaction.get("contextObservations") {
+                payload["contextObservations"] = observations.clone();
+            }
+            (SessionRecordType::Compaction, payload)
         }
         "Final" => {
             if !matches!(event.status.as_str(), "done" | "error") {
@@ -1186,11 +1187,11 @@ impl AgentRunSessionState {
                         self.artifact_fact_matches(payload)?,
                     )
                 }
-                ToolExecutionFact::CitationRecorded(payload) => {
+                ToolExecutionFact::SourceAssociated(payload) => {
                     require_tool_fact_identity(payload, result, "sourceToolCallId", true)?;
                     (
-                        SessionRecordType::CitationRecorded,
-                        self.citation_fact_matches(payload)?,
+                        SessionRecordType::SourceAssociated,
+                        self.source_association_fact_matches(payload)?,
                     )
                 }
                 ToolExecutionFact::ExternalEvidenceRef(payload) => (

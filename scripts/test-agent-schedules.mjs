@@ -1,5 +1,5 @@
 // Agent-first scheduling acceptance: natural-language prompt -> tool context -> create -> enable.
-import {createRuntimeHostTransport} from '../packages/desktop/src/runtimeHostTransport.mjs';
+import {createRuntimeHostTransport} from '../packages/desktop/src/main/services/runtimeHostTransport.mjs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';

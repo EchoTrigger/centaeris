@@ -8,7 +8,7 @@ The accepted compact light visualization reference remains the Desktop visual ba
 
 ## Shared package and host policy
 
-`packages/frontend-foundations` owns the upstream-derived Nova components,
+`packages/ui` owns the upstream-derived Nova components,
 headless Base UI entry points, Motion and panel-library entry points, theme
 declarations, the document-scoped theme store and platform-preference provider.
 Consumers import explicit package subpaths. React remains a peer dependency;
@@ -56,7 +56,7 @@ changing this setting alone does not migrate existing components.
 
 ## Desktop integration
 
-`packages/ui/src/components/ui` exposes the shared upstream-derived Nova primitives.
+`packages/ui/src/components` exposes the shared upstream-derived Nova primitives.
 Business components compose these primitives. Focus trapping, keyboard selection,
 outside dismissal and floating positioning belong to Base UI. The shadcn MIT
 notice is preserved in `THIRD_PARTY_NOTICES.md`. Element resets stay in the CSS

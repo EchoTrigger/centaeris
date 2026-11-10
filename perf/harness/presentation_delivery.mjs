@@ -1,9 +1,9 @@
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { createTranscriptViewStore } from '../../packages/web/src/chat/transcriptViewStore.ts';
-import { WorkspacePresentationController } from '../../packages/web/src/chat/workspacePresentationController.ts';
-import { streamWorkspacePresentation } from '../../packages/web/src/chat/workspacePresentationTransport.ts';
+import { createTranscriptViewStore } from '../../packages/workspace/web/src/chat/transcriptViewStore.ts';
+import { WorkspacePresentationController } from '../../packages/workspace/web/src/chat/workspacePresentationController.ts';
+import { streamWorkspacePresentation } from '../../packages/workspace/web/src/chat/workspacePresentationTransport.ts';
 
 export async function observePresentation({ baseUrl, identity, cookie, reference, slowReadMs = 0 }) {
   const origin = new URL(baseUrl);

@@ -11,16 +11,16 @@ ROOT = Path(__file__).resolve().parents[1]
 class SourceLayoutTests(unittest.TestCase):
     def test_hosted_rust_products_use_this_workspace(self):
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]
-        self.assertTrue({"packages/runtime_server", "packages/hosted_execution"}.issubset(workspace["members"]))
+        self.assertTrue({"packages/workspace/runtime", "packages/workspace/executor"}.issubset(workspace["members"]))
         for name, folder in (("centaeris-core", "core"), ("centaeris-model-catalog", "model-catalog"),
-                             ("centaeris-mcp", "mcp"), ("centaeris-runtime-sqlite", "runtime_sqlite")):
+                             ("centaeris-mcp", "mcp"), ("centaeris-runtime-sqlite", "sqlite")):
             dependency = workspace["dependencies"][name]
             self.assertEqual(dependency["path"], "packages/" + folder)
             self.assertFalse({"git", "rev", "branch"}.intersection(dependency))
 
     def test_all_node_products_share_the_root_lock(self):
         self.assertTrue((ROOT / "pnpm-lock.yaml").is_file())
-        for manifest in (ROOT / "packages").glob("*/package.json"):
+        for manifest in [*(ROOT / "packages").glob("*/package.json"), *(ROOT / "packages/workspace").glob("*/package.json")]:
             for name in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock"):
                 self.assertFalse((manifest.parent / name).exists(), str(manifest.parent / name))
         self.assertFalse((ROOT / "package-lock.json").exists())
@@ -46,12 +46,14 @@ class SourceLayoutTests(unittest.TestCase):
     def test_python_workspace_and_database_migrations_are_retained(self):
         project = tomllib.loads((ROOT / "pyproject.toml").read_text())
         self.assertEqual(project["tool"]["uv"]["workspace"]["members"],
-                         ["packages/api", "packages/document_processor", "packages/hosted_execution", "packages/worker"])
+                         ["packages/workspace/api", "packages/workspace/documents", "packages/workspace/executor", "packages/workspace/worker"])
         manifest = json.loads((ROOT / "docs/workspace/source-snapshot/manifest.json").read_text())
         import hashlib
         for entry in manifest["files"]:
             if "/migrations/" in entry["source"]:
-                self.assertEqual(hashlib.sha256((ROOT / entry["destination"]).read_bytes()).hexdigest(), entry["sha256"])
+                # The import manifest records the original destination before product regrouping.
+                destination = entry["destination"].replace("packages/api/", "packages/workspace/api/", 1)
+                self.assertEqual(hashlib.sha256((ROOT / destination).read_bytes()).hexdigest(), entry["sha256"])
 
 
 if __name__ == "__main__":

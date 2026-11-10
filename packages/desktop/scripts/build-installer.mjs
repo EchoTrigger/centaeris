@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { build, Platform, Arch } from "electron-builder";
-import configuration from "../electron-builder.config.mjs";
+import configuration from "../packaging/electron-builder.config.mjs";
 import { validateInstallerInput } from "./installer-input.mjs";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");

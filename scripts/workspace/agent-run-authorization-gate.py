@@ -17,7 +17,7 @@ def run_gate(run=run_command):
         receipt = Path(directory) / "receipt"
         env = {**os.environ, "AGENT_RUN_AUTHORIZATION_VECTORS": str(artifact),
                "AGENT_RUN_AUTHORIZATION_RECEIPT": str(receipt)}
-        run(["uv", "run", "--frozen", "--package", "api", "python", "packages/api/manage.py", "test",
+        run(["uv", "run", "--frozen", "--package", "api", "python", "packages/workspace/api/manage.py", "test",
              "app_core.test_agent_run_authorization", "--noinput", "--settings=api.migration_test_settings"], env)
         if not artifact.is_file():
             raise RuntimeError("Python emitted no authorization vectors")

@@ -52,8 +52,8 @@ assert(cache, "current Core cache gate must emit structured measurements");
 const cachePrefix = validateCachePrefixMeasurement(JSON.parse(cache[1]));
 
 const local = [
-  ...observationArtifacts(gate(core, "centaeris-runtime", "message_log::tests::local_model_request_cas_round_trips_rewrites_copies_and_deletes_with_quantified_growth", ["--exact"])),
-  ...observationArtifacts(gate(core, "centaeris-runtime", "message_log::observation_cas::tests::observation_manifest_growth_is_linear_with_early_changes_through_4095_observations", ["--exact", "--ignored"])),
+  ...observationArtifacts(gate(workspace, "centaeris-desktop-services", "message_log::tests::local_model_request_cas_round_trips_rewrites_copies_and_deletes_with_quantified_growth", ["--exact"])),
+  ...observationArtifacts(gate(workspace, "centaeris-desktop-services", "message_log::observation_cas::tests::observation_manifest_growth_is_linear_with_early_changes_through_4095_observations", ["--exact", "--ignored"])),
 ];
 const postgres = [
   ...observationArtifacts(gate(workspace, "runtime_server", "postgres_store::runtime::tests::twenty_round_model_request_storage_amplification_is_quantified", ["--exact"])),

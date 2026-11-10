@@ -19,7 +19,7 @@ incarnation, OCI security settings and cgroup membership before launching work.
 Commands, filesystem transfers, hooks and MCP use its common task protocol.
 The reviewed static helper is launched from a sealed descriptor. Workloads have
 no host control socket, journal, Docker socket or writable host cgroup mount.
-See [supervisor installation](../../../packages/hosted_execution/deploy/README.md).
+See [supervisor installation](../../../packages/workspace/executor/deploy/README.md).
 
 Docker enforces CPU, memory and PID limits. `workspaceBytes` declares the workspace
 capacity used by admission and bounds expanded file, input and recovery data.

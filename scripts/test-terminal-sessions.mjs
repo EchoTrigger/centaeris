@@ -1,6 +1,6 @@
-// Run after cargo build -p centaeris-runtime --bin centaeris-runtime.
+// Run after cargo build -p centaeris-desktop-services --bin centaeris-runtime.
 // Uses an isolated profile and two real clients; never sends model requests.
-import { createRuntimeHostTransport } from "../packages/desktop/src/runtimeHostTransport.mjs";
+import { createRuntimeHostTransport } from "../packages/desktop/src/main/services/runtimeHostTransport.mjs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";

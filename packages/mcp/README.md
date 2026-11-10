@@ -10,7 +10,7 @@ retryable failures. Discovery results are validated against Core's tool
 contract size and shape limits (`centaeris_core::tool::limits`) before a
 Plugin-declared MCP server's tools are exposed to a model.
 
-`packages/runtime` composes this adapter for the Local Runtime; `runtime_server`
+`packages/desktop/src/services` composes this adapter for the Local Runtime; `runtime_server`
 composes an MCP catalog inspection path for the hosted execution boundary. This
 package does not run a second Agent loop or redefine Core's extension
 semantics.

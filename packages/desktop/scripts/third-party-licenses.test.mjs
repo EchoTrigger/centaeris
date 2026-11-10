@@ -10,7 +10,7 @@ import { packageDirectory } from "./package-directory.mjs";
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
 
-const rolldownRoot = packageDirectory("rolldown", packageDirectory("vite", path.join(repoRoot, "packages/ui")));
+const rolldownRoot = packageDirectory("rolldown", packageDirectory("vite", path.join(repoRoot, "packages/desktop")));
 const rolldown = JSON.parse(await fs.readFile(path.join(rolldownRoot, "package.json"), "utf8"));
 const lock = await fs.readFile(path.join(repoRoot, "pnpm-lock.yaml"), "utf8");
 assert.equal(rolldown.version, "1.1.5");
@@ -60,7 +60,7 @@ test("third-party license assembly is complete and deterministic", async () => {
         `missing audited fallback ${key}`,
       );
     }
-    for (const relativeRoot of ["packages/ui", "packages/frontend-foundations"]) {
+    for (const relativeRoot of ["packages/desktop", "packages/ui"]) {
       const dependencyRoot = path.join(repoRoot, relativeRoot);
       const manifest = JSON.parse(await fs.readFile(path.join(dependencyRoot, "package.json"), "utf8"));
       for (const [name, requested] of Object.entries(manifest.dependencies)) {
@@ -85,7 +85,7 @@ test("third-party license assembly is complete and deterministic", async () => {
       repoRoot,
       hostRoot,
       tui,
-      ["centaeris-runtime", "centaeris-tui"],
+      ["centaeris-desktop-services", "centaeris-tui"],
       false,
     );
     const tuiIndex = JSON.parse(await fs.readFile(path.join(tui, "index.json"), "utf8"));

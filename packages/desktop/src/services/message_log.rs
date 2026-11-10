@@ -1,0 +1,3249 @@
+use crate::source_reconstruction::{parse_stored_record, stored_record_view};
+use centaeris_core::model::ToolCallEnvelope;
+use centaeris_core::runtime::contracts::current_timestamp_ms;
+use centaeris_core::runtime::event::RuntimeEventProjection;
+use centaeris_core::runtime::ModelRequestStartedV1;
+use centaeris_core::session::supplement::DurableTurnSupplement;
+use centaeris_core::session::transcript::{
+    parse_transcript_projection_source_envelope, parse_transcript_rebuild_ledger_fact,
+    TranscriptGenerationRebuildRequestV1, TranscriptProjectionPayloadRequirementV1,
+    TranscriptRebuildLedgerFactV1, TranscriptRebuildProjectionFactV1,
+};
+use centaeris_core::session::{
+    active_session_records, canonical_session_record, parse_manifest,
+    project_committed_session_record, reduce_events, session_record_projects_to_agent_run_stream,
+    validate_event_shape, wire_record_value, ReducedMessageRole, SequencedSessionRecord,
+    SessionLogRecord, SessionManifestV1, SessionMetadataV1, SessionRecordType,
+};
+use centaeris_core::tool::layer::ToolExecutionResult;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Mutex,
+};
+use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::{Instant, SystemTime};
+
+mod observation_cas;
+pub(crate) mod read_state;
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_DOCUMENT_READS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+static SESSION_LOG_LOCK: OnceLock<RwLock<()>> = OnceLock::new();
+static TOOL_OUTPUT_INDEX: OnceLock<RwLock<HashMap<String, ToolOutputIndex>>> = OnceLock::new();
+#[cfg(test)]
+static TOOL_OUTPUT_INDEX_BUILD_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SessionLogIdentity {
+    byte_length: u64,
+    modified_at: SystemTime,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ToolOutputStorage {
+    Inline {
+        record_offset: u64,
+        record_length: usize,
+    },
+    Spill {
+        path: PathBuf,
+        content_start: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ToolOutputLocator {
+    byte_length: u64,
+    complete: bool,
+    storage: ToolOutputStorage,
+}
+
+#[derive(Clone, Debug)]
+struct ToolOutputIndex {
+    path: PathBuf,
+    identity: SessionLogIdentity,
+    by_call_id: HashMap<String, ToolOutputLocator>,
+    by_event_id: HashMap<String, (u64, usize)>,
+}
+
+pub(crate) fn read_transcript_tool_output_range(
+    session_id: &str,
+    call_id: &str,
+    expected_byte_length: u64,
+    offset: u64,
+    max_bytes: usize,
+) -> Result<(u64, String), String> {
+    if session_id.trim().is_empty() || call_id.trim().is_empty() {
+        return Err("transcript tool output identity is required".to_string());
+    }
+    let file_path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    let locator = indexed_tool_output_locator(session_id, file_path.as_path(), call_id)?;
+    if locator.byte_length != expected_byte_length || !locator.complete {
+        return Err("transcript tool output reference is stale or incomplete".to_string());
+    }
+    if let ToolOutputStorage::Inline {
+        record_offset,
+        record_length,
+    } = locator.storage
+    {
+        let content = read_indexed_inline_tool_output(
+            file_path.as_path(),
+            call_id,
+            record_offset,
+            record_length,
+            expected_byte_length,
+        )?;
+        let offset = usize::try_from(offset)
+            .map_err(|_| "transcript tool output offset exceeds usize".to_string())?;
+        let (end, content) = centaeris_core::session::transcript::transcript_utf8_range(
+            content.as_str(),
+            offset,
+            max_bytes,
+        )?;
+        return Ok((end as u64, content.to_string()));
+    }
+    let ToolOutputStorage::Spill {
+        path,
+        content_start,
+    } = locator.storage
+    else {
+        unreachable!("inline tool output returned above")
+    };
+    let digest = Sha256::digest(session_id.as_bytes());
+    let digest_hex = format!("{digest:x}");
+    let root = std::env::temp_dir()
+        .join("agent-tool-results")
+        .join(&digest_hex[..24])
+        .canonicalize()
+        .map_err(|error| format!("resolve transcript tool output root failed: {error}"))?;
+    let path = path
+        .canonicalize()
+        .map_err(|error| format!("resolve transcript tool output failed: {error}"))?;
+    if !path.starts_with(root.as_path()) || !path.is_file() {
+        return Err("transcript tool output path escaped its session scope".to_string());
+    }
+    if offset > expected_byte_length {
+        return Err("transcript tool output offset exceeds byteLength".to_string());
+    }
+    read_utf8_file_range(
+        path.as_path(),
+        content_start,
+        expected_byte_length,
+        offset,
+        max_bytes,
+    )
+}
+
+fn session_log_identity(path: &Path) -> Result<SessionLogIdentity, String> {
+    let metadata =
+        fs::metadata(path).map_err(|error| format!("inspect transcript source failed: {error}"))?;
+    Ok(SessionLogIdentity {
+        byte_length: metadata.len(),
+        modified_at: metadata
+            .modified()
+            .map_err(|error| format!("inspect transcript source timestamp failed: {error}"))?,
+    })
+}
+
+fn tool_output_locator(
+    value: &Value,
+    record_offset: u64,
+    record_length: usize,
+) -> Result<Option<(String, ToolOutputLocator)>, String> {
+    if value.get("type").and_then(Value::as_str) != Some("tool_result") {
+        return Ok(None);
+    }
+    parse_stored_record(value).map_err(|error| error.to_string())?;
+    let payload = value.get("payload").expect("validated payload");
+    let call_id = payload
+        .get("callId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "transcript tool output callId is invalid".to_string())?;
+    let byte_length = payload
+        .get("outputByteLength")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "transcript tool output byteLength is invalid".to_string())?;
+    let complete = payload
+        .get("outputComplete")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "transcript tool output completeness is invalid".to_string())?;
+    let storage = match (
+        payload.get("fullOutputPath").and_then(Value::as_str),
+        payload.get("outputStartByte").and_then(Value::as_u64),
+    ) {
+        (Some(path), Some(content_start)) => ToolOutputStorage::Spill {
+            path: PathBuf::from(path),
+            content_start,
+        },
+        (None, None) => {
+            let content = payload
+                .get("modelContent")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "transcript tool output content is invalid".to_string())?;
+            if content.len() as u64 != byte_length {
+                return Err("transcript inline tool output length is invalid".to_string());
+            }
+            ToolOutputStorage::Inline {
+                record_offset,
+                record_length,
+            }
+        }
+        _ => return Err("transcript tool output spill identity is invalid".to_string()),
+    };
+    Ok(Some((
+        call_id.to_string(),
+        ToolOutputLocator {
+            byte_length,
+            complete,
+            storage,
+        },
+    )))
+}
+
+fn read_indexed_inline_tool_output(
+    path: &Path,
+    expected_call_id: &str,
+    record_offset: u64,
+    record_length: usize,
+    expected_byte_length: u64,
+) -> Result<String, String> {
+    let mut source =
+        fs::File::open(path).map_err(|error| format!("open transcript source failed: {error}"))?;
+    source
+        .seek(SeekFrom::Start(record_offset))
+        .map_err(|error| format!("seek transcript source failed: {error}"))?;
+    let mut bytes = vec![0; record_length];
+    source
+        .read_exact(bytes.as_mut_slice())
+        .map_err(|error| format!("read transcript source record failed: {error}"))?;
+    let value = serde_json::from_slice::<Value>(bytes.as_slice())
+        .map_err(|error| format!("decode transcript source record failed: {error}"))?;
+    parse_stored_record(&value).map_err(|error| error.to_string())?;
+    let payload = value.get("payload").expect("validated payload");
+    if payload.get("callId").and_then(Value::as_str) != Some(expected_call_id) {
+        return Err("transcript tool output index is stale".to_string());
+    }
+    let content = payload
+        .get("modelContent")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "transcript tool output content is invalid".to_string())?;
+    if content.len() as u64 != expected_byte_length {
+        return Err("transcript inline tool output length is invalid".to_string());
+    }
+    Ok(content.to_string())
+}
+
+fn indexed_tool_output_locator(
+    session_id: &str,
+    path: &Path,
+    call_id: &str,
+) -> Result<ToolOutputLocator, String> {
+    with_transcript_content_index(session_id, path, |index| {
+        index
+            .by_call_id
+            .get(call_id)
+            .cloned()
+            .ok_or_else(|| "transcript tool output reference was not found".to_string())
+    })
+}
+
+fn with_transcript_content_index<T>(
+    session_id: &str,
+    path: &Path,
+    read: impl FnOnce(&ToolOutputIndex) -> Result<T, String>,
+) -> Result<T, String> {
+    let identity = session_log_identity(path)?;
+    let indexes = TOOL_OUTPUT_INDEX.get_or_init(|| RwLock::new(HashMap::new()));
+    let mut indexes = indexes
+        .write()
+        .map_err(|_| "transcript tool output index lock is poisoned".to_string())?;
+    let current = indexes
+        .get(session_id)
+        .filter(|index| index.path == path && index.identity == identity);
+    if let Some(index) = current {
+        return read(index);
+    }
+    #[cfg(test)]
+    TOOL_OUTPUT_INDEX_BUILD_COUNT.fetch_add(1, Ordering::Relaxed);
+    let source =
+        fs::File::open(path).map_err(|error| format!("open transcript source failed: {error}"))?;
+    let mut by_call_id = HashMap::new();
+    let mut by_event_id = HashMap::new();
+    let mut source = BufReader::new(source);
+    let mut line = String::new();
+    let mut record_offset = source
+        .read_line(&mut line)
+        .map_err(|error| format!("read transcript manifest failed: {error}"))?
+        as u64;
+    loop {
+        line.clear();
+        let bytes_read = source
+            .read_line(&mut line)
+            .map_err(|error| format!("read transcript source failed: {error}"))?;
+        if bytes_read == 0 {
+            break;
+        }
+        let record = line
+            .strip_suffix('\n')
+            .ok_or_else(|| "transcript source has a truncated final line".to_string())?;
+        let value = serde_json::from_str::<Value>(record)
+            .map_err(|error| format!("decode transcript source failed: {error}"))?;
+        let value = stored_record_view(&value)?;
+        let envelope = parse_transcript_projection_source_envelope(&value)?;
+        if by_event_id
+            .insert(envelope.event_id, (record_offset, record.len()))
+            .is_some()
+        {
+            return Err("transcript source eventId is duplicated".to_string());
+        }
+        let Some((indexed_call_id, locator)) =
+            tool_output_locator(&value, record_offset, record.len())?
+        else {
+            record_offset = record_offset.saturating_add(bytes_read as u64);
+            continue;
+        };
+        if by_call_id.insert(indexed_call_id, locator).is_some() {
+            return Err("transcript tool output callId is duplicated".to_string());
+        }
+        record_offset = record_offset.saturating_add(bytes_read as u64);
+    }
+    let index = ToolOutputIndex {
+        path: path.to_path_buf(),
+        identity,
+        by_call_id,
+        by_event_id,
+    };
+    let result = read(&index);
+    while indexes.len() >= 8
+        || indexes
+            .values()
+            .map(|i| i.by_event_id.len() + i.by_call_id.len())
+            .sum::<usize>()
+            + index.by_event_id.len()
+            + index.by_call_id.len()
+            > 100_000
+    {
+        let Some(key) = indexes.keys().next().cloned() else {
+            break;
+        };
+        indexes.remove(&key);
+    }
+    if index.by_event_id.len() + index.by_call_id.len() <= 100_000 {
+        indexes.insert(session_id.to_string(), index);
+    }
+    result
+}
+
+pub(crate) fn read_transcript_event_content(
+    request: &centaeris_core::session::transcript::TranscriptContentRangeReadRequestV1,
+) -> Result<centaeris_core::session::transcript::TranscriptContentRangeV1, String> {
+    let path = existing_session_log_file_path(&request.session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_transcript_event_content_at(&path, request)
+}
+
+fn read_transcript_event_content_at(
+    path: &Path,
+    request: &centaeris_core::session::transcript::TranscriptContentRangeReadRequestV1,
+) -> Result<centaeris_core::session::transcript::TranscriptContentRangeV1, String> {
+    let (event_id, _) = request.event_reference()?;
+    let (offset, length) = with_transcript_content_index(&request.session_id, path, |index| {
+        index
+            .by_event_id
+            .get(event_id)
+            .copied()
+            .ok_or_else(|| "transcript content source was not found".to_string())
+    })?;
+    let mut source = fs::File::open(path).map_err(|error| error.to_string())?;
+    source
+        .seek(SeekFrom::Start(offset))
+        .map_err(|error| error.to_string())?;
+    let mut bytes = vec![0; length];
+    source
+        .read_exact(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    let value = serde_json::from_slice::<Value>(&bytes).map_err(|error| error.to_string())?;
+    let record = parse_stored_record(&value).map_err(|error| error.to_string())?;
+    centaeris_core::session::transcript::transcript_event_content_range(request, &record.event)
+}
+
+fn refresh_tool_output_index_after_append(
+    session_id: &str,
+    path: &Path,
+    previous_identity: &SessionLogIdentity,
+    next_identity: SessionLogIdentity,
+    locators: Vec<(String, ToolOutputLocator)>,
+    event_locators: Vec<(String, (u64, usize))>,
+) {
+    let Some(indexes) = TOOL_OUTPUT_INDEX.get() else {
+        return;
+    };
+    let Ok(mut indexes) = indexes.write() else {
+        return;
+    };
+    let Some(index) = indexes.get_mut(session_id) else {
+        return;
+    };
+    if index.path != path || &index.identity != previous_identity {
+        indexes.remove(session_id);
+        return;
+    }
+    for (call_id, locator) in locators {
+        index.by_call_id.insert(call_id, locator);
+    }
+    index.by_event_id.extend(event_locators);
+    index.identity = next_identity;
+    if index.by_event_id.len() + index.by_call_id.len() > 100_000 {
+        indexes.remove(session_id);
+    }
+}
+
+fn read_utf8_file_range(
+    path: &Path,
+    content_start: u64,
+    expected_byte_length: u64,
+    offset: u64,
+    max_bytes: usize,
+) -> Result<(u64, String), String> {
+    let requested = usize::try_from((expected_byte_length - offset).min(max_bytes as u64))
+        .map_err(|_| "transcript tool output range exceeds usize".to_string())?;
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("open transcript tool output failed: {error}"))?;
+    if file
+        .metadata()
+        .map_err(|error| format!("inspect transcript tool output failed: {error}"))?
+        .len()
+        < content_start.saturating_add(expected_byte_length)
+    {
+        return Err("transcript tool output ended before byteLength".to_string());
+    }
+    file.seek(SeekFrom::Start(content_start.saturating_add(offset)))
+        .map_err(|error| format!("seek transcript tool output failed: {error}"))?;
+    let mut bytes = vec![0_u8; requested];
+    file.read_exact(bytes.as_mut_slice())
+        .map_err(|error| format!("read transcript tool output failed: {error}"))?;
+    let valid_len = match std::str::from_utf8(bytes.as_slice()) {
+        Ok(_) => bytes.len(),
+        Err(error) if error.error_len().is_none() && error.valid_up_to() > 0 => error.valid_up_to(),
+        Err(_) => return Err("transcript tool output offset is not a UTF-8 boundary".to_string()),
+    };
+    bytes.truncate(valid_len);
+    let content = String::from_utf8(bytes)
+        .map_err(|_| "transcript tool output range is not UTF-8".to_string())?;
+    let end = offset
+        .checked_add(valid_len as u64)
+        .ok_or_else(|| "transcript tool output range overflow".to_string())?;
+    Ok((end, content))
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectedChatMessage {
+    pub(crate) id: String,
+    pub(crate) session_id: String,
+    pub(crate) turn_id: String,
+    pub(crate) role: String,
+    pub(crate) content: String,
+    pub(crate) status: Option<String>,
+    pub(crate) created_at_ms: i64,
+    pub(crate) updated_at_ms: i64,
+    pub(crate) agent_run_id: Option<String>,
+    pub(crate) image_data: Option<Value>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProjectedAgentRun {
+    pub(crate) agent_run_id: String,
+    pub(crate) session_id: String,
+    pub(crate) turn_id: String,
+    pub(crate) cwd: Option<String>,
+    pub(crate) status: String,
+    pub(crate) started_at_ms: i64,
+    pub(crate) updated_at_ms: i64,
+    pub(crate) completed_at_ms: Option<i64>,
+    pub(crate) last_event_at_ms: Option<i64>,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct IncompleteToolCall {
+    pub(crate) turn_id: String,
+    pub(crate) call: ToolCallEnvelope,
+    pub(crate) recorded_at_ms: i64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RewriteLastUserInputRequest<'a> {
+    pub(crate) session_id: &'a str,
+    pub(crate) target_chat_message_id: &'a str,
+    pub(crate) expected_tail_chat_message_id: &'a str,
+    pub(crate) new_turn_id: &'a str,
+    pub(crate) new_agent_run_id: &'a str,
+    pub(crate) new_content: &'a str,
+    pub(crate) reason: &'a str,
+    pub(crate) at_ms: i64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RewriteLastUserInputResult {
+    pub(crate) tombstoned_count: usize,
+}
+
+pub(crate) struct SessionDocument {
+    pub(crate) manifest: SessionManifestV1,
+    pub(crate) records: Vec<SessionLogRecord>,
+}
+
+pub(crate) enum CreateSessionDocumentError {
+    AlreadyExists,
+    Other(String),
+}
+
+impl From<String> for CreateSessionDocumentError {
+    fn from(error: String) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl CreateSessionDocumentError {
+    pub(crate) fn into_string(self) -> String {
+        match self {
+            Self::AlreadyExists => "session log already exists".to_string(),
+            Self::Other(error) => error,
+        }
+    }
+}
+
+pub(crate) fn create_session_document(
+    path: &Path,
+    manifest: SessionManifestV1,
+    mut metadata: SessionMetadataV1,
+) -> Result<(), CreateSessionDocumentError> {
+    let _guard = lock_session_logs_for_write().map_err(CreateSessionDocumentError::Other)?;
+    observation_cas::validate_session_log_path(path, manifest.session_id.as_str())
+        .map_err(CreateSessionDocumentError::Other)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            CreateSessionDocumentError::Other(format!("create session log parent failed: {error}"))
+        })?;
+    }
+    metadata.record_id = format!("session:{}:meta:1", manifest.session_id);
+    let metadata_record =
+        session_metadata_record(&manifest.session_id, metadata, 1, manifest.created_at_ms)?;
+    let manifest_json = serde_json::to_string(&manifest)
+        .map_err(|error| format!("serialize session manifest failed: {error}"))?;
+    let metadata_json = serde_json::to_string(
+        &wire_record_value(&SequencedSessionRecord {
+            sequence: 1,
+            event: metadata_record,
+        })
+        .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("serialize session metadata failed: {error}"))?;
+    crate::session_catalog::mark_dirty(path, &[])?;
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                CreateSessionDocumentError::AlreadyExists
+            } else {
+                CreateSessionDocumentError::Other(format!(
+                    "create session log failed for {}: {error}",
+                    path.display()
+                ))
+            }
+        })?;
+    let result = writeln!(file, "{manifest_json}")
+        .and_then(|_| writeln!(file, "{metadata_json}"))
+        .and_then(|_| file.sync_data())
+        .map_err(|error| {
+            format!(
+                "write session document failed for {}: {error}",
+                path.display()
+            )
+        });
+    if let Err(error) = result {
+        drop(file);
+        fs::remove_file(path).map_err(|cleanup_error| {
+            format!(
+                "{error}; cleanup incomplete Session log failed for {}: {cleanup_error}",
+                path.display()
+            )
+        })?;
+        return Err(CreateSessionDocumentError::Other(error));
+    }
+    Ok(())
+}
+
+pub(crate) fn append_session_metadata(
+    path: &Path,
+    session_id: &str,
+    mut metadata: SessionMetadataV1,
+    created_at_ms: i64,
+) -> Result<(), String> {
+    let session_id = required_string(session_id, "sessionId")?;
+    let _guard = lock_session_logs_for_write()?;
+    let state = read_state::take(path)?;
+    let sequence = state.sequence as u64 + 1;
+    read_state::put(path, state);
+    metadata.record_id = format!("session:{session_id}:meta:{sequence}");
+    let record = session_metadata_record(session_id.as_str(), metadata, sequence, created_at_ms)?;
+    append_incremental(path, vec![record])
+}
+
+pub(crate) fn read_session_document(path: &Path) -> Result<SessionDocument, String> {
+    let _guard = lock_session_logs_for_read()?;
+    read_session_document_unlocked(path, None)
+}
+
+pub(crate) fn delete_session_document(path: &Path, session_id: &str) -> Result<(), String> {
+    let _guard = lock_session_logs_for_write()?;
+    crate::session_catalog::mark_dirty(path, &[])?;
+    read_state::invalidate(path);
+    observation_cas::delete_session_document(path, session_id)
+}
+
+pub(crate) fn cleanup_orphan_observation_content_directories(
+    sessions_dir: &Path,
+) -> Result<(), String> {
+    let _guard = lock_session_logs_for_write()?;
+    observation_cas::cleanup_orphan_content_directories(sessions_dir)
+}
+
+pub(crate) struct ProjectedAgentContextState {
+    pub(crate) provider_usage: Option<centaeris_core::runtime::contracts::ProviderUsageV1>,
+    pub(crate) context_token_estimate: Option<u64>,
+    pub(crate) context_token_breakdown: Option<centaeris_core::runtime::ContextTokenBreakdownV1>,
+    pub(crate) context_token_estimate_updated_at_ms: Option<i64>,
+    pub(crate) latest_provider_usage_context_token_estimate: Option<u64>,
+    pub(crate) is_compacting: bool,
+}
+
+pub(crate) fn agent_run_session_state(
+    session_id: &str,
+    agent_run_id: &str,
+) -> Result<centaeris_core::session::AgentRunSessionState, String> {
+    let path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_state::run_state(&path, session_id, agent_run_id)
+}
+
+pub(crate) fn retain_active_read_state(
+    session_id: &str,
+) -> Result<read_state::ActiveReadState, String> {
+    let path = existing_session_log_file_path(session_id)?;
+    read_state::retain_active(&path)
+}
+
+pub(crate) fn append_agent_run_records(
+    session_id: &str,
+    records: Vec<SequencedSessionRecord>,
+) -> Result<Vec<String>, String> {
+    let event_ids = records
+        .iter()
+        .map(|record| record.event.event_id.clone())
+        .collect::<Vec<_>>();
+    append_records(
+        session_id,
+        records.into_iter().map(|record| record.event).collect(),
+    )?;
+    Ok(event_ids)
+}
+
+#[cfg(test)]
+pub(crate) fn append_user_message(
+    session_id: &str,
+    turn_id: &str,
+    agent_run_id: &str,
+    content: &str,
+    at_ms: i64,
+) -> Result<ProjectedChatMessage, String> {
+    let agent_run_id = required_string(agent_run_id, "agentRunId")?;
+    let mut state = agent_run_session_state(session_id, agent_run_id.as_str())?;
+    let records = state.start(
+        required_string(turn_id, "turnId")?.as_str(),
+        required_string(content, "content")?.as_str(),
+        Vec::new(),
+        at_ms,
+    )?;
+    append_agent_run_records(session_id, records)?;
+    let path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_state::message(&path, Some(&format!("message:{turn_id}:user")), None)?
+        .ok_or_else(|| format!("projected user message missing after append: {turn_id}"))
+}
+
+pub(crate) fn append_agent_run_started(
+    session_id: &str,
+    turn_id: &str,
+    agent_run_id: &str,
+    content: &str,
+    at_ms: i64,
+) -> Result<(), String> {
+    append_agent_run_started_with_attachments(
+        session_id,
+        turn_id,
+        agent_run_id,
+        content,
+        Vec::new(),
+        at_ms,
+    )
+}
+
+pub(crate) fn append_agent_run_started_with_attachments(
+    session_id: &str,
+    turn_id: &str,
+    agent_run_id: &str,
+    content: &str,
+    attachments: Vec<Value>,
+    at_ms: i64,
+) -> Result<(), String> {
+    let agent_run_id = required_string(agent_run_id, "agentRunId")?;
+    let mut state = agent_run_session_state(session_id, agent_run_id.as_str())?;
+    let records = state.start(
+        required_string(turn_id, "turnId")?.as_str(),
+        required_string(content, "content")?.as_str(),
+        attachments,
+        at_ms,
+    )?;
+    append_agent_run_records(session_id, records).map(|_| ())
+}
+
+pub(crate) fn append_turn_supplements(
+    session_id: &str,
+    turn_id: &str,
+    agent_run_id: &str,
+    supplements: &[DurableTurnSupplement],
+) -> Result<Vec<Value>, String> {
+    let mut state = agent_run_session_state(session_id, agent_run_id)?;
+    let mut records = Vec::new();
+    for supplement in supplements {
+        if let Some(record) = state.supplement(
+            turn_id,
+            supplement.supplement_id.as_str(),
+            supplement.message.as_str(),
+            supplement.created_at_ms,
+        )? {
+            records.push(record);
+        }
+    }
+    let event_ids = append_agent_run_records(session_id, records)?;
+    projected_stream_items_for_event_ids(session_id, agent_run_id, event_ids.as_slice())
+}
+
+pub(crate) fn append_agent_turn_queued(
+    session_id: &str,
+    turn_id: &str,
+    agent_run_id: &str,
+    content: &str,
+    at_ms: i64,
+) -> Result<(), String> {
+    append_agent_run_started(session_id, turn_id, agent_run_id, content, at_ms)
+}
+
+pub(crate) fn append_agent_turn_running(
+    session_id: &str,
+    agent_run_id: &str,
+) -> Result<(), String> {
+    project_agent_run(agent_run_id)?
+        .filter(|agent_run| agent_run.session_id == session_id)
+        .map(|_| ())
+        .ok_or_else(|| {
+            format!("agent_run_started missing before running agent_run transition: {agent_run_id}")
+        })
+}
+
+pub(crate) fn append_assistant_message(
+    session_id: &str,
+    turn_id: &str,
+    agent_run_id: Option<&str>,
+    content: &str,
+    status: &str,
+    at_ms: i64,
+) -> Result<ProjectedChatMessage, String> {
+    let agent_run_id = required_string(agent_run_id.unwrap_or_default(), "agentRunId")?;
+    let mut state = agent_run_session_state(session_id, agent_run_id.as_str())?;
+    if let Some(record) = state.assistant(turn_id, content, Vec::new(), status, at_ms)? {
+        append_agent_run_records(session_id, vec![record])?;
+    }
+    let path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_state::message(&path, Some(&format!("message:{turn_id}:assistant")), None)?
+        .ok_or_else(|| format!("projected assistant message missing after append: {turn_id}"))
+}
+
+pub(crate) fn append_runtime_event_fact(
+    event: &RuntimeEventProjection,
+    agent_run_id: &str,
+) -> Result<Option<Value>, String> {
+    let mut state = agent_run_session_state(event.session_id.as_str(), agent_run_id)?;
+    let Some(record) = state.record_runtime_event(event)? else {
+        return Ok(None);
+    };
+    let event_id = record.event.event_id.clone();
+    append_agent_run_records(event.session_id.as_str(), vec![record])?;
+    projected_stream_items_for_event_ids(
+        event.session_id.as_str(),
+        agent_run_id,
+        std::slice::from_ref(&event_id),
+    )?
+    .into_iter()
+    .next()
+    .map(Some)
+    .ok_or_else(|| format!("committed session_event projection missing: {event_id}"))
+}
+
+pub(crate) fn append_runtime_event_fact_if_sequence(
+    event: &RuntimeEventProjection,
+    agent_run_id: &str,
+    expected_sequence: &mut usize,
+) -> Result<(), String> {
+    let path = existing_session_log_file_path(event.session_id.as_str())?;
+    let _guard = lock_session_logs_for_write()?;
+    let mut state = read_state::run_state(&path, event.session_id.as_str(), agent_run_id)?;
+    let records = state
+        .record_runtime_event(event)?
+        .into_iter()
+        .map(|record| record.event)
+        .collect();
+    append_incremental_at_sequence(&path, records, Some(expected_sequence))
+}
+
+pub(crate) fn append_tool_call(
+    session_id: &str,
+    turn_id: &str,
+    agent_run_id: &str,
+    call: &ToolCallEnvelope,
+    provider_id: &str,
+    tool_contract_digest: &str,
+    recorded_at_ms: i64,
+) -> Result<Vec<Value>, String> {
+    let mut state = agent_run_session_state(session_id, agent_run_id)?;
+    let Some(record) = state.record_tool_call(
+        turn_id,
+        call,
+        provider_id,
+        tool_contract_digest,
+        call.name.as_str(),
+        recorded_at_ms,
+    )?
+    else {
+        return Ok(Vec::new());
+    };
+    let event_id = record.event.event_id.clone();
+    append_agent_run_records(session_id, vec![record])?;
+    projected_stream_items_for_event_ids(session_id, agent_run_id, &[event_id])
+}
+
+pub(crate) fn append_tool_result(
+    session_id: &str,
+    turn_id: &str,
+    agent_run_id: &str,
+    call: &ToolCallEnvelope,
+    result: &ToolExecutionResult,
+) -> Result<Vec<Value>, String> {
+    let mut state = agent_run_session_state(session_id, agent_run_id)?;
+    let records = state.record_tool_result(turn_id, call, result, current_timestamp_ms())?;
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let event_ids = records
+        .iter()
+        .map(|record| record.event.event_id.clone())
+        .collect::<Vec<_>>();
+    append_agent_run_records(session_id, records)?;
+    projected_stream_items_for_event_ids(session_id, agent_run_id, event_ids.as_slice())
+}
+
+pub(crate) fn append_model_request_started(
+    agent_run_id: &str,
+    started: &ModelRequestStartedV1,
+    recorded_at_ms: i64,
+) -> Result<(), String> {
+    let mut state = agent_run_session_state(started.session_id(), agent_run_id)?;
+    let records = state.record_model_request_started(started, recorded_at_ms)?;
+    append_agent_run_records(started.session_id(), records).map(|_| ())
+}
+
+pub(crate) fn append_model_request_started_if_sequence(
+    agent_run_id: &str,
+    started: &ModelRequestStartedV1,
+    recorded_at_ms: i64,
+    expected_sequence: &mut usize,
+) -> Result<(), String> {
+    let path = existing_session_log_file_path(started.session_id())?;
+    let _guard = lock_session_logs_for_write()?;
+    let mut state = read_state::run_state(&path, started.session_id(), agent_run_id)?;
+    let records = state
+        .record_model_request_started(started, recorded_at_ms)?
+        .into_iter()
+        .map(|record| record.event)
+        .collect();
+    append_incremental_at_sequence(&path, records, Some(expected_sequence))
+}
+
+pub(crate) fn append_provider_usage(
+    session_id: &str,
+    turn_id: &str,
+    agent_run_id: &str,
+    usage: &centaeris_core::runtime::contracts::ProviderTokenUsageV1,
+    recorded_at_ms: i64,
+) -> Result<(), String> {
+    let mut state = agent_run_session_state(session_id, agent_run_id)?;
+    if let Some(record) = state.provider_usage_record(turn_id, usage, recorded_at_ms)? {
+        append_agent_run_records(session_id, vec![record])?;
+    }
+    Ok(())
+}
+
+pub(crate) fn append_reasoning_block(
+    session_id: &str,
+    turn_id: &str,
+    agent_run_id: &str,
+    request_id: &str,
+    text: &str,
+    status: &str,
+) -> Result<Vec<Value>, String> {
+    let mut state = agent_run_session_state(session_id, agent_run_id)?;
+    let Some(record) =
+        state.record_reasoning_block(turn_id, request_id, text, status, current_timestamp_ms())?
+    else {
+        return Ok(Vec::new());
+    };
+    let event_id = record.event.event_id.clone();
+    append_agent_run_records(session_id, vec![record])?;
+    projected_stream_items_for_event_ids(session_id, agent_run_id, &[event_id])
+}
+
+pub(crate) fn append_committed_checkpoint_ref(
+    checkpoint: &centaeris_core::runtime::TurnCheckpointRef,
+    agent_run_id: &str,
+) -> Result<(), String> {
+    let session_id = required_string(checkpoint.session_id.as_str(), "sessionId")?;
+    let agent_run_id = required_string(agent_run_id, "agentRunId")?;
+    let mut state = agent_run_session_state(session_id.as_str(), agent_run_id.as_str())?;
+    let record = state.committed_checkpoint_ref(checkpoint)?;
+    append_agent_run_records(session_id.as_str(), vec![record]).map(|_| ())
+}
+
+pub(crate) fn append_agent_run_terminal(
+    session_id: &str,
+    turn_id: &str,
+    agent_run_id: &str,
+    status: &str,
+    error: Option<&str>,
+    at_ms: i64,
+) -> Result<ProjectedAgentRun, String> {
+    let session_id = required_string(session_id, "sessionId")?;
+    let turn_id = required_string(turn_id, "turnId")?;
+    let agent_run_id = required_string(agent_run_id, "agentRunId")?;
+    let incomplete = project_incomplete_tool_calls(session_id.as_str(), agent_run_id.as_str())?;
+    if let Some(call) = incomplete.first() {
+        return Err(format!(
+            "AgentRun terminal requires every ToolCall to be closed: callId={}",
+            call.call.id
+        ));
+    }
+    let mut state = agent_run_session_state(session_id.as_str(), agent_run_id.as_str())?;
+    let record = match status {
+        "succeeded" => state.complete(turn_id.as_str(), "finalized", at_ms)?,
+        "failed" => state.fail(
+            turn_id.as_str(),
+            "runtime_error",
+            required_string(error.unwrap_or_default(), "error")?.as_str(),
+            at_ms,
+        )?,
+        "cancelled" => state.interrupt(
+            turn_id.as_str(),
+            "cancelled",
+            error.unwrap_or("AgentRun cancelled"),
+            false,
+            at_ms,
+        )?,
+        "stopped" | "shutdown" => state.interrupt(
+            turn_id.as_str(),
+            status,
+            error.unwrap_or("AgentRun stopped"),
+            false,
+            at_ms,
+        )?,
+        other => return Err(format!("unsupported terminal agent_run status: {other}")),
+    };
+    append_agent_run_records(session_id.as_str(), vec![record])?;
+    project_agent_run(agent_run_id.as_str())?
+        .ok_or_else(|| format!("projected agent_run missing after terminal append: {agent_run_id}"))
+}
+
+pub(crate) fn append_file_mutation_pre_apply_fact(
+    session_id: &str,
+    turn_id: &str,
+    agent_run_id: &str,
+    file_fact: Value,
+) -> Result<(), String> {
+    if file_fact.get("schema").and_then(Value::as_str) != Some("file_mutation_pre_apply_fact_v1") {
+        return Err(
+            "file mutation pre-apply append requires file_mutation_pre_apply_fact_v1".to_string(),
+        );
+    }
+    let agent_run = project_agent_run(agent_run_id)?.ok_or_else(|| {
+        format!("agent_run_started missing before file mutation fact: {agent_run_id}")
+    })?;
+    if agent_run.session_id != session_id || agent_run.turn_id != turn_id {
+        return Err(format!(
+            "file mutation AgentRun identity mismatch: {agent_run_id}"
+        ));
+    }
+    let at_ms = current_timestamp_ms();
+    let mut state = agent_run_session_state(session_id, agent_run_id)?;
+    let record = state.file_fact(turn_id, file_fact, at_ms)?;
+    append_agent_run_records(session_id, vec![record])?;
+    Ok(())
+}
+
+pub(crate) fn rewrite_last_user_input(
+    request: RewriteLastUserInputRequest<'_>,
+) -> Result<RewriteLastUserInputResult, String> {
+    validate_positive_timestamp(request.at_ms, "rewrite atMs")?;
+    let session_id = required_string(request.session_id, "sessionId")?;
+    if request.reason != "rewrite_last_user_input" {
+        return Err(format!("unsupported rewrite reason: {}", request.reason));
+    }
+    let _guard = lock_session_logs_for_write()?;
+    let existing = read_session_records_unlocked(session_id.as_str())?;
+    let tombstone = centaeris_core::session::rewrite_last_user_tail_tombstone(
+        existing.as_slice(),
+        session_id.as_str(),
+        request.target_chat_message_id,
+        request.expected_tail_chat_message_id,
+        request.new_turn_id,
+        request.new_agent_run_id,
+        request.at_ms,
+    )?;
+    let tombstoned_count = tombstone
+        .payload
+        .get("targetEventIds")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .ok_or_else(|| "rewrite tombstone targetEventIds missing".to_string())?;
+    let mut state = centaeris_core::session::AgentRunSessionState::new(
+        session_id.as_str(),
+        request.new_agent_run_id,
+    )?;
+    state.record(tombstone.clone())?;
+    let started = state.start(
+        required_string(request.new_turn_id, "newTurnId")?.as_str(),
+        required_string(request.new_content, "newContent")?.as_str(),
+        Vec::new(),
+        request.at_ms.saturating_add(1),
+    )?;
+    let mut records = Vec::with_capacity(started.len() + 1);
+    records.push(tombstone);
+    records.extend(started.into_iter().map(|record| record.event));
+    append_records_unlocked(session_id.as_str(), existing.as_slice(), records, None)?;
+    Ok(RewriteLastUserInputResult { tombstoned_count })
+}
+
+pub(crate) fn project_chat_messages(session_id: &str) -> Result<Vec<ProjectedChatMessage>, String> {
+    let session_id = required_string(session_id, "sessionId")?;
+    let records = active_records(read_session_records(session_id.as_str())?.as_slice())?;
+    project_chat_messages_from_records(session_id.as_str(), records.as_slice())
+}
+
+pub(crate) fn project_agent_run_assistant(
+    session_id: &str,
+    agent_run_id: &str,
+) -> Result<Option<ProjectedChatMessage>, String> {
+    let agent_run_id = required_string(agent_run_id, "agentRunId")?;
+    let path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_state::message(&path, None, Some(&agent_run_id))
+}
+
+pub(crate) fn project_session_agent_runs(
+    session_id: &str,
+) -> Result<Vec<ProjectedAgentRun>, String> {
+    project_agent_runs_for_session(session_id)
+}
+
+pub(crate) fn restore_runtime_snapshot(
+    session_id: &str,
+) -> Result<centaeris_core::session::state::SessionStateSnapshot, String> {
+    restore_runtime_snapshot_with_sequence(session_id).map(|(snapshot, _)| snapshot)
+}
+
+pub(crate) fn restore_runtime_snapshot_with_sequence(
+    session_id: &str,
+) -> Result<(centaeris_core::session::state::SessionStateSnapshot, usize), String> {
+    let records = {
+        let _guard = lock_session_logs_for_read()?;
+        read_session_records_unlocked(session_id)?
+    };
+    let snapshot = centaeris_core::session::restore_runtime_snapshot_from_session_records(
+        session_id,
+        records.as_slice(),
+    )?;
+    Ok((snapshot, records.len()))
+}
+
+pub(crate) fn project_incomplete_tool_calls(
+    session_id: &str,
+    agent_run_id: &str,
+) -> Result<Vec<IncompleteToolCall>, String> {
+    let records = active_records(read_session_records(session_id)?.as_slice())?;
+    let projection = reduce_events(session_id, records.iter())?;
+    projection
+        .tool_calls
+        .values()
+        .filter(|call| call.agent_run_id == agent_run_id && call.result_state.is_none())
+        .map(|call| {
+            let recorded_at_ms = records
+                .iter()
+                .find(|event| {
+                    event.event_type == SessionRecordType::ToolCall
+                        && event.payload.get("callId").and_then(Value::as_str)
+                            == Some(call.call_id.as_str())
+                })
+                .map(|event| event.created_at_ms)
+                .ok_or_else(|| {
+                    format!(
+                        "incomplete ToolCall record is missing: callId={}",
+                        call.call_id
+                    )
+                })?;
+            Ok(IncompleteToolCall {
+                turn_id: call.turn_id.clone(),
+                call: ToolCallEnvelope {
+                    id: call.call_id.clone(),
+                    name: call.tool_name.clone(),
+                    args_json: serde_json::to_string(&call.normalized_input).map_err(|error| {
+                        format!("encode incomplete ToolCall input failed: {error}")
+                    })?,
+                },
+                recorded_at_ms,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn project_agent_context_state(
+    session_id: &str,
+) -> Result<ProjectedAgentContextState, String> {
+    let session_id = required_string(session_id, "sessionId")?;
+    let path = existing_session_log_file_path(&session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_state::context(&path)
+}
+
+#[cfg(test)]
+pub(crate) fn project_agent_runs() -> Result<Vec<ProjectedAgentRun>, String> {
+    crate::session_catalog::runs(None, None, false)
+}
+
+pub(crate) fn project_agent_runs_for_session(
+    session_id: &str,
+) -> Result<Vec<ProjectedAgentRun>, String> {
+    let session_id = required_string(session_id, "sessionId")?;
+    crate::session_catalog::runs(Some(&session_id), None, false)
+}
+
+pub(crate) fn project_agent_run(agent_run_id: &str) -> Result<Option<ProjectedAgentRun>, String> {
+    let agent_run_id = required_string(agent_run_id, "agentRunId")?;
+    Ok(
+        crate::session_catalog::runs(None, Some(&agent_run_id), false)?
+            .into_iter()
+            .next(),
+    )
+}
+
+pub(crate) fn terminal_agent_run_stream_projection(agent_run_id: &str) -> Result<Value, String> {
+    let agent_run = project_agent_run(agent_run_id)?
+        .ok_or_else(|| format!("AgentRun not found: {agent_run_id}"))?;
+    let path = existing_session_log_file_path(&agent_run.session_id)?;
+    let id = {
+        let _guard = lock_session_logs_for_read()?;
+        read_state::terminal_id(&path, agent_run_id)?
+    };
+    projected_stream_items_for_event_ids(&agent_run.session_id, agent_run_id, &[id])?
+        .into_iter()
+        .next()
+        .ok_or("terminal session_event projection missing".into())
+}
+
+fn project_chat_messages_from_records(
+    session_id: &str,
+    records: &[SessionLogRecord],
+) -> Result<Vec<ProjectedChatMessage>, String> {
+    let projection = reduce_events(session_id, records.iter())?;
+    let mut positions = HashMap::new();
+    for (index, record) in records.iter().enumerate() {
+        if !matches!(
+            record.event_type,
+            SessionRecordType::UserMessage | SessionRecordType::AssistantMessage
+        ) {
+            continue;
+        }
+        if let Some(message_id) = record.payload.get("messageId").and_then(Value::as_str) {
+            positions.insert(message_id.to_string(), (index, record.created_at_ms));
+        }
+    }
+    let mut messages = projection
+        .messages
+        .into_values()
+        .map(|message| {
+            let (position, created_at_ms) = positions
+                .get(message.message_id.as_str())
+                .copied()
+                .ok_or_else(|| format!("message record missing for {}", message.message_id))?;
+            let role = match message.role {
+                ReducedMessageRole::User => "user",
+                ReducedMessageRole::Assistant => "assistant",
+            };
+            Ok((
+                position,
+                ProjectedChatMessage {
+                    id: message.message_id,
+                    session_id: session_id.to_string(),
+                    turn_id: message
+                        .turn_id
+                        .ok_or_else(|| "projected message turnId is required".to_string())?,
+                    role: role.to_string(),
+                    content: message.text,
+                    status: message.status,
+                    created_at_ms,
+                    updated_at_ms: message.updated_at_ms,
+                    agent_run_id: message.agent_run_id.clone(),
+                    image_data: None,
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    messages.sort_by_key(|(position, _)| *position);
+    Ok(messages.into_iter().map(|(_, message)| message).collect())
+}
+
+pub(crate) fn project_agent_runs_from_records(
+    records: &[SessionLogRecord],
+) -> Result<Vec<ProjectedAgentRun>, String> {
+    let mut agent_runs = HashMap::<String, ProjectedAgentRun>::new();
+    let cwd = records
+        .iter()
+        .rev()
+        .find(|item| item.event_type == SessionRecordType::SessionMeta)
+        .and_then(|item| item.payload.get("cwd"))
+        .and_then(Value::as_str)
+        .ok_or("session metadata cwd is missing")?;
+    for record in records {
+        apply_run_record(&mut agent_runs, cwd, record)?;
+    }
+    let mut agent_runs = agent_runs.into_values().collect::<Vec<_>>();
+    agent_runs.sort_by(|left, right| {
+        left.started_at_ms
+            .cmp(&right.started_at_ms)
+            .then_with(|| left.agent_run_id.cmp(&right.agent_run_id))
+    });
+    Ok(agent_runs)
+}
+
+fn apply_run_record(
+    agent_runs: &mut HashMap<String, ProjectedAgentRun>,
+    cwd: &str,
+    record: &SessionLogRecord,
+) -> Result<(), String> {
+    let Some(agent_run_id) = record.agent_run_id.as_deref() else {
+        return Ok(());
+    };
+    if record.event_type == SessionRecordType::AgentRunStarted {
+        let turn_id = record
+            .turn_id
+            .clone()
+            .ok_or_else(|| format!("agent_run_started missing turnId: {}", record.event_id))?;
+        agent_runs
+            .entry(agent_run_id.to_string())
+            .or_insert_with(|| ProjectedAgentRun {
+                agent_run_id: agent_run_id.to_string(),
+                session_id: record.session_id.clone(),
+                turn_id,
+                cwd: Some(cwd.to_string()),
+                status: "running".to_string(),
+                started_at_ms: record.created_at_ms,
+                updated_at_ms: record.created_at_ms,
+                completed_at_ms: None,
+                last_event_at_ms: Some(record.created_at_ms),
+                error: None,
+            });
+    }
+    let Some(agent_run) = agent_runs.get_mut(agent_run_id) else {
+        if record.event_type == SessionRecordType::SessionMeta {
+            return Ok(());
+        }
+        return Err(format!(
+            "agent_run record appears before agent_run_started: {}",
+            record.event_id
+        ));
+    };
+    agent_run.updated_at_ms = agent_run.updated_at_ms.max(record.created_at_ms);
+    agent_run.last_event_at_ms = Some(
+        agent_run
+            .last_event_at_ms
+            .unwrap_or(0)
+            .max(record.created_at_ms),
+    );
+    match record.event_type {
+        SessionRecordType::AgentRunCompleted => {
+            agent_run.status = "succeeded".to_string();
+            agent_run.completed_at_ms = Some(record.created_at_ms);
+        }
+        SessionRecordType::AgentRunFailed => {
+            agent_run.status = "failed".to_string();
+            agent_run.error = record
+                .payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            agent_run.completed_at_ms = Some(record.created_at_ms);
+        }
+        SessionRecordType::AgentRunInterrupted => {
+            agent_run.status = match record.payload.get("reasonType").and_then(Value::as_str) {
+                Some("cancelled") => "cancelled",
+                Some("stopped" | "shutdown" | "provider_interrupted") => "stopped",
+                Some(other) => return Err(format!("unsupported interruption reason: {other}")),
+                None => return Err("agent_run_interrupted reasonType is required".to_string()),
+            }
+            .to_string();
+            agent_run.error = record
+                .payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            agent_run.completed_at_ms = Some(record.created_at_ms);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn projected_stream_items_for_event_ids(
+    session_id: &str,
+    agent_run_id: &str,
+    event_ids: &[String],
+) -> Result<Vec<Value>, String> {
+    let path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    let indices = read_state::stream_indices(&path, agent_run_id, event_ids)?;
+    let mut source = fs::File::open(&path).map_err(|e| e.to_string())?;
+    let mut items = vec![];
+    for (id, index) in indices {
+        let (offset, length) = with_transcript_content_index(session_id, &path, |lookup| {
+            lookup
+                .by_event_id
+                .get(&id)
+                .copied()
+                .ok_or("stream event location missing".into())
+        })?;
+        source
+            .seek(SeekFrom::Start(offset))
+            .map_err(|e| e.to_string())?;
+        let mut bytes = vec![0; length];
+        source.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+        let mut wires = vec![serde_json::from_slice::<Value>(&bytes).map_err(|e| e.to_string())?];
+        observation_cas::hydrate_wires(&path, session_id, &mut wires)?;
+        let record = parse_stored_record(&wires[0]).map_err(|e| e.to_string())?;
+        let projection = project_committed_session_record(&record.event, index)?;
+        items.push(serde_json::to_value(projection).map_err(|e| e.to_string())?);
+    }
+    Ok(items)
+}
+
+fn append_records(session_id: &str, records: Vec<SessionLogRecord>) -> Result<(), String> {
+    let session_id = required_string(session_id, "sessionId")?;
+    let _guard = lock_session_logs_for_write()?;
+    let path = existing_session_log_file_path(&session_id)?;
+    append_incremental(&path, records)
+}
+
+fn append_records_unlocked(
+    session_id: &str,
+    existing: &[SessionLogRecord],
+    records: Vec<SessionLogRecord>,
+    path: Option<&Path>,
+) -> Result<(), String> {
+    let known = existing
+        .iter()
+        .map(|record| (record.event_id.as_str(), record))
+        .collect::<HashMap<_, _>>();
+    let mut pending_ids = HashSet::new();
+    let mut pending = Vec::new();
+    for record in records {
+        validate_event_shape(&record)?;
+        if record.session_id != session_id {
+            return Err(format!(
+                "session record belongs to another sessionId: {}",
+                record.event_id
+            ));
+        }
+        if let Some(committed) = known.get(record.event_id.as_str()) {
+            if *committed == &record {
+                continue;
+            }
+            return Err(format!(
+                "session record eventId conflict: {}",
+                record.event_id
+            ));
+        }
+        if !pending_ids.insert(record.event_id.clone()) {
+            return Err(format!(
+                "session record batch duplicate eventId: {}",
+                record.event_id
+            ));
+        }
+        pending.push(record);
+    }
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let mut combined = existing.to_vec();
+    combined.extend(pending.iter().cloned());
+    reduce_events(session_id, combined.iter())?;
+    let file_path = path
+        .map(Path::to_path_buf)
+        .map_or_else(|| existing_session_log_file_path(session_id), Ok)?;
+    write_pending(session_id, &file_path, existing.len(), pending)
+}
+
+fn append_incremental(path: &Path, records: Vec<SessionLogRecord>) -> Result<(), String> {
+    append_incremental_at_sequence(path, records, None)
+}
+
+fn append_incremental_at_sequence(
+    path: &Path,
+    records: Vec<SessionLogRecord>,
+    expected_sequence: Option<&mut usize>,
+) -> Result<(), String> {
+    let mut state = read_state::take(path)?;
+    if expected_sequence
+        .as_deref()
+        .is_some_and(|expected| *expected != state.sequence)
+    {
+        read_state::put(path, state);
+        return Err("Session changed during context compaction".to_string());
+    }
+    let pending = state.prepare(records)?;
+    let count = pending.len();
+    if count > 0 {
+        let session_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or("invalid Session path")?;
+        write_pending(session_id, path, state.sequence, pending)?;
+        state.committed(path, count)?;
+    }
+    if let Some(expected) = expected_sequence {
+        *expected = state.sequence;
+    }
+    read_state::put(path, state);
+    Ok(())
+}
+
+fn write_pending(
+    session_id: &str,
+    file_path: &Path,
+    sequence: usize,
+    pending: Vec<SessionLogRecord>,
+) -> Result<(), String> {
+    let pending_run_ids: HashSet<String> = pending
+        .iter()
+        .filter_map(|record| record.agent_run_id.clone())
+        .collect();
+    let mut wires = pending
+        .into_iter()
+        .enumerate()
+        .map(|(offset, record)| {
+            let sequence = u64::try_from(sequence + offset + 1)
+                .map_err(|_| "session record sequence overflow".to_string())?;
+            wire_record_value(&SequencedSessionRecord {
+                sequence,
+                event: record,
+            })
+            .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let run_ids: Vec<_> = pending_run_ids.iter().map(String::as_str).collect();
+    crate::session_catalog::mark_dirty(file_path, &run_ids)?;
+    observation_cas::compact_and_install_wires(file_path, session_id, wires.as_mut_slice())?;
+    let previous_identity = session_log_identity(file_path)?;
+    let mut next_record_offset = previous_identity.byte_length;
+    let mut appended_tool_outputs = Vec::new();
+    let mut appended_events = Vec::new();
+    for wire in &wires {
+        let record_length = serde_json::to_vec(wire)
+            .map_err(|error| format!("serialize session record failed: {error}"))?
+            .len();
+        let envelope = parse_transcript_projection_source_envelope(wire)?;
+        appended_events.push((envelope.event_id, (next_record_offset, record_length)));
+        if let Some(locator) = tool_output_locator(wire, next_record_offset, record_length)? {
+            appended_tool_outputs.push(locator);
+        }
+        next_record_offset = next_record_offset
+            .checked_add(record_length as u64 + 1)
+            .ok_or_else(|| "session log byte offset overflow".to_string())?;
+    }
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(file_path)
+        .map_err(|error| {
+            format!(
+                "open session log for append failed for {}: {error}",
+                file_path.display()
+            )
+        })?;
+    for wire in &wires {
+        serde_json::to_writer(&mut file, &wire)
+            .map_err(|error| format!("serialize session record failed: {error}"))?;
+        file.write_all(b"\n")
+            .map_err(|error| format!("append session record failed: {error}"))?;
+    }
+    file.sync_data()
+        .map_err(|error| format!("sync session log failed: {error}"))?;
+    drop(file);
+    let next_identity = session_log_identity(file_path)?;
+    refresh_tool_output_index_after_append(
+        session_id,
+        file_path,
+        &previous_identity,
+        next_identity,
+        appended_tool_outputs,
+        appended_events,
+    );
+    Ok(())
+}
+
+fn read_session_records(session_id: &str) -> Result<Vec<SessionLogRecord>, String> {
+    let file_path = existing_session_log_file_path(session_id)?;
+    let _guard = lock_session_logs_for_read()?;
+    read_records_from_path_unlocked(file_path.as_path(), Some(session_id))
+}
+
+fn read_session_records_unlocked(session_id: &str) -> Result<Vec<SessionLogRecord>, String> {
+    let file_path = existing_session_log_file_path(session_id)?;
+    read_records_from_path_unlocked(file_path.as_path(), Some(session_id))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+// Bounded source adapter; the transcript page scheduler owns the production cursor lifecycle.
+#[allow(dead_code)]
+pub(crate) struct TranscriptSourceSliceCursorV1 {
+    next_byte_offset: u64,
+    next_sequence: u64,
+}
+
+impl TranscriptSourceSliceCursorV1 {
+    pub(crate) fn encode(&self) -> String {
+        format!("{}:{}", self.next_byte_offset, self.next_sequence)
+    }
+
+    pub(crate) fn decode(value: &str) -> Result<Self, String> {
+        let (offset, sequence) = value
+            .split_once(':')
+            .ok_or_else(|| "transcript source cursor is malformed".to_string())?;
+        if offset.is_empty() || sequence.is_empty() || sequence.contains(':') {
+            return Err("transcript source cursor is malformed".to_string());
+        }
+        let cursor = Self {
+            next_byte_offset: offset
+                .parse::<u64>()
+                .map_err(|_| "transcript source cursor byte offset is invalid".to_string())?,
+            next_sequence: sequence
+                .parse::<u64>()
+                .map_err(|_| "transcript source cursor sequence is invalid".to_string())?,
+        };
+        if cursor.next_sequence == 0 {
+            return Err("transcript source cursor sequence is invalid".to_string());
+        }
+        Ok(cursor)
+    }
+
+    pub(crate) fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub(crate) struct TranscriptSourceSliceV1 {
+    pub(crate) records: Vec<SequencedSessionRecord>,
+    pub(crate) cursors_after_records: Vec<TranscriptSourceSliceCursorV1>,
+    pub(crate) source_bytes_after_records: Vec<usize>,
+    pub(crate) source_bytes: usize,
+    pub(crate) oversized_record: bool,
+    pub(crate) source_eof: bool,
+    pub(crate) next_cursor: Option<TranscriptSourceSliceCursorV1>,
+}
+
+#[allow(dead_code)]
+pub(crate) fn read_transcript_source_slice(
+    path: &Path,
+    expected_session_id: &str,
+    cursor: Option<&TranscriptSourceSliceCursorV1>,
+) -> Result<TranscriptSourceSliceV1, String> {
+    let _guard = lock_session_logs_for_read()?;
+    observation_cas::validate_session_log_path(path, expected_session_id)?;
+    let file = fs::File::open(path).map_err(|error| {
+        format!(
+            "open transcript source failed for {}: {error}",
+            path.display()
+        )
+    })?;
+    let file_len = file
+        .metadata()
+        .map_err(|error| format!("read transcript source metadata failed: {error}"))?
+        .len();
+    let mut reader = BufReader::new(file);
+    let mut manifest_line = String::new();
+    let manifest_bytes = reader
+        .read_line(&mut manifest_line)
+        .map_err(|error| format!("read transcript source manifest failed: {error}"))?;
+    if manifest_bytes == 0 || !manifest_line.ends_with('\n') {
+        return Err("transcript source manifest is missing or truncated".to_string());
+    }
+    let manifest_value = serde_json::from_str::<Value>(manifest_line.trim_end_matches('\n'))
+        .map_err(|error| format!("decode transcript source manifest failed: {error}"))?;
+    let manifest = parse_manifest(&manifest_value).map_err(|error| error.to_string())?;
+    if manifest.session_id != expected_session_id {
+        return Err("transcript source manifest sessionId mismatch".to_string());
+    }
+    let manifest_end = u64::try_from(manifest_bytes)
+        .map_err(|_| "transcript source manifest offset overflow".to_string())?;
+    let (mut next_byte_offset, mut next_sequence) = cursor
+        .map(|value| (value.next_byte_offset, value.next_sequence))
+        .unwrap_or((manifest_end, 1));
+    if next_byte_offset < manifest_end || next_byte_offset > file_len || next_sequence == 0 {
+        return Err("transcript source slice cursor is invalid".to_string());
+    }
+    reader
+        .seek(SeekFrom::Start(next_byte_offset))
+        .map_err(|error| format!("seek transcript source failed: {error}"))?;
+
+    let started = Instant::now();
+    let mut records = Vec::new();
+    let mut cursors_after_records = Vec::new();
+    let mut source_bytes_after_records = Vec::new();
+    let mut source_bytes = 0usize;
+    let mut oversized_record = false;
+    let mut source_eof = next_byte_offset == file_len;
+    while !source_eof
+        && records.len()
+            < centaeris_core::session::transcript::TRANSCRIPT_PROJECTION_SLICE_MAX_EVENTS
+    {
+        if !records.is_empty()
+            && started.elapsed().as_micros()
+                >= u128::from(
+                    centaeris_core::session::transcript::TRANSCRIPT_PROJECTION_SLICE_MAX_MICROS,
+                )
+        {
+            break;
+        }
+        let line_start = next_byte_offset;
+        let mut line = String::new();
+        let line_bytes = reader
+            .read_line(&mut line)
+            .map_err(|error| format!("read transcript source record failed: {error}"))?;
+        if line_bytes == 0 {
+            source_eof = true;
+            break;
+        }
+        if !line.ends_with('\n') {
+            return Err(format!(
+                "transcript source has a truncated record at sequence {next_sequence}"
+            ));
+        }
+        let would_exceed_bytes = source_bytes
+            .checked_add(line_bytes)
+            .ok_or_else(|| "transcript source byte count overflow".to_string())?
+            > centaeris_core::session::transcript::TRANSCRIPT_PROJECTION_SLICE_MAX_BYTES;
+        if would_exceed_bytes && !records.is_empty() {
+            next_byte_offset = line_start;
+            break;
+        }
+        oversized_record = would_exceed_bytes;
+        let value =
+            serde_json::from_str::<Value>(line.trim_end_matches('\n')).map_err(|error| {
+                format!("decode transcript source sequence {next_sequence} failed: {error}")
+            })?;
+        let mut wires = vec![value];
+        observation_cas::hydrate_wires(path, expected_session_id, wires.as_mut_slice())?;
+        let record = parse_stored_record(&wires.remove(0)).map_err(|error| {
+            format!("decode transcript source sequence {next_sequence} failed: {error}")
+        })?;
+        if record.sequence != next_sequence {
+            return Err(format!(
+                "transcript source sequence gap: expected {next_sequence}, got {}",
+                record.sequence
+            ));
+        }
+        if record.event.session_id != expected_session_id {
+            return Err("transcript source contains a cross-session record".to_string());
+        }
+        source_bytes = source_bytes
+            .checked_add(line_bytes)
+            .ok_or_else(|| "transcript source byte count overflow".to_string())?;
+        next_byte_offset = next_byte_offset
+            .checked_add(
+                u64::try_from(line_bytes)
+                    .map_err(|_| "transcript source record offset overflow".to_string())?,
+            )
+            .ok_or_else(|| "transcript source record offset overflow".to_string())?;
+        next_sequence = next_sequence
+            .checked_add(1)
+            .ok_or_else(|| "transcript source sequence overflow".to_string())?;
+        records.push(record);
+        cursors_after_records.push(TranscriptSourceSliceCursorV1 {
+            next_byte_offset,
+            next_sequence,
+        });
+        source_bytes_after_records.push(source_bytes);
+        source_eof = next_byte_offset == file_len;
+    }
+    let next_cursor = (!source_eof).then_some(TranscriptSourceSliceCursorV1 {
+        next_byte_offset,
+        next_sequence,
+    });
+    Ok(TranscriptSourceSliceV1 {
+        records,
+        cursors_after_records,
+        source_bytes_after_records,
+        source_bytes,
+        oversized_record,
+        source_eof,
+        next_cursor,
+    })
+}
+
+pub(crate) fn transcript_source_high_water(
+    path: &Path,
+    expected_session_id: &str,
+) -> Result<u64, String> {
+    let _guard = lock_session_logs_for_read()?;
+    observation_cas::validate_session_log_path(path, expected_session_id)?;
+    let mut file = fs::File::open(path).map_err(|error| {
+        format!(
+            "open transcript source failed for {}: {error}",
+            path.display()
+        )
+    })?;
+    let file_len = file
+        .metadata()
+        .map_err(|error| format!("read transcript source metadata failed: {error}"))?
+        .len();
+    if file_len == 0 {
+        return Err("transcript source manifest is missing".to_string());
+    }
+    file.seek(SeekFrom::End(-1))
+        .map_err(|error| format!("seek transcript source tail failed: {error}"))?;
+    let mut tail = [0_u8; 1];
+    file.read_exact(&mut tail)
+        .map_err(|error| format!("read transcript source tail failed: {error}"))?;
+    if tail[0] != b'\n' {
+        return Err("transcript source has a truncated final line".to_string());
+    }
+
+    let line_end = file_len - 1;
+    let mut search_end = line_end;
+    let mut line_start = 0_u64;
+    while search_end > 0 {
+        let chunk_start = search_end.saturating_sub(8 * 1024);
+        let chunk_len = usize::try_from(search_end - chunk_start)
+            .map_err(|_| "transcript source tail chunk exceeds usize".to_string())?;
+        let mut chunk = vec![0_u8; chunk_len];
+        file.seek(SeekFrom::Start(chunk_start))
+            .map_err(|error| format!("seek transcript source tail chunk failed: {error}"))?;
+        file.read_exact(chunk.as_mut_slice())
+            .map_err(|error| format!("read transcript source tail chunk failed: {error}"))?;
+        if let Some(index) = chunk.iter().rposition(|byte| *byte == b'\n') {
+            line_start = chunk_start
+                .checked_add(index as u64)
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| "transcript source tail offset overflow".to_string())?;
+            break;
+        }
+        search_end = chunk_start;
+    }
+    file.seek(SeekFrom::Start(line_start))
+        .map_err(|error| format!("seek transcript source last line failed: {error}"))?;
+    let line_len = usize::try_from(line_end - line_start)
+        .map_err(|_| "transcript source last line exceeds usize".to_string())?;
+    let mut line = vec![0_u8; line_len];
+    file.read_exact(line.as_mut_slice())
+        .map_err(|error| format!("read transcript source last line failed: {error}"))?;
+    let value = serde_json::from_slice::<Value>(line.as_slice())
+        .map_err(|error| format!("decode transcript source last line failed: {error}"))?;
+    if line_start == 0 {
+        let manifest = parse_manifest(&value).map_err(|error| error.to_string())?;
+        if manifest.session_id != expected_session_id {
+            return Err("transcript source manifest sessionId mismatch".to_string());
+        }
+        return Ok(0);
+    }
+    if value.get("schemaVersion").and_then(Value::as_str)
+        != Some(centaeris_core::session::SESSION_EVENT_SCHEMA_VERSION)
+    {
+        return Err("transcript source last record schemaVersion is invalid".to_string());
+    }
+    let sequence = value
+        .get("sequence")
+        .and_then(Value::as_u64)
+        .filter(|sequence| *sequence > 0)
+        .ok_or_else(|| "transcript source last record sequence is invalid".to_string())?;
+    if value.get("sessionId").and_then(Value::as_str) != Some(expected_session_id) {
+        return Err("transcript source contains a cross-session record".to_string());
+    }
+    // Deliberately do not hydrate or validate the payload. This tail lookup owns
+    // only the source envelope waterline; projection validates the full record
+    // later inside its bounded source slice.
+    Ok(sequence)
+}
+
+pub(crate) fn scan_transcript_rebuild_ledger(
+    path: &Path,
+    request: &TranscriptGenerationRebuildRequestV1,
+    visitor: &mut dyn FnMut(TranscriptRebuildLedgerFactV1) -> Result<(), String>,
+) -> Result<(), String> {
+    scan_transcript_rebuild_wires(path, request, &mut |value, _, _| {
+        visitor(parse_transcript_rebuild_ledger_fact(value)?)
+    })
+}
+
+pub(crate) fn scan_transcript_rebuild_projection(
+    path: &Path,
+    request: &TranscriptGenerationRebuildRequestV1,
+    visitor: &mut dyn FnMut(TranscriptRebuildProjectionFactV1) -> Result<(), String>,
+) -> Result<(), String> {
+    scan_transcript_rebuild_wires(path, request, &mut |value, cursor, _| {
+        let envelope = parse_transcript_projection_source_envelope(value)?;
+        let fact = match envelope.transcript_payload_requirement()? {
+            TranscriptProjectionPayloadRequirementV1::FullRecord => {
+                let mut hydrated = vec![value.clone()];
+                observation_cas::hydrate_wires(
+                    path,
+                    request.session_id.as_str(),
+                    hydrated.as_mut_slice(),
+                )?;
+                TranscriptRebuildProjectionFactV1::FullRecord {
+                    record: parse_stored_record(&hydrated[0]).map_err(|error| error.to_string())?,
+                    stream_id: "session-jsonl.v1".to_string(),
+                    applied_cursor: cursor.to_string(),
+                }
+            }
+            TranscriptProjectionPayloadRequirementV1::EnvelopeOnly
+            | TranscriptProjectionPayloadRequirementV1::TombstoneRebuild => {
+                TranscriptRebuildProjectionFactV1::Envelope {
+                    envelope,
+                    stream_id: "session-jsonl.v1".to_string(),
+                    applied_cursor: cursor.to_string(),
+                }
+            }
+        };
+        visitor(fact)
+    })
+}
+
+fn scan_transcript_rebuild_wires(
+    path: &Path,
+    request: &TranscriptGenerationRebuildRequestV1,
+    visitor: &mut dyn FnMut(&Value, &str, u64) -> Result<(), String>,
+) -> Result<(), String> {
+    request.validate()?;
+    let target = request
+        .target_source_high_water
+        .parse::<u64>()
+        .map_err(|_| "transcript rebuild target sourceHighWater is invalid".to_string())?;
+    let _guard = lock_session_logs_for_read()?;
+    observation_cas::validate_session_log_path(path, request.session_id.as_str())?;
+    let file = fs::File::open(path)
+        .map_err(|error| format!("open transcript rebuild source failed: {error}"))?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    let manifest_bytes = reader
+        .read_line(&mut line)
+        .map_err(|error| format!("read transcript rebuild manifest failed: {error}"))?;
+    if manifest_bytes == 0 || !line.ends_with('\n') {
+        return Err("transcript rebuild source manifest is missing or truncated".to_string());
+    }
+    let manifest_value = serde_json::from_str::<Value>(line.trim_end_matches(['\r', '\n']))
+        .map_err(|error| format!("decode transcript rebuild manifest failed: {error}"))?;
+    let manifest = parse_manifest(&manifest_value).map_err(|error| error.to_string())?;
+    if manifest.session_id != request.session_id {
+        return Err("transcript rebuild source manifest sessionId mismatch".to_string());
+    }
+    let mut byte_offset = u64::try_from(manifest_bytes)
+        .map_err(|_| "transcript rebuild source offset overflow".to_string())?;
+    for expected_sequence in 1..=target {
+        line.clear();
+        let bytes = reader
+            .read_line(&mut line)
+            .map_err(|error| format!("read transcript rebuild source failed: {error}"))?;
+        if bytes == 0 || !line.ends_with('\n') {
+            return Err(
+                "transcript rebuild source did not reach targetSourceHighWater".to_string(),
+            );
+        }
+        byte_offset = byte_offset
+            .checked_add(
+                u64::try_from(bytes)
+                    .map_err(|_| "transcript rebuild source offset overflow".to_string())?,
+            )
+            .ok_or_else(|| "transcript rebuild source offset overflow".to_string())?;
+        let value = serde_json::from_str::<Value>(line.trim_end_matches(['\r', '\n'])).map_err(
+            |error| format!("decode transcript rebuild record {expected_sequence} failed: {error}"),
+        )?;
+        let value = stored_record_view(&value)?;
+        let envelope = parse_transcript_projection_source_envelope(&value)?;
+        if envelope.session_id != request.session_id || envelope.sequence != expected_sequence {
+            return Err("transcript rebuild source identity or sequence mismatch".to_string());
+        }
+        let cursor = TranscriptSourceSliceCursorV1 {
+            next_byte_offset: byte_offset,
+            next_sequence: expected_sequence.saturating_add(1),
+        }
+        .encode();
+        visitor(&value, cursor.as_str(), expected_sequence)?;
+    }
+    Ok(())
+}
+
+fn read_records_from_path_unlocked(
+    path: &Path,
+    expected_session_id: Option<&str>,
+) -> Result<Vec<SessionLogRecord>, String> {
+    Ok(read_session_document_unlocked(path, expected_session_id)?.records)
+}
+
+pub(crate) fn read_session_document_unlocked(
+    path: &Path,
+    expected_session_id: Option<&str>,
+) -> Result<SessionDocument, String> {
+    #[cfg(test)]
+    TEST_DOCUMENT_READS.with(|reads| reads.borrow_mut().push(path.to_path_buf()));
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("read session log failed for {}: {error}", path.display()))?;
+    if contents.is_empty() {
+        return Err(format!(
+            "session log manifest is missing: {}",
+            path.display()
+        ));
+    }
+    if !contents.ends_with('\n') {
+        return Err(format!(
+            "session log has a truncated final line: {}",
+            path.display()
+        ));
+    }
+    let mut manifest = None;
+    let mut wires = Vec::new();
+    for (index, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            return Err(format!(
+                "session log contains blank line: {}:{}",
+                path.display(),
+                index + 1
+            ));
+        }
+        let value = serde_json::from_str::<Value>(line)
+            .map_err(|error| format!("decode session log line {} failed: {error}", index + 1))?;
+        if index == 0 {
+            let parsed = parse_manifest(&value).map_err(|error| error.to_string())?;
+            if expected_session_id.is_some_and(|expected| parsed.session_id != expected) {
+                return Err("session manifest sessionId mismatch".to_string());
+            }
+            manifest = Some(parsed);
+            continue;
+        }
+        wires.push(value);
+    }
+    let manifest = manifest.ok_or_else(|| "session log manifest is missing".to_string())?;
+    observation_cas::validate_session_log_path(path, manifest.session_id.as_str())?;
+    observation_cas::hydrate_wires(path, manifest.session_id.as_str(), wires.as_mut_slice())?;
+    let mut records = Vec::with_capacity(wires.len());
+    let mut ids = HashSet::new();
+    for (index, value) in wires.into_iter().enumerate() {
+        let sequenced = parse_stored_record(&value).map_err(|error| error.to_string())?;
+        let expected_sequence =
+            u64::try_from(index + 1).map_err(|_| "session record sequence overflow".to_string())?;
+        if sequenced.sequence != expected_sequence {
+            return Err(format!(
+                "session record sequence gap: expected {expected_sequence}, got {}",
+                sequenced.sequence
+            ));
+        }
+        let record = sequenced.event;
+        if expected_session_id.is_some_and(|expected| record.session_id != expected) {
+            return Err(format!(
+                "session log cross-session record: {}",
+                record.event_id
+            ));
+        }
+        if !ids.insert(record.event_id.clone()) {
+            return Err(format!(
+                "session log duplicate eventId: {}",
+                record.event_id
+            ));
+        }
+        records.push(record);
+    }
+    Ok(SessionDocument { manifest, records })
+}
+
+fn active_records(records: &[SessionLogRecord]) -> Result<Vec<SessionLogRecord>, String> {
+    let Some(session_id) = records.first().map(|record| record.session_id.as_str()) else {
+        return Ok(Vec::new());
+    };
+    active_session_records(session_id, records)
+}
+
+fn existing_session_log_file_path(session_id: &str) -> Result<PathBuf, String> {
+    crate::session_catalog::path_unlocked(
+        &crate::user_data_layout::sessions_dir_path(),
+        session_id,
+    )?
+    .ok_or_else(|| format!("session log not found: {session_id}"))
+}
+
+fn session_metadata_record(
+    session_id: &str,
+    metadata: SessionMetadataV1,
+    sequence: u64,
+    created_at_ms: i64,
+) -> Result<SessionLogRecord, String> {
+    metadata.validate()?;
+    canonical_session_record(
+        format!("evt:session_meta:{session_id}:{sequence}"),
+        SessionRecordType::SessionMeta,
+        session_id,
+        None,
+        None,
+        created_at_ms,
+        serde_json::to_value(metadata)
+            .map_err(|error| format!("serialize session metadata failed: {error}"))?,
+    )
+}
+
+pub(crate) fn lock_session_logs_for_read() -> Result<RwLockReadGuard<'static, ()>, String> {
+    SESSION_LOG_LOCK
+        .get_or_init(|| RwLock::new(()))
+        .read()
+        .map_err(|_| "session log lock poisoned".to_string())
+}
+
+fn lock_session_logs_for_write() -> Result<RwLockWriteGuard<'static, ()>, String> {
+    SESSION_LOG_LOCK
+        .get_or_init(|| RwLock::new(()))
+        .write()
+        .map_err(|_| "session log lock poisoned".to_string())
+}
+
+fn required_string(raw: &str, field: &str) -> Result<String, String> {
+    raw.trim()
+        .is_empty()
+        .then(|| format!("{field} is required"))
+        .map_or_else(|| Ok(raw.trim().to_string()), Err)
+}
+
+fn validate_positive_timestamp(value: i64, field: &str) -> Result<(), String> {
+    (value > 0)
+        .then_some(())
+        .ok_or_else(|| format!("{field} must be positive unix milliseconds"))
+}
+
+#[cfg(test)]
+pub(crate) fn test_env_mutex() -> &'static Mutex<()> {
+    static TEST_ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+    TEST_ENV_MUTEX.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use centaeris_core::extension::composition::{
+        resolve_agent_composition, AgentCompositionInputsV1, ResolvedModelBindingV1,
+    };
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn tool_output_range_reads_only_one_bounded_utf8_page_from_a_large_file() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "centaeris-tool-output-range-{}-{nonce}.log",
+            std::process::id()
+        ));
+        let mut file = fs::File::create(path.as_path()).expect("create large output");
+        file.write_all("a".repeat(64 * 1024 - 2).as_bytes())
+            .expect("write prefix");
+        file.write_all("世".as_bytes())
+            .expect("write utf8 boundary");
+        file.set_len(50 * 1024 * 1024)
+            .expect("extend sparse output");
+        drop(file);
+
+        let (end, content) = read_utf8_file_range(
+            path.as_path(),
+            0,
+            50 * 1024 * 1024,
+            0,
+            centaeris_core::session::transcript::TRANSCRIPT_CONTENT_RANGE_MAX_BYTES,
+        )
+        .expect("read bounded page");
+        assert_eq!(content.len(), 64 * 1024 - 2);
+        assert_eq!(end, 64 * 1024 - 2);
+        fs::remove_file(path).expect("cleanup large output");
+    }
+
+    #[test]
+    fn tool_output_locator_scans_a_stable_session_log_only_once() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let session_id = format!("session-tool-output-index-{nonce}");
+        let path = std::env::temp_dir().join(format!(
+            "centaeris-tool-output-index-{}-{nonce}.jsonl",
+            std::process::id()
+        ));
+        let event = centaeris_core::session::parse_event(&json!({
+            "schemaVersion": "session.event.v1",
+            "eventVersion": 1,
+            "type": "tool_result",
+            "eventId": "event-tool-result",
+            "sessionId": session_id,
+            "turnId": "turn-1",
+            "agentRunId": "run-1",
+            "createdAtMs": 1,
+            "payload": {
+                "callId": "call-1",
+                "toolName": "read_file",
+                "resultState": "successWithOutput",
+                "modelContent": "contents",
+                "fullOutputPath": null,
+                "outputStartByte": null,
+                "outputByteLength": 8,
+                "outputComplete": true,
+                "summary": "Read README.md",
+                "operations": [],
+                "modelInputImages": [],
+                "latencyMs": 1
+            }
+        }))
+        .expect("tool result event");
+        let wire = wire_record_value(&SequencedSessionRecord { sequence: 1, event })
+            .expect("tool result wire");
+        let mut file = fs::File::create(path.as_path()).expect("create session log");
+        file.write_all(b"{}\n").expect("write placeholder manifest");
+        serde_json::to_writer(&mut file, &wire).expect("write tool result");
+        file.write_all(b"\n").expect("write record newline");
+        file.sync_all().expect("sync session log");
+        drop(file);
+
+        let builds_before = TOOL_OUTPUT_INDEX_BUILD_COUNT.load(Ordering::Relaxed);
+        let first = indexed_tool_output_locator(session_id.as_str(), path.as_path(), "call-1")
+            .expect("first lookup");
+        let second = indexed_tool_output_locator(session_id.as_str(), path.as_path(), "call-1")
+            .expect("cached lookup");
+        assert_eq!(first, second);
+        assert_eq!(
+            TOOL_OUTPUT_INDEX_BUILD_COUNT.load(Ordering::Relaxed) - builds_before,
+            1,
+            "a stable session log must not be rescanned for each output page"
+        );
+        let request = centaeris_core::session::transcript::TranscriptContentRangeReadRequestV1 {
+            schema: "transcript.content.range.read.v1".into(),
+            session_id: session_id.clone(),
+            projection_version: "transcript.projection.v1".into(),
+            projection_generation: "generation-1".into(),
+            ref_id: "session-event:event-tool-result:summary".into(),
+            revision: "2".into(),
+            byte_length: "14".into(),
+            offset: "0".into(),
+            max_bytes: 8,
+        };
+        let first_text = read_transcript_event_content_at(&path, &request).unwrap();
+        assert_eq!(first_text.content, "Read REA");
+        let second_text = read_transcript_event_content_at(
+            &path,
+            &centaeris_core::session::transcript::TranscriptContentRangeReadRequestV1 {
+                offset: first_text.end_offset,
+                ..request
+            },
+        )
+        .unwrap();
+        assert_eq!(second_text.content, "DME.md");
+        assert_eq!(
+            TOOL_OUTPUT_INDEX_BUILD_COUNT.load(Ordering::Relaxed) - builds_before,
+            1
+        );
+        fs::remove_file(path).expect("cleanup session log");
+    }
+
+    #[test]
+    fn transcript_backfill_reader_resumes_in_bounded_forward_slices() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-transcript-slice-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create root");
+        let session_id = "session-transcript-slice";
+        let path = root.join(format!("{session_id}.jsonl"));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .expect("create session log");
+        serde_json::to_writer(
+            &mut file,
+            &SessionManifestV1::new(session_id, 1, "test").expect("manifest"),
+        )
+        .expect("write manifest");
+        file.write_all(b"\n").expect("manifest newline");
+        for sequence in 1..=130_u64 {
+            let event = centaeris_core::session::parse_event(&json!({
+                "schemaVersion": "session.event.v1",
+                "eventVersion": 1,
+                "type": "user_message",
+                "eventId": format!("event-{sequence}"),
+                "sessionId": session_id,
+                "turnId": format!("turn-{sequence}"),
+                "agentRunId": format!("run-{sequence}"),
+                "createdAtMs": sequence,
+                "payload": {
+                    "messageId": format!("message-{sequence}"),
+                    "text": "bounded",
+                    "attachments": []
+                }
+            }))
+            .expect("event");
+            let wire = wire_record_value(&SequencedSessionRecord { sequence, event })
+                .expect("wire record");
+            serde_json::to_writer(&mut file, &wire).expect("write record");
+            file.write_all(b"\n").expect("record newline");
+        }
+        file.sync_all().expect("sync log");
+        drop(file);
+
+        let mut cursor = None;
+        let mut sequences = Vec::new();
+        let mut slices = 0;
+        loop {
+            let slice = read_transcript_source_slice(&path, session_id, cursor.as_ref())
+                .expect("read bounded slice");
+            assert!(!slice.records.is_empty());
+            assert!(
+                slice.records.len()
+                    <= centaeris_core::session::transcript::TRANSCRIPT_PROJECTION_SLICE_MAX_EVENTS
+            );
+            assert!(
+                slice.source_bytes
+                    <= centaeris_core::session::transcript::TRANSCRIPT_PROJECTION_SLICE_MAX_BYTES
+                    || slice.oversized_record
+            );
+            sequences.extend(slice.records.iter().map(|record| record.sequence));
+            slices += 1;
+            if slice.source_eof {
+                break;
+            }
+            cursor = slice.next_cursor;
+            assert!(cursor.is_some());
+        }
+        assert!(slices >= 2);
+        assert_eq!(sequences, (1..=130_u64).collect::<Vec<_>>());
+
+        let first = read_transcript_source_slice(&path, session_id, None)
+            .expect("read first bounded slice");
+        assert_eq!(first.records.len(), first.cursors_after_records.len());
+        assert_eq!(first.records.len(), first.source_bytes_after_records.len());
+        let committed_index = first.records.len() / 2;
+        let committed_sequence = first.records[committed_index].sequence;
+        let resumed = read_transcript_source_slice(
+            &path,
+            session_id,
+            Some(&first.cursors_after_records[committed_index]),
+        )
+        .expect("resume after an individual committed record");
+        assert_eq!(
+            resumed.records.first().map(|record| record.sequence),
+            Some(committed_sequence + 1)
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn transcript_source_high_water_reads_only_the_compacted_tail_envelope() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-transcript-high-water-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create root");
+        let session_id = "session-transcript-high-water";
+        let path = root.join(format!("{session_id}.jsonl"));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .expect("create session log");
+        serde_json::to_writer(
+            &mut file,
+            &SessionManifestV1::new(session_id, 1, "test").expect("manifest"),
+        )
+        .expect("write manifest");
+        file.write_all(b"\n").expect("manifest newline");
+        serde_json::to_writer(
+            &mut file,
+            &json!({
+                "schemaVersion": "session.event.v1",
+                "eventVersion": 1,
+                "sequence": 1,
+                "type": "model_request_started",
+                "eventId": "event-compacted-tail",
+                "sessionId": session_id,
+                "turnId": "turn-1",
+                "agentRunId": "run-1",
+                "createdAtMs": 1,
+                "payload": {
+                    "observations": {
+                        "manifestDigest": format!("sha256:{}", "a".repeat(64))
+                    }
+                }
+            }),
+        )
+        .expect("write compacted tail envelope");
+        file.write_all(b"\n").expect("record newline");
+        file.sync_all().expect("sync log");
+        drop(file);
+
+        assert_eq!(
+            transcript_source_high_water(&path, session_id).expect("read envelope waterline"),
+            1
+        );
+        let request = TranscriptGenerationRebuildRequestV1 {
+            session_id: session_id.to_string(),
+            projection_generation: "generation-rebuild".to_string(),
+            target_source_high_water: "1".to_string(),
+            expected_current_generation: Some("generation-old".to_string()),
+        };
+        let mut facts = Vec::new();
+        scan_transcript_rebuild_ledger(&path, &request, &mut |fact| {
+            facts.push(fact);
+            Ok(())
+        })
+        .expect("ledger pass must not hydrate compacted observations");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].envelope.sequence, 1);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn active_read_state_owners_survive_idle_churn_and_release_retention() {
+        let _guard = test_env_mutex().lock().unwrap_or_else(|p| p.into_inner());
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-active-read-state-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
+        let day = root.join("26").join("10").join("07");
+        fs::create_dir_all(&day).unwrap();
+        let create = |id: &str| {
+            let path = day.join(format!("{id}.jsonl"));
+            create_session_document(
+                &path,
+                SessionManifestV1::new(id, 1, centaeris_core::runtime::CORE_PROTOCOL_VERSION)
+                    .unwrap(),
+                SessionMetadataV1 {
+                    record_id: String::new(),
+                    title: id.into(),
+                    cwd: root.to_string_lossy().into(),
+                    session_kind: "main".into(),
+                    parent_session_id: None,
+                    runtime_job_id: None,
+                    sort_order: Some(0),
+                    is_pinned: false,
+                    is_unread: false,
+                },
+            )
+            .map_err(CreateSessionDocumentError::into_string)
+            .unwrap();
+            read_state::context(&path).unwrap();
+            path
+        };
+        let active = create("session-active-retention");
+        let owner = read_state::retain_active(&active).unwrap();
+        let other_owner = read_state::retain_active(&active).unwrap();
+        let churn = |batch: usize| {
+            for index in 0..10 {
+                create(&format!("session-idle-{batch}-{index}"));
+            }
+        };
+        churn(0);
+        TEST_DOCUMENT_READS.with(|reads| reads.borrow_mut().clear());
+        read_state::context(&active).unwrap();
+        assert!(TEST_DOCUMENT_READS.with(|reads| reads.borrow().is_empty()));
+        drop(owner);
+        churn(1);
+        TEST_DOCUMENT_READS.with(|reads| reads.borrow_mut().clear());
+        read_state::context(&active).unwrap();
+        assert!(TEST_DOCUMENT_READS.with(|reads| reads.borrow().is_empty()));
+        drop(other_owner);
+        churn(2);
+        TEST_DOCUMENT_READS.with(|reads| reads.borrow_mut().clear());
+        read_state::context(&active).unwrap();
+        assert_eq!(
+            TEST_DOCUMENT_READS.with(|reads| reads.borrow().clone()),
+            vec![active.clone()]
+        );
+        read_state::invalidate(&active);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn large_repeated_observations_keep_incremental_run_projection_available() {
+        let _guard = test_env_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-observation-read-state-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let session_id = "session-large-shared-observations";
+        let run_id = "run-large-shared-observations";
+        let turn_id = "turn-large-shared-observations";
+        let day = root.join("26").join("10").join("07");
+        fs::create_dir_all(&day).unwrap();
+        let path = day.join(format!("{session_id}.jsonl"));
+        create_session_document(
+            &path,
+            SessionManifestV1::new(
+                session_id,
+                1,
+                centaeris_core::runtime::CORE_PROTOCOL_VERSION,
+            )
+            .unwrap(),
+            SessionMetadataV1 {
+                record_id: String::new(),
+                title: "large observations".into(),
+                cwd: root.to_string_lossy().into(),
+                session_kind: "main".into(),
+                parent_session_id: None,
+                runtime_job_id: None,
+                sort_order: Some(0),
+                is_pinned: false,
+                is_unread: false,
+            },
+        )
+        .map_err(CreateSessionDocumentError::into_string)
+        .unwrap();
+        let started = canonical_session_record(
+            "event:large-observations:started",
+            SessionRecordType::AgentRunStarted,
+            session_id,
+            Some(turn_id.into()),
+            Some(run_id.into()),
+            2,
+            json!({"userObjective": "Keep the validated run projection incremental."}),
+        )
+        .unwrap();
+        append_incremental(&path, vec![started]).unwrap();
+        let observation = json!({"kind": "system_prompt", "content": "x".repeat(1024 * 1024)});
+        let mut last = None;
+        for round in 0..24 {
+            let record = canonical_session_record(
+                format!("event:large-observations:{round}"),
+                SessionRecordType::ModelRequestStarted,
+                session_id,
+                Some(turn_id.into()),
+                Some(run_id.into()),
+                3 + round,
+                test_model_request_payload(vec![observation.clone()], &format!("request-{round}")),
+            )
+            .unwrap();
+            append_incremental(&path, vec![record.clone()]).unwrap();
+            last = Some(record);
+        }
+        TEST_DOCUMENT_READS.with(|reads| reads.borrow_mut().clear());
+        let warm = read_state::run_state(&path, session_id, run_id).unwrap();
+        let _ = read_state::catalog_projection(&path, &root, None).unwrap();
+        let reads = TEST_DOCUMENT_READS.with(|reads| reads.borrow().clone());
+        assert!(
+            reads.is_empty(),
+            "warm validated state replayed the full historical observations: {reads:?}"
+        );
+        append_incremental(&path, vec![last.clone().unwrap()]).unwrap();
+        let mut conflict = last.clone().unwrap();
+        conflict.payload["observations"][0]["content"] = json!("different content");
+        assert!(append_incremental(&path, vec![conflict])
+            .unwrap_err()
+            .contains("eventId conflict"));
+        read_state::invalidate(&path);
+        let cold = read_state::run_state(&path, session_id, run_id).unwrap();
+        assert_eq!(warm.next_sequence(), cold.next_sequence());
+        let state = read_state::take(&path).unwrap();
+        let mut expected_sequence = state.sequence;
+        read_state::put(&path, state);
+        let original_sequence = expected_sequence;
+        let mut accepted = last.clone().unwrap();
+        accepted.event_id = "event:checked-model-request".into();
+        accepted.payload["requestId"] = json!("request-checked");
+        append_incremental_at_sequence(&path, vec![accepted.clone()], Some(&mut expected_sequence))
+            .unwrap();
+        assert_eq!(expected_sequence, original_sequence + 1);
+        let mut concurrent = accepted.clone();
+        concurrent.event_id = "event:concurrent-model-request".into();
+        concurrent.payload["requestId"] = json!("request-concurrent");
+        append_incremental(&path, vec![concurrent]).unwrap();
+        let before_rejected_append = fs::read(&path).unwrap();
+        accepted.event_id = "event:stale-model-request".into();
+        accepted.payload["requestId"] = json!("request-stale");
+        assert!(append_incremental_at_sequence(
+            &path,
+            vec![accepted],
+            Some(&mut expected_sequence),
+        )
+        .unwrap_err()
+        .contains("Session changed during context compaction"));
+        assert_eq!(expected_sequence, original_sequence + 1);
+        assert_eq!(fs::read(&path).unwrap(), before_rejected_append);
+        read_state::invalidate(&path);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn test_model_request_payload(observations: Vec<Value>, request_id: &str) -> Value {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let composition = resolve_agent_composition(
+            AgentCompositionInputsV1 {
+                prompt_digest: digest.clone(),
+                model_binding: ResolvedModelBindingV1 {
+                    provider_id: "test-provider".to_string(),
+                    model_name: "test-model".to_string(),
+                    wire_protocol: "test-wire".to_string(),
+                    config_digest: digest.clone(),
+                },
+                skill_catalog_digest: digest.clone(),
+                plugin_activation_digest: digest.clone(),
+                hook_composition_digest: digest.clone(),
+                execution_profile_digest: digest,
+                policy_version: "test-v1".to_string(),
+            },
+            std::iter::empty(),
+        )
+        .expect("composition");
+        json!({
+            "requestId": request_id,
+            "purpose": "main",
+            "loopIndex": 0,
+            "toolChoice": {"type": "none"},
+            "maxOutputTokens": 1024,
+            "promptCacheKey": null,
+            "promptCacheRetention": null,
+            "preparedPromptSchema": "prepared_prompt.v1",
+            "contextTokenEstimate": 0,
+            "contextTokenBreakdown": {
+                "systemPromptTokens": 0,
+                "systemToolTokens": 0,
+                "mcpToolTokens": 0,
+                "skillsTokens": 0,
+                "messageTokens": 0,
+                "mcpTools": [],
+            },
+            "agentComposition": composition,
+            "observations": observations,
+        })
+    }
+
+    fn copy_directory_files(source: &Path, destination: &Path) {
+        fs::create_dir(destination).expect("create copied CAS directory");
+        for entry in fs::read_dir(source).expect("read source CAS directory") {
+            let entry = entry.expect("source CAS entry");
+            assert!(entry.path().is_file());
+            fs::copy(entry.path(), destination.join(entry.file_name())).expect("copy CAS content");
+        }
+    }
+
+    #[test]
+    fn canonical_fixture_projects_start_success_failure_and_interruption() {
+        let fixtures = [
+            (
+                "succeeded",
+                "turn-success",
+                "agent_run-success",
+                "done",
+                "AgentRunCompleted",
+            ),
+            (
+                "failed",
+                "turn-failed",
+                "agent_run-failed",
+                "error",
+                "AgentRunFailed",
+            ),
+            (
+                "cancelled",
+                "turn-cancelled",
+                "agent_run-cancelled",
+                "error",
+                "AgentRunInterrupted",
+            ),
+        ];
+        for (terminal_status, turn_id, agent_run_id, assistant_status, terminal_type) in fixtures {
+            let mut state =
+                centaeris_core::session::AgentRunSessionState::new("session", agent_run_id)
+                    .unwrap();
+            let mut records = state
+                .start(turn_id, "objective", Vec::new(), 1)
+                .unwrap()
+                .into_iter()
+                .map(|record| record.event)
+                .collect::<Vec<_>>();
+            records.push(
+                state
+                    .assistant(turn_id, "answer", Vec::new(), assistant_status, 2)
+                    .unwrap()
+                    .unwrap()
+                    .event,
+            );
+            let terminal = match terminal_status {
+                "succeeded" => state.complete(turn_id, "finalized", 3).unwrap(),
+                "failed" => state.fail(turn_id, "runtime_error", "failed", 3).unwrap(),
+                "cancelled" => state
+                    .interrupt(turn_id, "cancelled", "cancelled", false, 3)
+                    .unwrap(),
+                _ => unreachable!(),
+            };
+            records.push(terminal.event);
+            let projection = reduce_events("session", records.iter()).unwrap();
+            assert_eq!(projection.messages.len(), 2);
+            let assistant =
+                serde_json::to_value(project_committed_session_record(&records[2], 2).unwrap())
+                    .unwrap();
+            assert_eq!(assistant["type"], "session_event");
+            assert_eq!(assistant["event"]["type"], "Final");
+            assert!(project_committed_session_record(records.last().unwrap(), 0).is_ok());
+            assert_eq!(
+                serde_json::to_value(
+                    project_committed_session_record(records.last().unwrap(), 3).unwrap()
+                )
+                .unwrap()["event"]["type"],
+                terminal_type
+            );
+        }
+    }
+
+    #[test]
+    fn model_request_records_are_not_agent_run_stream_records() {
+        assert!(!session_record_projects_to_agent_run_stream(
+            SessionRecordType::ModelRequestStarted
+        ));
+        assert!(session_record_projects_to_agent_run_stream(
+            SessionRecordType::ToolResult
+        ));
+    }
+
+    #[test]
+    fn agent_run_projection_skips_corrupt_session_logs() {
+        let _guard = test_env_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-agent-run-projection-isolation-{}-{nonce}",
+            std::process::id()
+        ));
+        let sessions_dir = root.join("sessions");
+        let day_dir = sessions_dir.join("26").join("09").join("01");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(day_dir.as_path()).expect("session day directory");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory");
+        let previous_data_dir = std::env::var_os("CENTAERIS_DESKTOP_DATA_DIR");
+        let previous_sessions_dir = std::env::var_os("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR");
+        std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", &root);
+        std::env::set_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", &sessions_dir);
+
+        let session_id = "session-agent-run-projection-healthy";
+        create_session_document(
+            day_dir.join(format!("{session_id}.jsonl")).as_path(),
+            SessionManifestV1::new(
+                session_id,
+                1,
+                centaeris_core::runtime::CORE_PROTOCOL_VERSION,
+            )
+            .expect("manifest"),
+            SessionMetadataV1 {
+                record_id: String::new(),
+                title: "healthy".to_string(),
+                cwd: workspace.to_string_lossy().to_string(),
+                session_kind: "main".to_string(),
+                parent_session_id: None,
+                runtime_job_id: None,
+                sort_order: Some(0),
+                is_pinned: false,
+                is_unread: false,
+            },
+        )
+        .map_err(CreateSessionDocumentError::into_string)
+        .expect("healthy session");
+        append_agent_run_started(session_id, "turn-healthy", "agent-run-healthy", "test", 2)
+            .expect("agent run");
+        let corrupt_path = day_dir.join("session-corrupt.jsonl");
+        fs::write(
+            &corrupt_path,
+            "{\"schemaVersion\":\"session.manifest.v2\"}\n",
+        )
+        .expect("corrupt fixture");
+
+        let projected = project_agent_runs().expect("isolated projection");
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].agent_run_id, "agent-run-healthy");
+        assert!(corrupt_path.is_file());
+
+        match previous_data_dir {
+            Some(value) => std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", value),
+            None => std::env::remove_var("CENTAERIS_DESKTOP_DATA_DIR"),
+        }
+        match previous_sessions_dir {
+            Some(value) => std::env::set_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", value),
+            None => std::env::remove_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR"),
+        }
+        fs::remove_dir_all(root).expect("remove root");
+    }
+
+    #[test]
+    fn reasoning_commit_round_trips_through_local_log_and_stream() {
+        let _guard = test_env_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-agent-run-projection-isolation-{}-{nonce}",
+            std::process::id()
+        ));
+        let sessions_dir = root.join("sessions");
+        let day_dir = sessions_dir.join("26").join("09").join("01");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(day_dir.as_path()).expect("session day directory");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory");
+        let previous_data_dir = std::env::var_os("CENTAERIS_DESKTOP_DATA_DIR");
+        let previous_sessions_dir = std::env::var_os("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR");
+        std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", &root);
+        std::env::set_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", &sessions_dir);
+
+        let session_id = "session-agent-run-projection-healthy";
+        create_session_document(
+            day_dir.join(format!("{session_id}.jsonl")).as_path(),
+            SessionManifestV1::new(
+                session_id,
+                1,
+                centaeris_core::runtime::CORE_PROTOCOL_VERSION,
+            )
+            .expect("manifest"),
+            SessionMetadataV1 {
+                record_id: String::new(),
+                title: "healthy".to_string(),
+                cwd: workspace.to_string_lossy().to_string(),
+                session_kind: "main".to_string(),
+                parent_session_id: None,
+                runtime_job_id: None,
+                sort_order: Some(0),
+                is_pinned: false,
+                is_unread: false,
+            },
+        )
+        .map_err(CreateSessionDocumentError::into_string)
+        .expect("healthy session");
+        append_agent_run_started(session_id, "turn-healthy", "agent-run-healthy", "test", 2)
+            .expect("agent run");
+        let request = canonical_session_record(
+            "request-event".to_string(),
+            SessionRecordType::ModelRequestStarted,
+            session_id,
+            Some("turn-healthy".to_string()),
+            Some("agent-run-healthy".to_string()),
+            3,
+            test_model_request_payload(vec![], "request-1"),
+        )
+        .unwrap();
+        append_records(session_id, vec![request]).unwrap();
+        let emitted = append_reasoning_block(
+            session_id,
+            "turn-healthy",
+            "agent-run-healthy",
+            "request-1",
+            " inspect\n",
+            "done",
+        )
+        .unwrap();
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0]["event"]["type"], "Reasoning");
+        assert_eq!(emitted[0]["event"]["payload"]["text"], " inspect\n");
+        assert!(append_reasoning_block(
+            session_id,
+            "turn-healthy",
+            "agent-run-healthy",
+            "request-1",
+            " inspect\n",
+            "done"
+        )
+        .unwrap()
+        .is_empty());
+        assert!(append_reasoning_block(
+            session_id,
+            "turn-healthy",
+            "agent-run-healthy",
+            "request-1",
+            "changed",
+            "done"
+        )
+        .is_err());
+        let restored =
+            read_session_document(day_dir.join(format!("{session_id}.jsonl")).as_path()).unwrap();
+        assert_eq!(
+            restored
+                .records
+                .iter()
+                .filter(|record| record.event_type == SessionRecordType::ReasoningBlock)
+                .count(),
+            1
+        );
+        let replay = projected_stream_items_for_event_ids(
+            session_id,
+            "agent-run-healthy",
+            &[restored.records.last().unwrap().event_id.clone()],
+        )
+        .unwrap();
+        assert_eq!(replay, emitted);
+        let request = canonical_session_record(
+            "request-live".to_string(),
+            SessionRecordType::ModelRequestStarted,
+            session_id,
+            Some("turn-healthy".to_string()),
+            Some("agent-run-healthy".to_string()),
+            5,
+            test_model_request_payload(vec![], "request-live"),
+        )
+        .unwrap();
+        append_records(session_id, vec![request]).unwrap();
+        let thinking = json!({"blockId":"reasoning:request-live","requestId":"request-live","text":"partial thinking"});
+        let mut journal = crate::runtime_server::LiveTextJournal::create(
+            crate::user_data_layout::runtime_live_text_journal_dir_path().as_path(),
+            crate::runtime_server::LiveTextJournalKey {
+                session_id: session_id.into(),
+                turn_id: "turn-healthy".into(),
+                agent_run_id: "agent-run-healthy".into(),
+            },
+        )
+        .unwrap();
+        journal
+            .append(&[
+                crate::runtime_server::LiveTextOperation::Reasoning {
+                    text: thinking.to_string(),
+                },
+                crate::runtime_server::LiveTextOperation::Revision { text: "1".into() },
+            ])
+            .unwrap();
+        let live =
+            crate::agent_runs::live_snapshot(crate::agent_runs::AgentRunLiveSnapshotRequest {
+                agent_run_id: "agent-run-healthy".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            live.live_snapshot.unwrap()["event"]["payload"]["reasoning"],
+            thinking
+        );
+        drop(journal);
+        crate::agent_runtime::recover_unsealed_live_text_journals().unwrap();
+        let recovered =
+            read_session_document(day_dir.join(format!("{session_id}.jsonl")).as_path()).unwrap();
+        let partial = recovered
+            .records
+            .iter()
+            .find(|record| {
+                record.event_type == SessionRecordType::ReasoningBlock
+                    && record.payload["requestId"] == "request-live"
+            })
+            .unwrap();
+        assert_eq!(partial.payload["status"], "interrupted");
+        assert_eq!(partial.payload["text"], "partial thinking");
+        assert!(
+            crate::agent_runs::live_snapshot(crate::agent_runs::AgentRunLiveSnapshotRequest {
+                agent_run_id: "agent-run-healthy".into(),
+            })
+            .unwrap()
+            .live_snapshot
+            .is_none()
+        );
+        match previous_data_dir {
+            Some(value) => std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", value),
+            None => std::env::remove_var("CENTAERIS_DESKTOP_DATA_DIR"),
+        }
+        match previous_sessions_dir {
+            Some(value) => std::env::set_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", value),
+            None => std::env::remove_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR"),
+        }
+        fs::remove_dir_all(root).expect("remove root");
+    }
+
+    #[test]
+    fn local_model_request_cas_round_trips_rewrites_copies_and_deletes_with_quantified_growth() {
+        let guard = test_env_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "centaeris-local-observation-cas-{}-{nonce}",
+            std::process::id()
+        ));
+        let sessions_dir = root.join("sessions");
+        let day_dir = sessions_dir.join("26").join("08").join("31");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(day_dir.as_path()).expect("Session day directory");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory");
+        let previous_data_dir = std::env::var_os("CENTAERIS_DESKTOP_DATA_DIR");
+        let previous_sessions_dir = std::env::var_os("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR");
+        std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", &root);
+        std::env::set_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", &sessions_dir);
+
+        let result = (|| -> Result<(), String> {
+            let session_id = "session-local-observation-cas";
+            let turn_id = "turn-local-observation-cas";
+            let agent_run_id = "agent-run-local-observation-cas";
+            let log_path = day_dir.join(format!("{session_id}.jsonl"));
+            create_session_document(
+                log_path.as_path(),
+                SessionManifestV1::new(
+                    session_id,
+                    1,
+                    centaeris_core::runtime::CORE_PROTOCOL_VERSION,
+                )
+                .map_err(|error| error.to_string())?,
+                SessionMetadataV1 {
+                    record_id: String::new(),
+                    title: "observation CAS".to_string(),
+                    cwd: workspace.to_string_lossy().to_string(),
+                    session_kind: "main".to_string(),
+                    parent_session_id: None,
+                    runtime_job_id: None,
+                    sort_order: Some(0),
+                    is_pinned: false,
+                    is_unread: false,
+                },
+            )
+            .map_err(CreateSessionDocumentError::into_string)?;
+            append_agent_run_started(session_id, turn_id, agent_run_id, "objective", 2)?;
+
+            let system_prompt = "system:".to_string() + "s".repeat(16 * 1024).as_str();
+            let tool_catalog = json!({
+                "kind": "tool_catalog",
+                "toolDefinitions": [{
+                    "name": "search_laws",
+                    "description": "d".repeat(12 * 1024),
+                    "inputSchema": {"type": "object"},
+                }],
+            });
+            let mut context = Vec::new();
+            let mut last_record = None;
+            let mut old_model_bytes = 0usize;
+            let mut old_model_rows = 0usize;
+            let mut old_sequence = 4u64;
+            for round in 1..=20u64 {
+                for role in ["user", "assistant"] {
+                    context.push(json!({
+                        "kind": "message",
+                        "message": {
+                            "messageId": format!("message-{round}-{role}"),
+                            "role": role,
+                            "content": format!("{round}:{role}:{}", "m".repeat(512)),
+                        },
+                    }));
+                }
+                let observations = std::iter::once(json!({
+                    "kind": "system_prompt",
+                    "content": system_prompt,
+                }))
+                .chain(context.iter().cloned())
+                .chain(std::iter::once(tool_catalog.clone()))
+                .collect::<Vec<_>>();
+                let request_id = format!("request-{round}");
+                for (index, observation) in observations.iter().enumerate() {
+                    let mut payload = observation.as_object().expect("observation object").clone();
+                    payload.insert(
+                        "observationId".to_string(),
+                        json!(format!("{request_id}:observation:{index}")),
+                    );
+                    old_model_bytes += serde_json::to_vec(&json!({
+                        "schemaVersion": "session.event.v1",
+                        "eventVersion": 1,
+                        "sequence": old_sequence,
+                        "type": "model_observation",
+                        "eventId": format!("event:{request_id}:observation:{index}"),
+                        "sessionId": session_id,
+                        "turnId": turn_id,
+                        "agentRunId": agent_run_id,
+                        "createdAtMs": 2 + round,
+                        "payload": payload,
+                    }))
+                    .expect("encode old observation")
+                    .len()
+                        + 1;
+                    old_model_rows += 1;
+                    old_sequence += 1;
+                }
+                let payload = test_model_request_payload(observations, request_id.as_str());
+                let record = canonical_session_record(
+                    format!("event:model-request:{round}"),
+                    SessionRecordType::ModelRequestStarted,
+                    session_id,
+                    Some(turn_id.to_string()),
+                    Some(agent_run_id.to_string()),
+                    2 + i64::try_from(round).expect("round timestamp"),
+                    payload.clone(),
+                )?;
+                let mut old_boundary_payload = payload;
+                old_boundary_payload
+                    .as_object_mut()
+                    .expect("request payload")
+                    .remove("observations");
+                let old_boundary_value = json!({
+                    "schemaVersion": "session.event.v1",
+                    "eventVersion": 1,
+                    "sequence": old_sequence,
+                    "type": "model_request_started",
+                    "eventId": format!("event:model-request:{round}"),
+                    "sessionId": session_id,
+                    "turnId": turn_id,
+                    "agentRunId": agent_run_id,
+                    "createdAtMs": 2 + round,
+                    "payload": old_boundary_payload,
+                });
+                old_model_bytes += serde_json::to_vec(&old_boundary_value)
+                    .expect("encode old request boundary")
+                    .len()
+                    + 1;
+                old_model_rows += 1;
+                old_sequence += 1;
+                append_records(session_id, vec![record.clone()])?;
+                last_record = Some(record);
+            }
+
+            let raw = fs::read_to_string(log_path.as_path())
+                .map_err(|error| format!("read raw local Session log failed: {error}"))?;
+            if raw.contains(system_prompt.as_str())
+                || !raw.contains("manifestDigest")
+                || raw.contains("contentDigest")
+            {
+                return Err("local Session JSONL did not compact model observations".to_string());
+            }
+            let raw_model_lines = raw
+                .lines()
+                .filter(|line| line.contains("\"type\":\"model_request_started\""))
+                .collect::<Vec<_>>();
+            if raw_model_lines.len() != 20 {
+                return Err("local Session JSONL model request row count mismatch".to_string());
+            }
+            let content_dir =
+                observation_cas::content_directory_path(log_path.as_path(), session_id)?;
+            let content_files = fs::read_dir(content_dir.as_path())
+                .map_err(|error| format!("read local observation CAS failed: {error}"))?
+                .map(|entry| {
+                    entry
+                        .map(|entry| entry.path())
+                        .map_err(|error| error.to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let manifest_count = content_files
+                .iter()
+                .filter(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with("manifest-"))
+                })
+                .count();
+            let unique_contents = content_files.len() - manifest_count;
+            if unique_contents != 42 || manifest_count != 20 {
+                return Err(format!(
+                    "local observation CAS unique content mismatch: {}",
+                    unique_contents
+                ));
+            }
+            let hydrated = read_session_document(log_path.as_path())?;
+            let model_records = hydrated
+                .records
+                .iter()
+                .filter(|record| record.event_type == SessionRecordType::ModelRequestStarted)
+                .collect::<Vec<_>>();
+            if model_records.len() != 20
+                || model_records
+                    .last()
+                    .and_then(|record| record.payload["observations"].as_array().map(Vec::len))
+                    != Some(42)
+            {
+                return Err("local observation CAS hydration lost order or content".to_string());
+            }
+            let restored = restore_runtime_snapshot(session_id)?;
+            if restored.messages.len() != 40 {
+                return Err("local observation CAS runtime restore lost messages".to_string());
+            }
+
+            let before_idempotent = fs::metadata(log_path.as_path())
+                .map_err(|error| format!("stat Session log failed: {error}"))?
+                .len();
+            append_records(
+                session_id,
+                vec![last_record.expect("last model request record")],
+            )?;
+            if fs::metadata(log_path.as_path())
+                .map_err(|error| format!("stat idempotent Session log failed: {error}"))?
+                .len()
+                != before_idempotent
+            {
+                return Err("idempotent model request append grew Session JSONL".to_string());
+            }
+
+            let copy_dir = root.join("copy");
+            fs::create_dir(copy_dir.as_path())
+                .map_err(|error| format!("create copy directory failed: {error}"))?;
+            let copied_log = copy_dir.join(format!("{session_id}.jsonl"));
+            fs::copy(log_path.as_path(), copied_log.as_path())
+                .map_err(|error| format!("copy Session log failed: {error}"))?;
+            copy_directory_files(
+                content_dir.as_path(),
+                copied_log.with_extension("observations").as_path(),
+            );
+            read_session_document(copied_log.as_path())?;
+            let incomplete_copy_dir = root.join("incomplete-copy");
+            fs::create_dir(incomplete_copy_dir.as_path())
+                .map_err(|error| format!("create incomplete copy directory failed: {error}"))?;
+            let incomplete_log = incomplete_copy_dir.join(format!("{session_id}.jsonl"));
+            fs::copy(log_path.as_path(), incomplete_log.as_path())
+                .map_err(|error| format!("copy incomplete Session log failed: {error}"))?;
+            if read_session_document(incomplete_log.as_path()).is_ok() {
+                return Err("Session JSONL copy without CAS did not fail loudly".to_string());
+            }
+
+            append_assistant_message(session_id, turn_id, Some(agent_run_id), "done", "done", 30)?;
+            append_agent_run_terminal(session_id, turn_id, agent_run_id, "succeeded", None, 31)?;
+            rewrite_last_user_input(RewriteLastUserInputRequest {
+                session_id,
+                target_chat_message_id: format!("message:{turn_id}:user").as_str(),
+                expected_tail_chat_message_id: format!("message:{turn_id}:assistant").as_str(),
+                new_turn_id: "turn-local-observation-cas-rewrite",
+                new_agent_run_id: "agent-run-local-observation-cas-rewrite",
+                new_content: "rewritten objective",
+                reason: "rewrite_last_user_input",
+                at_ms: 32,
+            })?;
+            read_session_document(log_path.as_path())?;
+
+            let new_jsonl_model_bytes = raw_model_lines
+                .iter()
+                .map(|line| line.len() + 1)
+                .sum::<usize>();
+            let cas_bytes = content_files.iter().try_fold(0usize, |total, path| {
+                let length = fs::metadata(path)
+                    .map_err(|error| format!("stat observation CAS content failed: {error}"))?
+                    .len();
+                usize::try_from(length)
+                    .map(|length| total.saturating_add(length))
+                    .map_err(|_| "observation CAS byte count overflow".to_string())
+            })?;
+            let new_physical_bytes = new_jsonl_model_bytes.saturating_add(cas_bytes);
+            println!(
+                "RUNTIME_01_ARTIFACT {}",
+                json!({
+                    "gate": "local_storage_lifecycle_20_round", "measurement": "actual_jsonl_and_cas_file_bytes",
+                    "rounds": 20, "oldModelRows": old_model_rows, "newModelRows": 20,
+                    "uniqueContents": unique_contents, "manifestNodes": manifest_count,
+                    "oldPhysicalObjects": old_model_rows, "newPhysicalObjects": 20 + content_files.len(),
+                    "oldModelBytes": old_model_bytes, "newJsonlModelBytes": new_jsonl_model_bytes,
+                    "casBytes": cas_bytes, "newPhysicalBytes": new_physical_bytes,
+                })
+            );
+            if old_model_rows != 480
+                || 20 + content_files.len() != 82
+                || new_physical_bytes.saturating_mul(5) >= old_model_bytes
+            {
+                return Err("local model observation amplification target was not met".to_string());
+            }
+
+            crate::session_files::SessionFiles::new(sessions_dir.clone()).delete(session_id)?;
+            if log_path.exists() || content_dir.exists() {
+                return Err("Session delete left local observation CAS behind".to_string());
+            }
+            let orphan = day_dir.join("session-orphan.observations");
+            fs::create_dir(orphan.as_path())
+                .map_err(|error| format!("create orphan CAS fixture failed: {error}"))?;
+            fs::write(orphan.join(format!("{}.json", "a".repeat(64))), "{}")
+                .map_err(|error| format!("write orphan CAS fixture failed: {error}"))?;
+            let catalog = crate::session_files::SessionFiles::new(sessions_dir.clone());
+            catalog.list()?;
+            if !orphan.exists() {
+                return Err("ordinary catalog reads must not perform orphan GC".into());
+            }
+            catalog.diagnostics()?;
+            if orphan.exists() {
+                return Err("orphan observation CAS cleanup did not run".to_string());
+            }
+            Ok(())
+        })();
+
+        if let Some(previous) = previous_data_dir {
+            std::env::set_var("CENTAERIS_DESKTOP_DATA_DIR", previous);
+        } else {
+            std::env::remove_var("CENTAERIS_DESKTOP_DATA_DIR");
+        }
+        if let Some(previous) = previous_sessions_dir {
+            std::env::set_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR", previous);
+        } else {
+            std::env::remove_var("CENTAERIS_MESSAGE_LOG_SESSIONS_DIR");
+        }
+        let _ = fs::remove_dir_all(root);
+        drop(guard);
+        result.expect("local observation CAS lifecycle");
+    }
+}

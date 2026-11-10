@@ -1,6 +1,5 @@
 """Validate container build inputs and checked-out source provenance."""
-import json
-import os
+import importlib.util
 from pathlib import Path
 import re
 import shlex
@@ -14,44 +13,46 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def rendered_config():
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    environment = {**os.environ, "CENTAERIS_SOURCE_REVISION": revision}
-    example_keys = [line.split("=", 1)[0] for line in (ROOT / ".env.example").read_text().splitlines()
-                    if "=" in line and not line.startswith("#")]
-    for key in example_keys:
-        environment.pop(key, None)
-    return json.loads(subprocess.check_output(["docker", "compose", "--env-file", ".env.example", "-f",
-                                              "docker-compose.yml", "config", "--format", "json"],
-                                             cwd=ROOT, env=environment, text=True, encoding="utf-8"))
+    spec = importlib.util.spec_from_file_location(
+        "deployment_contract", ROOT / "scripts/workspace/deployment-contract.test.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.compose_config()
 
 
 class DeploymentMigrationTests(unittest.TestCase):
-    def test_runtime_image_retains_compiled_hosted_command_contracts(self):
-        dockerfile = (ROOT / "packages/runtime_server/Dockerfile").read_text(encoding="utf-8")
+    def test_runtime_image_retains_compiled_application_inputs(self):
+        dockerfile = (ROOT / "packages/workspace/runtime/Dockerfile").read_text(encoding="utf-8")
         build = dockerfile.split("\nFROM ", 1)[0]
         copied = []
         for line in build.splitlines():
             if line.startswith("COPY "):
                 arguments = shlex.split(line)[1:]
                 copied.extend((Path(source), Path(arguments[-1])) for source in arguments[:-1])
-        contracts = ROOT / "packages/api/app_core/contracts"
+        application_inputs = ROOT / "packages/workspace/api/app_core"
         references = set()
-        for file in (ROOT / "packages/runtime_server/src").rglob("*.rs"):
-            for relative in re.findall(r'include_str!\(\s*"([^"]+)"', file.read_text(encoding="utf-8")):
+        for file in (ROOT / "packages/workspace/runtime/src").rglob("*.rs"):
+            for relative in re.findall(r'include_(?:str|bytes)!\(\s*"([^"]+)"', file.read_text(encoding="utf-8")):
                 resolved = (file.parent / relative).resolve()
-                if resolved.is_relative_to(contracts):
+                if resolved.is_relative_to(application_inputs):
                     references.add(resolved.relative_to(ROOT))
-        self.assertTrue(references, "Hosted command contracts must be discovered")
+        self.assertTrue(references, "Compiled application inputs must be discovered")
         for reference in references:
             with self.subTest(contract=reference):
+                self.assertTrue((ROOT / reference).is_file(), str(reference))
                 self.assertTrue(any(reference == source == destination or
                                     reference.is_relative_to(source) and source == destination
                                     for source, destination in copied),
                                 f"Runtime image is missing compiled contract: {reference}")
 
     def test_rust_image_inputs_form_valid_locked_workspaces(self):
-        tracked = subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True).splitlines()
-        for name in ("packages/runtime_server/Dockerfile", "packages/hosted_execution/Dockerfile.agent"):
+        paths = subprocess.check_output(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            cwd=ROOT, text=True, encoding="utf-8",
+        ).split("\0")
+        source_files = [Path(path) for path in paths if path and (ROOT / path).is_file()]
+        for name in ("packages/workspace/runtime/Dockerfile", "packages/workspace/executor/Dockerfile.agent"):
             with self.subTest(dockerfile=name), tempfile.TemporaryDirectory(prefix="docker-cargo-") as temporary:
                 stage = Path(temporary)
                 build = (ROOT / name).read_text(encoding="utf-8").split("\nFROM ", 1)[0]
@@ -62,15 +63,15 @@ class DeploymentMigrationTests(unittest.TestCase):
                     for source in arguments[:-1]:
                         source = Path(source)
                         destination = Path(arguments[-1])
-                        for tracked_path in map(Path, tracked):
-                            if tracked_path == source:
+                        for source_path in source_files:
+                            if source_path == source:
                                 target = destination / source.name if arguments[-1].endswith("/") else destination
-                            elif tracked_path.is_relative_to(source):
-                                target = destination / tracked_path.relative_to(source)
+                            elif source_path.is_relative_to(source):
+                                target = destination / source_path.relative_to(source)
                             else:
                                 continue
                             (stage / target).parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copyfile(ROOT / tracked_path, stage / target)
+                            shutil.copyfile(ROOT / source_path, stage / target)
                 result = subprocess.run(["cargo", "metadata", "--offline", "--locked", "--no-deps",
                                          "--format-version", "1", "--manifest-path", str(stage / "Cargo.toml")],
                                         cwd=stage, capture_output=True, text=True, encoding="utf-8")
