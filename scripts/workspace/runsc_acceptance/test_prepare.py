@@ -29,6 +29,7 @@ class PreparationTests(unittest.TestCase):
    with patch.object(sys,'argv',argv),patch.object(prepare,'verify_owner',return_value={'root':'/run/owned'}) as owner,patch.object(prepare.subprocess,'run',side_effect=self.outputs()) as run,patch('builtins.print') as printed:prepare.main()
    config=json.loads((root/'result/compose.json').read_text());manifest=json.loads((root/'result/manifest.json').read_text());env=dict(v.split('=',1) for v in (root/'result/synthetic.env').read_text().splitlines())
    self.assertEqual(env['RUNTIME_NATIVE_SHARED_ADMISSION'],'0')
+   self.assertEqual(env['PLATFORM_MCP_ALLOWED_HOSTS'],'localhost,127.0.0.1,api')
    self.assertEqual(env['RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS'],'1');self.assertEqual(env['RUNTIME_RUNSC_IDLE_PAUSE_MS'],'3000');self.assertEqual(env['SANDBOX_PIDS_LIMIT'],'512');self.assertEqual(env['RESIDENT_GLOBAL_COUNT'],'2')
    self.assertEqual(config['services']['runtime']['user'],'0:0');self.assertIn('/run/owned/host:/run/centaeris-host:ro',config['services']['runtime']['volumes'])
    helper=str((root/'bins/execution_agent').resolve());self.assertIn(helper+':'+helper+':ro',config['services']['runtime']['volumes'])
