@@ -1125,17 +1125,17 @@ mod tests {
                         }
                     }),
                     is_error: false,
-                    facts: vec![ToolExecutionFact::CitationRecorded(json!({
-                        "citationId": format!("citation:{}", "a".repeat(64)),
+                    facts: vec![ToolExecutionFact::SourceAssociated(json!({
+                        "associationId": "provider-poll-association",
                         "inputRef": "input_provider_poll",
-                        "ownerRef": "source_provider_poll",
-                        "ownerKind": "sourceObject",
-                        "displayName": "provider-poll.txt",
-                        "evidenceKind": "workspaceSource",
-                        "ownerSha256": format!("sha256:{}", "b".repeat(64)),
+                        "sourceIdentity": {
+                            "sourceRef": "source_provider_poll",
+                            "revision": "1",
+                            "sha256": format!("sha256:{}", "b".repeat(64))
+                        },
                         "sourceToolCallId": req.tool_call_id,
                         "sourceToolName": req.tool_name,
-                        "locator": {"startLine": 1, "endLine": 1},
+                        "range": {"startLine": 1, "endLine": 1},
                     }))],
                     transition_reason: Some("provider_poll_completed".to_string()),
                 })

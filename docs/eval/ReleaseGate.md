@@ -20,7 +20,7 @@ the normal test suite. Run it once for a release candidate, or when the Runtime
 message-log implementation changes:
 
 ```powershell
-cargo test --locked -p centaeris-runtime message_log::observation_cas::tests::observation_manifest_growth_is_linear_with_early_changes_through_4095_observations -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked -p centaeris-desktop-services message_log::observation_cas::tests::observation_manifest_growth_is_linear_with_early_changes_through_4095_observations -- --ignored --exact --nocapture --test-threads=1
 ```
 
 The checked-in `CI` workflow runs `scripts/ci.py` Rust and Node source gates
@@ -61,7 +61,7 @@ behavior tests without external model requests. The Linux mock-model acceptance
 and Harbor adapter checks are described in [the adapter guide](../../scripts/harbor/README.md).
 
 Changes to Runtime-owned process sessions also run the native, isolated-profile
-transport acceptance after `cargo build --locked -p centaeris-runtime --bin
+transport acceptance after `cargo build --locked -p centaeris-desktop-services --bin
 centaeris-runtime`: `node scripts/test-process-sessions.mjs`. It covers two-client
 output cursors, duplicate start, Session deletion/start races, disconnect survival,
 scoped stop and explicit service-shutdown tree cleanup. It requires the existing

@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { createRuntimeHostTransport } from "../src/runtimeHostTransport.mjs";
+import { createRuntimeHostTransport } from "../src/main/services/runtimeHostTransport.mjs";
 
 const terminal = (status) => ["succeeded", "failed", "cancelled", "stopped"].includes(status);
 

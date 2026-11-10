@@ -19,6 +19,13 @@ class ProductEntryTests(unittest.TestCase):
         for product in ("core", "runtime", "tui", "desktop"):
             commands = self.plan(product)
             self.assertFalse(any(command[0] in ("uv", "docker") for command in commands))
+        self.assertEqual(self.plan("runtime"), [
+            ["cargo", "build", "--locked", "-p", "centaeris-desktop-services"],
+        ])
+        self.assertEqual(self.plan("tui"), [
+            ["cargo", "build", "--locked", "-p", "centaeris-desktop-services"],
+            ["cargo", "build", "--locked", "-p", "centaeris-tui"],
+        ])
 
     def test_hosted_rust_binaries_are_selected_independently(self):
         for product, package in (("runtime-server", "runtime_server"), ("hosted-execution", "hosted_execution")):

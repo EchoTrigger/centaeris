@@ -317,7 +317,7 @@ an application or production database. Migration tests create/drop their own
 old-schema databases. Set `PGCONNECT_TIMEOUT` to bound a missing test service.
 
 ```sh
-uv run --frozen --package api python packages/api/manage.py test \
+uv run --frozen --package api python packages/workspace/api/manage.py test \
   app_core.test_presentation_stream app_core.test_presentation_authority \
   app_core.test_presentation_changes app_core.test_presentation_changes_migration \
   app_core.test_presentation_authority_removal_migration \

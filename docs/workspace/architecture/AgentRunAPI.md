@@ -47,7 +47,7 @@ Workspaces must discard stale selections and late responses.
 This isolation also applies on the server. An empty plugin scope must produce
 an empty activation without reading or validating unrelated Workspace plugins.
 The prepared correction adds that early return in
-[`plugin_activation_for_run`](../../../packages/api/app_core/agent_run_api_credentials.py).
+[`plugin_activation_for_run`](../../../packages/workspace/api/app_core/agent_run_api_credentials.py).
 Selected nonempty scopes still undergo the existing current-availability checks;
 this review does not claim to eliminate all catalog coupling for selected plugins.
 
@@ -107,9 +107,9 @@ and retention design. Neither is an existing v1 capability.
 ## V1 acceptance and recovery contract
 
 The implementation anchors are
-[`agent_run_api_runs.py`](../../../packages/api/app_core/agent_run_api_runs.py),
-[`http/agent_run_api.py`](../../../packages/api/app_core/http/agent_run_api.py), and
-[`agent_run_api_protocol.py`](../../../packages/api/app_core/agent_run_api_protocol.py).
+[`agent_run_api_runs.py`](../../../packages/workspace/api/app_core/agent_run_api_runs.py),
+[`http/agent_run_api.py`](../../../packages/workspace/api/app_core/http/agent_run_api.py), and
+[`agent_run_api_protocol.py`](../../../packages/workspace/api/app_core/agent_run_api_protocol.py).
 
 ### Response selection
 
@@ -333,7 +333,7 @@ an explicit expiry and revocation policy; a checksum does not grant access.
 
 ## Upgrade boundary: migration 0046
 
-[`0046_workspace_owned_resources`](../../../packages/api/app_core/migrations/0046_workspace_owned_resources.py)
+[`0046_workspace_owned_resources`](../../../packages/workspace/api/app_core/migrations/0046_workspace_owned_resources.py)
 preserves provider/model identities for historical references while retiring
 shared configuration. It disables shared current models/providers, revokes
 Agent Run API credentials bound to those models, deletes shared provider credentials

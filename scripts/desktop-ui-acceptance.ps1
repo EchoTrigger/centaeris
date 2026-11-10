@@ -20,11 +20,11 @@ try {
 
     if ($SkipFrontendTests) {
         Write-Host "[2/$stepCount] ui source validation" -ForegroundColor Cyan
-        pnpm --filter centaeris-ui run build
-        pnpm --filter centaeris-ui run lint:source
+        pnpm --filter @centaeris/electron-host run build:renderer
+        pnpm --filter @centaeris/electron-host run lint:source
     } else {
         Write-Host "[2/$stepCount] ui gate" -ForegroundColor Cyan
-        pnpm --filter centaeris-ui run gate
+        pnpm --filter @centaeris/electron-host run gate:renderer
     }
 
     if ($SkipFrontendTests) {

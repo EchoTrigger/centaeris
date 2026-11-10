@@ -324,6 +324,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "centaeris-agent"
+version = "0.1.0"
+dependencies = [
+ "centaeris-core",
+ "futures",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "centaeris-core"
 version = "0.1.0"
 dependencies = [
@@ -348,6 +363,40 @@ dependencies = [
  "unicode-normalization",
  "url",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "centaeris-desktop-services"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "centaeris-agent",
+ "centaeris-core",
+ "centaeris-mcp",
+ "centaeris-model-catalog",
+ "centaeris-model-http",
+ "centaeris-runtime-sqlite",
+ "chrono",
+ "chrono-tz",
+ "croner",
+ "fs2",
+ "futures",
+ "getrandom 0.4.3",
+ "libc",
+ "portable-pty",
+ "reqwest 0.12.28",
+ "rmcp",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "windows-sys 0.59.0",
+ "zstd",
 ]
 
 [[package]]
@@ -385,39 +434,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "centaeris-runtime"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "centaeris-core",
- "centaeris-mcp",
- "centaeris-model-catalog",
- "centaeris-model-http",
- "centaeris-runtime-sqlite",
- "chrono",
- "chrono-tz",
- "croner",
- "fs2",
- "futures",
- "getrandom 0.4.3",
- "libc",
- "portable-pty",
- "reqwest 0.12.28",
- "rmcp",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
- "tokio-util",
- "toml",
- "windows-sys 0.59.0",
- "zstd",
-]
-
-[[package]]
 name = "centaeris-runtime-sqlite"
 version = "0.1.0"
 dependencies = [
@@ -440,8 +456,9 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
+ "centaeris-agent",
  "centaeris-core",
- "centaeris-runtime",
+ "centaeris-desktop-services",
  "crossterm",
  "getrandom 0.4.3",
  "image",

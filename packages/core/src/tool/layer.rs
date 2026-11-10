@@ -2664,11 +2664,11 @@ mod tests {
     }
 
     #[test]
-    fn read_tool_rejects_binary_document_formats() {
+    fn read_tool_rejects_binary_content() {
         let workspace_root =
             std::env::temp_dir().join(format!("centaeris_read_pdf_reject_{}", unique_suffix()));
         fs::create_dir_all(workspace_root.as_path()).expect("workspace root");
-        fs::write(workspace_root.join("scan.pdf"), b"%PDF-1.7\n").expect("write pdf");
+        fs::write(workspace_root.join("scan.pdf"), b"%PDF-1.7\n\0binary").expect("write pdf");
         let layer = ToolLayer::new()
             .with_cwd(workspace_root.clone())
             .expect("workspace");
@@ -2685,7 +2685,7 @@ mod tests {
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or_default()
-            .contains("hosted Processing Pipeline"));
+            .contains("binary file is not directly readable"));
 
         remove_dir_all_with_retries(workspace_root.as_path(), 6);
     }

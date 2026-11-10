@@ -2,11 +2,12 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { runtimeArtifactPath } from "../src/runtimeArtifact.mjs";
+import { runtimeArtifactPath } from "../src/main/runtimeArtifact.mjs";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
-const runtimeCrateRoot = path.join(repoRoot, "packages", "runtime");
+const runtimeCrateRoot = path.join(hostRoot, "src", "services");
+const agentRoot = path.join(repoRoot, "packages", "agent");
 const coreRoot = path.join(repoRoot, "packages", "core");
 
 const args = process.argv.slice(2);
@@ -64,6 +65,7 @@ const newerSourcesThan = async (binaryMtimeMs) => {
     path.join(repoRoot, "Cargo.toml"),
     path.join(repoRoot, "rust-toolchain.toml"),
     path.join(runtimeCrateRoot, "Cargo.toml"),
+    path.join(agentRoot, "Cargo.toml"),
     path.join(coreRoot, "Cargo.toml"),
   ]) {
     const stat = await statMtimeMs(manifest);
@@ -72,9 +74,10 @@ const newerSourcesThan = async (binaryMtimeMs) => {
     }
   }
   const sourceFiles = [
-    ...await collectRustSourceFiles(path.join(runtimeCrateRoot, "src"), {
-      excludedTopLevelDirectories: new Set(["bin"]),
+    ...await collectRustSourceFiles(runtimeCrateRoot, {
+      excludedTopLevelDirectories: new Set(["bin", "examples", "tests"]),
     }),
+    ...await collectRustSourceFiles(path.join(agentRoot, "src")),
     ...await collectRustSourceFiles(path.join(coreRoot, "src")),
   ];
   for (const sourceFile of sourceFiles) {
@@ -91,7 +94,7 @@ const runBuild = () => {
   if (profile === "release") {
     buildArgs.push("--release");
   }
-  buildArgs.push("-p", "centaeris-runtime");
+  buildArgs.push("-p", "centaeris-desktop-services", "--bin", "centaeris-runtime");
   console.log(`[ensure-runtime] building ${profile} runtime...`);
   const result = spawnSync("cargo", buildArgs, {
     cwd: repoRoot,
@@ -103,7 +106,7 @@ const runBuild = () => {
   }
   if (result.status !== 0) {
     throw new Error(
-      `cargo build -p centaeris-runtime exited with code ${result.status}`,
+      `cargo build -p centaeris-desktop-services --bin centaeris-runtime exited with code ${result.status}`,
     );
   }
 };

@@ -152,7 +152,7 @@ wheels = [
 [[package]]
 name = "api"
 version = "0.1.0"
-source = { editable = "packages/api" }
+source = { editable = "packages/workspace/api" }
 dependencies = [
     { name = "anthropic" },
     { name = "argon2-cffi" },
@@ -387,7 +387,7 @@ redis = [
 [[package]]
 name = "centaeris-document-processor"
 version = "0.1.0"
-source = { editable = "packages/document_processor" }
+source = { editable = "packages/workspace/documents" }
 dependencies = [
     { name = "openpyxl" },
     { name = "paddleocr" },
@@ -417,7 +417,7 @@ provides-extras = ["cpu", "gpu"]
 [[package]]
 name = "centaeris-sandbox-tools"
 version = "0.1.0"
-source = { virtual = "packages/hosted_execution" }
+source = { virtual = "packages/workspace/executor" }
 dependencies = [
     { name = "openpyxl" },
     { name = "python-docx" },
@@ -2352,7 +2352,7 @@ wheels = [
 [[package]]
 name = "workspace-agent-worker"
 version = "0.1.0"
-source = { editable = "packages/worker" }
+source = { editable = "packages/workspace/worker" }
 
 [[package]]
 name = "xlsxwriter"

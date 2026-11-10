@@ -52,7 +52,7 @@ Fresh isolated CA files use `perf/certs/out/isolated/`, leaving any legacy certi
 files mounted by an existing development stack unchanged.
 
 Before starting the stack, install the supervisor and helper from the same checkout
-using the [native host deployment instructions](../packages/hosted_execution/deploy/README.md).
+using the [native host deployment instructions](../packages/workspace/executor/deploy/README.md).
 Use `/var/lib/centaeris-perf/host/execution_agent` for the helper and
 `/run/centaeris-perf-host/control.sock` for the supervisor socket, with separate
 control and output directories under `/var/lib/centaeris-perf/host/`.

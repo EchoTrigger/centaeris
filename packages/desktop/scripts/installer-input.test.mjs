@@ -18,9 +18,9 @@ test("installer requires a complete app payload and matching application version
     }
     await fs.mkdir(path.join(root, "resources/app"), { recursive: true });
     const manifest = path.join(root, "resources/app/package.json");
-    await fs.writeFile(manifest, JSON.stringify({ name: "@centaeris/electron-host", version: "0.1.0", main: "src/main.mjs" }));
+    await fs.writeFile(manifest, JSON.stringify({ name: "@centaeris/electron-host", version: "0.1.0", main: "src/main/index.mjs" }));
     await validateInstallerInput(root, "0.1.0");
-    await fs.writeFile(manifest, JSON.stringify({ name: "@centaeris/electron-host", version: "0.0.9", main: "src/main.mjs" }));
+    await fs.writeFile(manifest, JSON.stringify({ name: "@centaeris/electron-host", version: "0.0.9", main: "src/main/index.mjs" }));
     await assert.rejects(validateInstallerInput(root, "0.1.0"), /version mismatch/);
   } finally {
     await fs.rm(root, { recursive: true, force: true });

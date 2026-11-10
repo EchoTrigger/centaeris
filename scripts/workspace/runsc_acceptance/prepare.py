@@ -98,14 +98,14 @@ def main():
     def private_file(name,values):
         path=root/name;path.write_text(''.join(f'{k}={v}\n' for k,v in sorted(values.items())));path.chmod(0o600);return str(path)
     full=private_file('synthetic.env',env);limited=private_file('service.env',{k:v for k,v in env.items() if k!='ENVIRONMENT_MAINTENANCE_TOKEN'})
-    sources=[f'{source/"packages/api"}:/app/packages/api:ro',f'{source/"packages/worker"}:/app/packages/worker:ro']
+    sources=[f'{source/"packages/workspace/api"}:/app/packages/workspace/api:ro',f'{source/"packages/workspace/worker"}:/app/packages/workspace/worker:ro']
     services={
         'postgres':{'image':images['postgres']['id'],'environment':{k:env[k] for k in ('POSTGRES_DB','POSTGRES_USER','POSTGRES_PASSWORD')},'volumes':['postgres:/var/lib/postgresql'],'healthcheck':{'test':['CMD-SHELL','pg_isready -U acceptance -d retained_acceptance'],'interval':'2s','retries':30}},
         'redis':{'image':images['redis']['id'],'command':['redis-server','--save','','--appendonly','no','--maxmemory','32mb'],'healthcheck':{'test':['CMD','redis-cli','ping'],'interval':'2s','retries':30}},
         'model':{'image':images['api']['id'],'entrypoint':[],'command':['/app/.venv/bin/python','/harness/model.py'],'environment':{'MOCK_TLS_CERT':'/harness/model.crt','MOCK_TLS_KEY':'/harness/model.key'},'volumes':[f'{model}:/harness/model.py:ro',f'{source/"scripts/workspace/runsc_rotation_acceptance.py"}:/harness/runsc_rotation_acceptance.py:ro',f'{tls/"model.crt"}:/harness/model.crt:ro',f'{tls/"model.key"}:/harness/model.key:ro']},
-        'api':{'image':images['api']['id'],'env_file':[limited],'entrypoint':[],'working_dir':'/app/packages/api','command':['/app/.venv/bin/uvicorn','api.asgi:application','--host','0.0.0.0','--port','8000'],'volumes':sources+['storage:/var/lib/centaeris-storage','uploads:/var/lib/centaeris-upload-temp','plugins:/opt/centaeris/plugins:ro'],'ports':[f'127.0.0.1:{args.api_port}:8000']},
+        'api':{'image':images['api']['id'],'env_file':[limited],'entrypoint':[],'working_dir':'/app/packages/workspace/api','command':['/app/.venv/bin/uvicorn','api.asgi:application','--host','0.0.0.0','--port','8000'],'volumes':sources+['storage:/var/lib/centaeris-storage','uploads:/var/lib/centaeris-upload-temp','plugins:/opt/centaeris/plugins:ro'],'ports':[f'127.0.0.1:{args.api_port}:8000']},
         'runtime':{'image':images['runtime']['id'],'env_file':[full],'entrypoint':['/usr/local/bin/runtime_server'],'user':'0:0','volumes':[f'{bins/"runtime_server"}:/usr/local/bin/runtime_server:ro',args.docker_socket+':/var/run/docker.sock',args.host_socket_directory+':/run/centaeris-host:ro',str(bins/'execution_agent')+':'+str(bins/'execution_agent')+':ro','runtime:/var/lib/centaeris-runtime','memory:/var/lib/centaeris-agent-memory','plugins:/opt/centaeris/plugins:ro'],'ports':[f'127.0.0.1:{args.runtime_port}:9000']},
-        'worker':{'image':images['worker']['id'],'env_file':[limited],'working_dir':'/app/packages/worker','command':['/app/.venv/bin/python','worker.py','serve'],'volumes':sources,'init':True}}
+        'worker':{'image':images['worker']['id'],'env_file':[limited],'working_dir':'/app/packages/workspace/worker','command':['/app/.venv/bin/python','worker.py','serve'],'volumes':sources,'init':True}}
     for name in ('api','runtime','worker'):
         services[name].setdefault('environment',{})['SSL_CERT_FILE']='/harness/combined-ca.pem';services[name]['volumes'].append(f'{tls/"combined-ca.pem"}:/harness/combined-ca.pem:ro')
     if args.shared_workload:

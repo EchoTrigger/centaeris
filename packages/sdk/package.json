@@ -1,0 +1,23 @@
+{
+  "name": "@centaeris/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Typed client for the Centaeris local Session RPC protocol",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./node": "./src/node.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test tests/client.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.2",
+    "typescript": "7.0.2"
+  }
+}

@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class ProductVersionTests(unittest.TestCase):
     def test_advertised_service_versions_match_product(self):
-        for path, factory in [("packages/api/api/ninja_api.py", "NinjaAPI"),
-                              ("packages/api/app_core/platform_mcp.py", "Server")]:
+        for path, factory in [("packages/workspace/api/api/ninja_api.py", "NinjaAPI"),
+                              ("packages/workspace/api/app_core/platform_mcp.py", "Server")]:
             tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
             versions = [keyword.value.value for call in ast.walk(tree)
                         if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
@@ -39,7 +39,7 @@ class ProductVersionTests(unittest.TestCase):
         for package in uv["package"]:
             if package["name"] in python_names:
                 self.assertEqual(package["version"], version, package["name"])
-        for manifest in [ROOT / "package.json", *(ROOT / "packages").glob("*/package.json")]:
+        for manifest in [ROOT / "package.json", *(ROOT / "packages").glob("*/package.json"), *(ROOT / "packages/workspace").glob("*/package.json")]:
             self.assertEqual(json.loads(manifest.read_text(encoding="utf-8"))["version"], version, str(manifest))
 
 if __name__ == "__main__":

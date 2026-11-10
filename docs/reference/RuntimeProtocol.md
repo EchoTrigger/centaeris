@@ -369,7 +369,6 @@ authorization grant.
 | Method | Operation kind | Retry policy | Reconcile method |
 | --- | --- | --- | --- |
 | `app_exit` | `oneShotAction` | `noAutomaticRetry` | — |
-| `desktop_file_preview_read` | `read` | `safeRetry` | — |
 | `initialize` | `desiredStateWrite` | `noAutomaticRetry` | — |
 | `plugin/install` | `creation` | `noAutomaticRetry` | `plugin/list` |
 | `plugin/remove` | `identityMutation` | `noAutomaticRetry` | `plugin/list` |
@@ -398,15 +397,15 @@ Plugin source, and tray events remain outside this registry. They do not become
 Core or Runtime methods merely because Desktop exposes them.
 
 Method-specific payloads are the strict v1 request and response structures
-owned by the modules routed from `packages/runtime/src/handlers.rs`. The method
+owned by the modules routed from `packages/desktop/src/services/handlers.rs`. The method
 name, request structure, response structure, error behavior, and command scope
 change together; a Host must not infer a generic CRUD schema from similarly
 named methods.
 
 The generated registry above and
-`packages/runtime/generated/runtime-methods.json` come from the declarative
-Rust source in `packages/runtime/src/runtime_command_registry.rs`. Run
-`cargo run --locked -p centaeris-runtime --bin
+`packages/desktop/src/services/generated/runtime-methods.json` come from the declarative
+Rust source in `packages/desktop/src/services/runtime_command_registry.rs`. Run
+`cargo run --locked -p centaeris-desktop-services --bin
 centaeris-runtime-protocol-docs -- --write` after changing that source; the
 local CI gate runs the generator with `--check` and rejects stale artifacts.
 
@@ -592,14 +591,14 @@ reported. Deleting a Session or its subtree is rejected while it owns active
 processes. Start and deletion share an admission gate; successful deletion discards
 closed process records but preserves receipt tombstones.
 
-Verification: `cargo test --locked -p centaeris-runtime --bin centaeris-runtime
+Verification: `cargo test --locked -p centaeris-desktop-services --lib
 process_sessions`; after building the debug Runtime, run
 `node scripts/test-process-sessions.mjs` for isolated-profile, real Desktop/TUI
 transport checks, disconnect survival, deletion fencing and shutdown cleanup.
 
 
 Desktop and TUI process observers consume the same fixture in
-`packages/runtime/generated/process-session-samples.json`. Runtime serialization,
+`packages/desktop/src/services/generated/process-session-samples.json`. Runtime serialization,
 Desktop decoding/requests and TUI decoding are covered by parity tests. Desktop
 Tasks tabs are bound to a Session, and TUI `/process` provides explicit background
 start/list/output/stop commands. Their view lifetimes never own process lifetimes.

@@ -52,9 +52,9 @@ state, not a persisted Runtime or transport field.
 From the repository root:
 
 ```powershell
-node --test packages/web/tests/unit/work-progress.test.mjs packages/web/tests/unit/message-scroll.test.ts
+node --test packages/workspace/web/tests/unit/work-progress.test.mjs packages/workspace/web/tests/unit/message-scroll.test.ts
 $env:CHROME_BIN = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
-node --test packages/web/tests/browser/chat-presentation.test.mjs
+node --test packages/workspace/web/tests/browser/chat-presentation.test.mjs
 ```
 
 The browser fixture uses real React components and computed CSS in an isolated

@@ -317,7 +317,7 @@ class Stack:
                 'coreSha': revision,
                 'dirtyFiles': run(['git', 'status', '--porcelain'], cwd=ROOT).splitlines(),
                 'workspaceDiffSha256': hashlib.sha256(run(['git', 'diff', 'HEAD'], cwd=ROOT).encode()).hexdigest(),
-                'workerSourceSha256': hashlib.sha256((ROOT / 'packages/worker/worker.py').read_bytes()).hexdigest(),
+                'workerSourceSha256': hashlib.sha256((ROOT / 'packages/workspace/worker/worker.py').read_bytes()).hexdigest(),
                 'containers': {s: {'id': (c := self.container(s))['Id'], 'image': c['Image'],
                                    'startedAt': c['State']['StartedAt']} for s in SERVICES}}
 

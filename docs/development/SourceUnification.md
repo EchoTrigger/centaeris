@@ -1,9 +1,12 @@
 # Shared source and product boundaries
 
-The monorepo retains flat top-level packages. ui and web remain separate;
-system-skills and skills/system retain their existing content and responsibilities.
-packages/core is the source of truth for runtime semantics. api owns hosted
-control-plane facts; runtime_server and hosted_execution retain their adapters.
+Shared runtime foundations, the Rust Agent SDK, local clients, and frontend
+foundations live directly under `packages/`. Hosted API, Web, Worker, Runtime,
+Executor, and document processing belong to `packages/workspace/`.
+`packages/core` owns runtime semantics and generic source associations.
+`packages/desktop/src/services` composes the shared local product host for
+Desktop and CLI. Workspace owns hosted control-plane facts, material evidence,
+document locators, and citation presentation.
 
 ## Provenance and history
 
@@ -32,12 +35,10 @@ source baselines. Existing Core versions stay selected where constraints allow;
 incompatible major versions required by hosted packages remain side by side.
 The added hosted crates and their dependency graph account for the lock growth.
 
-pnpm retains ui, desktop and web workspaces, existing direct versions and root
-Node/TypeScript/Vite/Biome versions. pnpm 12.10.1 replaces npm after the source migration. Five explicit transitive overrides retain
-Workspace baseline versions for lang-liquid, legacy-modes, lezer/markdown,
-napi-rs/canvas and vscode-languageserver-types instead of refreshing their caret
-ranges. lucide-react retains the distinct versions requested by ui and web.
-The Python workspace and uv.lock remain unchanged. Local builds do not run uv.
+pnpm links SDK, Desktop, UI, visuals, and Workspace Web through one root lock.
+Pinned dependencies and transitive overrides are declared in the root manifests.
+The Python members under `packages/workspace/` share the root `uv.lock`.
+Local product builds use the Cargo and pnpm workspaces.
 
 ## Product gates
 

@@ -10,7 +10,7 @@ from pydantic import TypeAdapter
 from pydantic.alias_generators import to_camel
 
 
-OUTPUT = Path(__file__).resolve().parents[2] / "packages/web/src/developer/agentRunApiReference.json"
+OUTPUT = Path(__file__).resolve().parents[2] / "packages/workspace/web/src/developer/agentRunApiReference.json"
 
 
 def _public_path(path):

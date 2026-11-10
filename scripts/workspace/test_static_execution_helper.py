@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
-DOCKERFILE = ROOT / "packages/hosted_execution/Dockerfile.agent"
+DOCKERFILE = ROOT / "packages/workspace/executor/Dockerfile.agent"
 STATIC_BYTES = b"\x7fELF controlled static musl fixture"
 TOOL = r'''
 import json, os, pathlib, sys

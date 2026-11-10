@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-const script = path.resolve(import.meta.dirname, "../installer/preflight.ps1");
+const script = path.resolve(import.meta.dirname, "../packaging/installer/preflight.ps1");
 const powershell = path.join(process.env.SystemRoot ?? "C:/Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
 const windowsTest = process.platform === "win32" ? test : test.skip;
 

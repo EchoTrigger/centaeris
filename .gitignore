@@ -59,8 +59,9 @@ node_modules/
 # Rust / Tauri
 **/target/
 # UI transient emits from tsc -b
-packages/ui/vite.config.js
-packages/ui/vite.config.d.ts
+packages/desktop/vite.config.js
+packages/desktop/vite.config.d.ts
+packages/desktop/renderer-dist/
 .idea/
 .vscode/
 .DS_Store

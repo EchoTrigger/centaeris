@@ -138,7 +138,7 @@ These observations add no Session schema or product-visible messages.
 
 ## Reproducible loopback probe
 
-Run `cargo run -p centaeris-runtime --example model_transport_probe -- <label>`
+Run `cargo run -p centaeris-desktop-services --example model_transport_probe -- <label>`
 for bounded synthetic measurements of the actual local transport. The probe uses
 127.0.0.1, a no-proxy client, keep-alive and complete request-body reads. It measures
 100 request clones at 1/4/8 MiB, sequential 2-byte/1/4/8-MiB HTTP exchanges, and eight

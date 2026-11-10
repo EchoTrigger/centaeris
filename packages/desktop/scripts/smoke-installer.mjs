@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { runtimeArtifactPath } from "../src/runtimeArtifact.mjs";
+import { runtimeArtifactPath } from "../src/main/runtimeArtifact.mjs";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createRuntimeHostTransport } from "../src/runtimeHostTransport.mjs";
+import { createRuntimeHostTransport } from "../src/main/services/runtimeHostTransport.mjs";
 
 if (process.platform !== "win32") throw new Error("Installer acceptance requires Windows");
 const installer = process.argv[2];
@@ -79,7 +79,7 @@ try {
     await digest(runtimeArtifactPath(repoRoot, "release")),
     "Installed Runtime must match the source build",
   );
-  const uiRoot = path.join(repoRoot, "packages/ui/dist");
+  const uiRoot = path.join(hostRoot, "renderer-dist");
   for (const relative of await fs.readdir(uiRoot, { recursive: true })) {
     if (!(await fs.stat(path.join(uiRoot, relative))).isFile()) continue;
     assert.equal(await digest(path.join(installDirectory, "resources/ui-dist", relative)), await digest(path.join(uiRoot, relative)), "Installed UI must match the accepted source build: " + relative);

@@ -127,7 +127,7 @@ deploy mismatched helper/Runtime command contracts or silently fall back after
 a malformed response.
 
 The helper is copied into the tool image by
-`packages/hosted_execution/Dockerfile.agent`; Runtime executes that image's
+`packages/workspace/executor/Dockerfile.agent`; Runtime executes that image's
 `/opt/centaeris/bin/execution_agent`. It does not inject a replacement binary.
 `WORKSPACE_GENERAL_IMAGE` is resolved to an immutable image ID and container
 adoption checks the expected image. Changing a tag does not update an existing

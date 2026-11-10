@@ -176,7 +176,7 @@ no separate scheduling form or remote-connection screen.
 Run the normal Rust/Node source gates and:
 
 ```text
-cargo build --locked -p centaeris-runtime --bin centaeris-runtime -p centaeris-tui --bin centa
+cargo build --locked -p centaeris-desktop-services --bin centaeris-runtime -p centaeris-tui --bin centa
 node scripts/test-host-automation.mjs
 node scripts/test-agent-schedules.mjs
 node scripts/test-process-agent.mjs

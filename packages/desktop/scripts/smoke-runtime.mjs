@@ -6,19 +6,15 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { DatabaseSync } from "node:sqlite";
-import { createRuntimeHostTransport } from "../src/runtimeHostTransport.mjs";
+import { createRuntimeHostTransport } from "../src/main/services/runtimeHostTransport.mjs";
+import { runtimeArtifactPath } from "../src/main/runtimeArtifact.mjs";
 import { assertRuntimeLifecycle } from "./smoke-runtime-lifecycle.mjs";
 import { assertCleanExit, waitForExit, withCleanup } from "./smoke-runtime-cleanup.mjs";
 
 const hostRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(hostRoot, "..", "..");
 const bundledSystemSkills = path.join(repoRoot, "system-skills");
-const defaultRuntimeExe = path.join(
-  repoRoot,
-  "target",
-  "release",
-  "centaeris-runtime.exe",
-);
+const defaultRuntimeExe = runtimeArtifactPath(repoRoot, "release");
 const runtimeExe = process.env.CENTAERIS_ELECTRON_SMOKE_RUNTIME_EXE || defaultRuntimeExe;
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -858,18 +854,6 @@ const main = async () => {
       "Centaeris Local Runtime Host workspace smoke\n",
       "utf8",
     );
-    const previewPdfPath = path.join(tempRoot, "sample-preview.pdf");
-    await fs.writeFile(
-      previewPdfPath,
-      Buffer.from("%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n"),
-    );
-    const outsidePreviewPath = path.join(tempRoot, "outside-preview.txt");
-    await fs.writeFile(
-      outsidePreviewPath,
-      "Centaeris Local Runtime Host desktop preview smoke\n",
-      "utf8",
-    );
-
     const activatedWorkspace = await invoke(child, "workspace_activate", {
       request: { root: workspaceRoot },
     });
@@ -904,34 +888,6 @@ const main = async () => {
     assertRecord(filePreview, "workspace_read_file result");
     if (!filePreview.content.includes("workspace smoke")) {
       fail("workspace_read_file returned unexpected file content");
-    }
-
-    const desktopAbsolutePreview = await invoke(child, "desktop_file_preview_read", {
-      request: { path: outsidePreviewPath },
-    });
-    assertRecord(desktopAbsolutePreview, "desktop_file_preview_read absolute result");
-    if (!desktopAbsolutePreview.content.includes("desktop preview smoke")) {
-      fail("desktop_file_preview_read did not read absolute non-workspace text");
-    }
-
-    const desktopRelativePreview = await invoke(child, "desktop_file_preview_read", {
-      request: { workspaceRoot, path: "sample.txt" },
-    });
-    assertRecord(desktopRelativePreview, "desktop_file_preview_read relative result");
-    if (!desktopRelativePreview.content.includes("workspace smoke")) {
-      fail("desktop_file_preview_read did not read workspace-relative text");
-    }
-
-    const desktopPdfPreview = await invoke(child, "desktop_file_preview_read", {
-      request: { path: previewPdfPath },
-    });
-    assertRecord(desktopPdfPreview, "desktop_file_preview_read PDF result");
-    if (
-      desktopPdfPreview.contentKind !== "pdf" ||
-      desktopPdfPreview.mimeType !== "application/pdf" ||
-      !String(desktopPdfPreview.dataUrl || "").startsWith("data:application/pdf;base64,")
-    ) {
-      fail("desktop_file_preview_read did not return PDF preview metadata");
     }
 
     const workspaceSession = await invoke(child, "session/new", {
@@ -1391,9 +1347,6 @@ const main = async () => {
             "workspace_get",
             "workspace_file_tree",
             "workspace_read_file",
-            "desktop_file_preview_read absolute text",
-            "desktop_file_preview_read relative text",
-            "desktop_file_preview_read PDF",
             "workspace session/new",
             "session delete",
             "workspace session/list",

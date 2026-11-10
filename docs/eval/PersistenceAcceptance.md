@@ -36,8 +36,8 @@ published generation.
 The focused acceptance commands are:
 
 ```powershell
-cargo test --locked -p centaeris-runtime --bin centaeris-runtime transcript_runtime::tests -- --test-threads=1
-cargo test --locked -p centaeris-runtime --bin centaeris-runtime user_config::tests -- --test-threads=1
+cargo test --locked -p centaeris-desktop-services --lib transcript_runtime::tests -- --test-threads=1
+cargo test --locked -p centaeris-desktop-services --lib user_config::tests -- --test-threads=1
 cargo test --locked -p centaeris-runtime-sqlite -- --test-threads=1
 cargo test --locked -p centaeris-core query_loop
 ```
@@ -145,6 +145,6 @@ durable-intent interruption/reopen, portable reconstruction, and query plans.
 Run the large-source acceptance when changing the index:
 
 ```powershell
-cargo test --locked -p centaeris-runtime --bin centaeris-runtime session_catalog::tests -- --test-threads=1
-cargo test --locked -p centaeris-runtime --bin centaeris-runtime session_catalog::tests::hundred_megabytes_of_unrelated_history_do_not_enter_warm_reads -- --ignored --exact --test-threads=1
+cargo test --locked -p centaeris-desktop-services --lib session_catalog::tests -- --test-threads=1
+cargo test --locked -p centaeris-desktop-services --lib session_catalog::tests::hundred_megabytes_of_unrelated_history_do_not_enter_warm_reads -- --ignored --exact --test-threads=1
 ```

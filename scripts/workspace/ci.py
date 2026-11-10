@@ -69,12 +69,12 @@ def main(skip_frontend_tests=False, stage="All"):
         ("Performance workload metrics", ["node", "--test", "perf/tests/k6-metrics.test.mjs"]),
         ("Presentation delivery scenario", ["node", "--test", "perf/tests/presentation-delivery.test.mjs"]),
         ("Document processor tests", ["uv", "run", "--frozen", "--package", "centaeris-document-processor", "python", "scripts/workspace/python_test_gate.py", "document_processor"]),
-        ("Django migration drift", [*api, "packages/api/manage.py", "makemigrations", "--check", "--dry-run", "--settings=api.migration_test_settings", "--skip-checks"]),
+        ("Django migration drift", [*api, "packages/workspace/api/manage.py", "makemigrations", "--check", "--dry-run", "--settings=api.migration_test_settings", "--skip-checks"]),
         ("Full Django PostgreSQL suite", [*api, "scripts/workspace/python_test_gate.py", "api"]),
         ("First-party MCP Rust/Python client", [*api, "scripts/workspace/platform-mcp-client-gate.py"]),
         ("Node install", [pnpm, "install", "--frozen-lockfile"]),
         ("Performance artifact validation", ["node", "--test", "scripts/workspace/performance-eval-artifact.test.mjs"]),
-        ("Shared frontend types", [pnpm, "--filter", "@centaeris/frontend-foundations", "run", "typecheck"]),
+        ("Shared frontend types", [pnpm, "--filter", "@centaeris/ui", "run", "typecheck"]),
         ("Web production validation", [pnpm, "--filter", "web", "run", "build"]),
     ]
     if not skip_frontend_tests:

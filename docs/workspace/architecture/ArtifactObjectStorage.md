@@ -22,7 +22,7 @@ The interactive Library copy has its own storage key and deletion lifecycle.
 
 ## Existing ownership and coupling
 
-Paths below are relative to `packages/api/`.
+Paths below are relative to `packages/workspace/api/`.
 
 | Path / symbol | Current behavior | Artifact slice consequence |
 | --- | --- | --- |

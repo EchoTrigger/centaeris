@@ -237,10 +237,9 @@ fn attach_resolved_input_matches(
         }
         matches.push(json!({
             "inputRef": input.input_ref,
-            "objectRef": input.object_ref,
+            "sourceRef": input.source_ref,
             "virtualPath": input.virtual_path,
             "displayName": input.display_name,
-            "evidenceKind": input.evidence_kind,
             "line": line_number,
         }));
     }

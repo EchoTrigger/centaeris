@@ -1,5 +1,5 @@
 // Isolated, real Host protocol acceptance. No external model requests.
-import { createRuntimeHostTransport } from "../packages/desktop/src/runtimeHostTransport.mjs";
+import { createRuntimeHostTransport } from "../packages/desktop/src/main/services/runtimeHostTransport.mjs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";

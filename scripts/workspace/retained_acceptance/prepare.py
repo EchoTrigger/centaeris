@@ -227,7 +227,7 @@ def main():
         if key != 'ENVIRONMENT_MAINTENANCE_TOKEN'), encoding='utf-8')
     os.chmod(service_envpath, 0o600)
 
-    source_mounts = [f"{source / 'packages/api'}:/app/packages/api:ro", f"{source / 'packages/worker'}:/app/packages/worker:ro"]
+    source_mounts = [f"{source / 'packages/workspace/api'}:/app/packages/workspace/api:ro", f"{source / 'packages/workspace/worker'}:/app/packages/workspace/worker:ro"]
 
     volumes = {"postgres": {}, "storage": {}, "uploads": {}, "plugins": {"name": project + "_plugins"}, "memory": {"name": project + "_memory"}, "runtime": {}}
 
@@ -239,11 +239,11 @@ def main():
 
         "model": {"image":images['api']['id'], "entrypoint":[], "command":["/app/.venv/bin/python","/harness/model.py"], "volumes":[f"{model}:/harness/model.py:ro",f"{Path(__file__).with_name('boundary.py').resolve(strict=True)}:/harness/boundary.py:ro"]},
 
-        "api": {"image":images['api']['id'], "env_file":[str(service_envpath)], "entrypoint":[], "working_dir":"/app/packages/api", "command":["/app/.venv/bin/uvicorn","api.asgi:application","--host","0.0.0.0","--port","8000"], "volumes":source_mounts+["storage:/var/lib/centaeris-storage","uploads:/var/lib/centaeris-upload-temp","plugins:/opt/centaeris/plugins:ro"], "ports":[f"127.0.0.1:{args.api_port}:8000"]},
+        "api": {"image":images['api']['id'], "env_file":[str(service_envpath)], "entrypoint":[], "working_dir":"/app/packages/workspace/api", "command":["/app/.venv/bin/uvicorn","api.asgi:application","--host","0.0.0.0","--port","8000"], "volumes":source_mounts+["storage:/var/lib/centaeris-storage","uploads:/var/lib/centaeris-upload-temp","plugins:/opt/centaeris/plugins:ro"], "ports":[f"127.0.0.1:{args.api_port}:8000"]},
 
         "runtime": {"image":images['runtime']['id'], "env_file":[str(envpath)], "entrypoint":["/usr/local/bin/runtime_server"], "volumes":[f"{bins / 'runtime_server'}:/usr/local/bin/runtime_server:ro",(args.docker_socket or "/var/run/docker.sock") + ":/var/run/docker.sock","runtime:/var/lib/centaeris-runtime","memory:/var/lib/centaeris-agent-memory","plugins:/opt/centaeris/plugins:ro"]},
 
-        "worker": {"image":images['worker']['id'], "env_file":[str(service_envpath)], "working_dir":"/app/packages/worker", "command":["/app/.venv/bin/python","worker.py","serve"], "volumes":source_mounts, "init":True},
+        "worker": {"image":images['worker']['id'], "env_file":[str(service_envpath)], "working_dir":"/app/packages/workspace/worker", "command":["/app/.venv/bin/python","worker.py","serve"], "volumes":source_mounts, "init":True},
 
     }
     if args.benchmark_mode:
@@ -316,7 +316,7 @@ def main():
 
     hashes = {name: hashlib.sha256((bins / name).read_bytes()).hexdigest() for name in ("runtime_server","execution_agent","environment_task_service")}
 
-    (root / "manifest.json").write_text(json.dumps({"project":project,"sourceRevision":sha,"source":str(source),"binaryDirectory":str(bins),"binarySha256":hashes,'images':images,'buildManifest':build,'mountedPackages':['packages/api','packages/worker'],"apiPort":args.api_port,"runtimePort":args.runtime_port,"status":"prepared-not-started"},indent=2),encoding="utf-8")
+    (root / "manifest.json").write_text(json.dumps({"project":project,"sourceRevision":sha,"source":str(source),"binaryDirectory":str(bins),"binarySha256":hashes,'images':images,'buildManifest':build,'mountedPackages':['packages/workspace/api','packages/workspace/worker'],"apiPort":args.api_port,"runtimePort":args.runtime_port,"status":"prepared-not-started"},indent=2),encoding="utf-8")
 
     if args.benchmark_mode:
         manifest_path = root / 'manifest.json'

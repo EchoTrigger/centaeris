@@ -246,9 +246,12 @@ result mentioning a receipt ID cannot forge that binding. Generic MCP `facts`
 are not the platform's evidence-persistence mechanism.
 
 Projection rebuilding is transactional and serialized on the AgentRun. It
-combines validated receipts with supported `citation_recorded` events and
-derives stable IDs across restart. Purging the owning Session also deletes its
-receipts.
+combines validated material receipts, historical application-owned citation
+records, and generic `source_associated` read records bound to admitted input
+identities. Workspace applies citation eligibility and document locators and
+derives stable citation IDs across restart. Historical citation rows retain
+their complete original evidence while storage readers reconstruct generic
+Core records. Purging the owning Session also deletes its receipts.
 
 Workspace exposes `workspace.citations.v1` snapshots through the run citation
 endpoint. A snapshot includes the run/session identity, `throughSequence` and
@@ -259,7 +262,7 @@ current authorization; revoked access does not reveal the resource.
 
 ## Code and verification
 
-API modules under `packages/api/app_core` own the implementation:
+API modules under `packages/workspace/api/app_core` own the implementation:
 `platform_mcp.py` and `platform_mcp_auth.py` handle transport/authentication;
 `material_access.py`, `material_reads.py` and `material_evidence.py` handle
 authorized evidence; `material_operations.py`, `material_task_source.py`,
@@ -267,7 +270,7 @@ authorized evidence; `material_operations.py`, `material_task_source.py`,
 `platform_material_commit.py`, `material_commit.py` and
 `material_staging.py` handle publication; `material_receipts.py` and the
 citation projection handle citations. Runtime's first-party integration is in
-`packages/runtime_server/src/platform_materials.rs`.
+`packages/workspace/runtime/src/platform_materials.rs`.
 
 Run the [release gate](../eval/ReleaseGate.md) for integration validation.
 The audited API suite covers authorization, cancellation, leases, lifecycle

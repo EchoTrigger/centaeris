@@ -44,8 +44,9 @@
 **/*.tar.gz
 **/*.7z
 
-packages/ui/vite.config.js
-packages/ui/vite.config.d.ts
+packages/desktop/vite.config.js
+packages/desktop/vite.config.d.ts
+packages/desktop/renderer-dist/
 
 # Local instructions, private deployment inputs and product overlays.
 AGENTS.md

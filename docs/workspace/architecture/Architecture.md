@@ -9,12 +9,12 @@ Core behavior.
 
 | Component | Responsibility |
 | --- | --- |
-| `packages/api` | Django identity, membership, workspace ACL, files, credentials, Plugin installation, AgentRun authorization, and durable product jobs |
-| `packages/runtime_server` | Core composition, PostgreSQL RuntimeStore adapter, Redis live projection, and Docker execution binding |
-| `packages/worker` | Bounded claim, lease, retry, and wake loop for product jobs |
-| `packages/hosted_execution` | Fixed helper included in the AgentRun execution image |
-| `packages/document_processor` | Office, PDF, and image inspection plus bounded canonical representations |
-| `packages/web` | Browser product consuming REST and SSE |
+| `packages/workspace/api` | Django identity, membership, workspace ACL, files, credentials, Plugin installation, AgentRun authorization, and durable product jobs |
+| `packages/workspace/runtime` | Core composition, PostgreSQL RuntimeStore adapter, Redis live projection, and Docker execution binding |
+| `packages/workspace/worker` | Bounded claim, lease, retry, and wake loop for product jobs |
+| `packages/workspace/executor` | Fixed helper included in the AgentRun execution image |
+| `packages/workspace/documents` | Office, PDF, and image inspection plus bounded canonical representations |
+| `packages/workspace/web` | Browser product consuming REST and SSE |
 | `skills/system` | First-party built-in behavior, separate from installable Plugin inventory |
 
 Runtime HTTP uses axum and Hyper; explicit routes call concrete operations through

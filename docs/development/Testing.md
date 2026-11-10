@@ -199,7 +199,7 @@ coverage from production/WAF acceptance. Use an isolated synthetic PostgreSQL
 instance configured through `TEST_POSTGRES_*`, never an application database.
 
 ```sh
-uv run --frozen --package api python packages/api/manage.py test \
+uv run --frozen --package api python packages/workspace/api/manage.py test \
   app_core.test_presentation_stream app_core.test_presentation_authority \
   app_core.test_session_attention \
   app_core.test_session_attention_migration app_core.test_schema_wire_contract \
@@ -245,7 +245,7 @@ not an unmeasured latency or capacity claim.
 For changes limited to this authorization/list boundary, run:
 
 ```sh
-uv run --frozen --package api python packages/api/manage.py test \
+uv run --frozen --package api python packages/workspace/api/manage.py test \
   app_core.test_presentation_authority app_core.test_workspace_session_list_queries \
   app_core.test_http_query_contract app_core.test_http_error_contract \
   --settings=api.test_settings --noinput
@@ -256,7 +256,7 @@ uv run --frozen --package api python packages/api/manage.py test \
 Use the isolated synthetic PostgreSQL configuration through `TEST_POSTGRES_*`:
 
 ```sh
-uv run --frozen --package api python packages/api/manage.py test \
+uv run --frozen --package api python packages/workspace/api/manage.py test \
   app_core.test_session_workspace_authority \
   app_core.test_session_workspace_authority_migration \
   app_core.test_session_workspace_retention \

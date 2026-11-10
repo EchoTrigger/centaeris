@@ -6,9 +6,10 @@ Node.js, or unrestricted Electron primitives.
 
 ## Boundary
 
-Electron main/preload owns windows, tray behavior, native directory and reveal
-actions, and the renderer bridge. `packages/runtime` owns the shared Local
-Runtime process and exposes the exact Host protocol over JSON-RPC 2.0/JSONL.
+Electron `src/main` and `src/preload` own windows, tray behavior, native directory and reveal
+actions, and the renderer bridge. `src/services` owns the shared local product
+services and Runtime process, using the Rust Agent SDK in `packages/agent`.
+It exposes the exact Host protocol over JSON-RPC 2.0/JSONL.
 Desktop and TUI use the same Runtime for one user data root.
 
 Session, prompt, tool, Plugin, Skill, continuation, and runtime-job semantics
@@ -33,7 +34,7 @@ virtual environment, or bundle hosted-product services.
 ```powershell
 pnpm install --frozen-lockfile
 node packages/desktop/scripts/ensure-runtime.mjs --profile debug
-pnpm --filter centaeris-ui run dev
+pnpm --filter @centaeris/electron-host run dev:renderer
 pnpm --filter @centaeris/electron-host run dev
 ```
 
@@ -56,7 +57,7 @@ pnpm --filter @centaeris/electron-host run check
 pnpm --filter @centaeris/electron-host run check:host-parity
 pnpm --filter @centaeris/electron-host run smoke:runtime
 pnpm --filter @centaeris/electron-host run smoke:window
-cargo test --locked -p centaeris-runtime
+cargo test --locked -p centaeris-desktop-services
 ```
 
 Host parity compares renderer `invoke/listen`, the Electron contract, and

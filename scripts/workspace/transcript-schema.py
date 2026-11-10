@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
-OUTPUT = ROOT / "packages/api/app_core/generated/transcript_block.schema.json"
+OUTPUT = ROOT / "packages/workspace/api/app_core/generated/transcript_block.schema.json"
 
 
 def main():

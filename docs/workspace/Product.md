@@ -27,7 +27,7 @@ the choice is saved in this browser. Sign-in pages also provide a language selec
 Changing the interface language preserves drafts and does not translate user content,
 model responses, commands, or protocol identifiers.
 
-Translation resources live in `packages/web/src/locales/`. Run
+Translation resources live in `packages/workspace/web/src/locales/`. Run
 `pnpm --filter web run test:unit` for resource parity and plural checks.
 The main browser regression suite explicitly selects English; dedicated language
 tests cover the Chinese default, switching, and persistence.

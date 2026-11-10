@@ -47,7 +47,7 @@ const fallbacks = new Map([
     "rust:rmcp@3.1.4",
     {
       commit: "4a738b9dd99eaca418b614afa433a0cbdaf8d056",
-      file: "third_party_license_fallbacks/rust/rmcp-3.1.4/LICENSE",
+      file: "packaging/third_party_license_fallbacks/rust/rmcp-3.1.4/LICENSE",
       sha256: "0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a",
       sourceUrl:
         "https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/4a738b9dd99eaca418b614afa433a0cbdaf8d056/LICENSE",
@@ -57,7 +57,7 @@ const fallbacks = new Map([
     "rust:tree-sitter@0.25.10",
     {
       commit: "da6fe9beb4f7f67beb75914ca8e0d48ae48d6406",
-      file: "third_party_license_fallbacks/rust/tree-sitter-0.25.10/LICENSE",
+      file: "packaging/third_party_license_fallbacks/rust/tree-sitter-0.25.10/LICENSE",
       sha256: "09b1195d61dd1ff227d38e936040440b205825d3be05176d72e0f19e9899ab1f",
       sourceUrl:
         "https://raw.githubusercontent.com/tree-sitter/tree-sitter/da6fe9beb4f7f67beb75914ca8e0d48ae48d6406/LICENSE",
@@ -67,7 +67,7 @@ const fallbacks = new Map([
     "rust:base64-simd@0.8.0",
     {
       commit: "d74c030d9dc4f3cae02146d1f497ff62726ef09a",
-      file: "third_party_license_fallbacks/rust/simd-d74c030d/LICENSE",
+      file: "packaging/third_party_license_fallbacks/rust/simd-d74c030d/LICENSE",
       sha256: "14e66de892a0e218a4d60b2cc41a17a28080c46621d812fa2471983d8c524748",
       sourceUrl:
         "https://raw.githubusercontent.com/Nugine/simd/d74c030d9dc4f3cae02146d1f497ff62726ef09a/LICENSE",
@@ -77,7 +77,7 @@ const fallbacks = new Map([
     "rust:vsimd@0.8.0",
     {
       commit: "d74c030d9dc4f3cae02146d1f497ff62726ef09a",
-      file: "third_party_license_fallbacks/rust/simd-d74c030d/LICENSE",
+      file: "packaging/third_party_license_fallbacks/rust/simd-d74c030d/LICENSE",
       sha256: "14e66de892a0e218a4d60b2cc41a17a28080c46621d812fa2471983d8c524748",
       sourceUrl:
         "https://raw.githubusercontent.com/Nugine/simd/d74c030d9dc4f3cae02146d1f497ff62726ef09a/LICENSE",
@@ -87,7 +87,7 @@ const fallbacks = new Map([
     "rust:clipboard-win@5.4.1",
     {
       commit: "3b27cf2bfd1adcfa6e0264eb51c1025ddaf0f342",
-      file: "third_party_license_fallbacks/rust/clipboard-win-5.4.1/LICENSE",
+      file: "packaging/third_party_license_fallbacks/rust/clipboard-win-5.4.1/LICENSE",
       sha256: "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
       sourceUrl:
         "https://raw.githubusercontent.com/DoumanAsh/clipboard-win/3b27cf2bfd1adcfa6e0264eb51c1025ddaf0f342/LICENSE",
@@ -127,7 +127,7 @@ const licenseFiles = async (directory) =>
 const npmPackages = async (repoRoot) => {
   const paths = run(
     process.platform === "win32" ? "pnpm.cmd" : "pnpm",
-    ["--filter", "centaeris-ui", "list", "--prod", "--depth", "Infinity", "--parseable"],
+    ["--filter", "@centaeris/electron-host", "list", "--prod", "--depth", "Infinity", "--parseable"],
     repoRoot,
     process.platform === "win32",
   )
@@ -138,7 +138,7 @@ const npmPackages = async (repoRoot) => {
     const manifestPath = path.join(directory, "package.json");
     try {
       const manifest = await readJson(manifestPath);
-      if (!manifest.name || manifest.private || manifest.name === "centaeris-ui") continue;
+      if (!manifest.name || manifest.private || manifest.name === "@centaeris/electron-host") continue;
       packages.push({
         ecosystem: "npm",
         name: manifest.name,
@@ -218,7 +218,7 @@ export const fallbackFiles = async (item, repoRoot, hostRoot) => {
   let sourcePath;
   let source;
   if (item.ecosystem === "npm") {
-    const uiRoot = path.join(repoRoot, "packages", "ui");
+    const uiRoot = path.join(repoRoot, "packages", "desktop");
     const owner = fallback.sourcePackage === "rolldown" ? resolvePackageDirectory("vite", uiRoot) : uiRoot;
     const sourceRoot = resolvePackageDirectory(fallback.sourcePackage, owner);
     const manifest = await readJson(path.join(sourceRoot, "package.json"));
@@ -250,7 +250,7 @@ export const fallbackFiles = async (item, repoRoot, hostRoot) => {
 export async function collectThirdPartyLicenses(
   repoRoot,
   hostRoot,
-  rustPackageNames = ["centaeris-runtime"],
+  rustPackageNames = ["centaeris-desktop-services"],
   includeNpm = true,
   rustTarget = "x86_64-pc-windows-msvc",
 ) {

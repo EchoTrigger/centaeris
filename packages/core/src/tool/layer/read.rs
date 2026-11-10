@@ -380,125 +380,108 @@ fn execute_read(
         .map_err(|message| {
             FileToolError::new(FileToolErrorKind::Io, message).with_model_path(lookup_path)
         })?;
-    let (display_path, file_hash, content) = if binding.mode()
-        == crate::execution::ExecutionHostMode::Remote
-    {
-        let output = binding
-            .run_file_system_operation(
-                lookup_path,
-                ExecutionFileSystemOperation::ReadFile {
-                    max_bytes: MAX_DIRECT_READ_BYTES as usize,
-                },
+    let (display_path, file_hash, content) =
+        if binding.mode() == crate::execution::ExecutionHostMode::Remote {
+            let output = binding
+                .run_file_system_operation(
+                    lookup_path,
+                    ExecutionFileSystemOperation::ReadFile {
+                        max_bytes: MAX_DIRECT_READ_BYTES as usize,
+                    },
+                )
+                .map_err(|error| {
+                    FileToolError::from_execution_host(error).with_model_path(lookup_path)
+                })?;
+            let ExecutionFileSystemOutput::ReadFile(output) = output else {
+                return Err(FileToolError::new(
+                    FileToolErrorKind::Io,
+                    "execution host returned the wrong filesystem result for resolved input",
+                ));
+            };
+            if resolved_input
+                .as_ref()
+                .is_some_and(|input| output.file_hash != input.sha256)
+            {
+                return Err(FileToolError::new(
+                    FileToolErrorKind::StaleInput,
+                    "resolved input hash mismatch",
+                ));
+            }
+            if let Some(outcome) = try_image_read_outcome(
+                output.bytes.as_slice(),
+                output.identity.display_path.as_str(),
+                output.file_hash.as_str(),
+                ImageReadSource::ExecutionFile(lookup_path.to_string()),
+                offset,
+                limit,
+                runtime_context,
+            )? {
+                return Ok(outcome);
+            }
+            if output.bytes.contains(&0) {
+                return Err(FileToolError::new(
+                    FileToolErrorKind::InvalidInput,
+                    "binary file is not directly readable",
+                )
+                .with_model_path(lookup_path));
+            }
+            (
+                output.identity.display_path,
+                output.file_hash,
+                String::from_utf8_lossy(output.bytes.as_slice()).into_owned(),
             )
-            .map_err(|error| {
-                FileToolError::from_execution_host(error).with_model_path(lookup_path)
+        } else {
+            let resolved = resolve_manifest_physical_path(runtime_context, lookup_path)?;
+            let display_path = resolved.display_path.clone();
+            if !resolved.path.is_file() {
+                return Err(FileToolError::new(
+                    FileToolErrorKind::InvalidInput,
+                    format!("Read path is not a file: {}", resolved.path.display()),
+                ));
+            }
+            let bytes = fs::read(resolved.path.as_path()).map_err(|error| {
+                FileToolError::new(
+                    FileToolErrorKind::Io,
+                    format!("read resolved input for content hash failed: {error}"),
+                )
+                .with_model_path(display_path.as_str())
             })?;
-        let ExecutionFileSystemOutput::ReadFile(output) = output else {
-            return Err(FileToolError::new(
-                FileToolErrorKind::Io,
-                "execution host returned the wrong filesystem result for resolved input",
-            ));
+            let file_hash = sha256_bytes(bytes.as_slice());
+            if resolved_input
+                .as_ref()
+                .is_some_and(|input| file_hash != input.sha256)
+            {
+                return Err(FileToolError::new(
+                    FileToolErrorKind::StaleInput,
+                    "resolved input hash mismatch",
+                ));
+            }
+            if let Some(outcome) = try_image_read_outcome(
+                bytes.as_slice(),
+                display_path.as_str(),
+                file_hash.as_str(),
+                ImageReadSource::InputRef(
+                    resolved_input
+                        .as_ref()
+                        .expect("resolved input branch requires input")
+                        .input_ref
+                        .clone(),
+                ),
+                offset,
+                limit,
+                runtime_context,
+            )? {
+                return Ok(outcome);
+            }
+            let content = read_bounded_text(resolved.path.as_path(), display_path.as_str())?;
+            (display_path, file_hash, content)
         };
-        if resolved_input
-            .as_ref()
-            .is_some_and(|input| output.file_hash != input.sha256)
-        {
-            return Err(FileToolError::new(
-                FileToolErrorKind::StaleInput,
-                "resolved input hash mismatch",
-            ));
-        }
-        if let Some(outcome) = try_image_read_outcome(
-            output.bytes.as_slice(),
-            output.identity.display_path.as_str(),
-            output.file_hash.as_str(),
-            ImageReadSource::ExecutionFile(lookup_path.to_string()),
-            offset,
-            limit,
-            runtime_context,
-        )? {
-            return Ok(outcome);
-        }
-        if is_pdf_path(Path::new(lookup_path)) || is_binary_document_path(Path::new(lookup_path)) {
-            return Err(FileToolError::new(
-                FileToolErrorKind::Io,
-                "binary document requires the hosted Processing Pipeline",
-            )
-            .with_model_path(lookup_path));
-        }
-        if output.bytes.contains(&0) {
-            return Err(FileToolError::new(
-                FileToolErrorKind::InvalidInput,
-                "binary file is not directly readable",
-            )
-            .with_model_path(lookup_path));
-        }
-        (
-            output.identity.display_path,
-            output.file_hash,
-            String::from_utf8_lossy(output.bytes.as_slice()).into_owned(),
-        )
-    } else {
-        let resolved = resolve_manifest_physical_path(runtime_context, lookup_path)?;
-        let display_path = resolved.display_path.clone();
-        if !resolved.path.is_file() {
-            return Err(FileToolError::new(
-                FileToolErrorKind::InvalidInput,
-                format!("Read path is not a file: {}", resolved.path.display()),
-            ));
-        }
-        let bytes = fs::read(resolved.path.as_path()).map_err(|error| {
-            FileToolError::new(
-                FileToolErrorKind::Io,
-                format!("read resolved input for content hash failed: {error}"),
-            )
-            .with_model_path(display_path.as_str())
-        })?;
-        let file_hash = sha256_bytes(bytes.as_slice());
-        if resolved_input
-            .as_ref()
-            .is_some_and(|input| file_hash != input.sha256)
-        {
-            return Err(FileToolError::new(
-                FileToolErrorKind::StaleInput,
-                "resolved input hash mismatch",
-            ));
-        }
-        if let Some(outcome) = try_image_read_outcome(
-            bytes.as_slice(),
-            display_path.as_str(),
-            file_hash.as_str(),
-            ImageReadSource::InputRef(
-                resolved_input
-                    .as_ref()
-                    .expect("resolved input branch requires input")
-                    .input_ref
-                    .clone(),
-            ),
-            offset,
-            limit,
-            runtime_context,
-        )? {
-            return Ok(outcome);
-        }
-        if is_pdf_path(resolved.path.as_path()) || is_binary_document_path(resolved.path.as_path())
-        {
-            return Err(FileToolError::new(
-                FileToolErrorKind::InvalidInput,
-                "binary document requires the hosted Processing Pipeline",
-            )
-            .with_model_path(display_path.as_str()));
-        }
-        let content = read_bounded_text(resolved.path.as_path(), display_path.as_str())?;
-        (display_path, file_hash, content)
-    };
     let mut outcome = text_read_outcome(display_path, file_hash.clone(), &content, offset, limit)?;
-    outcome.citation_ref = resolved_input
+    outcome.source_association_ref = resolved_input
         .as_ref()
-        .filter(|input| input.citation_allowed)
         .filter(|_| outcome.start_line <= outcome.end_line)
         .map(|input| {
-            build_citation_ref(
+            build_source_association_ref(
                 runtime_context
                     .resolved_input_manifest
                     .as_ref()
@@ -507,23 +490,20 @@ fn execute_read(
                 input,
                 outcome.start_line,
                 outcome.end_line,
-                None,
             )
         });
     outcome.input_ref = resolved_input.as_ref().map(|input| input.input_ref.clone());
     outcome.display_name = resolved_input
         .as_ref()
         .map(|input| input.display_name.clone());
-    outcome.owner_ref = resolved_input
-        .as_ref()
-        .map(|input| input.object_ref.clone());
-    outcome.owner_kind = resolved_input
-        .as_ref()
-        .map(|input| input.owner_kind.clone());
-    outcome.evidence_kind = resolved_input
-        .as_ref()
-        .map(|input| input.evidence_kind.clone());
-    outcome.owner_sha256 = resolved_input.as_ref().map(|input| input.sha256.clone());
+    outcome.source_identity =
+        resolved_input
+            .as_ref()
+            .map(|input| crate::source::SourceIdentityV1 {
+                source_ref: input.source_ref.clone(),
+                revision: input.source_version.clone(),
+                sha256: input.sha256.clone(),
+            });
     Ok(FileToolOutcome::Read(Box::new(outcome)))
 }
 
@@ -533,16 +513,6 @@ fn execute_workspace_read(
     limit: Option<usize>,
     runtime_context: &ToolRuntimeContext,
 ) -> Result<FileToolOutcome, FileToolError> {
-    if is_pdf_path(Path::new(path))
-        || (is_binary_document_path(Path::new(path))
-            && !is_supported_model_image_path(Path::new(path)))
-    {
-        return Err(FileToolError::new(
-            FileToolErrorKind::InvalidInput,
-            "binary document requires the hosted Processing Pipeline",
-        )
-        .with_model_path(path));
-    }
     let binding = runtime_context
         .execution_host_binding()
         .map_err(|message| {
@@ -575,12 +545,19 @@ fn execute_workspace_read(
     )? {
         return Ok(outcome);
     }
+    if output.bytes.contains(&0) {
+        return Err(FileToolError::new(
+            FileToolErrorKind::InvalidInput,
+            "binary file is not directly readable",
+        )
+        .with_model_path(display_path.as_str()));
+    }
     let content = String::from_utf8_lossy(output.bytes.as_slice()).into_owned();
     let outcome = text_read_outcome(display_path, file_hash.clone(), &content, offset, limit)?;
     Ok(FileToolOutcome::Read(Box::new(outcome)))
 }
 
-// Source validation and citations stay with the read entry points.
+// Source validation stays with the read entry points.
 fn text_read_outcome(
     display_path: String,
     file_hash: String,
@@ -625,15 +602,8 @@ fn text_read_outcome(
         content: selected.join("\n"),
         input_ref: None,
         display_name: None,
-        owner_ref: None,
-        owner_kind: None,
-        evidence_kind: None,
-        owner_sha256: None,
-        citation_ref: None,
-        page_start: None,
-        page_end: None,
-        document_route: None,
-        document_used_ocr: None,
+        source_identity: None,
+        source_association_ref: None,
     })
 }
 
@@ -922,60 +892,26 @@ fn deferred_input_error(error: DeferredInputResolutionError) -> FileToolError {
     FileToolError::new(kind, error.message)
 }
 
-pub(super) fn build_citation_ref(
+pub(super) fn build_source_association_ref(
     agent_run_id: &str,
     input: &ResolvedInput,
     start_line: usize,
     end_line: usize,
-    page: Option<u64>,
 ) -> String {
-    let locator = page
-        .map(|value| format!("page:{value}"))
-        .unwrap_or_else(|| format!("lines:{start_line}-{end_line}"));
+    let locator = format!("lines:{start_line}-{end_line}");
     let mut digest = Sha256::new();
     for value in [
         agent_run_id,
         input.input_ref.as_str(),
-        input.object_ref.as_str(),
+        input.source_ref.as_str(),
+        input.source_version.as_str(),
         input.sha256.as_str(),
         locator.as_str(),
     ] {
         digest.update(value.as_bytes());
         digest.update([0]);
     }
-    format!("citation:{:x}", digest.finalize())
-}
-
-fn is_pdf_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .map(|value| value.eq_ignore_ascii_case("pdf"))
-        .unwrap_or(false)
-}
-
-fn is_binary_document_path(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|value| value.to_str())
-            .map(|value| value.to_ascii_lowercase())
-            .as_deref(),
-        Some(
-            "doc"
-                | "docx"
-                | "ppt"
-                | "pptx"
-                | "xls"
-                | "xlsx"
-                | "odt"
-                | "ods"
-                | "odp"
-                | "png"
-                | "jpg"
-                | "jpeg"
-                | "tif"
-                | "tiff"
-        )
-    )
+    format!("source:sha256:{:x}", digest.finalize())
 }
 
 #[cfg(test)]
@@ -1186,10 +1122,13 @@ mod tests {
                                 "{field}: {options}"
                             );
                         }
-                        assert!(plain.details.get("citationRef").is_none());
+                        assert!(plain.details.get("sourceAssociationRef").is_none());
                         let has_lines = resolved.details["startLine"].as_u64().unwrap()
                             <= resolved.details["endLine"].as_u64().unwrap();
-                        assert_eq!(resolved.details.get("citationRef").is_some(), has_lines);
+                        assert_eq!(
+                            resolved.details.get("sourceAssociationRef").is_some(),
+                            has_lines
+                        );
                         assert_eq!(resolved.details["inputRef"], "input_1");
                     }
                     (Err(plain), Err(resolved)) => {
@@ -1223,16 +1162,13 @@ mod tests {
         ResolvedInput {
             schema: RESOLVED_INPUT_SCHEMA.to_string(),
             input_ref: "input_1".to_string(),
-            object_ref: "srcobj_1".to_string(),
-            owner_kind: "sourceObject".to_string(),
+            source_ref: "srcobj_1".to_string(),
             virtual_path: "sources/srcobj_1/notice.md".to_string(),
             display_name: "notice.md".to_string(),
             content_type: "text/markdown".to_string(),
             size_bytes: bytes.len() as u64,
             sha256: super::file_content_hash_for_bytes(bytes),
             source_version: "1".to_string(),
-            evidence_kind: "workspaceSource".to_string(),
-            citation_allowed: true,
         }
     }
 
@@ -1242,13 +1178,9 @@ mod tests {
             input_ref: input.input_ref.clone(),
             display_name: input.display_name.clone(),
             content_type: input.content_type.clone(),
-            input_identity: crate::tool::inputs::InputIdentityV1 {
-                owner_kind: input.owner_kind.clone(),
-                owner_id: input.object_ref.clone(),
-                generation: input
-                    .source_version
-                    .parse()
-                    .expect("numeric content generation"),
+            input_identity: crate::source::SourceIdentityV1 {
+                source_ref: input.source_ref.clone(),
+                revision: input.source_version.clone(),
                 sha256: input.sha256.clone(),
             },
             size_bytes: input.size_bytes,
@@ -1476,7 +1408,7 @@ mod tests {
     }
 
     #[test]
-    fn read_returns_stable_citation_and_rejects_stale_or_unknown_input() {
+    fn read_returns_stable_source_association_and_rejects_stale_or_unknown_input() {
         let root = std::env::temp_dir().join(format!(
             "centaeris-resolved-read-{}",
             crate::runtime::contracts::current_timestamp_ms()
@@ -1494,10 +1426,10 @@ mod tests {
             .with_resolved_input_root(inputs.clone())
             .expect("resolved input root")
             .with_tool_invocation("call_read", "read");
-        let knowledge_handler = test_handler();
+        let input_handler = test_handler();
         let path_handler = test_handler();
 
-        let first = knowledge_handler
+        let first = input_handler
             .invoke(
                 json!({"input_ref": "input_1", "offset": 1, "limit": 2})
                     .to_string()
@@ -1516,14 +1448,14 @@ mod tests {
         let first = first.details;
         let second = second.details;
         assert_eq!(first["inputRef"], "input_1");
-        assert_eq!(first["citationRef"], second["citationRef"]);
-        assert_eq!(first["ownerRef"], "srcobj_1");
-        assert_eq!(first["evidenceKind"], "workspaceSource");
+        assert_eq!(
+            first["sourceAssociationRef"],
+            second["sourceAssociationRef"]
+        );
+        assert_eq!(first["sourceIdentity"]["sourceRef"], "srcobj_1");
 
         let mut user_input = test_input(bytes);
-        user_input.object_ref = "library_1".to_string();
-        user_input.owner_kind = "userLibraryObject".to_string();
-        user_input.evidence_kind = "userProvided".to_string();
+        user_input.source_ref = "library_1".to_string();
         let user_context = ToolRuntimeContext::with_cwd(inputs.clone())
             .expect("workspace context")
             .with_resolved_input_manifest(manifest_state(
@@ -1535,22 +1467,18 @@ mod tests {
             .with_resolved_input_root(inputs.clone())
             .expect("resolved input root")
             .with_tool_invocation("call_read", "read");
-        let user_read = knowledge_handler
+        let user_read = input_handler
             .invoke(
                 json!({"input_ref": "input_1"}).to_string().as_str(),
                 &user_context,
             )
             .expect("read user input")
             .details;
-        assert_eq!(user_read["ownerKind"], "userLibraryObject");
-        assert_eq!(user_read["evidenceKind"], "userProvided");
-        assert!(user_read["citationRef"].as_str().is_some());
+        assert_eq!(user_read["sourceIdentity"]["sourceRef"], "library_1");
+        assert!(user_read["sourceAssociationRef"].as_str().is_some());
 
         let mut artifact_input = test_input(bytes);
-        artifact_input.object_ref = "artifact_1".to_string();
-        artifact_input.owner_kind = "artifact".to_string();
-        artifact_input.evidence_kind = "generatedArtifact".to_string();
-        artifact_input.citation_allowed = false;
+        artifact_input.source_ref = "artifact_1".to_string();
         let artifact_context = ToolRuntimeContext::with_cwd(inputs.clone())
             .expect("workspace context")
             .with_resolved_input_manifest(manifest_state(
@@ -1562,20 +1490,18 @@ mod tests {
             .with_resolved_input_root(inputs.clone())
             .expect("resolved input root")
             .with_tool_invocation("call_read", "read");
-        let artifact_read = knowledge_handler
+        let artifact_read = input_handler
             .invoke(
                 json!({"input_ref": "input_1"}).to_string().as_str(),
                 &artifact_context,
             )
             .expect("read artifact input")
             .details;
-        assert_eq!(artifact_read["ownerKind"], "artifact");
-        assert!(artifact_read["citationRef"].is_null());
+        assert_eq!(artifact_read["sourceIdentity"]["sourceRef"], "artifact_1");
+        assert!(artifact_read["sourceAssociationRef"].as_str().is_some());
 
         let mut next_agent_run_input = test_input(bytes);
-        next_agent_run_input.object_ref = "library_1".to_string();
-        next_agent_run_input.owner_kind = "userLibraryObject".to_string();
-        next_agent_run_input.evidence_kind = "userProvided".to_string();
+        next_agent_run_input.source_ref = "library_1".to_string();
         let next_agent_run_context = ToolRuntimeContext::with_cwd(inputs.clone())
             .expect("workspace context")
             .with_resolved_input_manifest(manifest_state(
@@ -1587,16 +1513,19 @@ mod tests {
             .with_resolved_input_root(inputs.clone())
             .expect("resolved input root")
             .with_tool_invocation("call_read", "read");
-        let next_run = knowledge_handler
+        let next_run = input_handler
             .invoke(
                 json!({"input_ref": "input_1"}).to_string().as_str(),
                 &next_agent_run_context,
             )
             .expect("read next run")
             .details;
-        assert_ne!(user_read["citationRef"], next_run["citationRef"]);
+        assert_ne!(
+            user_read["sourceAssociationRef"],
+            next_run["sourceAssociationRef"]
+        );
 
-        let unknown = knowledge_handler
+        let unknown = input_handler
             .invoke(
                 json!({"input_ref": "banana"}).to_string().as_str(),
                 &context,
@@ -1604,7 +1533,7 @@ mod tests {
             .expect_err("unknown input must fail");
         assert!(unknown.details.to_string().contains("asset_unavailable"));
         std::fs::write(file.as_path(), "tampered").expect("tamper input");
-        let stale = knowledge_handler
+        let stale = input_handler
             .invoke(
                 json!({"input_ref": "input_1"}).to_string().as_str(),
                 &context,
@@ -1616,7 +1545,7 @@ mod tests {
     }
 
     #[test]
-    fn read_batch_returns_one_citation_per_input_and_rejects_partial_contracts() {
+    fn read_batch_returns_one_source_association_per_input_and_rejects_partial_contracts() {
         let root = std::env::temp_dir().join(format!(
             "centaeris-resolved-read-batch-{}",
             crate::runtime::contracts::current_timestamp_ms()
@@ -1633,7 +1562,7 @@ mod tests {
         let first = test_input(first_bytes);
         let mut second = test_input(second_bytes);
         second.input_ref = "input_2".to_string();
-        second.object_ref = "srcobj_2".to_string();
+        second.source_ref = "srcobj_2".to_string();
         second.virtual_path = "sources/srcobj_2/policy.md".to_string();
         second.display_name = "policy.md".to_string();
         let authorization_digest = format!("sha256:{}", "a".repeat(64));
@@ -1670,11 +1599,15 @@ mod tests {
             .details;
         assert_eq!(output["schema"], "read_batch_result.v1");
         assert_eq!(output["items"].as_array().expect("batch items").len(), 2);
-        assert!(output["items"][0]["citationRef"].as_str().is_some());
-        assert!(output["items"][1]["citationRef"].as_str().is_some());
+        assert!(output["items"][0]["sourceAssociationRef"]
+            .as_str()
+            .is_some());
+        assert!(output["items"][1]["sourceAssociationRef"]
+            .as_str()
+            .is_some());
         assert_ne!(
-            output["items"][0]["citationRef"],
-            output["items"][1]["citationRef"]
+            output["items"][0]["sourceAssociationRef"],
+            output["items"][1]["sourceAssociationRef"]
         );
 
         for invalid in [
@@ -1690,7 +1623,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_binary_document_requires_the_document_execution_capability() {
+    fn resolved_binary_input_uses_the_generic_binary_read_policy() {
         let root = std::env::temp_dir().join(format!(
             "centaeris-resolved-pdf-read-{}",
             crate::runtime::contracts::current_timestamp_ms()
@@ -1698,7 +1631,7 @@ mod tests {
         let inputs = root.join("inputs");
         let file = inputs.join("sources/srcobj_1/scan.pdf");
         std::fs::create_dir_all(file.parent().expect("file parent")).expect("create inputs");
-        let bytes = b"%PDF-1.4 scan fixture";
+        let bytes = b"%PDF-1.4\0scan fixture";
         std::fs::write(file.as_path(), bytes).expect("write pdf");
         let mut input = test_input(bytes);
         input.virtual_path = "sources/srcobj_1/scan.pdf".to_string();
@@ -1716,11 +1649,8 @@ mod tests {
                 json!({"input_ref": "input_1"}).to_string().as_str(),
                 &context,
             )
-            .expect_err("binary document must require hosted processing");
-        assert!(error
-            .details
-            .to_string()
-            .contains("hosted Processing Pipeline"));
+            .expect_err("binary bytes are rejected");
+        assert!(error.details.to_string().contains("binary file"));
 
         std::fs::remove_dir_all(root).expect("cleanup pdf read test");
     }
@@ -1748,16 +1678,13 @@ mod tests {
             let input = ResolvedInput {
                 schema: RESOLVED_INPUT_SCHEMA.to_string(),
                 input_ref,
-                object_ref: format!("source_object_{index}"),
-                owner_kind: "sourceObject".to_string(),
+                source_ref: format!("source_object_{index}"),
                 virtual_path,
                 display_name: format!("{index:03}.md"),
                 content_type: "text/markdown".to_string(),
                 size_bytes: content.len() as u64,
                 sha256: super::file_content_hash_for_bytes(content.as_bytes()),
                 source_version: "1".to_string(),
-                evidence_kind: "workspaceSource".to_string(),
-                citation_allowed: true,
             };
             declared_inputs.push(declared_input(&input));
             manifest_inputs.push(input);

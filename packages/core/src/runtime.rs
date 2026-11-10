@@ -1186,11 +1186,11 @@ impl AgentRunSessionState {
                         self.artifact_fact_matches(payload)?,
                     )
                 }
-                ToolExecutionFact::CitationRecorded(payload) => {
+                ToolExecutionFact::SourceAssociated(payload) => {
                     require_tool_fact_identity(payload, result, "sourceToolCallId", true)?;
                     (
-                        SessionRecordType::CitationRecorded,
-                        self.citation_fact_matches(payload)?,
+                        SessionRecordType::SourceAssociated,
+                        self.source_association_fact_matches(payload)?,
                     )
                 }
                 ToolExecutionFact::ExternalEvidenceRef(payload) => (

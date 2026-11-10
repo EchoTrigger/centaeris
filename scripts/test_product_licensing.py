@@ -68,10 +68,14 @@ class ProductLicensingTests(unittest.TestCase):
     def test_product_defaults_remain_agpl(self):
         cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
         self.assertEqual(cargo["workspace"]["package"]["license"], "AGPL-3.0-only")
-        for manifest in [ROOT / "package.json", *(ROOT / "packages").glob("*/package.json")]:
+        for manifest in [ROOT / "package.json", *(ROOT / "packages").glob("*/package.json"), *(ROOT / "packages/workspace").glob("*/package.json")]:
             self.assertEqual(json.loads(manifest.read_text(encoding="utf-8"))["license"],
                              "AGPL-3.0-only", str(manifest))
-        for manifest in [ROOT / "pyproject.toml", *(ROOT / "packages").glob("*/pyproject.toml")]:
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        python_manifests = [ROOT / "pyproject.toml", *(
+            ROOT / member / "pyproject.toml" for member in project["tool"]["uv"]["workspace"]["members"]
+        )]
+        for manifest in python_manifests:
             self.assertEqual(tomllib.loads(manifest.read_text(encoding="utf-8"))["project"]["license"],
                              "AGPL-3.0-only", str(manifest))
 

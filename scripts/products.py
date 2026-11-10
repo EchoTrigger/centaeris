@@ -33,10 +33,10 @@ def source_revision(clean=True):
 
 def build_commands(product, release=False):
     pnpm = "pnpm.cmd" if os.name == "nt" else "pnpm"
-    rust = {"core": "centaeris-core", "runtime": "centaeris-runtime", "tui": "centaeris-tui",
+    rust = {"core": "centaeris-core", "runtime": "centaeris-desktop-services", "tui": "centaeris-tui",
             "runtime-server": "runtime_server", "hosted-execution": "hosted_execution"}
     if product in rust:
-        names = ["centaeris-runtime", rust[product]] if product == "tui" else [rust[product]]
+        names = ["centaeris-desktop-services", rust[product]] if product == "tui" else [rust[product]]
         return [["cargo", "build", "--locked", "-p", name, *(["--release"] if release else [])] for name in names]
     if product == "desktop":
         return [["pwsh", "-NoProfile", "-File", "scripts/build-desktop.ps1"]]

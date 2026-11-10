@@ -11,16 +11,47 @@ Hosts and adapters translate external systems into Core contracts:
 
 | Package | Responsibility |
 | --- | --- |
-| `packages/runtime_sqlite` | Local `RuntimeStore` schema, transactions, and persistence |
+| `packages/sqlite` | Local `RuntimeStore` schema, transactions, and persistence |
 | `packages/mcp` | Lazy MCP connection, discovery validation, and call translation |
-| `packages/runtime` | Local composition of Core, storage, model providers, processes, and host protocol |
-| `packages/desktop` | Electron window, native shell integration, and controlled renderer bridge |
-| `packages/tui` | Terminal projection and input handling |
-| `packages/ui` | Host-agnostic Desktop renderer |
+| `packages/agent` | Rust Agent SDK, Session host interface and local execution adapters |
+| `packages/desktop/src/services` | Shared local product services, host composition and RPC transport |
+| `packages/desktop` | Desktop product services, Electron shell, renderer and controlled bridge |
+| `packages/cli` | Interactive terminal, Print, JSON and RPC mode entry points |
+| `packages/ui` | Shared frontend primitives and theme foundations |
+| `packages/visuals` | Shared inline visualization rendering |
+| `packages/sdk` | Typed TypeScript Session RPC client |
+| `packages/model-http` | Shared bounded model HTTP and SSE transport |
 
 An adapter may translate identities, transport, storage, or process behavior. It
 must not define a second prompt, tool loop, continuation state machine, or
 Session truth.
+
+Core associates successful tool calls with immutable source identities and
+optional line ranges through `source_associated` records. Host input adapters
+translate application identities into `runtime.declared_source.v1`,
+`runtime.resolved_source.v1`, and `runtime.source_manifest.v1`. Application
+services own material eligibility, document locators, citation projections,
+and preview authorization.
+
+Historical product citation records remain authoritative in their original
+storage. Local and hosted storage readers reconstruct generic source records
+for Core while retaining event identities, sequence positions, and original
+document evidence. Local queued provider receipts advance transactionally
+before their runtime store actor starts, retaining product evidence alongside
+the generic facts.
+
+## Session entry points
+
+The local Rust Session API and RPC handler share admission, operation receipts,
+Run controls and persistence. Native connections receive typed notifications;
+RPC connections encode the same method and params as JSONL. Desktop owns its
+product services and renderer, and CLI owns its terminal and headless behavior.
+A connection's lifetime is distinct from its service-owned Runs.
+
+Hosted requests enter Django and durable Worker scheduling, then Workspace
+Runtime composes Core with platform authorization, PostgreSQL and sandbox
+execution. The executor runs environment tasks. CLI is an additional client
+entry point to the local host.
 
 ## Tool concurrency ownership
 
@@ -162,8 +193,8 @@ MCP tools, or Hooks. Core owns their composition and execution semantics; the
 package does not receive a second Agent loop.
 
 This repository contains local and hosted product components. packages/core
-owns host-agnostic contracts and runtime semantics; packages/api owns hosted
-control-plane facts, and packages/runtime_server adapts those contracts. Private
+owns host-agnostic contracts and runtime semantics; packages/workspace/api owns hosted
+control-plane facts, and packages/workspace/runtime adapts those contracts. Private
 plugins, credentials, customer data and local deployment configuration remain external.
 
 ## Desktop Git workbench
@@ -199,7 +230,7 @@ This feature does not provide durable command receipts or exactly-once commits.
 Successful Host commit responses include the resulting HEAD, checked against the expected parent;
 external processes can still race this observation.
 
-The shared `packages/runtime/generated/workspace-git-samples.json` fixture is
+The shared `packages/desktop/src/services/generated/workspace-git-samples.json` fixture is
 checked against Rust serialization/strict request decoding and Desktop bridge
 payloads. Real temporary-repository tests cover partial staging, unborn HEAD,
 renames, literal paths, conflicts, hooks, and stale review rejection.

@@ -37,7 +37,7 @@ const walkFiles = (root, predicate) => {
 };
 
 const collectUiBridgeUsage = () => {
-  const uiRoot = path.join(repoRoot, "packages", "ui", "src");
+  const uiRoot = path.join(hostRoot, "src", "renderer");
   const commands = new Set();
   const events = new Set();
   for (const filePath of walkFiles(uiRoot, (item) => /\.(ts|tsx)$/.test(item))) {
@@ -57,7 +57,7 @@ const collectUiBridgeUsage = () => {
 };
 
 const collectElectronContract = () => {
-  const text = readText("packages/desktop/src/hostContract.mjs");
+  const text = readText("packages/desktop/src/main/hostContract.mjs");
   const eventSection = text.slice(
     text.indexOf("HOST_EVENT_NAMES"),
     text.indexOf("HOST_COMMANDS"),
@@ -81,7 +81,7 @@ const collectElectronContract = () => {
 
 const collectRuntimeHostCommands = () => {
   const manifest = JSON.parse(
-    readText("packages/runtime/generated/runtime-methods.json"),
+    readText("packages/desktop/src/services/generated/runtime-methods.json"),
   );
   requireExactFields(manifest, ["schema", "methods"], "Runtime method registry");
   if (manifest.schema !== "centaeris.runtime-method-registry.v1") {

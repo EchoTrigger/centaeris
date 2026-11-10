@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$tuiDir = Join-Path $repoRoot "packages/tui"
+$tuiDir = Join-Path $repoRoot "packages/cli"
 $tuiReleaseTarget = Join-Path $repoRoot "target/tui-release"
 $releaseTarget = Join-Path $repoRoot "target/release"
 $tuiBinary = Join-Path $tuiReleaseTarget "centa.exe"
@@ -70,7 +70,7 @@ function Get-SystemSkillsBundle {
         [Parameter(Mandatory = $true)][string]$Path
     )
     $inspector = @'
-import { inspectSystemSkillsBundle } from "./packages/desktop/src/systemSkills.mjs";
+import { inspectSystemSkillsBundle } from "./packages/desktop/src/main/services/systemSkills.mjs";
 try {
   process.stdout.write(JSON.stringify(await inspectSystemSkillsBundle(process.argv[1])));
 } catch (error) {
@@ -153,13 +153,13 @@ Invoke-Checked "product license assembly" "node.exe" @(
 Invoke-Checked "product license validation" "node.exe" @(
     (Join-Path $repoRoot "scripts/product-licenses.mjs"), "check", $distRoot
 ) $repoRoot
-$notices = (Get-Content -Raw -LiteralPath (Join-Path $repoRoot "THIRD_PARTY_NOTICES.md")).Replace("packages/ui/public/licenses/", "licenses/")
+$notices = (Get-Content -Raw -LiteralPath (Join-Path $repoRoot "THIRD_PARTY_NOTICES.md")).Replace("packages/desktop/public/licenses/", "licenses/")
 Set-Content -LiteralPath (Join-Path $distRoot "THIRD_PARTY_NOTICES.md") -Value $notices -Encoding utf8NoBOM
-Copy-Item -LiteralPath (Join-Path $repoRoot "packages/ui/public/licenses") -Destination (Join-Path $distRoot "licenses") -Recurse
+Copy-Item -LiteralPath (Join-Path $repoRoot "packages/desktop/public/licenses") -Destination (Join-Path $distRoot "licenses") -Recurse
 Invoke-Checked "third-party license assembly" "node.exe" @(
     (Join-Path $repoRoot "packages/desktop/scripts/write-third-party-licenses.mjs"),
     (Join-Path $distRoot "THIRD_PARTY_LICENSES"),
-    "centaeris-runtime",
+    "centaeris-desktop-services",
     "centaeris-tui",
     "--rust-only"
 ) $repoRoot

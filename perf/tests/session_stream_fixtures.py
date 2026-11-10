@@ -6,7 +6,7 @@ import sys
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
-source = ROOT / 'packages/api/app_core/agent_run_stream.py'
+source = ROOT / 'packages/workspace/api/app_core/agent_run_stream.py'
 tree = ast.parse(source.read_text(encoding='utf-8'))
 selected = [node for node in tree.body if (
     isinstance(node, ast.FunctionDef) and node.name == '_committed_item') or (

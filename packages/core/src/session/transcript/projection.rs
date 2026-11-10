@@ -826,7 +826,7 @@ impl TranscriptProjectorV1 {
             | SessionRecordType::ModelRequestStarted
             | SessionRecordType::ProviderUsage
             | SessionRecordType::ExternalEvidenceRef
-            | SessionRecordType::CitationRecorded
+            | SessionRecordType::SourceAssociated
             | SessionRecordType::ArtifactPublished
             | SessionRecordType::Compaction
             | SessionRecordType::CheckpointRef
@@ -875,7 +875,7 @@ pub(super) fn transcript_event_type_is_payload_free(event_type: SessionRecordTyp
             | SessionRecordType::ModelRequestStarted
             | SessionRecordType::ProviderUsage
             | SessionRecordType::ExternalEvidenceRef
-            | SessionRecordType::CitationRecorded
+            | SessionRecordType::SourceAssociated
             | SessionRecordType::ArtifactPublished
             | SessionRecordType::Compaction
             | SessionRecordType::CheckpointRef

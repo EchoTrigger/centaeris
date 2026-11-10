@@ -50,7 +50,7 @@ docker run --rm \
   --mount "type=bind,source=$PWD/target,target=/build" \
   -e CARGO_TARGET_DIR=/build/harbor-bookworm -e CARGO_BUILD_JOBS=2 \
   -w /source rust:1.95.0-bookworm \
-  /usr/local/cargo/bin/cargo build --locked -p centaeris-runtime --bin centaeris-runtime
+  /usr/local/cargo/bin/cargo build --locked -p centaeris-desktop-services --bin centaeris-runtime
 export CENTAERIS_RUNTIME_BINARY="$PWD/target/harbor-bookworm/debug/centaeris-runtime"
 python3 -B -m unittest discover -s scripts/harbor -p 'test_*.py'
 ```

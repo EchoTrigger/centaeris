@@ -10,7 +10,7 @@ use serde_json::Value;
 )]
 pub enum ToolExecutionFact {
     ArtifactPublished(Value),
-    CitationRecorded(Value),
+    SourceAssociated(Value),
     ExternalEvidenceRef(Value),
     FileFact(Value),
 }
@@ -19,7 +19,7 @@ impl ToolExecutionFact {
     pub(crate) fn payload(&self) -> &Value {
         match self {
             Self::ArtifactPublished(payload)
-            | Self::CitationRecorded(payload)
+            | Self::SourceAssociated(payload)
             | Self::ExternalEvidenceRef(payload)
             | Self::FileFact(payload) => payload,
         }

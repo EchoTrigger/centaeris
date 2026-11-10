@@ -1,29 +1,19 @@
-# Centaeris UI
+# Shared UI
 
-`packages/ui` (`centaeris-ui`) is the host-agnostic Desktop renderer. It is a
-React application shared by Local Host products — currently
-[`packages/desktop`](../desktop/README.md) — over a controlled host bridge; it
-does not talk to the Local Runtime Host protocol, the filesystem, or native
-APIs directly.
+Shared frontend primitives for the Desktop and hosted Web products. Import an
+explicit subpath such as `@centaeris/ui/button`,
+`@centaeris/ui/primitives/menu` or
+`@centaeris/ui/theme-store`.
 
-Session, prompt, tool, Plugin, Skill, continuation, and runtime-job semantics
-belong to Core and the Runtime hosts that adapt it; `ui` only renders the
-canonical events and state a host bridge exposes.
+Nova components contain their existing Tailwind styles; consumers using them
+must include this package's source in their Tailwind scan. Headless Base UI
+exports allow consumers to retain their own markup and CSS. Importing JavaScript
+does not install a global CSS reset. Theme declarations are an explicit CSS import.
 
-The `react-i18next` foundation and English resources live in `src/i18n.ts` and
-`src/locales/`. See [Architecture](../../docs/architecture/Architecture.md)
-for the host/renderer boundary.
+Product routes, layout policy, transcript folding, follow mode, request ownership
+and execution semantics stay in their existing owners. See
+[Frontend foundations](../../docs/development/FrontendFoundations.md) for the
+shared boundary and validation requirements.
 
-## Development
-
-```powershell
-pnpm --filter centaeris-ui run dev
-```
-
-## Gate
-
-```powershell
-pnpm --filter centaeris-ui run gate
-```
-
-Runs the build, lint, and vitest suite.
+The Nova components are adapted from shadcn/ui under MIT; preserve the file
+headers and [third-party notice](../../THIRD_PARTY_NOTICES.md).

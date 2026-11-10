@@ -524,7 +524,7 @@ The ordinary package-wide API gate discovers `test_agent_messages.py`,
 Focused reproduction from the repository root is:
 
 ```sh
-uv run --frozen --package api python packages/api/manage.py test app_core.test_agent_messages app_core.test_agent_coordination_migration app_core.test_agent_message_runtime --settings=api.test_settings --noinput
+uv run --frozen --package api python packages/workspace/api/manage.py test app_core.test_agent_messages app_core.test_agent_coordination_migration app_core.test_agent_message_runtime --settings=api.test_settings --noinput
 cargo test --locked -p runtime_server agent_message
 ```
 
@@ -584,7 +584,7 @@ Package-wide API discovery includes `test_agent_work.py` and
 synthetic native identities/files and mocked existing profile/scheduling I/O:
 
 ```sh
-uv run --frozen --package api python packages/api/manage.py test app_core.test_agent_work app_core.test_agent_work_migration app_core.test_transcript_index_migration --settings=api.test_settings --noinput
+uv run --frozen --package api python packages/workspace/api/manage.py test app_core.test_agent_work app_core.test_agent_work_migration app_core.test_transcript_index_migration --settings=api.test_settings --noinput
 ```
 
 Require source facts to be invisible from a second connection before commit and

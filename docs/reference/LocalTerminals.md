@@ -84,7 +84,7 @@ PowerShell input/output, resize, duplicate start, stale-instance and operation
 conflicts, Ctrl+C, all-client disconnect/reconnect beyond the idle timeout,
 confirmed child creation before stop, and explicit service shutdown.
 
-Rust/TypeScript share `packages/runtime/generated/terminal-samples.json` with a
+Rust/TypeScript share `packages/desktop/src/services/generated/terminal-samples.json` with a
 Rust serialization parity check. UI tests cover control replies, no input retry,
 and closing a view without stopping its process. Windows native verification is
 performed locally; macOS/Linux native shell and cleanup acceptance remain required

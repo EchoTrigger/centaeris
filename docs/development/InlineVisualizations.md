@@ -96,11 +96,12 @@ canonical text projection. It exports JSON Schema, TypeScript types and catalog
 metadata. Generated artifacts and shared fixtures keep Rust and browser
 acceptance aligned. Core retains pure Rust dependencies and no React runtime.
 
-A shared `packages/visualization-react` package owns the json-render wrapper,
+A shared `packages/visuals` package owns the json-render wrapper,
 registry, theme styles, generated browser contract and block error boundary.
-Both `packages/ui`, used by Desktop, and `packages/web` consume that package.
+Desktop in `packages/desktop/src/renderer` and Web in `packages/workspace/web`
+consume that package.
 The shared Nova mapping, compact layout selection and theme styles live in
-`packages/frontend-foundations`; both clients use that mapping rather than
+`packages/ui`; both clients use that mapping rather than
 maintaining separate visual renderers. Its public interface takes a visual spec
 and presentation state; session transport and hosted authentication remain in
 their existing owners.
@@ -232,7 +233,7 @@ appearance and performance acceptance remain required before merge.
 
 ## Manual preview
 
-Run `pnpm --filter centaeris-ui run preview:visualizations` and open
+Run `pnpm --filter @centaeris/electron-host run preview:visualizations` and open
 `http://127.0.0.1:5179/visualization-preview.html`. This development page renders
 the two reference examples and four additional scenarios through the actual
 shared adapter: Session lifecycle, resource control, delivery, recovery, task

@@ -10,7 +10,7 @@ HTTP, idempotency, delivery and cancellation contracts remain unchanged.
 Read this alongside [workspace resource administration](../operations/WorkspaceResourceAdministration.md),
 the [test policy](../../development/Testing.md#test-quality) and the
 [workspace release gate](ReleaseGate.md). The implementation under test is
-[migration 0046](../../../packages/api/app_core/migrations/0046_workspace_owned_resources.py).
+[migration 0046](../../../packages/workspace/api/app_core/migrations/0046_workspace_owned_resources.py).
 
 ## Evidence obtained and outstanding work
 
@@ -24,10 +24,10 @@ the [test policy](../../development/Testing.md#test-quality) and the
 | Authenticated history delivery, live model/connector boundaries after retirement, cleanup, and backup restoration | Pending in a disposable deployment with real PostgreSQL and the required services. | These remain release acceptance requirements. |
 
 The five executed no-database regressions are in
-[Agent Run API authority tests](../../../packages/api/app_core/test_agent_run_api_authority.py)
-and [workspace resource tests](../../../packages/api/app_core/test_workspace_owned_resources.py).
+[Agent Run API authority tests](../../../packages/workspace/api/app_core/test_agent_run_api_authority.py)
+and [workspace resource tests](../../../packages/workspace/api/app_core/test_workspace_owned_resources.py).
 The historical-state test is in
-[workspace resource migration tests](../../../packages/api/app_core/test_workspace_owned_resources_migration.py).
+[workspace resource migration tests](../../../packages/workspace/api/app_core/test_workspace_owned_resources_migration.py).
 Do not replace these statuses with “passed” from a test-discovery count, skipped
 test, mocked database, SQLite run or direct invocation of the migration function
 against the current application registry.
@@ -47,7 +47,7 @@ must be able to create and drop its isolated test databases. Keep passwords and
 credential values out of command transcripts and reports.
 
 The integration test uses
-[`isolated_migration_database`](../../../packages/api/app_core/migration_testing.py).
+[`isolated_migration_database`](../../../packages/workspace/api/app_core/migration_testing.py).
 It leaves the runner's shared schema intact, creates a separate database at
 0045, obtains historical models from `MigrationExecutor.loader.project_state`,
 seeds those historical models and migrates that database to 0046. It also routes
@@ -66,7 +66,7 @@ signed authorization.
 The smallest executable checks from the repository root are:
 
 ```sh
-DJANGO_SETTINGS_MODULE=api.test_settings .venv/bin/python packages/api/manage.py test \
+DJANGO_SETTINGS_MODULE=api.test_settings .venv/bin/python packages/workspace/api/manage.py test \
   app_core.test_agent_run_api_authority.AgentRunApiPluginScopeTests \
   app_core.test_workspace_owned_resources.WorkspaceResourceRetirementMigrationTests \
   --verbosity 2 --noinput
@@ -76,7 +76,7 @@ That command does not need PostgreSQL. Once the database prerequisite is met,
 run the actual historical upgrade test:
 
 ```sh
-DJANGO_SETTINGS_MODULE=api.test_settings .venv/bin/python packages/api/manage.py test \
+DJANGO_SETTINGS_MODULE=api.test_settings .venv/bin/python packages/workspace/api/manage.py test \
   app_core.test_workspace_owned_resources_migration.WorkspaceOwnedResourceUpgradeTests \
   --verbosity 2 --noinput
 ```
@@ -85,7 +85,7 @@ The directly related database regressions can then be run without selecting the
 entire API suite:
 
 ```sh
-DJANGO_SETTINGS_MODULE=api.test_settings .venv/bin/python packages/api/manage.py test \
+DJANGO_SETTINGS_MODULE=api.test_settings .venv/bin/python packages/workspace/api/manage.py test \
   app_core.test_workspace_owned_resources.WorkspaceOwnedResourceTests \
   app_core.test_workspace_resource_admin \
   app_core.test_agent_run_api_authority.AgentRunApiCredentialAuthorityTests \

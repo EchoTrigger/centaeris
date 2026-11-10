@@ -4,13 +4,22 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$uiDir = Join-Path $repoRoot "packages/ui"
 $electronDir = Join-Path $repoRoot "packages/desktop"
-$releaseRuntime = Join-Path $repoRoot "target/release/centaeris-runtime.exe"
-$desktopDist = Join-Path $electronDir "dist/Centaeris Desktop"
+$cargoTargetRoot = if ($env:CARGO_TARGET_DIR) {
+    [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR, $repoRoot)
+} else {
+    Join-Path $repoRoot "target"
+}
+$releaseRuntime = Join-Path $cargoTargetRoot "release/centaeris-runtime.exe"
+$desktopOutputRoot = if ($env:CENTAERIS_DESKTOP_DIST_DIR) {
+    $env:CENTAERIS_DESKTOP_DIST_DIR
+} else {
+    Join-Path $electronDir "dist"
+}
+$desktopDist = Join-Path $desktopOutputRoot "Centaeris Desktop"
 $packagedRuntime = Join-Path $desktopDist "resources/bin/centaeris-runtime.exe"
 $centaerisExe = Join-Path $desktopDist "Centaeris Desktop.exe"
-$uiIndex = Join-Path $repoRoot "packages/ui/dist/index.html"
+$uiIndex = Join-Path $repoRoot "packages/desktop/renderer-dist/index.html"
 
 # Some terminals can have COMSPEC changed; pnpm run may fail if it is not cmd.exe.
 $env:ComSpec = "C:\Windows\System32\cmd.exe"
@@ -88,7 +97,6 @@ Assert-CommandAvailable "node.exe"
 Assert-CommandAvailable "cargo.exe"
 Assert-DistNotRunning
 
-Invoke-Checked "ui production build" "pnpm.cmd" @("run", "build") $uiDir
 Invoke-Checked "electron release runtime and desktop dist build" "pnpm.cmd" @("run", "build") $electronDir
 
 Assert-PathExists $uiIndex "UI dist index"
