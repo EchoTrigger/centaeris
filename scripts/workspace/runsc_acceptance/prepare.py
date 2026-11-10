@@ -26,7 +26,7 @@ def main():
     parser.add_argument('--model-script',type=Path,default=Path(__file__).with_name('model.py'))
     parser.add_argument('--api-port',type=int,default=18083)
     parser.add_argument('--runtime-port',type=int,default=19003)
-    for name in ('api','worker','runtime','general','postgres','redis'):parser.add_argument('--'+name+'-image',required=True)
+    for name in ('api','worker','runtime','general','processor','postgres','redis'):parser.add_argument('--'+name+'-image',required=True)
     args=parser.parse_args()
     if args.workspace_recovery and (not args.shared_workload or args.execution_mode!='perRun'):
         parser.error('workspace recovery requires explicit shared perRun fixture')
@@ -57,7 +57,7 @@ def main():
     def command(argv):return subprocess.run(argv,check=True,capture_output=True,text=True).stdout.strip()
     if command([*docker,'ps','-aq','--filter','label=centaeris.managed=true']):raise SystemExit('managed sandbox responsibility already exists')
     images={}
-    for name in ('api','worker','runtime','general','postgres','redis'):
+    for name in ('api','worker','runtime','general','processor','postgres','redis'):
         reference=getattr(args,name+'_image');identity=command([*docker,'image','inspect',reference,'--format','{{.Id}}'])
         if not re.fullmatch('sha256:[a-f0-9]{64}',identity):raise SystemExit('cached image identity unavailable')
         images[name]={'reference':reference,'id':identity}
@@ -116,6 +116,12 @@ def main():
         services['model']['environment']['MOCK_FIXED_MODEL_WAIT_MS']=str(args.model_wait_ms)
         services['model']['volumes']=[f'{scripts/"server.py"}:/harness/server.py:ro',f'{scripts/"fixed_workload.py"}:/harness/fixed_workload.py:ro',f'{tls/"model.pem"}:/opt/mock/tls.pem:ro']
     services['catalog-init']={**services['api'],'profiles':['setup'],'command':['/app/.venv/bin/python','manage.py','initialize_plugin_catalog'],'volumes':[v.replace('plugins:/opt/centaeris/plugins:ro','plugins:/opt/centaeris/plugins:rw') for v in services['api']['volumes']]};services['catalog-init'].pop('ports')
+    services['processor-init']={**services['api'],'profiles':['setup'],
+        'command':['/app/.venv/bin/python','manage.py','shell','-c','from app_core.material_processor import MaterialWorker; MaterialWorker()'],
+        'environment':{**services['api']['environment'],'MATERIAL_PROCESSOR_NAMESPACE':project,
+            'MATERIAL_PROCESSOR_IMAGE':images['processor']['id'],'MATERIAL_PROCESSOR_DEVICE':'cpu','MATERIAL_PROCESSOR_RUNTIME':'runsc'},
+        'volumes':[*services['api']['volumes'],args.docker_socket+':/var/run/docker.sock']}
+    services['processor-init'].pop('ports')
     for service in services.values():service.update(restart='no',labels={'centaeris.acceptance.project':project},mem_limit='512m',cpus='1',pids_limit=128)
     volumes={'postgres':{},'storage':{},'uploads':{},'plugins':{'name':project+'_plugins'},'memory':{'name':project+'_memory'},'runtime':{}}
     (root/'compose.json').write_text(json.dumps({'name':project,'services':services,'volumes':volumes},indent=2))
