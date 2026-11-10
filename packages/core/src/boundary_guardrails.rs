@@ -89,7 +89,7 @@ fn transcript_projection_is_not_session_or_model_input() {
 }
 
 #[test]
-fn core_public_modules_are_the_six_framework_facades() {
+fn core_public_modules_are_the_framework_facades() {
     let lib = read_src("src/lib.rs");
     let public_modules = lib
         .lines()
@@ -107,6 +107,7 @@ fn core_public_modules_are_the_six_framework_facades() {
             "model",
             "runtime",
             "session",
+            "source",
             "tool"
         ]
     );
