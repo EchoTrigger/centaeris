@@ -2454,19 +2454,26 @@ fn restore_active_runtime_snapshot(
     sources: &HashMap<String, crate::runtime::prompt_compaction_commit::CompactionSourceRequest>,
     updated_at_ms: i64,
 ) -> Result<SessionStateSnapshot, String> {
-    let latest_request_index = active.iter().rposition(|event| {
+    let latest_context_index = active.iter().rposition(|event| {
         event.event_type == SessionRecordType::ModelRequestStarted
             && event.payload.get("purpose").and_then(Value::as_str) == Some("main")
+            || event.event_type == SessionRecordType::Compaction
+                && event.payload.get("contextObservations").is_some()
     });
     let mut snapshot = SessionStateSnapshot::new(expected_session_id.to_string(), updated_at_ms);
 
-    let tail_start = if let Some(request_index) = latest_request_index {
+    let tail_start = if let Some(request_index) = latest_context_index {
         let request = &active[request_index];
+        let field = if request.event_type == SessionRecordType::Compaction {
+            "contextObservations"
+        } else {
+            "observations"
+        };
         let observations = serde_json::from_value::<Vec<ModelObservationV1>>(
             request
                 .payload
-                .get("observations")
-                .expect("validated model request observations")
+                .get(field)
+                .expect("validated context observations")
                 .clone(),
         )
         .map_err(|error| format!("decode Session model observations failed: {error}"))?;
@@ -2724,7 +2731,11 @@ fn restore_active_runtime_snapshot(
                     kind.to_owned(),
                 );
             }
-            if !images.is_empty() {
+            if !images.is_empty()
+                && !message
+                    .metadata
+                    .contains_key(crate::runtime::keys::metadata::MODEL_INPUT_IMAGE_SOURCES)
+            {
                 message.metadata.insert(
                     crate::runtime::keys::metadata::MODEL_INPUT_IMAGES.to_string(),
                     serde_json::to_string(&images).map_err(|error| {
@@ -2739,10 +2750,14 @@ fn restore_active_runtime_snapshot(
         &projection.host_event_inputs,
         &projection.host_event_owning_runs,
     )?;
-    let current_request = latest_request_index.map(|index| &active[index]);
+    let current_request = latest_context_index
+        .map(|index| &active[index])
+        .filter(|event| event.event_type == SessionRecordType::ModelRequestStarted);
     controls.restore_into(&mut snapshot, current_request)?;
     snapshot.context_window = snapshot.messages.clone();
-    if let Some(main_index) = latest_request_index {
+    if let Some(main_index) = latest_context_index
+        .filter(|index| active[*index].event_type == SessionRecordType::ModelRequestStarted)
+    {
         let main = &active[main_index];
         let observations = main.payload["observations"]
             .as_array()
@@ -4231,21 +4246,56 @@ fn validate_provider_usage(event: &SessionLogRecord) -> Result<(), String> {
 fn validate_compaction(event: &SessionLogRecord) -> Result<(), String> {
     required_event_turn_id(event)?;
     let payload = payload_object(event)?;
-    require_exact_payload_fields(
-        payload,
-        &[
-            "compactionId",
-            "summaryMessageId",
-            "summaryMarkdown",
-            "firstKeptMessageId",
-            "createdReason",
-        ],
-        event,
-    )?;
+    let mut fields = vec![
+        "compactionId",
+        "summaryMessageId",
+        "summaryMarkdown",
+        "firstKeptMessageId",
+        "createdReason",
+    ];
+    if payload.contains_key("contextObservations") {
+        fields.push("contextObservations");
+    }
+    require_exact_payload_fields(payload, &fields, event)?;
     required_payload_string(payload, "compactionId", event)?;
     required_payload_string(payload, "summaryMessageId", event)?;
     required_payload_string(payload, "summaryMarkdown", event)?;
     required_payload_string(payload, "createdReason", event)?;
+    if let Some(value) = payload.get("contextObservations") {
+        let observations: Vec<ModelObservationV1> = serde_json::from_value(value.clone())
+            .map_err(|error| format!("manual compaction context observations invalid: {error}"))?;
+        let mut message_ids = HashSet::new();
+        let mut images_started = false;
+        let mut summary_matches = 0;
+        for observation in &observations {
+            validate_model_observation(observation, event)?;
+            match observation {
+                ModelObservationV1::ContextMessage { message } if !images_started => {
+                    if !message_ids.insert(message.message_id.as_str()) {
+                        return Err("manual compaction context message identity duplicated".into());
+                    }
+                    if Some(message.message_id.as_str())
+                        == payload.get("summaryMessageId").and_then(Value::as_str)
+                        && message.role == ModelMessageRoleV1::System
+                        && Some(message.content.as_str())
+                            == payload.get("summaryMarkdown").and_then(Value::as_str)
+                    {
+                        summary_matches += 1;
+                    }
+                }
+                ModelObservationV1::InputImage { image } => {
+                    images_started = true;
+                    if !message_ids.contains(image.message_id.as_str()) {
+                        return Err("manual compaction image context message missing".into());
+                    }
+                }
+                _ => return Err("manual compaction context observation kind/order invalid".into()),
+            }
+        }
+        if summary_matches != 1 {
+            return Err("manual compaction context summary binding mismatch".into());
+        }
+    }
     match payload.get("firstKeptMessageId") {
         Some(Value::Null) => Ok(()),
         Some(Value::String(value)) if !value.trim().is_empty() => Ok(()),

@@ -248,7 +248,7 @@ pub struct SessionRecoveryAccumulator {
     session_id: String,
     records: Vec<SessionLogRecord>,
     tool_call_origins: Vec<ToolCallRecoveryOrigin>,
-    latest_main: Option<(usize, SessionLogRecord)>,
+    latest_context: Option<(usize, SessionLogRecord)>,
     controls: ModelControlFacts,
     latest_sources: HashMap<String, CompactionSourceRequest>,
     sources: HashMap<String, CompactionSourceRequest>,
@@ -263,7 +263,7 @@ impl SessionRecoveryAccumulator {
             session_id: session_id.into(),
             records: Vec::new(),
             tool_call_origins: Vec::new(),
-            latest_main: None,
+            latest_context: None,
             controls: ModelControlFacts::default(),
             latest_sources: HashMap::new(),
             sources: HashMap::new(),
@@ -292,8 +292,12 @@ impl SessionRecoveryAccumulator {
         self.updated_at_ms = record.created_at_ms;
         if record.event_type == SessionRecordType::ModelRequestStarted {
             if record.payload["purpose"] == "main" {
-                self.latest_main = Some((self.records.len(), record));
+                self.latest_context = Some((self.records.len(), record));
             }
+        } else if record.event_type == SessionRecordType::Compaction
+            && record.payload.get("contextObservations").is_some()
+        {
+            self.latest_context = Some((self.records.len(), record));
         } else {
             self.records.push(record);
         }
@@ -319,16 +323,21 @@ impl SessionRecoveryAccumulator {
             .filter(|record| record.event_type == SessionRecordType::ModelRequestStarted)
             .map(|record| record.payload["observations"].to_string().len())
             .sum::<usize>()
-            + self.latest_main.as_ref().map_or(0, |(_, record)| {
-                record.payload["observations"].to_string().len()
+            + self.latest_context.as_ref().map_or(0, |(_, record)| {
+                record
+                    .payload
+                    .get("contextObservations")
+                    .unwrap_or(&record.payload["observations"])
+                    .to_string()
+                    .len()
             })
     }
     pub fn finish(mut self) -> Result<SessionRecoveryResult, String> {
         if self.session_id.trim().is_empty() {
             return Err("expected sessionId is required".into());
         }
-        if let Some((index, main)) = self.latest_main {
-            self.records.insert(index, main);
+        if let Some((index, context)) = self.latest_context {
+            self.records.insert(index, context);
         }
         let snapshot = restore_active_runtime_snapshot(
             &self.session_id,

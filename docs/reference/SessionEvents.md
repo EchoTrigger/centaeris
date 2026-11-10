@@ -163,7 +163,7 @@ Session. `Stream` says whether the record is projected into AgentRun replay.
 | `external_evidence_ref` | turn + run | yes | `objectRef`, `contentType`, `sha256`, `byteLength`, `sourceKind`, `locator` |
 | `source_associated` | turn + run | yes | `associationId`, `inputRef`, `sourceIdentity`, `sourceToolCallId`, `sourceToolName`, optional `range` |
 | `artifact_published` | turn + run | yes | `publicationId`, `artifactRef`, `toolCallId`, `filename`, `sizeBytes`, `sha256` |
-| `compaction` | turn + run | yes | `compactionId`, `summaryMessageId`, `summaryMarkdown`, `firstKeptMessageId`, `createdReason` |
+| `compaction` | turn + run | yes | `compactionId`, `summaryMessageId`, `summaryMarkdown`, `firstKeptMessageId`, `createdReason`, optional `contextObservations` |
 | `checkpoint_ref` | turn + run | no | `checkpointId`, `kind`, `objectRef`, `status`, `payloadSha256`, `payloadByteLength`, `updatedAtMs` |
 | `tombstone` | owning rewrite turn + run | yes | `tombstoneId`, `targetEventIds`, `reasonType` |
 | `file_fact` | turn + run | no | `schema`, `toolName`, `toolCallId`, `operation`, `path`, `targetPath`, `previousFileHash`, `readSnapshotHash`, `fileHash`, `bytesWritten`, `addedLines`, `removedLines`, `sessionId`, `executionOwner` |
@@ -388,6 +388,13 @@ bound into the sealed assistant message through `artifactRefs`.
 Compaction is additive. It records a summary and the first message retained
 after the compacted prefix; `firstKeptMessageId` is a non-empty string or null.
 It does not delete the underlying events and must preserve atomic tool groups.
+
+Manual compaction also commits `contextObservations`, the resulting active model
+messages and image source references. Recovery uses the latest committed main
+request or manual compaction context, then applies subsequent input and tool
+facts. The host commits this context before returning a successful compaction
+response. Automatic compaction records its context through the consuming main
+request.
 
 A checkpoint reference never embeds a checkpoint, snapshot, message list, or
 state object. `kind` is `wait` or `recovery`; `status` is `paused_question`,

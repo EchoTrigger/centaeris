@@ -32,6 +32,7 @@ use centaeris_core::runtime::contracts::{
     current_timestamp_ms, new_turn_id, AgentRunInterventionV1, RuntimeAgentRunIdentityV1,
     RuntimeAwaitJobCheckpointV1,
 };
+use centaeris_core::runtime::event::RuntimeEventProjection;
 use centaeris_core::runtime::projection::{
     headless_transcript_lines_from_stream_items, project_turn_update, HeadlessTranscriptLine,
 };
@@ -1068,6 +1069,7 @@ pub(crate) async fn compact_context(
         .max_by_key(|run| run.updated_at_ms)
         .map(|run| run.agent_run_id.clone())
         .ok_or_else(|| "context compaction requires an existing AgentRun".to_string())?;
+    restore_runtime_snapshot_from_session(session_id.as_str())?;
     let turn_id = new_turn_id();
     let runtime_config = runtime_config::get(runtime_config::AgentRuntimeConfigGetRequest {})?;
     let agent_runtime = resolve_agent_runtime(session_id.as_str())?;
@@ -1099,6 +1101,11 @@ pub(crate) async fn compact_context(
         ),
         _ => Err("manual context compaction emitted an unsupported safe point".to_string()),
     };
+    let mut event_sink = |event: RuntimeEventProjection| {
+        run_message_log_blocking("persist manual context compaction", || {
+            message_log::append_runtime_event_fact(&event, agent_run_id.as_str()).map(|_| ())
+        })
+    };
     let compacted = run_manual_context_compaction(
         &event_writer,
         &runtime,
@@ -1106,6 +1113,7 @@ pub(crate) async fn compact_context(
         session_id.as_str(),
         turn_id.as_str(),
         &mut tool_safe_point,
+        &mut event_sink,
     )
     .await?;
     Ok(AgentContextCompactResponse {
@@ -1734,6 +1742,7 @@ async fn run_manual_context_compaction(
     session_id: &str,
     turn_id: &str,
     tool_safe_point: &mut (dyn FnMut(ToolSafePoint) -> Result<(), String> + Send),
+    event_sink: &mut (dyn FnMut(RuntimeEventProjection) -> Result<(), String> + Send),
 ) -> Result<bool, String> {
     let (model_config, registry) = model_session_config_and_registry(runtime_config)?;
     let config_store = SingleModelSessionConfigStore {
@@ -1748,36 +1757,39 @@ async fn run_manual_context_compaction(
         WireApi::AnthropicMessages => {
             let client = AnthropicMessagesModelClient::new(registry, transport);
             runtime
-                .compact_session_online_with_model_client_and_tool_safe_point_async(
+                .compact_session_online_with_model_client_and_event_sink_async(
                     session_id,
                     turn_id,
                     &client,
                     &config_store,
                     tool_safe_point,
+                    event_sink,
                 )
                 .await
         }
         WireApi::OpenAiResponses => {
             let client = OpenAiResponsesModelClient::new(registry, transport);
             runtime
-                .compact_session_online_with_model_client_and_tool_safe_point_async(
+                .compact_session_online_with_model_client_and_event_sink_async(
                     session_id,
                     turn_id,
                     &client,
                     &config_store,
                     tool_safe_point,
+                    event_sink,
                 )
                 .await
         }
         WireApi::OpenAiChatCompletions => {
             let client = OpenAiCompatibleModelClient::new(registry, transport);
             runtime
-                .compact_session_online_with_model_client_and_tool_safe_point_async(
+                .compact_session_online_with_model_client_and_event_sink_async(
                     session_id,
                     turn_id,
                     &client,
                     &config_store,
                     tool_safe_point,
+                    event_sink,
                 )
                 .await
         }

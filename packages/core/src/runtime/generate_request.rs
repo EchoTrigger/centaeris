@@ -119,6 +119,7 @@ impl<
         session_id: &str,
         turn_id: &str,
         driver: &D,
+        event_sink: &mut (dyn FnMut(RuntimeEventProjection) -> Result<(), String> + Send),
     ) -> Result<bool, String> {
         let mut session = self.session_manager.load_or_create_session(session_id)?;
         if super::prompt_compaction_commit::active_commit(&session)?
@@ -145,8 +146,7 @@ impl<
                 Some(&candidate_producer),
             )
             .await?;
-        self.session_manager.save_session(&session)?;
-        Ok(result.stats_json.as_deref().is_some_and(|raw| {
+        let compacted = result.stats_json.as_deref().is_some_and(|raw| {
             serde_json::from_str::<Value>(raw)
                 .ok()
                 .and_then(|value| {
@@ -157,7 +157,74 @@ impl<
                         .map(|action| action == "compact")
                 })
                 .unwrap_or(false)
-        }))
+        });
+        for mut event in result.runtime_events {
+            if event.event_type == "PromptCompaction" && event.status == "done" {
+                let observations = self.manual_compaction_context_observations(&session)?;
+                event
+                    .payload
+                    .get_mut("compaction")
+                    .and_then(Value::as_object_mut)
+                    .ok_or("manual compaction event payload missing")?
+                    .insert(
+                        "contextObservations".into(),
+                        serde_json::to_value(observations).map_err(|error| error.to_string())?,
+                    );
+            }
+            event_sink(event)?;
+        }
+        self.session_manager.save_session(&session)?;
+        Ok(compacted)
+    }
+
+    fn manual_compaction_context_observations(
+        &self,
+        session: &SessionStateSnapshot,
+    ) -> Result<Vec<ModelObservationV1>, String> {
+        let messages =
+            project_session_messages_to_model_messages(session, &session.context_window)?;
+        let mut observations = messages
+            .into_iter()
+            .map(|message| ModelObservationV1::ContextMessage { message })
+            .collect::<Vec<_>>();
+        for message in &session.context_window {
+            let mut sources = Vec::new();
+            if let Some(raw) = message
+                .metadata
+                .get(crate::runtime::keys::metadata::MODEL_INPUT_IMAGES)
+            {
+                let references: Vec<ModelInputImageRefV1> = serde_json::from_str(raw)
+                    .map_err(|error| format!("decode model input image refs failed: {error}"))?;
+                sources.extend(references.into_iter().map(|reference| {
+                    ModelInputImageSourceRefV1::InputRef {
+                        input_ref: reference.input_ref,
+                        content_type: reference.content_type,
+                        placeholder: reference.placeholder,
+                    }
+                }));
+            }
+            if let Some(raw) = message
+                .metadata
+                .get(crate::runtime::keys::metadata::MODEL_INPUT_IMAGE_SOURCES)
+            {
+                sources.extend(
+                    serde_json::from_str::<Vec<ModelInputImageSourceRefV1>>(raw).map_err(
+                        |error| format!("decode model input image sources failed: {error}"),
+                    )?,
+                );
+            }
+            observations.extend(
+                sources
+                    .into_iter()
+                    .map(|source| ModelObservationV1::InputImage {
+                        image: ModelInputImageObservationV1 {
+                            message_id: message.message_id.clone(),
+                            source,
+                        },
+                    }),
+            );
+        }
+        Ok(observations)
     }
 
     pub(super) fn apply_system_prompt_template(

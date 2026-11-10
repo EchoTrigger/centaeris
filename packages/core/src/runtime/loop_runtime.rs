@@ -1345,6 +1345,30 @@ impl<
         session_config_store: &CfgStore,
         tool_safe_point: &mut (dyn FnMut(ToolSafePoint) -> Result<(), String> + Send),
     ) -> Result<bool, String> {
+        self.compact_session_online_with_model_client_and_event_sink_async(
+            session_id,
+            turn_id,
+            model_client,
+            session_config_store,
+            tool_safe_point,
+            &mut |_| Ok(()),
+        )
+        .await
+    }
+
+    /// Commits manual compaction context through the host before acknowledging it.
+    pub async fn compact_session_online_with_model_client_and_event_sink_async<
+        M: ModelClient,
+        CfgStore: ModelSessionConfigStore,
+    >(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        model_client: &M,
+        session_config_store: &CfgStore,
+        tool_safe_point: &mut (dyn FnMut(ToolSafePoint) -> Result<(), String> + Send),
+        event_sink: &mut (dyn FnMut(RuntimeEventProjection) -> Result<(), String> + Send),
+    ) -> Result<bool, String> {
         let tool_safe_point = ToolSafePointDispatcher {
             sink: Mutex::new(tool_safe_point),
         };
@@ -1355,7 +1379,7 @@ impl<
             &tool_safe_point,
             &composition_environment,
         );
-        self.compact_session_with_async_driver(session_id, turn_id, &driver)
+        self.compact_session_with_async_driver(session_id, turn_id, &driver, event_sink)
             .await
     }
 

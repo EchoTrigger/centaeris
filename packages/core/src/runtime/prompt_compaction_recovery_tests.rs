@@ -259,6 +259,110 @@ async fn query_loop_canonical_main_recovery_keeps_compacted_chain_anchor_and_clo
             committed_before,
             "recovery must not append/replay accepted tool effects or regenerate compaction"
         );
+        let mut manual_records = records.clone();
+        let mut observations =
+            crate::model::prepared_prompt::project_session_messages_to_model_messages(
+                &saved,
+                &saved.context_window,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|message| ModelObservationV1::ContextMessage { message })
+            .collect::<Vec<_>>();
+        let tool_message_id = saved
+            .context_window
+            .iter()
+            .find(|message| message.role == MessageRole::Tool)
+            .unwrap()
+            .message_id
+            .clone();
+        let tool_image = crate::model::prepared_prompt::ModelInputImageSourceRefV1::InputRef {
+            input_ref: "manual-tool-image".into(),
+            content_type: "image/png".into(),
+            placeholder: "[tool image]".into(),
+        };
+        observations.push(ModelObservationV1::InputImage {
+            image: crate::model::prepared_prompt::ModelInputImageObservationV1 {
+                message_id: tool_message_id.clone(),
+                source: tool_image.clone(),
+            },
+        });
+        if !host_event {
+            manual_records
+                .iter_mut()
+                .find(|record| record.event_type == SessionRecordType::UserMessage)
+                .unwrap()
+                .payload["attachments"] = json!([{
+                "inputRef":"manual-user-image", "displayName":"input.png", "contentType":"image/png", "placeholder":"[user image]"
+            }]);
+            observations.push(ModelObservationV1::InputImage {
+                image: crate::model::prepared_prompt::ModelInputImageObservationV1 {
+                    message_id: anchor.message_id.clone(),
+                    source: crate::model::prepared_prompt::ModelInputImageSourceRefV1::InputRef {
+                        input_ref: "manual-user-image".into(),
+                        content_type: "image/png".into(),
+                        placeholder: "[user image]".into(),
+                    },
+                },
+            });
+        }
+        let mut manual = records
+            .iter()
+            .find(|record| record.event_type == SessionRecordType::Compaction)
+            .unwrap()
+            .clone();
+        manual.event_id = "manual-context-commit".into();
+        manual.payload["contextObservations"] = serde_json::to_value(observations).unwrap();
+        manual_records.push(manual);
+        let manual_restored =
+            restore_runtime_snapshot_from_session_records(session_id, &manual_records).unwrap();
+        assert_eq!(
+            crate::model::prepared_prompt::project_session_messages_to_model_messages(
+                &manual_restored,
+                &manual_restored.context_window
+            )
+            .unwrap(),
+            crate::model::prepared_prompt::project_session_messages_to_model_messages(
+                &saved,
+                &saved.context_window
+            )
+            .unwrap(),
+            "manual context retains replay, causal anchor and the complete tool batch",
+        );
+        let tool_image_sources: Vec<crate::model::prepared_prompt::ModelInputImageSourceRefV1> =
+            serde_json::from_str(
+                &manual_restored
+                    .messages
+                    .iter()
+                    .find(|message| message.message_id == tool_message_id)
+                    .unwrap()
+                    .metadata[crate::runtime::keys::metadata::MODEL_INPUT_IMAGE_SOURCES],
+            )
+            .unwrap();
+        assert_eq!(tool_image_sources, vec![tool_image]);
+        let manual_anchor = manual_restored
+            .messages
+            .iter()
+            .find(|message| message.message_id == anchor.message_id)
+            .unwrap();
+        if host_event {
+            assert_eq!(
+                crate::session::host_event_input::host_event_origin(session_id, manual_anchor)
+                    .unwrap(),
+                Some(host)
+            );
+        } else {
+            assert!(!manual_anchor
+                .metadata
+                .contains_key(crate::runtime::keys::metadata::MODEL_INPUT_IMAGES));
+            let image_sources: Vec<crate::model::prepared_prompt::ModelInputImageSourceRefV1> =
+                serde_json::from_str(
+                    &manual_anchor.metadata
+                        [crate::runtime::keys::metadata::MODEL_INPUT_IMAGE_SOURCES],
+                )
+                .unwrap();
+            assert_eq!(image_sources.len(), 1);
+        }
     }
 }
 
@@ -690,9 +794,8 @@ async fn query_loop_manual_compaction_preserves_its_bool_contract_without_automa
     let session_id = "manual-summary-followed-by-new-run";
     let store = AgentRuntimeTestStore::new();
     let manager = SessionManager::new(store.clone());
-    manager
-        .save_session(&model_prompt_compaction_session(session_id))
-        .unwrap();
+    let original = model_prompt_compaction_session(session_id);
+    manager.save_session(&original).unwrap();
     let engine = AgentRuntime::new_for_test(
         store,
         AgentRuntimeConfig {
@@ -708,9 +811,11 @@ async fn query_loop_manual_compaction_preserves_its_bool_contract_without_automa
     let config = StaticModelSessionConfigStore {
         config: Some(ModelSessionConfig::default()),
     };
-    let mut old_run = AgentRunSessionState::new(session_id, "existing-finished-run").unwrap();
+    let old_run =
+        Mutex::new(AgentRunSessionState::new(session_id, "existing-finished-run").unwrap());
+    let records = Mutex::new(Vec::new());
     let compacted = engine
-        .compact_session_online_with_model_client_and_tool_safe_point_async(
+        .compact_session_online_with_model_client_and_event_sink_async(
             session_id,
             "manual-request",
             &model,
@@ -720,7 +825,20 @@ async fn query_loop_manual_compaction_preserves_its_bool_contract_without_automa
                     return Err("unexpected manual safe point".into());
                 };
                 assert_eq!(started.purpose(), ModelRequestPurposeV1::Compaction);
-                old_run.record_model_request_started(&started, 100)?;
+                records.lock().unwrap().extend(
+                    old_run
+                        .lock()
+                        .unwrap()
+                        .record_model_request_started(&started, 100)?
+                        .into_iter()
+                        .map(|record| record.event),
+                );
+                Ok(())
+            },
+            &mut |event| {
+                if let Some(record) = old_run.lock().unwrap().record_runtime_event(&event)? {
+                    records.lock().unwrap().push(record.event);
+                }
                 Ok(())
             },
         )
@@ -740,6 +858,23 @@ async fn query_loop_manual_compaction_preserves_its_bool_contract_without_automa
             .is_none(),
         "manual does not claim the automatic durable receipt protocol"
     );
+    let restored =
+        restore_runtime_snapshot_from_session_records(session_id, &records.lock().unwrap())
+            .unwrap();
+    assert_eq!(
+        crate::model::prepared_prompt::project_session_messages_to_model_messages(
+            &restored,
+            &restored.context_window,
+        )
+        .unwrap(),
+        crate::model::prepared_prompt::project_session_messages_to_model_messages(
+            &saved,
+            &saved.context_window,
+        )
+        .unwrap(),
+        "canonical manual context restores the exact committed model messages",
+    );
+    manager.save_session(&restored).unwrap();
     let mut new_run = AgentRunSessionState::new(session_id, "next-accepted-run").unwrap();
     let mut commit = |point| {
         if let ToolSafePoint::ModelRequestStarted(started) = point {
@@ -773,6 +908,32 @@ async fn query_loop_manual_compaction_preserves_its_bool_contract_without_automa
         )
         .await
         .unwrap();
+    assert!(request
+        .prepared_prompt
+        .messages
+        .iter()
+        .any(|message| message.content == "continuation accepted"));
     driver.generate_next_async(&request).await.unwrap();
     assert_eq!(model.requests.load(Ordering::SeqCst), 2);
+
+    manager.save_session(&original).unwrap();
+    let before_failure =
+        serde_json::to_value(manager.load_or_create_session(session_id).unwrap()).unwrap();
+    let rejected = engine
+        .compact_session_online_with_model_client_and_event_sink_async(
+            session_id,
+            "manual-commit-fails",
+            &model,
+            &config,
+            &mut |_| Ok(()),
+            &mut |_| Err("manual context commit failed".into()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(rejected, "manual context commit failed");
+    assert_eq!(
+        serde_json::to_value(manager.load_or_create_session(session_id).unwrap()).unwrap(),
+        before_failure,
+        "failed manual fact commit must not replace the saved context",
+    );
 }
