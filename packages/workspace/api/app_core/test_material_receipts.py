@@ -266,12 +266,12 @@ class MaterialReceiptTests(TestCase):
         self.source_read(owner_kind="userLibraryObject")
         self.assertEqual(len(rebuild_agent_run_citation_projection(self.run)), 1)
         RunMaterialScope.objects.filter(agent_run=self.run).delete()
-        self.assertEqual(rebuild_agent_run_citation_projection(self.run), [])
+        self.assertEqual(len(rebuild_agent_run_citation_projection(self.run)), 0)
         RunMaterialAdmission.objects.create(agent_run=self.run, material_input=record, confirmed=True)
         self.assertEqual(len(rebuild_agent_run_citation_projection(self.run)), 1)
         record.resolved = {**resolved, "citationAllowed": False}
         record.save(update_fields=["resolved"])
-        self.assertEqual(rebuild_agent_run_citation_projection(self.run), [])
+        self.assertEqual(len(rebuild_agent_run_citation_projection(self.run)), 0)
 
     def test_historical_source_stream_reconstruction_preserves_original_identity_and_locator(self):
         from copy import deepcopy
