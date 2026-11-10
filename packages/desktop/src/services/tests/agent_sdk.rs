@@ -19,6 +19,10 @@ fn embedded_host_serves_native_sessions_without_an_rpc_listener() {
         return;
     }
 
+    // macOS TMPDIR can exceed the Unix socket path budget once the endpoint is appended.
+    #[cfg(target_os = "macos")]
+    let profile = tempfile::tempdir_in("/tmp").expect("isolated SDK profile");
+    #[cfg(not(target_os = "macos"))]
     let profile = tempfile::tempdir().expect("isolated SDK profile");
     let output = Command::new(std::env::current_exe().expect("SDK test executable"))
         .args([

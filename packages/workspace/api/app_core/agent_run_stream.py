@@ -347,7 +347,7 @@ def _committed_item(agent_run: AgentRun, record: dict) -> dict:
         "kind": "committed",
         "agentRunId": agent_run.id,
         "sourceSequence": sequence,
-        "event": reconstruct_source_event(event),
+        "event": event,
     }
 
 
@@ -363,7 +363,8 @@ async def _drain_postgres(agent_run: AgentRun, state: dict):
             if sequence <= state["source_sequence"]:
                 raise RuntimeError("PostgreSQL session stream sequence did not advance")
             state["source_sequence"] = sequence
-            event = item["event"]
+            event = reconstruct_source_event(item["event"])
+            item["event"] = event
             advance_overlay_barrier(state["overlay_barriers"], event, sequence)
             if event.get("type") == "assistant_message":
                 payload = event.get("payload")

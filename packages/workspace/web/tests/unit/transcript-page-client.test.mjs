@@ -16,7 +16,7 @@ const projectionGeneration = "generation-1";
 
 test("Web accepts current Core-generated blocks including optional presentation facts", () => {
   const samples = JSON.parse(readFileSync(new URL(
-    "../../../../api/app_core/generated/transcript_block.samples.json", import.meta.url), "utf8"));
+    "../../../api/app_core/generated/transcript_block.samples.json", import.meta.url), "utf8"));
   assert.ok(samples.some((sample) => sample.presentation !== null && sample.presentation !== undefined));
   for (const sample of samples) {
     const result = validateTranscriptPage(page({ blocks: [sample] }), { sessionId });
