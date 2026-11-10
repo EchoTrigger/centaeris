@@ -90,43 +90,6 @@ fn validate_bbox([left, top, right, bottom]: [u16; 4]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn invalid_locator_values_fail_loudly() {
-        let invalid = CitationLocator::PageRegion {
-            page: 1,
-            bbox: [0, 0, 10_001, 100],
-        };
-        assert!(invalid.validate().is_err());
-
-        let locator = serde_json::from_value::<CitationLocator>(serde_json::json!({
-            "kind": "textSpan",
-            "pageStart": 2,
-            "pageEnd": 4,
-            "startByte": 10,
-            "endByte": 30,
-            "startLine": 4,
-            "endLine": 8
-        }))
-        .expect("multi-page textSpan locator");
-        locator.validate().expect("valid multi-page locator");
-        assert!(
-            serde_json::from_value::<CitationLocator>(serde_json::json!({
-                "kind": "textSpan",
-                "page": 2,
-                "startByte": 10,
-                "endByte": 30,
-                "startLine": 4,
-                "endLine": 8
-            }))
-            .is_err()
-        );
-    }
-}
-
 pub(super) fn line_range(value: &Value) -> Result<Option<SourceLineRangeV1>, String> {
     if value.get("kind").is_some() {
         let locator: CitationLocator = serde_json::from_value(value.clone())
@@ -168,4 +131,41 @@ pub(super) fn line_range(value: &Value) -> Result<Option<SourceLineRangeV1>, Str
         start_line: start,
         end_line: end,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_locator_values_fail_loudly() {
+        let invalid = CitationLocator::PageRegion {
+            page: 1,
+            bbox: [0, 0, 10_001, 100],
+        };
+        assert!(invalid.validate().is_err());
+
+        let locator = serde_json::from_value::<CitationLocator>(serde_json::json!({
+            "kind": "textSpan",
+            "pageStart": 2,
+            "pageEnd": 4,
+            "startByte": 10,
+            "endByte": 30,
+            "startLine": 4,
+            "endLine": 8
+        }))
+        .expect("multi-page textSpan locator");
+        locator.validate().expect("valid multi-page locator");
+        assert!(
+            serde_json::from_value::<CitationLocator>(serde_json::json!({
+                "kind": "textSpan",
+                "page": 2,
+                "startByte": 10,
+                "endByte": 30,
+                "startLine": 4,
+                "endLine": 8
+            }))
+            .is_err()
+        );
+    }
 }

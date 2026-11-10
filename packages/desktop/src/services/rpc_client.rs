@@ -1091,6 +1091,35 @@ fn validate_runtime_executable(path: PathBuf) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Bridges JSONL standard I/O to the same profile service used by other clients.
+/// The service retains accepted Runs after this connection closes.
+pub fn run_rpc_stdio() -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("create RPC I/O runtime failed: {error}"))?;
+    let result = runtime.block_on(async {
+        let executable = resolve_runtime_executable()?;
+        let endpoint = runtime_server_endpoint(&executable)?;
+        let stream = connect_or_start_runtime_server(&executable, &endpoint)?;
+        #[cfg(unix)]
+        let stream = {
+            stream.set_nonblocking(true).map_err(|error| error.to_string())?;
+            tokio::net::UnixStream::from_std(stream).map_err(|error| error.to_string())?
+        };
+        let (mut reader, mut writer) = tokio::io::split(stream);
+        let mut stdin = tokio::io::stdin();
+        let mut stdout = tokio::io::stdout();
+        tokio::select! {
+            result = tokio::io::copy(&mut stdin, &mut writer) => result.map(|_| ()).map_err(|error| error.to_string()),
+            result = tokio::io::copy(&mut reader, &mut stdout) => result.map(|_| ()).map_err(|error| error.to_string()),
+        }
+    });
+    // Tokio's standard input owns a blocking read which can outlive a remote close.
+    runtime.shutdown_timeout(Duration::from_millis(100));
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1514,33 +1543,4 @@ mod tests {
             handle_runtime_notification(&invalid, "runtime/config-changed", &event_tx).is_err()
         );
     }
-}
-
-/// Bridges JSONL standard I/O to the same profile service used by other clients.
-/// The service retains accepted Runs after this connection closes.
-pub fn run_rpc_stdio() -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("create RPC I/O runtime failed: {error}"))?;
-    let result = runtime.block_on(async {
-        let executable = resolve_runtime_executable()?;
-        let endpoint = runtime_server_endpoint(&executable)?;
-        let stream = connect_or_start_runtime_server(&executable, &endpoint)?;
-        #[cfg(unix)]
-        let stream = {
-            stream.set_nonblocking(true).map_err(|error| error.to_string())?;
-            tokio::net::UnixStream::from_std(stream).map_err(|error| error.to_string())?
-        };
-        let (mut reader, mut writer) = tokio::io::split(stream);
-        let mut stdin = tokio::io::stdin();
-        let mut stdout = tokio::io::stdout();
-        tokio::select! {
-            result = tokio::io::copy(&mut stdin, &mut writer) => result.map(|_| ()).map_err(|error| error.to_string()),
-            result = tokio::io::copy(&mut reader, &mut stdout) => result.map(|_| ()).map_err(|error| error.to_string()),
-        }
-    });
-    // Tokio's standard input owns a blocking read which can outlive a remote close.
-    runtime.shutdown_timeout(Duration::from_millis(100));
-    result
 }
