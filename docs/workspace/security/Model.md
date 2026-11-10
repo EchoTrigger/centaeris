@@ -10,6 +10,29 @@ membership, resource authorization, administrative roles, and credential
 management. Browser clients receive masked metadata and authorized file or
 event projections, never internal service tokens or decrypted credentials.
 
+## Workspace member administration
+
+Workspace roles are `owner`, `admin`, and `member`. The owner can manage and
+invite administrators and members. Administrators can remove ordinary members
+and issue, reissue, or revoke member invitations. They cannot change or remove
+peer administrators, promote members to administrator, or manage administrator
+invitations. Ordinary members cannot use these administration endpoints.
+
+Role changes check both the target's current role and the requested role.
+Replacing an unexpired pending invitation also checks its existing role, so
+issuing a member invitation cannot replace an administrator invitation without
+owner authority. Rejected operations leave memberships and invitations intact.
+These checks use the current actor membership inside the existing transaction;
+the Web controls reflect the same hierarchy.
+
+The owner remains unique and changes only through the password-confirmed
+ownership-transfer flow. Member-management operations cannot target oneself.
+Platform superuser status is separate from Workspace membership roles.
+
+Already-issued invitations remain grants until accepted, revoked, or expired;
+their acceptance does not depend on the issuer's current membership or role.
+Narrowing invitation-management authority does not invalidate existing links.
+
 ## Internal services
 
 API, Runtime, and worker authenticate internal calls with a dedicated token.

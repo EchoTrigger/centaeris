@@ -46,6 +46,17 @@ Record the tested commit, browser/version, viewport, account role, and result.
 - Exercise invitation activation, member role changes, group membership, model
   administration, and direct settings URLs with both authorized and denied
   accounts.
+- In Members and permissions, an owner can promote/demote administrators, remove
+  administrators or members, and invite either role. An administrator sees peer
+  administrators as read-only, can remove ordinary members, and can invite only
+  members. Neither role can manage its own membership through these controls;
+  owner transfer retains its separate password-confirmed flow.
+- Pending administrator invitations show reissue/revoke actions only to the
+  owner. Administrators can reissue/revoke member invitations. Trying to invite
+  the email of an unexpired administrator invitation as a member must explain
+  that the owner is required, retain the input, and preserve the original link.
+  Existing invitations retain their original expiry and remain usable after
+  their issuer is demoted or removed.
 - Enable, configure, fail, recover, and disable a Plugin; confirm credentials and
   capabilities remain isolated between Plugins and Workspaces.
 

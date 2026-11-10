@@ -612,6 +612,8 @@
   "workspaceMembersRoute.thisAccountIsAlreadyAMemberOfThisWorkspace": "该账号已经是当前工作区成员。",
   "workspaceMembersRoute.theMemberSRoleHasNotChanged": "成员角色没有变化。",
   "workspaceMembersRoute.youCannotPerformThisActionOnYourOwnMembership": "不能对自己的成员身份执行此操作。",
+  "workspaceMembersRoute.onlyOwnersCanManageAdministrators": "只有工作区所有者可以管理或授予管理员身份，请联系所有者操作。",
+  "workspaceMembersRoute.onlyOwnersCanManageAdministratorInvitations": "只有工作区所有者可以管理管理员邀请，请联系所有者操作。",
   "workspaceMembersRoute.theOwnerCanOnlyBeChangedThroughAnOwnership": "所有者只能通过转让所有权来变更。",
   "workspaceMembersRoute.theInvitationStatusHasChanged": "邀请状态已经发生变化。",
   "workspaceMembersRoute.unableToReloadValue": "重新读取失败：{{value1}}",

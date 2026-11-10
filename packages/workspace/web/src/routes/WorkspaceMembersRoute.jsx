@@ -16,6 +16,8 @@ const ERROR_MESSAGES = () => ({
   workspace_member_exists: t("workspaceMembersRoute.thisAccountIsAlreadyAMemberOfThisWorkspace"),
   workspace_member_role_unchanged: t("workspaceMembersRoute.theMemberSRoleHasNotChanged"),
   workspace_member_self_operation_forbidden: t("workspaceMembersRoute.youCannotPerformThisActionOnYourOwnMembership"),
+  workspace_member_management_forbidden: t("workspaceMembersRoute.onlyOwnersCanManageAdministrators"),
+  workspace_invitation_management_forbidden: t("workspaceMembersRoute.onlyOwnersCanManageAdministratorInvitations"),
   workspace_owner_transfer_required: t("workspaceMembersRoute.theOwnerCanOnlyBeChangedThroughAnOwnership"),
   workspace_owner_reauthentication_failed: t("settingsRoute.theCurrentPasswordIsIncorrect"),
   workspace_invitation_not_pending: t("workspaceMembersRoute.theInvitationStatusHasChanged"),
@@ -243,6 +245,8 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
   }
 
   const actorRole = members?.find((member) => member.userId === String(user.id))?.role || workspace.role;
+  const canManageRole = (role) => (actorRole === "owner" && (role === "admin" || role === "member"))
+    || (actorRole === "admin" && role === "member");
   const inviteBusy = busyKeys.has("invite");
   const transferBusy = transferTarget ? busyKeys.has(`transfer:${transferTarget.membershipId}`) : false;
   const removeBusy = removeTarget ? busyKeys.has(`remove:${removeTarget.membershipId}`) : false;
@@ -273,12 +277,12 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
           <div className="settingsPanel settingsListPanel shWorkspaceMemberList">
             {members.map((member) => {
               const isCurrent = member.userId === String(user.id);
-              const canMutate = member.role !== "owner" && !isCurrent;
+              const canMutate = canManageRole(member.role) && !isCurrent;
               const memberBusy = busyKeys.has(`member:${member.membershipId}`);
               return <div className="shWorkspaceMemberRow" key={member.membershipId}>
                 <span className="shWorkspaceMemberAvatar" aria-hidden="true">{member.email.slice(0, 1).toUpperCase()}</span>
                 <span className="shWorkspaceMemberIdentity"><strong>{member.email}{isCurrent ? t("workspaceMembersRoute.you") : ""}</strong><small>{t("workspaceMembersRoute.joined")}{" "}{formatDate(member.createdAt)}</small></span>
-                {canMutate ? <select value={member.role} disabled={memberBusy} aria-label={t("workspaceMembersRoute.roleForValue", { value1: member.email })} onChange={(event) => void updateRole(member, event.target.value)}>
+                {canMutate && actorRole === "owner" ? <select value={member.role} disabled={memberBusy} aria-label={t("workspaceMembersRoute.roleForValue", { value1: member.email })} onChange={(event) => void updateRole(member, event.target.value)}>
                   <option value="admin">{t("invitationActivationRoute.administrator")}</option><option value="member">{t("invitationActivationRoute.member")}</option>
                 </select> : <span className="shWorkspaceRoleLabel">{roleLabel(member.role)}</span>}
                 {canMutate && !memberBusy ? <details className="shWorkspaceRowMenu">
@@ -300,10 +304,10 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
               <span className="shWorkspaceMemberIdentity"><strong>{invitation.email}</strong><small>{t("workspaceMembersRoute.created")}{" "}{formatDate(invitation.createdAt)}</small></span>
               <span>{roleLabel(invitation.role)}</span>
               <small>{formatDate(invitation.expiresAt)}{" "}{t("workspaceMembersRoute.expires")}</small>
-              <span className="shWorkspaceInvitationActions">
+              {canManageRole(invitation.role) ? <span className="shWorkspaceInvitationActions">
                 <button type="button" onClick={() => setReissueTarget(invitation)}>{t("workspaceMembersRoute.reissue")}</button>
                 <button type="button" onClick={() => setRevokeTarget(invitation)}>{t("workspaceMembersRoute.revoke")}</button>
-              </span>
+              </span> : <span />}
             </div>)}
           </div> : <div className="settingsPanel shWorkspaceSettingsEmpty">{t("workspaceMembersRoute.noPendingInvitations")}</div>}
         </section>
@@ -325,7 +329,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
         <footer><button type="button" onClick={() => setInviteDialog(null)}>{t("workspaceMembersRoute.done")}</button><button className="isPrimary" type="button" onClick={() => void copyInviteUrl()}><Copy aria-hidden="true" />{t("workspaceMembersRoute.copyLink")}</button></footer>
       </div> : <form onSubmit={(event) => { event.preventDefault(); void issueInvitation(inviteDialog.email, inviteDialog.role); }}>
         <label>{t("loginForm.email")}<input autoFocus type="email" required value={inviteDialog.email} onChange={(event) => setInviteDialog({ ...inviteDialog, email: event.target.value })} /></label>
-        <label>{t("invitationActivationRoute.role")}<select value={inviteDialog.role} onChange={(event) => setInviteDialog({ ...inviteDialog, role: event.target.value })}><option value="member">{t("invitationActivationRoute.member")}</option><option value="admin">{t("invitationActivationRoute.administrator")}</option></select></label>
+        <label>{t("invitationActivationRoute.role")}<select value={inviteDialog.role} onChange={(event) => setInviteDialog({ ...inviteDialog, role: event.target.value })}><option value="member">{t("invitationActivationRoute.member")}</option>{actorRole === "owner" ? <option value="admin">{t("invitationActivationRoute.administrator")}</option> : null}</select></label>
         <footer><button type="button" disabled={inviteBusy} onClick={() => setInviteDialog(null)}>{t("agentRunRow.cancel")}</button><button className="isPrimary" type="submit" disabled={inviteBusy || !inviteDialog.email.trim()}>{inviteBusy ? t("workspaceMembersRoute.creating") : t("workspaceMembersRoute.createInvitationLink")}</button></footer>
       </form>}
     </WorkspaceDialog> : null}

@@ -612,6 +612,8 @@
   "workspaceMembersRoute.thisAccountIsAlreadyAMemberOfThisWorkspace": "This account is already a member of this workspace.",
   "workspaceMembersRoute.theMemberSRoleHasNotChanged": "The member's role has not changed.",
   "workspaceMembersRoute.youCannotPerformThisActionOnYourOwnMembership": "You cannot perform this action on your own membership.",
+  "workspaceMembersRoute.onlyOwnersCanManageAdministrators": "Only the workspace owner can manage or grant the administrator role. Ask the owner to make this change.",
+  "workspaceMembersRoute.onlyOwnersCanManageAdministratorInvitations": "Only the workspace owner can manage administrator invitations. Ask the owner to make this change.",
   "workspaceMembersRoute.theOwnerCanOnlyBeChangedThroughAnOwnership": "The owner can only be changed through an ownership transfer.",
   "workspaceMembersRoute.theInvitationStatusHasChanged": "The invitation status has changed.",
   "workspaceMembersRoute.unableToReloadValue": "Unable to reload: {{value1}}",
