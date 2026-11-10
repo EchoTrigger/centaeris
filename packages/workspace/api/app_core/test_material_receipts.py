@@ -274,16 +274,31 @@ class MaterialReceiptTests(TestCase):
         self.assertEqual(len(rebuild_agent_run_citation_projection(self.run)), 0)
 
     def test_historical_source_stream_reconstruction_preserves_original_identity_and_locator(self):
+        from contextlib import aclosing
         from copy import deepcopy
-        from .agent_run_stream import _committed_item
+        from unittest.mock import AsyncMock, patch
+
+        from asgiref.sync import async_to_sync
+
+        from . import agent_run_stream
         legacy = {field: self.evidence[field] for field in receipts.EVIDENCE_FIELDS}
         legacy["locator"] = {"kind": "pageRegion", "page": 4, "bbox": [0, 0, 100, 100]}
         original = self.event("citation_recorded", {**legacy, "citationId": "citation:" + "f" * 64,
             "sourceToolCallId": "legacy-call", "sourceToolName": "read"})
         raw = deepcopy(original.payload)
-        result = _committed_item(self.run, {"sequence": original.sequence,
-            "eventId": original.pk, "payload": original.payload})
-        event = result["event"]
+        record = {"sequence": original.sequence, "eventId": original.pk, "payload": original.payload}
+
+        async def read_source_frame():
+            with patch.object(
+                agent_run_stream, "_load_postgres_page",
+                new=AsyncMock(return_value=([record], original.sequence)),
+            ):
+                state = agent_run_stream._new_tail_state(original.sequence - 1)
+                async with aclosing(agent_run_stream._drain_postgres(self.run, state)) as stream:
+                    return await anext(stream)
+
+        frame = async_to_sync(read_source_frame)()
+        event = json.loads(frame.splitlines()[1].removeprefix("data: "))["event"]
         self.assertEqual(event["type"], "source_associated")
         self.assertEqual(event["eventId"], original.pk)
         self.assertEqual(event["sequence"], original.sequence)
