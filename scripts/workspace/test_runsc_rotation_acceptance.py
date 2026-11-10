@@ -24,15 +24,20 @@ def oracle(label, index):
 
 
 def sample(label, index):
+    owner = {'label': label, 'environmentId': f'env-{label}', 'instanceId': f'instance-{label}',
+             'containerId': ('1' if label == 'A' else '2') * 64,
+             'execId': ('3' if label == 'A' else '4') * 64, 'dockerPid': 0,
+             'user': '10001:10001', 'state': 'running'}
     return {'label': label, 'agentRunId': f'run-{index}', 'sessionId': f'session-{label}',
             'environmentId': f'env-{label}', 'instanceId': f'instance-{label}',
+            'controllerEpoch': 1, 'hostId': 'fixture-host',
             'containerId': ('1' if label == 'A' else '2') * 64, 'runStatus': 'completed',
             'coreTerminalType': 'agent_run_completed', 'releaseReceiptCount': 1,
             'cleanupComplete': True, 'runtime': 'runsc', 'running': True, 'paused': True, 'powerState': 'paused',
             'runningReservations': 0, 'residentCount': 2,
             'residentMemoryBytes': 512,
             'residentPids':512,'pids':{'current':67,'max':512,'eventsMax':0},
-            'oracle': oracle(label, index)}
+            'oracle': oracle(label, index), 'oracleOwner': owner}
 
 
 def wave(number):
@@ -60,7 +65,8 @@ class RotationEvidenceTests(unittest.TestCase):
                                  'holderStarted': True, 'queuedCleanupComplete': True, 'holderCleanupComplete': True,
                                  'queuedReleaseReceiptCount': 1, 'holderReleaseReceiptCount': 1},
                 'retirements': [{'environmentId': f'env-{label}', 'status': 'destroyed',
-                                 'containerAbsent': True, 'residentHoldingCount': 0, 'historyPreserved': True}
+                                 'containerAbsent': True, 'residentHoldingCount': 0, 'historyPreserved': True,
+                                 'oracleExecId': ('3' if label == 'A' else '4') * 64, 'oracleExecReleased': True}
                                 for label in ('A', 'B')]}
 
     def test_every_pair_requires_durable_wait_and_release_driven_claim(self):
@@ -213,12 +219,130 @@ class RotationEvidenceTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(RuntimeError):
                 rotation.validate_evidence(data)
 
-    def test_model_initialization_uses_background_task_and_subsequent_run_only_queries(self):
+    def test_model_initialization_waits_for_fixture_oracle_before_starting_real_holder(self):
         initial = {'messages': [{'role': 'user', 'content': 'RUNSC_ROTATION ' + 'a' * 32 + ' A 0'}]}
+        name, arguments = rotation.next_rotation_call(initial)
+        self.assertEqual(name, 'bash')
+        self.assertEqual(arguments['command'], rotation.memory_oracle_client('a' * 32, 'A', 0, ready=True))
+        ready = {**oracle('A', 0), 'challenge': 'a' * 32 + '-A-ready'}
+        initial['messages'].append({'role': 'tool', 'content': 'RUNSC_ROTATION_READY ' + json.dumps(ready)})
         self.assertEqual(rotation.next_rotation_call(initial)[0], 'background_task_start')
+        initial['messages'][-1]['content'] = 'RUNSC_ROTATION_ORACLE ' + json.dumps(ready)
+        with self.assertRaisesRegex(RuntimeError, 'lacks memory oracle'):
+            rotation.next_rotation_call(initial)
         subsequent = {'messages': [{'role': 'user', 'content': 'RUNSC_ROTATION ' + 'a' * 32 + ' A 2'}]}
         call = rotation.next_rotation_call(subsequent)
         self.assertEqual(call[0], 'background_task_start')
+
+    def test_bootstrap_owns_exec_before_start_and_preserves_unknown_outcome(self):
+        for outcome in ('running', 'startUnknown', 'wrongUser'):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as folder:
+                driver = object.__new__(rotation.FixtureDriver)
+                driver.result, driver.tag, driver.oracle_owners = Path(folder), 'a' * 32, {}
+                binding = {key: sample('A', 0)[key] for key in ('environmentId', 'instanceId', 'containerId')}
+                driver.sql = Mock(side_effect=[{**binding, 'ready': False}, {**binding, 'ready': True}])
+                physical = {'Id': binding['containerId'], 'Config': {
+                    'User': '10001:10001', 'Env': ['CENTAERIS_WORKSPACE_USER=10001:10001'],
+                    'Labels': {'centaeris.managed': 'true', 'centaeris.environment_id': 'env-A',
+                               'centaeris.instance_id': 'instance-A'}},
+                    'HostConfig': {'Runtime': 'runsc'}, 'State': {'Running': True, 'Paused': False}}
+                if outcome == 'wrongUser':
+                    physical['Config']['Env'] = ['CENTAERIS_WORKSPACE_USER=0:0']
+                def wait(observe, predicate, description, timeout=120):
+                    self.assertFalse(predicate(observe()))
+                    driver.docker_api.assert_not_called()
+                    value = observe()
+                    self.assertTrue(predicate(value))
+                    return value
+                driver.wait = wait
+                exec_id = '3' * 64
+                def api(method, path, payload=None):
+                    if path == '/containers/' + binding['containerId'] + '/json':
+                        return 200, physical
+                    if path == '/containers/' + binding['containerId'] + '/exec':
+                        self.assertEqual(payload['Cmd'], rotation.memory_oracle_server(driver.tag, 'A'))
+                        self.assertFalse(payload['AttachStdin'] or payload['AttachStdout'] or payload['AttachStderr'])
+                        self.assertNotIn('User', payload)
+                        self.assertNotIn('Env', payload)
+                        return 201, {'Id': exec_id}
+                    if path == '/exec/' + exec_id + '/start':
+                        owner = json.loads((driver.result / 'oracle-owners.json').read_text())['A']
+                        self.assertEqual(owner['execId'], exec_id)
+                        self.assertEqual(owner['containerId'], binding['containerId'])
+                        self.assertEqual(owner['instanceId'], binding['instanceId'])
+                        self.assertEqual(owner['state'], 'startUnknown')
+                        self.assertEqual(payload, {'Detach': True, 'Tty': False})
+                        if outcome == 'startUnknown':
+                            raise TimeoutError('start acknowledgement lost')
+                        return 200, None
+                    self.assertEqual((method, path), ('GET', '/exec/' + exec_id + '/json'))
+                    return 200, {'ID': exec_id, 'ContainerID': binding['containerId'], 'Running': True, 'Pid': 0}
+                driver.docker_api = Mock(side_effect=api)
+                if outcome == 'running':
+                    driver.bootstrap_oracle('A', {'agentRunId': 'run-0'})
+                    self.assertEqual(driver.oracle_owners['A']['dockerPid'], 0)
+                    self.assertEqual(driver.oracle_owners['A']['state'], 'running')
+                elif outcome == 'startUnknown':
+                    with self.assertRaisesRegex(TimeoutError, 'acknowledgement lost'):
+                        driver.bootstrap_oracle('A', {'agentRunId': 'run-0'})
+                    calls = driver.docker_api.call_count
+                    with self.assertRaisesRegex(RuntimeError, 'already has an owner'):
+                        driver.bootstrap_oracle('A', {'agentRunId': 'run-0'})
+                    self.assertEqual(driver.docker_api.call_count, calls)
+                    self.assertEqual(driver.oracle_owners['A']['state'], 'startUnknown')
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'user differs'):
+                        driver.bootstrap_oracle('A', {'agentRunId': 'run-0'})
+                    self.assertEqual(driver.docker_api.call_count, 1)
+                    self.assertEqual(driver.oracle_owners, {})
+
+    def test_fixture_exec_observation_rejects_wrong_identity_or_missing_pid(self):
+        driver = object.__new__(rotation.FixtureDriver)
+        owner = sample('A', 0)['oracleOwner']
+        observation = {'ID': owner['execId'], 'ContainerID': owner['containerId'], 'Running': True, 'Pid': 0}
+        for field, value in [('ID', 'other'), ('ContainerID', 'other'), ('Running', False), ('Pid', None)]:
+            driver.docker_api = Mock(return_value=(200, {**observation, field: value}))
+            with self.subTest(field=field), self.assertRaisesRegex(RuntimeError, 'identity'):
+                driver.observe_oracle_exec(owner)
+
+    def test_fixture_exec_ownership_and_release_are_required_evidence(self):
+        for mutation in ('owner', 'replacement', 'unreleased', 'wrongRelease'):
+            data = self.evidence()
+            if mutation == 'owner':
+                data['runs'][2]['oracleOwner']['containerId'] = 'f' * 64
+            elif mutation == 'replacement':
+                data['runs'][2]['oracleOwner']['execId'] = 'f' * 64
+            elif mutation == 'unreleased':
+                data['retirements'][0]['oracleExecReleased'] = False
+            else:
+                data['retirements'][0]['oracleExecId'] = 'f' * 64
+            with self.subTest(mutation=mutation), self.assertRaises(RuntimeError):
+                rotation.validate_evidence(data)
+
+    def test_retirement_requires_owned_exec_to_be_absent_or_exited(self):
+        for status, observed, succeeds in [(404, {'message': 'absent'}, True),
+                                           (200, {'Running': False}, True),
+                                           (200, {'Running': True}, False),
+                                           (500, {}, False)]:
+            with self.subTest(status=status, observed=observed), tempfile.TemporaryDirectory() as folder:
+                driver = object.__new__(rotation.FixtureDriver)
+                row = sample('A', 0)
+                driver.result, driver.oracle_owners = Path(folder), {'A': row['oracleOwner']}
+                driver.manifest = {'runtimePort': 1}
+                driver.private = {'INTERNAL_API_TOKEN': 'synthetic', 'ENVIRONMENT_MAINTENANCE_TOKEN': 'synthetic'}
+                driver.docker = ['owned-docker']
+                driver.command = Mock(return_value='')
+                driver.sql = Mock(return_value={'residentHoldingCount': 0, 'historyPreserved': True})
+                driver.retirement_request = Mock(return_value={'status': 'destroyed'})
+                driver.docker_api = Mock(return_value=(status, {
+                    'ID': row['oracleOwner']['execId'], 'ContainerID': row['containerId'], **observed}))
+                if succeeds:
+                    proof = driver.retire(row)
+                    self.assertTrue(proof['oracleExecReleased'])
+                    self.assertEqual(proof['oracleExecId'], row['oracleOwner']['execId'])
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'release unconfirmed'):
+                        driver.retire(row)
 
     def test_product_driver_admits_exactly_twelve_runs_and_only_retires_after_lifecycle_checks(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -227,6 +351,7 @@ class RotationEvidenceTests(unittest.TestCase):
             driver.tag = 'a' * 32
             driver.manifest = {'sourceRevision': 'a' * 40}
             driver.last = {}
+            driver.bootstrap_oracle = Mock(side_effect=lambda label, run: sequence.append(('bootstrap', label)))
             sequence = []
             def admit(label, marker):
                 index = int(marker.rsplit(' ', 1)[1])
@@ -234,7 +359,7 @@ class RotationEvidenceTests(unittest.TestCase):
                 return {'agentRunId': f'run-{index}', 'sessionId': 'session-' + label}
             driver.admit = Mock(side_effect=admit)
             driver.completed = Mock(side_effect=lambda run: sequence.append(('completed', int(run['agentRunId'][4:]))) or sample('A' if int(run['agentRunId'][4:]) % 2 == 0 else 'B', int(run['agentRunId'][4:])))
-            driver.paused = Mock(side_effect=lambda label, run: sample(label, int(run['agentRunId'][4:])))
+            driver.paused = Mock(side_effect=lambda label, run: sequence.append(('paused', label)) or sample(label, int(run['agentRunId'][4:])))
             def observe(label, run):
                 row = sample(label, int(run['agentRunId'][4:]))
                 row['runningReservations'] = 1
@@ -262,6 +387,11 @@ class RotationEvidenceTests(unittest.TestCase):
             self.assertEqual(driver.admit.call_count, 12)
             self.assertEqual(driver.holder_started.call_count, 6)
             self.assertEqual(driver.queued_wait.call_count, 6)
+            self.assertEqual(driver.bootstrap_oracle.call_count, 2)
+            self.assertLess(sequence.index(('admit', 0)), sequence.index(('bootstrap', 'A')))
+            self.assertLess(sequence.index(('bootstrap', 'A')), sequence.index(('admit', 1)))
+            self.assertLess(sequence.index(('paused', 'A')), sequence.index(('bootstrap', 'B')))
+            self.assertLess(sequence.index(('bootstrap', 'B')), sequence.index(('completed', 1)))
             for index in range(0, 12, 2):
                 self.assertLess(sequence.index(('admit', index + 1)), sequence.index(('completed', index)))
             self.assertLess(sequence.index(('admit', 3)), sequence.index(('cancellation',)))
@@ -276,6 +406,7 @@ class RotationEvidenceTests(unittest.TestCase):
             driver.tag = 'a' * 32
             driver.manifest = {'sourceRevision': 'a' * 40}
             driver.last = {}
+            driver.bootstrap_oracle = Mock()
             def admit(label, marker):
                 return {'agentRunId': 'run-' + marker.rsplit(' ', 1)[1], 'sessionId': 'session-' + label}
             driver.admit = Mock(side_effect=admit)
