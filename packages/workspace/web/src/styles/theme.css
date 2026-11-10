@@ -1,4 +1,16 @@
 @import "@centaeris/ui/theme.css";
+:root {
+  --control-height-compact: 32px;
+  --control-height: 36px;
+  --control-radius: 7px;
+  --settings-form-width: 720px;
+}
+@media (pointer: coarse) {
+  :root {
+    --control-height-compact: 44px;
+    --control-height: 44px;
+  }
+}
 .themeToggle { display:flex; align-items:center; margin:0 8px; -webkit-app-region:no-drag; }
 .themeToggle button { border:0; background:transparent; color:var(--process-text); display:grid; place-items:center; width:28px; height:28px; border-radius:6px; cursor:pointer; }
 .themeToggle button:hover { color:var(--on-surface); }

@@ -41,6 +41,19 @@ Record the tested commit, browser/version, viewport, account role, and result.
 
 ## Identity and administration
 
+- In account security and member settings, compare page headings, outline entry
+  actions, neutral solid commit actions, ghost cancellation and danger actions.
+  Personal settings forms use a narrower column than member lists. Check both
+  themes, keyboard focus, long translated labels and a narrow touch viewport.
+- Reject an invitation, ownership transfer, removal, reissue or revoke request.
+  Its error stays inside the open dialog after waiting, with the input and target
+  retained; retry remains available. Cancel and open another dialog: the previous
+  error must not follow it. A role-change rejection stays on the member page and
+  retains the original role. Successful operations use short status notices.
+- While an invitation or transfer is pending, its fields and submit/close actions
+  stay disabled and Escape cannot discard the input. After a rejected request,
+  the fields become editable again. Verify password-editor validation and focus
+  return on cancellation.
 - Sign in, sign out, reload a protected deep link, and verify an expired or
   unauthorized session cannot expose cached Workspace content.
 - Exercise invitation activation, member role changes, group membership, model
@@ -62,6 +75,9 @@ Record the tested commit, browser/version, viewport, account role, and result.
 
 ## Materials and appearance
 
+- Compare chat prose, metadata and code/tool output at their 14/24, 12/18 and
+  13/21px roles. Check long mixed Chinese/English code and scrolling output in
+  both themes; status text and ordinary document prose retain their own roles.
 - Upload, open, search, preview, and remove representative image, code, PDF, and
   supported Office files; verify library/trash state and access revocation.
 - Start a chat from selected materials, interrupt material linking after Session

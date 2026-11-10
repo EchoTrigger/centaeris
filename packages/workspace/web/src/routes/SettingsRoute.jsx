@@ -124,7 +124,7 @@ function AccountSecurity() {
       {notice ? <p className="settingsEditNotice" role="status">{notice}</p> : null}
     </div>
     <ExternalIdentitySettings />
-    {editing ? <WorkspaceDialog className="settingsEditDialog" title={t("passwordResetRoute.updatePassword")} busy={busy} onClose={closeEditor}>
+    {editing ? <WorkspaceDialog className="settingsEditDialog" title={t("passwordResetRoute.updatePassword")} error={error} busy={busy} onClose={closeEditor}>
       <form onSubmit={submit}>
         <label>{t("settingsRoute.currentPassword")}<input autoFocus autoComplete="current-password" type="password" value={currentPassword} onChange={update(setCurrentPassword)} required disabled={busy} /></label>
         <label>
@@ -133,7 +133,6 @@ function AccountSecurity() {
           <small id="new-password-hint">{t("settingsRoute.atLeast15Characters")}</small>
         </label>
         <label>{t("settingsRoute.confirmNewPassword")}<input autoComplete="new-password" type="password" minLength={15} value={confirmation} onChange={update(setConfirmation)} required disabled={busy} /></label>
-        {error ? <p className="settingsEditError" role="alert">{error}</p> : null}
         <footer>
           <button className="secondary" type="button" disabled={busy} onClick={closeEditor}>{t("agentRunRow.cancel")}</button>
           <button className="isPrimary" type="submit" disabled={busy || !currentPassword || !newPassword || !confirmation}>{busy ? t("passwordResetRoute.updating") : t("passwordResetRoute.updatePassword")}</button>
