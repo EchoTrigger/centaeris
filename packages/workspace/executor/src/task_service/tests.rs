@@ -549,6 +549,11 @@ fn same_run_takeover_preserves_uncertain_input_and_terminal_start_history() {
         j.reserve_receipt(&key, &data_digest).unwrap_err(),
         "task_operation_unknown"
     );
+    assert_eq!(
+        j.reserve_receipt_with_preflight(&key, &data_digest, || { Err("task_not_running".into()) })
+            .unwrap_err(),
+        "task_operation_unknown"
+    );
     fs::remove_dir_all(p).unwrap();
 }
 

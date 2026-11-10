@@ -538,6 +538,15 @@ impl Journal {
         key: &str,
         d: &str,
     ) -> Result<Option<EnvironmentTaskResult>, String> {
+        self.reserve_receipt_with_preflight(key, d, || Ok(()))
+    }
+    #[cfg(any(target_os = "linux", test))]
+    fn reserve_receipt_with_preflight(
+        &mut self,
+        key: &str,
+        d: &str,
+        preflight: impl FnOnce() -> Result<(), String>,
+    ) -> Result<Option<EnvironmentTaskResult>, String> {
         let indexed = self
             .index_root
             .as_ref()
@@ -561,6 +570,7 @@ impl Journal {
             }
             return Err("task_operation_unknown".into());
         }
+        preflight()?;
         let mut candidate = self.clone();
         candidate.receipts.insert(
             key.into(),

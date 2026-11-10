@@ -1110,7 +1110,7 @@ fn input_history_pressure_leaves_termination_and_end_run_reconcilable() {
 
 #[test]
 #[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
-fn task_deadline_exits_before_late_input_and_uncertain_input_is_not_replayed() {
+fn task_deadline_exits_before_late_input_without_reserving_a_receipt() {
     let f = Fixture::new();
     let mut start = f.start(
         "deadline-cat",
@@ -1137,21 +1137,31 @@ fn task_deadline_exits_before_late_input_and_uncertain_input_is_not_replayed() {
         assert!(snapshot.cleanup_complete);
         assert!(!manager.journal.poisoned);
     }
-    let input = EnvironmentTaskRequest::Input {
-        fence: f.fence.clone(),
-        task_id: task.clone(),
-        operation_id: f.fence.operation_id("late-input"),
-        data: b"must-not-be-replayed".to_vec(),
-        close: false,
-    };
-    assert_eq!(
-        Manager::handle(&f.manager, input.clone()).unwrap_err(),
-        "task_not_running"
-    );
-    assert_eq!(
-        Manager::handle(&f.manager, input).unwrap_err(),
-        "task_operation_unknown"
-    );
+    for (operation, data, close) in [
+        ("late-input", b"must-not-be-replayed".to_vec(), false),
+        ("late-close", Vec::new(), true),
+    ] {
+        let operation_id = f.fence.operation_id(operation);
+        let key = input_identity(&f.fence, &task, &operation_id).unwrap();
+        let input = EnvironmentTaskRequest::Input {
+            fence: f.fence.clone(),
+            task_id: task.clone(),
+            operation_id,
+            data,
+            close,
+        };
+        assert_eq!(
+            Manager::handle(&f.manager, input.clone()).unwrap_err(),
+            "task_not_running"
+        );
+        assert_eq!(
+            Manager::handle(&f.manager, input).unwrap_err(),
+            "task_not_running"
+        );
+        assert!(store::receipt(&f.root.join("control"), &key)
+            .unwrap()
+            .is_none());
+    }
     let result = Manager::handle(
         &f.manager,
         EnvironmentTaskRequest::Query {
@@ -1588,6 +1598,15 @@ fn successful_input_receipt_replays_after_child_exit_without_writing_twice() {
     };
     let receipt = Manager::handle(&f.manager, input.clone()).unwrap();
     f.await_cleanup(&task_id);
+    assert_eq!(Manager::handle(&f.manager, input.clone()).unwrap(), receipt);
+    {
+        let mut manager = f.manager.lock().unwrap();
+        manager.journal = Journal::open(
+            &manager.storage.control_root,
+            &f.fence.environment_instance_id,
+        )
+        .unwrap();
+    }
     assert_eq!(Manager::handle(&f.manager, input).unwrap(), receipt);
     let m = f.manager.lock().unwrap();
     let (chunks, _, _, _, _) = m.logs[&task_id]
@@ -1599,6 +1618,60 @@ fn successful_input_receipt_replays_after_child_exit_without_writing_twice() {
         chunks.into_iter().flat_map(|c| c.data).collect::<Vec<_>>(),
         b"one-input\n"
     );
+}
+
+#[test]
+#[ignore = "requires explicitly delegated disposable Linux cgroup v2 subtree"]
+fn closed_task_stdin_rejects_new_input_without_reserving_a_receipt() {
+    let f = Fixture::new();
+    let mut start = f.start(
+        "closed-stdin",
+        EnvironmentTaskScope::Environment,
+        "exec sleep 3600",
+    );
+    if let EnvironmentTaskRequest::Start { timeout_ms, .. } = &mut start {
+        *timeout_ms = 0;
+    }
+    let task_id = id(&Manager::handle(&f.manager, start).unwrap());
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Input {
+            fence: f.fence.clone(),
+            task_id: task_id.clone(),
+            operation_id: f.fence.operation_id("close"),
+            data: Vec::new(),
+            close: true,
+        },
+    )
+    .unwrap();
+    let operation_id = f.fence.operation_id("closed-input");
+    let key = input_identity(&f.fence, &task_id, &operation_id).unwrap();
+    let input = EnvironmentTaskRequest::Input {
+        fence: f.fence.clone(),
+        task_id: task_id.clone(),
+        operation_id,
+        data: b"must-not-be-written".to_vec(),
+        close: false,
+    };
+    for _ in 0..2 {
+        assert_eq!(
+            Manager::handle(&f.manager, input.clone()).unwrap_err(),
+            "task_input_closed"
+        );
+    }
+    assert!(store::receipt(&f.root.join("control"), &key)
+        .unwrap()
+        .is_none());
+    Manager::handle(
+        &f.manager,
+        EnvironmentTaskRequest::Terminate {
+            fence: f.fence.clone(),
+            task_id: task_id.clone(),
+            operation_id: f.fence.operation_id("stop"),
+        },
+    )
+    .unwrap();
+    f.await_cleanup(&task_id);
 }
 
 #[test]

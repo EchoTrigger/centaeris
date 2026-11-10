@@ -952,9 +952,20 @@ impl Manager {
                 m.journal.authorize_task_input(&fence, &task_id)?;
                 let key = input_identity(&fence, &task_id, &operation_id)?;
                 let d = environment_task_input_digest(&data, close)?;
-                if let Some(r) = m.receipt(&key, &d)? {
+                let input_available = m
+                    .live
+                    .get(&task_id)
+                    .ok_or("task_not_running")
+                    .and_then(|live| live.input.as_ref().ok_or("task_input_closed"))
+                    .map(|_| ())
+                    .map_err(str::to_owned);
+                if let Some(r) = m
+                    .journal
+                    .reserve_receipt_with_preflight(&key, &d, || input_available)?
+                {
                     return Ok(r);
                 }
+                m.persist()?;
                 let live = m.live.get_mut(&task_id).ok_or("task_not_running")?;
                 live.input
                     .as_mut()
