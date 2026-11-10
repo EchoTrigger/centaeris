@@ -250,6 +250,10 @@ A/B, for **12 completed main Runs** with one running slot:
   guest PID/start-time observations remain separate identity domains. A Docker
   PID of zero records an unknown host mapping. Exact exec/container ownership,
   guest process identity, nonce and fresh challenge proofs remain required.
+- The first A Run completes and its own physical and durable pause is observed
+  before B's oracle is started. B may already hold the released running slot
+  while its setup command awaits that oracle. Final evidence for both Runs
+  still requires zero global running reservations.
 - Every idle state has matching physical Docker `Paused=true` and durable
   `paused` facts. Running reservations reach zero while resident charges remain.
 - Every wave starts A, observes a successful background-task response in the

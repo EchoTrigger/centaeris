@@ -758,13 +758,16 @@ with transaction.atomic():
                 evidence['waves'].append(wave)
                 persist()
                 for number, label, admitted in ((index, 'A', holder), (index + 1, 'B', waiting_run)):
-                    if number == 1:
-                        self.bootstrap_oracle('B', admitted)
                     status = self.completed(admitted)
                     evidence['mainRunCounts']['completed'] += 1
                     # Keep each successful peer even when the other peer fails.
                     (self.result / f'completed-{number:02d}.json').write_text(json.dumps(status, indent=2))
                     persist()
+                    if number == 0:
+                        self.wait(lambda: self.observe(label, admitted),
+                                  lambda row: row['powerState'] == 'paused' and row['paused'] is True,
+                                  'first holder physical and durable pause')
+                        self.bootstrap_oracle('B', waiting_run)
                     row = {**self.paused(label, admitted), **status}
                     evidence['runs'].append(row)
                     evidence['mainRunCounts']['validated'] += 1

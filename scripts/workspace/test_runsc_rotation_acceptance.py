@@ -359,12 +359,15 @@ class RotationEvidenceTests(unittest.TestCase):
                 return {'agentRunId': f'run-{index}', 'sessionId': 'session-' + label}
             driver.admit = Mock(side_effect=admit)
             driver.completed = Mock(side_effect=lambda run: sequence.append(('completed', int(run['agentRunId'][4:]))) or sample('A' if int(run['agentRunId'][4:]) % 2 == 0 else 'B', int(run['agentRunId'][4:])))
-            driver.paused = Mock(side_effect=lambda label, run: sequence.append(('paused', label)) or sample(label, int(run['agentRunId'][4:])))
+            driver.paused = Mock(side_effect=lambda label, run: sequence.append(('paused', label))
+                                 or rotation.FixtureDriver.paused(driver, label, run))
             def observe(label, run):
                 row = sample(label, int(run['agentRunId'][4:]))
-                row['runningReservations'] = 1
-                row['paused'] = label == 'B'
-                row.pop('oracle')
+                # B has claimed the released slot and cannot finish until its
+                # fixture oracle exists. A is already physically paused.
+                row['runningReservations'] = 0 if ('bootstrap', 'B') in sequence else 1
+                if row['runningReservations'] == 1:
+                    sequence.append(('own-paused', label))
                 return row
             driver.observe = Mock(side_effect=observe)
             driver.status = Mock(return_value={'runStatus': 'running'})
@@ -390,7 +393,9 @@ class RotationEvidenceTests(unittest.TestCase):
             self.assertEqual(driver.bootstrap_oracle.call_count, 2)
             self.assertLess(sequence.index(('admit', 0)), sequence.index(('bootstrap', 'A')))
             self.assertLess(sequence.index(('bootstrap', 'A')), sequence.index(('admit', 1)))
-            self.assertLess(sequence.index(('paused', 'A')), sequence.index(('bootstrap', 'B')))
+            self.assertLess(sequence.index(('completed', 0)), sequence.index(('own-paused', 'A')))
+            self.assertLess(sequence.index(('own-paused', 'A')), sequence.index(('bootstrap', 'B')))
+            self.assertLess(sequence.index(('bootstrap', 'B')), sequence.index(('paused', 'A')))
             self.assertLess(sequence.index(('bootstrap', 'B')), sequence.index(('completed', 1)))
             for index in range(0, 12, 2):
                 self.assertLess(sequence.index(('admit', index + 1)), sequence.index(('completed', index)))
@@ -407,6 +412,8 @@ class RotationEvidenceTests(unittest.TestCase):
             driver.manifest = {'sourceRevision': 'a' * 40}
             driver.last = {}
             driver.bootstrap_oracle = Mock()
+            driver.observe = Mock(return_value=sample('A', 0))
+            driver.wait = lambda observe, predicate, description, timeout=120: observe()
             def admit(label, marker):
                 return {'agentRunId': 'run-' + marker.rsplit(' ', 1)[1], 'sessionId': 'session-' + label}
             driver.admit = Mock(side_effect=admit)
