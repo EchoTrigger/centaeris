@@ -395,6 +395,9 @@ request or manual compaction context, then applies subsequent input and tool
 facts. The host commits this context before returning a successful compaction
 response. Automatic compaction records its context through the consuming main
 request.
+The host rejects a manual context commit when the Session advances during
+summary production. Conditional snapshot writes preserve a newer cache after
+the authoritative commit.
 
 A checkpoint reference never embeds a checkpoint, snapshot, message list, or
 state object. `kind` is `wait` or `recovery`; `status` is `paused_question`,

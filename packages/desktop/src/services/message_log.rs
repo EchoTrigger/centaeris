@@ -806,6 +806,22 @@ pub(crate) fn append_runtime_event_fact(
     .ok_or_else(|| format!("committed session_event projection missing: {event_id}"))
 }
 
+pub(crate) fn append_runtime_event_fact_if_sequence(
+    event: &RuntimeEventProjection,
+    agent_run_id: &str,
+    expected_sequence: &mut usize,
+) -> Result<(), String> {
+    let path = existing_session_log_file_path(event.session_id.as_str())?;
+    let _guard = lock_session_logs_for_write()?;
+    let mut state = read_state::run_state(&path, event.session_id.as_str(), agent_run_id)?;
+    let records = state
+        .record_runtime_event(event)?
+        .into_iter()
+        .map(|record| record.event)
+        .collect();
+    append_incremental_at_sequence(&path, records, Some(expected_sequence))
+}
+
 pub(crate) fn append_tool_call(
     session_id: &str,
     turn_id: &str,
@@ -860,6 +876,23 @@ pub(crate) fn append_model_request_started(
     let mut state = agent_run_session_state(started.session_id(), agent_run_id)?;
     let records = state.record_model_request_started(started, recorded_at_ms)?;
     append_agent_run_records(started.session_id(), records).map(|_| ())
+}
+
+pub(crate) fn append_model_request_started_if_sequence(
+    agent_run_id: &str,
+    started: &ModelRequestStartedV1,
+    recorded_at_ms: i64,
+    expected_sequence: &mut usize,
+) -> Result<(), String> {
+    let path = existing_session_log_file_path(started.session_id())?;
+    let _guard = lock_session_logs_for_write()?;
+    let mut state = read_state::run_state(&path, started.session_id(), agent_run_id)?;
+    let records = state
+        .record_model_request_started(started, recorded_at_ms)?
+        .into_iter()
+        .map(|record| record.event)
+        .collect();
+    append_incremental_at_sequence(&path, records, Some(expected_sequence))
 }
 
 pub(crate) fn append_provider_usage(
@@ -1048,11 +1081,21 @@ pub(crate) fn project_session_agent_runs(
 pub(crate) fn restore_runtime_snapshot(
     session_id: &str,
 ) -> Result<centaeris_core::session::state::SessionStateSnapshot, String> {
-    let records = read_session_records(session_id)?;
-    centaeris_core::session::restore_runtime_snapshot_from_session_records(
+    restore_runtime_snapshot_with_sequence(session_id).map(|(snapshot, _)| snapshot)
+}
+
+pub(crate) fn restore_runtime_snapshot_with_sequence(
+    session_id: &str,
+) -> Result<(centaeris_core::session::state::SessionStateSnapshot, usize), String> {
+    let records = {
+        let _guard = lock_session_logs_for_read()?;
+        read_session_records_unlocked(session_id)?
+    };
+    let snapshot = centaeris_core::session::restore_runtime_snapshot_from_session_records(
         session_id,
         records.as_slice(),
-    )
+    )?;
+    Ok((snapshot, records.len()))
 }
 
 pub(crate) fn project_incomplete_tool_calls(
@@ -1381,7 +1424,22 @@ fn append_records_unlocked(
 }
 
 fn append_incremental(path: &Path, records: Vec<SessionLogRecord>) -> Result<(), String> {
+    append_incremental_at_sequence(path, records, None)
+}
+
+fn append_incremental_at_sequence(
+    path: &Path,
+    records: Vec<SessionLogRecord>,
+    expected_sequence: Option<&mut usize>,
+) -> Result<(), String> {
     let mut state = read_state::take(path)?;
+    if expected_sequence
+        .as_deref()
+        .is_some_and(|expected| *expected != state.sequence)
+    {
+        read_state::put(path, state);
+        return Err("Session changed during context compaction".to_string());
+    }
     let pending = state.prepare(records)?;
     let count = pending.len();
     if count > 0 {
@@ -1391,6 +1449,9 @@ fn append_incremental(path: &Path, records: Vec<SessionLogRecord>) -> Result<(),
             .ok_or("invalid Session path")?;
         write_pending(session_id, path, state.sequence, pending)?;
         state.committed(path, count)?;
+    }
+    if let Some(expected) = expected_sequence {
+        *expected = state.sequence;
     }
     read_state::put(path, state);
     Ok(())
@@ -2448,7 +2509,7 @@ mod tests {
             "warm validated state replayed the full historical observations: {reads:?}"
         );
         append_incremental(&path, vec![last.clone().unwrap()]).unwrap();
-        let mut conflict = last.unwrap();
+        let mut conflict = last.clone().unwrap();
         conflict.payload["observations"][0]["content"] = json!("different content");
         assert!(append_incremental(&path, vec![conflict])
             .unwrap_err()
@@ -2456,6 +2517,32 @@ mod tests {
         read_state::invalidate(&path);
         let cold = read_state::run_state(&path, session_id, run_id).unwrap();
         assert_eq!(warm.next_sequence(), cold.next_sequence());
+        let state = read_state::take(&path).unwrap();
+        let mut expected_sequence = state.sequence;
+        read_state::put(&path, state);
+        let original_sequence = expected_sequence;
+        let mut accepted = last.clone().unwrap();
+        accepted.event_id = "event:checked-model-request".into();
+        accepted.payload["requestId"] = json!("request-checked");
+        append_incremental_at_sequence(&path, vec![accepted.clone()], Some(&mut expected_sequence))
+            .unwrap();
+        assert_eq!(expected_sequence, original_sequence + 1);
+        let mut concurrent = accepted.clone();
+        concurrent.event_id = "event:concurrent-model-request".into();
+        concurrent.payload["requestId"] = json!("request-concurrent");
+        append_incremental(&path, vec![concurrent]).unwrap();
+        let before_rejected_append = fs::read(&path).unwrap();
+        accepted.event_id = "event:stale-model-request".into();
+        accepted.payload["requestId"] = json!("request-stale");
+        assert!(append_incremental_at_sequence(
+            &path,
+            vec![accepted],
+            Some(&mut expected_sequence),
+        )
+        .unwrap_err()
+        .contains("Session changed during context compaction"));
+        assert_eq!(expected_sequence, original_sequence + 1);
+        assert_eq!(fs::read(&path).unwrap(), before_rejected_append);
         read_state::invalidate(&path);
         fs::remove_dir_all(root).unwrap();
     }

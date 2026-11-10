@@ -1057,19 +1057,29 @@ pub(crate) async fn compact_context(
     request: AgentContextCompactRequest,
 ) -> Result<AgentContextCompactResponse, String> {
     let session_id = required_string(request.session_id.as_str(), "sessionId")?;
-    if event_writer
-        .active_agent_run_for_session(session_id.as_str())?
-        .is_some()
-    {
-        return Err("cannot compact context while an AgentRun is active".to_string());
-    }
-    let agent_runs = message_log::project_session_agent_runs(session_id.as_str())?;
-    let agent_run_id = agent_runs
-        .iter()
-        .max_by_key(|run| run.updated_at_ms)
-        .map(|run| run.agent_run_id.clone())
-        .ok_or_else(|| "context compaction requires an existing AgentRun".to_string())?;
-    restore_runtime_snapshot_from_session(session_id.as_str())?;
+    let (agent_run_id, source_sequence) = {
+        let _guard = SESSION_PROMPT_OPERATION_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "session prompt operation lock poisoned".to_string())?;
+        if event_writer
+            .active_agent_run_for_session(session_id.as_str())?
+            .is_some()
+        {
+            return Err("cannot compact context while an AgentRun is active".to_string());
+        }
+        let agent_runs = message_log::project_session_agent_runs(session_id.as_str())?;
+        let agent_run_id = agent_runs
+            .iter()
+            .max_by_key(|run| run.updated_at_ms)
+            .map(|run| run.agent_run_id.clone())
+            .ok_or_else(|| "context compaction requires an existing AgentRun".to_string())?;
+        let (snapshot, sequence) =
+            message_log::restore_runtime_snapshot_with_sequence(session_id.as_str())?;
+        SessionManager::new(agent_runtime_store_actor()?).save_session(&snapshot)?;
+        (agent_run_id, sequence)
+    };
+    let expected_sequence = Mutex::new(source_sequence);
     let turn_id = new_turn_id();
     let runtime_config = runtime_config::get(runtime_config::AgentRuntimeConfigGetRequest {})?;
     let agent_runtime = resolve_agent_runtime(session_id.as_str())?;
@@ -1094,16 +1104,29 @@ pub(crate) async fn compact_context(
         file_mutation_commit_port: None,
     })?;
     let mut tool_safe_point = |safe_point: ToolSafePoint| match safe_point {
-        ToolSafePoint::ModelRequestStarted(started) => message_log::append_model_request_started(
-            agent_run_id.as_str(),
-            &started,
-            current_timestamp_ms(),
-        ),
+        ToolSafePoint::ModelRequestStarted(started) => {
+            let mut sequence = expected_sequence
+                .lock()
+                .map_err(|_| "context compaction sequence lock poisoned".to_string())?;
+            message_log::append_model_request_started_if_sequence(
+                agent_run_id.as_str(),
+                &started,
+                current_timestamp_ms(),
+                &mut sequence,
+            )
+        }
         _ => Err("manual context compaction emitted an unsupported safe point".to_string()),
     };
     let mut event_sink = |event: RuntimeEventProjection| {
         run_message_log_blocking("persist manual context compaction", || {
-            message_log::append_runtime_event_fact(&event, agent_run_id.as_str()).map(|_| ())
+            let mut sequence = expected_sequence
+                .lock()
+                .map_err(|_| "context compaction sequence lock poisoned".to_string())?;
+            message_log::append_runtime_event_fact_if_sequence(
+                &event,
+                agent_run_id.as_str(),
+                &mut sequence,
+            )
         })
     };
     let compacted = run_manual_context_compaction(
@@ -1323,9 +1346,15 @@ struct StartedAgentRun {
 async fn start_agent_run_blocking(
     request: StartAgentRunRequest,
 ) -> Result<StartedAgentRun, String> {
-    tokio::task::spawn_blocking(move || start_agent_run(request))
-        .await
-        .map_err(|error| format!("agent stream agent run blocking owner join failed: {error}"))?
+    tokio::task::spawn_blocking(move || {
+        let _guard = SESSION_PROMPT_OPERATION_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "session prompt operation lock poisoned".to_string())?;
+        start_agent_run(request)
+    })
+    .await
+    .map_err(|error| format!("agent stream agent run blocking owner join failed: {error}"))?
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

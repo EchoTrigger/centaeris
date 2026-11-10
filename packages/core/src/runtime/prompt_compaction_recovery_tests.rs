@@ -86,7 +86,7 @@ async fn query_loop_canonical_main_recovery_keeps_compacted_chain_anchor_and_clo
                 session_id,
                 "initial",
                 run,
-                "  Continue the accepted objective.\n",
+                "  Continue the accepted objective. [image:manual-user-image]\n",
                 1,
             )
             .unwrap()
@@ -293,7 +293,7 @@ async fn query_loop_canonical_main_recovery_keeps_compacted_chain_anchor_and_clo
                 .find(|record| record.event_type == SessionRecordType::UserMessage)
                 .unwrap()
                 .payload["attachments"] = json!([{
-                "inputRef":"manual-user-image", "displayName":"input.png", "contentType":"image/png", "placeholder":"[user image]"
+                "inputRef":"manual-user-image", "displayName":"input.png", "contentType":"image/png", "placeholder":"[image:manual-user-image]"
             }]);
             observations.push(ModelObservationV1::InputImage {
                 image: crate::model::prepared_prompt::ModelInputImageObservationV1 {
@@ -301,18 +301,28 @@ async fn query_loop_canonical_main_recovery_keeps_compacted_chain_anchor_and_clo
                     source: crate::model::prepared_prompt::ModelInputImageSourceRefV1::InputRef {
                         input_ref: "manual-user-image".into(),
                         content_type: "image/png".into(),
-                        placeholder: "[user image]".into(),
+                        placeholder: "[image:manual-user-image]".into(),
                     },
                 },
             });
         }
-        let mut manual = records
-            .iter()
-            .find(|record| record.event_type == SessionRecordType::Compaction)
-            .unwrap()
-            .clone();
-        manual.event_id = "manual-context-commit".into();
-        manual.payload["contextObservations"] = serde_json::to_value(observations).unwrap();
+        let manual = crate::session::canonical_session_record(
+            "manual-context-commit",
+            SessionRecordType::Compaction,
+            session_id,
+            Some("manual-context-turn".into()),
+            Some(run.into()),
+            101,
+            json!({
+                "compactionId": summary.metadata["compaction_id"],
+                "summaryMessageId": summary.message_id,
+                "summaryMarkdown": summary.content,
+                "firstKeptMessageId": summary.metadata.get("first_kept_message_id"),
+                "createdReason": "context_pressure_threshold_reached",
+                "contextObservations": observations,
+            }),
+        )
+        .unwrap();
         manual_records.push(manual);
         let manual_restored =
             restore_runtime_snapshot_from_session_records(session_id, &manual_records).unwrap();
@@ -935,5 +945,39 @@ async fn query_loop_manual_compaction_preserves_its_bool_contract_without_automa
         serde_json::to_value(manager.load_or_create_session(session_id).unwrap()).unwrap(),
         before_failure,
         "failed manual fact commit must not replace the saved context",
+    );
+
+    let mut newer = original.clone();
+    newer.messages.push(ChatMessage {
+        message_id: "concurrent-user-input".into(),
+        role: MessageRole::User,
+        content: "User input accepted after manual context commit.".into(),
+        created_at_ms: 102,
+        metadata: JsonMap::new(),
+    });
+    newer.model_semantics.insert(
+        "concurrent-user-input".into(),
+        ModelMessageSemanticsV1::Plain,
+    );
+    refresh_session_context_window(&mut newer);
+    let conflict = engine
+        .compact_session_online_with_model_client_and_event_sink_async(
+            session_id,
+            "manual-cache-conflict",
+            &model,
+            &config,
+            &mut |_| Ok(()),
+            &mut |_| manager.save_session(&newer),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        conflict,
+        "manual compaction snapshot changed before cache commit"
+    );
+    assert_eq!(
+        serde_json::to_value(manager.load_or_create_session(session_id).unwrap()).unwrap(),
+        serde_json::to_value(newer).unwrap(),
+        "manual compaction must preserve a newer snapshot written after its fact commit",
     );
 }

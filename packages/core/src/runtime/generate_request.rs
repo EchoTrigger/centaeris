@@ -121,7 +121,12 @@ impl<
         driver: &D,
         event_sink: &mut (dyn FnMut(RuntimeEventProjection) -> Result<(), String> + Send),
     ) -> Result<bool, String> {
-        let mut session = self.session_manager.load_or_create_session(session_id)?;
+        let expected_snapshot = self.runtime_store.load_agent_runtime_snapshot(session_id)?;
+        let mut session = match expected_snapshot.as_deref() {
+            Some(raw) => serde_json::from_str::<SessionStateSnapshot>(raw)
+                .map_err(|error| format!("deserialize session state failed: {error}"))?,
+            None => SessionStateSnapshot::new(session_id.to_string(), now_ms()),
+        };
         if super::prompt_compaction_commit::active_commit(&session)?
             .is_some_and(|commit| !commit.acknowledged)
         {
@@ -173,7 +178,16 @@ impl<
             }
             event_sink(event)?;
         }
-        self.session_manager.save_session(&session)?;
+        let snapshot_json = serde_json::to_string(&session)
+            .map_err(|error| format!("serialize session state failed: {error}"))?;
+        if !self.runtime_store.compare_and_save_agent_runtime_snapshot(
+            session_id,
+            expected_snapshot.as_deref(),
+            &snapshot_json,
+            now_ms(),
+        )? {
+            return Err("manual compaction snapshot changed before cache commit".into());
+        }
         Ok(compacted)
     }
 
