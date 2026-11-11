@@ -1577,9 +1577,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
 
       <section className="workspaceChatColumn" inert={search.open || Boolean(catalogContent)}>
         <div className={`workspaceConversationPlane ${isHome ? "isEmpty" : ""}`}>
-          {searchEventId ? <div className="workspaceToolOutputStatus" role={focusedTranscript.error ? "alert" : "status"}>
-            <span>{t(focusedTranscript.error ? "searchOverlay.targetUnavailable" : "searchOverlay.viewingMatch")}</span>
-            {focusedTranscript.error ? <button type="button" onClick={focusedTranscript.retry}>{t("agentChat.retry")}</button> : null}
+          {searchEventId && focusedTranscript.error ? <div className="workspaceToolOutputStatus" role="alert">
+            <span>{t("searchOverlay.targetUnavailable")}</span>
+            <button type="button" onClick={focusedTranscript.retry}>{t("agentChat.retry")}</button>
             <button type="button" onClick={returnToLatest}>{t("virtualAgentRunList.jumpToLatest")}</button>
           </div> : null}
           <TranscriptBlockList
