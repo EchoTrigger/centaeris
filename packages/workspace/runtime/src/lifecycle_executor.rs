@@ -161,6 +161,19 @@ pub(crate) fn start(state: HttpServerState) -> Result<Executor, String> {
     Ok(executor)
 }
 
+/// The latency fixture observes wake eligibility without executing synthetic parents.
+#[cfg(test)]
+pub(crate) fn start_terminal_delivery(state: HttpServerState) -> Result<Executor, String> {
+    let platform = Platform::new().map_err(|_| "lifecycle platform client unavailable")?;
+    let shutdown = Shutdown::default();
+    let store = state.job_store.clone();
+    Ok(Executor {
+        dispatchers: vec![state.runtime.spawn(outbox::run(store, shutdown.clone()))],
+        shutdown,
+        _platform: platform,
+    })
+}
+
 async fn dispatch(
     state: HttpServerState,
     platform: Platform,
