@@ -26,7 +26,7 @@ from unittest.mock import patch
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
-BASELINE = "96a5dd5c950da44a01425e4be728276365eda424"
+BASELINE = "29809dfdc52f1377681285e9d1c5b00507200b3b"
 REPORT = {"schema": "runtime.lifecycle.comparison.v1", "cases": []}
 
 
