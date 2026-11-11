@@ -133,7 +133,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   const { blockIds, hasOlder, viewEpoch } = useTranscriptList(store);
   const targetBlockId = searchTarget?.blockId ?? "";
   const targetQuery = searchTarget?.query ?? "";
-  const locatedTarget = useRef({ key: "", block: false, word: false });
+  const locatedTarget = useRef({ store, key: "", block: false, word: false });
   const live = useTranscriptLive(store);
   const citations = useTranscriptCitations(store, sessionId);
   const turns = useMemo(() => groupTranscriptTurns(blockIds, store.getBlockSnapshot), [store, blockIds]);
@@ -396,7 +396,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     const content = contentRef.current;
     if (!viewport || !content) return undefined;
     const key = `${viewEpoch}:${targetBlockId}:${targetQuery}`;
-    if (locatedTarget.current.key !== key) locatedTarget.current = { key, block: false, word: false };
+    if (locatedTarget.current.store !== store || locatedTarget.current.key !== key) locatedTarget.current = { store, key, block: false, word: false };
     if (locatedTarget.current.word) return undefined;
     const initialInput = userScrollInputRef.current;
     getController().pause();
@@ -425,7 +425,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     });
     observer.observe(content, { childList: true, subtree: true, characterData: true });
     return () => { observer.disconnect(); window.cancelAnimationFrame(frame); };
-  }, [blockIds, targetBlockId, targetQuery, viewEpoch, getController, setProgrammaticScrollTop]);
+  }, [store, blockIds, targetBlockId, targetQuery, viewEpoch, getController, setProgrammaticScrollTop]);
 
   // Read visibility follows the committed layout, independently of whether
   // anchoring, streamed content or a disclosure caused that layout to change.

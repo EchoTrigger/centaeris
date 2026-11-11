@@ -44,6 +44,13 @@ test("a stage hit expands its process, highlights only the hit block and pauses 
   const disclosure = screen.getByRole("button", { expanded: true });
   expect(disclosure).toBeTruthy();
   expect(reading.mock.calls.every(([, latest]) => latest === false)).toBe(true);
+  screen.getByRole("button", { name: "virtualAgentRunList.jumpToLatest" }).focus();
+  const retried = createTranscriptViewStore();
+  retried.openTail(page());
+  view.rerender(<TranscriptBlockList store={retried} sessionId="session" loadingHistory={false} loadingOlderHistory={false}
+    onLoadOlderHistory={async () => {}} onReadingLatestChange={reading}
+    searchTarget={{ blockId: "stage", query: "权限", onReturnLatest: returnLatest }} />);
+  await waitFor(() => expect(document.activeElement).toBe(view.container.querySelector('[data-block-id="stage"]')));
   await userEvent.click(screen.getByRole("button", { name: "virtualAgentRunList.jumpToLatest" }));
   expect(returnLatest).toHaveBeenCalledOnce();
 });
