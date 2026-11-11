@@ -1,5 +1,6 @@
 import { animate } from "@centaeris/ui/motion";
 import { useTranslation } from "../i18n";
+import { useCompactWorkspaceLayout, useSidebarOpen, useWorkspaceNavigation } from "../shell/workspaceNavigationState";
 import { useCallback, useEffect, useEffectEvent, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { matchPath, useNavigate, useRouteLoaderData } from "react-router";
 import { apiJson, apiResponse } from "../api";
@@ -74,15 +75,6 @@ const ARTIFACT_PREVIEW_CONTENT_TYPES = new Set([
   "image/jpeg",
   "image/webp",
 ]);
-
-function subscribeViewport(onResize) {
-  window.addEventListener("resize", onResize);
-  return () => window.removeEventListener("resize", onResize);
-}
-
-function isCompactViewport() {
-  return window.innerWidth <= 760;
-}
 
 function useWorkbenchProgress(ref, property, open, { initial, duration, immediate = false }) {
   useLayoutEffect(() => {
@@ -176,6 +168,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const { t } = useTranslation();
   const { user } = useRouteLoaderData("authenticated");
   const { workspace } = useRouteLoaderData("workspace");
+  const workspaceNavigation = useWorkspaceNavigation(user.id, workspace.id);
   const operations = useMemo(() => new OperationClient({ userId: user.id, workspaceId: workspace.id, command: "submitMessage" }), [user.id, workspace.id]);
   const questionOperations = useMemo(() => new OperationClient({ userId: user.id, workspaceId: workspace.id, command: "respondQuestion" }), [user.id, workspace.id]);
   const cancelSubmission = useCallback(async (target) => {
@@ -275,6 +268,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const [composerError, setComposerError] = useState("");
   const [conversationError, setConversationError] = useState("");
   const [navigationError, setNavigationError] = useState(false);
+  const [navigationLoaded, setNavigationLoaded] = useState(false);
   const [olderHistoryError, setOlderHistoryError] = useState(false);
   const [streamIssue, setStreamIssue] = useState(null);
   const [sending, setSending] = useState(false);
@@ -292,8 +286,10 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const previewPanelId = useId();
   const previewToggleRef = useRef(null);
   const [browserPanelWidthPx, setBrowserPanelWidthPx] = useState(null);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const compactLayout = useSyncExternalStore(subscribeViewport, isCompactViewport);
+  const isSidebarOpen = useSidebarOpen(workspaceNavigation);
+  const setIsSidebarOpen = workspaceNavigation.setDesktopOpen;
+  const initialSidebarProgress = useRef(isSidebarOpen ? 1 : 0).current;
+  const compactLayout = useCompactWorkspaceLayout();
   const [drawerFor, setDrawerFor] = useState(null);
   const workbenchRef = useRef(null);
   const transcriptRef = useRef(null);
@@ -301,7 +297,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const search = useWorkspaceSearch(navigationKey, visible || Boolean(catalogContent));
   const drawerOpen = compactLayout && drawerFor === navigationKey && !search.open && (visible || Boolean(catalogContent));
   useWorkbenchProgress(workbenchRef, "--workspace-sidebar-progress", isSidebarOpen,
-    { initial: 1, duration: 0.22, immediate: compactLayout });
+    { initial: initialSidebarProgress, duration: 0.22, immediate: compactLayout });
   useWorkbenchProgress(workbenchRef, "--workspace-preview-progress", visible && filePreviewOpen,
     { initial: 0, duration: 0.24, immediate: !visible });
   useLayoutEffect(() => {
@@ -586,6 +582,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
         const navigation = navigationSnapshotRef.current.sessions ?? data.sessions;
         if (navigationSnapshotRef.current.sessions === null) setSessions(navigation);
         setProjects(projectData.projects);
+        setNavigationLoaded(true);
         // Only an entry without an explicit Session chooses a first row.
         // A late workspace response never changes an explicit current selection.
         selectInitialDirectory(navigation);
@@ -1503,8 +1500,8 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const runControlUnknown = currentRunIdentityRef.current === undefined;
   const renderSessionRow = useCallback((session, options = {}) => <SessionNavigationRow key={session.id} workspaceId={workspace.id} session={session} actions={rowActions} active={session.id === sessionId} running={session.id === sessionId ? hasActiveAgentRun || runControlUnknown && session.hasActiveAgentRun : session.hasActiveAgentRun} onSelect={selectNavigationSession} {...options} />,
     [workspace.id, rowActions, sessionId, hasActiveAgentRun, runControlUnknown, selectNavigationSession]);
-  const sidebarSessions = useMemo(() => ({ sessions, projects, groupedSessions, renderSessionRow, onCreateProject: createNavigationProject }),
-    [sessions, projects, groupedSessions, renderSessionRow, createNavigationProject]);
+  const sidebarSessions = useMemo(() => ({ sessions, projects, groupedSessions, renderSessionRow, onCreateProject: createNavigationProject, ready: navigationLoaded }),
+    [sessions, projects, groupedSessions, renderSessionRow, createNavigationProject, navigationLoaded]);
   const recentNavigation = useMemo(() => navigationError ? { error: true } : undefined, [navigationError]);
 
   async function answerQuestion(question, answer) {
@@ -1527,7 +1524,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     <main
       ref={workbenchRef}
       className={`workspaceWorkbench ${isSidebarOpen ? "withSidebar" : "withoutSidebar"}${catalogContent ? " isBrowsing" : ""}${search.open ? " isSearching" : ""}`}
-      style={{ "--browser-panel-width": browserPanelWidthPx == null ? undefined : `${browserPanelWidthPx}px` }}
+      style={{ "--workspace-sidebar-progress": initialSidebarProgress, "--browser-panel-width": browserPanelWidthPx == null ? undefined : `${browserPanelWidthPx}px` }}
     >
       {!compactLayout ? <button
         className="workspaceSidebarToggle shAvatarToggle"
@@ -1546,6 +1543,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
         onClick={compactLayout ? event => { if (event.target === event.currentTarget) setDrawerFor(null); } : undefined}>
         <ShellSidebar
           workspace={workspace}
+          navigationVisible={compactLayout ? drawerOpen : isSidebarOpen}
           menuContainer={compactLayout ? sidebarRef : undefined}
           search={compactLayout ? undefined : search}
           onCollapse={compactLayout ? collapseNavigation : undefined}

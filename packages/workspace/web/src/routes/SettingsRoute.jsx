@@ -16,6 +16,7 @@ import EnvironmentSettings from "./EnvironmentSettings";
 import WorkspaceProfileSettings from "./WorkspaceProfileSettings";
 import { SessionArchive } from "./SessionArchive";
 import { DEVELOPER_DOC_GROUPS, developerDocSearch, developerTopic, DeveloperSettings } from "./DeveloperSettings";
+import { useNavigationScroll, useWorkspaceNavigation } from "../shell/workspaceNavigationState";
 
 const ADMIN_ROLES = new Set(["owner", "admin"]);
 const SECTIONS = (t) => ({
@@ -175,6 +176,8 @@ export default function SettingsPage() {
     return () => playback.cancel();
   }, [showingDocs]);
   const workspace = workspaceData?.workspace || (isAccountRoute ? accountData?.workspace : null);
+  const navigation = useWorkspaceNavigation(user.id, workspace?.id ?? null);
+  useNavigationScroll(navigationRef, navigation, showingDocs ? "developerDocs" : "settings");
   const home = workspace ? `/w/${encodeURIComponent(workspace.id)}/app` : "/";
   const closeTo = safeReturnTo(location.state?.returnTo, workspace) || safeReturnTo(chat?.returnTo, workspace) || home;
   const lastDocTopic = docTopic || developerTopic(location.state?.developerTopic);

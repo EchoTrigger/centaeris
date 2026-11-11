@@ -9,13 +9,20 @@ import { apiJson } from "../api";
 import { groupSessionNavigation, sortSessionNavigation } from "./sessionNavigation.mjs";
 import { SessionNavigationRow } from "./SessionNavigationRow";
 import { useSessionNavigationActions } from "./useSessionNavigationActions";
+import { useCompactWorkspaceLayout, useSidebarOpen, useWorkspaceNavigation } from "./workspaceNavigationState";
 
 /** @param {{ children: import("react").ReactNode, mainClassName?: string, showRecentSessions?: boolean, recentRevision?: string, presentationNavigation?: readonly import("../chat/workspacePresentationProtocol").PresentationSession[] | null, onNavigationRetry?: () => void }} props */
 export function ShellPage({ children, mainClassName = "", showRecentSessions = false, recentRevision = "", presentationNavigation, onNavigationRetry }) {
   const { t } = useTranslation();
   const { workspace } = useRouteLoaderData("workspace");
+  const { user } = useRouteLoaderData("authenticated");
+  const navigation = useWorkspaceNavigation(user.id, workspace.id);
+  const desktopOpen = useSidebarOpen(navigation);
+  const compactLayout = useCompactWorkspaceLayout();
+  const [mobileOpen, setMobileOpen] = useState(() => !showRecentSessions);
   const search = useWorkspaceSearch(useLocation().key);
-  const [sidebarOpen, setSidebarOpen] = useState(() => !showRecentSessions || typeof window === "undefined" || !window.matchMedia("(max-width: 760px)").matches);
+  const sidebarOpen = compactLayout ? mobileOpen : desktopOpen;
+  const setSidebarOpen = compactLayout ? setMobileOpen : navigation.setDesktopOpen;
   const [recent, setRecent] = useState({ scope: "", sessions: [], projects: [], loading: true, error: false });
   const [retry, setRetry] = useState(0);
   const scope = workspace.id;
@@ -68,7 +75,7 @@ export function ShellPage({ children, mainClassName = "", showRecentSessions = f
   return (
     <div className={`shShellPage ${showRecentSessions ? "agentChatShell" : ""} ${sidebarOpen ? "isSidebarOpen" : "isSidebarClosed"}`}>
       <a className="shSkipLink" href="#workspace-main">{t("shellPage.skipToMainContent")}</a>
-      <ShellSidebar workspace={workspace} recentNavigation={recentNavigation} sessionProps={sessionNavigation} search={search} onCollapse={() => setSidebarOpen(false)} />
+      <ShellSidebar workspace={workspace} recentNavigation={recentNavigation} sessionProps={sessionNavigation} search={search} onCollapse={() => setSidebarOpen(false)} navigationVisible={sidebarOpen} />
       <main className={`shMain ${mainClassName}${search.open ? " isSearching" : ""}`} id="workspace-main" tabIndex="-1">
         {!sidebarOpen ? <button className="shSidebarOpen" type="button" aria-label={t("appRoute.showSidebar")} title={t("appRoute.showSidebar")} onClick={() => setSidebarOpen(true)}><PanelLeft aria-hidden="true" /></button> : null}
         {children}

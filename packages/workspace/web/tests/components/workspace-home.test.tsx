@@ -32,7 +32,10 @@ vi.mock("../../src/routes/AppRoute", () => ({
   },
 }));
 
-beforeEach(() => configureApi({ apiBaseUrl: window.location.origin }));
+beforeEach(() => {
+  configureApi({ apiBaseUrl: window.location.origin });
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+});
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();

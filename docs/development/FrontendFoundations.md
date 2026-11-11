@@ -34,6 +34,23 @@ position, close/reopen continuity and reduced motion. Both product gates check
 the shared package; the Web image and standalone build install its workspace
 dependency closure.
 
+Web navigation preferences are owned by `workspaceNavigationState.ts`, scoped by
+authenticated user and Workspace. The shared `@centaeris/ui/state` entry exposes
+upstream Zustand; it owns no navigation policy. Native `details` retain their
+keyboard behavior. Group/project folding and desktop sidebar visibility use a
+versioned localStorage record. Scroll offsets use a separate sessionStorage
+record for the conversation directory, settings categories and developer docs.
+Only opaque identities, flags and offsets are stored; selected Sessions and
+categories continue to follow the authorized URL.
+
+Scroll tracking stays outside reactive state and flushes on page hide, document
+hide or reader unmount. Restoring waits for navigation rows and visible geometry;
+a hidden/collapsed sidebar must not overwrite its last readable offset. Desktop
+visibility survives reloads. Compact chat drawers remain transient, start closed
+and close on navigation; they share folding and scroll without changing the
+desktop preference. Account settings without a Workspace have their own user
+scope. Storage restrictions retain usable state in the current document.
+
 ## Web interface roles
 
 This document defines the intended roles and host boundaries. Exact color values

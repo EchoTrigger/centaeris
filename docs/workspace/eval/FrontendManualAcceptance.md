@@ -6,6 +6,17 @@ Record the tested commit, browser/version, viewport, account role, and result.
 
 ## Conversation workbench
 
+- Fold Pinned, Projects, Recent and an individual project with mouse and keyboard.
+  Visit materials and settings, then use Back and reload. Confirm folding, the
+  directory scroll and the route's selected Session return. Repeat after hiding
+  the desktop sidebar; reopening it restores its position without a visible
+  expansion during initial paint. Another user/Workspace keeps its own choices.
+- At a narrow viewport, open the chat drawer, fold a project and scroll. Selecting
+  a route closes the drawer; reopening retains its folding and position. Reload
+  starts with the drawer closed. Resize to desktop and back: closing a compact
+  drawer must not change the saved desktop visibility. Settings categories and
+  developer-document navigation retain independent scroll positions.
+
 - Open search from the sidebar and Ctrl/Cmd+K. Search a Chinese two-character
   phrase, an English identifier and literal `%`/`_` text occurring only in a user
   message, an Agent stage update or a final answer. Confirm type labels, matching
