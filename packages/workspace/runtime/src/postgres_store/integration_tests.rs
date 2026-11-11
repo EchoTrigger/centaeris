@@ -753,6 +753,27 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
     // AgentRun start and completion are first-class transcript boundary blocks
     // in the Core projection, alongside the user and assistant messages.
     assert_eq!(page.page.blocks.len(), 4);
+    let mut window = TranscriptPageReadRequestV1 {
+        session_id: "session_transcript".into(),
+        projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.into(),
+        projection_generation: generation.clone(),
+        source_high_water: "4".into(),
+        older_cursor: None,
+        policy: TranscriptPagePolicyV1 {
+            max_blocks: 1,
+            ..TranscriptPagePolicyV1::default()
+        },
+    };
+    let tail_window = store.load_transcript_page(window.clone()).unwrap();
+    assert_eq!(tail_window.page.blocks.len(), 1);
+    assert_ne!(tail_window.page.blocks[0].order_key.source_sequence, "2");
+    window.older_cursor = store.transcript_anchor_cursor(&window, "2").unwrap();
+    let old_window = store.load_transcript_page(window).unwrap();
+    assert_eq!(old_window.page.blocks.len(), 1);
+    assert_eq!(old_window.page.blocks[0].order_key.source_sequence, "2");
+    assert!(old_window.page.has_older);
+    assert_eq!(old_window.work.raw_event_visits, 0);
+    assert!(old_window.work.candidate_rows_read <= 2);
     // Seek to an old user message at the current waterline without returning
     // the later answer or scanning source events for presentation.
     let anchor_request = serde_json::json!({
