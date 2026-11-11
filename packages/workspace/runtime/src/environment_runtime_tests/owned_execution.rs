@@ -363,6 +363,25 @@ pub(crate) fn cleanup_owned_physical_execution(
     host().cleanup(allocation, resources, fence, per_run)
 }
 
+pub(super) fn verify_retained_cleanup(
+    store: &PostgresRuntimeStore,
+    run_id: &str,
+) -> Result<Value, String> {
+    if !owns_run(run_id) {
+        return Err("owned retained proof run unknown".into());
+    }
+    store.with_client(|client| {
+        let row = client.query_one("SELECT c.instance_id,c.environment_id,c.cleanup_complete,c.physical_removed,EXISTS(SELECT 1 FROM runtime.resident_sandboxes s WHERE s.instance_id=c.instance_id) AS charged FROM runtime.agent_run_cleanup_receipts c WHERE c.agent_run_id=$1 AND c.allocation_kind='instance'", &[&run_id]).map_err(|error|error.to_string())?;
+        let id: String = row.get("instance_id");
+        let instances = host().instances.lock().map_err(|_|"owned host lock poisoned")?;
+        let instance = instances.get(&id).ok_or("owned retained instance missing")?;
+        if !row.get::<_,bool>("cleanup_complete") || row.get::<_,bool>("physical_removed") || !row.get::<_,bool>("charged") || !instance.present || !instance.cleanup_confirmed || instance.allocation.environment_id != row.get::<_,String>("environment_id") {
+            return Err("owned retained cleanup proof rejected".into());
+        }
+        Ok(json!({"agentRunId":run_id,"instanceId":id,"cleanupComplete":true,"physicalPresent":true,"residentChargeRetained":true}))
+    })
+}
+
 pub(super) fn verify_cleanup(store: &PostgresRuntimeStore, run_id: &str) -> Result<Value, String> {
     if !owns_run(run_id) {
         return Err("owned cleanup proof run unknown".into());

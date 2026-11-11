@@ -40,7 +40,8 @@ class EnvironmentRuntimeFixture:
         url = "postgresql://{}:{}@{}:{}/{}".format(
             quote(database["USER"]), quote(database["PASSWORD"]), database["HOST"],
             database["PORT"], quote(database["NAME"]))
-        fixture = {"databaseUrl": url, "userId": str(self.user.pk), "workspaceId": self.workspace.pk}
+        fixture = {"databaseUrl": url, "userId": str(self.user.pk), "workspaceId": self.workspace.pk,
+                   "agentRunId": self.run.pk}
         environment = {**os.environ, "CARGO_BUILD_JOBS": "1",
             "CENTAERIS_ENVIRONMENT_RUNTIME_FIXTURE": json.dumps(fixture),
             "API_INTERNAL_URL": self.live_server_url, "INTERNAL_API_TOKEN": settings.INTERNAL_API_TOKEN,

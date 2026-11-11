@@ -1357,14 +1357,7 @@ def run_worker_service():
             name="workspace-reconciler",
         ),
     ]
-    job_threads = [threading.Thread(target=run_job_dispatcher, args=(stopped,),
-        name="workspace-job-dispatcher", daemon=True)]
-    lifecycle_threads = [
-        threading.Thread(target=run_control_dispatcher, args=(stage, stopped),
-            name=f"workspace-control-{stage}", daemon=True)
-        for stage in ("advance", "cleanup")
-    ]
-    for thread in control_threads + job_threads + lifecycle_threads:
+    for thread in control_threads:
         thread.start()
     try:
         stopped.wait()

@@ -26,7 +26,7 @@ fn owned_runs() -> &'static Mutex<HashSet<String>> {
 }
 
 pub(super) fn register_owned_run(run: &str) {
-    assert!(owned_runs().lock().unwrap().insert(run.to_string()));
+    owned_runs().lock().unwrap().insert(run.to_string());
 }
 
 pub(super) fn owns_run(run: &str) -> bool {
@@ -41,6 +41,10 @@ pub(super) fn owns_run(run: &str) -> bool {
 fn environment_runtime_server() {
     use std::io::{BufRead, Write};
     let value = production_fixture().unwrap();
+    if let Some(run) = value["agentRunId"].as_str() {
+        // Cancellation can reach cleanup before host preparation registers it.
+        register_owned_run(run);
+    }
     let runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -69,7 +73,8 @@ fn environment_runtime_server() {
         native_model: None,
         request_policy: request_policy::RequestPolicy::from_env().unwrap(),
     };
-    let server = runtime.spawn(serve_http(listener, state));
+    let server = runtime.spawn(serve_http(listener, state.clone()));
+    let mut lifecycle: Option<crate::lifecycle_executor::Executor> = None;
     let mut physical_pin = None;
     println!("environment-runtime-ready:http://{address}");
     io::stdout().flush().unwrap();
@@ -77,6 +82,13 @@ fn environment_runtime_server() {
         let command = command.unwrap();
         if command == "stop" {
             break;
+        }
+        if command == "start-lifecycle" {
+            assert!(lifecycle.is_none());
+            lifecycle = Some(crate::lifecycle_executor::start(state.clone()).unwrap());
+            println!("environment-runtime-lifecycle:{}", json!({"started":true}));
+            io::stdout().flush().unwrap();
+            continue;
         }
         if let Some(wire) = command.strip_prefix("physical-pin:") {
             assert!(
@@ -97,6 +109,12 @@ fn environment_runtime_server() {
             io::stdout().flush().unwrap();
             continue;
         }
+        if let Some(run_id) = command.strip_prefix("verify-retained-cleanup:") {
+            let proof = owned_execution::verify_retained_cleanup(backend.as_ref(), run_id).unwrap();
+            println!("environment-runtime-retained-cleanup:{proof}");
+            io::stdout().flush().unwrap();
+            continue;
+        }
         if let Some(run_id) = command.strip_prefix("verify-cleanup:") {
             let proof = owned_execution::verify_cleanup(backend.as_ref(), run_id).unwrap();
             println!("environment-runtime-cleanup:{proof}");
@@ -108,6 +126,9 @@ fn environment_runtime_server() {
     if let Some((release, operation)) = physical_pin {
         let _ = release.send(());
         operation.join().unwrap().unwrap();
+    }
+    if let Some(executor) = lifecycle.as_mut() {
+        runtime.block_on(executor.shutdown());
     }
     server.abort();
     runtime.block_on(async {

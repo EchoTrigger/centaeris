@@ -165,34 +165,6 @@ class WorkerContractTests(unittest.TestCase):
         self.assertIsNone(bodies[2]["deadLetterAfter"])
 
 
-    def test_service_dispatches_all_claimed_jobs_while_other_jobs_are_active(self):
-        count=12
-        barrier=threading.Barrier(count)
-        lock=threading.Lock()
-        completed=[]
-        stop=None
-        jobs=iter({'jobId':f'job-{index}','leaseOwner':f'opaque-owner-{index}'} for index in range(count))
-        def install_handler(_number,handler):
-            nonlocal stop
-            if callable(handler): stop=handler
-        def execute(job,owner):
-            self.assertEqual(owner,job['leaseOwner'])
-            barrier.wait(timeout=5)
-            with lock:
-                completed.append(job['jobId'])
-                if len(completed)==count: stop(None,None)
-        with patch.object(worker.signal,'signal',side_effect=install_handler), \
-                patch.object(worker,'run_loop'), patch.object(worker,'run_control_dispatcher'), \
-                patch.object(worker,'claim_next_job',side_effect=lambda _sequence:next(jobs,None)), \
-                patch.object(worker,'wait_for_jobs',return_value='timeout'), \
-                patch.object(worker,'execute_claimed_job',side_effect=execute):
-            watchdog=threading.Timer(8,lambda:stop(None,None));watchdog.start()
-            try: worker.run_worker_service()
-            finally:
-                watchdog.cancel()
-                for thread in threading.enumerate():
-                    if thread.name.startswith('workspace-active-job-'): thread.join(timeout=2)
-        self.assertEqual(len(set(completed)),count)
 
 
     def test_remote_disconnect_is_dependency_unavailable(self):
