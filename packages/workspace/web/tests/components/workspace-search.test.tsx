@@ -96,9 +96,13 @@ test("more results use the same query cursor and errors retain the query for ret
 
 test("browser history restores the query, loaded pages, selection and scroll position", async () => {
   const user = userEvent.setup();
-  request.mockImplementation(async (path: string) => path === "/api/library" ? { objects: [] }
-    : path.includes("cursor=") ? { matches: [hit("second")], nextCursor: null }
-      : { matches: [hit("first")], nextCursor: "next" });
+  let failFirst = true;
+  request.mockImplementation(async (path: string) => {
+    if (path === "/api/library") return { objects: [] };
+    if (failFirst) { failFirst = false; throw new Error("offline"); }
+    return path.includes("cursor=") ? { matches: [hit("second")], nextCursor: null }
+      : { matches: [hit("first")], nextCursor: "next" };
+  });
   function SearchPage() {
     const search = useWorkspaceSearch("page");
     return <><button type="button" onClick={search.toggle}>Open search</button>
@@ -111,6 +115,8 @@ test("browser history restores the query, loaded pages, selection and scroll pos
   render(<RouterProvider router={router} />);
   await user.click(screen.getByRole("button", { name: "Open search" }));
   await user.type(screen.getByRole("combobox"), "权限");
+  await screen.findByRole("alert");
+  await user.click(screen.getByRole("button", { name: "agentChat.retry" }));
   await screen.findByRole("option", { name: /Conversation first/ });
   await user.click(screen.getByRole("button", { name: "searchOverlay.loadMoreConversations" }));
   const second = await screen.findByRole("option", { name: /Conversation second/ });
@@ -130,4 +136,30 @@ test("browser history restores the query, loaded pages, selection and scroll pos
   await act(async () => { await router.navigate(-1); await router.navigate(-1); });
   expect(router.state.location.hash).toBe("");
   expect(screen.queryByRole("combobox")).toBeNull();
+});
+
+test("leaving during pagination cancels the request and Back restores usable results", async () => {
+  const user = userEvent.setup();
+  let pageSignal!: AbortSignal;
+  let finishPage!: (value: unknown) => void;
+  request.mockImplementation(async (path: string, options: { signal: AbortSignal }) => {
+    if (path === "/api/library") return { objects: [] };
+    if (path.includes("cursor=")) { pageSignal = options.signal; return new Promise(resolve => { finishPage = resolve; }); }
+    return { matches: [hit("first")], nextCursor: "next" };
+  });
+  const router = createMemoryRouter([{ element: <WorkspaceSearchHistory><Outlet /></WorkspaceSearchHistory>, children: [
+    { path: "/", element: <WorkspaceSearch workspaceId="research" onClose={() => {}} /> },
+    { path: "/w/research/sessions/:id", element: <div>Selected conversation</div> },
+  ] }]);
+  render(<RouterProvider router={router} />);
+  await user.type(screen.getByRole("combobox"), "权限");
+  await screen.findByRole("option", { name: /Conversation first/ });
+  await user.click(screen.getByRole("button", { name: "searchOverlay.loadMoreConversations" }));
+  await user.click(screen.getByRole("option", { name: /Conversation first/ }));
+  expect(pageSignal.aborted).toBe(true);
+  await act(async () => { await router.navigate(-1); });
+  expect(screen.getByRole("button", { name: "searchOverlay.loadMoreConversations" }).hasAttribute("disabled")).toBe(false);
+  await act(async () => { finishPage({ matches: [hit("late")], nextCursor: null }); });
+  expect(screen.queryByRole("option", { name: /Conversation late/ })).toBeNull();
+  expect(screen.getAllByRole("option")).toHaveLength(1);
 });

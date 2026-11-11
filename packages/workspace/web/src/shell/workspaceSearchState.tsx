@@ -1,6 +1,7 @@
 import { createContext, useContext, useRef, type ReactNode } from "react";
 
 type SearchSnapshot = {
+  attempt: number;
   selectedIndex: number;
   scrollTop: number;
   libraryResponse: unknown;

@@ -79,7 +79,7 @@ export function WorkspaceSearch({ workspaceId, onClose, inputRef }) {
   }
   const [libraryResponse, setLibraryResponse] = useState(restored.current?.libraryResponse ?? null);
   const [sessionResponse, setSessionResponse] = useState(restored.current?.sessionResponse ?? null);
-  const [attempt, setAttempt] = useState(0);
+  const [attempt, setAttempt] = useState(restored.current?.attempt ?? 0);
   const [selectedIndex, setSelectedIndex] = useState(restored.current?.selectedIndex ?? 0);
   const resultsRef = useRef(null);
   const restoreScroll = useRef(restored.current?.scrollTop ?? null);
@@ -105,7 +105,8 @@ export function WorkspaceSearch({ workspaceId, onClose, inputRef }) {
   }, [attempt, libraryReady]);
 
   useEffect(() => {
-    if (!text || filter === "library" || sessionReady) return undefined;
+    const cancelMore = () => { moreRequest.current?.abort(); moreRequest.current = null; };
+    if (!text || filter === "library" || sessionReady) return cancelMore;
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       apiJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/sessions/search?${new URLSearchParams({ query: text })}`, { signal: controller.signal })
@@ -115,7 +116,7 @@ export function WorkspaceSearch({ workspaceId, onClose, inputRef }) {
         })
         .catch(() => { if (!controller.signal.aborted) setSessionResponse({ key: searchKey, matches: [], nextCursor: null, failed: true, loadingMore: false }); });
     }, 250);
-    return () => { window.clearTimeout(timer); controller.abort(); moreRequest.current?.abort(); };
+    return () => { window.clearTimeout(timer); controller.abort(); cancelMore(); };
   }, [filter, searchKey, text, workspaceId, sessionReady]);
 
   async function loadMore() {
@@ -170,7 +171,8 @@ export function WorkspaceSearch({ workspaceId, onClose, inputRef }) {
   }, [results.length]);
 
   function select(href) {
-    history?.set(location.key, { selectedIndex, scrollTop: resultsRef.current?.scrollTop ?? 0, libraryResponse, sessionResponse });
+    history?.set(location.key, { attempt, selectedIndex, scrollTop: resultsRef.current?.scrollTop ?? 0, libraryResponse,
+      sessionResponse: sessionResponse ? { ...sessionResponse, loadingMore: false } : null });
     navigate(href);
   }
 
