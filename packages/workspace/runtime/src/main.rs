@@ -1,5 +1,7 @@
 mod agent_inputs;
 mod agent_run_authorization;
+mod agent_run_cleanup;
+mod agent_run_execution;
 mod api_model_client;
 mod artifact_publication;
 mod contract;
@@ -20,6 +22,7 @@ mod file_mutation_commit;
 mod host_retirement;
 mod http;
 mod job_protocol;
+mod lifecycle_executor;
 mod lifecycle_hooks;
 mod material_execution;
 mod mcp;
@@ -498,7 +501,10 @@ fn main() -> Result<(), String> {
         request_policy: request_policy::RequestPolicy::from_env()?,
         native_model,
     };
-    runtime.block_on(serve_http(listener, state))
+    let mut lifecycle = lifecycle_executor::start(state.clone())?;
+    let result = runtime.block_on(serve_http(listener, state));
+    runtime.block_on(lifecycle.shutdown());
+    result
 }
 
 // One admission boundary for every execution-capable background consumer.

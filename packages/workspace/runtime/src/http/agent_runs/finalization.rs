@@ -1,5 +1,6 @@
 //! Advance an ordinary per-Run Job from its committed terminal to platform release.
-use super::{teardown_owned_tasks, HttpServerState};
+use crate::agent_run_execution::Failure;
+use crate::HttpServerState;
 use crate::{
     http_response, json_error_response, AGENT_RUN_LIFECYCLE_JOB_KIND, MAX_HTTP_BODY_BYTES,
 };
@@ -18,7 +19,7 @@ const RESOLVED_SCHEMA: &str = "runtime.agent_run_lifecycle.resolved.v1";
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-enum TerminalState {
+pub(crate) enum TerminalState {
     Completed,
     Failed,
     Cancelled,
@@ -26,16 +27,16 @@ enum TerminalState {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct FinalizeRequest {
-    schema: String,
-    job_id: String,
-    lease_owner: String,
-    agent_run_id: String,
-    authorization_digest: String,
+pub(crate) struct FinalizeRequest {
+    pub(crate) schema: String,
+    pub(crate) job_id: String,
+    pub(crate) lease_owner: String,
+    pub(crate) agent_run_id: String,
+    pub(crate) authorization_digest: String,
     #[serde(deserialize_with = "Deserialize::deserialize")]
-    terminal_state: Option<TerminalState>,
+    pub(crate) terminal_state: Option<TerminalState>,
     #[serde(deserialize_with = "Deserialize::deserialize")]
-    agent_run_cleanup: Option<Box<crate::contract::AgentRunCleanup>>,
+    pub(crate) agent_run_cleanup: Option<Box<crate::contract::AgentRunCleanup>>,
 }
 
 enum FinalizeIntent {
@@ -71,7 +72,7 @@ struct ReleaseReceipt {
     release_receipt_id: String,
 }
 
-fn valid_identity(value: &str) -> bool {
+pub(crate) fn valid_identity(value: &str) -> bool {
     (1..=160).contains(&value.len())
         && value
             .bytes()
@@ -106,36 +107,50 @@ pub(crate) fn advance(
     state: HttpServerState,
     request: Request<Bytes>,
 ) -> Result<Response<Body>, String> {
-    let mut request: FinalizeRequest = match serde_json::from_slice(request.body()) {
+    let request: FinalizeRequest = match serde_json::from_slice(request.body()) {
         Ok(request) => request,
         Err(_) => return json_error_response(400, "agent_run_finalize_request_invalid"),
     };
+    let run = request.agent_run_id.clone();
+    match finish(state, request) {
+        Ok(receipt) => released(&run, &receipt),
+        Err(error) => error.response(),
+    }
+}
+
+pub(crate) fn finish(
+    state: HttpServerState,
+    mut request: FinalizeRequest,
+) -> Result<String, Failure> {
     if !request.valid() {
-        return json_error_response(400, "agent_run_finalize_request_invalid");
+        return Err(Failure::rejected(400, "agent_run_finalize_request_invalid"));
     }
     let Some(intent) = request.take_intent() else {
-        return json_error_response(400, "agent_run_finalize_request_invalid");
+        return Err(Failure::rejected(400, "agent_run_finalize_request_invalid"));
     };
     if let Err(error) = state
         .job_store
         .require_execute_lease(&request.job_id, &request.lease_owner)
     {
         return if error == "ordinary execution lease rejected" {
-            PlatformFailure::LeaseLost.response()
+            Err(PlatformFailure::LeaseLost.failure())
         } else {
-            json_error_response(503, "agent_run_finalize_lease_unavailable")
+            Err(Failure::rejected(
+                503,
+                "agent_run_finalize_lease_unavailable",
+            ))
         };
     }
     let platform = match Platform::new() {
         Ok(platform) => platform,
-        Err(error) => return error.response(),
+        Err(error) => return Err(error.failure()),
     };
     let cleanup = match intent {
         FinalizeIntent::Cleanup(cleanup) => cleanup,
         FinalizeIntent::Resolve(expected_terminal) => {
             let resolution = match platform.resolve(&request, expected_terminal) {
                 Ok(resolution) => resolution,
-                Err(error) => return error.response(),
+                Err(error) => return Err(error.failure()),
             };
             match resolution {
                 CleanupResolution::Terminal {
@@ -153,9 +168,9 @@ pub(crate) fn advance(
                     && terminal_state == expected_terminal
                     && valid_identity(&release_receipt_id) =>
                 {
-                    return released(&request.agent_run_id, &release_receipt_id);
+                    return Ok(release_receipt_id);
                 }
-                _ => return PlatformFailure::Invalid.response(),
+                _ => return Err(PlatformFailure::Invalid.failure()),
             }
         }
     };
@@ -164,22 +179,27 @@ pub(crate) fn advance(
         || cleanup.authorization_digest != request.authorization_digest
         || environment.execution_mode != "perRun"
     {
-        return json_error_response(409, "agent_run_finalize_binding_mismatch");
+        return Err(Failure::rejected(
+            409,
+            "agent_run_finalize_binding_mismatch",
+        ));
     }
     let Some(controller) = &environment.controller else {
-        return json_error_response(409, "agent_run_finalize_binding_mismatch");
+        return Err(Failure::rejected(
+            409,
+            "agent_run_finalize_binding_mismatch",
+        ));
     };
     let epoch = controller.controller_epoch;
-    teardown_owned_tasks(
+    let receipt = crate::agent_run_cleanup::teardown(
         state,
         request.job_id.clone(),
         request.lease_owner.clone(),
         *cleanup,
-        |run, cleanup_receipt| match platform.release(&request, epoch, cleanup_receipt) {
-            Ok(receipt) => released(run, &receipt),
-            Err(error) => error.response(),
-        },
-    )
+    )?;
+    platform
+        .release(&request, epoch, &receipt)
+        .map_err(|error| error.failure())
 }
 
 fn released(run: &str, receipt: &str) -> Result<Response<Body>, String> {
@@ -195,7 +215,8 @@ fn released(run: &str, receipt: &str) -> Result<Response<Body>, String> {
     ))
 }
 
-enum PlatformFailure {
+#[derive(Debug)]
+pub(crate) enum PlatformFailure {
     Unavailable,
     Invalid,
     ControllerBusy,
@@ -204,27 +225,27 @@ enum PlatformFailure {
 }
 
 impl PlatformFailure {
-    fn response(self) -> Result<Response<Body>, String> {
-        match self {
-            Self::Unavailable => {
-                json_error_response(503, "agent_run_finalize_platform_unavailable")
-            }
-            Self::Invalid => json_error_response(409, "agent_run_finalize_platform_rejected"),
-            Self::ControllerBusy => json_error_response(409, "environment_controller_busy"),
-            Self::ControllerOwned => json_error_response(409, "environment_controller_owned"),
-            Self::LeaseLost => json_error_response(409, "agent_run_lifecycle_lease_lost"),
-        }
+    pub(crate) fn failure(self) -> Failure {
+        let (status, code) = match self {
+            Self::Unavailable => (503, "agent_run_finalize_platform_unavailable"),
+            Self::Invalid => (409, "agent_run_finalize_platform_rejected"),
+            Self::ControllerBusy => (409, "environment_controller_busy"),
+            Self::ControllerOwned => (409, "environment_controller_owned"),
+            Self::LeaseLost => (409, "agent_run_lifecycle_lease_lost"),
+        };
+        Failure::rejected(status, code)
     }
 }
 
-struct Platform {
+#[derive(Clone)]
+pub(crate) struct Platform {
     api_url: String,
     token: String,
     client: reqwest::blocking::Client,
 }
 
 impl Platform {
-    fn new() -> Result<Self, PlatformFailure> {
+    pub(crate) fn new() -> Result<Self, PlatformFailure> {
         Ok(Self {
             api_url: env::var("API_INTERNAL_URL").map_err(|_| PlatformFailure::Unavailable)?,
             token: env::var("INTERNAL_API_TOKEN").map_err(|_| PlatformFailure::Unavailable)?,
@@ -255,7 +276,7 @@ impl Platform {
         )
     }
 
-    fn release(
+    pub(crate) fn release(
         &self,
         request: &FinalizeRequest,
         epoch: i64,
@@ -282,7 +303,7 @@ impl Platform {
         Ok(receipt.release_receipt_id)
     }
 
-    fn post<T: DeserializeOwned>(
+    pub(crate) fn post<T: DeserializeOwned>(
         &self,
         route: &str,
         body: serde_json::Value,

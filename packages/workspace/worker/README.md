@@ -1,15 +1,12 @@
 # Workspace Agent Worker
 
-`packages/workspace/worker` (`workspace-agent-worker`) is the hosted product's lifecycle
-worker. It polls and leases `agent_run.lifecycle` and `worker.noop` jobs from
-the internal Runtime/API job queues (`RUNTIME_INTERNAL_URL`,
-`API_INTERNAL_URL`), advances AgentRun lifecycle state, and reconciles pending
-work under bounded lease and recheck intervals.
+`packages/workspace/worker` delivers terminal Job outbox events and invokes
+bounded platform reconciliation. Workspace Runtime owns lifecycle Job claim,
+renewal, execution, waiting, cancellation and cleanup dispatch. The service no
+longer starts Python execution or control dispatchers.
 
-The worker does not own Session, model, tool, or Runtime job semantics; those
-remain owned by `packages/core` and are adapted by
-[`packages/workspace/runtime`](../runtime/README.md). It is a lifecycle
-driver over the existing authorized AgentRun API.
+Session, model, tool and Runtime Job semantics remain owned by `packages/core`.
+The remaining outbox and reconciliation loops use existing Runtime/API contracts.
 
 See [Deployment](../../../docs/workspace/operations/Deployment.md) and
 [Data](../../../docs/workspace/operations/Data.md) for required images, topology,

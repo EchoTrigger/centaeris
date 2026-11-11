@@ -419,13 +419,13 @@ pub(crate) fn complete(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolRes
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct FailRequest {
-    schema: String,
-    job_id: String,
-    lease_owner: String,
-    failed_at_ms: i64,
-    error: String,
-    retryable: bool,
+pub(crate) struct FailRequest {
+    pub(crate) schema: String,
+    pub(crate) job_id: String,
+    pub(crate) lease_owner: String,
+    pub(crate) failed_at_ms: i64,
+    pub(crate) error: String,
+    pub(crate) retryable: bool,
 }
 
 pub(crate) fn fail(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult {
@@ -437,6 +437,13 @@ pub(crate) fn fail(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult 
     {
         return Err((400, "job_fail_invalid"));
     }
+    fail_owned_job(request, store).map(|disposition| json!({"disposition":disposition}))
+}
+
+pub(crate) fn fail_owned_job(
+    request: FailRequest,
+    store: &PostgresRuntimeStore,
+) -> Result<RuntimeJobFailureDisposition, (u16, &'static str)> {
     let job = store
         .get_runtime_job(&request.job_id)
         .map_err(|_| (500, "job_store_failed"))?
@@ -516,7 +523,7 @@ pub(crate) fn fail(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult 
             .fail_runtime_job(fail_job)
             .map_err(|_| (409, "job_fail_rejected"))?;
     }
-    Ok(json!({"disposition":disposition}))
+    Ok(disposition)
 }
 
 #[derive(Deserialize)]

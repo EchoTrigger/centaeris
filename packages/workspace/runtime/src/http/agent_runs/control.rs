@@ -1,4 +1,5 @@
 //! Terminal-only processing: no model client, host construction or execution grant.
+use crate::agent_run_execution::Failure;
 use crate::*;
 
 #[derive(serde::Deserialize)]
@@ -24,40 +25,48 @@ pub(crate) fn advance(
     {
         return json_error_response(400, "agent_run_control_invalid");
     }
-    let key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
-        .map_err(|_| "control signing key unavailable")?;
-    let checked = crate::contract::AgentRunCancelRequest {
-        schema: crate::contract::AGENT_RUN_CANCEL_SCHEMA.into(),
-        agent_run_control: request.agent_run_control.clone(),
-    };
-    if checked.validate(key.as_bytes()).is_err() {
-        return json_error_response(400, "agent_run_control_invalid");
-    }
-    let control = &request.agent_run_control;
-    if state
-        .job_store
-        .require_control_lease(control, &request.job_id, &request.lease_owner)
-        .is_err()
-    {
-        return json_error_response(409, "agent_run_control_lease_rejected");
-    }
-    let result = advance_terminal(
-        state.job_store.as_ref(),
-        control,
+    match execute(
+        &state,
         &request.job_id,
         &request.lease_owner,
-    );
-    match result {
+        &request.agent_run_control,
+    ) {
         Ok(value) => Ok(http_response(
             200,
             "application/json",
             serde_json::to_vec(&value).map_err(|e| e.to_string())?,
         )),
-        Err(error) => {
-            failure_diagnostics::report(&control.agent_run_id, "control_advance", &error);
-            json_error_response(503, "agent_run_control_pending")
-        }
+        Err(error) => error.response(),
     }
+}
+
+pub(crate) fn execute(
+    state: &HttpServerState,
+    job: &str,
+    owner: &str,
+    control: &crate::contract::AgentRunControl,
+) -> Result<serde_json::Value, Failure> {
+    let key = env::var("AGENT_RUN_AUTHORIZATION_SIGNING_KEY")
+        .map_err(|_| "control signing key unavailable")?;
+    let checked = crate::contract::AgentRunCancelRequest {
+        schema: crate::contract::AGENT_RUN_CANCEL_SCHEMA.into(),
+        agent_run_control: control.clone(),
+    };
+    if checked.validate(key.as_bytes()).is_err() {
+        return Err(Failure::rejected(400, "agent_run_control_invalid"));
+    }
+    if state
+        .job_store
+        .require_control_lease(control, job, owner)
+        .is_err()
+    {
+        return Err(Failure::rejected(409, "agent_run_control_lease_rejected"));
+    }
+    let result = advance_terminal(state.job_store.as_ref(), control, job, owner);
+    result.map_err(|error| {
+        failure_diagnostics::report(&control.agent_run_id, "control_advance", &error);
+        Failure::rejected(503, "agent_run_control_pending")
+    })
 }
 
 fn advance_terminal(
