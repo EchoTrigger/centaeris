@@ -433,7 +433,7 @@ export function Sidebar({
 									{error}
 								</p>
 							) : null}
-							<DialogFooter className={currentDialog.kind === "delete" ? "border-0" : undefined}>
+							<DialogFooter className={currentDialog.kind === "delete" ? "border-0 bg-transparent" : undefined}>
 								<Button
 									variant="outline"
 									type="button"
