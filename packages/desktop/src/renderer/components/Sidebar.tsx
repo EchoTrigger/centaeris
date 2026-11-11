@@ -393,7 +393,7 @@ export function Sidebar({
 						showCloseButton={!pending}
 					>
 						<DialogHeader>
-							<DialogTitle>
+							<DialogTitle className={currentDialog.kind === "delete" ? "workbenchVisuallyHidden" : undefined}>
 								{currentDialog.kind === "rename"
 									? "Rename conversation"
 									: "Delete conversation?"}
@@ -433,7 +433,7 @@ export function Sidebar({
 									{error}
 								</p>
 							) : null}
-							<DialogFooter>
+							<DialogFooter className={currentDialog.kind === "delete" ? "border-0" : undefined}>
 								<Button
 									variant="outline"
 									type="button"

@@ -72,7 +72,7 @@ test("failed deletion retains the confirmation and offers retry", async () => {
 	);
 	await f.user.click(within(f.dialog).getByRole("button", { name: "Delete" }));
 	expect((await screen.findByRole("alert")).textContent).toContain(
-		"Delete unavailable",
+		"The conversation could not be updated. Try again.",
 	);
 	await f.user.click(within(f.dialog).getByRole("button", { name: "Delete" }));
 	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
