@@ -12,7 +12,7 @@ try:
 finally:
     sys.path.pop(0)
 
-SERVICES = ("postgres", "runtime", "workspace-general", "api", "worker", "web", "document-processor")
+SERVICES = ("postgres", "runtime", "workspace-general", "api", "web", "document-processor")
 
 
 def main():

@@ -19,7 +19,7 @@ class SharedArgumentTests(unittest.TestCase):
   import subprocess,sys
   for options in ([],['--shared-workload','--execution-mode','retained']):
    command=[sys.executable,str(Path(__file__).with_name('launch.py')),'--root','absent','--source','absent','--workspace-recovery']+options
-   for name in ('api','worker','runtime','general','processor','postgres','redis'):command+=['--'+name+'-image','not-loaded']
+   for name in ('api','runtime','general','processor','postgres','redis'):command+=['--'+name+'-image','not-loaded']
    result=subprocess.run(command,capture_output=True,text=True,timeout=10)
    self.assertEqual(result.returncode,2)
    self.assertIn('workspace recovery requires explicit shared perRun fixture',result.stderr)
@@ -44,14 +44,14 @@ class MemoryProfileArgumentTests(unittest.TestCase):
   for options,message in cases:
    with self.subTest(options=options):
     command=[sys.executable,str(Path(__file__).with_name('launch.py')),'--root','absent','--source','absent','--shared-workload','--iterations','1']+options
-    for name in ('api','worker','runtime','general','processor','postgres','redis'):command+=['--'+name+'-image','not-loaded']
+    for name in ('api','runtime','general','processor','postgres','redis'):command+=['--'+name+'-image','not-loaded']
     result=subprocess.run(command,capture_output=True,text=True,timeout=10)
     self.assertEqual(result.returncode,2);self.assertIn(message,result.stderr)
  def test_launcher_rejects_memory_options_outside_shared_mode(self):
   import subprocess,sys
   for options in (['--memory-mib','1','--minimum-hold-ms','1'],['--workspace-memory-budget-bytes',str(8*1024**3)]):
    command=[sys.executable,str(Path(__file__).with_name('launch.py')),'--root','absent','--source','absent']+options
-   for name in ('api','worker','runtime','general','processor','postgres','redis'):command+=['--'+name+'-image','not-loaded']
+   for name in ('api','runtime','general','processor','postgres','redis'):command+=['--'+name+'-image','not-loaded']
    result=subprocess.run(command,capture_output=True,text=True,timeout=10)
    self.assertEqual(result.returncode,2);self.assertIn('require shared mode',result.stderr)
 class FailureDiagnosticTests(unittest.TestCase):
@@ -129,7 +129,7 @@ class WorkloadBudgetTests(unittest.TestCase):
    command=[sys.executable,str(Path(__file__).with_name('launch.py')),'--root',str(absent),'--source',str(absent),
     '--shared-workload','--execute','--environment-count','64','--iterations','20','--work-units','100000',
     '--run-terminal-timeout-seconds','600','--between-run-ms','60000','--k6-binary',str(absent)]
-   for name in ('api','worker','runtime','general','processor','postgres','redis'):command+=['--'+name+'-image','not-loaded']
+   for name in ('api','runtime','general','processor','postgres','redis'):command+=['--'+name+'-image','not-loaded']
    result=subprocess.run(command,capture_output=True,text=True,timeout=10)
    self.assertEqual(result.returncode,2)
    self.assertIn('four-hour',result.stderr)
@@ -152,7 +152,7 @@ class StorageDriverArgumentTests(unittest.TestCase):
     for name,value in values.items():(bins/name).write_bytes(value)
     (root/'build-final.json').write_text(json.dumps({'binarySha256':{name:hashlib.sha256(value).hexdigest() for name,value in values.items()},'hostSupervisorSha256':hashlib.sha256(values['environment_host_supervisor']).hexdigest()}))
     argv=['launch','--root',str(root),'--source',str(source),'--execution-mode','retained','--execute']+extra
-    for name in ('api','worker','runtime','general','processor','postgres','redis'):argv+=['--'+name+'-image','sha256:'+'a'*64]
+    for name in ('api','runtime','general','processor','postgres','redis'):argv+=['--'+name+'-image','sha256:'+'a'*64]
     original_stat=Path.stat
     def stat(path,**kwargs):
      if str(path)=='/proc/self/ns/net':return types.SimpleNamespace(st_ino=2)
@@ -168,7 +168,7 @@ class StorageDriverArgumentTests(unittest.TestCase):
  def test_unsupported_storage_driver_fails_before_fixture_access(self):
   import subprocess,sys
   argv=[sys.executable,str(Path(__file__).with_name('launch.py')),'--root','absent','--source','absent','--storage-driver','vfs']
-  for name in ('api','worker','runtime','general','processor','postgres','redis'):argv+=['--'+name+'-image','not-loaded']
+  for name in ('api','runtime','general','processor','postgres','redis'):argv+=['--'+name+'-image','not-loaded']
   result=subprocess.run(argv,capture_output=True,text=True,timeout=10)
   self.assertEqual(result.returncode,2);self.assertIn('invalid choice',result.stderr)
 

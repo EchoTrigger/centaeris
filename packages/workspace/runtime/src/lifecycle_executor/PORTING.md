@@ -19,8 +19,16 @@ confirms Run task cleanup without requiring environment destruction.
 
 The existing HTTP adapter and PostgreSQL fencing/receipt regressions still cover
 the same operations. Native lease-window tests cover delayed acknowledgements
-and fence loss; native waiting tests preserve Runtime and authorization deadlines.
+and fence loss. Handoff coverage waits for an in-flight renewer and rejects both
+a confirmed fence loss and an uncertain acknowledgement before lease-ending
+mutations. Native waiting tests preserve Runtime and authorization deadlines.
 `test_native_lifecycle_runtime.py` exercises real Runtime/API/PostgreSQL execution,
 renewal, cancellation, new-owner resume and independent control progress with no
 Python execution dispatcher. Its physical host and model are owned test adapters;
 these tests do not establish production capacity or model latency.
+
+The Python package is retired. `app_core.platform_reconciler` retains only the
+two Django business reconciliation calls, bounded pagination and safe diagnostics.
+It receives no database or execution configuration. Existing controller pin and
+exhausted-retry waiting scenarios now use Runtime's native dispatcher or the
+canonical Runtime HTTP client.

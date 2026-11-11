@@ -17,7 +17,7 @@ def protection_record(operation="successful-attempt", metric="apiWrittenBytes"):
 
 def container_identities():
     return {name: {"id": character * 64} for name, character in
-            (("api", "a"), ("runtime", "b"), ("worker", "c"), ("gc", "d"))}
+            (("api", "a"), ("runtime", "b"), ("platform-reconciler", "c"), ("gc", "d"))}
 
 
 class ObservationCollectionTests(unittest.TestCase):
@@ -104,13 +104,13 @@ class ObservationCollectionTests(unittest.TestCase):
     def test_invalid_collection_does_not_leave_a_success_only_file(self):
         identities = container_identities()
         logs = {row["id"]: json.dumps(protection_record()) for row in identities.values()}
-        logs[identities["worker"]["id"]] += '\n{"phase":"workspaceProtection",'
+        logs[identities["platform-reconciler"]["id"]] += '\n{"phase":"workspaceProtection",'
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
             with self.assertRaises(ValueError):
                 self.run_collection(directory, identities, logs)
             self.assertFalse((directory / "centaeris-perf-evidence" / "synthetic-collection" /
-                              "worker-observations.jsonl").exists())
+                              "platform-reconciler-observations.jsonl").exists())
 
     def test_gc_with_no_observations_fails_even_when_other_services_succeed(self):
         identities = container_identities()

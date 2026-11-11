@@ -11,7 +11,7 @@ Core behavior.
 | --- | --- |
 | `packages/workspace/api` | Django identity, membership, workspace ACL, files, credentials, Plugin installation, AgentRun authorization, and durable product jobs |
 | `packages/workspace/runtime` | Core composition, PostgreSQL RuntimeStore adapter, Redis live projection, and Docker execution binding |
-| `packages/workspace/worker` | Platform reconciliation |
+
 | `packages/workspace/executor` | Fixed helper included in the AgentRun execution image |
 | `packages/workspace/documents` | Office, PDF, and image inspection plus bounded canonical representations |
 | `packages/workspace/web` | Browser product consuming REST and SSE |
@@ -28,8 +28,9 @@ Django Runtime clients share `app_core/runtime_http.py` for JSON request
 construction, token headers and response reading/closure. Each operation retains
 its timeout, HTTP error interpretation and response binding checks in
 `runtime_client.py` or `runtime_job_client.py`. The transport does not retry calls
-or translate uncertain writes into successful outcomes. Worker keeps its own
-dependency-free transport and durable scheduling policy.
+or translate uncertain writes into successful outcomes. The platform reconciliation
+client invokes only Django business interfaces; durable execution scheduling
+uses the native Runtime Job store.
 
 Transcript response structure comes from the generated Rust JSON schemas.
 Python checks that structure before applying identity bindings, ordered waterlines,
@@ -129,7 +130,10 @@ stops and joins its renewer and checks the last confirmed lease window again.
 Django resolves execution and cleanup authorization, projects committed terminal
 facts and verifies release receipts. Runtime completes a lifecycle Job only after
 its existing terminal, cleanup and release constraints pass. Terminal outbox
-publication and platform reconciliation remain independent control loops.
+publication and platform reconciliation remain independent control loops. The
+`platform-reconciler` service is a control-plane API client: it repairs accepted
+Run delivery, projects committed facts and invokes product cleanup reconciliation.
+It receives only the internal API URL and token and never claims execution leases.
 
 Runtime commits each terminal Job fact and its outbox record in one transaction.
 That transaction sends `runtime_job_terminal_v1`; PostgreSQL delivers the hint
@@ -234,14 +238,14 @@ Only Runtime and the dedicated material Worker mount the Docker socket.
 That socket makes both services part of the host's trusted infrastructure; container
 mount separation does not isolate other container secrets from a compromised
 Docker controller. The deployment contract gate protects against accidentally
-adding socket access to an API, lifecycle Worker or another service.
+adding socket access to an API, platform reconciliation client or another service.
 
 API owns credential storage, authorization decisions and credential release.
 This does not mean it is the only process holding secrets: the shared API
 environment also supplies the signing/encryption keys and database credentials
 to api-init, gc, mail-sender and the material Worker. Runtime shares the HMAC authorization key and
-receives authorized MCP bearer tokens for HTTP connections. Worker receives the
-internal API token, not the HMAC key through Compose. Narrowing those inherited
+receives authorized MCP bearer tokens for HTTP connections. The platform
+reconciliation client receives the internal API token and no HMAC key through Compose. Narrowing those inherited
 credentials is a separate design and test task, not a guarantee of the current
 layout.
 

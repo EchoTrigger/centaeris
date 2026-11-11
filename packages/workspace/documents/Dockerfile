@@ -29,7 +29,6 @@ COPY LICENSE LICENSE-APACHE LICENSING.md COPYRIGHT /usr/share/licenses/centaeris
 COPY pyproject.toml uv.lock .python-version ./
 COPY packages/workspace/api/pyproject.toml packages/workspace/api/pyproject.toml
 COPY packages/workspace/executor/pyproject.toml packages/workspace/executor/pyproject.toml
-COPY packages/workspace/worker/pyproject.toml packages/workspace/worker/pyproject.toml
 COPY packages/workspace/documents/pyproject.toml packages/workspace/documents/document_processor.py packages/workspace/documents/processor_build_extra.py packages/workspace/documents/
 RUN --mount=type=cache,target=/root/.cache/uv \
         PROCESSOR_EXTRA="$(python packages/workspace/documents/processor_build_extra.py "$PROCESSOR_DEVICE")" \

@@ -13,5 +13,4 @@ members = [
   "packages/workspace/api",
   "packages/workspace/documents",
   "packages/workspace/executor",
-  "packages/workspace/worker",
 ]

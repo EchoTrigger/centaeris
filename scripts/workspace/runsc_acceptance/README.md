@@ -67,7 +67,7 @@ unshare --net python3 "$SOURCE/scripts/workspace/runsc_acceptance/launch.py" \
   --shared-workload --workspace-recovery --execution-mode perRun \
   --environment-count 2 --iterations 3 --work-units 1 --between-run-ms 0 \
   --k6-binary "$LINUX_K6" \
-  --api-image "$API_IMAGE" --worker-image "$WORKER_IMAGE" \
+  --api-image "$API_IMAGE" \
   --runtime-image "$RUNTIME_IMAGE" --general-image "$GENERAL_IMAGE" \
   --processor-image "$PROCESSOR_IMAGE" \
   --postgres-image "$POSTGRES_IMAGE" --redis-image "$REDIS_IMAGE"

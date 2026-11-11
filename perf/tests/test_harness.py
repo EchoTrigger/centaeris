@@ -267,7 +267,7 @@ class IsolationTests(unittest.TestCase):
             lambda c: c['services']['runtime']['volumes'].pop(),
             lambda c: c['services']['runtime']['environment'].update(ENVIRONMENT_EXECUTION_HELPER='/opt/production/execution_agent'),
             lambda c: c['services']['runtime']['environment'].update(ENVIRONMENT_HOST_SOCKET='/run/production-host/control.sock'),
-            lambda c: c['services'].update(worker={'volumes': [c['services']['runtime']['volumes'][2]]}),
+            lambda c: c['services'].update({'platform-reconciler': {'volumes': [c['services']['runtime']['volumes'][2]]}}),
         ):
             config = json.loads(json.dumps(valid))
             mutate(config)

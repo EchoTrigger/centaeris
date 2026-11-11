@@ -21,8 +21,8 @@ class PreparationTests(unittest.TestCase):
   manifest=root/'build.json';manifest.write_text(json.dumps({'sourceRevision':'a'*40,'sourceTree':'c'*40,'binarySha256':{n:hashlib.sha256(n.encode()).hexdigest() for n in ('runtime_server','execution_agent')},'hostSupervisorSha256':hashlib.sha256(b'environment_host_supervisor').hexdigest()}))
   tls=root/'tls';tls.mkdir()
   for name in ('model.key','model.crt','combined-ca.pem'):(tls/name).write_text('synthetic fixture certificate')
-  return ['prepare','--source',str(source),'--bins',str(bins),'--output',str(root/'result'),'--revision','a'*40,'--build-manifest',str(manifest),'--tls-dir',str(tls),'--isolation-owner',str(root/'owner.json'),'--runsc-rotation','--docker-socket','/run/owned/docker.sock','--host-socket-directory','/run/owned/host']+[v for n in ('api','worker','runtime','general','processor','postgres','redis') for v in ('--'+n+'-image','cached-image')]
- def outputs(self):return [subprocess.CompletedProcess([],0,'','')]+[subprocess.CompletedProcess([],0,'sha256:'+'b'*64,'')]*7+[subprocess.CompletedProcess([],0,'a'*40,''),subprocess.CompletedProcess([],0,'',''),subprocess.CompletedProcess([],0,'c'*40,''),subprocess.CompletedProcess([],0,str(16*1024**3),'')]
+  return ['prepare','--source',str(source),'--bins',str(bins),'--output',str(root/'result'),'--revision','a'*40,'--build-manifest',str(manifest),'--tls-dir',str(tls),'--isolation-owner',str(root/'owner.json'),'--runsc-rotation','--docker-socket','/run/owned/docker.sock','--host-socket-directory','/run/owned/host']+[v for n in ('api','runtime','general','processor','postgres','redis') for v in ('--'+n+'-image','cached-image')]
+ def outputs(self):return [subprocess.CompletedProcess([],0,'','')]+[subprocess.CompletedProcess([],0,'sha256:'+'b'*64,'')]*6+[subprocess.CompletedProcess([],0,'a'*40,''),subprocess.CompletedProcess([],0,'',''),subprocess.CompletedProcess([],0,'c'*40,''),subprocess.CompletedProcess([],0,str(16*1024**3),'')]
  def test_native_fixture_preserves_resource_charge_and_splits_maintenance_authority(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);argv=self.fixture(root)+['--execution-mode','retained']
@@ -34,9 +34,10 @@ class PreparationTests(unittest.TestCase):
    self.assertEqual(config['services']['runtime']['user'],'0:0');self.assertIn('/run/owned/host:/run/centaeris-host:ro',config['services']['runtime']['volumes'])
    helper=str((root/'bins/execution_agent').resolve());self.assertIn(helper+':'+helper+':ro',config['services']['runtime']['volumes'])
    self.assertEqual((root/'result/general-image/execution_agent').read_bytes(),b'execution_agent')
-   for name in ('api','worker','catalog-init','processor-init'):
+   for name in ('api','platform-reconciler','catalog-init','processor-init'):
     effective={}
-    for file in config['services'][name]['env_file']:effective.update(line.split('=',1) for line in Path(file).read_text().splitlines())
+    for file in config['services'][name].get('env_file',[]):effective.update(line.split('=',1) for line in Path(file).read_text().splitlines())
+    effective.update(config['services'][name].get('environment',{}))
     self.assertNotIn('ENVIRONMENT_MAINTENANCE_TOKEN',effective)
    self.assertEqual(manifest['isolationOwner'],str((root/'owner.json').resolve()))
    processor=config['services']['processor-init']
@@ -49,7 +50,7 @@ class PreparationTests(unittest.TestCase):
    self.assertIn('/run/owned/docker.sock:/var/run/docker.sock',processor['volumes'])
    self.assertNotIn('/run/owned/docker.sock:/var/run/docker.sock',config['services']['api']['volumes'])
    self.assertNotIn('ports',processor)
-   self.assertNotIn(env['INTERNAL_API_TOKEN'],str(printed.call_args_list));self.assertEqual(run.call_count,11);owner.assert_called_once()
+   self.assertNotIn(env['INTERNAL_API_TOKEN'],str(printed.call_args_list));self.assertEqual(run.call_count,10);owner.assert_called_once()
  def test_shared_workload_uses_default_caps_and_overlapping_slots_with_owned_model(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);argv=self.fixture(root)+['--shared-workload','--environment-count','4']
