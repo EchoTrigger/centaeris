@@ -656,7 +656,7 @@ pub(crate) fn reconcile_waiters(body: &[u8], store: &PostgresRuntimeStore) -> Pr
 
 type WaiterPage = (usize, Vec<Value>, Option<RuntimeJobWaiterCursor>);
 
-fn process_waiter_page(
+pub(crate) fn process_waiter_page(
     store: &PostgresRuntimeStore,
     source: Option<RuntimeJobRecord>,
     after: Option<&RuntimeJobWaiterCursor>,

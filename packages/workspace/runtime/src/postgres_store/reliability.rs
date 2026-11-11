@@ -31,6 +31,32 @@ pub(crate) struct RuntimeJobWaitResult {
 }
 
 impl PostgresRuntimeStore {
+    pub(crate) fn wait_for_terminal_outbox(&self, max_wait: Duration) -> Result<bool, String> {
+        self.with_listener_client(|client| {
+            // Register before inspecting durable work: an already committed row
+            // must not wait for a notification that was sent before registration.
+            client
+                .batch_execute("LISTEN runtime_job_terminal_v1")
+                .map_err(|error| format!("listen for terminal jobs failed: {error}"))?;
+            let pending: bool = client
+                .query_one(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_job_outbox WHERE published_at_ms IS NULL)",
+                    &[],
+                )
+                .map_err(|error| format!("inspect terminal job outbox failed: {error}"))?
+                .get(0);
+            if pending {
+                return Ok(true);
+            }
+            let notification = client
+                .notifications()
+                .timeout_iter(max_wait)
+                .next()
+                .map_err(|error| format!("wait for terminal jobs failed: {error}"))?;
+            Ok(notification.is_some())
+        })
+    }
+
     pub(crate) fn get_runtime_job_execution_control(
         &self,
         id: &str,
@@ -584,7 +610,7 @@ pub(super) fn upsert_job_outbox<C: GenericClient>(
     job_id: &str,
     event_type: &str,
 ) -> Result<(), String> {
-    c.execute("INSERT INTO runtime_job_outbox(job_id,event_type,published_at_ms,generation) VALUES($1,$2,NULL,0) ON CONFLICT(job_id,event_type) DO UPDATE SET published_at_ms=NULL,generation=runtime_job_outbox.generation+1", &[&job_id, &event_type]).map(|_|()).map_err(|error|format!("upsert Postgres runtime job outbox failed: {error}"))
+    c.query_one("WITH recorded AS (INSERT INTO runtime_job_outbox(job_id,event_type,published_at_ms,generation) VALUES($1,$2,NULL,0) ON CONFLICT(job_id,event_type) DO UPDATE SET published_at_ms=NULL,generation=runtime_job_outbox.generation+1 RETURNING job_id) SELECT pg_notify('runtime_job_terminal_v1','') FROM recorded", &[&job_id, &event_type]).map(|_|()).map_err(|error|format!("upsert Postgres runtime job outbox failed: {error}"))
 }
 pub(super) fn insert_dead_letter<C: GenericClient>(
     c: &mut C,

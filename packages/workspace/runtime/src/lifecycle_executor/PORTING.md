@@ -8,6 +8,8 @@
 | `finish_environment_agent_run` | `finish`, shared fenced cleanup and platform release |
 | `execute_control_job` | `advance_control`, shared terminal-only control operation |
 | `fail_job` | Shared typed `job_protocol::fail_owned_job` |
+| `TerminalDispatcher` | `outbox::Dispatcher`, transactional PostgreSQL notification |
+| Waiter reconciliation | `outbox::reconcile`, same durable checkpoint cursor |
 
 The native dispatcher invokes execution and cleanup directly. Platform requests
 remain HTTP authorization/projection boundaries. Waiting still yields the lease;

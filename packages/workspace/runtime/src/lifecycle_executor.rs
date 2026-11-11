@@ -1,5 +1,6 @@
 //! The hosted Run's leased execution owner. Django remains the platform authority.
 mod lease;
+pub(crate) mod outbox;
 
 use crate::agent_run_execution::Failure;
 use crate::http::agent_runs::finalization::{FinalizeRequest, Platform, TerminalState};
@@ -133,6 +134,16 @@ pub(crate) fn start(state: HttpServerState) -> Result<Executor, String> {
             )));
     }
     let store = state.job_store.clone();
+    executor.dispatchers.push(
+        state
+            .runtime
+            .spawn(outbox::run(store.clone(), executor.shutdown.clone())),
+    );
+    executor.dispatchers.push(
+        state
+            .runtime
+            .spawn(outbox::reconcile(store.clone(), executor.shutdown.clone())),
+    );
     let shutdown = executor.shutdown.clone();
     executor.dispatchers.push(state.runtime.spawn(async move {
         while !shutdown.is_stopped() {
