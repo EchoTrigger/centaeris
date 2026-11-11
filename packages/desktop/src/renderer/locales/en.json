@@ -256,5 +256,13 @@
   "welcome.greeting.afternoon": "Good afternoon.",
   "welcome.greeting.evening": "Good evening.",
   "welcome.chooseWorkspace": "Choose workspace",
-  "welcome.openFolder": "Open folder…"
+  "welcome.openFolder": "Open folder…",
+  "agentSession.status.running": "Running",
+  "agentSession.status.queued": "Queued",
+  "agentSession.status.waiting": "Waiting",
+  "agentSession.status.done": "Completed",
+  "agentSession.status.error": "Failed",
+  "agentSession.status.cancelled": "Cancelled",
+  "agentSession.status.interrupted": "Interrupted",
+  "agentSession.status.unknown": "Status unavailable"
 }

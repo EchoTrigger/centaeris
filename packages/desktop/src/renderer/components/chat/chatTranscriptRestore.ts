@@ -557,11 +557,13 @@ const buildSubagentFromSessionEvent = (
     : undefined;
   const toolGroup = buildSubagentToolGroupFromEvent(event, payload);
   const isToolGroupUpdate = Boolean(toolGroup);
-  const incomingStatus = resolveEventStatus(event);
+  const incomingStatus = event.type === "SubagentCancelled" ? "cancelled" as const
+    : event.status === "queued" ? "queued" as const : resolveEventStatus(event);
   const status = isToolGroupUpdate
     ? existingSubagent?.status ||
     (incomingStatus === "error" ? "error" : "running")
     : incomingStatus;
+  const active = status === "running" || status === "queued" || status === "waiting";
   const subagentId = resolveEventSubagentId(event);
   const title =
     (!isToolGroupUpdate && getEventPayloadString(payload, "title")) ||
@@ -590,7 +592,7 @@ const buildSubagentFromSessionEvent = (
   const incomingStartedAtMs = toPositiveInt(payload.startedAtMs);
   const incomingCompletedAtMs =
     toPositiveInt(payload.completedAtMs) ??
-    (status === "running" ? undefined : toPositiveInt(event.at));
+    (active ? undefined : toPositiveInt(event.at));
   const childSessionId =
     getEventPayloadString(payload, "childSessionId") ||
     (isRecord(payload.taskNotification)
@@ -606,6 +608,7 @@ const buildSubagentFromSessionEvent = (
     childSessionId,
     displayName: title,
     avatarSeed: childSessionId || existingSubagent?.avatarSeed,
+    sessionId: event.sessionId,
     role:
       getEventPayloadString(payload, "role") ||
       existingSubagent?.role,
@@ -614,9 +617,10 @@ const buildSubagentFromSessionEvent = (
     description,
     status,
     resultPreview,
+    updatedAtMs: getEventAtMs(event),
     startedAtMs: existingSubagent?.startedAtMs ?? incomingStartedAtMs,
     completedAtMs:
-      status === "running"
+      active
         ? undefined
         : incomingCompletedAtMs ?? existingSubagent?.completedAtMs,
     workPacketSummary: workPacketSummary || existingSubagent?.workPacketSummary,

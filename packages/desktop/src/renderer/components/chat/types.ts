@@ -163,9 +163,12 @@ export type SubagentToolGroup = {
   sourceEventIds?: string[];
 };
 
+export type SubagentStatus = TaskStatus | "queued" | "cancelled" | "interrupted" | "waiting" | "unknown";
+
 export type SubagentResult = {
   id: string;
   subagentId: string;
+  sessionId?: string;
   turnId?: string;
   taskId?: string;
   parentTaskId?: string | null;
@@ -176,9 +179,10 @@ export type SubagentResult = {
   title: string;
   summary: string;
   description?: string;
-  status: TaskStatus;
+  status: SubagentStatus;
   resultPreview?: string;
   startedAtMs?: number;
+  updatedAtMs?: number;
   completedAtMs?: number;
   workPacketSummary?: Record<string, unknown>;
   resultEnvelope?: Record<string, unknown>;
@@ -334,6 +338,7 @@ export type SessionViewSnapshot = {
 
 export type AgentResultStreamProps = {
   turn: AssistantExecutionTurn;
+  subagents?: SubagentResult[];
   onOpenAgentSession?: (sessionId: string, title: string) => void;
   onOpenWorkspacePath?: (
     path: string,

@@ -3,6 +3,7 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { expect, test, vi } from "vitest";
 
 const harness = vi.hoisted(() => ({
+  userOnly: false,
   assistantRenders: 0,
   totalSize: 440,
   notifyMeasurement: () => {},
@@ -37,7 +38,7 @@ vi.mock("../src/renderer/components/chat/chatViewStore", () => {
     assistant: { id: "assistant", role: "assistant", turn: { id: "turn", agentRunId: "run:1", chunks: [], finalAnswer: "answer", isStreaming: false } },
   };
   return {
-    selectChatMessageIds: () => ["user", "assistant"],
+    selectChatMessageIds: () => harness.userOnly ? ["user"] : ["user", "assistant"],
     selectChatMessageById: (messageId: string) => () => {
       count(harness.messageReads, messageId);
       return messages[messageId as keyof typeof messages] ?? null;
@@ -171,4 +172,28 @@ test("content-size notifications carry each measured total", async () => {
   expect(onContentSizeChange).toHaveBeenLastCalledWith(880, 0, "user");
 
   await act(async () => renderer!.unmount());
+});
+
+test("retained Agent tags remain available when a cancelled turn has only a user message", async () => {
+  harness.userOnly = true;
+  const stable = () => {};
+  const onOpenAgentSession = vi.fn();
+  let renderer!: ReactTestRenderer;
+  try {
+    await act(async () => {
+      renderer = create(<VirtualMessageList containerRef={createRef<HTMLDivElement>()}
+        editingUserMessageId={null} editingPrompt="" copiedUserMessageId={null}
+        latestUserMessageId="user" editableUserMessageId="user"
+        onScroll={stable} onContentSizeChange={stable} onEditingPromptChange={stable}
+        onCancelEditingUserMessage={stable} onSubmitEditedUserMessage={stable}
+        onCopyUserMessage={stable} onStartEditingUserMessage={stable} onOpenAgentSession={onOpenAgentSession}
+        subagents={[{ id: "child", subagentId: "child", childSessionId: "child-session", title: "Retained work", summary: "", status: "cancelled" }]} />);
+    });
+    const tag = renderer.root.findByProps({ "aria-label": "Agent Retained work: Cancelled" });
+    await act(async () => tag.props.onClick());
+    expect(onOpenAgentSession).toHaveBeenCalledExactlyOnceWith("child-session", "Retained work");
+  } finally {
+    await act(async () => renderer?.unmount());
+    harness.userOnly = false;
+  }
 });

@@ -8,6 +8,7 @@ import { memo, useCallback, useLayoutEffect, useMemo, useRef, type CSSProperties
 import { Check, Copy, Pencil } from "lucide-react";
 import { defaultRangeExtractor, measureElement, useVirtualizer, type Range, type Virtualizer } from "@tanstack/react-virtual";
 import { AgentResultStream } from "./AgentResultStream";
+import { AgentSessionTags } from "./AgentSessionTags";
 import { useTranscriptText } from "./useTranscriptText";
 import {
   selectChatMessageById,
@@ -18,9 +19,10 @@ import {
 import { formatUserMessageTimestamp } from "./chatRuntimeModel";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
-import type { ChatMessage } from "./types";
+import type { ChatMessage, SubagentResult } from "./types";
 
 type VirtualMessageListProps = {
+  subagents?: SubagentResult[];
   containerRef: RefObject<HTMLDivElement | null>;
   contentRef?: RefObject<HTMLDivElement | null>;
   spacerRef?: RefObject<HTMLDivElement | null>;
@@ -52,6 +54,7 @@ const ESTIMATED_MESSAGE_HEIGHT_PX = 220;
 const MESSAGE_LIST_OVERSCAN = 6;
 const MESSAGE_LIST_BUFFER_SCREENS = 2;
 const MESSAGE_LIST_MAX_BUFFER_ROWS = 60;
+const EMPTY_SUBAGENTS: SubagentResult[] = [];
 
 const UserMessageRow = memo(function UserMessageRow({
   messageId,
@@ -159,6 +162,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   projectedMessage,
   isStandaloneRow = true,
   completedAtMs,
+  subagents = EMPTY_SUBAGENTS,
   onOpenAgentSession,
   onOpenWorkspacePath,
 }: {
@@ -166,6 +170,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   projectedMessage?: ChatMessage;
   isStandaloneRow?: boolean;
   completedAtMs?: number;
+  subagents?: SubagentResult[];
   onOpenAgentSession?: VirtualMessageListProps["onOpenAgentSession"];
   onOpenWorkspacePath?: VirtualMessageListProps["onOpenWorkspacePath"];
 }) {
@@ -187,6 +192,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
         {status}
         <AgentResultStream
           turn={message.turn}
+          subagents={subagents}
           onOpenAgentSession={onOpenAgentSession}
           onOpenWorkspacePath={onOpenWorkspacePath}
         />
@@ -196,8 +202,9 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   );
 });
 
-const HistoryProcessGroup = memo(function HistoryProcessGroup({ ids, onOpenAgentSession, onOpenWorkspacePath }: {
+const HistoryProcessGroup = memo(function HistoryProcessGroup({ ids, subagents, onOpenAgentSession, onOpenWorkspacePath }: {
   ids: string[];
+  subagents: SubagentResult[];
   onOpenAgentSession?: VirtualMessageListProps["onOpenAgentSession"];
   onOpenWorkspacePath?: VirtualMessageListProps["onOpenWorkspacePath"];
 }) {
@@ -212,6 +219,7 @@ const HistoryProcessGroup = memo(function HistoryProcessGroup({ ids, onOpenAgent
     ? messages.find(message => message?.role === "assistant" && message.turn.projectionRunId === final.turn.projectionRunId && message.turn.completedAtMs !== undefined)
     : undefined;
   const row = (message: ChatMessage, standalone = false) => <AssistantMessageRow key={message.id} messageId={message.id} projectedMessage={message}
+    subagents={message === final ? subagents : EMPTY_SUBAGENTS}
     isStandaloneRow={standalone} completedAtMs={completedAtMs?.role === "assistant" ? completedAtMs.turn.completedAtMs : undefined} onOpenAgentSession={onOpenAgentSession} onOpenWorkspacePath={onOpenWorkspacePath} />;
   return <>
     {process.length ? <div className="historyProcessRows">{process.map(message => row(message))}</div> : null}
@@ -221,9 +229,11 @@ const HistoryProcessGroup = memo(function HistoryProcessGroup({ ids, onOpenAgent
 
 const MessageRow = memo(function MessageRow({
   messageId,
+  subagents,
   props,
 }: {
   messageId: string;
+  subagents: SubagentResult[];
   props: Omit<
     VirtualMessageListProps,
     "containerRef" | "onScroll" | "onContentSizeChange"
@@ -235,6 +245,7 @@ const MessageRow = memo(function MessageRow({
   }
   if (role === "user") {
     return (
+      <>
       <UserMessageRow
         messageId={messageId}
         isEditing={props.editingUserMessageId === messageId}
@@ -250,11 +261,14 @@ const MessageRow = memo(function MessageRow({
         onCopyUserMessage={props.onCopyUserMessage}
         onStartEditingUserMessage={props.onStartEditingUserMessage}
       />
+      <AgentSessionTags subagents={subagents} onOpenAgentSession={props.onOpenAgentSession} />
+      </>
     );
   }
   return (
     <AssistantMessageRow
       messageId={messageId}
+      subagents={subagents}
       onOpenAgentSession={props.onOpenAgentSession}
       onOpenWorkspacePath={props.onOpenWorkspacePath}
     />
@@ -300,6 +314,7 @@ function TimelineRow({ id, item, retainedHeight, messageRole, measureElement, on
 }
 
 export function VirtualMessageList({
+  subagents = EMPTY_SUBAGENTS,
   containerRef,
   contentRef,
   spacerRef,
@@ -425,8 +440,8 @@ export function VirtualMessageList({
     const messageId = ids[0];
     const message = useChatViewStore.getState().messageById[messageId];
     return message?.role === "assistant" && !message.turn.agentRunId
-      ? <HistoryProcessGroup ids={ids} onOpenAgentSession={props.onOpenAgentSession} onOpenWorkspacePath={props.onOpenWorkspacePath} />
-      : <MessageRow messageId={messageId} props={props} />;
+      ? <HistoryProcessGroup ids={ids} subagents={ids === lastGroup ? subagents : EMPTY_SUBAGENTS} onOpenAgentSession={props.onOpenAgentSession} onOpenWorkspacePath={props.onOpenWorkspacePath} />
+      : <MessageRow messageId={messageId} subagents={ids === lastGroup ? subagents : EMPTY_SUBAGENTS} props={props} />;
   };
 
   const readScroll = (direction: number, viewport: HTMLDivElement) => {

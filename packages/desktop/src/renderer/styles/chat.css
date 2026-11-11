@@ -522,21 +522,26 @@
 }
 
 .agentSubagentTagMark {
-  width: 11px;
-  height: 11px;
+  width: 15px;
+  height: 15px;
   flex: 0 0 auto;
-  border-radius: 3px;
-  background: repeating-linear-gradient(90deg, var(--success) 0 2px, transparent 2px 4px),
-    repeating-linear-gradient(var(--success) 0 2px, transparent 2px 4px);
 }
 
-.agentSubagentTag.is-running .agentSubagentTagMark {
-  animation: centaerisThinkingPulse 1.35s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+.agentSubagentStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  color: var(--on-surface-variant);
+  font-size: var(--font-size-xs);
 }
-
-.agentSubagentTag.is-error .agentSubagentTagMark {
-  background: var(--error);
+.agentSubagentTag.is-done .agentSubagentStatus { color: var(--success); }
+.agentSubagentTag.is-error .agentSubagentStatus { color: var(--error); }
+.agentSubagentTag.is-cancelled .agentSubagentStatus { color: #d9ad71; }
+@media (prefers-reduced-motion: no-preference) {
+  .agentSubagentSpinner { animation: agent-subagent-spin 1s linear infinite; }
 }
+@keyframes agent-subagent-spin { to { transform: rotate(360deg); } }
 
 .agentSubagentTagRole {
   font-size: var(--font-size-xs);

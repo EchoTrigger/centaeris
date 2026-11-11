@@ -71,6 +71,7 @@ import {
   type AssistantTurnCommitOptions,
 } from "./useAssistantTurnUpdateQueue";
 import { VirtualMessageList } from "./VirtualMessageList";
+import { useSessionSubagents } from "./useSessionSubagents";
 import type {
   ChatAreaProps, ChatViewMode, ChatMessage,
   PendingQuestionState, CachedActiveReplay,
@@ -225,6 +226,7 @@ export function ChatArea({
     selectedSessionId === undefined
       ? currentSession?.id || ""
       : selectedSessionId?.trim() || "";
+  const sessionAgents = useSessionSubagents(currentSessionId);
   const {
     adoptSession,
     captureSessionRequest,
@@ -1005,6 +1007,7 @@ export function ChatArea({
             </div>
           ) : (
             <VirtualMessageList
+              subagents={sessionAgents.subagents}
               containerRef={messagesContainerRef}
               contentRef={messagesContentRef}
               spacerRef={messagesSpacerRef}
@@ -1030,8 +1033,8 @@ export function ChatArea({
             />
           )}
         </div>
-        {!sessionLoadError && syncError ? (
-          <Button variant="ghost" size="sm" type="button" className="chatSyncRetry" onClick={retrySessionSync}>
+        {!sessionLoadError && (syncError || sessionAgents.error) ? (
+          <Button variant="ghost" size="sm" type="button" className="chatSyncRetry" onClick={() => { retrySessionSync(); sessionAgents.retry(); }}>
             {t("chatArea.retryConversationSync")}
           </Button>
         ) : null}
