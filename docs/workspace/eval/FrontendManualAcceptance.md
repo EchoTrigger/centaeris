@@ -97,3 +97,16 @@ Record the tested commit, browser/version, viewport, account role, and result.
   layout, icons, interpolation, and focus indicators remain coherent.
 - Compare the main workbench at 100%, 150%, and 200% zoom for clipping, overlap,
   unintended horizontal scrolling, and unreadable contrast.
+### Search navigation and browser history
+
+- Search for a historical user input, Agent stage reply and final answer. Each
+  opens the exact body block, with local word highlighting; a stage hit opens
+  its process disclosure. Markdown links and code retain their normal behavior.
+- Load another search page, select a result, then use browser Back. Verify the
+  query, filter, result pages, selected item and result scroll position return.
+  Forward reopens the same target. Typing does not add extra Back steps.
+- Reload a target link and a search URL. Both retain their intent. Try an old
+  hit outside the newest transcript page, including referenced long text.
+- While viewing a historical hit, new output must not pull the reader to the
+  bottom or mark unseen latest content as read. Return to latest restores the
+  live view. A denied or missing target shows an explicit failure and retry.

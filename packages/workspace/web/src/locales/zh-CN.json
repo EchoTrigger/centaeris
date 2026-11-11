@@ -1119,5 +1119,7 @@
   "searchOverlay.match.user": "用户输入",
   "searchOverlay.match.stage": "Agent 阶段回复",
   "searchOverlay.match.final": "Agent 最终回复",
-  "searchOverlay.loadMoreConversations": "更多会话"
+  "searchOverlay.loadMoreConversations": "更多会话",
+  "searchOverlay.viewingMatch": "正在查看命中消息及此前的上下文",
+  "searchOverlay.targetUnavailable": "暂时无法加载这条命中消息。"
 }

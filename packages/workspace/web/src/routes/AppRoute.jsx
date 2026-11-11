@@ -18,6 +18,7 @@ import { compareTranscriptBlocks } from "../chat/transcriptContract";
 import { hasCommittedPendingMessage } from "../chat/transcriptTurns";
 import { TranscriptToolOperationRegistry } from "../chat/transcriptToolOperations";
 import { createWorkspaceTranscriptTransport } from "../chat/transcriptTransport";
+import { useTranscriptSearchTarget } from "../chat/useTranscriptSearchTarget";
 import { WorkspacePresentationController } from "../chat/workspacePresentationController";
 import { TranscriptBlockList } from "../chat/TranscriptBlockList";
 import { clearTranscriptContentRangeCache } from "../chat/transcriptContentRanges";
@@ -230,6 +231,14 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const transcriptTransportRef = useRef(null);
   if (!transcriptTransportRef.current) transcriptTransportRef.current = createWorkspaceTranscriptTransport();
   const transcriptTransport = transcriptTransportRef.current;
+  const searchEventId = requestedSessionId ? searchParams.get("at") || "" : "";
+  const searchHighlight = (searchParams.get("highlight") || "").slice(0, 256);
+  const focusedTranscript = useTranscriptSearchTarget(requestedSessionId, searchEventId, transcriptTransport);
+  function returnToLatest() {
+    const params = new URLSearchParams(location.search);
+    params.delete("at"); params.delete("highlight");
+    navigate({ pathname: location.pathname, search: params.size ? `?${params}` : "", hash: location.hash }, { replace: true });
+  }
   const fileInputRef = useRef(null);
   const composerRef = useRef(null);
   const composerStartRectRef = useRef(null);
@@ -622,7 +631,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     return () => { visibilityTarget.removeEventListener("visibilitychange", update); focusTarget.removeEventListener("focus", update); };
   }, []);
   useEffect(() => {
-    const canObserve = visible && pageVisible && !loadingHistory;
+    const canObserve = visible && pageVisible && !loadingHistory && !searchEventId;
     if (activeSession && canObserve && readingLatest && BigInt(readableThrough) >= BigInt(activeSession.latestAttentionSequence)) {
       const entered = enteredReadRef.current;
       if (entered.sessionId === sessionId && !entered.handled) {
@@ -631,7 +640,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       }
     }
     readController.observe({ session: activeSession ?? null, visible: canObserve, readingLatest, appliedSourceHighWater: readableThrough });
-  }, [activeSession, loadingHistory, pageVisible, readingLatest, readableThrough, readController, sessionId, visible]);
+  }, [activeSession, loadingHistory, pageVisible, readingLatest, readableThrough, readController, sessionId, visible, searchEventId]);
 
   const handlePresentationFailure = useCallback((errorValue, targetSessionId) => {
     if (errorValue?.name === "AbortError" || (targetSessionId || "") !== activeSessionIdRef.current) return;
@@ -939,6 +948,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     const text = submittedDraft.trim();
     if (!workspace) return;
     if (!text) { document.getElementById?.("messageDraft")?.focus(); return; }
+    if (searchEventId) returnToLatest();
     if (messageRequestRef.current || auxiliaryRequestRef.current) return;
     if (loadingHistory) { setPresentationAttempt(value => value + 1); return; }
     const requestScope = requestScopeRef.current;
@@ -1569,27 +1579,34 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
 
       <section className="workspaceChatColumn" inert={search.open || Boolean(catalogContent)}>
         <div className={`workspaceConversationPlane ${isHome ? "isEmpty" : ""}`}>
+          {searchEventId ? <div className="workspaceToolOutputStatus" role={focusedTranscript.error ? "alert" : "status"}>
+            <span>{t(focusedTranscript.error ? "searchOverlay.targetUnavailable" : "searchOverlay.viewingMatch")}</span>
+            {focusedTranscript.error ? <button type="button" onClick={focusedTranscript.retry}>{t("agentChat.retry")}</button> : null}
+            <button type="button" onClick={returnToLatest}>{t("virtualAgentRunList.jumpToLatest")}</button>
+          </div> : null}
           <TranscriptBlockList
+            key={searchEventId ? `search:${sessionId}:${searchEventId}` : `live:${sessionId}`}
             ref={transcriptRef}
-            store={transcriptStore}
+            store={searchEventId ? focusedTranscript.store : transcriptStore}
+            searchTarget={searchEventId ? { blockId: focusedTranscript.blockId, query: searchHighlight, onReturnLatest: returnToLatest } : undefined}
           onReadingLatestChange={(targetSessionId, following) => { if (targetSessionId === activeSessionIdRef.current) setReadingLatest(following); }}
             toolOperations={toolOperations}
             sessionId={sessionId || null}
-            loadingHistory={loadingHistory}
-            loadingOlderHistory={loadingOlderHistory}
-            onLoadOlderHistory={loadOlderHistory}
-            olderHistoryError={olderHistoryError}
+            loadingHistory={searchEventId ? focusedTranscript.loading : loadingHistory}
+            loadingOlderHistory={searchEventId ? focusedTranscript.loadingOlder : loadingOlderHistory}
+            onLoadOlderHistory={searchEventId ? focusedTranscript.loadOlder : loadOlderHistory}
+            olderHistoryError={searchEventId ? focusedTranscript.olderError : olderHistoryError}
             emptyState={isHome ? <HomePlane /> : <ConversationReadFeedback {...readFeedbackProps} placement="empty" />}
             onShowCitation={showCitation}
             onShowArtifact={showArtifact}
-            pendingUserMessage={visiblePendingMessage}
-            submissionRejected={rejectedSubmissionScopes.has(requestScopeKey)}
-            onReleaseLoadedHistory={releaseLoadedTranscriptHistory}
-            running={hasActiveAgentRun || Boolean(sending && visiblePendingMessage && !["failed", "cancelled", "completed"].includes(visiblePendingMessage.status))}
-            activity={controlApplies && controlSnapshot.stopRequested && controlPending ? "stopping" : workActivity?.sessionId === sessionId
+            pendingUserMessage={searchEventId ? null : visiblePendingMessage}
+            submissionRejected={!searchEventId && rejectedSubmissionScopes.has(requestScopeKey)}
+            onReleaseLoadedHistory={searchEventId ? undefined : releaseLoadedTranscriptHistory}
+            running={!searchEventId && (hasActiveAgentRun || Boolean(sending && visiblePendingMessage && !["failed", "cancelled", "completed"].includes(visiblePendingMessage.status)))}
+            activity={searchEventId ? undefined : controlApplies && controlSnapshot.stopRequested && controlPending ? "stopping" : workActivity?.sessionId === sessionId
               && workActivity.agentRunId === activeAgentRunId ? workActivity.activity : undefined}
-            startedAtMs={workTime?.sessionId === sessionId ? workTime.startedAtMs : undefined}
-            completedAtMs={workTime?.sessionId === sessionId ? workTime.completedAtMs : undefined}
+            startedAtMs={!searchEventId && workTime?.sessionId === sessionId ? workTime.startedAtMs : undefined}
+            completedAtMs={!searchEventId && workTime?.sessionId === sessionId ? workTime.completedAtMs : undefined}
           />
 
           <div className="workspaceComposerDock">

@@ -840,6 +840,22 @@ def session_transcript(request, session_id: str):
         return _transcript_json_response(
             {"error": "transcript_page_query_invalid"}, status=400
         )
+    anchor_event = None
+    if "anchorEventId" in fields:
+        if fields not in ({"anchorEventId"}, {"anchorEventId", "sourceHighWater", "projectionGeneration"}):
+            return _transcript_json_response({"error": "transcript_page_query_invalid"}, status=400)
+        event_id = request.GET["anchorEventId"]
+        if not event_id or len(event_id) > 160:
+            return _transcript_json_response({"error": "transcript_page_query_invalid"}, status=400)
+        anchor_event = SessionEvent.objects.filter(session=session, eventId=event_id).values(
+            "sequence", "payload__type", "payload__payload__stage").first()
+        if anchor_event is None or not (
+            anchor_event["payload__type"] in {"user_message", "assistant_message"}
+            or (anchor_event["payload__type"] == "phase_event"
+                and anchor_event["payload__payload__stage"] == "model_process_summary")
+        ):
+            return _transcript_json_response({"error": "transcript_target_not_found"}, status=404)
+        fields = fields - {"anchorEventId"}
     if not fields:
         source_high_water = _session_source_high_water(session.id)
         generation = None
@@ -874,6 +890,10 @@ def session_transcript(request, session_id: str):
         "sourceHighWater": str(source_high_water),
         "olderCursor": older_cursor,
     }
+    if anchor_event is not None:
+        if anchor_event["sequence"] > int(source_high_water):
+            return _transcript_json_response({"error": "transcript_page_cursor_invalid"}, status=400)
+        body["anchorSequence"] = str(anchor_event["sequence"])
     try:
         page = request_transcript_page(body)
     except TranscriptRuntimeError as error:
@@ -883,6 +903,11 @@ def session_transcript(request, session_id: str):
         return _transcript_json_response(
             {"error": "transcript_page_unavailable"}, status=503
         )
+    if anchor_event is not None:
+        block = next((block for block in page["blocks"] if block["orderKey"]["sourceSequence"] == str(anchor_event["sequence"])), None)
+        if block is None:
+            return _transcript_json_response({"error": "transcript_target_not_found"}, status=404)
+        return _transcript_json_response({"schema": "workspace.transcript.target.v1", "targetBlockId": block["blockId"], "page": page})
     return _transcript_json_response(page)
 
 

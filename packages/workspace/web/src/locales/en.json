@@ -1119,5 +1119,7 @@
   "searchOverlay.match.user": "You",
   "searchOverlay.match.stage": "Agent update",
   "searchOverlay.match.final": "Agent answer",
-  "searchOverlay.loadMoreConversations": "More conversations"
+  "searchOverlay.loadMoreConversations": "More conversations",
+  "searchOverlay.viewingMatch": "Viewing the matching message and earlier context",
+  "searchOverlay.targetUnavailable": "This matching message could not be loaded."
 }

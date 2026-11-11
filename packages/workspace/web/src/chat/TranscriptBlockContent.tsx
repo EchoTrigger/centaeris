@@ -1,4 +1,5 @@
 import { AnimatedDisclosure } from "./AnimatedDisclosure";
+import { TranscriptSearchQuery, HighlightedTranscriptText } from "./TranscriptSearchHighlight";
 import type { CitationSummary } from "./citationSnapshot";
 import {
   memo,
@@ -131,7 +132,7 @@ function ReferencedContent({ store, reference, mode = "markdown", allowVisuals =
   if (!identity.sessionId || !identity.projectionGeneration) return null;
   if (pushed !== null && !pushed.complete && coveredByLive) return null;
   if (pushed !== null) return <div ref={streamedBody}>
-    {pushed.content ? (mode === "markdown" ? <MarkdownContent text={pushed.content} allowVisuals={allowVisuals} isStreaming={!pushed.complete} /> : pushed.content) : null}
+    {pushed.content ? (mode === "markdown" ? <MarkdownContent text={pushed.content} allowVisuals={allowVisuals} isStreaming={!pushed.complete} /> : <HighlightedTranscriptText text={pushed.content} />) : null}
     {pushed.limited ? <span role="status">{t("transcriptBlockContent.contentPreviewLimited")}</span> : null}
   </div>;
   if (evicted) return <div style={retainedHeight.current ? { minHeight: retainedHeight.current } : undefined}>
@@ -421,10 +422,16 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
 export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   store,
   blockId,
+  searchQuery,
 }: Readonly<{
   store: TranscriptViewStore;
   blockId: string;
+  searchQuery?: string;
 }>) {
+  return <TranscriptSearchQuery value={searchQuery ?? ""}><TranscriptBlockBody store={store} blockId={blockId} searchHit={searchQuery !== undefined} /></TranscriptSearchQuery>;
+});
+
+function TranscriptBlockBody({ store, blockId, searchHit }: { store: TranscriptViewStore; blockId: string; searchHit: boolean }) {
   const { t } = useTranslation();
   const block = useTranscriptBlock(store, blockId);
   const viewEpoch = useTranscriptViewEpoch(store);
@@ -440,9 +447,9 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   }
   if (kind === "userText") {
     return (
-      <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id={block.blockId}>
+      <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id={block.blockId} data-search-hit={searchHit || undefined} tabIndex={searchHit ? -1 : undefined}>
         <div className="workspaceUserMessage">
-          {text ?? (reference ? <ReferencedContent store={store} reference={reference} mode="plain" /> : null)}
+          {text !== null ? <HighlightedTranscriptText text={text} /> : (reference ? <ReferencedContent store={store} reference={reference} mode="plain" /> : null)}
         </div>
         <TranscriptMessageMeta key={`${viewEpoch}:${block.blockRevision}`} user text={text} reference={reference}
           sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} observedAtMs={block.presentation?.observedAtMs} />
@@ -451,7 +458,7 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   }
   if (kind === "assistantText") {
     return (
-      <div className="workspaceTranscriptBlock workspaceTranscriptAssistant" data-block-id={block.blockId}>
+      <div className="workspaceTranscriptBlock workspaceTranscriptAssistant" data-block-id={block.blockId} data-search-hit={searchHit || undefined} tabIndex={searchHit ? -1 : undefined}>
         <div className="workspaceTerminalAnswer">
           {text === null
             ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" allowVisuals /> : null)
@@ -477,7 +484,7 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
     </div>;
   }
   return (
-    <div className="workspaceTranscriptBlock workspaceStageSummary" data-block-id={block.blockId}>
+    <div className="workspaceTranscriptBlock workspaceStageSummary" data-block-id={block.blockId} data-search-hit={searchHit || undefined} tabIndex={searchHit ? -1 : undefined}>
       {text === null
         ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" allowVisuals /> : null)
         : <MarkdownContent text={text} allowVisuals />}
@@ -485,7 +492,7 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
         sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} observedAtMs={block.presentation?.observedAtMs} /> : null}
     </div>
   );
-});
+}
 
 export const TranscriptLiveTail = memo(function TranscriptLiveTail({ live, mode = "all" }: Readonly<{
   live: TranscriptLiveOverlay;

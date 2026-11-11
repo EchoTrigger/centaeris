@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "../i18n";
 import { MarkdownContent } from "./MarkdownContent";
+import { HighlightedTranscriptText } from "./TranscriptSearchHighlight";
 import type { TranscriptContentRef } from "./transcriptContract";
 import { TranscriptContentReader } from "./transcriptContentReader";
 import { loadTranscriptContentRange } from "./transcriptContentRanges";
@@ -44,7 +45,7 @@ function Content({ reader, mode, allowVisuals }: Readonly<{ reader: TranscriptCo
   const { t } = useTranslation();
   const state = useSyncExternalStore(reader.subscribe, reader.getSnapshot, reader.getSnapshot);
   return <>
-    {state.content ? (mode === "markdown" ? <MarkdownContent text={state.content} allowVisuals={allowVisuals} isStreaming={state.hasMore && !state.error} /> : state.content) : null}
+    {state.content ? (mode === "markdown" ? <MarkdownContent text={state.content} allowVisuals={allowVisuals} isStreaming={state.hasMore && !state.error} /> : <HighlightedTranscriptText text={state.content} />) : null}
     {state.unavailable ? <span role="alert">{t("transcriptBlockContent.unableToLoadContent")}</span> : null}
   </>;
 }

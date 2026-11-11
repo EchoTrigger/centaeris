@@ -1,11 +1,50 @@
 use centaeris_core::session::transcript::{
-    TranscriptBlockBodyV1, TranscriptBlockIndexV1, TranscriptBlockStatusV1, TranscriptBlockV1,
+    transcript_page_before_order, transcript_page_cursor_after_order, TranscriptBlockBodyV1,
+    TranscriptBlockIndexV1, TranscriptBlockStatusV1, TranscriptBlockV1,
     TranscriptCheckpointDecisionV1, TranscriptCheckpointWorkV1, TranscriptContentRefV1,
-    TranscriptOrderKeyV1, TranscriptPagePolicyV1, TranscriptPageV1, TranscriptPatchV1,
-    TranscriptTextContentV1, TRANSCRIPT_CHECKPOINT_REQUIRED_EVENTS,
+    TranscriptOrderKeyV1, TranscriptPagePolicyV1, TranscriptPageReadRequestV1, TranscriptPageV1,
+    TranscriptPatchV1, TranscriptTextContentV1, TRANSCRIPT_CHECKPOINT_REQUIRED_EVENTS,
     TRANSCRIPT_CHECKPOINT_REQUIRED_EVENT_BYTES, TRANSCRIPT_PAGE_SCHEMA_V1,
     TRANSCRIPT_PATCH_SCHEMA_V1, TRANSCRIPT_PROJECTION_VERSION_V1,
 };
+
+#[test]
+fn anchored_page_cursor_includes_the_target_and_binds_the_frozen_view() {
+    let mut request = TranscriptPageReadRequestV1 {
+        session_id: "session-1".into(),
+        projection_version: TRANSCRIPT_PROJECTION_VERSION_V1.into(),
+        projection_generation: "generation-1".into(),
+        source_high_water: "1000".into(),
+        older_cursor: None,
+        policy: TranscriptPagePolicyV1::default(),
+    };
+    for (ordinal, expected) in [(0, (50, 1)), (u32::MAX, (51, 0))] {
+        request.older_cursor = Some(
+            transcript_page_cursor_after_order(
+                &request,
+                &TranscriptOrderKeyV1 {
+                    source_sequence: "50".into(),
+                    ordinal,
+                },
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            transcript_page_before_order(&request).unwrap(),
+            Some(expected)
+        );
+    }
+    request.source_high_water = "999".into();
+    assert!(transcript_page_before_order(&request).is_err());
+    assert!(transcript_page_cursor_after_order(
+        &request,
+        &TranscriptOrderKeyV1 {
+            source_sequence: "1000".into(),
+            ordinal: 0
+        }
+    )
+    .is_err());
+}
 
 #[test]
 fn transcript_json_uses_camel_case_and_explicit_null_content_fields() {

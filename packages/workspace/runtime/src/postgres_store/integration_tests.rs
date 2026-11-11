@@ -753,6 +753,49 @@ fn postgres_transcript_producer_serves_versioned_page_patch_and_deletes_derived_
     // AgentRun start and completion are first-class transcript boundary blocks
     // in the Core projection, alongside the user and assistant messages.
     assert_eq!(page.page.blocks.len(), 4);
+    // Seek to an old user message at the current waterline without returning
+    // the later answer or scanning source events for presentation.
+    let anchor_request = serde_json::json!({
+        "schema":"runtime.transcript.page.read.v1", "sessionId":"session_transcript",
+        "projectionVersion":"transcript.projection.v1", "projectionGeneration":generation,
+        "sourceHighWater":"4", "olderCursor":null, "anchorSequence":"2"
+    });
+    let (status, body) = crate::runtime_http_tests::stored_request(
+        store.clone(),
+        "POST",
+        "/internal/transcript/page",
+        &serde_json::to_vec(&anchor_request).unwrap(),
+    );
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let anchored: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(anchored["sourceHighWater"], "4");
+    assert_eq!(
+        anchored["blocks"].as_array().unwrap().last().unwrap()["body"]["kind"],
+        "userText"
+    );
+    assert!(!anchored["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|block| block["body"]["kind"] == "assistantText"));
+    for value in [
+        serde_json::json!("02"),
+        serde_json::json!("5"),
+        serde_json::json!("0"),
+    ] {
+        let mut invalid = anchor_request.clone();
+        invalid["anchorSequence"] = value;
+        assert_eq!(
+            crate::runtime_http_tests::stored_request(
+                store.clone(),
+                "POST",
+                "/internal/transcript/page",
+                &serde_json::to_vec(&invalid).unwrap()
+            )
+            .0,
+            400
+        );
+    }
     let content_request = serde_json::json!({
         "schema":"transcript.content.range.read.v1", "sessionId":"session_transcript",
         "projectionVersion":"transcript.projection.v1", "projectionGeneration":generation,

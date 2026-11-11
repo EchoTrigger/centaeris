@@ -50,16 +50,21 @@ function page(items: TranscriptBlock[], cursor: string | null, generation: numbe
     resumeCursors: [{ streamId: "workspace-transcript.v1", cursor: String(48 + generation) }] };
 }
 const initial = blocks(1);
+let chooseSearchTarget: (blockId: string) => void;
 const epoch = store.openTail(page(initial.slice(32), "older-1", 1));
 store.prependPage(page(initial.slice(16, 32), "older-2", 1), epoch);
 store.prependPage(page(initial.slice(0, 16), null, 1), epoch);
 function Session() {
   const [text, setText] = useState(draft);
+  const [target, setTarget] = useState<string | null>(null);
+  chooseSearchTarget = blockId => flushSync(() => setTarget(blockId));
   const input = useRef<HTMLInputElement>(null);
   return <main className="workspaceWorkbench withoutSidebar">
     <header className="workspaceTopbar">Synthetic recovery Session</header>
     <section className="workspaceChatColumn"><div className="workspaceConversationPlane">
-      <TranscriptBlockList store={store} sessionId="synthetic-recovery" loadingHistory={false} loadingOlderHistory={false} onLoadOlderHistory={async () => { throw new Error("Recovery fixture already loaded its bounded older range"); }} />
+      <TranscriptBlockList key={target ?? "live"} store={store} sessionId="synthetic-recovery" loadingHistory={false} loadingOlderHistory={false}
+        searchTarget={target ? { blockId: target, query: "中文历史正文", onReturnLatest: () => setTarget(null) } : undefined}
+        onLoadOlderHistory={async () => { throw new Error("Recovery fixture already loaded its bounded older range"); }} />
       <WorkspaceComposer fileInputRef={input} isHome={false} onSubmit={event => event.preventDefault()}
         pendingAttachments={[]} pendingUploadFiles={[]} draft={text} onDraftChange={setText} enterStartsNewLine={false}
         workspaceName="Synthetic workspace" workspaceAvailable sending={false} loadingHistory={false} hasActiveAgentRun={false}
@@ -89,6 +94,7 @@ function geometry() {
 const settle = () => waitForLayout([".workspaceMessages", ".workspaceTranscriptBlocks", "[data-block-id=answer-11]", "[data-block-id=user-12]", ".workspaceComposer"]);
 const fixture = {
   ready: false, requests, failures, draft, geometry, settle,
+  searchTarget: (blockId: string) => chooseSearchTarget(blockId),
   async alignReading() {
     // Following has already been paused by a real Chromium wheel event.
     for (let attempt = 0; attempt < 3; attempt++) {

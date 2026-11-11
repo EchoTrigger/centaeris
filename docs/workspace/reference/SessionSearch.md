@@ -43,9 +43,29 @@ user and workspace; changing any of them requires a fresh first page.
 The existing sidebar/Ctrl-or-Cmd+K entry shows body-match labels and highlights
 literal hits. Typing aborts older requests and waits briefly before searching;
 stale results cannot replace the current query. More results retain the query.
-Failures preserve already-loaded matches and allow retry. Selecting a result
-opens its Session route; message locator fields identify the match but the route
-retains its normal conversation-loading behavior.
+Failures preserve already-loaded matches and allow retry. Opening search pushes
+one browser history entry. Its `#search?q=...&filter=...` fragment retains the
+query without revalidating route loaders for each keystroke; typing and filtering
+replace that entry. Selecting a result pushes its Session route with `at` (event
+identity) and `highlight` (literal query). Browser Back restores the query,
+loaded pages, selection and result scroll position from a memory cache scoped
+to the authenticated user and Workspace. A reload rebuilds results from the URL.
+
+`GET /api/sessions/{sessionId}/transcript?anchorEventId=...` authorizes the Session
+and visible source event before requesting its sequence from Runtime. The
+response is `workspace.transcript.target.v1` with `targetBlockId` and a normal
+bounded transcript `page`. Projection-progress retries retain the frozen
+`sourceHighWater` and `projectionGeneration`. Runtime seeks the projection's
+position index, using Core's bound cursor contract, and returns a page ending at
+the target with preceding context. Earlier pages use the existing cursor.
+
+This historical window stays separate from the live tail. The UI expands a
+matched process, scrolls to its block or first highlighted word and pauses
+automatic following. Rendered text is highlighted without modifying Markdown;
+referenced long text uses the ordinary content reader. The first loaded hit is
+positioned once; later text arrival must not override user scrolling. Return to
+latest replaces the positioning URL and restores the live view. Reading a search
+window does not acknowledge the latest conversation as read.
 
 ## Verification
 

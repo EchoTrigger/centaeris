@@ -288,6 +288,30 @@ test("tail projection retries freeze the first reported waterline and generation
   assert.deepEqual(waits, [50]);
 });
 
+test("target reads retain event identity across projection progress and reject a missing block", async () => {
+  const paths = [];
+  const transport = createWorkspaceTranscriptTransport({
+    request: async path => {
+      paths.push(path);
+      if (paths.length === 1) throw new ApiError("transcript_projection_not_ready", 409, {
+        error: "transcript_projection_not_ready", projectionGeneration, sourceHighWater: "10", projectedHighWater: "2",
+      });
+      return new Response(JSON.stringify({ schema: "workspace.transcript.target.v1", targetBlockId: "hit",
+        page: page({ blocks: [block("hit", 1, 3)] }) }));
+    }, wait: async () => {},
+  });
+  const result = await transport.loadTarget(sessionId, "event-hit", new AbortController().signal);
+  assert.equal(result.targetBlockId, "hit");
+  assert.deepEqual(paths, [
+    `/api/sessions/${sessionId}/transcript?anchorEventId=event-hit`,
+    `/api/sessions/${sessionId}/transcript?anchorEventId=event-hit&sourceHighWater=10&projectionGeneration=generation-1`,
+  ]);
+  const invalid = createWorkspaceTranscriptTransport({ request: async () => new Response(JSON.stringify({
+    schema: "workspace.transcript.target.v1", targetBlockId: "missing", page: page({ blocks: [] }),
+  })) });
+  await assert.rejects(invalid.loadTarget(sessionId, "event-hit", new AbortController().signal), /missing from page/);
+});
+
 test("patch continuation keeps one through-waterline until fully applied", async () => {
   const paths = [];
   const applied = [];

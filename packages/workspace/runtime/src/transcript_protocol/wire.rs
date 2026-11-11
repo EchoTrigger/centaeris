@@ -11,6 +11,7 @@ pub(super) struct PageRequest {
     pub(super) projection_generation: Option<String>,
     pub(super) source_high_water: String,
     pub(super) older_cursor: Option<String>,
+    pub(super) anchor_sequence: Option<String>,
 }
 
 #[cfg_attr(feature = "contract-schema", derive(schemars::JsonSchema))]

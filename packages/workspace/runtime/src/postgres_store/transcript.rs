@@ -2,12 +2,13 @@ use centaeris_core::session::transcript::{
     assemble_transcript_page_from_newest, parse_transcript_projection_source_envelope,
     parse_transcript_rebuild_ledger_fact, rebuild_transcript_generation_v1,
     transcript_event_content_prefix, transcript_event_content_range, transcript_page_before_order,
-    transcript_patch_read_result_serialized_bytes, validate_transcript_resume_cursor_read,
-    TranscriptBlockV1, TranscriptCheckpointRefsV1, TranscriptContentRangeReadRequestV1,
-    TranscriptContentRangeV1, TranscriptGenerationRebuildRequestV1,
-    TranscriptGenerationRebuildSourcePortV1, TranscriptPageReadRequestV1,
-    TranscriptPageReadResultV1, TranscriptPatchReadRequestV1, TranscriptPatchReadResultV1,
-    TranscriptPatchV1, TranscriptPersistentPageQueryWorkV1, TranscriptPersistentPatchQueryWorkV1,
+    transcript_page_cursor_after_order, transcript_patch_read_result_serialized_bytes,
+    validate_transcript_resume_cursor_read, TranscriptBlockV1, TranscriptCheckpointRefsV1,
+    TranscriptContentRangeReadRequestV1, TranscriptContentRangeV1,
+    TranscriptGenerationRebuildRequestV1, TranscriptGenerationRebuildSourcePortV1,
+    TranscriptOrderKeyV1, TranscriptPageReadRequestV1, TranscriptPageReadResultV1,
+    TranscriptPatchReadRequestV1, TranscriptPatchReadResultV1, TranscriptPatchV1,
+    TranscriptPersistentPageQueryWorkV1, TranscriptPersistentPatchQueryWorkV1,
     TranscriptProjectionCheckpointV1, TranscriptProjectionCommitDispositionV1,
     TranscriptProjectionCommitV1, TranscriptProjectionCurrentGenerationV1,
     TranscriptProjectionFrontierV1, TranscriptProjectionGenerationRotationDispositionV1,
@@ -94,6 +95,30 @@ fn decode_transcript_content_source(row: &Row) -> Result<serde_json::Value, Stri
 }
 
 impl PostgresRuntimeStore {
+    pub(crate) fn transcript_anchor_cursor(
+        &self,
+        request: &TranscriptPageReadRequestV1,
+        sequence: &str,
+    ) -> Result<Option<String>, String> {
+        request.validate()?;
+        let sequence = decimal_to_i64(sequence, "anchorSequence")?;
+        let high_water = decimal_to_i64(&request.source_high_water, "sourceHighWater")?;
+        self.with_client(|client| {
+            require_projected_head(client, &request.session_id, &request.projection_generation, high_water)?;
+            let row = client.query_opt(
+                "SELECT order_ordinal FROM runtime.transcript_block_identities WHERE session_id=$1 AND projection_version=$2 AND projection_generation=$3 AND order_source_sequence=$4 ORDER BY order_ordinal LIMIT 1",
+                &[&request.session_id, &request.projection_version, &request.projection_generation, &sequence],
+            ).map_err(|error| format!("read transcript anchor failed: {error}"))?;
+            row.map(|row| {
+                let ordinal: i64 = row.get(0);
+                transcript_page_cursor_after_order(request, &TranscriptOrderKeyV1 {
+                    source_sequence: sequence.to_string(),
+                    ordinal: u32::try_from(ordinal).map_err(|_| "transcript anchor ordinal is invalid")?,
+                })
+            }).transpose()
+        })
+    }
+
     pub fn read_transcript_event_content(
         &self,
         request: &TranscriptContentRangeReadRequestV1,

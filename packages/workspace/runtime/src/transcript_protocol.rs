@@ -121,6 +121,15 @@ async fn page(read: &TranscriptRead) -> Result<(u16, Vec<u8>), String> {
         }
         Ok(_) | Err(_) => return json_error(400, ErrorCode::PageRequestInvalid),
     };
+    let anchor_sequence = wire.anchor_sequence;
+    if anchor_sequence.as_deref().is_some_and(|value| {
+        wire.older_cursor.is_some()
+            || value
+                .parse::<u64>()
+                .map_or(true, |number| number == 0 || number.to_string() != value)
+    }) {
+        return json_error(400, ErrorCode::PageRequestInvalid);
+    }
     let opens_current_view = wire.projection_generation.is_none();
     let session_id = wire.session_id.clone();
     let current = read
@@ -133,7 +142,7 @@ async fn page(read: &TranscriptRead) -> Result<(u16, Vec<u8>), String> {
     {
         return json_error(409, ErrorCode::ViewInvalidated);
     }
-    let request = TranscriptPageReadRequestV1 {
+    let mut request = TranscriptPageReadRequestV1 {
         session_id: wire.session_id,
         projection_version: wire.projection_version,
         projection_generation: current.projection_generation,
@@ -141,7 +150,11 @@ async fn page(read: &TranscriptRead) -> Result<(u16, Vec<u8>), String> {
         older_cursor: wire.older_cursor,
         policy: TranscriptPagePolicyV1::default(),
     };
-    if request.validate().is_err() {
+    if request.validate().is_err()
+        || anchor_sequence.as_ref().is_some_and(|value| {
+            value.parse::<u64>().unwrap() > request.source_high_water.parse::<u64>().unwrap()
+        })
+    {
         return json_error(400, ErrorCode::PageRequestInvalid);
     }
     if request.source_high_water == "0" {
@@ -171,6 +184,20 @@ async fn page(read: &TranscriptRead) -> Result<(u16, Vec<u8>), String> {
     .await?
     {
         return Ok(response);
+    }
+    if let Some(sequence) = anchor_sequence {
+        let anchor_request = request.clone();
+        let cursor = match read
+            .blocking(move |store| store.transcript_anchor_cursor(&anchor_request, &sequence))
+            .await
+        {
+            Ok(cursor) => cursor,
+            Err(error) if is_invalidated_store_read(&error) => {
+                return json_error(409, ErrorCode::ViewInvalidated)
+            }
+            Err(error) => return Err(error),
+        };
+        request.older_cursor = Some(cursor.ok_or("transcript anchor block is unavailable")?);
     }
     let result = match read
         .blocking(move |store| store.load_current_transcript_page(request))

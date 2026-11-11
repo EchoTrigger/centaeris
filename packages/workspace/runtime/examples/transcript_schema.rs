@@ -24,6 +24,7 @@ fn main() {
         projection_generation: None,
         source_high_water: "0".into(),
         older_cursor: None,
+        anchor_sequence: None,
     };
     let patch_request = PatchRequest {
         schema: "runtime.transcript.patch.read.v1".into(),

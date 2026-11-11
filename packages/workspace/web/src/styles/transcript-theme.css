@@ -46,3 +46,21 @@
   text-decoration: underline;
   cursor: pointer;
 }
+.workspaceTranscriptBlock[data-search-hit] {
+  scroll-margin-block: 24px;
+  border-radius: var(--radius-md);
+  outline: 1px solid color-mix(in srgb, var(--primary-color) 35%, transparent);
+  outline-offset: 6px;
+  animation: transcriptSearchFlash 2s ease-out;
+}
+.workspaceTranscriptBlock[data-search-hit] mark {
+  background: color-mix(in srgb, var(--primary-color) 24%, transparent);
+  color: inherit;
+}
+@keyframes transcriptSearchFlash {
+  from { background: color-mix(in srgb, var(--primary-color) 16%, transparent); }
+  to { background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workspaceTranscriptBlock[data-search-hit] { animation: none; }
+}

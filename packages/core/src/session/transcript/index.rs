@@ -76,6 +76,39 @@ pub fn transcript_page_before_order(
         .transpose()
 }
 
+/// Positions a bounded page immediately after an existing block, so the block
+/// itself is included. The cursor retains the frozen view identity.
+pub fn transcript_page_cursor_after_order(
+    request: &TranscriptPageReadRequestV1,
+    order: &TranscriptOrderKeyV1,
+) -> Result<String, String> {
+    request.validate()?;
+    let sequence = order.source_sequence_value()?;
+    let high_water = parse_decimal_u64(&request.source_high_water, "sourceHighWater")?;
+    if sequence == 0 || sequence > high_water {
+        return Err("transcript anchor is outside the requested view".to_string());
+    }
+    let before = match order.ordinal.checked_add(1) {
+        Some(ordinal) => TranscriptOrderKeyV1 {
+            source_sequence: sequence.to_string(),
+            ordinal,
+        },
+        None => TranscriptOrderKeyV1 {
+            source_sequence: sequence
+                .checked_add(1)
+                .ok_or("transcript anchor order overflow")?
+                .to_string(),
+            ordinal: 0,
+        },
+    };
+    encode_bound_cursor(
+        &request.session_id,
+        &request.projection_generation,
+        high_water,
+        before,
+    )
+}
+
 pub fn assemble_transcript_page_from_newest<I>(
     request: &TranscriptPageReadRequestV1,
     candidates: I,

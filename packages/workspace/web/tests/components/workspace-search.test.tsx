@@ -2,8 +2,9 @@
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { createMemoryRouter, RouterProvider } from "react-router";
-import { WorkspaceSearch } from "../../src/shell/WorkspaceSearch";
+import { createMemoryRouter, RouterProvider, Outlet } from "react-router";
+import { WorkspaceSearch, useWorkspaceSearch } from "../../src/shell/WorkspaceSearch";
+import { WorkspaceSearchHistory } from "../../src/shell/workspaceSearchState";
 
 const request = vi.hoisted(() => vi.fn());
 vi.mock("../../src/api", () => ({ apiJson: (...args: unknown[]) => request(...args) }));
@@ -91,4 +92,42 @@ test("more results use the same query cursor and errors retain the query for ret
   expect(screen.getAllByRole("option")).toHaveLength(2);
   expect(screen.queryByRole("alert")).toBeNull();
   expect(screen.queryByRole("button", { name: "searchOverlay.loadMoreConversations" })).toBeNull();
+});
+
+test("browser history restores the query, loaded pages, selection and scroll position", async () => {
+  const user = userEvent.setup();
+  request.mockImplementation(async (path: string) => path === "/api/library" ? { objects: [] }
+    : path.includes("cursor=") ? { matches: [hit("second")], nextCursor: null }
+      : { matches: [hit("first")], nextCursor: "next" });
+  function SearchPage() {
+    const search = useWorkspaceSearch("page");
+    return <><button type="button" onClick={search.toggle}>Open search</button>
+      {search.open ? <WorkspaceSearch workspaceId="research" onClose={search.close} inputRef={search.inputRef} /> : null}</>;
+  }
+  const router = createMemoryRouter([{ element: <WorkspaceSearchHistory><Outlet /></WorkspaceSearchHistory>, children: [
+    { path: "/", element: <SearchPage /> },
+    { path: "/w/research/sessions/:id", element: <div>Selected conversation</div> },
+  ] }]);
+  render(<RouterProvider router={router} />);
+  await user.click(screen.getByRole("button", { name: "Open search" }));
+  await user.type(screen.getByRole("combobox"), "权限");
+  await screen.findByRole("option", { name: /Conversation first/ });
+  await user.click(screen.getByRole("button", { name: "searchOverlay.loadMoreConversations" }));
+  const second = await screen.findByRole("option", { name: /Conversation second/ });
+  const list = screen.getByRole("listbox");
+  list.scrollTop = 137;
+  await user.click(second);
+  expect(new URLSearchParams(router.state.location.search).get("at")).toBe("event-second");
+  const requestCount = request.mock.calls.length;
+  await act(async () => { await router.navigate(-1); });
+  expect((await screen.findByRole("combobox")) as HTMLInputElement).toHaveProperty("value", "权限");
+  expect(screen.getAllByRole("option")).toHaveLength(2);
+  expect(screen.getByRole("option", { name: /Conversation second/ }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("listbox").scrollTop).toBe(137);
+  expect(request.mock.calls).toHaveLength(requestCount);
+  await act(async () => { await router.navigate(1); });
+  expect(new URLSearchParams(router.state.location.search).get("at")).toBe("event-second");
+  await act(async () => { await router.navigate(-1); await router.navigate(-1); });
+  expect(router.state.location.hash).toBe("");
+  expect(screen.queryByRole("combobox")).toBeNull();
 });
