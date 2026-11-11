@@ -128,7 +128,7 @@ export function WorkspaceOverview({
 					</Button>
 					<Button
 						variant="ghost"
-						disabled={!root}
+						disabled={!root || !gitStatus?.isGitRepository}
 						onClick={() => activate(onReview)}
 					>
 						<FileDiff size={16} aria-hidden="true" />
@@ -158,7 +158,7 @@ export function WorkspaceOverview({
 						</Button>
 					) : null}
 				</div>
-				{root ? (
+				{root && (gitStatus?.isGitRepository || gitError) ? (
 					<div className="desktopResourceGit">
 						{gitStatus?.isGitRepository ? (
 							<>
@@ -167,8 +167,7 @@ export function WorkspaceOverview({
 							</>
 						) : (
 							<span>
-								{gitError ||
-									(gitStatus ? "Not a Git repository" : "Loading Git status…")}
+								{gitError}
 							</span>
 						)}
 					</div>

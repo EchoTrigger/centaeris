@@ -150,3 +150,27 @@ test("selecting an existing conversation from New chat places the real composer 
     expect(plane.getAttribute("data-position")).toBe("bottom");
   } finally { cancelFrame(sample); }
 });
+
+test("submitting a new conversation animates the composer down while delivery is pending", async () => {
+  const user = userEvent.setup();
+  vi.mocked(createSession).mockResolvedValueOnce({ id: "created", title: "New task", updatedAt: 1, messageCount: 0, sessionKind: "main", activityState: "idle", cwd: "D:/centaeris" });
+  vi.mocked(sendAgentInput).mockReturnValueOnce(new Promise(() => {}));
+  const props = { workspaceName: "centaeris", workspaceRoot: "D:/centaeris" };
+  const view = render(<ChatArea {...props} currentSession={null} currentSessionId={null}
+    onSessionResolved={(session, options) => {
+      if (options?.activate) view.rerender(<ChatArea {...props} currentSession={session} currentSessionId={session.id} />);
+    }} />);
+  const plane = screen.getByRole("region", { name: "Message composer" });
+  const input = screen.getByRole("textbox", { name: "Message" });
+  await user.type(input, "New task{Enter}");
+  await waitFor(() => expect(sendAgentInput).toHaveBeenCalledOnce());
+  expect(plane.getAttribute("data-position")).toBe("bottom");
+  expect(screen.queryByLabelText("Welcome")).toBeNull();
+  expect(screen.getByRole("region", { name: "Message composer" })).toBe(plane);
+  await waitFor(() => {
+    const top = Number.parseFloat(plane.style.top);
+    expect(top).toBeGreaterThan(50);
+    expect(top).toBeLessThan(100);
+  });
+  await waitFor(() => expect(Number.parseFloat(plane.style.top)).toBe(100));
+});

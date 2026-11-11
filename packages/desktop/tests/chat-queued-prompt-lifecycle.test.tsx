@@ -1819,7 +1819,7 @@ test("an unsupported stream payload fails closed and closes the active connectio
 
 const composerPosition = (renderer: ReactTestRenderer): string => renderer.root.findByProps({ "aria-label": "Message composer" }).props["data-position"];
 
-test("a new draft waits for actual response content through submission, session adoption and stream opening", async () => {
+test("a submitted draft docks through session adoption before any response content", async () => {
   // Browser frame callbacks run after scheduling, including metadata and the first text frame.
   vi.mocked(window.requestAnimationFrame).mockImplementation(callback => { queueMicrotask(() => callback(0)); return 1; });
   const accepted = createDeferred<Awaited<ReturnType<typeof harness.sendAgentInput>>>();
@@ -1831,15 +1831,15 @@ test("a new draft waits for actual response content through submission, session 
   expect(composerPosition(renderer)).toBe("center");
   await act(async () => { getComposer().onSubmit(); await flushAsyncWork(); });
   expect(harness.sendAgentInput).toHaveBeenCalledOnce();
-  expect(composerPosition(renderer)).toBe("center");
+  expect(composerPosition(renderer)).toBe("bottom");
   await act(async () => { accepted.resolve({ sessionId: "created-session", agentRunId: "run-1", turnId: "turn-1" }); await flushAsyncWork(); });
   const stream = getStream(0);
   await openStream(stream);
-  expect(composerPosition(renderer)).toBe("center");
+  expect(composerPosition(renderer)).toBe("bottom");
   await act(async () => { stream.onMessage(modelRequestStartPayload("created-session", "run-1")); await flushAsyncWork(); });
-  expect(composerPosition(renderer)).toBe("center");
+  expect(composerPosition(renderer)).toBe("bottom");
   await act(async () => { stream.onMessage(textDeltaPayload("created-session", "run-1", "private-delta", "internal", "internal")); await flushAsyncWork(); });
-  expect(composerPosition(renderer)).toBe("center");
+  expect(composerPosition(renderer)).toBe("bottom");
   await act(async () => { stream.onMessage(textDeltaPayload("created-session", "run-1", "first-response", "I will inspect the project.")); await flushAsyncWork(); });
   expect(composerPosition(renderer)).toBe("bottom");
   await act(async () => { getComposer().onInputChange("Follow-up"); getComposer().onInputChange(""); });

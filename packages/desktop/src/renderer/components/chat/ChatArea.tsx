@@ -167,8 +167,8 @@ export function ChatArea({
   onSessionCompleted,
 }: ChatAreaProps) {
   const [inputValue, setInputValue] = useState("");
-  const [hasResponseStarted, setHasResponseStarted] = useState(false);
-  const awaitingFirstResponseRef = useRef(!selectedSessionId && !currentSession?.id);
+  const [hasConversationStarted, setHasConversationStarted] = useState(false);
+  const awaitingFirstMessageRef = useRef(!selectedSessionId && !currentSession?.id);
   const welcomeSessionIdRef = useRef<string | null>(null);
   const composerContainerRef = useRef<HTMLDivElement | null>(null);
   const flushAssistantTurnUpdatesRef = useRef<() => void>(() => {});
@@ -289,14 +289,11 @@ export function ChatArea({
       options: AssistantTurnCommitOptions = {},
     ) => {
       messagesRef.current = nextMessages;
-      // Optimistic user/assistant placeholders do not leave the welcome state.
-      // Observe the committed view once, including the first batched text delta.
-      if (awaitingFirstResponseRef.current && nextMessages.some(message =>
-        message.role === "assistant" && (message.turn.finalAnswer.length > 0 ||
-          message.turn.chunks.some(chunk => chunk.kind !== "guidedSupplement") || !message.turn.isStreaming),
-      )) {
-        awaitingFirstResponseRef.current = false;
-        setHasResponseStarted(true);
+      // The accepted local submission leaves welcome immediately, including
+      // while delivery is pending or its outcome cannot yet be confirmed.
+      if (awaitingFirstMessageRef.current && nextMessages.some(message => message.role === "user")) {
+        awaitingFirstMessageRef.current = false;
+        setHasConversationStarted(true);
       }
       if (options.assistantMessages) {
         useChatViewStore
@@ -474,15 +471,15 @@ export function ChatArea({
     if (previousNewChatRevision.current === newChatRevision) return;
     previousNewChatRevision.current = newChatRevision;
     setInputValue("");
-    setHasResponseStarted(false);
-    awaitingFirstResponseRef.current = true;
+    setHasConversationStarted(false);
+    awaitingFirstMessageRef.current = true;
     welcomeSessionIdRef.current = null;
   }, [newChatRevision]);
   const handleInputChange = useCallback((value: string) => {
     setInputValue(value);
   }, []);
   const hasSelectedSession = currentSessionId.length > 0;
-  const isWelcomeComposer = !hasResponseStarted &&
+  const isWelcomeComposer = !hasConversationStarted &&
     (!hasSelectedSession || welcomeSessionIdRef.current === currentSessionId);
   const chatViewMode: ChatViewMode = hasVisibleConversation
     ? "conversation"
@@ -707,11 +704,11 @@ export function ChatArea({
   }, [handleJumpToLatest, syncTranscriptView]);
 
   const handlePromptSessionResolved = useCallback<NonNullable<ChatAreaProps["onSessionResolved"]>>((session, options) => {
-    if (options?.activate && awaitingFirstResponseRef.current) {
+    if (options?.activate && !currentSessionId) {
       welcomeSessionIdRef.current = session.id;
     }
     onSessionResolved?.(session, options);
-  }, [onSessionResolved]);
+  }, [currentSessionId, onSessionResolved]);
 
   const {
     sendPrompt,
@@ -937,7 +934,7 @@ export function ChatArea({
               <span>{t("chatArea.local")}</span>
               <strong>{shouldShowWorkspaceLabel ? workspaceName : t("chatArea.noWorkspaceSelected")}</strong>
             </div>
-            {gitStatus ? (
+            {gitStatus?.isGitRepository ? (
               <>
                 <div className="pinnedSummaryRow">
                   <FileText className="pinnedSummaryIcon" aria-hidden="true" />
@@ -953,7 +950,7 @@ export function ChatArea({
                   <strong>{gitStatus.branch || "detached"}</strong>
                 </div>
               </>
-            ) : (
+            ) : gitStatus ? null : (
               <div className="pinnedSummaryRow">
                 <GitBranch className="pinnedSummaryIcon" aria-hidden="true" />
                 <span>Git</span>
@@ -1053,7 +1050,7 @@ export function ChatArea({
       </div>
 
       {!sessionLoadError ? (
-        <ComposerPlane welcome={isWelcomeComposer} animateDocking={hasResponseStarted && (!hasSelectedSession || welcomeSessionIdRef.current === currentSessionId)}>
+        <ComposerPlane welcome={isWelcomeComposer} animateDocking={hasConversationStarted && (!hasSelectedSession || welcomeSessionIdRef.current === currentSessionId)}>
         <div className="input-section">
           <div className="input-container" ref={composerContainerRef}>
             {isWelcomeComposer ? <WelcomeGreeting /> : null}

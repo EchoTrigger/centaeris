@@ -70,7 +70,16 @@ pub(crate) fn status(
     request: WorkspaceGitRootRequest,
 ) -> Result<WorkspaceGitStatusResponse, String> {
     let workspace_root = resolve_cwd(request.workspace_root.as_str())?;
-    ensure_git_repository(workspace_root.as_path())?;
+    if !is_git_repository(workspace_root.as_path())? {
+        return Ok(WorkspaceGitStatusResponse {
+            workspace_root: display_path(workspace_root.as_path()),
+            branch: None,
+            changed_files: Vec::new(),
+            total_added: 0,
+            total_removed: 0,
+            is_git_repository: false,
+        });
+    }
     let branch = current_branch(workspace_root.as_path())?;
     let stat_by_path = diff_numstat(workspace_root.as_path())?;
     let changed_files = status_files(workspace_root.as_path(), &stat_by_path)?;
@@ -159,15 +168,24 @@ fn resolve_cwd(raw: &str) -> Result<PathBuf, String> {
     Ok(root)
 }
 
-fn ensure_git_repository(workspace_root: &Path) -> Result<(), String> {
-    let output = run_git(workspace_root, &["rev-parse", "--is-inside-work-tree"])?;
-    let value = String::from_utf8_lossy(output.stdout.as_slice())
-        .trim()
-        .to_string();
-    if value == "true" {
-        return Ok(());
+fn is_git_repository(workspace_root: &Path) -> Result<bool, String> {
+    match run_git(workspace_root, &["rev-parse", "--is-inside-work-tree"]) {
+        Ok(output) => Ok(String::from_utf8_lossy(&output.stdout).trim() == "true"),
+        Err(error)
+            if error.starts_with("workspace_git_command_failed: fatal: not a git repository") =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
     }
-    Err(String::from("workspace_git_not_repository"))
+}
+
+fn ensure_git_repository(workspace_root: &Path) -> Result<(), String> {
+    if is_git_repository(workspace_root)? {
+        Ok(())
+    } else {
+        Err(String::from("workspace_git_not_repository"))
+    }
 }
 
 fn current_branch(workspace_root: &Path) -> Result<Option<String>, String> {
@@ -250,6 +268,7 @@ fn run_git(workspace_root: &Path, args: &[&str]) -> Result<Output, String> {
     let mut command = Command::new("git");
     configure_background_command(&mut command);
     let output = command
+        .env("LC_ALL", "C")
         .args(args)
         .current_dir(workspace_root)
         .output()
@@ -345,6 +364,31 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn status_accepts_an_ordinary_directory_without_git() {
+        let root = temp_repo_path("centaeris-non-git-status");
+        fs::create_dir_all(&root).expect("create workspace");
+        let result = status(WorkspaceGitRootRequest {
+            workspace_root: root.to_string_lossy().into_owned(),
+        });
+        fs::remove_dir_all(&root).expect("remove workspace");
+        let response = result.expect("non-Git workspace is a normal status");
+        assert!(!response.is_git_repository);
+        assert!(response.branch.is_none());
+        assert!(response.changed_files.is_empty());
+        assert_eq!((response.total_added, response.total_removed), (0, 0));
+    }
+
+    #[test]
+    fn status_still_reports_an_invalid_workspace() {
+        let root = temp_repo_path("centaeris-missing-git-workspace");
+        assert!(status(WorkspaceGitRootRequest {
+            workspace_root: root.to_string_lossy().into_owned(),
+        })
+        .unwrap_err()
+        .starts_with("workspace_git_resolve_root_failed:"));
+    }
 
     #[test]
     fn rejects_absolute_or_parent_file_diff_paths() {
