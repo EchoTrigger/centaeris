@@ -1,14 +1,11 @@
 """Owned ordinary Session fixture for the actual Runtime/API lifecycle boundary."""
-import importlib.util
 import json
 import os
 from pathlib import Path
 import queue
 import subprocess
-import sys
 import threading
 import time
-from unittest.mock import patch
 from urllib.parse import quote
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -40,7 +37,8 @@ class EnvironmentRuntimeFixture:
         url = "postgresql://{}:{}@{}:{}/{}".format(
             quote(database["USER"]), quote(database["PASSWORD"]), database["HOST"],
             database["PORT"], quote(database["NAME"]))
-        fixture = {"databaseUrl": url, "userId": str(self.user.pk), "workspaceId": self.workspace.pk}
+        fixture = {"databaseUrl": url, "userId": str(self.user.pk), "workspaceId": self.workspace.pk,
+                   "agentRunId": self.run.pk}
         environment = {**os.environ, "CARGO_BUILD_JOBS": "1",
             "CENTAERIS_ENVIRONMENT_RUNTIME_FIXTURE": json.dumps(fixture),
             "API_INTERNAL_URL": self.live_server_url, "INTERNAL_API_TOKEN": settings.INTERNAL_API_TOKEN,
@@ -128,33 +126,18 @@ class EnvironmentRuntimeFixture:
         return proof
 
 
-    def load_worker(self, runtime_url):
-        path = Path(__file__).resolve().parents[2] / "worker"
-        with patch.dict(os.environ, {"RUNTIME_INTERNAL_URL": runtime_url,
-                "API_INTERNAL_URL": self.live_server_url, "INTERNAL_API_TOKEN": settings.INTERNAL_API_TOKEN,
-                # A legal positive recheck retains real Core due-time waiting
-                # while keeping this isolated HTTP fixture within five seconds.
-                "AGENT_RUN_LIFECYCLE_RECHECK_MS": "1000"}), \
-             patch.object(sys, "path", [str(path), *sys.path]):
-            spec = importlib.util.spec_from_file_location("environment_runtime_worker", path / "worker.py")
-            worker = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(worker)
-        return worker
-
-
-    def claim_due_job(self, worker, job_id, job_kind, worker_id):
+    def claim_due_job(self, job_id, job_kind, worker_id):
+        from .runtime_client import request_json
         """Observe durable due time under a monotonic deadline before claiming."""
         deadline = time.monotonic() + 5
         def poll_request(path, body=None):
             remaining = deadline - time.monotonic()
             self.assertGreater(remaining, 0, f"job claim deadline exceeded: {job_id}")
-            return worker.json_request(f"{worker.RUNTIME_INTERNAL_URL}{path}", body,
-                "X-Internal-Token", worker.INTERNAL_API_TOKEN, "native_job_claim_unavailable",
-                timeout=remaining)
+            return request_json(path, body, timeout=remaining)
         while True:
             jobs = poll_request("/internal/jobs/claim", {
                 "schema": "runtime.job.claim.v1", "workerId": worker_id,
-                "jobId": job_id, "jobKind": job_kind, "nowMs": worker.now_ms(),
+                "jobId": job_id, "jobKind": job_kind, "nowMs": int(time.time() * 1000),
                 "leaseMs": 300000, "limit": 1})["jobs"]
             if jobs:
                 break
@@ -164,7 +147,7 @@ class EnvironmentRuntimeFixture:
             self.assertEqual((current["jobId"], current["jobKind"]), (job_id, job_kind))
             self.assertEqual(current["status"], "queued", current)
             self.assertIs(type(current["runAtMs"]), int)
-            due_seconds = max(0.01, (current["runAtMs"] - worker.now_ms()) / 1000)
+            due_seconds = max(0.01, (current["runAtMs"] - int(time.time() * 1000)) / 1000)
             time.sleep(min(due_seconds, remaining))
         self.assertEqual(len(jobs), 1)
         job = jobs[0]

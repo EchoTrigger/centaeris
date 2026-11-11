@@ -30,7 +30,7 @@ class PreparationTests(unittest.TestCase):
             ('runtime_server','execution_agent','environment_task_service')}}))
         return ['prepare','--source',str(source),'--bins',str(bins),'--model-script',str(model),
                 '--output',str(root / 'result'),'--revision','a' * 40,'--build-manifest',str(manifest)] + [
-                    item for name in ('api','worker','runtime','general','postgres','redis')
+                    item for name in ('api','runtime','general','postgres','redis')
                     for item in ('--'+name+'-image','fixture-image')]
 
     def benchmark_fixture(self, root):
@@ -55,7 +55,7 @@ class PreparationTests(unittest.TestCase):
 
     def benchmark_commands(self):
         return [subprocess.CompletedProcess([], 0, '', '')] + [
-            subprocess.CompletedProcess([], 0, 'sha256:'+'b'*64+'\n', '')]*6 + [
+            subprocess.CompletedProcess([], 0, 'sha256:'+'b'*64+'\n', '')]*5 + [
             subprocess.CompletedProcess([], 0, 'a'*40, ''),
             subprocess.CompletedProcess([], 0, '', ''),
             subprocess.CompletedProcess([], 0, 'c'*40, ''),
@@ -70,7 +70,7 @@ class PreparationTests(unittest.TestCase):
                 prepare.main()
             config = json.loads((root / 'result/compose.json').read_text())
             manifest = json.loads((root / 'result/manifest.json').read_text())
-            self.assertEqual(set(config['services']), {'api', 'worker', 'runtime', 'postgres', 'redis', 'catalog-init'})
+            self.assertEqual(set(config['services']), {'api', 'platform-reconciler', 'runtime', 'postgres', 'redis', 'catalog-init'})
             values = dict(line.split('=', 1) for line in (root / 'result/synthetic.env').read_text().splitlines())
             self.assertEqual(values['RUNTIME_NATIVE_SHARED_ADMISSION'], '0')
             self.assertEqual(values['RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS'], '')
@@ -101,10 +101,11 @@ class PreparationTests(unittest.TestCase):
                 command = call.args[0]
                 if command[0] == 'docker':
                     self.assertEqual(command[1:3], ['--host', 'unix:///run/owned-benchmark/docker.sock'])
-            for service, gets_maintenance in (('api', True), ('runtime', True), ('worker', False), ('catalog-init', False)):
+            for service, gets_maintenance in (('api', True), ('runtime', True), ('platform-reconciler', False), ('catalog-init', False)):
                 effective = {}
-                for env_path in config['services'][service]['env_file']:
+                for env_path in config['services'][service].get('env_file',[]):
                     effective.update(line.split('=', 1) for line in Path(env_path).read_text().splitlines())
+                effective.update(config['services'][service].get('environment',{}))
                 self.assertEqual('ENVIRONMENT_MAINTENANCE_TOKEN' in effective, gets_maintenance, service)
 
     def test_benchmark_foreign_inventory_refuses_without_stopping_existing_work(self):
@@ -155,13 +156,13 @@ class PreparationTests(unittest.TestCase):
             root = Path(tmp)
             with patch.object(sys, 'argv', self.fixture(root)), \
                     patch.object(prepare.subprocess,'run',side_effect=[subprocess.CompletedProcess([],0,'','')]
-                        + [subprocess.CompletedProcess([],0,'sha256:'+'b'*64+'\n','')]*6
+                        + [subprocess.CompletedProcess([],0,'sha256:'+'b'*64+'\n','')]*5
                         + [subprocess.CompletedProcess([],0,'a'*40,'')]
                         + [subprocess.CompletedProcess([],0,'','')]
                         + [subprocess.CompletedProcess([],0,'c'*40,'')]) as run, \
                     patch('builtins.print'):
                 prepare.main()
-            self.assertEqual(run.call_count, 10)
+            self.assertEqual(run.call_count, 9)
             env = dict(line.split('=',1) for line in (root / 'result/synthetic.env').read_text().splitlines())
             self.assertGreaterEqual(len(env['ENVIRONMENT_MAINTENANCE_TOKEN'].encode()),32)
             self.assertNotEqual(env['ENVIRONMENT_MAINTENANCE_TOKEN'],env['INTERNAL_API_TOKEN'])
@@ -175,7 +176,7 @@ class PreparationTests(unittest.TestCase):
             root=Path(tmp)
             with patch.object(sys,'argv',self.fixture(root)), \
                     patch.object(prepare.subprocess,'run',side_effect=[subprocess.CompletedProcess([],0,'','')]
-                        + [subprocess.CompletedProcess([],0,'sha256:'+'b'*64+'\n','')]*6
+                        + [subprocess.CompletedProcess([],0,'sha256:'+'b'*64+'\n','')]*5
                         + [subprocess.CompletedProcess([],0,'a'*40,'')]
                         + [subprocess.CompletedProcess([],0,'','')]
                         + [subprocess.CompletedProcess([],0,'c'*40,'')]), patch('builtins.print'):
@@ -198,10 +199,10 @@ class PreparationTests(unittest.TestCase):
             for mount in config['services']['api']['volumes']:
                 if mount.split(':')[0]!='plugins':
                     self.assertIn(mount,setup['volumes'])
-            for name in ('catalog-init','api','worker'):
+            for name in ('catalog-init','api','platform-reconciler'):
                 effective={}
                 service=config['services'][name]
-                for env_file in service['env_file']:
+                for env_file in service.get('env_file',[]):
                     effective.update(line.split('=',1) for line in Path(env_file).read_text().splitlines())
                 effective.update(service.get('environment',{}))
                 self.assertTrue('ENVIRONMENT_MAINTENANCE_TOKEN' not in effective,
@@ -212,7 +213,7 @@ class PreparationTests(unittest.TestCase):
             root=Path(tmp)
             with patch.object(sys,'argv',self.fixture(root)), \
                     patch.object(prepare.subprocess,'run',side_effect=[subprocess.CompletedProcess([],0,'','')]
-                        + [subprocess.CompletedProcess([],0,'sha256:'+'b'*64+'\n','')]*6
+                        + [subprocess.CompletedProcess([],0,'sha256:'+'b'*64+'\n','')]*5
                         + [subprocess.CompletedProcess([],0,'a'*40,'')]
                         + [subprocess.CompletedProcess([],0,'','')]
                         + [subprocess.CompletedProcess([],0,'c'*40,'')]), patch('builtins.print'):
@@ -224,7 +225,7 @@ class PreparationTests(unittest.TestCase):
                     result.update(line.split('=',1) for line in Path(env_file).read_text().splitlines())
                 result.update(service.get('environment',{}))
                 return result
-            for name in ('api','worker'):
+            for name in ('api','platform-reconciler'):
                 effective=effective_environment(config['services'][name])
                 with self.subTest(service=name):
                     self.assertTrue('ENVIRONMENT_MAINTENANCE_TOKEN' not in effective,

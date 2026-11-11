@@ -11,7 +11,7 @@ Core behavior.
 | --- | --- |
 | `packages/workspace/api` | Django identity, membership, workspace ACL, files, credentials, Plugin installation, AgentRun authorization, and durable product jobs |
 | `packages/workspace/runtime` | Core composition, PostgreSQL RuntimeStore adapter, Redis live projection, and Docker execution binding |
-| `packages/workspace/worker` | Bounded claim, lease, retry, and wake loop for product jobs |
+
 | `packages/workspace/executor` | Fixed helper included in the AgentRun execution image |
 | `packages/workspace/documents` | Office, PDF, and image inspection plus bounded canonical representations |
 | `packages/workspace/web` | Browser product consuming REST and SSE |
@@ -28,8 +28,9 @@ Django Runtime clients share `app_core/runtime_http.py` for JSON request
 construction, token headers and response reading/closure. Each operation retains
 its timeout, HTTP error interpretation and response binding checks in
 `runtime_client.py` or `runtime_job_client.py`. The transport does not retry calls
-or translate uncertain writes into successful outcomes. Worker keeps its own
-dependency-free transport and durable scheduling policy.
+or translate uncertain writes into successful outcomes. The platform reconciliation
+client invokes only Django business interfaces; durable execution scheduling
+uses the native Runtime Job store.
 
 Transcript response structure comes from the generated Rust JSON schemas.
 Python checks that structure before applying identity bindings, ordered waterlines,
@@ -97,8 +98,8 @@ for the retained registration boundary.
    immutable AgentRun authorization containing the exact workspace, model,
    execution profile, files, and Plugin activation. A currently authorized
    retry returns that acceptance identity without creating another Run.
-3. The worker claims the durable job and asks Runtime Server to start or resume
-   the AgentRun.
+3. Workspace Runtime claims the durable lifecycle Job and starts or resumes
+   the AgentRun under its current lease.
 4. Runtime Server validates the authorization and composes Core with the
    PostgreSQL store, model adapter, Plugin resources, and one execution binding.
 5. Core drives model and tool continuation. Hosted execution and document
@@ -113,12 +114,35 @@ hosted admission and receipt persistence; Core continues to own execution and
 terminal runtime semantics. Browser recovery queries the receipt before
 resubmitting the same command identity after an uncertain response.
 
-## Worker concurrency
+## Run lifecycle dispatch
 
-Worker dispatches each claimed Job independently. Runtime Job leases establish
-ownership and fencing, not a fixed concurrency quota. Advance and cleanup have
-independent dispatchers so long model calls do not occupy their execution threads.
-Terminal publication and reconciliation remain separate control loops.
+Workspace Runtime schedules ordinary execution, cancellation advancement and
+cleanup independently on Tokio. Blocking execution, PostgreSQL operations and
+platform requests run outside Tokio's async worker threads. Job leases establish
+ownership and fencing; they do not impose a fixed Run concurrency quota.
+
+The dispatcher reuses hosted tenant admission, host affinity and resource
+reservations when claiming. Renewals use the existing database-clock lease
+boundary. A confirmed fence rejection stops the owner; an uncertain renewal
+grants no new dispatch window. Before yielding, failing or completing, the owner
+stops and joins its renewer and checks the last confirmed lease window again.
+
+Django resolves execution and cleanup authorization, projects committed terminal
+facts and verifies release receipts. Runtime completes a lifecycle Job only after
+its existing terminal, cleanup and release constraints pass. Terminal outbox
+publication and platform reconciliation remain independent control loops. The
+`platform-reconciler` service is a control-plane API client: it repairs accepted
+Run delivery, projects committed facts and invokes product cleanup reconciliation.
+It receives only the internal API URL and token and never claims execution leases.
+
+Runtime commits each terminal Job fact and its outbox record in one transaction.
+That transaction sends `runtime_job_terminal_v1`; PostgreSQL delivers the hint
+only after commit. Runtime drains durable outbox pages directly, wakes lifecycle
+Jobs through the existing idempotent wake transaction, and acknowledges only a
+fully processed generation. Listener registration precedes the pending-row check.
+Startup scans, reconnects and five-second waiter reconciliation recover missed
+notifications and relationships registered after publication. Published history
+is never made pending merely to recover a late waiter.
 
 Model request concurrency and rate limits belong to the configured upstream
 gateway or provider. Docker environments retain their explicit CPU, memory and
@@ -214,14 +238,14 @@ Only Runtime and the dedicated material Worker mount the Docker socket.
 That socket makes both services part of the host's trusted infrastructure; container
 mount separation does not isolate other container secrets from a compromised
 Docker controller. The deployment contract gate protects against accidentally
-adding socket access to an API, lifecycle Worker or another service.
+adding socket access to an API, platform reconciliation client or another service.
 
 API owns credential storage, authorization decisions and credential release.
 This does not mean it is the only process holding secrets: the shared API
 environment also supplies the signing/encryption keys and database credentials
 to api-init, gc, mail-sender and the material Worker. Runtime shares the HMAC authorization key and
-receives authorized MCP bearer tokens for HTTP connections. Worker receives the
-internal API token, not the HMAC key through Compose. Narrowing those inherited
+receives authorized MCP bearer tokens for HTTP connections. The platform
+reconciliation client receives the internal API token and no HMAC key through Compose. Narrowing those inherited
 credentials is a separate design and test task, not a guarantee of the current
 layout.
 
@@ -362,15 +386,16 @@ snapshot boundary. Witnesses are never transferred between host instances.
 The advanced checkpoint covers the already committed failed receipt. Its
 reference and the old Execution's `lost` end record commit in one transaction
 under the lifecycle lease. Runtime then stops before sending the next model
-request and yields to the worker's durable retry deadline. A replacement loads
-the advanced model state; it never dispatches the recorded call again.
+request and yields to the lifecycle dispatcher's durable retry deadline. A
+replacement loads the advanced model state; it never dispatches the recorded call again.
 Preparation attempts are reserved durably and share the configured five-attempt
 budget across restarts. Uncertain outcomes remain failures, not replay requests.
 
-The supported worker dispatches one step per claimed attempt. Recovery returns
-before the worker yields that lease; yield clears its owner, and the next claim
-gets a new owner even on the same worker. A lost step response schedules a job
-retry rather than resending the step with the old owner. Thus replacement in
+The native lifecycle dispatcher executes one step per claimed attempt. Recovery
+returns before the dispatcher yields that lease; yield clears its owner, and
+the next claim gets a new owner even in the same Runtime process. An interrupted
+attempt is recovered under a new lease, never by repeating the step with the
+old owner. Thus replacement in
 this flow crosses a lease boundary while retaining the Run and frozen workspace
 generation. Session workspace publication checks that lease before and after
 upload, and Session terminal/checkpoint appends check it inside their transaction.

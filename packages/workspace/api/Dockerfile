@@ -10,7 +10,6 @@ WORKDIR /app
 COPY pyproject.toml uv.lock .python-version ./
 COPY packages/workspace/api/pyproject.toml packages/workspace/api/pyproject.toml
 COPY packages/workspace/executor/pyproject.toml packages/workspace/executor/pyproject.toml
-COPY packages/workspace/worker/pyproject.toml packages/workspace/worker/pyproject.toml
 COPY packages/workspace/documents/pyproject.toml packages/workspace/documents/pyproject.toml
 COPY packages/workspace/api packages/workspace/api
 COPY packages/code_preview_languages.json packages/code_preview_languages.json

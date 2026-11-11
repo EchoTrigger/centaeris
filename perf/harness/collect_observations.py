@@ -50,7 +50,7 @@ def records(text):
 
 
 def observation_services(manifest):
-    for service in ('worker', 'runtime', 'api', 'gc'):
+    for service in ('platform-reconciler', 'runtime', 'api', 'gc'):
         identity = manifest.get('containers', {}).get(service, {}).get('id')
         if not isinstance(identity, str) or not re.fullmatch(r'[0-9a-f]{64}', identity):
             raise ValueError(f'{service}: missing or invalid container identity')

@@ -34,7 +34,6 @@ WORKDIR /src
 COPY pyproject.toml uv.lock .python-version ./
 COPY packages/workspace/api/pyproject.toml packages/workspace/api/pyproject.toml
 COPY packages/workspace/executor/pyproject.toml packages/workspace/executor/pyproject.toml
-COPY packages/workspace/worker/pyproject.toml packages/workspace/worker/pyproject.toml
 COPY packages/workspace/documents/pyproject.toml packages/workspace/documents/pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --package centaeris-sandbox-tools --no-install-workspace

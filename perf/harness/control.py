@@ -14,7 +14,7 @@ import time
 
 PROJECT = 'centaeris-perf'
 ROOT = Path(__file__).resolve().parents[2]
-SERVICES = ('api', 'runtime', 'worker', 'gc', 'postgres', 'redis')
+SERVICES = ('api', 'runtime', 'platform-reconciler', 'gc', 'postgres', 'redis')
 HOST_ROOT = f'/var/lib/{PROJECT}/host'
 HOST_SOCKET_DIRECTORY = f'/run/{PROJECT}-host'
 EXECUTION_HELPER = f'{HOST_ROOT}/execution_agent'
@@ -285,7 +285,7 @@ class Stack:
         ids = self.compose(['ps', '--all', '-q']).split()
         containers = json.loads(run(['docker', 'inspect', *ids])) if ids else []
         return {c['Name']: c['Id'] for c in containers
-                if c['Config']['Labels'].get('com.docker.compose.service') != 'worker'}
+                if c['Config']['Labels'].get('com.docker.compose.service') != 'platform-reconciler'}
 
     def sql(self, statement):
         return self.compose(['exec', '-T', 'postgres', 'psql', '-v', 'ON_ERROR_STOP=1',
@@ -317,7 +317,7 @@ class Stack:
                 'coreSha': revision,
                 'dirtyFiles': run(['git', 'status', '--porcelain'], cwd=ROOT).splitlines(),
                 'workspaceDiffSha256': hashlib.sha256(run(['git', 'diff', 'HEAD'], cwd=ROOT).encode()).hexdigest(),
-                'workerSourceSha256': hashlib.sha256((ROOT / 'packages/workspace/worker/worker.py').read_bytes()).hexdigest(),
+                'runtimeLifecycleSourceSha256': hashlib.sha256((ROOT / 'packages/workspace/runtime/src/lifecycle_executor.rs').read_bytes()).hexdigest(),
                 'containers': {s: {'id': (c := self.container(s))['Id'], 'image': c['Image'],
                                    'startedAt': c['State']['StartedAt']} for s in SERVICES}}
 
@@ -360,9 +360,9 @@ def main():
     if args.action == 'check':
         print('Isolated Compose configuration verified.')
     elif args.action == 'build':
-        stack.compose(['build', 'api', 'worker', 'runtime', 'workspace-general', 'mock-model'], timeout=3600)
+        stack.compose(['build', 'api', 'runtime', 'workspace-general', 'mock-model'], timeout=3600)
     elif args.action == 'up':
-        stack.compose(['up', '-d', 'worker'], timeout=600)
+        stack.compose(['up', '-d', 'platform-reconciler'], timeout=600)
         stack.sql('CREATE EXTENSION IF NOT EXISTS pg_stat_statements;')
         stack.preflight()
     elif args.action == 'stop':

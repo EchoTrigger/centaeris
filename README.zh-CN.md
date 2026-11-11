@@ -42,7 +42,6 @@ Centaeris 是使用 Rust 编写、不依赖特定宿主的智能体运行时框�
 | [`packages/workspace/runtime`](packages/workspace/runtime/README.md) | 托管 Runtime 适配器 |
 | [`packages/workspace/executor`](packages/workspace/executor/README.md) | 托管执行代理与沙箱工具 |
 | [`packages/workspace/web`](packages/workspace/web/README.md) | 托管 Web 界面 |
-| [`packages/workspace/worker`](packages/workspace/worker/README.md) | 托管生命周期 Worker |
 | [`packages/workspace/documents`](packages/workspace/documents/README.md) | 材料处理服务 |
 
 `system-skills/` 为本地产品内置 Skill，`skills/system/` 为托管产品内置 Skill，两者均不属于 workspace 包。各包 README 目前仅提供英文版本。

@@ -43,7 +43,7 @@ def build_commands(product, release=False):
     if product == "web":
         return [[pnpm, "--filter", "web...", "--filter", "centaeris", "install", "--frozen-lockfile"],
                 [pnpm, "--filter", "web", "run", "build"]]
-    python = {"api": "api", "worker": "workspace-agent-worker", "document-processor": "centaeris-document-processor"}
+    python = {"api": "api", "document-processor": "centaeris-document-processor"}
     if product in python:
         return [["uv", "sync", "--frozen", "--package", python[product]]]
     if product == "workspace-images":
@@ -55,7 +55,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("build",))
     parser.add_argument("product", choices=("core", "runtime", "tui", "desktop", "runtime-server", "hosted-execution",
-                                           "web", "api", "worker", "document-processor", "workspace-images"))
+                                           "web", "api", "document-processor", "workspace-images"))
     parser.add_argument("--release", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

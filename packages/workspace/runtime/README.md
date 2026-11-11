@@ -9,6 +9,25 @@ See [Workspace architecture](../../../docs/architecture/Architecture.md),
 [Workspace API](../../../docs/reference/API.md), and the
 [security model](../../../docs/workspace/security/Model.md) for the complete boundary.
 
+## Run lifecycle ownership
+
+The native Tokio lifecycle executor claims and renews Run Jobs, invokes execution
+in process, yields waits to durable deadlines, and dispatches cancellation and
+cleanup separately. Django retains authorization and product-state projection.
+Every resumed execution crosses a lease boundary; Job completion retains the
+existing cleanup and release receipt requirement.
+
+Terminal Job facts and their outbox record notify Runtime after transaction
+commit. Runtime drains waiter pages in process and acknowledges the delivered
+generation only after fan-out finishes. Notifications are hints; startup scans
+and periodic durable-waiter reconciliation recover lost hints and late waiters.
+
+
+`RUNTIME_JOB_LEASE_MS` configures the lease duration (1000–300000 ms).
+`AGENT_RUN_LIFECYCLE_RECHECK_MS` controls the existing logical-wait compensation;
+Runtime recovery checkpoints supply their own deadline. Execution mode remains
+`AGENT_RUN_EXECUTION_MODE=perRun|retained`.
+
 ## Execution boundary
 
 A Session owns one environment profile and controller. AgentRuns and maintenance

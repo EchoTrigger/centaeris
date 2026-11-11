@@ -128,6 +128,8 @@ services:
       AGENT_RUN_AUTHORIZATION_SIGNING_KEY: ${AGENT_RUN_AUTHORIZATION_SIGNING_KEY}
       ENVIRONMENT_MAINTENANCE_TOKEN: ${ENVIRONMENT_MAINTENANCE_TOKEN-}
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      AGENT_RUN_EXECUTION_MODE: ${AGENT_RUN_EXECUTION_MODE-perRun}
+      RUNTIME_JOB_LEASE_MS: ${RUNTIME_JOB_LEASE_MS-120000}
       RUNTIME_POSTGRES_POOL_SIZE: ${RUNTIME_POSTGRES_POOL_SIZE-10}
       DOCKER_CREATE_CONCURRENCY: ${DOCKER_CREATE_CONCURRENCY-4}
       RESIDENT_GLOBAL_COUNT:
@@ -190,34 +192,24 @@ services:
       api:
         condition: service_healthy
 
-  worker:
-    image: centaeris-workspace-agent-worker
+  platform-reconciler:
+    image: centaeris-workspace-agent-api
+    build: *api-build
     init: true
+    user: "10001:10001"
     restart: unless-stopped
-    build:
-      context: .
-      dockerfile: packages/workspace/worker/Dockerfile
-      labels: *release-image-labels
-    command: ["python", "worker.py", "serve"]
+    entrypoint: ["python", "-m", "app_core.platform_reconciler"]
+    environment:
+      API_INTERNAL_URL: *api-internal-url
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
+    depends_on:
+      api:
+        condition: service_healthy
     logging:
       driver: json-file
       options:
         max-size: "20m"
         max-file: "5"
-    environment: &worker-environment
-      RUNTIME_INTERNAL_URL: http://runtime:${RUNTIME_PORT}
-      API_INTERNAL_URL: *api-internal-url
-      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
-      AGENT_RUN_EXECUTION_MODE: ${AGENT_RUN_EXECUTION_MODE-perRun}
-      WORKER_LEASE_MS: ${WORKER_LEASE_MS}
-      RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS: ${RUNTIME_HTTP_CONTROL_TIMEOUT_SECONDS-5}
-    depends_on:
-      redis:
-        condition: service_healthy
-      runtime:
-        condition: service_started
-      api:
-        condition: service_healthy
     security_opt:
       - no-new-privileges:true
     cap_drop:

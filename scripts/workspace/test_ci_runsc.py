@@ -74,7 +74,7 @@ if args[0] == "compose":
         if not helper.is_absolute():
             raise SystemExit(78)
         if "--format" in args:
-            names = ["api", "document-processor", "runtime", "web", "worker", "workspace-general"]
+            names = ["api", "document-processor", "runtime", "web", "platform-reconciler", "workspace-general"]
             services = {name: {"build": {"context": os.environ["GATE_WORKSPACE_ROOT"]}} for name in names}
             services["workspace-general"]["image"] = "built-workspace-general"
             services["runtime"]["depends_on"] = {"workspace-general": {}}
@@ -99,7 +99,7 @@ if args[0] == "compose":
     elif args[0] == "build" and args[-1] == os.environ["GATE_FAIL"]:
         raise SystemExit(23)
     elif args[0] == "ps" and "--status" in args:
-        print("postgres\nredis\napi\nruntime\nworker\nmaterial-broker\nmaterial-worker\nmaterial-scheduler\nweb")
+        print("postgres\nredis\napi\nruntime\nplatform-reconciler\nmaterial-broker\nmaterial-worker\nmaterial-scheduler\nweb")
 else:
     event["action"] = args[0]
     record()
@@ -193,7 +193,7 @@ node() { printf '%s\\n' fixture-revision; }
                     self.assertNotIn("up", [event["action"] for event in events])
 
     def test_deployment_builds_one_image_at_a_time_and_stops_on_failure(self):
-        for fail in ("", "worker"):
+        for fail in ("", "api"):
             with self.subTest(fail=fail):
                 result, events = self._run_release_gate(fail)
                 builds = [event for event in events if event["action"] == "build" and event["args"][0] == "compose"]

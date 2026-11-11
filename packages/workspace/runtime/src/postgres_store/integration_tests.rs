@@ -98,6 +98,113 @@ fn terminal_source(store: &PostgresRuntimeStore, id: &str) {
         .unwrap();
 }
 
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_outbox_terminal_notification_commits_with_facts_and_recovers_missed_hint() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    let mut source = job("source:notification", "source:notification");
+    source.status = RuntimeJobStatus::Running;
+    source.lease_owner = Some("worker_source".into());
+    source.lease_expires_at_ms = Some(10_000);
+    store
+        .schedule_runtime_job(ScheduleRuntimeJobRequest { job: source })
+        .unwrap();
+    let mut listener = Client::connect(&url, NoTls).unwrap();
+    listener
+        .batch_execute("LISTEN runtime_job_terminal_v1")
+        .unwrap();
+    let mut writer = Client::connect(&url, NoTls).unwrap();
+    writer
+        .batch_execute("SET search_path TO runtime,public")
+        .unwrap();
+    for commit in [false, true] {
+        let mut tx = writer.transaction().unwrap();
+        tx.execute("UPDATE runtime_jobs SET status='succeeded',lease_owner=NULL,lease_expires_at_ms=NULL,updated_at_ms=20 WHERE job_id='source:notification'",&[]).unwrap();
+        super::reliability::upsert_job_outbox(
+            &mut tx,
+            "source:notification",
+            "runtime_job.terminal",
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .get_runtime_job("source:notification")
+                .unwrap()
+                .unwrap()
+                .status,
+            RuntimeJobStatus::Running
+        );
+        assert!(store
+            .list_pending_runtime_job_outbox(10)
+            .unwrap()
+            .is_empty());
+        assert!(listener
+            .notifications()
+            .timeout_iter(Duration::from_millis(10))
+            .next()
+            .unwrap()
+            .is_none());
+        if commit {
+            tx.commit().unwrap();
+        } else {
+            tx.rollback().unwrap();
+        }
+        let hint = listener
+            .notifications()
+            .timeout_iter(Duration::from_millis(100))
+            .next()
+            .unwrap();
+        assert_eq!(hint.is_some(), commit);
+    }
+    assert_eq!(
+        store
+            .get_runtime_job("source:notification")
+            .unwrap()
+            .unwrap()
+            .status,
+        RuntimeJobStatus::Succeeded
+    );
+    // The listener already consumed the hint; a new consumer discovers the row
+    // after registering instead of waiting for another completion notification.
+    assert!(store
+        .wait_for_terminal_outbox(Duration::from_secs(10))
+        .unwrap());
+}
+
+#[test]
+#[ignore = "requires destructive dedicated Postgres test database"]
+fn postgres_outbox_native_delivery_restarts_mid_fanout_without_early_acknowledgement() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let url = test_url();
+    reset_store(&url);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    terminal_source(&store, "source:terminal");
+    let ids: Vec<_> = (0..300).map(|index| late_waiter(&store, index)).collect();
+    let mut dispatcher = crate::lifecycle_executor::outbox::Dispatcher::default();
+    assert_eq!(dispatcher.deliver(&store).unwrap(), 1);
+    assert_eq!(store.list_pending_runtime_job_outbox(10).unwrap().len(), 1);
+    drop(dispatcher);
+    let store = PostgresRuntimeStore::new(&url).unwrap();
+    let mut dispatcher = crate::lifecycle_executor::outbox::Dispatcher::default();
+    for _ in 0..1000 {
+        if dispatcher.deliver(&store).unwrap() == 0 {
+            break;
+        }
+    }
+    assert!(store
+        .list_pending_runtime_job_outbox(10)
+        .unwrap()
+        .is_empty());
+    for id in ids {
+        assert_eq!(store.get_runtime_job(&id).unwrap().unwrap().run_at_ms, 20);
+    }
+    let mut db = Client::connect(&url, NoTls).unwrap();
+    assert_eq!(db.query_one("SELECT count(*) FROM runtime.runtime_events WHERE event_type='runtime_job_wake_requested'",&[]).unwrap().get::<_,i64>(0),300);
+}
+
 fn late_waiter(store: &PostgresRuntimeStore, index: usize) -> String {
     use centaeris_core::runtime::contracts::{
         RuntimeAgentRunIdentityV1, RuntimeAwaitJobCheckpointV1, RuntimeJobWaitV1,
