@@ -3,7 +3,6 @@ import {
   getChunkWaterfallOrder,
   getChunkWaterfallSection,
 } from "./chatRuntimeModel";
-import { taskFamily } from "./historyProcessEntries";
 import type {
   AssistantExecutionTurn,
   AgentDisplayEntry,
@@ -51,8 +50,10 @@ const buildAgentDisplayEntries = (
 
   for (const chunk of chunks) {
     if (work) work.inputChunkVisits += 1;
+    // Agent tags have their own retained footer; their lifecycle updates do not
+    // split otherwise consecutive tool rows in the visible transcript.
+    if (chunk.kind === "subagent") continue;
     if (chunk.kind === "task") {
-      if (pendingTasks.length && taskFamily(pendingTasks[0]) !== taskFamily(chunk.task)) flushTasks();
       pendingTasks.push(chunk.task);
       continue;
     }
@@ -64,13 +65,6 @@ const buildAgentDisplayEntries = (
     if (chunk.kind === "guidedSupplement") {
       entries.push({
         kind: "guidedSupplement",
-        chunk,
-      });
-      continue;
-    }
-    if (chunk.kind === "subagent") {
-      entries.push({
-        kind: "subagent",
         chunk,
       });
       continue;

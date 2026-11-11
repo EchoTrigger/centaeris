@@ -15,11 +15,14 @@ test("history groups adjacent tools while keeping intermediate text in order", (
   expect(historyProcessEntries([tool("a"), tool("b"), tool("c")])[0].id).toBe("a");
 });
 
-test("history grouping respects visible reasoning and tool families", () => {
+test("history groups mixed tools and respects visible reasoning", () => {
   const reasoning: ChatMessage = { id: "reason", role: "assistant", turn: { id: "reason", finalAnswer: "", isStreaming: false,
     chunks: [{ id: "reason", kind: "reasoning", text: "why", status: "done" }] } };
   expect(historyProcessEntries([tool("a"), reasoning, tool("b"), tool("run", "bash")]).map(entry => entry.id))
-    .toEqual(["a", "reason", "b", "run"]);
+    .toEqual(["a", "reason", "b"]);
+  const mixed = historyProcessEntries([tool("write", "write"), tool("run", "bash"), tool("read", "read")]);
+  expect(mixed).toHaveLength(1);
+  expect(mixed[0].role === "assistant" && mixed[0].turn.chunks.map(chunk => chunk.id)).toEqual(["write", "run", "read"]);
 });
 
 
