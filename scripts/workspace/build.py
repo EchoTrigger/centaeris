@@ -12,7 +12,7 @@ try:
 finally:
     sys.path.pop(0)
 
-SERVICES = ("runtime", "workspace-general", "api", "worker", "web", "document-processor")
+SERVICES = ("runtime", "workspace-general", "api", "web", "document-processor")
 
 
 def main():

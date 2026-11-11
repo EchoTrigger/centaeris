@@ -63,7 +63,6 @@ def main(skip_frontend_tests=False, stage="All"):
         ("Agent Run API reference drift", [*api, "scripts/workspace/agent-run-api-reference.py", "--check"]),
         ("Deployment identity contracts", [*api, "scripts/workspace/deployment-contract.test.py"]),
         ("Python discovery gate regressions", [py, "scripts/workspace/python_test_gate.py", "gate"]),
-        ("Worker tests", [py, "scripts/workspace/python_test_gate.py", "worker"]),
         ("Retained acceptance fixture guards", [py, "-m", "unittest", "discover", "-s", "scripts/workspace/retained_acceptance", "-p", "test_*.py"]),
         ("Performance harness isolation", [py, "-m", "unittest", "discover", "-s", "perf/tests", "-v"]),
         ("Performance workload metrics", ["node", "--test", "perf/tests/k6-metrics.test.mjs"]),

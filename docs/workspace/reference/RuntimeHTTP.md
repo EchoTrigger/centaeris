@@ -25,7 +25,7 @@ An `/internal` prefix alone does not identify which service owns an endpoint.
 | AgentRun request types and signed-start validation | [contract.rs](../../../packages/workspace/runtime/src/contract.rs) and [agent_run_authorization.rs](../../../packages/workspace/runtime/src/agent_run_authorization.rs) |
 | Bounded timing labels and request accounting | [observations.rs](../../../packages/workspace/runtime/src/observations.rs) |
 | Django callers | [runtime_client.py](../../../packages/workspace/api/app_core/runtime_client.py) and [runtime_job_client.py](../../../packages/workspace/api/app_core/runtime_job_client.py) |
-| Worker callers, terminal dispatch and waiter reconciliation | [worker.py](../../../packages/workspace/worker/worker.py) |
+| Native lifecycle, terminal dispatch and waiter recovery | [lifecycle_executor.rs](../../../packages/workspace/runtime/src/lifecycle_executor.rs) |
 
 The service uses axum with Hyper HTTP/1. Its Router registers each operation
 explicitly. Supported operations and fallback share admission, bounded body
@@ -59,15 +59,15 @@ identity, lifecycle binding and current storage fences remain domain checks.
 
 ### Jobs
 
-Request types, schema identities, worker-kind restrictions and transition
+Request types, schema identities, hosted Job-kind restrictions and transition
 validation are in `job_protocol.rs`. Its `PYTHON_WORKER_JOB_KINDS` list defines
-the worker kinds accepted by these operations.
+the hosted Job kinds accepted by these operations.
 
 | Method | Path | Responsibility | Success |
 | --- | --- | --- | --- |
-| POST | `/internal/jobs/schedule` | Schedule or replay an allowed worker job with its durable identity, payload reference and applicable tenant binding | 200 |
-| POST | `/internal/jobs/claim` | Claim due allowed worker jobs under exclusive Job row leases | 200 |
-| POST | `/internal/jobs/wait` | Wait for eligible worker jobs or the bounded wait deadline; return readiness and the next due time | 200 |
+| POST | `/internal/jobs/schedule` | Schedule or replay an allowed hosted Job with its durable identity, payload reference and applicable tenant binding | 200 |
+| POST | `/internal/jobs/claim` | Claim due allowed hosted Jobs under exclusive Job row leases | 200 |
+| POST | `/internal/jobs/wait` | Wait for eligible hosted Jobs or the bounded wait deadline; return readiness and the next due time | 200 |
 | POST | `/internal/jobs/start` | Start a claimed job under its lease owner | 200 |
 | POST | `/internal/jobs/heartbeat` | Renew a job lease under its owner | 200 |
 | POST | `/internal/jobs/yield` | Requeue the same job with its run time and transition reason under the current lease | 200 |

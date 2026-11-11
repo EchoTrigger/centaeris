@@ -11,10 +11,8 @@ services:
   redis-test:
     ports: !override ["127.0.0.1:16379:6379"]
 
-  worker:
-    image: centaeris-perf-worker:local
-    environment:
-      WORKSPACE_PERF_OBSERVATIONS: "1"
+  platform-reconciler:
+    image: centaeris-perf-api:local
 
   material-worker:
     image: centaeris-perf-api:local

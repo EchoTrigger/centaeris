@@ -26,7 +26,7 @@ def main():
     parser.add_argument('--model-script',type=Path,default=Path(__file__).with_name('model.py'))
     parser.add_argument('--api-port',type=int,default=18083)
     parser.add_argument('--runtime-port',type=int,default=19003)
-    for name in ('api','worker','runtime','general','processor','postgres','redis'):parser.add_argument('--'+name+'-image',required=True)
+    for name in ('api','runtime','general','processor','postgres','redis'):parser.add_argument('--'+name+'-image',required=True)
     args=parser.parse_args()
     if args.workspace_recovery and (not args.shared_workload or args.execution_mode!='perRun'):
         parser.error('workspace recovery requires explicit shared perRun fixture')
@@ -57,7 +57,7 @@ def main():
     def command(argv):return subprocess.run(argv,check=True,capture_output=True,text=True).stdout.strip()
     if command([*docker,'ps','-aq','--filter','label=centaeris.managed=true']):raise SystemExit('managed sandbox responsibility already exists')
     images={}
-    for name in ('api','worker','runtime','general','processor','postgres','redis'):
+    for name in ('api','runtime','general','processor','postgres','redis'):
         reference=getattr(args,name+'_image');identity=command([*docker,'image','inspect',reference,'--format','{{.Id}}'])
         if not re.fullmatch('sha256:[a-f0-9]{64}',identity):raise SystemExit('cached image identity unavailable')
         images[name]={'reference':reference,'id':identity}
@@ -99,15 +99,15 @@ def main():
     def private_file(name,values):
         path=root/name;path.write_text(''.join(f'{k}={v}\n' for k,v in sorted(values.items())));path.chmod(0o600);return str(path)
     full=private_file('synthetic.env',env);limited=private_file('service.env',{k:v for k,v in env.items() if k!='ENVIRONMENT_MAINTENANCE_TOKEN'})
-    sources=[f'{source/"packages/workspace/api"}:/app/packages/workspace/api:ro',f'{source/"packages/workspace/worker"}:/app/packages/workspace/worker:ro']
+    sources=[f'{source/"packages/workspace/api"}:/app/packages/workspace/api:ro']
     services={
         'postgres':{'image':images['postgres']['id'],'environment':{k:env[k] for k in ('POSTGRES_DB','POSTGRES_USER','POSTGRES_PASSWORD')},'volumes':['postgres:/var/lib/postgresql'],'healthcheck':{'test':['CMD-SHELL','pg_isready -U acceptance -d retained_acceptance'],'interval':'2s','retries':30}},
         'redis':{'image':images['redis']['id'],'command':['redis-server','--save','','--appendonly','no','--maxmemory','32mb'],'healthcheck':{'test':['CMD','redis-cli','ping'],'interval':'2s','retries':30}},
         'model':{'image':images['api']['id'],'entrypoint':[],'command':['/app/.venv/bin/python','/harness/model.py'],'environment':{'MOCK_TLS_CERT':'/harness/model.crt','MOCK_TLS_KEY':'/harness/model.key'},'volumes':[f'{model}:/harness/model.py:ro',f'{source/"scripts/workspace/runsc_rotation_acceptance.py"}:/harness/runsc_rotation_acceptance.py:ro',f'{tls/"model.crt"}:/harness/model.crt:ro',f'{tls/"model.key"}:/harness/model.key:ro']},
         'api':{'image':images['api']['id'],'env_file':[limited],'entrypoint':[],'working_dir':'/app/packages/workspace/api','command':['/app/.venv/bin/uvicorn','api.asgi:application','--host','0.0.0.0','--port','8000'],'volumes':sources+['storage:/var/lib/centaeris-storage','uploads:/var/lib/centaeris-upload-temp','plugins:/opt/centaeris/plugins:ro'],'ports':[f'127.0.0.1:{args.api_port}:8000']},
         'runtime':{'image':images['runtime']['id'],'env_file':[full],'entrypoint':['/usr/local/bin/runtime_server'],'user':'0:0','volumes':[f'{bins/"runtime_server"}:/usr/local/bin/runtime_server:ro',args.docker_socket+':/var/run/docker.sock',args.host_socket_directory+':/run/centaeris-host:ro',str(bins/'execution_agent')+':'+str(bins/'execution_agent')+':ro','runtime:/var/lib/centaeris-runtime','memory:/var/lib/centaeris-agent-memory','plugins:/opt/centaeris/plugins:ro'],'ports':[f'127.0.0.1:{args.runtime_port}:9000']},
-        'worker':{'image':images['worker']['id'],'env_file':[limited],'working_dir':'/app/packages/workspace/worker','command':['/app/.venv/bin/python','worker.py','serve'],'volumes':sources,'init':True}}
-    for name in ('api','runtime','worker'):
+        'platform-reconciler':{'image':images['api']['id'],'entrypoint':['/app/.venv/bin/python','-m','app_core.platform_reconciler'],'working_dir':'/app/packages/workspace/api','environment':{key:env[key] for key in ('API_INTERNAL_URL','INTERNAL_API_TOKEN')},'user':'10001:10001','volumes':sources,'init':True}}
+    for name in ('api','runtime'):
         services[name].setdefault('environment',{})['SSL_CERT_FILE']='/harness/combined-ca.pem';services[name]['volumes'].append(f'{tls/"combined-ca.pem"}:/harness/combined-ca.pem:ro')
     if args.shared_workload:
         scripts=source/'perf/mock-model'

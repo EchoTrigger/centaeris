@@ -33,11 +33,11 @@ class ExistingFixtureWorkloadTests(unittest.TestCase):
         module=self.load()
         with tempfile.TemporaryDirectory() as folder:
             env=Path(folder)/'synthetic.env';env.write_text('AGENT_RUN_EXECUTION_MODE=perRun\n')
-            compose={'services':{name:{'env_file':[str(env)]} for name in ('api','worker','runtime')}}
+            compose={'services':{name:{'env_file':[str(env)]} for name in ('api','runtime')}}
             self.assertEqual(module.fixture_execution_mode({'executionMode':'perRun'},compose),'perRun')
             for manifest in ({},{'executionMode':'unknown'},{'executionMode':'retained'}):
                 with self.assertRaises(ValueError):module.fixture_execution_mode(manifest,compose)
-            compose['services']['worker']['environment']={'AGENT_RUN_EXECUTION_MODE':'retained'}
+            compose['services']['runtime']['environment']={'AGENT_RUN_EXECUTION_MODE':'retained'}
             with self.assertRaises(ValueError):module.fixture_execution_mode({'executionMode':'perRun'},compose)
     def test_foreign_api_url_and_reused_sample_id_are_rejected_before_start(self):
         module=self.load()

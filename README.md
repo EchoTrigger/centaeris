@@ -47,7 +47,6 @@ Choose System, Light, or Dark in Settings > Appearance. The preference persists 
 | [`packages/workspace/runtime`](packages/workspace/runtime/README.md) | Hosted Runtime adapter |
 | [`packages/workspace/executor`](packages/workspace/executor/README.md) | Hosted execution agent and sandbox tools |
 | [`packages/workspace/web`](packages/workspace/web/README.md) | Hosted Web interface |
-| [`packages/workspace/worker`](packages/workspace/worker/README.md) | Hosted lifecycle worker |
 | [`packages/workspace/documents`](packages/workspace/documents/README.md) | Material processing service |
 
 `system-skills/` holds local-product built-in System Skills; `skills/system/`

@@ -60,12 +60,11 @@ class AuditedRunner(unittest.TextTestRunner):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("package", choices=("api", "worker", "document_processor", "gate"))
+    parser.add_argument("package", choices=("api", "document_processor", "gate"))
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     directory = {
         "api": root / "packages/workspace/api",
-        "worker": root / "packages/workspace/worker",
         "document_processor": root / "packages/workspace/documents",
         "gate": root / "scripts/workspace",
     }[args.package]

@@ -104,7 +104,7 @@ PY
 import json, os, pathlib, sys
 config = json.load(sys.stdin)
 assert config["name"] == "centaeris-workspace"
-required_builds = {"api", "document-processor", "runtime", "web", "worker", "workspace-general"}
+required_builds = {"api", "document-processor", "runtime", "web", "workspace-general"}
 assert required_builds <= {name for name, service in config["services"].items() if "build" in service}
 for service_name, consumer in (("document-processor", "material-worker"), ("workspace-general", "runtime")):
     service = config["services"][service_name]
@@ -121,7 +121,7 @@ for key, value in config["volumes"].items():
     assert value["name"] == f"centaeris-workspace_{key}"
 '
 
-for service in document-processor workspace-general runtime api worker web; do
+for service in document-processor workspace-general runtime api web; do
   "${compose[@]}" build --pull "$service"
 done
 "${compose[@]}" config --format json | python3 scripts/workspace/verify-deployment-images.py
@@ -154,9 +154,9 @@ values = {"ENVIRONMENT_EXECUTION_HELPER": str(root / "execution_agent"),
 path.write_text("\n".join(f"{key}={values[key]}" if (key := line.partition("=")[0]) in values else line
                           for line in path.read_text().splitlines()) + "\n")
 PY
-"${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime worker material-worker material-scheduler web
+"${compose[@]}" up -d --wait --wait-timeout 420 postgres redis api runtime platform-reconciler material-worker material-scheduler web
 
-for service in postgres redis api runtime worker material-broker material-worker material-scheduler web; do
+for service in postgres redis api runtime platform-reconciler material-broker material-worker material-scheduler web; do
   "${compose[@]}" ps --status running --services | grep -Fx "$service" >/dev/null
 done
 
@@ -168,7 +168,7 @@ done
 "${compose[@]}" up -d --no-build --no-deps --force-recreate --wait api
 "${compose[@]}" exec -T api python /app/scripts/workspace/verify-api-deployment.py read
 
-for service in document-processor workspace-general runtime api worker web; do
+for service in document-processor workspace-general runtime api web; do
   image_id="$("${compose[@]}" images -q "$service" | head -n 1)"
   test -n "$image_id"
   test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.licenses" }}' "$image_id")" = "AGPL-3.0-only"

@@ -331,7 +331,7 @@ sys.stdout.write(re.sub(pattern,replace,text))
             self.assertEqual(services["runtime"]["environment"]["DOCKER_CREATE_CONCURRENCY"], "4")
             self.assertIsNone(services["runtime"]["environment"].get("RUNTIME_RUNSC_MAX_RUNNING_ENVIRONMENTS"))
             self.assertEqual(services["runtime"]["environment"]["RUNTIME_RUNSC_IDLE_PAUSE_MS"], "3000")
-            self.assertEqual(services["worker"]["environment"]["AGENT_RUN_EXECUTION_MODE"], "perRun")
+            self.assertEqual(services["runtime"]["environment"]["AGENT_RUN_EXECUTION_MODE"], "perRun")
             for service in ("api", "api-init"):
                 with self.subTest(service=service, overrides=overrides):
                     environment = services[service]["environment"]
@@ -421,8 +421,8 @@ sys.stdout.write(re.sub(pattern,replace,text))
             with self.subTest(service=service):
                 self.assertNotIn("API_POSTGRES_POOL_MAX_SIZE", services[service]["environment"])
                 self.assertNotEqual(services[service]["environment"]["POSTGRES_APPLICATION_NAME"], "centaeris-api")
-        self.assertNotIn("POSTGRES_HOST", services["worker"]["environment"])
-        self.assertNotIn("DATABASE_URL", services["worker"]["environment"])
+        self.assertNotIn("POSTGRES_HOST", services["platform-reconciler"]["environment"])
+        self.assertNotIn("DATABASE_URL", services["platform-reconciler"]["environment"])
 
     def test_api_pool_default_and_explicit_overrides_render_in_compose(self):
         for value, expected in ((None, "10"), ("", "10"), ("0", "0"), ("6", "6"), ("10", "10")):
@@ -501,11 +501,11 @@ sys.stdout.write(re.sub(pattern,replace,text))
                 self.assertEqual(processor["build"]["args"]["PROCESSOR_DEVICE"], device)
                 self.assertEqual(runtime["MATERIAL_PROCESSOR_DEVICE"], device)
 
-    def test_runtime_port_change_reaches_api_and_worker(self):
+    def test_runtime_port_change_reaches_api_and_platform_client_uses_api(self):
         services = compose_config(RUNTIME_PORT="9100")["services"]
         runtime_url = f"http://runtime:{services['runtime']['environment']['RUNTIME_PORT']}"
         self.assertEqual(services["api"]["environment"]["RUNTIME_URL"], runtime_url)
-        self.assertEqual(services["worker"]["environment"]["RUNTIME_INTERNAL_URL"], runtime_url)
+        self.assertEqual(services["platform-reconciler"]["environment"]["API_INTERNAL_URL"], "http://api:8000")
 
     def test_compose_paths_remain_on_shared_named_volumes(self):
         services = compose_config(STORAGE_ROOT="/wrong/storage", PLUGIN_CATALOG_ROOT="/wrong/plugins")["services"]
@@ -526,7 +526,7 @@ sys.stdout.write(re.sub(pattern,replace,text))
     def test_bundled_service_addresses_cannot_split(self):
         services = compose_config(API_INTERNAL_URL="http://wrong:1", REDIS_URL="redis://wrong:1",
                                   POSTGRES_HOST="wrong", POSTGRES_PORT="9999")["services"]
-        for name in ("runtime", "worker"):
+        for name in ("runtime", "platform-reconciler"):
             self.assertEqual(services[name]["environment"]["API_INTERNAL_URL"], "http://api:8000")
         for name in ("api", "runtime"):
             self.assertEqual(services[name]["environment"]["REDIS_URL"], "redis://redis:6379/0")

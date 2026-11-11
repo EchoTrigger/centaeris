@@ -6,7 +6,7 @@ def fixture_execution_mode(manifest,compose):
     mode=manifest.get('executionMode')
     if mode not in ('perRun','retained'):
         raise ValueError('explicit supported fixture execution mode required')
-    for name in ('api','worker','runtime'):
+    for name in ('api','runtime'):
         service=compose['services'][name]
         if not isinstance(service.get('env_file'),list) or not service['env_file']:
             raise ValueError('explicit effective fixture service environment required')

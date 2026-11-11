@@ -182,7 +182,7 @@ cached image references; no image pull or application deployment is performed.
 ```sh
 unshare --net -- python3 "$SOURCE/scripts/workspace/runsc_acceptance/launch.py" \
   --root "$NEW_ROOT" --source "$SOURCE" --execute --execution-mode retained \
-  --api-image "$CACHED_API" --worker-image "$CACHED_WORKER" \
+  --api-image "$CACHED_API" \
   --runtime-image "$CACHED_RUNTIME" --general-image "$CACHED_GENERAL_TOOLS" \
   --processor-image "$CACHED_DOCUMENT_PROCESSOR" \
   --postgres-image "$CACHED_POSTGRES" --redis-image "$CACHED_REDIS"

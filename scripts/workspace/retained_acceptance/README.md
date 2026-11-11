@@ -44,7 +44,7 @@ cat /etc/ssl/certs/ca-certificates.crt "$TLS/model.crt" > "$TLS/combined-ca.pem"
 python3 "$TOOLS/prepare.py" --source "$SOURCE" --revision "$REVISION" \
   --bins "$BINS" --model-script "$TOOLS/model.py" --output "$FIXTURE" \
   --build-manifest "$OWNED_BUILD_MANIFEST" \
-  --api-image "$API_IMAGE" --worker-image "$WORKER_IMAGE" --runtime-image "$RUNTIME_IMAGE" \
+  --api-image "$API_IMAGE" --runtime-image "$RUNTIME_IMAGE" \
   --general-image "$GENERAL_IMAGE" --postgres-image "$POSTGRES_IMAGE" --redis-image "$REDIS_IMAGE" \
   --python-deps "$API_DEPS" --tls-dir "$TLS" --api-port 18081 --runtime-port 19002
 docker compose -f "$FIXTURE/compose.json" config --quiet
@@ -54,7 +54,7 @@ docker compose -f "$FIXTURE/compose.json" up -d --wait postgres redis
 docker compose -f "$FIXTURE/compose.json" run --rm -T api /app/.venv/bin/python manage.py migrate --noinput < /dev/null
 docker compose -f "$FIXTURE/compose.json" run --rm -T catalog-init < /dev/null
 docker compose -f "$FIXTURE/compose.json" run --rm -T api /app/.venv/bin/python manage.py shell < "$TOOLS/seed.py"
-docker compose -f "$FIXTURE/compose.json" up -d model api runtime worker
+docker compose -f "$FIXTURE/compose.json" up -d model api runtime platform-reconciler
 API_CONTAINER=$(docker compose -f "$FIXTURE/compose.json" ps -q api)
 docker cp "$API_CONTAINER:/var/lib/centaeris-storage/acceptance-seed.json" "$FIXTURE/seed.json"
 chmod 600 "$FIXTURE/seed.json"

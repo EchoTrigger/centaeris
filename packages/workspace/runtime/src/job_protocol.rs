@@ -22,10 +22,10 @@ use serde_json::{json, Value};
 
 const TERMINAL_EVENT_TYPE: &str = "runtime_job.terminal";
 const SESSION_ID_PREFIX: &str = "session_";
-const PYTHON_WORKER_JOB_KINDS: [&str; 2] = ["agent_run.lifecycle", "worker.noop"];
+const HOSTED_JOB_KINDS: [&str; 2] = ["agent_run.lifecycle", "worker.noop"];
 
-fn python_worker_job_kind(value: &str) -> bool {
-    PYTHON_WORKER_JOB_KINDS.contains(&value)
+fn hosted_job_kind(value: &str) -> bool {
+    HOSTED_JOB_KINDS.contains(&value)
 }
 
 pub(crate) type ProtocolResult = Result<Value, (u16, &'static str)>;
@@ -135,7 +135,7 @@ pub(crate) fn claim(body: &[u8], store: &PostgresRuntimeStore) -> ProtocolResult
             .job_id
             .as_deref()
             .is_some_and(|value| !runtime_job_id(value))
-        || !python_worker_job_kind(request.job_kind.as_str())
+        || !hosted_job_kind(request.job_kind.as_str())
         || !(1_000..=300_000).contains(&request.lease_ms)
         || !(1..=32).contains(&request.limit)
     {
@@ -254,11 +254,11 @@ fn valid_wait_request(request: &WaitRequest) -> bool {
     request.schema == "runtime.job.wait.v1"
         && (1..=20_000).contains(&request.wait_ms)
         && !request.job_kinds.is_empty()
-        && request.job_kinds.len() <= PYTHON_WORKER_JOB_KINDS.len()
+        && request.job_kinds.len() <= HOSTED_JOB_KINDS.len()
         && request
             .job_kinds
             .iter()
-            .all(|job_kind| python_worker_job_kind(job_kind))
+            .all(|job_kind| hosted_job_kind(job_kind))
         && request.job_kinds.iter().collect::<HashSet<_>>().len() == request.job_kinds.len()
 }
 
@@ -966,7 +966,7 @@ mod tests {
 
     #[test]
     fn runtime_job_claim_requires_exact_python_worker_kind() {
-        for job_kind in PYTHON_WORKER_JOB_KINDS {
+        for job_kind in HOSTED_JOB_KINDS {
             let request = serde_json::from_value::<ClaimRequest>(json!({
                 "schema": "runtime.job.claim.v1",
                 "workerId": "worker:python-slot-0",
@@ -977,7 +977,7 @@ mod tests {
                 "limit": 1,
             }))
             .expect("decode exact worker claim");
-            assert!(python_worker_job_kind(request.job_kind.as_str()));
+            assert!(hosted_job_kind(request.job_kind.as_str()));
         }
         for job_kind in [
             "provider.poll",
@@ -985,7 +985,7 @@ mod tests {
             "knowledge.process",
             "banana",
         ] {
-            assert!(!python_worker_job_kind(job_kind));
+            assert!(!hosted_job_kind(job_kind));
         }
         assert!(serde_json::from_value::<ClaimRequest>(json!({
             "schema": "runtime.job.claim.v1",
@@ -1003,7 +1003,7 @@ mod tests {
     fn runtime_job_wait_contract_is_exact_bounded_and_v1() {
         let request = serde_json::from_value::<WaitRequest>(json!({
             "schema": "runtime.job.wait.v1",
-            "jobKinds": PYTHON_WORKER_JOB_KINDS,
+            "jobKinds": HOSTED_JOB_KINDS,
             "waitMs": 20_000,
         }))
         .expect("decode exact worker wait request");

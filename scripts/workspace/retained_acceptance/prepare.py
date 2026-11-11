@@ -47,7 +47,7 @@ def main():
     parser.add_argument("--api-port", type=int, default=18080)
     parser.add_argument("--runtime-port", type=int, default=19001)
     parser.add_argument('--build-manifest', required=True, type=Path)
-    for name in ('api','worker','runtime','general','postgres','redis'):
+    for name in ('api','runtime','general','postgres','redis'):
         parser.add_argument('--'+name+'-image', required=True)
 
     parser.add_argument("--python-deps", type=Path, help="Isolated dependency target for cached API image")
@@ -94,7 +94,7 @@ def main():
 
         raise SystemExit("managed sandboxes already exist; isolated DB cannot reconcile this host")
     images={}
-    for name in ('api','worker','runtime','general','postgres','redis'):
+    for name in ('api','runtime','general','postgres','redis'):
         reference=getattr(args,name+'_image')
         inspected=subprocess.run(docker + ['image','inspect','--format','{{.Id}}',reference],
                                  check=True,capture_output=True,text=True).stdout.strip()
@@ -227,7 +227,7 @@ def main():
         if key != 'ENVIRONMENT_MAINTENANCE_TOKEN'), encoding='utf-8')
     os.chmod(service_envpath, 0o600)
 
-    source_mounts = [f"{source / 'packages/workspace/api'}:/app/packages/workspace/api:ro", f"{source / 'packages/workspace/worker'}:/app/packages/workspace/worker:ro"]
+    source_mounts = [f"{source / 'packages/workspace/api'}:/app/packages/workspace/api:ro"]
 
     volumes = {"postgres": {}, "storage": {}, "uploads": {}, "plugins": {"name": project + "_plugins"}, "memory": {"name": project + "_memory"}, "runtime": {}}
 
@@ -243,7 +243,7 @@ def main():
 
         "runtime": {"image":images['runtime']['id'], "env_file":[str(envpath)], "entrypoint":["/usr/local/bin/runtime_server"], "volumes":[f"{bins / 'runtime_server'}:/usr/local/bin/runtime_server:ro",(args.docker_socket or "/var/run/docker.sock") + ":/var/run/docker.sock","runtime:/var/lib/centaeris-runtime","memory:/var/lib/centaeris-agent-memory","plugins:/opt/centaeris/plugins:ro"]},
 
-        "worker": {"image":images['worker']['id'], "env_file":[str(service_envpath)], "working_dir":"/app/packages/workspace/worker", "command":["/app/.venv/bin/python","worker.py","serve"], "volumes":source_mounts, "init":True},
+        "platform-reconciler": {"image":images['api']['id'], "entrypoint":["/app/.venv/bin/python","-m","app_core.platform_reconciler"], "working_dir":"/app/packages/workspace/api", "environment":{key:env[key] for key in ("API_INTERNAL_URL","INTERNAL_API_TOKEN")}, "user":"10001:10001", "volumes":source_mounts, "init":True},
 
     }
     if args.benchmark_mode:
@@ -316,7 +316,7 @@ def main():
 
     hashes = {name: hashlib.sha256((bins / name).read_bytes()).hexdigest() for name in ("runtime_server","execution_agent","environment_task_service")}
 
-    (root / "manifest.json").write_text(json.dumps({"project":project,"sourceRevision":sha,"source":str(source),"binaryDirectory":str(bins),"binarySha256":hashes,'images':images,'buildManifest':build,'mountedPackages':['packages/workspace/api','packages/workspace/worker'],"apiPort":args.api_port,"runtimePort":args.runtime_port,"status":"prepared-not-started"},indent=2),encoding="utf-8")
+    (root / "manifest.json").write_text(json.dumps({"project":project,"sourceRevision":sha,"source":str(source),"binaryDirectory":str(bins),"binarySha256":hashes,'images':images,'buildManifest':build,'mountedPackages':['packages/workspace/api'],"apiPort":args.api_port,"runtimePort":args.runtime_port,"status":"prepared-not-started"},indent=2),encoding="utf-8")
 
     if args.benchmark_mode:
         manifest_path = root / 'manifest.json'

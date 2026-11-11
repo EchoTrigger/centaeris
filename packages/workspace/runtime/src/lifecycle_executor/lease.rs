@@ -207,4 +207,35 @@ mod tests {
         assert!(state.healthy);
         assert_eq!(state.deadline, start + Duration::from_secs(12));
     }
+
+    #[test]
+    fn handoff_joins_inflight_renewal_and_rejects_fence_loss_or_uncertain_acknowledgement() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for fence_lost in [true, false] {
+            runtime.block_on(async {
+                let state = Arc::new((Mutex::new(Window {
+                    deadline: Instant::now()+Duration::from_secs(60), healthy:true, lost:false, stopped:false,
+                }),Condvar::new()));
+                let shared = state.clone();
+                let (stop,mut receiver)=watch::channel(false);
+                let (started,observed)=tokio::sync::oneshot::channel();
+                let (finish,finished)=tokio::sync::oneshot::channel();
+                let renewal = tokio::spawn(async move {
+                    receiver.changed().await.unwrap();
+                    started.send(()).unwrap();
+                    finished.await.unwrap();
+                    let mut state=shared.0.lock().unwrap();
+                    state.lost=fence_lost;
+                    state.healthy=false;
+                    shared.1.notify_all();
+                });
+                let lease=Lease {state,renewal:Some(renewal),stop,shutdown:Shutdown::default()};
+                let handoff=tokio::task::spawn_blocking(move || lease.handoff());
+                observed.await.unwrap();
+                assert!(!handoff.is_finished());
+                finish.send(()).unwrap();
+                assert!(matches!(handoff.await.unwrap(),Err(Failure::Rejected {status:409,code}) if code=="agent_run_lifecycle_lease_lost"));
+            });
+        }
+    }
 }
