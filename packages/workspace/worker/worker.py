@@ -1348,11 +1348,6 @@ def run_worker_service():
     control_threads = [
         threading.Thread(
             target=run_loop,
-            args=(TerminalDispatcher(), OUTBOX_POLL_INTERVAL_SECONDS, stopped),
-            name="workspace-terminal-dispatcher",
-        ),
-        threading.Thread(
-            target=run_loop,
             args=(LifecycleReconciler(), RECONCILE_INTERVAL_SECONDS, stopped),
             name="workspace-reconciler",
         ),

@@ -11,7 +11,7 @@ Core behavior.
 | --- | --- |
 | `packages/workspace/api` | Django identity, membership, workspace ACL, files, credentials, Plugin installation, AgentRun authorization, and durable product jobs |
 | `packages/workspace/runtime` | Core composition, PostgreSQL RuntimeStore adapter, Redis live projection, and Docker execution binding |
-| `packages/workspace/worker` | Terminal outbox delivery and platform reconciliation |
+| `packages/workspace/worker` | Platform reconciliation |
 | `packages/workspace/executor` | Fixed helper included in the AgentRun execution image |
 | `packages/workspace/documents` | Office, PDF, and image inspection plus bounded canonical representations |
 | `packages/workspace/web` | Browser product consuming REST and SSE |
@@ -130,6 +130,15 @@ Django resolves execution and cleanup authorization, projects committed terminal
 facts and verifies release receipts. Runtime completes a lifecycle Job only after
 its existing terminal, cleanup and release constraints pass. Terminal outbox
 publication and platform reconciliation remain independent control loops.
+
+Runtime commits each terminal Job fact and its outbox record in one transaction.
+That transaction sends `runtime_job_terminal_v1`; PostgreSQL delivers the hint
+only after commit. Runtime drains durable outbox pages directly, wakes lifecycle
+Jobs through the existing idempotent wake transaction, and acknowledges only a
+fully processed generation. Listener registration precedes the pending-row check.
+Startup scans, reconnects and five-second waiter reconciliation recover missed
+notifications and relationships registered after publication. Published history
+is never made pending merely to recover a late waiter.
 
 Model request concurrency and rate limits belong to the configured upstream
 gateway or provider. Docker environments retain their explicit CPU, memory and
