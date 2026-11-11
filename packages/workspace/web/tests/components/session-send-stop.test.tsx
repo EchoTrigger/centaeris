@@ -136,6 +136,26 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); fixture.subscriptions.length = 0; vi.clearAllMocks(); vi.unstubAllGlobals(); sessionStorage.clear(); localStorage.clear(); });
 
+test("pending conversation metadata does not substitute loading text for the title", async () => {
+  const details = deferred<{ session: typeof row }>();
+  const navigation = deferred<{ sessions: typeof row[] }>();
+  const request = fixture.request.getMockImplementation()!;
+  fixture.request.mockImplementation((path, options) => path === "/api/sessions/session" ? details.promise
+    : path === "/api/workspaces/workspace/sessions" ? navigation.promise : request(path, options));
+  const summary = { id: row.id, workspaceId: row.workspaceId, status: row.status, title: row.title };
+  render(<MemoryRouter><AppPageContent initialSession={summary} workspaceDraft={false}
+    location={{ search: "", state: null }} modelsVersion={0} onSessionAccepted={() => {}} /></MemoryRouter>);
+  expect(screen.queryByRole("heading", { level: 1 })).toBeNull();
+  expect(screen.queryByText("agentChat.loading")).toBeNull();
+
+  const updated = { ...row, title: "Updated title" };
+  await act(async () => {
+    details.resolve({ session: updated });
+    navigation.resolve({ sessions: [updated] });
+  });
+  expect(await screen.findByRole("heading", { name: "Updated title", level: 1 })).toBeTruthy();
+});
+
 test("the home page opens an existing conversation from the sidebar", async () => {
   const user = userEvent.setup();
   const home = "/w/workspace/app";

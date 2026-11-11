@@ -1565,8 +1565,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           >
             <PanelLeft aria-hidden="true" />
           </button> : null}
-          {!catalogContent && activeSession ? <ConversationTitle key={activeSession.id} session={activeSession} actions={sessionActions} running={hasActiveAgentRun} />
-            : !catalogContent && requestedSessionId && loadingHistory ? <span className="workspaceConversationTitle" role="status">{t("agentChat.loading")}</span> : null}
+          {!catalogContent && activeSession ? <ConversationTitle key={activeSession.id} session={activeSession} actions={sessionActions} running={hasActiveAgentRun} /> : null}
           {compactLayout ? <button className="workspacePanelToggle" ref={search.triggerRef} type="button" onClick={search.toggle}
             aria-label={t("searchOverlay.searchConversationsAndNotes")} title={t("shellSidebar.searchCtrlK")}><Search aria-hidden="true" /></button> : null}
         </div>

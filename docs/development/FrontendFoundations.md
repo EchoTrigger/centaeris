@@ -248,9 +248,12 @@ whole history. Referenced content readers share in-flight reads for the same
 content range. Clearing the view invalidates those reads; a late completion
 cannot erase the replacement request or repopulate the cache.
 
-Conversation loading exposes one generic loading status. Internal projection,
-replay and materialization stages are not UI copy. A selected view stays in the
-loading state until its snapshot resolves, including the first render.
+Initial route and conversation reads keep their layout without loading copy.
+Pending titles and conversation content stay blank while data is loading;
+an empty-conversation message requires an authoritative snapshot. Errors and
+paused reads retain their existing feedback and recovery actions. Internal
+projection, replay and materialization stages are not UI copy. A selected view
+stays internally loading until its snapshot resolves, including the first render.
 
 The first snapshot waits for the bounded transcript, active runs and pending
 questions. Runtime configuration and context usage refresh independently after

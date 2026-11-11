@@ -585,9 +585,8 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
         tabIndex={0}
         role="region"
         aria-label={t("virtualAgentRunList.conversationMessages")}
+        aria-busy={loadingHistory}
       >
-        {loadingHistory && blockIds.length === 0 && live === null && !pendingVisible
-          ? <div className="workspaceEmptyState" role="status">{t('appRoute.loadingConversation')}</div> : null}
         {!loadingHistory && blockIds.length === 0 && live === null && !pendingVisible ? (emptyState || null) : null}
         {citations.error ? <div role="status" className="workspaceToolOutputStatus">
           {t("appRoute.citationRefreshFailed")}

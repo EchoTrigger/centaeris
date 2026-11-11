@@ -28,6 +28,19 @@ function page() {
     ] };
 }
 
+test("pending history reserves the conversation without substituting loading or empty text", () => {
+  const store = createTranscriptViewStore();
+  const props = { store, sessionId: "session", loadingHistory: true, loadingOlderHistory: false,
+    onLoadOlderHistory: async () => {}, emptyState: <p>Authoritative empty conversation</p> };
+  const view = render(<TranscriptBlockList {...props} />);
+  const region = screen.getByRole("region", { name: "virtualAgentRunList.conversationMessages" });
+  expect(region.getAttribute("aria-busy")).toBe("true");
+  expect(region.textContent).toBe("");
+  view.rerender(<TranscriptBlockList {...props} loadingHistory={false} />);
+  expect(region.getAttribute("aria-busy")).toBe("false");
+  expect(screen.getByText("Authoritative empty conversation")).toBeTruthy();
+});
+
 test("a stage hit expands its process, highlights only the hit block and pauses latest reading", async () => {
   const store = createTranscriptViewStore();
   store.openTail(page());

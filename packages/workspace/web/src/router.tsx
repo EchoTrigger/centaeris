@@ -118,8 +118,7 @@ function RootLayout() {
 }
 
 function RouteLoading() {
-  const { t } = useTranslation();
-  return <main className="routeLoading" aria-live="polite">{t("router.loadingWorkspace")}</main>;
+  return <main className="routeLoading" aria-busy />;
 }
 
 function RouteError() {
