@@ -61,7 +61,7 @@ Runtime mounts the helper at its original path and the socket directory at
 `/run/centaeris-host`, both read-only. Configuration validation checks those exact
 bindings and rejects production host paths or access from other services.
 
-The Worker dispatches each claimed Job independently. Run `stop` only after the
+Runtime dispatches each claimed Job independently. Run `stop` only after the
 stack drains; it preserves test volumes. There is no automatic volume deletion,
 password reset, cancellation, or replay of failed runs.
 
@@ -503,6 +503,25 @@ PR CI exercises the probe against a synthetic HTTP response and checks in
 Django that the 1 MiB body uses one Runtime request before the checkpoint.
 The existing presentation tests cover slow consumption, cancellation, and
 replay. The per-Run k6 event-stream scenarios still measure the per-Run API.
+
+## Lifecycle coordination comparison
+
+`python perf/harness/lifecycle_comparison.py --build-executables --output /path/outside/checkout/comparison.json`
+compares the historical Python coordinator with the native Runtime using the
+existing Django/Runtime fixture. Set `TEST_POSTGRES_*` to an owned disposable
+PostgreSQL server with `track_commit_timestamp=on`; never use an application
+database. Compilation finishes before sampling. Both executables use the same
+test-only waiter and empty physical adapters.
+
+The default is 30 samples per mode after three warmups, with a fixed 50 ms model
+response. It reports dispatch-to-model, model-to-observed-Job-completion, terminal
+commit-to-parent-wake latency, and coordinator HTTP counts. The wake case checks
+that the parent becomes eligible without executing it. The report records versions,
+fixture changes, binary digests, case outcomes and raw samples. Samples run
+sequentially, baseline then candidate; this does not control for time-varying host
+load. Temporary source assets remain available through sampling and are removed
+with the copied executables afterward. Real provider and sandbox latency,
+production capacity, CPU/RSS and database query cost are separate measurements.
 
 ## Local processing comparisons
 

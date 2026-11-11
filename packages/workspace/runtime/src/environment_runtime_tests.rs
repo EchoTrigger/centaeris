@@ -2,6 +2,7 @@ use super::*;
 use centaeris_core::session::reliability::*;
 use serde_json::Value;
 
+mod lifecycle_measurement;
 mod owned_execution;
 pub(super) use owned_execution::{
     cleanup_owned_physical_execution, owned_host_context, owned_inventory, prepare_owned_allocation,
@@ -87,6 +88,32 @@ fn environment_runtime_server() {
             assert!(lifecycle.is_none());
             lifecycle = Some(crate::lifecycle_executor::start(state.clone()).unwrap());
             println!("environment-runtime-lifecycle:{}", json!({"started":true}));
+            io::stdout().flush().unwrap();
+            continue;
+        }
+        if command == "start-terminal-delivery" {
+            assert!(lifecycle.is_none());
+            lifecycle =
+                Some(crate::lifecycle_executor::start_terminal_delivery(state.clone()).unwrap());
+            println!(
+                "environment-runtime-terminal-delivery:{}",
+                json!({"started":true})
+            );
+            io::stdout().flush().unwrap();
+            continue;
+        }
+        if let Some(wire) = command.strip_prefix("measure-waiter:") {
+            let proof = lifecycle_measurement::seed(backend.as_ref(), wire);
+            println!("environment-runtime-measure-waiter:{proof}");
+            io::stdout().flush().unwrap();
+            continue;
+        }
+        if let Some(source) = command.strip_prefix("measure-source-complete:") {
+            lifecycle_measurement::complete(backend.as_ref(), source);
+            println!(
+                "environment-runtime-measure-source-complete:{}",
+                json!({"completed":true})
+            );
             io::stdout().flush().unwrap();
             continue;
         }
