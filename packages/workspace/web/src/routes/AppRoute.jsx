@@ -1585,7 +1585,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
             <button type="button" onClick={returnToLatest}>{t("virtualAgentRunList.jumpToLatest")}</button>
           </div> : null}
           <TranscriptBlockList
-            key={searchEventId ? `search:${sessionId}:${searchEventId}` : `live:${sessionId}`}
+            key={searchEventId ? `search:${sessionId}:${searchEventId}` : "live"}
             ref={transcriptRef}
             store={searchEventId ? focusedTranscript.store : transcriptStore}
             searchTarget={searchEventId ? { blockId: focusedTranscript.blockId, query: searchHighlight, onReturnLatest: returnToLatest } : undefined}
