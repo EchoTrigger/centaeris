@@ -6,6 +6,16 @@ Record the tested commit, browser/version, viewport, account role, and result.
 
 ## Conversation workbench
 
+- Open search from the sidebar and Ctrl/Cmd+K. Search a Chinese two-character
+  phrase, an English identifier and literal `%`/`_` text occurring only in a user
+  message, an Agent stage update or a final answer. Confirm type labels, matching
+  context, keyword highlights and opening the selected Session. Materials still
+  match names. Check an older committed message that is not in the loaded page.
+- Type another query while a search request is pending; only current results may
+  appear. Page through more than 20 matching conversations, then simulate a failed
+  page: loaded matches and query stay available. Check keyboard selection,
+  retry, long snippets, narrow viewports and both themes. Other users', archived
+  and deleted Sessions must not appear; repeat after membership is revoked.
 - Open short and long Sessions, load one older page per deliberate upward read,
   and confirm a visible block keeps its viewport offset when content is prepended.
 - Let reasoning, tool activity, and the final answer stream while detached from

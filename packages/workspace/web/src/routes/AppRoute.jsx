@@ -1650,7 +1650,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       {catalogContent ? <section className="workspaceCatalog" inert={search.open}>
         {catalogContent}
       </section> : null}
-      {search.open ? <WorkspaceSearch workspaceId={workspace.id} sessions={sessions} onClose={search.close} inputRef={search.inputRef} /> : null}
+      {search.open ? <WorkspaceSearch workspaceId={workspace.id} onClose={search.close} inputRef={search.inputRef} /> : null}
       {visible ? <WorkspaceContextPanel
         id={previewPanelId}
         panel={contextPanel}

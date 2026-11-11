@@ -676,7 +676,7 @@
   "searchOverlay.markdownNote": "Markdown 笔记",
   "searchOverlay.untitledConversation": "未命名会话",
   "searchOverlay.workspaceSearch": "工作区搜索",
-  "searchOverlay.searchWorkspace": "搜索会话标题、资料名称…",
+  "searchOverlay.searchWorkspace": "搜索会话、正文、资料名称…",
   "searchOverlay.searchConversationsAndNotes": "搜索会话和资料",
   "searchOverlay.loadFailed": "无法加载搜索结果。",
   "searchOverlay.libraryLoadFailed": "无法加载资料库。",
@@ -685,7 +685,7 @@
   "searchOverlay.searchResults": "搜索结果",
   "searchOverlay.noMatchingResults": "没有匹配的内容",
   "searchOverlay.searchResultPreview": "搜索结果预览",
-  "searchOverlay.enterKeywordsToSearch": "按标题查找会话，按名称查找资料。",
+  "searchOverlay.enterKeywordsToSearch": "搜索会话标题、用户输入、Agent 阶段和最终回复，或按名称查找资料。",
   "searchOverlay.select": "↑↓ 选择",
   "searchOverlay.enterOpen": "Enter 打开",
   "searchOverlay.escClose": "Esc 关闭",
@@ -1115,5 +1115,9 @@
   "developer.response.existingOperation": "同一凭证、键和输入对应的操作已被接受，只返回回执，不重放结果。",
   "developer.response.statusOnly": "当前执行与清理回执，不含文本或文件。",
   "developer.response.terminal": "运行已达到终态，请检查 runStatus。",
-  "developer.response.cancelRequested": "已请求取消，需查询原操作确认终态。"
+  "developer.response.cancelRequested": "已请求取消，需查询原操作确认终态。",
+  "searchOverlay.match.user": "用户输入",
+  "searchOverlay.match.stage": "Agent 阶段回复",
+  "searchOverlay.match.final": "Agent 最终回复",
+  "searchOverlay.loadMoreConversations": "更多会话"
 }

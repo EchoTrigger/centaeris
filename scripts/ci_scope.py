@@ -27,6 +27,7 @@ def select_products(paths):
         (("packages/sdk/",), ("localNode",)),
         (("packages/workspace/web/",), ("web", "docker")),
         (("packages/workspace/api/",), ("workspaceRust", "workspacePython", "docker")),
+        (("packages/workspace/postgres/",), ("workspacePython", "docker")),
         (("packages/workspace/runtime/",), ("workspaceRust", "workspacePython", "web", "docker")),
         (("packages/workspace/executor/",), ("workspaceRust", "workspacePython", "docker")),
         (("packages/workspace/worker/", "packages/workspace/documents/"), ("workspacePython", "docker")),

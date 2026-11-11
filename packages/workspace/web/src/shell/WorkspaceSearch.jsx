@@ -49,7 +49,21 @@ export function useWorkspaceSearch(navigationKey, enabled = true) {
   return useMemo(() => ({ open, close, triggerRef, inputRef, toggle: open ? close : show }), [open, close, show]);
 }
 
-export function WorkspaceSearch({ sessions, workspaceId, onClose, inputRef }) {
+function SearchText({ text, query }) {
+  const parts = [];
+  const folded = text.toLocaleLowerCase();
+  let start = 0;
+  let position = folded.indexOf(query);
+  while (query && position >= 0) {
+    parts.push(text.slice(start, position), <mark key={position}>{text.slice(position, position + query.length)}</mark>);
+    start = position + query.length;
+    position = folded.indexOf(query, start);
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+export function WorkspaceSearch({ workspaceId, onClose, inputRef }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
@@ -58,11 +72,13 @@ export function WorkspaceSearch({ sessions, workspaceId, onClose, inputRef }) {
   const [sessionResponse, setSessionResponse] = useState(null);
   const [attempt, setAttempt] = useState(0);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const moreRequest = useRef(null);
   const listId = useId();
   const base = `/w/${encodeURIComponent(workspaceId)}`;
-  const needsSessions = !sessions?.length;
+  const text = query.trim().toLocaleLowerCase();
+  const searchKey = JSON.stringify([workspaceId, text, attempt]);
   const library = libraryResponse?.attempt === attempt ? libraryResponse.items : null;
-  const fetchedSessions = sessionResponse?.attempt === attempt ? sessionResponse.items : null;
+  const conversations = sessionResponse?.key === searchKey ? sessionResponse : null;
 
   useEffect(() => { inputRef?.current?.focus({ preventScroll: true }); }, [inputRef]);
 
@@ -75,15 +91,36 @@ export function WorkspaceSearch({ sessions, workspaceId, onClose, inputRef }) {
   }, [attempt]);
 
   useEffect(() => {
-    if (!needsSessions) return undefined;
+    if (!text || filter === "library") return undefined;
     const controller = new AbortController();
-    apiJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/sessions`, { signal: controller.signal })
-      .then(result => { if (!controller.signal.aborted) setSessionResponse({ attempt, items: result.sessions || [] }); })
-      .catch(() => { if (!controller.signal.aborted) setSessionResponse({ attempt, items: "failed" }); });
-    return () => controller.abort();
-  }, [attempt, needsSessions, workspaceId]);
+    const timer = window.setTimeout(() => {
+      apiJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/sessions/search?${new URLSearchParams({ query: text })}`, { signal: controller.signal })
+        .then(result => {
+          if (!Array.isArray(result.matches) || (result.nextCursor !== null && typeof result.nextCursor !== "string")) throw new Error("session_search_response_invalid");
+          if (!controller.signal.aborted) setSessionResponse({ key: searchKey, ...result, failed: false, loadingMore: false });
+        })
+        .catch(() => { if (!controller.signal.aborted) setSessionResponse({ key: searchKey, matches: [], nextCursor: null, failed: true, loadingMore: false }); });
+    }, 250);
+    return () => { window.clearTimeout(timer); controller.abort(); moreRequest.current?.abort(); };
+  }, [filter, searchKey, text, workspaceId]);
 
-  const text = query.trim().toLocaleLowerCase();
+  async function loadMore() {
+    if (!conversations?.nextCursor || conversations.loadingMore) return;
+    const controller = new AbortController();
+    moreRequest.current = controller;
+    setSessionResponse(current => ({ ...current, loadingMore: true }));
+    try {
+      const result = await apiJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/sessions/search?${new URLSearchParams({ query: text, cursor: conversations.nextCursor })}`, { signal: controller.signal });
+      if (!Array.isArray(result.matches) || (result.nextCursor !== null && typeof result.nextCursor !== "string")) throw new Error("session_search_response_invalid");
+      if (!controller.signal.aborted) setSessionResponse(current => {
+        const ids = new Set(current.matches.map(item => item.sessionId));
+        return { key: searchKey, matches: [...current.matches, ...result.matches.filter(item => !ids.has(item.sessionId))], nextCursor: result.nextCursor, failed: false, loadingMore: false };
+      });
+    } catch {
+      if (!controller.signal.aborted) setSessionResponse(current => ({ ...current, failed: true, loadingMore: false }));
+    }
+  }
+
   const matches = value => (value || "").toLocaleLowerCase().includes(text);
   const groups = [
     {
@@ -97,17 +134,17 @@ export function WorkspaceSearch({ sessions, workspaceId, onClose, inputRef }) {
       type: "conversations",
       label: t("searchOverlay.conversations"),
       icon: MessageSquare,
-      results: (needsSessions ? Array.isArray(fetchedSessions) ? fetchedSessions : [] : sessions).filter(session => matches(session.title))
-        .slice(0, 12).map(session => ({ title: session.title || t("searchOverlay.untitledConversation"), href: sessionChatPath(workspaceId, session.id) })),
+      results: (conversations?.matches || []).map(session => ({ title: session.title || t("searchOverlay.untitledConversation"),
+        snippet: session.match.snippet, kind: session.match.kind, href: sessionChatPath(workspaceId, session.sessionId) })),
     },
   ].filter(group => text && (filter === "all" || filter === group.type));
   const results = groups.flatMap(group => group.results);
   const activeIndex = Math.min(selectedIndex, results.length - 1);
   const optionId = index => `${listId}-${index}`;
   const loading = (filter !== "conversations" && library === null)
-    || (filter !== "library" && needsSessions && fetchedSessions === null);
+    || (filter !== "library" && text && (conversations === null || conversations.loadingMore));
   const libraryFailed = filter !== "conversations" && library === "failed";
-  const conversationsFailed = filter !== "library" && needsSessions && fetchedSessions === "failed";
+  const conversationsFailed = filter !== "library" && conversations?.failed;
   const failed = libraryFailed || conversationsFailed;
 
   function select(href) {
@@ -132,7 +169,7 @@ export function WorkspaceSearch({ sessions, workspaceId, onClose, inputRef }) {
     <header className="shSearchInputRow">
       <input ref={inputRef} autoFocus role="combobox" aria-expanded={Boolean(results.length)} aria-controls={listId}
         aria-autocomplete="list" aria-activedescendant={activeIndex >= 0 ? optionId(activeIndex) : undefined}
-        value={query} onChange={event => { setQuery(event.target.value); setSelectedIndex(0); }}
+        value={query} maxLength={256} onChange={event => { setQuery(event.target.value); setSelectedIndex(0); }}
         onKeyDown={handleKeyDown} placeholder={t("searchOverlay.searchWorkspace")} aria-label={t("searchOverlay.searchConversationsAndNotes")} />
       <button className="workspacePanelToggle" type="button" aria-label={t("workspaceContextPanel.close")} onClick={onClose}><X aria-hidden="true" /></button>
     </header>
@@ -151,12 +188,17 @@ export function WorkspaceSearch({ sessions, workspaceId, onClose, inputRef }) {
               aria-selected={index === activeIndex} key={result.href}
               onMouseEnter={() => setSelectedIndex(index)} onMouseDown={event => event.preventDefault()} onClick={() => select(result.href)}>
               <Icon aria-hidden="true" />
-              <span>{result.title}</span>
+              <span className="shSearchResultText"><strong><SearchText text={result.title} query={text} /></strong>
+                {result.snippet ? <small><span>{t(`searchOverlay.match.${result.kind}`)}</span><SearchText text={result.snippet} query={text} /></small> : null}
+              </span>
             </button>;
           })}
         </div>
       ) : null)}
     </div>
+    {text && filter !== "library" && conversations?.nextCursor ? <div className="shSearchNotice">
+      <button type="button" disabled={conversations.loadingMore} onClick={() => void loadMore()}>{t("searchOverlay.loadMoreConversations")}</button>
+    </div> : null}
     {text && failed ? <div className="shSearchNotice">
       <span role="alert">{t(libraryFailed && conversationsFailed ? "searchOverlay.loadFailed" : libraryFailed ? "searchOverlay.libraryLoadFailed" : "searchOverlay.conversationsLoadFailed")}</span>
       <button type="button" onClick={() => {

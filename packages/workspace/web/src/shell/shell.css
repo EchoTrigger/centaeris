@@ -302,6 +302,12 @@
 .shSearchResults button:hover, .shSearchResults button[aria-selected="true"] { background: var(--workspace-selection); }
 .shSearchResults button > svg { width: 14px; flex: none; color: var(--process-text); }
 .shSearchResults button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shSearchResults button:has(.shSearchResultText small) { align-items: flex-start; padding-block: 9px; }
+.shSearchResultText { flex: 1; }
+.shSearchResultText strong { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 13px; font-weight: 500; }
+.shSearchResultText small { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; white-space: normal; color: var(--process-text); font-size: 12px; line-height: 18px; }
+.shSearchResultText small > span { margin-right: 8px; color: var(--on-surface); }
+.shSearchResultText mark { background: color-mix(in srgb, var(--primary-color) 18%, transparent); color: inherit; }
 .shSearchEmpty { display: grid; flex: 1; place-content: center; justify-items: center; gap: 4px; padding: 24px; color: var(--process-text); text-align: center; }
 .shSearchEmpty strong { color: var(--on-surface); font-weight: 550; }
 .shSearchEmpty span { font-size: 12px; }

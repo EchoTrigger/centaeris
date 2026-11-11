@@ -5,9 +5,11 @@ from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.contrib.sessions.base_session import AbstractBaseSession
+from django.contrib.postgres.indexes import GinIndex, OpClass
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.db import IntegrityError, models, router, transaction
+from django.db.models.functions import Lower
 from .session_payload import SessionPayloadField
 
 from .agent_identity import (
@@ -995,6 +997,7 @@ class Session(models.Model):
     updatedAt = models.DateTimeField(auto_now=True)
 
     class Meta:
+        indexes = [GinIndex(OpClass(Lower("title"), name="gin_bigm_ops"), name="session_title_bigm")]
         constraints = [
             models.CheckConstraint(
                 condition=models.Q(purpose__in=("interactive", "agentRunApi")),
@@ -1615,7 +1618,11 @@ class SessionEvent(models.Model):
     insertedAt = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        indexes = [models.Index(fields=["insertedAt", "eventId"], name="agent_work_recovery_scan",
+        indexes = [
+            GinIndex(OpClass(Lower(models.Func("payload", function="workspace_session_search_text",
+                output_field=models.TextField())), name="gin_bigm_ops"), name="session_event_body_bigm",
+                condition=models.Q(payload__type__in=["user_message", "phase_event", "assistant_message"])),
+            models.Index(fields=["insertedAt", "eventId"], name="agent_work_recovery_scan",
             condition=models.Q(session_level=False, projects_to_agent_run_stream=True,
                 payload__type="tool_result", payload__payload__toolName="dispatch_work",
                 payload__payload__resultState="successWithOutput"))]

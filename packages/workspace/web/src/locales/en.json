@@ -676,7 +676,7 @@
   "searchOverlay.markdownNote": "Markdown note",
   "searchOverlay.untitledConversation": "Untitled conversation",
   "searchOverlay.workspaceSearch": "Workspace search",
-  "searchOverlay.searchWorkspace": "Search conversation titles and material names…",
+  "searchOverlay.searchWorkspace": "Search conversations, messages and material names…",
   "searchOverlay.loadFailed": "Couldn’t load search results.",
   "searchOverlay.libraryLoadFailed": "Couldn’t load library materials.",
   "searchOverlay.conversationsLoadFailed": "Couldn’t load conversations.",
@@ -685,7 +685,7 @@
   "searchOverlay.searchResults": "Search results",
   "searchOverlay.noMatchingResults": "No matching results",
   "searchOverlay.searchResultPreview": "Search result preview",
-  "searchOverlay.enterKeywordsToSearch": "Find a conversation by title or a library item by name.",
+  "searchOverlay.enterKeywordsToSearch": "Search conversation titles, your messages, Agent updates and answers, or material names.",
   "searchOverlay.select": "↑↓ Select",
   "searchOverlay.enterOpen": "Enter Open",
   "searchOverlay.escClose": "Esc Close",
@@ -1115,5 +1115,9 @@
   "developer.response.existingOperation": "Already accepted operation with the same credential, key and input; receipt only, no result replay.",
   "developer.response.statusOnly": "Current execution and cleanup receipt; no text or files.",
   "developer.response.terminal": "Run already terminal; inspect runStatus.",
-  "developer.response.cancelRequested": "Cancellation requested; query the operation to confirm a terminal state."
+  "developer.response.cancelRequested": "Cancellation requested; query the operation to confirm a terminal state.",
+  "searchOverlay.match.user": "You",
+  "searchOverlay.match.stage": "Agent update",
+  "searchOverlay.match.final": "Agent answer",
+  "searchOverlay.loadMoreConversations": "More conversations"
 }

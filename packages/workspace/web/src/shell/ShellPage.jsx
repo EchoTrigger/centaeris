@@ -73,7 +73,7 @@ export function ShellPage({ children, mainClassName = "", showRecentSessions = f
         {!sidebarOpen ? <button className="shSidebarOpen" type="button" aria-label={t("appRoute.showSidebar")} title={t("appRoute.showSidebar")} onClick={() => setSidebarOpen(true)}><PanelLeft aria-hidden="true" /></button> : null}
         {children}
       </main>
-      {search.open ? <WorkspaceSearch workspaceId={workspace.id} sessions={recentNavigation?.sessions} onClose={search.close} inputRef={search.inputRef} /> : null}
+      {search.open ? <WorkspaceSearch workspaceId={workspace.id} onClose={search.close} inputRef={search.inputRef} /> : null}
     </div>
   );
 }

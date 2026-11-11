@@ -89,6 +89,7 @@ from .response_schema import (
     AgentRunEnvironmentResponse,
     AgentRunSupplementResponse,
     SessionsEnvelope,
+    SessionSearchEnvelope,
     WorkspacesEnvelope,
     WorkspacePluginEnvelope,
     WorkspacePluginResponse,
@@ -443,15 +444,47 @@ def create_session_project(
     return Status(201, {"project": serialize_session_project(project)})
 
 
-def prepare_workspace_session_list(request, workspace_id: str):
-    """Authorize and scope navigation without loading or projecting its rows."""
+def _authorized_workspace_sessions(request, workspace_id: str):
     workspace = _workspace_for_user(request.user, workspace_id)
     if workspace is None:
         return Status(404, {"error": "workspace_not_found"})
-    if request.GET:
-        return Status(400, {"error": "session_filter_unsupported"})
     require_request_delegation(request, "sessions:read", workspace_id=workspace_id)
     return Session.objects.filter(workspace=workspace, owner=request.user, status="active", purpose="interactive")
+
+
+def prepare_workspace_session_list(request, workspace_id: str):
+    """Authorize and scope navigation without loading or projecting its rows."""
+    sessions = _authorized_workspace_sessions(request, workspace_id)
+    if isinstance(sessions, Status):
+        return sessions
+    if request.GET:
+        return Status(400, {"error": "session_filter_unsupported"})
+    return sessions
+
+
+@router.get(
+    "/workspaces/{workspace_id}/sessions/search",
+    auth=usage_auth("sessions:read"),
+    response={200: SessionSearchEnvelope} | COMMON_ERROR_RESPONSES,
+)
+def search_workspace_sessions(request, workspace_id: str):
+    sessions = _authorized_workspace_sessions(request, workspace_id)
+    if isinstance(sessions, Status):
+        return sessions
+    if not valid_query_fields(request.GET, {"query", "cursor"}, required={"query"}):
+        return Status(400, {"error": "session_search_query_invalid"})
+    query = request.GET["query"].strip()
+    cursor = request.GET.get("cursor")
+    if not query or len(query) > 256 or "\0" in query or (cursor is not None and (not cursor or len(cursor) > 4096)):
+        return Status(400, {"error": "session_search_query_invalid"})
+    from app_core.session_search import search_sessions
+    try:
+        return search_sessions(sessions.filter(archivedAt__isnull=True), user_id=request.user.pk,
+            workspace_id=workspace_id, query=query, cursor=cursor)
+    except ValueError as error:
+        if str(error) != "session_search_cursor_invalid":
+            raise
+        return Status(400, {"error": str(error)})
 
 
 @router.get(

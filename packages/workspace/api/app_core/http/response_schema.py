@@ -307,6 +307,26 @@ class SessionsEnvelope(StrictSchema):
     sessions: list[SessionResponse]
 
 
+class SessionSearchMatch(StrictSchema):
+    kind: Literal["title", "user", "stage", "final"]
+    snippet: str
+    event_id: str | None
+    message_id: str | None
+    source_sequence: str | None
+
+
+class SessionSearchResult(StrictSchema):
+    session_id: str
+    title: str
+    updated_at: str
+    match: SessionSearchMatch
+
+
+class SessionSearchEnvelope(StrictSchema):
+    matches: list[SessionSearchResult]
+    next_cursor: str | None
+
+
 class SessionProjectResponse(StrictSchema):
     id: str
     workspace_id: str

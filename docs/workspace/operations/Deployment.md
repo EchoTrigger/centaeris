@@ -7,8 +7,12 @@ required. The current Compose build accepts Runtime source through the named
 `centaeris` build context. A release pipeline must materialize an exact revision
 and use it for both Cargo and Docker builds.
 
-Required images include API, Runtime Server, worker, Web, general execution, and
-document processor. PostgreSQL and Redis use pinned upstream image digests.
+Required images include API, Runtime Server, worker, Web, general execution,
+document processor, and PostgreSQL. Redis uses a pinned upstream image digest.
+The PostgreSQL image builds pg_bigm on a pinned PostgreSQL base for
+[Session body search](../reference/SessionSearch.md). Deploy that image before
+running the search migration, retaining the existing PostgreSQL data volume;
+both application and test databases require the extension.
 Execution and document processing are normal runtime dependencies.
 
 ## Local start
