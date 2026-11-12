@@ -1,3 +1,4 @@
+import { ConversationDockItem } from "../shell/ConversationDock";
 import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate, useRouteLoaderData, useSearchParams } from "react-router";
 import { ArrowUpRight, CheckCircle2, ChevronRight, Clock3, FileText, Folder, ListFilter, MessageSquare, Minus, Plus, Search, Star, SignalHigh, SignalMedium, SignalLow, RotateCcw, X } from "lucide-react";
@@ -150,7 +151,7 @@ function FloatingConversation({ conversation, onClose }) {
   const [draft, setDraft] = useState("");
   const [messages, setMessages] = useState([]);
   return <>
-    <button className="workConversationTab" aria-pressed={!minimized} onClick={() => setMinimized(value => !value)}><MessageSquare />{conversation.title}</button>
+    <ConversationDockItem><button className="workConversationTab" aria-pressed={!minimized} onClick={() => setMinimized(value => !value)}><MessageSquare />{conversation.title}</button></ConversationDockItem>
     {!minimized ? <section className="workFloatingConversation" role="dialog" aria-label={conversation.title} onKeyDown={event => { if(event.key === "Escape") { event.stopPropagation(); onClose(); } }}>
       <header><h2>{conversation.title}</h2><button aria-label="最小化示例会话" onClick={() => setMinimized(true)}><Minus /></button><button autoFocus aria-label="关闭示例会话" onClick={onClose}><X /></button></header>
       <div className="workFloatingMessages"><p className="workMuted">{conversation.state} · 示例会话</p><h3>Agent</h3><p>{conversation.text}</p>{messages.map((message,index) => <p className="workExampleReply" key={index}>{message}</p>)}</div>

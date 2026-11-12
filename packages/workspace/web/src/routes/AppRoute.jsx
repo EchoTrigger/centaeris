@@ -1,3 +1,4 @@
+import { ConversationDockContext } from "../shell/ConversationDock";
 import { ConversationHistory } from "../shell/ConversationHistory";
 import { animate } from "@centaeris/ui/motion";
 import { useTranslation } from "../i18n";
@@ -276,6 +277,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const [composerError, setComposerError] = useState("");
   const [conversationError, setConversationError] = useState("");
   const [navigationError, setNavigationError] = useState(false);
+  const [conversationDock, setConversationDock] = useState(null);
   const [navigationLoaded, setNavigationLoaded] = useState(false);
   const [olderHistoryError, setOlderHistoryError] = useState(false);
   const [streamIssue, setStreamIssue] = useState(null);
@@ -1699,9 +1701,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       </section>
 
       {catalogContent ? <section className="workspaceCatalog" inert={search.open}>
-        {catalogContent}
+        <ConversationDockContext.Provider value={conversationDock}>{catalogContent}</ConversationDockContext.Provider>
       </section> : null}
-      <nav className="conversationDock" aria-label="会话工具栏" inert={search.open}>
+      <nav className="conversationDock" ref={setConversationDock} aria-label="会话工具栏" inert={search.open}>
         {activeSession ? <button className="conversationDockSession" aria-pressed={chatFloating} onClick={chatFloating ? onMinimizeChat : onShowChat}><span className={hasActiveAgentRun ? "isRunning" : ""} />{activeSession.title}</button> : null}
         <button onClick={chatFloating ? onMinimizeChat : onShowChat}><MessageSquare />Agent</button>
         <ConversationHistory {...historyProps}><History /></ConversationHistory>

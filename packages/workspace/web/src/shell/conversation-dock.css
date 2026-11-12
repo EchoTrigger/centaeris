@@ -1,8 +1,8 @@
 main.workspaceWorkbench.hasConversationDock { padding-bottom:36px; }
 .conversationDock { position:fixed; z-index:35; right:10px; bottom:4px; display:flex; align-items:center; gap:4px; height:28px; max-width:calc(100vw - 24px); }
-.conversationDock button { display:inline-flex; align-items:center; justify-content:center; gap:7px; min-width:28px; height:28px; padding:4px 9px; border:0; border-radius:6px; background:transparent; color:var(--process-text); font:inherit; font-size:12px; cursor:pointer; }
+.conversationDock button { flex-shrink:0; display:inline-flex; align-items:center; justify-content:center; gap:7px; min-width:28px; height:28px; padding:4px 9px; border:0; border-radius:6px; background:transparent; color:var(--process-text); font:inherit; font-size:12px; cursor:pointer; }
 .conversationDock button:hover,.conversationDock button[aria-pressed=true] { background:var(--workspace-selection); color:var(--on-surface); }
-.conversationDock .conversationDockSession { display:block; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.conversationDock .conversationDockSession { flex-shrink:1; min-width:0; display:block; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .conversationDockSession > .isRunning { display:inline-block; width:5px; height:5px; border-radius:50%; background:var(--primary-color); margin-right:7px; }
 .conversationDock svg { width:14px; height:14px; }
 .conversationWindowActions { display:flex; align-items:center; gap:2px; margin-left:auto; }
@@ -25,7 +25,7 @@ main.workspaceWorkbench.hasConversationDock { padding-bottom:36px; }
 .conversationHistory select { width:100%; margin-bottom:6px; padding:6px 8px; border:0; border-radius:6px; background:var(--surface-container); color:inherit; font:inherit; font-size:12px; }
 .conversationHistoryList { max-height:min(360px, 50dvh); overflow:auto; padding-bottom:4px; }
 .conversationHistory .workspaceSessionRow { width:100%; min-height:36px; }
-.conversationHistory .workspaceSessionButton { min-height:36px; }
+.conversationHistory .workspaceSessionButton { display:flex; align-items:center; gap:8px; min-height:36px; text-decoration:none; font-size:13px; }
 .conversationHistory > p { padding:8px; color:var(--process-text); font-size:12px; }
 .conversationHistory footer { display:flex; justify-content:space-between; padding-top:6px; }
 .conversationHistory footer button { display:flex; align-items:center; gap:7px; padding:7px 8px; border:0; border-radius:6px; background:transparent; color:var(--process-text); font:inherit; font-size:12px; cursor:pointer; }
@@ -43,3 +43,9 @@ main.workspaceWorkbench.hasConversationDock { padding-bottom:36px; }
 .conversationRecent button > span:last-child { flex:none; font-size:11px; }
 
 .workspaceWorkbench.isBrowsing.isChatFloating.isSearching > :is(.workspaceTopbar,.workspaceChatColumn) { visibility:hidden; }
+
+.workspaceWorkbench.isChatFloating .workspaceConversationPlane.isEmpty { --workspace-draft-width:calc(100% - 24px); grid-template-rows:minmax(0,1fr) auto; }
+.workspaceWorkbench.isChatFloating .workspaceConversationPlane.isEmpty::after { display:none; }
+.workspaceWorkbench.isChatFloating .workspaceEmptyState { padding-bottom:24px; }
+
+.conversationDock .workConversationTab { flex-shrink:1; }
