@@ -5,5 +5,5 @@ export const ConversationDockContext = createContext(null);
 
 export function ConversationDockItem({ children }) {
   const dock = useContext(ConversationDockContext);
-  return dock ? createPortal(children, dock) : children;
+  return dock?.container ? createPortal(children, dock.container) : children;
 }

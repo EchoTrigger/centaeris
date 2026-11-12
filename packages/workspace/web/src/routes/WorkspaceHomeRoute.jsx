@@ -1,10 +1,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Outlet, matchPath, useLocation, useNavigate, useRouteLoaderData } from "react-router";
+import { useTranslation } from "../i18n";
 import { AppPageContent } from "./AppRoute";
 import { isWorkspaceCatalogPath } from "../shell/sessionNavigation.mjs";
 
 export default function WorkspaceChatLayout() {
+  const { t } = useTranslation();
+  const [dockContainer, setDockContainer] = useState(null);
   const { workspace, selectedSession } = useRouteLoaderData("workspace");
   const location = useLocation();
   const locationRef = useRef(location);
@@ -13,6 +16,7 @@ export default function WorkspaceChatLayout() {
   const [notice, setNotice] = useState("");
   const [floating, setFloating] = useState(false);
   const lastCatalog = useRef("");
+  const pendingFloatingSession = useRef(undefined);
   const base = `/w/${encodeURIComponent(workspace.id)}`;
   const isChatRoute = Boolean(matchPath(`${base}/app`, location.pathname) || matchPath(`${base}/sessions/:sessionId`, location.pathname));
   const isCatalogRoute = isWorkspaceCatalogPath(base, location.pathname);
@@ -26,6 +30,12 @@ export default function WorkspaceChatLayout() {
   if (isChatRoute && chatLocation !== location) {
     setChatLocation(location);
     if (chatSession?.id !== selectedSession?.id) setChatSession(selectedSession);
+  }
+  if (isCatalogRoute && pendingFloatingSession.current !== undefined) {
+    const session = pendingFloatingSession.current;
+    pendingFloatingSession.current = undefined;
+    setChatSession(session);
+    setChatLocation({ pathname: session?.id ? `${base}/sessions/${encodeURIComponent(session.id)}` : `${base}/app`, search: "", state: null });
   }
   const sessionRoute = Boolean(chatLocation && matchPath(`${base}/sessions/:sessionId`, chatLocation.pathname));
 
@@ -59,9 +69,10 @@ export default function WorkspaceChatLayout() {
     return () => window.clearTimeout(timeout);
   }, [notice]);
 
-  return <>
+  return <div className="workspaceChatLayout">
     {chatLocation || isCatalogRoute ? <div hidden={!isChatRoute && !isCatalogRoute}>
       <AppPageContent
+        dockContainer={dockContainer}
         initialSession={chatSession}
         workspaceDraft={!sessionRoute}
         visible={isChatRoute || (isCatalogRoute && floating)}
@@ -74,8 +85,13 @@ export default function WorkspaceChatLayout() {
         onDockChat={() => { setFloating(true); navigate(lastCatalog.current || `${base}/work`); }}
         onExpandChat={() => { setFloating(false); navigate(chatLocation ? chatLocation.pathname + chatLocation.search : `${base}/app`); }}
         onOpenFloatingSession={session => {
-          setChatSession(session);
-          setChatLocation({ pathname: `${base}/sessions/${encodeURIComponent(session.id)}`, search: "", state: null });
+          if (isCatalogRoute) {
+            setChatSession(session);
+            setChatLocation({ pathname: session?.id ? `${base}/sessions/${encodeURIComponent(session.id)}` : `${base}/app`, search: "", state: null });
+          } else {
+            pendingFloatingSession.current = session;
+            navigate(lastCatalog.current || `${base}/work`);
+          }
           setFloating(true);
         }}
         location={chatLocation ?? { pathname: `${base}/app`, search: "", state: null }}
@@ -87,5 +103,6 @@ export default function WorkspaceChatLayout() {
     </div> : null}
     {notice ? <div className="shWorkspaceToast" role="status">{notice}</div> : null}
     {!isCatalogRoute ? <Outlet context={{ returnTo: chatLocation ? `${chatLocation.pathname}${chatLocation.search}${chatLocation.hash || ""}` : null, onModelsChanged }} /> : null}
-  </>;
+    <nav className="conversationDock" ref={setDockContainer} aria-label={t("work.conversation.toolbar")} />
+  </div>;
 }

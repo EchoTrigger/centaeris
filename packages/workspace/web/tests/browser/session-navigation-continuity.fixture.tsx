@@ -5,6 +5,8 @@ import { configureApi } from '../../src/api';
 import { i18n } from '../../src/i18n';
 import WorkspaceChatLayout from '../../src/routes/WorkspaceHomeRoute';
 import { RecentlyDeleted } from '../../src/routes/RecentlyDeleted';
+import WorkPrototypeRoute from '../../src/work/WorkPrototypeRoute';
+import { WorkPrototypeProvider } from '../../src/work/workPrototype';
 import SettingsRoute from '../../src/routes/SettingsRoute';
 import '../../src/globals.css';
 
@@ -61,7 +63,7 @@ window.fetch = async (input, options) => {
 const router = createMemoryRouter([{ id: 'authenticated', loader: () => ({ user }), children: [{ id: 'workspace', path: '/w/:workspaceId',
   loader: ({ params }) => ({ workspace, workspaces: [workspace], selectedSession: rows.find(row => row.id === params.sessionId) ?? null }),
   shouldRevalidate: () => true, Component: WorkspaceChatLayout,
-  children: [{ path: 'sessions/:sessionId', element: null }, { path: 'app', element: null },
+  children: [{ path: 'work/*', element: <WorkPrototypeProvider><WorkPrototypeRoute /></WorkPrototypeProvider> }, { path: 'sessions/:sessionId', element: null }, { path: 'app', element: null },
     { path: 'library', element: <h1>Navigation library</h1> },
     { path: 'settings/preferences', Component: SettingsRoute },
     { path: 'settings/archive', element: <RecentlyDeleted workspace={workspace} /> }],
@@ -88,6 +90,7 @@ Object.assign(window, { sessionNavigationFixture: { requests, failures, ready: (
   connected: (id: string) => streams.has(id), hydrate, navigate: (id: string) => router.navigate(`/w/workspace/sessions/${id}`),
   trash: () => router.navigate('/w/workspace/settings/archive?view=deleted'),
   library: () => router.navigate('/w/workspace/library'),
+  task: () => router.navigate('/w/workspace/work/tasks/CW-12'),
   preferences: () => router.navigate('/w/workspace/settings/preferences'),
   back: () => router.navigate(-1),
   repeatNavigation: (id: string) => send(id, 'navigation', { snapshotId: `${id}-repeat`, offset: 0, hasMore: false, sessions: rows }),

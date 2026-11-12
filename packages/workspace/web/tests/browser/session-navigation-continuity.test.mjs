@@ -192,3 +192,74 @@ test('Recently Deleted confirmation retains borderless styling and keyboard focu
     await rm(actual,{recursive:true,force:true});
   }
 });
+
+
+test('docked chat tabs preserve drafts, open one window and reserve space on settings only while needed', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'centaeris-navigation-'));
+  const server = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), server: { port: 0, host: '127.0.0.1' } });
+  try {
+    await server.listen();
+    await runBrowser(`${server.resolvedUrls.local[0]}tests/browser/session-navigation-continuity.html`, { width: 1280, height: 900 }, profile, async ({ evaluate, frame, send }) => {
+      const click = selector => evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+      const padding = selector => evaluate(`parseFloat(getComputedStyle(document.querySelector(${JSON.stringify(selector)})).paddingBottom)`);
+      await waitFor(() => evaluate('window.sessionNavigationFixture?.ready()'), 'workspace');
+      await evaluate("sessionNavigationFixture.hydrate('session-4')");
+      await waitFor(() => evaluate("document.body.textContent.includes('Readable session-4')"), 'first chat');
+      const originalPadding = await padding('.workspaceWorkbench');
+      await evaluate("document.querySelector('#messageDraft').focus()");
+      await send('Input.insertText', { text: 'Draft for chat four' });
+      await click('[aria-label="Move to toolbar"]');
+      await waitFor(() => evaluate("document.querySelectorAll('[role=tab]').length === 1 && Boolean(document.querySelector('.isChatFloating'))"), 'first tab');
+      const dockPadding = await padding('.workspaceWorkbench');
+      assert(dockPadding > originalPadding);
+      await evaluate("sessionNavigationFixture.navigate('session-5')");
+      await waitFor(() => evaluate("sessionNavigationFixture.connected('session-5')"), 'second chat');
+      await evaluate("sessionNavigationFixture.hydrate('session-5')");
+      await waitFor(() => evaluate("document.body.textContent.includes('Readable session-5')"), 'second content');
+      await evaluate("document.querySelector('#messageDraft').focus()");
+      await send('Input.insertText', { text: 'Draft for chat five' });
+      await click('[aria-label="Move to toolbar"]');
+      await waitFor(() => evaluate("document.querySelectorAll('[role=tab]').length === 2"), 'two tabs');
+      await evaluate('sessionNavigationFixture.task()');
+      await waitFor(() => evaluate("Array.from(document.querySelectorAll('button')).some(button => button.textContent.trim() === 'Continue')"), 'sample task');
+      await evaluate("Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'Continue').click()");
+      await waitFor(() => evaluate("Boolean(document.querySelector('.workFloatingConversation')) && !document.querySelector('.isChatFloating')"), 'sample takes the window');
+      await click('[role=tab]:first-child'); await frame();
+      assert.equal(await evaluate("document.querySelectorAll('.workFloatingConversation').length"), 0);
+      await waitFor(() => evaluate("document.querySelector('#messageDraft').value === 'Draft for chat four'"), 'first draft restored');
+      assert.equal(await evaluate("document.querySelectorAll('.isChatFloating .workspaceChatColumn').length"), 1);
+      await click('[role=tab]:last-child'); await frame();
+      await waitFor(() => evaluate("document.querySelector('#messageDraft').value === 'Draft for chat five'"), 'second draft restored');
+      if (process.env.NAVIGATION_SCREENSHOT_PATH) {
+        const shot = await send('Page.captureScreenshot', { format: 'png' });
+        await writeFile(process.env.NAVIGATION_SCREENSHOT_PATH, Buffer.from(shot.data, 'base64'));
+      }
+      await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false }); await frame();
+      assert(await evaluate("(() => { const r = document.querySelector('.conversationDock').getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth; })()"));
+      await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }); await frame();
+      await click('[role=tab]:last-child');
+      await waitFor(() => evaluate("!document.querySelector('.isChatFloating')"), 'minimized window');
+      assert.equal(await evaluate("document.querySelectorAll('[role=tab]').length"), 2);
+      await evaluate('sessionNavigationFixture.preferences()');
+      await waitFor(() => evaluate("Boolean(document.querySelector('.workspaceSettingsContent'))"), 'settings');
+      assert.equal(await padding('.workspaceSettingsPage'), dockPadding);
+      await click('[role=tab]:first-child');
+      await waitFor(() => evaluate("Boolean(document.querySelector('.isChatFloating')) && !document.querySelector('.workspaceSettingsPage')"), 'tab opens from settings');
+      await click('[aria-label="Expand chat"]');
+      await waitFor(() => evaluate("document.querySelectorAll('[role=tab]').length === 1"), 'expanded tab removed');
+      await click('[role=tab]');
+      await waitFor(() => evaluate("document.querySelector('[role=tab][aria-selected=true]')?.textContent === 'Conversation 5'"), 'last minimized chat selected');
+      await click('[aria-label="Expand chat"]');
+      await waitFor(() => evaluate("!document.querySelector('[role=tab]')"), 'all expanded');
+      assert.equal(await padding('.workspaceWorkbench'), originalPadding);
+      await evaluate('sessionNavigationFixture.preferences()');
+      await waitFor(() => evaluate("Boolean(document.querySelector('.workspaceSettingsContent'))"), 'settings without dock');
+      assert.equal(await padding('.workspaceSettingsPage'), originalPadding);
+      assert.deepEqual(await evaluate('sessionNavigationFixture.failures'), []);
+    });
+  } finally {
+    await server.close(); const actual = await realpath(profile);
+    assert.equal(dirname(actual), await realpath(tmpdir())); assert.ok(basename(actual).startsWith('centaeris-navigation-'));
+    await rm(actual, { recursive: true, force: true });
+  }
+});

@@ -1,4 +1,6 @@
 import { ConversationDockContext } from "../shell/ConversationDock";
+import { createPortal } from "react-dom";
+import { ConversationTabs } from "../shell/ConversationTabs";
 import { ChatTitle } from "../shell/ChatTitle";
 import { ConversationHistory } from "../shell/ConversationHistory";
 import { animate } from "@centaeris/ui/motion";
@@ -114,7 +116,7 @@ function upsertBy(items, key, value) {
   return items.map((item, itemIndex) => (itemIndex === index ? value : item));
 }
 
-export function AppPageContent({ initialSession = null, workspaceDraft, visible = true, location, navigationKey = location.key, catalogContent = null, chatFloating = false, onShowChat, onMinimizeChat, onExpandChat, onDockChat, onOpenFloatingSession, modelsVersion, onSessionAccepted }) {
+export function AppPageContent({ initialSession = null, dockContainer = null, workspaceDraft, visible = true, location, navigationKey = location.key, catalogContent = null, chatFloating = false, onShowChat, onMinimizeChat, onExpandChat, onDockChat, onOpenFloatingSession, modelsVersion, onSessionAccepted }) {
   const { t } = useTranslation();
   const { user } = useRouteLoaderData("authenticated");
   const { workspace } = useRouteLoaderData("workspace");
@@ -207,6 +209,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const [pendingAttachmentIds, setPendingAttachmentIds] = useState([]);
   const [pendingUploadFiles, setPendingUploadFiles] = useState([]);
   const [draft, setDraft] = useState("");
+  const draftCache = useRef(new Map());
+  const draftScope = useRef(requestScopeKey);
+  const latestDraft = useRef(draft); latestDraft.current = draft;
   const [rejectedSubmissionScopes, setRejectedSubmissionScopes] = useState(() => new Set());
   const [pendingUserMessage, setPendingUserMessage] = useState(null);
   const pendingUserMessageRef = useRef(null);
@@ -219,7 +224,8 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const [composerError, setComposerError] = useState("");
   const [conversationError, setConversationError] = useState("");
   const [navigationError, setNavigationError] = useState(false);
-  const [conversationDock, setConversationDock] = useState(null);
+  const chatPanelId = useId();
+  const [dockedSessionIds, setDockedSessionIds] = useState([]);
   const [navigationLoaded, setNavigationLoaded] = useState(false);
   const [olderHistoryError, setOlderHistoryError] = useState(false);
   const [streamIssue, setStreamIssue] = useState(null);
@@ -391,6 +397,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     [assets, pendingAttachmentIds],
   );
   const activeSession = sessions.find((candidate) => candidate.id === sessionId);
+  useEffect(() => {
+    if (workspaceDraft && sessionId) setDockedSessionIds(ids => ids.map(id => id === "draft" ? sessionId : id).filter((id, index, all) => all.indexOf(id) === index));
+  }, [workspaceDraft, sessionId]);
 
   const acceptModels = useCallback((nextModels) => {
     const previousModels = modelsRef.current;
@@ -486,13 +495,14 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     };
   }, [stopActiveStream]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: changing route intent (including its project) starts a new conversation view scope.
   useLayoutEffect(() => {
     if (!startFresh && requestedSessionId && acceptedRouteSessionIdRef.current === requestedSessionId) {
       acceptedRouteSessionIdRef.current = "";
       setLoadingHistory(false);
       return undefined;
     }
+    draftCache.current.set(draftScope.current, latestDraft.current);
+    draftScope.current = requestScopeKey;
     const previousController = chatControllerRef.current;
     const previousView = previousController?.captureAppliedView();
     if (previousView && previousController.identity.sessionId) sessionViewCache.set(previousController.identity.sessionId, previousView);
@@ -507,7 +517,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     setPresentationReady(Boolean(resumedViewRef.current));
     setReadableThrough("0");
     setReadingLatest(true);
-    setDraft("");
+    setDraft(draftCache.current.get(requestScopeKey) || "");
     setSending(false);
     setEditingSessionId("");
     setOpenSessionMenuId("");
@@ -1480,6 +1490,15 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     setPendingQuestion(value => value?.continuationId === question.continuationId ? null : value);
   }
 
+  const dockedSessions = dockedSessionIds.flatMap(id => id === "draft" ? [{ id: "draft", title: t("work.conversation.untitled") }] : sessions.filter(session => session.id === id));
+  function keepChatTab() {
+    const id = activeSession?.id || "draft";
+    setDockedSessionIds(ids => ids.includes(id) ? ids : [...ids, id]);
+  }
+  function openDockedSession(target) {
+    selectSession(target.id === "draft" ? null : target);
+    onOpenFloatingSession(target.id === "draft" ? null : target);
+  }
   function openHistorySession(target) {
     selectSession(target);
     if (catalogContent) onOpenFloatingSession(target);
@@ -1538,14 +1557,14 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
             aria-label={t("searchOverlay.searchConversationsAndNotes")} title={t("shellSidebar.searchCtrlK")}><Search aria-hidden="true" /></button> : null}
         </div>
         <div className="conversationWindowActions">
-          {chatFloating ? <><button className="workspacePanelToggle" aria-label={t("work.conversation.minimize")} onClick={onMinimizeChat}><Minus /></button><button className="workspacePanelToggle" aria-label={t("work.conversation.expand")} onClick={onExpandChat}><Maximize2 /></button></> : !catalogContent ? <button className="workspacePanelToggle" aria-label={t("work.conversation.dock")} onClick={onDockChat}><Minimize2 /></button> : null}
+          {chatFloating ? <><button className="workspacePanelToggle" aria-label={t("work.conversation.minimize")} onClick={() => { keepChatTab(); onMinimizeChat(); }}><Minus /></button><button className="workspacePanelToggle" aria-label={t("work.conversation.expand")} onClick={() => { setDockedSessionIds(ids => ids.filter(id => id !== (activeSession?.id || "draft"))); onExpandChat(); }}><Maximize2 /></button></> : !catalogContent ? <button className="workspacePanelToggle" aria-label={t("work.conversation.dock")} onClick={() => { keepChatTab(); onDockChat(); }}><Minimize2 /></button> : null}
         </div>
         {visible && contextPanel.mode !== "closed" ? <WorkspacePreviewToggle
           ref={previewToggleRef} panelId={previewPanelId} open={filePreviewOpen} onToggle={toggleFilePreview}
         /> : null}
       </header>
 
-      <section className="workspaceChatColumn" inert={search.open || Boolean(catalogContent && !chatFloating)}>
+      <section className="workspaceChatColumn" id={chatPanelId} role={dockedSessions.length ? "tabpanel" : undefined} aria-label={dockedSessions.length ? activeSession?.title || t("work.conversation.untitled") : undefined} inert={search.open || Boolean(catalogContent && !chatFloating)}>
         <div className={`workspaceConversationPlane ${isHome ? "isEmpty" : ""}`}>
           {searchEventId && focusedTranscript.error ? <div className="workspaceToolOutputStatus" role="alert">
             <span>{t("searchOverlay.targetUnavailable")}</span>
@@ -1633,11 +1652,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       </section>
 
       {catalogContent ? <section className="workspaceCatalog" inert={search.open}>
-        <ConversationDockContext.Provider value={conversationDock}>{catalogContent}</ConversationDockContext.Provider>
+        <ConversationDockContext.Provider value={{ container: dockContainer, chatFloating, minimizeChat: () => { if (chatFloating) keepChatTab(); onMinimizeChat(); } }}>{catalogContent}</ConversationDockContext.Provider>
       </section> : null}
-      <nav className="conversationDock" ref={setConversationDock} aria-label={t("work.conversation.toolbar")} inert={search.open}>
-        {catalogContent && activeSession && !chatFloating ? <button className="conversationDockSession" aria-pressed={chatFloating} onClick={chatFloating ? onMinimizeChat : onShowChat}><span className={hasActiveAgentRun ? "isRunning" : ""} />{activeSession.title}</button> : null}
-      </nav>
+      {dockContainer ? createPortal(<ConversationTabs panelId={chatPanelId} sessions={dockedSessions} activeId={activeSession?.id || "draft"} expanded={chatFloating && !search.open} onSelect={openDockedSession} onMinimize={onMinimizeChat} />, dockContainer) : null}
       {search.open ? <WorkspaceSearch workspaceId={workspace.id} onClose={search.close} inputRef={search.inputRef} /> : null}
       {visible ? <WorkspaceContextPanel
         id={previewPanelId}

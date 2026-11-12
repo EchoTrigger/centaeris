@@ -25,6 +25,7 @@
     "./primitives/dialog": "./src/primitives/dialog.ts",
     "./primitives/menu": "./src/primitives/menu.ts",
     "./primitives/popover": "./src/primitives/popover.ts",
+    "./primitives/tabs": "./src/primitives/tabs.ts",
     "./motion": "./src/motion.ts",
     "./motion-mini": "./src/motion-mini.ts",
     "./motion-react": "./src/motion-react.ts",

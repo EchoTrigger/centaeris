@@ -1,6 +1,6 @@
 import { useTranslation } from "../i18n";
-import { ConversationDockItem } from "../shell/ConversationDock";
-import { useEffect, useState } from "react";
+import { ConversationDockContext, ConversationDockItem } from "../shell/ConversationDock";
+import { useContext, useEffect, useState } from "react";
 import { Link, useLocation, useNavigate, useRouteLoaderData, useSearchParams } from "react-router";
 import { ArrowUpRight, CheckCircle2, ChevronRight, Clock3, FileText, Folder, ListFilter, MessageSquare, Minus, Plus, Star, SignalHigh, SignalMedium, SignalLow, RotateCcw, X } from "lucide-react";
 import { useModalDialog } from "../components/useModalDialog";
@@ -34,6 +34,7 @@ function NewTask({ onClose, onCreate, project }) {
 }
 
 export default function WorkPrototypeRoute() {
+  const dock = useContext(ConversationDockContext);
   const { t, text, statusOptions, priorityOptions, projectOptions, ownerOptions } = useWorkCopy();
   const { workspace } = useRouteLoaderData("workspace");
   const state = useWorkPrototype();
@@ -48,6 +49,7 @@ export default function WorkPrototypeRoute() {
   const [creating, setCreating] = useState(false);
   const [notice, setNotice] = useState("");
   const [conversation, setConversation] = useState(null);
+  function openConversation(item) { dock?.minimizeChat(); setConversation(item); }
   const [document, setDocument] = useState(null);
   useEffect(() => {
     if (!notice) return undefined;
@@ -70,7 +72,7 @@ export default function WorkPrototypeRoute() {
       return group.length ? <details className="workGroup" key={status} open><summary><ChevronRight className="workGroupChevron" /><StatusIcon status={status} /><span>{t(`work.status.${status}`)}</span><small>{group.length}</small></summary>{rows(group)}</details> : null;
     });
   }
-  function discussions(items) { return items.length ? items.map((item, i) => <button className="workResource" key={i} onClick={() => setConversation(item)}><MessageSquare /><span>{text(item.title)}<small>{text(item.state)}</small></span><ArrowUpRight /></button>) : <p className="workEmptyText">{t("work.noConversations")}</p>; }
+  function discussions(items) { return items.length ? items.map((item, i) => <button className="workResource" key={i} onClick={() => openConversation(item)}><MessageSquare /><span>{text(item.title)}<small>{text(item.state)}</small></span><ArrowUpRight /></button>) : <p className="workEmptyText">{t("work.noConversations")}</p>; }
   let content;
   if ((page === "tasks" || page === "projects") && path[1] && !task && !project) content = <div className="workEmpty"><h2>{t("work.notFound")}</h2><Link to={`${base}/work`}>{t("work.backToWork")}</Link></div>;
   else if (task) {
@@ -84,7 +86,7 @@ export default function WorkPrototypeRoute() {
         <div className="workBreadcrumb"><Link to={`${base}/work/tasks`}>{t("work.tasks")}</Link><ChevronRight /><span>{task.id}</span></div>
         <button className="workQuiet" onClick={() => {
           const item = { title: workText("work.discussionTitle"), state: workText("work.run.discussion"), text: workText("work.discussionText", { title: task.title }) };
-          update({ conversations: [...task.conversations, item] }, workText("work.event.linkedDiscussion")); setConversation(item);
+          update({ conversations: [...task.conversations, item] }, workText("work.event.linkedDiscussion")); openConversation(item);
         }}><MessageSquare />{t("work.addSampleDiscussion")}</button>
       </header>
       <div className="workDetail">
@@ -93,7 +95,7 @@ export default function WorkPrototypeRoute() {
           <section className="workProse"><p>{text(task.description) || t("work.noDescription")}</p><h2>{t("work.deliverable")}</h2><p>{text(task.deliverable) || t("work.noDeliverable")}</p></section>
           <section className={`workExecution ${task.attention ? "needsAttention" : ""}`} aria-label={t("work.currentRun")}>
             <div className="workExecutionSummary"><span className="workExecutionIcon"><Clock3 /></span><div><h2>{text(task.run)}</h2><p>{(latestConversation ? text(latestConversation.text) : "") || t("work.executionHint")}</p></div>
-              {latestConversation ? <button onClick={() => setConversation(latestConversation)}>{t("work.continueWork")}<ArrowUpRight /></button> : <button onClick={simulateRun}>{t("work.simulateRun")}</button>}
+              {latestConversation ? <button onClick={() => openConversation(latestConversation)}>{t("work.continueWork")}<ArrowUpRight /></button> : <button onClick={simulateRun}>{t("work.simulateRun")}</button>}
             </div>
             {task.attention ? <button className="workQuiet" onClick={() => update({ attention: false, run: workText("work.run.awaitingNext") }, workText("work.event.confirmed"))}>{t("work.confirmResult")}</button> : null}
             {task.conversations.length ? <details className="workLinkedConversations"><summary><ChevronRight />{t("work.linkedConversations")}<span>{task.conversations.length}</span></summary>{discussions(task.conversations)}</details> : null}
@@ -155,13 +157,15 @@ function Preview({ title, onClose, children }) {
 }
 
 function FloatingConversation({ conversation, onClose }) {
+  const dock = useContext(ConversationDockContext);
   const { t, text } = useWorkCopy();
   const [minimized, setMinimized] = useState(false);
+  useEffect(() => { if (dock?.chatFloating) setMinimized(true); }, [dock?.chatFloating]);
   const [draft, setDraft] = useState("");
   const [messages, setMessages] = useState([]);
   return <>
-    <ConversationDockItem><button className="workConversationTab" aria-pressed={!minimized} onClick={() => setMinimized(value => !value)}><MessageSquare />{text(conversation.title)}</button></ConversationDockItem>
-    {!minimized ? <section className="workFloatingConversation" role="dialog" aria-label={text(conversation.title)} onKeyDown={event => { if(event.key === "Escape") { event.stopPropagation(); onClose(); } }}>
+    <ConversationDockItem><button className="workConversationTab" aria-pressed={!minimized && !dock?.chatFloating} onClick={() => { if (minimized || dock?.chatFloating) { dock?.minimizeChat(); setMinimized(false); } else setMinimized(true); }}><MessageSquare />{text(conversation.title)}</button></ConversationDockItem>
+    {!minimized && !dock?.chatFloating ? <section className="workFloatingConversation" role="dialog" aria-label={text(conversation.title)} onKeyDown={event => { if(event.key === "Escape") { event.stopPropagation(); onClose(); } }}>
       <header><h2>{text(conversation.title)}</h2><button aria-label={t("work.minimizeSample")} onClick={() => setMinimized(true)}><Minus /></button><button autoFocus aria-label={t("work.closeSample")} onClick={onClose}><X /></button></header>
       <div className="workFloatingMessages"><p className="workMuted">{t("work.conversation.sampleState", { state: text(conversation.state) })}</p><h3>Agent</h3><p>{text(conversation.text)}</p>{messages.map((message,index) => <p className="workExampleReply" key={index}>{message}</p>)}</div>
       <form onSubmit={event => { event.preventDefault(); if(draft.trim()) { setMessages(items => [...items,draft.trim()]); setDraft(""); } }}><textarea aria-label={t("work.sampleMessage")} placeholder={t("work.messagePlaceholder")} value={draft} onChange={event => setDraft(event.target.value)} rows={2} /><footer><span>{t("work.interactionOnly")}</span><button type="submit" disabled={!draft.trim()}>{t("work.send")}</button></footer></form>

@@ -1433,3 +1433,7 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 @media (prefers-reduced-motion: reduce) { .workspaceTranscriptActivityLoader { animation: none; } }
 @media (max-width: 640px) { .sessionQuestion, .sessionQuestionCollapsed { width: calc(100% - 18px); } .sessionQuestion { padding: 14px 9px 11px; } .sessionQuestionActions { margin-left: auto; } .sessionQuestionFree textarea { font-size: 16px; } }
 @media (pointer: coarse) { .sessionQuestion button { min-height: 44px; } }
+
+/* The chat dock reserves space only while it contains tabs, including on settings. */
+.workspaceChatLayout :is(.workspaceWorkbench, .workspaceSettingsPage, .shShellPage) { padding-bottom:var(--workspace-bottom-space); }
+@media(max-width:760px) { .workspaceChatLayout { --workspace-bottom-space:0px; } }
