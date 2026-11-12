@@ -11,9 +11,12 @@ export default function WorkspaceChatLayout() {
   locationRef.current = location;
   const navigate = useNavigate();
   const [notice, setNotice] = useState("");
+  const [floating, setFloating] = useState(false);
+  const lastCatalog = useRef("");
   const base = `/w/${encodeURIComponent(workspace.id)}`;
   const isChatRoute = Boolean(matchPath(`${base}/app`, location.pathname) || matchPath(`${base}/sessions/:sessionId`, location.pathname));
   const isCatalogRoute = isWorkspaceCatalogPath(base, location.pathname);
+  if (isCatalogRoute) lastCatalog.current = location.pathname + location.search;
   const [chatLocation, setChatLocation] = useState(() => isChatRoute ? location : null);
   const [chatSession, setChatSession] = useState(() => isChatRoute ? selectedSession : null);
   const [modelsVersion, setModelsVersion] = useState(0);
@@ -61,7 +64,20 @@ export default function WorkspaceChatLayout() {
       <AppPageContent
         initialSession={chatSession}
         workspaceDraft={!sessionRoute}
-        visible={isChatRoute}
+        visible={isChatRoute || (isCatalogRoute && floating)}
+        chatFloating={isCatalogRoute && floating}
+        onShowChat={() => {
+          if (isChatRoute) return;
+          setFloating(true);
+        }}
+        onMinimizeChat={() => setFloating(false)}
+        onDockChat={() => { setFloating(true); navigate(lastCatalog.current || `${base}/work`); }}
+        onExpandChat={() => { setFloating(false); navigate(chatLocation ? chatLocation.pathname + chatLocation.search : `${base}/app`); }}
+        onOpenFloatingSession={session => {
+          setChatSession(session);
+          setChatLocation({ pathname: `${base}/sessions/${encodeURIComponent(session.id)}`, search: "", state: null });
+          setFloating(true);
+        }}
         location={chatLocation ?? { pathname: `${base}/app`, search: "", state: null }}
         navigationKey={location.key}
         catalogContent={isCatalogRoute ? <Outlet /> : null}

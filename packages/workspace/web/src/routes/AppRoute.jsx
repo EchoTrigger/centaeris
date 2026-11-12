@@ -1,3 +1,4 @@
+import { ConversationHistory } from "../shell/ConversationHistory";
 import { animate } from "@centaeris/ui/motion";
 import { useTranslation } from "../i18n";
 import { useCompactWorkspaceLayout, useSidebarOpen, useWorkspaceNavigation } from "../shell/workspaceNavigationState";
@@ -54,6 +55,12 @@ import { useNavigationRowActions, useLatestCallback } from "../shell/useNavigati
 import {
   Archive,
   Image as ImageIcon,
+  ChevronDown,
+  History,
+  MessageSquare,
+  Minimize2,
+  Minus,
+  Maximize2,
   Ellipsis,
   Pencil,
   Pin,
@@ -114,7 +121,7 @@ function upsertBy(items, key, value) {
   return items.map((item, itemIndex) => (itemIndex === index ? value : item));
 }
 
-function ConversationTitle({ session, actions, running }) {
+function ConversationTitle({ session, actions, running, titleControl }) {
   const { t } = useTranslation();
   const menuRef = useRef(null);
   const titleRef = useRef(null);
@@ -151,7 +158,7 @@ function ConversationTitle({ session, actions, running }) {
   </form>;
 
   return <div className="workspaceConversationHeading">
-    <h1 className="workspaceConversationTitle" title={session.title}>{session.title || t("searchOverlay.untitledConversation")}</h1>
+    <h1 className="workspaceConversationTitle" title={session.title}>{titleControl || session.title || t("searchOverlay.untitledConversation")}</h1>
     <details className="workspaceConversationActions" ref={menuRef}>
       <summary ref={titleRef} className="workspacePanelToggle" role="button" aria-label={t("appRoute.conversationActionsForValue", { value1: session.title })}><Ellipsis aria-hidden="true" /></summary>
       <div className="workspaceSessionMenu">
@@ -164,7 +171,7 @@ function ConversationTitle({ session, actions, running }) {
   </div>;
 }
 
-export function AppPageContent({ initialSession = null, workspaceDraft, visible = true, location, navigationKey = location.key, catalogContent = null, modelsVersion, onSessionAccepted }) {
+export function AppPageContent({ initialSession = null, workspaceDraft, visible = true, location, navigationKey = location.key, catalogContent = null, chatFloating = false, onShowChat, onMinimizeChat, onExpandChat, onDockChat, onOpenFloatingSession, modelsVersion, onSessionAccepted }) {
   const { t } = useTranslation();
   const { user } = useRouteLoaderData("authenticated");
   const { workspace } = useRouteLoaderData("workspace");
@@ -880,7 +887,9 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     setEditingSessionId("");
     setOpenSessionMenuId("");
     clearContextPanel();
-    navigate(`${workspaceBase}/app${projectId ? `?${new URLSearchParams({ projectId })}` : ""}`);
+    const path = `${workspaceBase}/app${projectId ? `?${new URLSearchParams({ projectId })}` : ""}`;
+    if (catalogContent && chatFloating) onSessionAccepted(path, null);
+    else navigate(path);
   }
 
   function selectSession(target) {
@@ -914,7 +923,8 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       setDraft("");
       setLoadingHistory(true);
       const next = remainingSessions[0];
-      if (visible) navigate(next ? sessionChatPath(workspace.id, next.id) : `${workspaceBase}/app`);
+      if (catalogContent && chatFloating) onSessionAccepted(next ? sessionChatPath(workspace.id, next.id) : `${workspaceBase}/app`, next || null);
+      else if (visible) navigate(next ? sessionChatPath(workspace.id, next.id) : `${workspaceBase}/app`);
       else setSessionId("");
       if (!visible || !next) setLoadingHistory(false);
       clearContextPanel();
@@ -1533,10 +1543,18 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     setPendingQuestion(value => value?.continuationId === question.continuationId ? null : value);
   }
 
+  function openHistorySession(target) {
+    selectSession(target);
+    if (catalogContent) onOpenFloatingSession(target);
+    else navigate(sessionChatPath(workspace.id, target.id));
+  }
+  const historyProps = { sessionProps: sidebarSessions, recentNavigation: navigationError ? { error: true } : { loading: !navigationLoaded }, onStartNewChat: startNavigationChat, onOpenSession: openHistorySession };
+  const chatTitleControl = <ConversationHistory {...historyProps} label="切换会话" className="conversationSwitcher" side="bottom"><span>{activeSession?.title || "新会话"}</span><ChevronDown /></ConversationHistory>;
+
   return (
     <main
       ref={workbenchRef}
-      className={`workspaceWorkbench ${isSidebarOpen ? "withSidebar" : "withoutSidebar"}${catalogContent ? " isBrowsing" : ""}${search.open ? " isSearching" : ""}`}
+      className={`workspaceWorkbench hasConversationDock${chatFloating ? " isChatFloating" : ""} ${isSidebarOpen ? "withSidebar" : "withoutSidebar"}${catalogContent ? " isBrowsing" : ""}${search.open ? " isSearching" : ""}`}
       style={{ "--workspace-sidebar-progress": initialSidebarProgress, "--browser-panel-width": browserPanelWidthPx == null ? undefined : `${browserPanelWidthPx}px` }}
     >
       {!compactLayout ? <button
@@ -1578,16 +1596,19 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           >
             <PanelLeft aria-hidden="true" />
           </button> : null}
-          {!catalogContent && activeSession ? <ConversationTitle key={activeSession.id} session={activeSession} actions={sessionActions} running={hasActiveAgentRun} /> : null}
+          {!catalogContent || chatFloating ? activeSession ? <ConversationTitle key={activeSession.id} session={activeSession} actions={sessionActions} running={hasActiveAgentRun} titleControl={chatTitleControl} /> : chatTitleControl : null}
           {compactLayout ? <button className="workspacePanelToggle" ref={search.triggerRef} type="button" onClick={search.toggle}
             aria-label={t("searchOverlay.searchConversationsAndNotes")} title={t("shellSidebar.searchCtrlK")}><Search aria-hidden="true" /></button> : null}
+        </div>
+        <div className="conversationWindowActions">
+          {chatFloating ? <><button className="workspacePanelToggle" aria-label="最小化会话" onClick={onMinimizeChat}><Minus /></button><button className="workspacePanelToggle" aria-label="展开会话" onClick={onExpandChat}><Maximize2 /></button></> : !catalogContent ? <button className="workspacePanelToggle" aria-label="收起到工具栏" onClick={onDockChat}><Minimize2 /></button> : null}
         </div>
         {visible && contextPanel.mode !== "closed" ? <WorkspacePreviewToggle
           ref={previewToggleRef} panelId={previewPanelId} open={filePreviewOpen} onToggle={toggleFilePreview}
         /> : null}
       </header>
 
-      <section className="workspaceChatColumn" inert={search.open || Boolean(catalogContent)}>
+      <section className="workspaceChatColumn" inert={search.open || Boolean(catalogContent && !chatFloating)}>
         <div className={`workspaceConversationPlane ${isHome ? "isEmpty" : ""}`}>
           {searchEventId && focusedTranscript.error ? <div className="workspaceToolOutputStatus" role="alert">
             <span>{t("searchOverlay.targetUnavailable")}</span>
@@ -1672,6 +1693,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           </div>
           {isHome ? <div className="shHomeFollowups">
             <HomeQuickActions onQuickAction={handleQuickAction} />
+            {sessions.length ? <nav className="conversationRecent" aria-label="最近会话">{sessions.slice(0, 3).map(item => <button key={item.id} onClick={() => openHistorySession(item)}><span>{item.title}</span><span>继续会话</span></button>)}</nav> : null}
           </div> : null}
         </div>
       </section>
@@ -1679,6 +1701,11 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       {catalogContent ? <section className="workspaceCatalog" inert={search.open}>
         {catalogContent}
       </section> : null}
+      <nav className="conversationDock" aria-label="会话工具栏" inert={search.open}>
+        {activeSession ? <button className="conversationDockSession" aria-pressed={chatFloating} onClick={chatFloating ? onMinimizeChat : onShowChat}><span className={hasActiveAgentRun ? "isRunning" : ""} />{activeSession.title}</button> : null}
+        <button onClick={chatFloating ? onMinimizeChat : onShowChat}><MessageSquare />Agent</button>
+        <ConversationHistory {...historyProps}><History /></ConversationHistory>
+      </nav>
       {search.open ? <WorkspaceSearch workspaceId={workspace.id} onClose={search.close} inputRef={search.inputRef} /> : null}
       {visible ? <WorkspaceContextPanel
         id={previewPanelId}

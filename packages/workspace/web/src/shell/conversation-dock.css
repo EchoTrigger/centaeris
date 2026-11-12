@@ -1,0 +1,45 @@
+main.workspaceWorkbench.hasConversationDock { padding-bottom:36px; }
+.conversationDock { position:fixed; z-index:35; right:10px; bottom:4px; display:flex; align-items:center; gap:4px; height:28px; max-width:calc(100vw - 24px); }
+.conversationDock button { display:inline-flex; align-items:center; justify-content:center; gap:7px; min-width:28px; height:28px; padding:4px 9px; border:0; border-radius:6px; background:transparent; color:var(--process-text); font:inherit; font-size:12px; cursor:pointer; }
+.conversationDock button:hover,.conversationDock button[aria-pressed=true] { background:var(--workspace-selection); color:var(--on-surface); }
+.conversationDock .conversationDockSession { display:block; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.conversationDockSession > .isRunning { display:inline-block; width:5px; height:5px; border-radius:50%; background:var(--primary-color); margin-right:7px; }
+.conversationDock svg { width:14px; height:14px; }
+.conversationWindowActions { display:flex; align-items:center; gap:2px; margin-left:auto; }
+.conversationSwitcher { display:flex; align-items:center; gap:7px; min-width:0; max-width:100%; padding:5px 8px; border:0; border-radius:6px; background:transparent; color:var(--on-surface); font:inherit; font-size:13px; cursor:pointer; }
+.conversationSwitcher > span { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.conversationSwitcher > svg { width:12px; height:12px; flex:none; color:var(--process-text); }
+.conversationSwitcher:hover { background:var(--surface-hover); }
+.workspaceWorkbench.isBrowsing.isChatFloating > .workspaceTopbar { position:fixed; z-index:52; display:flex; right:20px; bottom:calc(44px + min(520px, 100dvh - 140px)); top:auto; width:min(440px, calc(100vw - 24px)); height:44px; min-height:44px; padding:0 8px; border:1px solid var(--outline-variant); border-bottom:0; border-radius:12px 12px 0 0; background:var(--surface-color); }
+.workspaceWorkbench.isBrowsing.isChatFloating > .workspaceChatColumn { position:fixed; z-index:51; display:flex; flex-direction:column; right:20px; bottom:44px; width:min(440px, calc(100vw - 24px)); height:min(520px, calc(100dvh - 140px)); min-height:0; border:1px solid var(--outline-variant); border-top:0; border-radius:0 0 12px 12px; background:var(--surface-color); box-shadow:0 12px 36px var(--scrim); }
+.isChatFloating .workspaceConversationPlane { width:100%; height:100%; min-height:0; }
+.isChatFloating .workspaceConversationHeading { min-width:0; }
+.isChatFloating .workspaceMessages { padding-inline:16px; }
+.isChatFloating .workspaceComposerDock { padding-inline:12px; }
+.isChatFloating .shHomeFollowups { display:none; }
+.isChatFloating .workspaceTopbarStart { flex:1; min-width:0; }
+.conversationHistoryPositioner { z-index:100; }
+.conversationHistory { width:360px; max-width:calc(100vw - 24px); padding:6px; border:1px solid var(--outline-variant); border-radius:10px; background:var(--surface-color); box-shadow:0 8px 28px var(--scrim); color:var(--on-surface); outline:none; }
+.conversationHistorySearch { display:flex; align-items:center; gap:8px; padding:6px 8px 10px; color:var(--process-text); }
+.conversationHistorySearch input { min-width:0; width:100%; padding:5px 0; border:0; background:transparent; color:var(--on-surface); font:inherit; font-size:13px; outline:none; }
+.conversationHistory select { width:100%; margin-bottom:6px; padding:6px 8px; border:0; border-radius:6px; background:var(--surface-container); color:inherit; font:inherit; font-size:12px; }
+.conversationHistoryList { max-height:min(360px, 50dvh); overflow:auto; padding-bottom:4px; }
+.conversationHistory .workspaceSessionRow { width:100%; min-height:36px; }
+.conversationHistory .workspaceSessionButton { min-height:36px; }
+.conversationHistory > p { padding:8px; color:var(--process-text); font-size:12px; }
+.conversationHistory footer { display:flex; justify-content:space-between; padding-top:6px; }
+.conversationHistory footer button { display:flex; align-items:center; gap:7px; padding:7px 8px; border:0; border-radius:6px; background:transparent; color:var(--process-text); font:inherit; font-size:12px; cursor:pointer; }
+.conversationHistory footer button:hover { background:var(--surface-hover); color:var(--on-surface); }
+.conversationDock button:focus-visible,.conversationSwitcher:focus-visible,.conversationHistory button:focus-visible { outline:2px solid var(--primary-color); outline-offset:1px; }
+@media(max-width:760px) {
+  .workspaceWorkbench.isBrowsing.isChatFloating > .workspaceTopbar,.workspaceWorkbench.isBrowsing.isChatFloating > .workspaceChatColumn { right:12px; }
+  .conversationDock .conversationDockSession { max-width:170px; }
+}
+
+.conversationRecent { width:min(700px,100%); margin:16px auto 0; display:grid; gap:2px; }
+.conversationRecent button { display:flex; align-items:center; justify-content:space-between; gap:16px; width:100%; padding:9px 12px; border:0; border-radius:7px; background:transparent; color:var(--process-text); font:inherit; font-size:12px; text-align:left; cursor:pointer; }
+.conversationRecent button:hover { background:var(--surface-hover); color:var(--on-surface); }
+.conversationRecent button > span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.conversationRecent button > span:last-child { flex:none; font-size:11px; }
+
+.workspaceWorkbench.isBrowsing.isChatFloating.isSearching > :is(.workspaceTopbar,.workspaceChatColumn) { visibility:hidden; }

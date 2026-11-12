@@ -20,7 +20,6 @@ test("material correction records evidence progress without completing the busin
   const user = userEvent.setup();
   const router = mount();
   await user.click(await screen.findByRole("link", { name: /核查工具包发布材料/ }));
-  await user.click(screen.getByRole("button", { name: "核查结果" }));
   await user.click(screen.getByRole("button", { name: "补充示例文件" }));
   expect(screen.getByText("待复核")).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "模拟复核" }));
@@ -30,8 +29,8 @@ test("material correction records evidence progress without completing the busin
   await user.click(await screen.findByRole("menuitemradio", { name: /已完成/ }));
   await router.navigate("/w/demo/work?tab=completed");
   await user.click(await screen.findByRole("link", { name: /核查工具包发布材料/ }));
-  await user.click(screen.getByRole("button", { name: "活动" }));
-  expect(screen.getByText("补充了示例文件 quick-start.md。")).toBeTruthy();
+  await screen.findByRole("heading", { name: "核查工具包发布材料" });
+  expect(within(screen.getByRole("list", { name: "活动记录" })).getByText("补充了示例文件 quick-start.md。")).toBeTruthy();
   expect(within(screen.getByRole("list")).getByText("状态变更为已完成。")).toBeTruthy();
 });
 
@@ -49,7 +48,8 @@ test("new tasks belong to the chosen project and remain available across views",
   expect(screen.getByRole("button", { name: "状态：待开始" })).toBeTruthy();
   await router.navigate("/w/demo/work/projects/knowledge?tab=tasks");
   await user.click(await screen.findByRole("link", { name: /整理研究结论/ }));
-  await user.click(screen.getByRole("button", { name: "会话 1" }));
+  await screen.findByRole("heading", { name: "整理研究结论" });
+  await user.click(screen.getByText("关联会话"));
   await user.click(screen.getByRole("button", { name: /任务执行记录/ }));
   expect(screen.getByRole("dialog", { name: "任务执行记录" })).toBeTruthy();
   await user.keyboard("{Escape}");

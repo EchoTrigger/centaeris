@@ -1,7 +1,6 @@
 import { Menu } from "@centaeris/ui/primitives/menu";
 import { useTranslation } from "../i18n";
-import { memo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { memo, useState } from "react";
 import { Link, useLocation, useNavigate, useRouteLoaderData } from "react-router";
 import {
   ChevronDown,
@@ -10,20 +9,19 @@ import {
   Folder,
   Library,
   PanelLeft,
-  Plus,
   Search,
   SquarePen,
   ListTodo,
   House,
+  MessageSquare,
+  Settings,
 } from "lucide-react";
 import { exampleProjects, useWorkPrototype } from "../work/workPrototype";
 import { apiResponse, clearCsrfToken } from "../api";
-import { useModalDialog } from "../components/useModalDialog";
 import { WorkspaceAvatar } from "../components/WorkspaceAvatar";
 import { clearWorkspaceIdentityCache } from "./workspaceIdentityCache";
-import { useCollapsedNavigation, useNavigationScroll, useWorkspaceNavigation } from "./workspaceNavigationState";
 
-function WorkspaceHeader({ workspace, workspaces, logoutBusy, logoutError, onLogout, onCollapse, search, returnTo, menuContainer }) {
+function WorkspaceHeader({ onNewConversation, workspace, workspaces, logoutBusy, logoutError, onLogout, onCollapse, search, returnTo, menuContainer }) {
   const { t } = useTranslation();
   const base = `/w/${encodeURIComponent(workspace.id)}`;
   const otherWorkspaces = workspaces.filter((item) => item.id !== workspace.id);
@@ -69,119 +67,18 @@ function WorkspaceHeader({ workspace, workspaces, logoutBusy, logoutError, onLog
       </Menu.Root>
       {search ? <button className="shSearchButton" type="button" ref={search.triggerRef} aria-pressed={search.open}
         aria-label={t("searchOverlay.searchConversationsAndNotes")} title={t("shellSidebar.searchCtrlK")} onClick={search.toggle}><Search aria-hidden="true" /></button> : null}
+      <button className="shSearchButton" type="button" aria-label={t("shellSidebar.newConversation")} title={t("shellSidebar.newConversation")} onClick={onNewConversation}><SquarePen aria-hidden="true" /></button>
       {onCollapse ? <button className="shSidebarCollapse shAvatarToggle" type="button" aria-label={t("shellSidebar.hideSidebar")} title={t("shellSidebar.hideSidebar")} onClick={onCollapse}><PanelLeft aria-hidden="true" /></button> : null}
     </div>
   );
 }
 
-function ProjectCreateDialog({ onClose, onCreate }) {
-  const { t } = useTranslation();
-  const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const dialogRef = useModalDialog({ onClose });
-
-  async function submit(event) {
-    event.preventDefault();
-    const normalizedName = name.trim();
-    if (!normalizedName || busy) return;
-    setBusy(true);
-    setError("");
-    try {
-      await onCreate(normalizedName);
-      onClose();
-    } catch {
-      setError(t("shellSidebar.unableToCreateProjectPleaseTryAgain"));
-      setBusy(false);
-    }
-  }
-
-  return createPortal(<div className="shPrivateCreateBackdrop" role="presentation" onMouseDown={onClose}>
-    <form className="shProjectCreateDialog" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="shProjectCreateTitle" tabIndex={-1} onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}>
-      <header><button className="quietCloseButton" type="button" aria-label={t("shellSidebar.closeProjectCreation")} onClick={onClose}><X aria-hidden="true" /></button><h2 id="shProjectCreateTitle">{t("shellSidebar.createProject")}</h2></header>
-      <label>
-        <span>{t("shellSidebar.projectName")}</span>
-        <input className="shProjectNameInput" autoFocus maxLength={100} value={name} onChange={(event) => setName(event.target.value)} />
-      </label>
-      {error ? <p role="alert">{error}</p> : null}
-      <footer><button type="button" onClick={onClose}>{t("agentRunRow.cancel")}</button><button className="isPrimary" type="submit" disabled={!name.trim() || busy}>{busy ? t("shellSidebar.creatingProject") : t("shellSidebar.createProject")}</button></footer>
-    </form>
-  </div>, document.body);
-}
-
-function ConversationSections({ base, sessionProps, recentNavigation, onStartNewChat, navigation, visible }) {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
-  const collapsed = useCollapsedNavigation(navigation);
-  const scrollRef = useRef(null);
-  useNavigationScroll(scrollRef, navigation, "conversations", visible && Boolean(sessionProps) && (sessionProps.ready ?? !recentNavigation?.loading));
-  const disclosure = key => ({ open: !collapsed.includes(key),
-    onToggle: event => navigation.setCollapsed(key, !event.currentTarget.open) });
-  const startNewChat = (projectId = "") => {
-    if (onStartNewChat) onStartNewChat(projectId);
-    else {
-      const query = new URLSearchParams({ new: "1" });
-      if (projectId) query.set("projectId", projectId);
-      navigate(`${base}/app?${query}`);
-    }
-  };
-  return (
-    <div className="shScroll" ref={scrollRef}>
-      {sessionProps ? <>
-        <section className="shSection shCollapsibleSection shSessionSection">
-          <details className="shDisclosure" {...disclosure("pinned")}>
-            <summary className="shSectionHeader shDisclosureSummary"><span>{t("appRoute.pin")}</span><ChevronDown aria-hidden="true" /></summary>
-            <nav className="workspaceSessionList" aria-label={t("shellSidebar.pinnedConversations")}>
-              {sessionProps.groupedSessions.pinned.map((session) => sessionProps.renderSessionRow(session, { icon: true }))}
-            </nav>
-          </details>
-        </section>
-
-        <section className="shSection shCollapsibleSection shSessionSection">
-          <details className="shDisclosure" {...disclosure("projects")}>
-            <summary className="shSectionHeader shDisclosureSummary"><span>{t("shellSidebar.projects")}</span><ChevronDown aria-hidden="true" /></summary>
-            <div className="shProjectTree">
-              {sessionProps.projects.map((project) => <section className="shProject" key={project.id}>
-                <details className="shProjectDisclosure" {...disclosure(`project:${project.id}`)}>
-                  <summary className="shProjectSummary"><ChevronDown aria-hidden="true" /><Folder aria-hidden="true" /><span>{project.name}</span></summary>
-                  <nav className="workspaceSessionList isProject" aria-label={t("shellSidebar.valueConversations", { value1: project.name })}>
-                    {sessionProps.groupedSessions.projectSessions[project.id].map((session) => sessionProps.renderSessionRow(session, { nested: true }))}
-                  </nav>
-                </details>
-                <button className="shProjectAction" type="button" aria-label={t("shellSidebar.newConversationInValue", { value1: project.name })} onClick={() => startNewChat(project.id)}><Plus aria-hidden="true" /></button>
-              </section>)}
-            </div>
-          </details>
-          <button className="shSectionAction" type="button" aria-label={t("shellSidebar.createProject")} onClick={sessionProps.onOpenProjectCreate}><Plus aria-hidden="true" /></button>
-        </section>
-
-        <section className="shSection shCollapsibleSection shSessionSection">
-          <details className="shDisclosure" {...disclosure("recent")}>
-            <summary className="shSectionHeader shDisclosureSummary"><span>{t("shellSidebar.recent")}</span><ChevronDown aria-hidden="true" /></summary>
-            <nav className="workspaceSessionList" aria-label={t("shellSidebar.recentConversations")}>
-              {sessionProps.groupedSessions.recent.map((session) => sessionProps.renderSessionRow(session))}
-            </nav>
-          </details>
-        </section>
-      </> : null}
-      {recentNavigation?.loading ? <p className="shEmptyHint" role="status">{t("agentChat.loading")}</p> : null}
-      {recentNavigation?.error ? <p className="shEmptyHint" role="alert">
-        {t(recentNavigation.onRetry ? "agentChat.recentError" : "appRoute.unableToLoadConversationsRefreshThePageAndTry")}
-        {recentNavigation.onRetry ? <button type="button" onClick={recentNavigation.onRetry}>{t("agentChat.retry")}</button> : null}
-      </p> : null}
-    </div>
-  );
-}
-
-export const ShellSidebar = memo(function ShellSidebar({ workspace, sessionProps, recentNavigation, onStartNewChat, onCollapse, search, menuContainer, navigationVisible = true }) {
+export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewChat, onCollapse, search, menuContainer }) {
   const work = useWorkPrototype();
   const { t } = useTranslation();
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [logoutError, setLogoutError] = useState("");
-  const [projectCreateOpen, setProjectCreateOpen] = useState(false);
   const { workspaces = [workspace] } = useRouteLoaderData("workspace");
-  const { user } = useRouteLoaderData("authenticated");
-  const navigation = useWorkspaceNavigation(user.id, workspace.id);
   const location = useLocation();
   const navigate = useNavigate();
   const base = `/w/${encodeURIComponent(workspace.id)}`;
@@ -225,27 +122,26 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, sessionProps
 
   return (
     <aside className="workspaceSidebar shSidebar" aria-label={t("shellSidebar.conversationNavigation")}>
-      <WorkspaceHeader workspace={workspace} workspaces={workspaces} logoutBusy={logoutBusy} logoutError={logoutError} onLogout={logout} menuContainer={menuContainer}
+      <WorkspaceHeader onNewConversation={newConversation} workspace={workspace} workspaces={workspaces} logoutBusy={logoutBusy} logoutError={logoutError} onLogout={logout} menuContainer={menuContainer}
         search={search} onCollapse={onCollapse} returnTo={location.pathname + location.search + location.hash} />
       <nav className="shPrimaryNav workPrimaryNav" aria-label={t("shellSidebar.mainView")}>
         <Link className="shRow" to={`${base}/work`} aria-current={location.pathname === `${base}/work` && !location.search ? "page" : undefined}><House aria-hidden="true" /><span>我的工作</span></Link>
-        <button className="shRow" type="button" onClick={newConversation}><SquarePen aria-hidden="true" /><span>{t("shellSidebar.newConversation")}</span></button>
-        <p className="workRailHeading">工作区</p>
         <Link className="shRow" to={`${base}/work/projects`} aria-current={location.pathname.startsWith(`${base}/work/projects`) ? "page" : undefined}><Folder aria-hidden="true" /><span>项目</span></Link>
         <Link className="shRow" to={`${base}/work/tasks`} aria-current={location.pathname.startsWith(`${base}/work/tasks`) ? "page" : undefined}><ListTodo aria-hidden="true" /><span>任务</span></Link>
         <Link className="shRow" to={base + "/library"} aria-current={inLibrary ? "page" : undefined}><Library aria-hidden="true" /><span>{t("libraryObjectRoute.library")}</span></Link>
-        <Link className="shRow" to={base + "/extensions"} aria-current={inExtensions ? "page" : undefined}><Blocks aria-hidden="true" /><span>{t("extensions.title")}</span></Link>
+        <Link className="shRow" to={`${base}/app`} aria-current={isHome || location.pathname.startsWith(`${base}/sessions/`) ? "page" : undefined}><MessageSquare aria-hidden="true" /><span>Agent</span></Link>
       </nav>
-      {location.pathname.startsWith(`${base}/work`) ? <nav className="workRailViews" aria-label="收藏与视图">
+      <nav className="workRailViews" aria-label="收藏与视图">
         <p className="workRailHeading">收藏</p>
         {exampleProjects.filter(project => work?.favorites.includes(project.id)).map(project => <Link className="shRow" key={project.id} to={`${base}/work/projects/${project.id}`}><span className="workRailProjectIcon">{project.icon}</span><span>{project.name}</span></Link>)}
         {!work?.favorites.length ? <p className="workRailEmpty">收藏项目，方便下次访问</p> : null}
         <p className="workRailHeading">视图</p>
         <Link className="shRow" to={`${base}/work?tab=attention`} aria-current={location.pathname === `${base}/work` && location.search.includes("tab=attention") ? "page" : undefined}><ListTodo aria-hidden="true" /><span>需要回应</span><span className="workRailCount">{work?.tasks.filter(task => task.owner === "我" && task.attention && !["已完成", "已取消"].includes(task.status)).length || 0}</span></Link>
-      </nav> : null}
-      {!location.pathname.startsWith(`${base}/work`) ? <ConversationSections base={base} sessionProps={sessionProps ? { ...sessionProps, onOpenProjectCreate: () => setProjectCreateOpen(true) } : null} recentNavigation={recentNavigation} onStartNewChat={onStartNewChat} navigation={navigation} visible={navigationVisible} /> : null}
-
-      {projectCreateOpen ? <ProjectCreateDialog onClose={() => setProjectCreateOpen(false)} onCreate={sessionProps.onCreateProject} /> : null}
+      </nav>
+      <nav className="shPrimaryNav workRailFooter" aria-label="工作区工具">
+        <Link className="shRow" to={base + "/extensions"} aria-current={inExtensions ? "page" : undefined}><Blocks aria-hidden="true" /><span>{t("extensions.title")}</span></Link>
+        <Link className="shRow" to={`${base}/settings/preferences`} state={{ returnTo: location.pathname + location.search }}><Settings aria-hidden="true" /><span>{t("shellSidebar.settings")}</span></Link>
+      </nav>
     </aside>
   );
 });

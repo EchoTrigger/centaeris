@@ -19,7 +19,7 @@ vi.mock("../../src/i18n", () => {
 });
 
 vi.mock("../../src/routes/AppRoute", () => ({
-  AppPageContent({ location, visible, catalogContent }: { location: { key: string }, visible: boolean, catalogContent?: ReactNode }) {
+  AppPageContent({ location, visible, catalogContent, chatFloating, onShowChat, onMinimizeChat, onExpandChat, onDockChat }: { location: { key: string }, visible: boolean, catalogContent?: ReactNode, chatFloating?: boolean, onShowChat?: () => void, onMinimizeChat?: () => void, onExpandChat?: () => void, onDockChat?: () => void }) {
     const { workspace } = useRouteLoaderData("workspace");
     const [draft, setDraft] = useState("");
     const search = useWorkspaceSearch(location.key, visible);
@@ -27,6 +27,8 @@ vi.mock("../../src/routes/AppRoute", () => ({
       <ShellSidebar workspace={workspace} search={search} />
       <textarea id="messageDraft" hidden={!visible || search.open} aria-label="Session draft" value={draft} onChange={event => setDraft(event.target.value)} />
       {catalogContent}
+      <button onClick={onShowChat}>打开浮窗</button><button onClick={onMinimizeChat}>最小化会话</button><button onClick={onExpandChat}>展开会话</button><button onClick={onDockChat}>收起到工具栏</button>
+      {chatFloating ? <span>浮窗已打开</span> : null}
       {search.open ? <WorkspaceSearch workspaceId={workspace.id} onClose={search.close} inputRef={search.inputRef} /> : null}
     </>;
   },
@@ -291,4 +293,28 @@ test("workspace settings replace the work navigation and return to the same draf
   await user.click(await screen.findByRole("menuitem", { name: "shellSidebar.settings" }));
   await user.click(await screen.findByRole("link", { name: "settingsRoute.backToApp" }));
   expect(await screen.findByRole("heading", { name: "Extension catalog" })).toBeTruthy();
+});
+
+test("a conversation keeps its draft while floating above work, minimizing and expanding", async () => {
+  const user = userEvent.setup();
+  const workspace = { id: "dock", name: "Dock" };
+  const router = createMemoryRouter([{ id: "authenticated", loader: () => ({ user: { id: "dock-user" } }), HydrateFallback: () => null, children: [{ id: "workspace", path: "/w/dock", loader: () => ({ workspace, selectedSession: null }), Component: WorkspaceHomeRoute, children: [{ path: "app", element: <></> }, { path: "work", element: <h1>工作列表</h1> }] }] }], { initialEntries: ["/w/dock/app"] });
+  render(<RouterProvider router={router} />);
+  await user.type(await screen.findByRole("textbox", { name: "Session draft" }), "保留这段草稿");
+  await user.click(screen.getByRole("link", { name: "我的工作" }));
+  await screen.findByRole("heading", { name: "工作列表" });
+  await user.click(screen.getByRole("button", { name: "打开浮窗" }));
+  expect(screen.getByText("浮窗已打开")).toBeTruthy();
+  expect((screen.getByRole("textbox", { name: "Session draft" }) as HTMLTextAreaElement).value).toBe("保留这段草稿");
+  expect(router.state.location.pathname).toBe("/w/dock/work");
+  await user.click(screen.getByRole("button", { name: "最小化会话" }));
+  expect(screen.queryByRole("textbox", { name: "Session draft" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "打开浮窗" }));
+  await user.click(screen.getByRole("button", { name: "展开会话" }));
+  expect(router.state.location.pathname).toBe("/w/dock/app");
+  expect((await screen.findByRole("textbox", { name: "Session draft" }) as HTMLTextAreaElement).value).toBe("保留这段草稿");
+  await user.click(screen.getByRole("button", { name: "收起到工具栏" }));
+  await screen.findByRole("heading", { name: "工作列表" });
+  expect(screen.getByText("浮窗已打开")).toBeTruthy();
+  expect((screen.getByRole("textbox", { name: "Session draft" }) as HTMLTextAreaElement).value).toBe("保留这段草稿");
 });
