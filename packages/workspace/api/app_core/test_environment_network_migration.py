@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from django.db import IntegrityError, connection, transaction
+from django.db import IntegrityError, connection, connections, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 from django.utils import timezone
@@ -239,6 +239,7 @@ class EnvironmentNetworkMigrationTests(TransactionTestCase):
             workspace = apps.get_model("app_core", "Workspace").objects.using(database.alias).create(
                 name="Network", createdBy_id=user.pk)
             writer = database.copy(alias=database.alias + "_policy_writer")
+            connections[writer.alias] = writer
             changed = False
             insertion = f'INSERT INTO {database.ops.quote_name(SessionEnvironment._meta.db_table)}'
 
@@ -256,7 +257,10 @@ class EnvironmentNetworkMigrationTests(TransactionTestCase):
                     session = Session.objects.using(database.alias).create(
                         workspace_id=workspace.pk, owner_id=user.pk)
             finally:
-                writer.close()
+                try:
+                    writer.close()
+                finally:
+                    del connections[writer.alias]
             self.assertTrue(changed, "the fixture must commit the policy change between read and insert")
             stored = SessionEnvironment.objects.using(database.alias).get(pk=session.current_environment_id)
             self.assertEqual(stored.network, "publicInternet")

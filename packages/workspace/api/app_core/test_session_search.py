@@ -1,13 +1,15 @@
 from datetime import timedelta
 from urllib.parse import urlencode
 
-from django.db import connection
+from django.db import transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 
+from .migration_testing import isolated_migration_database
 from .models import AgentRun, ModelConfig, Session, Workspace, WorkspaceMembership
 from .session_record_test_fixtures import SessionRecordFixture
+from .session_search import search_sessions
 
 
 class SessionSearchTests(SessionRecordFixture, TestCase):
@@ -117,18 +119,64 @@ class SessionSearchTests(SessionRecordFixture, TestCase):
         self.assertEqual(response.status_code, 400)
 
 
-class SessionSearchMigrationTests(SessionRecordFixture, TransactionTestCase):
+class SessionSearchMigrationTests(TransactionTestCase):
+    serialized_rollback = True
+
     def test_existing_committed_text_is_indexed_and_future_text_is_maintained(self):
-        executor = MigrationExecutor(connection)
-        executor.migrate([("app_core", "0053_validate_library_note_body_constraint")])
-        try:
-            run = self.message_run(self.session)
-            old = self.commit(run, "user_message", {"text": "历史权限"})
-            executor = MigrationExecutor(connection)
-            executor.migrate([("app_core", "0054_session_body_search")])
-            path = f"/api/workspaces/{self.workspace.id}/sessions/search"
-            self.assertEqual(self.client.get(path, {"query": "权限"}).json()["matches"][0]["match"]["eventId"], old.pk)
-            new = self.commit(run, "assistant_message", {"modelMarkdown": "新的权限答复"})
-            self.assertEqual(self.client.get(path, {"query": "权限"}).json()["matches"][0]["match"]["eventId"], new.pk)
-        finally:
-            MigrationExecutor(connection).migrate([("app_core", "0054_session_body_search")])
+        previous = [("app_core", "0053_validate_library_note_body_constraint")]
+        target = [("app_core", "0054_session_body_search")]
+        with isolated_migration_database(previous, route_current_models=True) as database:
+            alias = database.alias
+            executor = MigrationExecutor(database)
+            apps = executor.loader.project_state(previous).apps
+
+            def objects(name, app="app_core"):
+                return apps.get_model(app, name).objects.using(alias)
+
+            user = objects("User", "auth").create(username="search-upgrade-owner")
+            workspace = objects("Workspace").create(name="Search upgrade", createdBy_id=user.pk)
+            membership = objects("WorkspaceMembership").create(
+                workspace_id=workspace.pk, user_id=user.pk, role="owner",
+            )
+            with transaction.atomic(using=alias):
+                session = objects("Session").create(workspace_id=workspace.pk, owner_id=user.pk)
+                environment = objects("SessionEnvironment").create(session_id=session.pk)
+                objects("Session").filter(pk=session.pk).update(current_environment_id=environment.pk)
+            model = objects("ModelConfig").create(displayName="Search upgrade")
+            run = objects("AgentRun").create(
+                workspace_id=workspace.pk, session_id=session.pk, environment_id=environment.pk,
+                user_id=user.pk, membership_ref=membership.pk, modelConfig_id=model.pk,
+                prompt="Historical search input", status="running",
+            )
+
+            def commit(event_type, payload):
+                sequence = objects("SessionEvent").filter(session_id=session.pk).count() + 1
+                wire = {
+                    "schemaVersion": "session.event.v1", "eventVersion": 1,
+                    "eventId": f"search-upgrade-{sequence}", "sessionId": session.pk,
+                    "agentRunId": run.pk, "turnId": run.turn_id, "type": event_type,
+                    "createdAtMs": sequence, "sequence": sequence,
+                    "payload": {"callId": "search-upgrade-call", **payload},
+                }
+                return objects("SessionEvent").create(
+                    eventId=wire["eventId"], workspace_id=workspace.pk, session_id=session.pk,
+                    agent_run_id=run.pk, sequence=sequence, agent_run_sequence=sequence,
+                    projects_to_agent_run_stream=True, createdAtMs=sequence, payload=wire,
+                )
+
+            old = commit("user_message", {"text": "历史权限"})
+            executor.migrate(target)
+            apps = executor.loader.project_state(target).apps
+            # Project IDs so the current search consumer can use the historical
+            # Session queryset as a relation subquery without loading newer fields.
+            sessions = objects("Session").filter(
+                workspace_id=workspace.pk, owner_id=user.pk, status="active",
+                purpose="interactive", archivedAt__isnull=True,
+            ).values("pk")
+
+            def search():
+                return search_sessions(sessions, user_id=user.pk, workspace_id=workspace.pk, query="权限")
+
+            self.assertEqual(search()["matches"][0]["match"]["eventId"], old.pk)
+            new = commit("assistant_message", {"modelMarkdown": "新的权限答复"})
+            self.assertEqual(search()["matches"][0]["match"]["eventId"], new.pk)
