@@ -245,7 +245,7 @@ export default function SettingsPage() {
         </> : <>
         <nav ref={navigationRef} className="workspaceSettingsSections" aria-label={t("shellSidebar.settings")}>
           {groups.map(({ label, entries }) => <section key={label ?? "archive"}>
-            {label ? <h2>{label}</h2> : null}
+            {label && label !== t("settingsRoute.personal") ? <h2>{label}</h2> : null}
             {entries.map(([key, item]) => {
               const Icon = item.icon;
               const active = key === section || (key === "members" && section === "groups");
@@ -255,7 +255,7 @@ export default function SettingsPage() {
         </nav>
         <select className="workspaceSettingsSectionPicker" aria-label={t("shellSidebar.settings")} value={section === "groups" ? "members" : section}
           onChange={event => navigate(sectionPath(event.target.value), { state: { returnTo: closeTo } })}>
-          {groups.map(({ label, entries }) => label ? <optgroup key={label} label={label}>
+          {groups.map(({ label, entries }) => label && label !== t("settingsRoute.personal") ? <optgroup key={label} label={label}>
             {entries.map(([key, item]) => <option key={key} value={key}>{item.label}</option>)}
           </optgroup> : entries.map(([key, item]) => <option key={key} value={key}>{item.label}</option>))}
         </select>
