@@ -824,8 +824,8 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .sessionExpiredRestored p { color: var(--muted); font-size: 13px; line-height: 1.65; }
 
 .workspaceSettingsPage {
-  --settings-page-top: 32px;
-  --settings-page-gutter: 32px;
+  --settings-page-top: 48px;
+  --settings-page-gutter: 24px;
   --settings-page-width: min(var(--workspace-content-width), calc(100% - 2 * var(--settings-page-gutter)));
   display: flex;
   height: 100dvh;
@@ -845,7 +845,6 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 .workspaceSettingsContent { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; overflow: hidden; border: 1px solid var(--workspace-frame-edge); border-radius: var(--workspace-frame-radius); background: var(--surface-color); }
 .workspaceSettingsContent:focus { outline: none; }
 .workspaceSettingsScroll { min-height: 0; flex: 1; overflow: auto; }
-.workspaceSettingsScroll > :is(.preferenceSettings, .workspaceSettingsFeature, .shWorkspaceSettingsPage.isEmbedded) { margin-inline: var(--settings-page-gutter) 0; }
 .workspaceSettingsScroll:has(.developerSettings) { scrollbar-gutter: stable; }
 .developerSettings { color: var(--on-surface); }
 .developerSettings p { margin: 0; line-height: 1.65; overflow-wrap: anywhere; }
