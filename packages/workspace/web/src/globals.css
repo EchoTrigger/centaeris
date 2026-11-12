@@ -217,7 +217,7 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .libraryHeader, .libraryContent { width: min(var(--workspace-content-width), calc(100% - 64px)); margin: 0 auto; }
 .libraryHeader { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 48px 0 24px; }
 .libraryHeader h1 { margin: 0; font-size: 22px; font-weight: 500; line-height: 1.4; }
-.libraryCatalogTabs { display: flex; gap: 2px; overflow-x: auto; border-bottom: 1px solid var(--border); scrollbar-width: none; }
+.libraryCatalogTabs { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
 .libraryCatalogTabs::-webkit-scrollbar { display: none; }
 .libraryCatalogTabs a { display: inline-flex; min-height: 40px; align-items: center; gap: 7px; border-bottom: 2px solid transparent; color: var(--muted); padding: 0 9px; font-size: 13px; text-decoration: none; white-space: nowrap; }
 .libraryCatalogTabs a:hover { color: var(--text); }

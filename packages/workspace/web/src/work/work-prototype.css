@@ -15,11 +15,11 @@
 .workPrototype input,.workPrototype select,.workPrototype textarea { background:var(--surface-color); border:1px solid var(--outline-variant); border-radius:6px; min-height:var(--control-height); padding:7px 10px; max-width:100%; }
 .workPrototype textarea { resize:vertical; line-height:1.7; }
 .workPrototype :is(button,a,input,select,textarea):focus-visible { outline:2px solid var(--primary-color); outline-offset:2px; }
-.workHeader { min-height:55px; padding:10px 24px; display:flex; justify-content:space-between; align-items:center; gap:16px; border-bottom:1px solid var(--outline-variant); }
+.workHeader { min-height:55px; padding:10px 24px; display:flex; justify-content:space-between; align-items:center; gap:16px; }
 .workHeader h1 { display:flex; align-items:center; gap:10px; font-size:14px; letter-spacing:0; font-weight:500; }
 .workHeader h1 > svg { color:var(--process-text); }
 .workCount { color:var(--process-text); font-size:12px; font-variant-numeric:tabular-nums; }
-.workTabs { display:flex; gap:24px; padding:0 24px; border-bottom:1px solid var(--outline-variant); flex-wrap:wrap; }
+.workTabs { display:flex; gap:24px; padding:0 24px; flex-wrap:wrap; }
 .workTabs button { min-height:42px; padding:8px 0; border:0; border-bottom:2px solid transparent; border-radius:0; background:transparent; color:var(--process-text); font-size:13px; }
 .workTabs button[aria-pressed=true] { border-bottom-color:var(--on-surface); color:var(--on-surface); font-weight:500; }
 .workTabs button:hover { background:transparent; color:var(--on-surface); }
