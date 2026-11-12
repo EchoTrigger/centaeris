@@ -16,7 +16,7 @@ await i18n.changeLanguage("en");
 const workspace = { id: "workspace", name: "Research workspace", role: "owner", avatarUrl: null };
 const user = { id: "user", email: "fixture@example.invalid" };
 const plugin = { name: "research", displayName: "Research tools", shortDescription: "Read source documents and assemble evidence.", version: "1.0.0", packageDigest: "digest", enabled: true, errors: [], capabilities: ["skills", "mcp"], mcpCredentialRefs: ["sources"], hooks: [], scope: "workspace", writable: true,
-  mcpServers: [{ id: "Document service", transport: { type: "streamableHttp", endpoint: "https://example.invalid/mcp" }, auth: { type: "bearer", credentialRef: "sources", credentialConfigured: false }, tools: [] }] };
+  mcpServers: [{ id: "Document service", transport: { type: "streamableHttp", endpoint: "https://example.invalid/mcp" }, auth: { type: "bearer", credentialRef: "sources", credentialConfigured: false }, tools: [] }, { id: "Search service", transport: { type: "streamableHttp", endpoint: "https://example.invalid/search" }, auth: { type: "bearer", credentialRef: "sources", credentialConfigured: false }, tools: [] }] };
 const skill = { skillId: "plugin:research:evidence", name: "Evidence review", description: "Check claims against the available sources.", allowImplicitInvocation: true, allowedTools: [] };
 const failures: string[] = [];
 window.addEventListener("error", event => failures.push(event.message));

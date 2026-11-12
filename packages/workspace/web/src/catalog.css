@@ -68,7 +68,6 @@
 .catalogPage .extensionSkillFacts, .catalogPage .extensionSkillDocument { background:transparent; border:0; box-shadow:none; padding:16px 0; }
 .catalogPage .pluginSettingsToggle { font-size:12px; }
 .catalogPage .extensionUpload button { min-height:30px; }
-.catalogPage .connectionCatalog { padding-top:12px; }
 .workPrototype > .inboxLayout { display:grid; grid-template-columns:336px minmax(0,1fr); flex:1 1 0; min-height:0; margin-inline:8px; border-top:1px solid color-mix(in srgb,var(--outline-variant) 65%,transparent); }
 .inboxList { min-width:0; overflow:auto; border-right:1px solid color-mix(in srgb,var(--outline-variant) 65%,transparent); padding:12px 12px 24px 0; scrollbar-width:thin; }
 .inboxTabs { margin-bottom:14px; }

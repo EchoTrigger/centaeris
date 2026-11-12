@@ -1381,8 +1381,6 @@
   "catalog.installed": "Installed",
   "catalog.connections": "Connections",
   "catalog.manageConnections": "Manage connections",
-  "catalog.skillsHint": "Available to Agent in this workspace",
-  "catalog.connectionsHint": "Services provided by installed plugins. Saved credentials do not indicate a live connection.",
   "catalog.service": "Service",
   "catalog.noConnections": "Installed plugins have no connections to configure.",
   "space.materials": "My materials",

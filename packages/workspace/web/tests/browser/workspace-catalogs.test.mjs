@@ -61,13 +61,16 @@ test("Inbox and catalogs keep navigation, acknowledged state and usable controls
       await waitFor(() => text("Workspace resources"), "Home resources");
       await evaluate("[...document.querySelectorAll('.catalogRows a')].find(a => a.textContent.includes('Manage connections')).click()");
       await waitFor(() => text("Credentials required"), "connection status");
+      assert.equal(await evaluate("document.querySelectorAll('.connectionCatalog .catalogRows a').length"), 1, "one MCP entry for the plugin");
       await capture("connections");
       await evaluate("document.querySelector('.connectionCatalog .catalogRows a').click()");
       await waitFor(() => evaluate("Boolean(document.querySelector('input[type=password]'))"), "existing credential controls");
       assert.equal(await evaluate("document.querySelector('input[type=password]').value"), "");
       await capture("plugin-detail");
       assert.ok(await evaluate("Boolean(document.querySelector('.connectionCatalog .catalogRows'))"), "connection directory remains mounted");
-      assert.ok(await evaluate("document.querySelector('[role=switch]').getBoundingClientRect().width > 0"), "plugin enablement remains visible");
+      assert.ok(await evaluate("document.querySelector('.catalogDetailView').textContent.includes('Document service') && document.querySelector('.catalogDetailView').textContent.includes('Search service')"), "all MCP services are expanded in the detail");
+      assert.equal(await evaluate("document.querySelectorAll('.catalogDetailView input[type=password]').length"), 1, "shared credentials are configured once");
+      assert.equal(await evaluate("document.querySelectorAll('.catalogDetailView [role=switch]').length"), 0, "connection details do not change plugin enablement");
       await evaluate("document.querySelector('.catalogBack').click()");
       await waitFor(() => evaluate("!document.querySelector('.catalogDetailView')"), "returned to connections");
       await click("Skills");

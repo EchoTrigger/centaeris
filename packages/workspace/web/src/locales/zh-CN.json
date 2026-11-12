@@ -1381,8 +1381,6 @@
   "catalog.installed": "已安装",
   "catalog.connections": "连接",
   "catalog.manageConnections": "管理连接",
-  "catalog.skillsHint": "此工作区 Agent 可使用的技能",
-  "catalog.connectionsHint": "已安装插件提供的服务。已保存凭据不代表服务当前连通。",
   "catalog.service": "服务",
   "catalog.noConnections": "已安装插件没有需要配置的连接。",
   "space.materials": "我的资料",

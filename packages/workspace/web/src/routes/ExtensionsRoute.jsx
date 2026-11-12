@@ -70,7 +70,6 @@ function ExtensionCatalog({ workspace, view, isSuperuser, detailId, onSelectPlug
         {navigation}
         <div className={`catalogWorkspace${detailId ? " hasDetail" : ""}`}>
         <div className="catalogDirectory" hidden={Boolean(detailId)}>
-          <div className="catalogSectionHeading"><h2>{t("extensions.skills")}</h2><span>{t("catalog.skillsHint")}</span></div>
           {error ? <p className="catalogEmpty" role="alert">{error}</p> : items === null
             ? <p className="catalogEmpty" role="status">{t("agentChat.loading")}</p>
             : items.length === 0 ? <p className="catalogEmpty">{t("libraryRoute.noSkillsAvailableInThisWorkspace")}</p>
