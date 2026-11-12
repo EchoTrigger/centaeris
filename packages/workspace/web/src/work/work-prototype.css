@@ -161,7 +161,6 @@
 .workRailViews .shRow { margin:0; }
 .workRailProjectIcon { display:inline-grid; place-items:center; width:16px; height:16px; border:1px solid var(--outline-variant); border-radius:4px; color:var(--process-text); font-size:10px; }
 .workRailCount { margin-left:auto; font-size:11px; color:var(--process-text); font-variant-numeric:tabular-nums; }
-.workRailEmpty { color:var(--process-text); font-size:11px; margin:8px 10px; }
 @media (max-width:1100px) { .workRowProject { display:none; } .workDetail { grid-template-columns:minmax(0,1fr) 218px; } .workDetailMain { padding-inline:28px; } }
 @media (max-width:760px) {
   .workHeader { padding:10px 18px; flex-wrap:wrap; } .workNoticeDetail { display:none; }

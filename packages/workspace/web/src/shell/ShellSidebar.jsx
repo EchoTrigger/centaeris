@@ -145,7 +145,6 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
               sessionProps.onOpenSession(session);
             }
           }}><span>{session.title || t("work.conversation.untitled")}</span></Link>)}
-        {!favoriteProjects.length && !favoriteSessions.length ? <p className="workRailEmpty">{t("work.favoriteHint")}</p> : null}
         <p className="workRailHeading">{t("work.views")}</p>
         <Link className="shRow" to={`${base}/work?tab=attention`} aria-current={location.pathname === `${base}/work` && location.search.includes("tab=attention") ? "page" : undefined}><ListTodo aria-hidden="true" /><span>{t("work.needsAttention")}</span><span className="workRailCount">{work?.tasks.filter(task => task.owner === "me" && task.attention && !["done", "cancelled"].includes(task.status)).length || 0}</span></Link>
       </nav>
