@@ -102,6 +102,17 @@ test("Inbox and catalogs keep navigation, acknowledged state and usable controls
       await waitFor(() => evaluate("Boolean(document.querySelector('input[type=password]'))"), "narrow credential form");
       assert.ok(await evaluate("document.documentElement.scrollWidth <= innerWidth"), "credential form fits viewport");
       await capture("plugin-mobile");
+      await evaluate("catalogFixture.language('en'); catalogFixture.navigate('work/tasks')");
+      await waitFor(() => text("Review evidence for the connector integration"), "API-backed issue list");
+      await evaluate("document.querySelector('.issueRow').click()");
+      await waitFor(() => text("Check the source permissions and record the result."), "Issue detail");
+      assert.ok(await evaluate("document.documentElement.scrollWidth <= innerWidth"), "Issue detail fits narrow viewport");
+      await capture("issue-mobile");
+      await send("Page.reload");
+      await waitFor(() => evaluate("Boolean(window.catalogFixture && document.querySelector('.issueDetail'))"), "reloaded Issue URL");
+      await waitFor(() => text("Check the source permissions and record the result."), "Issue refetched after reload");
+      await evaluate("document.querySelector('.workBreadcrumb a').click()");
+      await waitFor(() => evaluate("Boolean(document.querySelector('.issueRow'))"), "returned to Issues list");
       assert.deepEqual(await evaluate("catalogFixture.failures"), []);
     });
   } finally {

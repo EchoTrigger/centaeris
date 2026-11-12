@@ -17,6 +17,7 @@ const workspace = { id: "workspace", name: "Research workspace", role: "owner", 
 const user = { id: "user", email: "fixture@example.invalid" };
 const plugin = { name: "research", displayName: "Research tools", shortDescription: "Read source documents and assemble evidence.", version: "1.0.0", packageDigest: "digest", enabled: true, errors: [], capabilities: ["skills", "mcp"], mcpCredentialRefs: ["sources"], hooks: [], scope: "workspace", writable: true,
   mcpServers: [{ id: "Document service", transport: { type: "streamableHttp", endpoint: "https://example.invalid/mcp" }, auth: { type: "bearer", credentialRef: "sources", credentialConfigured: false }, tools: [] }, { id: "Search service", transport: { type: "streamableHttp", endpoint: "https://example.invalid/search" }, auth: { type: "bearer", credentialRef: "sources", credentialConfigured: false }, tools: [] }] };
+const issue = { id: "issue-evidence", workspaceId: workspace.id, title: "Review evidence for the connector integration", description: "Check the source permissions and record the result.", status: "inProgress", assigneeId: user.id, creatorId: user.id, version: 1, archivedAt: null, createdAt: "2026-11-12T01:00:00Z", updatedAt: "2026-11-12T01:00:00Z" };
 const skill = { skillId: "plugin:research:evidence", name: "Evidence review", description: "Check claims against the available sources.", allowImplicitInvocation: true, allowedTools: [] };
 const failures: string[] = [];
 window.addEventListener("error", event => failures.push(event.message));
@@ -24,6 +25,10 @@ window.addEventListener("unhandledrejection", event => failures.push(String(even
 window.fetch = async (input, options) => {
   const url = new URL(String(input), location.href);
   if (options?.method && options.method !== "GET") throw new Error(`Unexpected mutation: ${url.pathname}`);
+  if (url.pathname.endsWith("/issues/assignees")) return Response.json({ assignees: [{ id: user.id, name: "Alex" }] });
+  if (url.pathname.endsWith("/issues/issue-evidence/events")) return Response.json({ events: [{ id: "event-evidence", issueId: issue.id, actor: { id: user.id, name: "Alex" }, type: "created", changes: { title: { before: null, after: issue.title } }, createdAt: issue.createdAt }], total: 1 });
+  if (url.pathname.endsWith("/issues/issue-evidence")) return Response.json({ issue });
+  if (url.pathname.endsWith("/issues")) return Response.json({ issues: [issue], total: 1 });
   if (url.pathname === "/api/models") return Response.json({ models: [] });
   if (url.pathname.endsWith("/session-projects")) return Response.json({ projects: [] });
   if (url.pathname.endsWith("/sessions")) return Response.json({ sessions: [] });

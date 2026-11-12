@@ -1,0 +1,28 @@
+.issuesSurface { font-size:14px; font-weight:400; min-width:0; }
+.issuesSurface .workHeader { height:44px; min-height:44px; flex-wrap:nowrap; }
+.issuesSurface svg { width:14px; height:14px; stroke-width:1.8; }
+.issueFilters { display:flex; gap:8px; padding:8px 16px; }
+.issueFilters [aria-pressed=true] { font-weight:500; background:var(--surface-container); }
+.issueList { padding:0 12px; }
+.issueRow { display:flex; align-items:center; gap:12px; min-height:42px; padding:10px 12px; border-radius:6px; }
+.issueRow:hover { background:var(--surface-hover); }
+.issueRow > span { flex:1; overflow-wrap:anywhere; }
+.issueRow small { color:var(--process-text); font-size:12px; }
+.issueEmpty { padding:32px 12px; color:var(--process-text); }
+.issueDetail { max-width:840px; margin:24px auto; padding:0 24px 32px; width:100%; }
+.issueDetail h1 { overflow-wrap:anywhere; font-size:22px; font-weight:500; }
+.issueMetadata,.issueActions { display:flex; align-items:center; gap:12px; margin:16px 0; }
+.issueMetadata { color:var(--process-text); }
+.issueDescription { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.7; margin-block:24px !important; }
+.issueForm { display:grid; gap:20px; }
+.issueForm label { display:grid; gap:8px; }
+.issueFormProperties,.issueForm footer,.issuePagination { display:flex; gap:12px; align-items:center; }
+.issueForm footer,.issuePagination { justify-content:flex-end; }
+.issueActivity { margin-top:32px; border-top:1px solid var(--outline-variant); padding-top:20px; }
+.issueActivity ol { list-style:none; padding:0; }
+.issueActivity li { padding:12px 0; font-size:13px; overflow-wrap:anywhere; }
+.issueActivity li > div { display:flex; gap:8px; flex-wrap:wrap; }
+.issueActivity time { color:var(--process-text); margin-left:auto; font-size:12px; }
+.issueActivity li p { margin-top:8px; color:var(--process-text); white-space:pre-wrap; }
+.issueError { display:flex; align-items:center; gap:12px; margin:8px 16px; color:var(--error); font-size:13px; }
+@media(max-width:600px) { .issueDetail { padding-inline:12px; } .issueRow small { max-width:90px; overflow:hidden; text-overflow:ellipsis; } }
