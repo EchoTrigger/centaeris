@@ -2718,3 +2718,46 @@ class PresentationChangeOutbox(models.Model):
     class Meta:
         constraints = [models.UniqueConstraint(fields=["key", "transactionId"],
             name="presentation_change_transaction_unique")]
+
+
+def new_issue_id() -> str:
+    return new_id("issue")
+
+
+def new_issue_event_id() -> str:
+    return new_id("issue_event")
+
+
+class Issue(models.Model):
+    id = models.CharField(primary_key=True, max_length=64, default=new_issue_id)
+    workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE, related_name="issues")
+    title = models.CharField(max_length=240)
+    description = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=16, default="todo")
+    assignee = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        null=True, blank=True, related_name="assigned_issues")
+    creator = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="created_issues")
+    version = models.PositiveIntegerField(default=1)
+    archivedAt = models.DateTimeField(null=True, blank=True)
+    createdAt = models.DateTimeField(auto_now_add=True)
+    updatedAt = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["workspace", "-updatedAt", "id"], name="issue_workspace_updated")]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(status__in=["backlog", "todo", "inProgress", "done", "canceled"]), name="issue_status_valid"),
+            models.CheckConstraint(condition=models.Q(version__gte=1), name="issue_version_positive"),
+        ]
+
+
+class IssueEvent(models.Model):
+    id = models.CharField(primary_key=True, max_length=64, default=new_issue_event_id)
+    issue = models.ForeignKey(Issue, on_delete=models.CASCADE, related_name="events")
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="issue_events")
+    type = models.CharField(max_length=16)
+    changes = models.JSONField(default=dict)
+    createdAt = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["issue", "createdAt", "id"], name="issue_event_chronological")]
+        constraints = [models.CheckConstraint(condition=models.Q(type__in=["created", "updated", "archived", "restored"]), name="issue_event_type_valid")]

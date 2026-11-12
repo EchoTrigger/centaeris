@@ -336,6 +336,54 @@ remaining `runtime.await_question.v1` wait. Those old records have no authoritat
 question body to copy; they must be resolved or reconstructed from authoritative
 records before upgrading. New pending records use `runtime.await_question.v2`.
 
+## Workspace Issues
+
+Issues are durable Workspace business records. Django owns their fields and
+change history; Agent Run execution and Session events retain their separate
+contracts. Completing a Run does not complete an Issue. These routes do not
+create Runs, notifications, Reviews or business Projects.
+
+All Issue routes require a signed-in current member of an active Workspace.
+Owner, admin and member roles can create and edit records in that Workspace.
+An Issue identifier does not grant access across Workspaces. Mutation requests
+use the existing browser CSRF contract. Assignees must be current members of
+the same Workspace; `null` clears the assignment.
+
+| Action | Method and path | Input / response |
+| --- | --- | --- |
+| List Issues | `GET /api/workspaces/{workspaceId}/issues` | `mine`, `archived`, `limit`, `offset`; `{issues, total}` |
+| Create Issue | `POST /api/workspaces/{workspaceId}/issues` | `title`, optional `description`, `status`, `assigneeId`; HTTP 201 `{issue}` |
+| Read Issue | `GET /api/workspaces/{workspaceId}/issues/{issueId}` | `{issue}` |
+| Edit or archive Issue | `PATCH /api/workspaces/{workspaceId}/issues/{issueId}` | Required `version`; optional `title`, `description`, `status`, `assigneeId`, `archived`; `{issue}` |
+| Read activity | `GET /api/workspaces/{workspaceId}/issues/{issueId}/events` | `limit`, `offset`; `{events, total}` |
+| List assignees | `GET /api/workspaces/{workspaceId}/issues/assignees` | `{assignees: [{id, name}]}` |
+
+An Issue contains `id`, `workspaceId`, `title`, `description`, `status`,
+`assigneeId`, `creatorId`, `version`, `archivedAt`, `createdAt` and `updatedAt`.
+Timestamps use ISO 8601. `assigneeId` and `archivedAt` can be null. Status is one
+of `backlog`, `todo`, `inProgress`, `done`, `canceled`; creation defaults to
+`todo`, an empty description and no assignee. Titles must be nonblank after
+trimming and at most 240 characters. Unknown input fields are rejected.
+
+List requests default to unarchived records and 50 results from offset zero.
+`mine=true` selects records assigned to the signed-in user; `archived=true`
+selects archived records only. Lists sort by update time descending, then ID.
+Archive and restore retain the record and its history; there is no hard-delete
+endpoint.
+
+A successful change increments `version` and writes an immutable Issue event
+in the same database transaction. A stale version returns HTTP 409 without
+changing the record or history. A patch that changes no values creates no event
+and does not increment the version. Events carry `id`, `issueId`, `actor`
+(`id`, `name`), `type`, `changes` and `createdAt`. Types are `created`, `updated`,
+`archived`, `restored`; changes map each affected field to `{before, after}`.
+The activity endpoint returns chronological events with deterministic ordering.
+No API permits editing or deleting an event.
+
+Web Issues and My issues use these records and URL-selected details. Browser
+refresh and navigation reload authoritative records; local browser storage is
+not the business-data store.
+
 ## Hosted command acceptance
 
 `POST /api/workspaces/{workspaceId}/sessions` (`createSession`) and
