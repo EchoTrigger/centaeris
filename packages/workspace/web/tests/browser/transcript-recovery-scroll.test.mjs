@@ -54,6 +54,23 @@ for (const scenario of [
       assert.equal(latest.following, true, "recovery keeps latest following active");
       assert.ok(Math.abs(latest.bottomDistance) <= 2, `latest recovery leaves ${latest.bottomDistance}px to bottom`);
       assert.equal(latest.draft, before.draft);
+      await evaluate("transcriptRecoveryFixture.searchTarget('answer-12')");
+      await evaluate("transcriptRecoveryFixture.settle()");
+      const match = await evaluate(`(() => {
+        const viewport = document.querySelector('.workspaceMessages').getBoundingClientRect();
+        const node = document.querySelector('[data-block-id="answer-12"]');
+        const mark = node.querySelector('mark').getBoundingClientRect();
+        return { visible: mark.top >= viewport.top && mark.bottom <= viewport.bottom,
+          focused: document.activeElement === node, marks: node.querySelectorAll('mark').length,
+          otherMarks: document.querySelectorAll('[data-block-id="answer-13"] mark').length };
+      })()`);
+      assert.equal(match.visible, true, 'the matching word is inside the real viewport');
+      assert.equal(match.focused, true, 'keyboard focus follows the target block');
+      assert.ok(match.marks > 0);
+      assert.equal(match.otherMarks, 0);
+      await evaluate("document.querySelector('.workspaceJumpToLatest').click()");
+      await evaluate("transcriptRecoveryFixture.settle()");
+      assert.ok(Math.abs((await geometry()).bottomDistance) <= 2, 'return from a search target restores the latest view');
       assert.deepEqual(await evaluate("transcriptRecoveryFixture.failures"), []);
       assert.deepEqual([...new Set(await evaluate("transcriptRecoveryFixture.requests"))], ["/api/sessions/synthetic-recovery/transcript/turn-metadata"], "fixture makes only intercepted synthetic metadata reads");
     });

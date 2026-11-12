@@ -90,7 +90,7 @@ fn physical_identity(facts: &serde_json::Value, target: &RetirementTarget) -> bo
         .all(|(name, value)| labels[*name].as_str() == Some(*value))
 }
 
-fn retire_physical(target: &RetirementTarget) -> Result<bool, String> {
+pub(super) fn retire_physical(target: &RetirementTarget) -> Result<bool, String> {
     retire_observed(target, crate::docker_engine::inspect, |id| {
         crate::docker_engine::remove(id, false)
     })

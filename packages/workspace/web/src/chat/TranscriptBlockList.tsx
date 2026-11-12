@@ -24,6 +24,8 @@ import { useTranslation } from "../i18n";
 import { TranscriptBlockRow, TranscriptFailureNotice, TranscriptLiveTail, TranscriptToolGroupCard } from "./TranscriptBlockContent";
 import type { TranscriptToolOperationRegistry } from "./transcriptToolOperations";
 import type { TranscriptViewStore } from "./transcriptViewStore";
+import { useSessionSubagents } from "./useSessionSubagents";
+import type { SessionSubagent } from "./sessionSubagents";
 
 
 type Props = Readonly<{
@@ -31,6 +33,7 @@ type Props = Readonly<{
   store: TranscriptViewStore;
   toolOperations?: TranscriptToolOperationRegistry;
   sessionId: string | null;
+  subagentsRevision?: string;
   loadingHistory: boolean;
   loadingOlderHistory: boolean;
   onLoadOlderHistory(): Promise<void>;
@@ -43,10 +46,12 @@ type Props = Readonly<{
   onReadingLatestChange?(sessionId: string | null, readingLatest: boolean): void;
   onShowCitation?(citation: CitationSummary, origin: { elementId: string }): void;
   onShowArtifact?(artifact: import("./useTranscriptTurnMetadata").PublishedArtifact, origin: { elementId: string }): void;
+  onOpenSubagent?(agent: SessionSubagent, origin: { elementId: string }): void;
   running?: boolean;
   activity?: TranscriptActivityState;
   startedAtMs?: number;
   completedAtMs?: number;
+  searchTarget?: Readonly<{ blockId: string; query: string; onReturnLatest(): void }>;
 }>;
 
 function useTranscriptList(store: TranscriptViewStore) {
@@ -108,6 +113,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   store,
   toolOperations,
   sessionId,
+  subagentsRevision = "0",
   loadingHistory,
   loadingOlderHistory,
   onLoadOlderHistory,
@@ -120,15 +126,25 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   onReadingLatestChange,
   onShowArtifact,
   onShowCitation,
+  onOpenSubagent,
   running = false,
   activity,
   startedAtMs,
   completedAtMs,
+  searchTarget,
 }: Props) {
   const { t } = useTranslation();
   const measuredMemoryPressure = useTranscriptMemoryPressure(store);
   const historyMemoryPressure = reportedMemoryPressure || measuredMemoryPressure;
-  const { blockIds, hasOlder, viewEpoch } = useTranscriptList(store);
+  const { blockIds, hasOlder, viewEpoch, sourceHighWater } = useTranscriptList(store);
+  const hasAgentTools = blockIds.some(blockId => {
+    const body = store.getBlockSnapshot(blockId)?.body;
+    return body?.kind === "tool" && (body.toolName === "agent" || body.toolName === "task_output");
+  });
+  const { agents: subagents } = useSessionSubagents(hasAgentTools ? sessionId : null, `${sourceHighWater}:${subagentsRevision}`, running);
+  const targetBlockId = searchTarget?.blockId ?? "";
+  const targetQuery = searchTarget?.query ?? "";
+  const locatedTarget = useRef({ store, key: "", block: false, word: false });
   const live = useTranscriptLive(store);
   const citations = useTranscriptCitations(store, sessionId);
   const turns = useMemo(() => groupTranscriptTurns(blockIds, store.getBlockSnapshot), [store, blockIds]);
@@ -176,7 +192,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     setLatestContentVisible(element.clientHeight > 0
       && measuredContentEnd(element, content) <= element.scrollTop + element.clientHeight + 2);
   }, []);
-  useEffect(() => { if (!loadingHistory) onReadingLatestChange?.(sessionId, latestContentVisible); }, [latestContentVisible, loadingHistory, onReadingLatestChange, sessionId]);
+  useEffect(() => { if (!loadingHistory) onReadingLatestChange?.(sessionId, !searchTarget && latestContentVisible); }, [latestContentVisible, loadingHistory, onReadingLatestChange, sessionId, searchTarget]);
   useEffect(() => {
     if (shouldReleaseLoadedHistory(historyMemoryPressure, followingLatest, loadingOlderHistory)) onReleaseLoadedHistory?.();
   }, [historyMemoryPressure, followingLatest, loadingOlderHistory, onReleaseLoadedHistory]);
@@ -385,6 +401,43 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     } else getController().update();
   }, [blockIds, getController, setProgrammaticScrollTop]);
 
+  useLayoutEffect(() => {
+    if (!targetBlockId || !blockIds.includes(targetBlockId)) return undefined;
+    const viewport = scrollRef.current;
+    const content = contentRef.current;
+    if (!viewport || !content) return undefined;
+    const key = `${viewEpoch}:${targetBlockId}:${targetQuery}`;
+    if (locatedTarget.current.store !== store || locatedTarget.current.key !== key) locatedTarget.current = { store, key, block: false, word: false };
+    if (locatedTarget.current.word) return undefined;
+    const initialInput = userScrollInputRef.current;
+    getController().pause();
+    const locate = () => {
+      if (userScrollInputRef.current !== initialInput) return;
+      const node = content.querySelector<HTMLElement>(`[data-block-id="${CSS.escape(targetBlockId)}"]`);
+      if (!node) return;
+      const mark = node.querySelector<HTMLElement>("mark");
+      if (locatedTarget.current.block && !mark) return;
+      const target = mark ?? node;
+      setProgrammaticScrollTop(viewport, Math.max(0, viewport.scrollTop + target.getBoundingClientRect().top
+        - viewport.getBoundingClientRect().top - viewport.clientHeight / 3));
+      if (!locatedTarget.current.block) node.focus({ preventScroll: true });
+      locatedTarget.current.block = true;
+      locatedTarget.current.word = Boolean(mark) || !targetQuery;
+      readingAnchorRef.current = { element: target,
+        offset: target.getBoundingClientRect().top - viewport.getBoundingClientRect().top,
+        detail: null, closingContentEnd: null };
+    };
+    let frame = window.requestAnimationFrame(locate);
+    // Referenced long text arrives asynchronously through the existing reader.
+    const observer = new MutationObserver(() => {
+      if (locatedTarget.current.word) return;
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(locate);
+    });
+    observer.observe(content, { childList: true, subtree: true, characterData: true });
+    return () => { observer.disconnect(); window.cancelAnimationFrame(frame); };
+  }, [store, blockIds, targetBlockId, targetQuery, viewEpoch, getController, setProgrammaticScrollTop]);
+
   // Read visibility follows the committed layout, independently of whether
   // anchoring, streamed content or a disclosure caused that layout to change.
   useLayoutEffect(observeReadingLatest);
@@ -461,6 +514,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   }
 
   function scrollToLatest() {
+    if (searchTarget) { searchTarget.onReturnLatest(); return; }
     getController().jump();
   }
 
@@ -542,9 +596,8 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
         tabIndex={0}
         role="region"
         aria-label={t("virtualAgentRunList.conversationMessages")}
+        aria-busy={loadingHistory}
       >
-        {loadingHistory && blockIds.length === 0 && live === null && !pendingVisible
-          ? <div className="workspaceEmptyState" role="status">{t('appRoute.loadingConversation')}</div> : null}
         {!loadingHistory && blockIds.length === 0 && live === null && !pendingVisible ? (emptyState || null) : null}
         {citations.error ? <div role="status" className="workspaceToolOutputStatus">
           {t("appRoute.citationRefreshFailed")}
@@ -573,16 +626,16 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
               {isPending ? <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id="pending:user">
                 <div className="workspaceUserMessage">{pendingUserMessage?.text}</div>
                 <div className="workspaceUserMessageMeta workspaceUserMessageMetaPlaceholder" aria-hidden="true" />
-              </div> : turn.userBlockId ? <TranscriptBlockRow store={store} blockId={turn.userBlockId} /> : null}
-              {hasWork ? <WorkProgress key="work" running={Boolean(isPending ? !pendingTerminal : isLast && (running || (submitted && !runEnded)))} finalStarted={turn.answerIds.length > 0}
+              </div> : turn.userBlockId ? <TranscriptBlockRow store={store} blockId={turn.userBlockId} searchQuery={turn.userBlockId === targetBlockId ? targetQuery : undefined} /> : null}
+              {hasWork ? <WorkProgress key="work" revealKey={turn.processIds.includes(targetBlockId) ? targetBlockId : undefined} running={Boolean(isPending ? !pendingTerminal : isLast && (running || (submitted && !runEnded)))} finalStarted={turn.answerIds.length > 0}
                 response={turnLive ? <TranscriptLiveTail live={turnLive} mode="text" /> : null}
                 startedAtMs={isPending || (runKey && runKey === pendingRunKey) ? pendingStartedAt : submitted?.startedAtMs ?? time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={isPending ? pendingUserMessage?.completedAtMs : turnCompletedAt}>
                 {groupTranscriptBlocks(store, turn.processIds).map((entry) => entry.kind === "tool"
-                  ? <TranscriptToolGroupCard store={store} blockIds={entry.blockIds} toolOperations={toolOperations} citations={citations.citations} onShowCitation={onShowCitation} runEnded={runEnded} key={`tool:${entry.blockIds[0]}`} />
-                  : <TranscriptBlockRow store={store} blockId={entry.blockId} key={entry.blockId} />)}
+                  ? <TranscriptToolGroupCard store={store} blockIds={entry.blockIds} toolOperations={toolOperations} citations={citations.citations} onShowCitation={onShowCitation} runEnded={runEnded} subagents={subagents} onOpenSubagent={onOpenSubagent} key={`tool:${entry.blockIds[0]}`} />
+                  : <TranscriptBlockRow store={store} blockId={entry.blockId} searchQuery={entry.blockId === targetBlockId ? targetQuery : undefined} key={entry.blockId} />)}
                 {turnLive ? <TranscriptLiveTail live={turnLive} mode="reasoning" /> : null}
               </WorkProgress> : null}
-              {turn.answerIds.map((blockId) => <TranscriptBlockRow store={store} blockId={blockId} key={blockId} />)}
+              {turn.answerIds.map((blockId) => <TranscriptBlockRow store={store} blockId={blockId} searchQuery={blockId === targetBlockId ? targetQuery : undefined} key={blockId} />)}
               {time?.artifacts.length ? <div className="workspaceArtifactInline" aria-label={t("agentRunRow.generatedFiles")}>
                 {time.artifacts.map((artifact) => <span className="workspaceArtifactInlineRow" key={artifact.artifactRef}>
                   <span className="workspaceArtifactPlus" aria-hidden="true">+</span>
@@ -599,7 +652,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
         </div>
         <div ref={spacerRef} aria-hidden="true" style={{ height: 0, flexShrink: 0, transitionProperty: "none" }} />
       </div>
-      {!followingLatest && (blockIds.length > 0 || live !== null) ? (
+      {(searchTarget || !followingLatest) && (blockIds.length > 0 || live !== null) ? (
         <button
           type="button"
           className="workspaceJumpToLatest"

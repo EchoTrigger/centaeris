@@ -16,6 +16,8 @@ const ERROR_MESSAGES = () => ({
   workspace_member_exists: t("workspaceMembersRoute.thisAccountIsAlreadyAMemberOfThisWorkspace"),
   workspace_member_role_unchanged: t("workspaceMembersRoute.theMemberSRoleHasNotChanged"),
   workspace_member_self_operation_forbidden: t("workspaceMembersRoute.youCannotPerformThisActionOnYourOwnMembership"),
+  workspace_member_management_forbidden: t("workspaceMembersRoute.onlyOwnersCanManageAdministrators"),
+  workspace_invitation_management_forbidden: t("workspaceMembersRoute.onlyOwnersCanManageAdministratorInvitations"),
   workspace_owner_transfer_required: t("workspaceMembersRoute.theOwnerCanOnlyBeChangedThroughAnOwnership"),
   workspace_owner_reauthentication_failed: t("settingsRoute.theCurrentPasswordIsIncorrect"),
   workspace_invitation_not_pending: t("workspaceMembersRoute.theInvitationStatusHasChanged"),
@@ -52,6 +54,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState("");
   const [notice, setNotice] = useState(null);
+  const [dialogError, setDialogError] = useState("");
   const [busyKeys, setBusyKeys] = useState(() => new Set());
   const [removeTarget, setRemoveTarget] = useState(null);
   const [transferTarget, setTransferTarget] = useState(null);
@@ -92,7 +95,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
   }, [canManageWorkspace, load]);
 
   useEffect(() => {
-    if (!notice) return undefined;
+    if (notice?.kind !== "success") return undefined;
     const timeout = window.setTimeout(() => setNotice(null), 4200);
     return () => window.clearTimeout(timeout);
   }, [notice]);
@@ -106,17 +109,17 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
     });
   }
 
-  async function handleMutationError(error) {
+  async function handleMutationError(error, showError = (text) => setNotice({ kind: "error", text })) {
     if (error instanceof ApiError && error.message === "workspace_not_found") {
       await redirectForLostAccess();
       return;
     }
     if (error instanceof ApiError && [404, 409].includes(error.status)) {
       await load(true);
-      setNotice({ kind: "error", text: t("workspaceMembersRoute.theStatusChangedAndHasBeenReloadedValue", { value1: errorText(error) }) });
+      showError(t("workspaceMembersRoute.theStatusChangedAndHasBeenReloadedValue", { value1: errorText(error) }));
       return;
     }
-    setNotice({ kind: "error", text: errorText(error) });
+    showError(errorText(error));
   }
 
   async function updateRole(member, role) {
@@ -141,6 +144,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
     if (!removeTarget) return;
     const target = removeTarget;
     const key = `remove:${target.membershipId}`;
+    setDialogError("");
     setBusy(key, true);
     try {
       const result = await apiJson(
@@ -152,7 +156,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
       setRemoveTarget(null);
       setNotice({ kind: "success", text: t("workspaceMembersRoute.valueWasRemovedFromTheWorkspace", { value1: target.email }) });
     } catch (error) {
-      await handleMutationError(error);
+      await handleMutationError(error, setDialogError);
     } finally {
       setBusy(key, false);
     }
@@ -163,6 +167,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
     if (!transferTarget || !transferPassword) return;
     const target = transferTarget;
     const key = `transfer:${target.membershipId}`;
+    setDialogError("");
     setBusy(key, true);
     try {
       const result = await apiJson(
@@ -183,13 +188,14 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
       setTransferPassword("");
       setNotice({ kind: "success", text: t("workspaceMembersRoute.ownershipTransferredToValue", { value1: owner.email }) });
     } catch (error) {
-      await handleMutationError(error);
+      await handleMutationError(error, setDialogError);
     } finally {
       setBusy(key, false);
     }
   }
 
   async function issueInvitation(email, role) {
+    setDialogError("");
     setBusy("invite", true);
     try {
       const result = await apiJson(
@@ -202,7 +208,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
       setInviteDialog({ email: invitation.email, role: invitation.role, inviteUrl: result.inviteUrl });
       setReissueTarget(null);
     } catch (error) {
-      await handleMutationError(error);
+      await handleMutationError(error, setDialogError);
     } finally {
       setBusy("invite", false);
     }
@@ -212,6 +218,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
     if (!revokeTarget) return;
     const target = revokeTarget;
     const key = `revoke:${target.id}`;
+    setDialogError("");
     setBusy(key, true);
     try {
       const result = await apiJson(
@@ -223,18 +230,22 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
       setRevokeTarget(null);
       setNotice({ kind: "success", text: t("workspaceMembersRoute.theInvitationForValueWasRevoked", { value1: target.email }) });
     } catch (error) {
-      await handleMutationError(error);
+      await handleMutationError(error, setDialogError);
     } finally {
       setBusy(key, false);
     }
   }
 
   async function copyInviteUrl() {
+    setDialogError("");
+    setBusy("copy", true);
     try {
       await navigator.clipboard.writeText(inviteDialog.inviteUrl);
       setNotice({ kind: "success", text: t("workspaceMembersRoute.invitationLinkCopied") });
     } catch (error) {
-      setNotice({ kind: "error", text: t("workspaceMembersRoute.unableToCopyInvitationLinkValue", { value1: errorText(error) }) });
+      setDialogError(t("workspaceMembersRoute.unableToCopyInvitationLinkValue", { value1: errorText(error) }));
+    } finally {
+      setBusy("copy", false);
     }
   }
 
@@ -243,7 +254,10 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
   }
 
   const actorRole = members?.find((member) => member.userId === String(user.id))?.role || workspace.role;
+  const canManageRole = (role) => (actorRole === "owner" && (role === "admin" || role === "member"))
+    || (actorRole === "admin" && role === "member");
   const inviteBusy = busyKeys.has("invite");
+  const copyBusy = busyKeys.has("copy");
   const transferBusy = transferTarget ? busyKeys.has(`transfer:${transferTarget.membershipId}`) : false;
   const removeBusy = removeTarget ? busyKeys.has(`remove:${removeTarget.membershipId}`) : false;
   const revokeBusy = revokeTarget ? busyKeys.has(`revoke:${revokeTarget.id}`) : false;
@@ -255,7 +269,7 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
           <span>{workspace.name}{" "}{t("workspaceGroupsRoute.workspaceSettings")}</span>
           <h1>{t("settingsRoute.membersAndPermissions")}</h1>
         </div>
-        <button className="shPrimaryButton" type="button" disabled={loading || Boolean(pageError)} onClick={() => setInviteDialog({ email: "", role: "member", inviteUrl: "" })}>
+        <button className="shPrimaryButton" type="button" disabled={loading || Boolean(pageError)} onClick={() => { setDialogError(""); setInviteDialog({ email: "", role: "member", inviteUrl: "" }); }}>
           <UserPlus aria-hidden="true" />{t("workspaceMembersRoute.inviteMember")}</button>
       </header>
 
@@ -263,6 +277,8 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
         <span className="isActive" aria-current="page">{t("workspaceGroupsRoute.membersAndInvitations")}</span>
         <Link to={`${base}/settings/groups`}>{t("settingsRoute.groups")}</Link>
       </nav>
+
+      {notice?.kind === "error" ? <p className="shWorkspaceNotice" role="alert">{notice.text}</p> : null}
 
       {loading ? <div className="shWorkspaceSettingsState" aria-live="polite">{t("workspaceMembersRoute.loadingMembersAndInvitations")}</div> : null}
       {!loading && pageError ? <div className="shWorkspaceSettingsState isError" role="alert">{t("workspaceMembersRoute.unableToLoadWorkspaceSettings")}{pageError}<button type="button" onClick={() => void load()}>{t("router.reloadPage")}</button></div> : null}
@@ -273,19 +289,19 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
           <div className="settingsPanel settingsListPanel shWorkspaceMemberList">
             {members.map((member) => {
               const isCurrent = member.userId === String(user.id);
-              const canMutate = member.role !== "owner" && !isCurrent;
+              const canMutate = canManageRole(member.role) && !isCurrent;
               const memberBusy = busyKeys.has(`member:${member.membershipId}`);
               return <div className="shWorkspaceMemberRow" key={member.membershipId}>
                 <span className="shWorkspaceMemberAvatar" aria-hidden="true">{member.email.slice(0, 1).toUpperCase()}</span>
                 <span className="shWorkspaceMemberIdentity"><strong>{member.email}{isCurrent ? t("workspaceMembersRoute.you") : ""}</strong><small>{t("workspaceMembersRoute.joined")}{" "}{formatDate(member.createdAt)}</small></span>
-                {canMutate ? <select value={member.role} disabled={memberBusy} aria-label={t("workspaceMembersRoute.roleForValue", { value1: member.email })} onChange={(event) => void updateRole(member, event.target.value)}>
+                {canMutate && actorRole === "owner" ? <select value={member.role} disabled={memberBusy} aria-label={t("workspaceMembersRoute.roleForValue", { value1: member.email })} onChange={(event) => void updateRole(member, event.target.value)}>
                   <option value="admin">{t("invitationActivationRoute.administrator")}</option><option value="member">{t("invitationActivationRoute.member")}</option>
                 </select> : <span className="shWorkspaceRoleLabel">{roleLabel(member.role)}</span>}
                 {canMutate && !memberBusy ? <details className="shWorkspaceRowMenu">
                   <summary role="button" aria-label={t("workspaceMembersRoute.memberActionsForValue", { value1: member.email })}><MoreHorizontal aria-hidden="true" /></summary>
                   <div>
-                    {actorRole === "owner" ? <button type="button" onClick={(event) => { event.currentTarget.closest("details").removeAttribute("open"); setTransferPassword(""); setTransferTarget(member); }}>{t("workspaceMembersRoute.transferOwnership")}</button> : null}
-                    <button className="isDanger" type="button" onClick={(event) => { event.currentTarget.closest("details").removeAttribute("open"); setRemoveTarget(member); }}>{t("workspaceMembersRoute.removeMember")}</button>
+                    {actorRole === "owner" ? <button type="button" onClick={(event) => { event.currentTarget.closest("details").removeAttribute("open"); setDialogError(""); setTransferPassword(""); setTransferTarget(member); }}>{t("workspaceMembersRoute.transferOwnership")}</button> : null}
+                    <button className="isDanger" type="button" onClick={(event) => { event.currentTarget.closest("details").removeAttribute("open"); setDialogError(""); setRemoveTarget(member); }}>{t("workspaceMembersRoute.removeMember")}</button>
                   </div>
                 </details> : <span />}
               </div>;
@@ -300,46 +316,47 @@ export default function WorkspaceMembersRoute({ embedded = false } = {}) {
               <span className="shWorkspaceMemberIdentity"><strong>{invitation.email}</strong><small>{t("workspaceMembersRoute.created")}{" "}{formatDate(invitation.createdAt)}</small></span>
               <span>{roleLabel(invitation.role)}</span>
               <small>{formatDate(invitation.expiresAt)}{" "}{t("workspaceMembersRoute.expires")}</small>
-              <span className="shWorkspaceInvitationActions">
-                <button type="button" onClick={() => setReissueTarget(invitation)}>{t("workspaceMembersRoute.reissue")}</button>
-                <button type="button" onClick={() => setRevokeTarget(invitation)}>{t("workspaceMembersRoute.revoke")}</button>
-              </span>
+              {canManageRole(invitation.role) ? <span className="shWorkspaceInvitationActions">
+                <button type="button" onClick={() => { setDialogError(""); setReissueTarget(invitation); }}>{t("workspaceMembersRoute.reissue")}</button>
+                <button type="button" onClick={() => { setDialogError(""); setRevokeTarget(invitation); }}>{t("workspaceMembersRoute.revoke")}</button>
+              </span> : <span />}
             </div>)}
           </div> : <div className="settingsPanel shWorkspaceSettingsEmpty">{t("workspaceMembersRoute.noPendingInvitations")}</div>}
         </section>
       </> : null}
     </div>
 
-    {notice ? <div className={`shWorkspaceToast ${notice.kind === "error" ? "isError" : ""}`} role={notice.kind === "error" ? "alert" : "status"}>{notice.text}</div> : null}
+    {notice?.kind === "success" ? <div className="shWorkspaceToast" role="status">{notice.text}</div> : null}
 
     {inviteDialog ? <WorkspaceDialog
       title={inviteDialog.inviteUrl ? t("workspaceMembersRoute.invitationLinkCreated") : t("workspaceMembersRoute.inviteMember")}
       description={inviteDialog.inviteUrl ? t("workspaceMembersRoute.thisLinkIsShownOnlyAfterThisIssuance") : t("workspaceMembersRoute.createAnInvitationLinkValidFor72HoursYou")}
-      busy={inviteBusy}
-      onClose={() => !inviteBusy && setInviteDialog(null)}
+      busy={inviteBusy || copyBusy}
+      error={dialogError}
+      onClose={() => !inviteBusy && !copyBusy && setInviteDialog(null)}
     >
       {inviteDialog.inviteUrl ? <div className="shWorkspaceInviteResult">
         <strong>{inviteDialog.email}</strong>
         <code>{inviteDialog.inviteUrl}</code>
         <p>{t("workspaceMembersRoute.previousUnacceptedInvitationsForThisEmailAreNowInvalid")}</p>
-        <footer><button type="button" onClick={() => setInviteDialog(null)}>{t("workspaceMembersRoute.done")}</button><button className="isPrimary" type="button" onClick={() => void copyInviteUrl()}><Copy aria-hidden="true" />{t("workspaceMembersRoute.copyLink")}</button></footer>
+        <footer><button type="button" disabled={copyBusy} onClick={() => setInviteDialog(null)}>{t("workspaceMembersRoute.done")}</button><button className="isPrimary" type="button" disabled={copyBusy} onClick={() => void copyInviteUrl()}><Copy aria-hidden="true" />{t("workspaceMembersRoute.copyLink")}</button></footer>
       </div> : <form onSubmit={(event) => { event.preventDefault(); void issueInvitation(inviteDialog.email, inviteDialog.role); }}>
-        <label>{t("loginForm.email")}<input autoFocus type="email" required value={inviteDialog.email} onChange={(event) => setInviteDialog({ ...inviteDialog, email: event.target.value })} /></label>
-        <label>{t("invitationActivationRoute.role")}<select value={inviteDialog.role} onChange={(event) => setInviteDialog({ ...inviteDialog, role: event.target.value })}><option value="member">{t("invitationActivationRoute.member")}</option><option value="admin">{t("invitationActivationRoute.administrator")}</option></select></label>
+        <label>{t("loginForm.email")}<input autoFocus type="email" required disabled={inviteBusy} value={inviteDialog.email} onChange={(event) => { setDialogError(""); setInviteDialog({ ...inviteDialog, email: event.target.value }); }} /></label>
+        <label>{t("invitationActivationRoute.role")}<select disabled={inviteBusy} value={inviteDialog.role} onChange={(event) => { setDialogError(""); setInviteDialog({ ...inviteDialog, role: event.target.value }); }}><option value="member">{t("invitationActivationRoute.member")}</option>{actorRole === "owner" ? <option value="admin">{t("invitationActivationRoute.administrator")}</option> : null}</select></label>
         <footer><button type="button" disabled={inviteBusy} onClick={() => setInviteDialog(null)}>{t("agentRunRow.cancel")}</button><button className="isPrimary" type="submit" disabled={inviteBusy || !inviteDialog.email.trim()}>{inviteBusy ? t("workspaceMembersRoute.creating") : t("workspaceMembersRoute.createInvitationLink")}</button></footer>
       </form>}
     </WorkspaceDialog> : null}
 
-    {transferTarget ? <WorkspaceDialog title={t("workspaceMembersRoute.transferWorkspaceOwnership")} description={t("workspaceMembersRoute.transferValueToValueYouWillBecomeAnAdministrator", { value1: workspace.name, value2: transferTarget.email })} busy={transferBusy} onClose={() => { setTransferTarget(null); setTransferPassword(""); }}>
+    {transferTarget ? <WorkspaceDialog title={t("workspaceMembersRoute.transferWorkspaceOwnership")} description={t("workspaceMembersRoute.transferValueToValueYouWillBecomeAnAdministrator", { value1: workspace.name, value2: transferTarget.email })} error={dialogError} busy={transferBusy} onClose={() => { setTransferTarget(null); setTransferPassword(""); }}>
       <form onSubmit={transferOwnership}>
-        <label>{t("settingsRoute.currentPassword")}<input autoFocus type="password" autoComplete="current-password" required value={transferPassword} onChange={(event) => setTransferPassword(event.target.value)} /></label>
+        <label>{t("settingsRoute.currentPassword")}<input autoFocus type="password" autoComplete="current-password" required disabled={transferBusy} value={transferPassword} onChange={(event) => { setDialogError(""); setTransferPassword(event.target.value); }} /></label>
         <footer><button type="button" disabled={transferBusy} onClick={() => { setTransferTarget(null); setTransferPassword(""); }}>{t("agentRunRow.cancel")}</button><button className="isDanger" type="submit" disabled={transferBusy || !transferPassword}>{transferBusy ? t("workspaceMembersRoute.transferring") : t("workspaceMembersRoute.confirmTransfer")}</button></footer>
       </form>
     </WorkspaceDialog> : null}
 
-    <ConfirmDialog open={Boolean(removeTarget)} title={t("workspaceMembersRoute.removeMember")} message={removeTarget ? t("workspaceMembersRoute.removeValueTheirMembershipAndCustomGroupMembershipsWill", { value1: removeTarget.email }) : ""} confirmLabel={t("globalPluginSettings.remove")} busy={removeBusy} onCancel={() => setRemoveTarget(null)} onConfirm={() => void removeMember()} />
-    <ConfirmDialog open={Boolean(reissueTarget)} title={t("workspaceMembersRoute.reissueInvitation")} message={reissueTarget ? t("workspaceMembersRoute.issueANewLinkForValueTheOldLink", { value1: reissueTarget.email }) : ""} confirmLabel={t("workspaceMembersRoute.reissue")} busy={inviteBusy} onCancel={() => setReissueTarget(null)} onConfirm={() => void issueInvitation(reissueTarget.email, reissueTarget.role)} />
-    <ConfirmDialog open={Boolean(revokeTarget)} title={t("workspaceMembersRoute.revokeInvitation")} message={revokeTarget ? t("workspaceMembersRoute.revokeTheInvitationForValueTheExistingLinkWill", { value1: revokeTarget.email }) : ""} confirmLabel={t("workspaceMembersRoute.revoke")} busy={revokeBusy} onCancel={() => setRevokeTarget(null)} onConfirm={() => void revokeInvitation()} />
+    <ConfirmDialog open={Boolean(removeTarget)} title={t("workspaceMembersRoute.removeMember")} message={removeTarget ? t("workspaceMembersRoute.removeValueTheirMembershipAndCustomGroupMembershipsWill", { value1: removeTarget.email }) : ""} error={dialogError} confirmLabel={t("globalPluginSettings.remove")} busy={removeBusy} onCancel={() => setRemoveTarget(null)} onConfirm={() => void removeMember()} />
+    <ConfirmDialog open={Boolean(reissueTarget)} title={t("workspaceMembersRoute.reissueInvitation")} message={reissueTarget ? t("workspaceMembersRoute.issueANewLinkForValueTheOldLink", { value1: reissueTarget.email }) : ""} error={dialogError} confirmLabel={t("workspaceMembersRoute.reissue")} busy={inviteBusy} onCancel={() => setReissueTarget(null)} onConfirm={() => void issueInvitation(reissueTarget.email, reissueTarget.role)} />
+    <ConfirmDialog open={Boolean(revokeTarget)} title={t("workspaceMembersRoute.revokeInvitation")} message={revokeTarget ? t("workspaceMembersRoute.revokeTheInvitationForValueTheExistingLinkWill", { value1: revokeTarget.email }) : ""} error={dialogError} confirmLabel={t("workspaceMembersRoute.revoke")} busy={revokeBusy} onCancel={() => setRevokeTarget(null)} onConfirm={() => void revokeInvitation()} />
   </>;
   return embedded ? content : <ShellPage>{content}</ShellPage>;
 }

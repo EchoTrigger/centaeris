@@ -119,7 +119,7 @@ test("keeps reads in their chronological position before and after completion", 
   );
 });
 
-test("keeps distinct read and command groups in source order while members settle", () => {
+test("keeps mixed tools in one group and preserves source order while members settle", () => {
   const settledRead = makeTask({
     id: "settled-read",
     turnId: "turn-shared",
@@ -155,7 +155,7 @@ test("keeps distinct read and command groups in source order while members settl
     ],
   });
 
-  assert.equal(view.processItems.length, 2);
+  assert.equal(view.processItems.length, 1);
   assert.equal(view.processItems[0]?.id, "settled-read-activity");
   assert.deepEqual(
     view.processItems.flatMap(item => item.tasks.map(task => task.id)),

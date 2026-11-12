@@ -24,6 +24,7 @@ mod lease_contention_tests;
 mod pre_admission_failure_tests;
 mod preparation_tests;
 mod retirement_tests;
+mod subagent_execution_tests;
 fn controller_lease_digest(owner: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(b"workspace:environment-controller-lease:v1\0");

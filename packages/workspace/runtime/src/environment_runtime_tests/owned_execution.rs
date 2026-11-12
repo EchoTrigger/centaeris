@@ -97,7 +97,11 @@ pub(crate) fn prepare_owned_allocation(
                     .map_err(|_| "owned fixture controller epoch invalid")?,
                 controller_purpose: EnvironmentTaskControllerPurpose::Execute,
             };
-            host().prepare(allocation, resources, fence)
+            if request.has_execution_fact {
+                host().resume_existing(allocation, resources, fence)
+            } else {
+                host().prepare(allocation, resources, fence)
+            }
         },
     )
 }
@@ -127,22 +131,13 @@ impl OwnedPhysicalHost {
         fence: EnvironmentTaskFence,
     ) -> Result<String, String> {
         fence.validate()?;
+        if allocation.reused {
+            return self.resume_existing(allocation, resources, fence);
+        }
         let mut instances = self
             .instances
             .lock()
             .map_err(|_| "owned host lock poisoned")?;
-        if allocation.reused {
-            let instance = instances
-                .get_mut(&allocation.instance_id)
-                .ok_or("owned physical instance missing")?;
-            instance.require_allocation(allocation, resources)?;
-            if !instance.present {
-                return Err("owned physical instance absent".into());
-            }
-            instance.fence = fence;
-            instance.cleanup_confirmed = false;
-            return Ok(instance.allocation.container_id.clone().unwrap());
-        }
         if instances.contains_key(&allocation.instance_id) {
             return Err("owned physical instance already exists".into());
         }
@@ -165,6 +160,41 @@ impl OwnedPhysicalHost {
             },
         );
         Ok(container_id)
+    }
+
+    fn resume_existing(
+        &self,
+        allocation: &RetainedInstanceAllocation,
+        resources: ResidentResourceUsage,
+        fence: EnvironmentTaskFence,
+    ) -> Result<String, String> {
+        fence.validate()?;
+        if !allocation.reused
+            || fence.environment_instance_id != allocation.instance_id
+            || fence.controller_purpose != EnvironmentTaskControllerPurpose::Execute
+        {
+            return Err("owned execution resume binding rejected".into());
+        }
+        let mut instances = self
+            .instances
+            .lock()
+            .map_err(|_| "owned host lock poisoned")?;
+        let instance = instances
+            .get_mut(&allocation.instance_id)
+            .ok_or("owned physical instance missing")?;
+        instance.require_allocation(allocation, resources)?;
+        if !instance.present {
+            return Err("owned physical instance absent".into());
+        }
+        if fence.controller_epoch < instance.fence.controller_epoch
+            || (fence.controller_epoch == instance.fence.controller_epoch
+                && fence != instance.fence)
+        {
+            return Err("owned execution resume fence rejected".into());
+        }
+        instance.fence = fence;
+        instance.cleanup_confirmed = false;
+        Ok(instance.allocation.container_id.clone().unwrap())
     }
 
     fn cleanup(
@@ -433,6 +463,30 @@ pub(super) fn verify_cleanup(store: &PostgresRuntimeStore, run_id: &str) -> Resu
     })
 }
 
+pub(super) fn finish_host_retirements(store: &PostgresRuntimeStore) -> Result<usize, String> {
+    store.process_host_retirements(HOST_ID, |target| {
+        let allocation = host()
+            .instances
+            .lock()
+            .map_err(|_| "owned host lock poisoned")?
+            .get(&target.environment_instance_id)
+            .ok_or("owned retirement instance unknown")?
+            .allocation
+            .clone();
+        if allocation.profile_digest != target.profile_digest
+            || allocation.image_digest != target.image_digest
+        {
+            return Err("owned retirement target mismatch".into());
+        }
+        host().require_absent(
+            &target.environment_instance_id,
+            &allocation.allocation_execution_id,
+            &target.environment_id,
+            &target.container_id,
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,6 +527,46 @@ mod tests {
             .prepare(&allocation, resources, execute.clone())
             .unwrap();
         allocation.container_id = Some(container.clone());
+        assert!(host
+            .resume_existing(&allocation, resources, execute.clone())
+            .is_err());
+        let mut reused = allocation.clone();
+        reused.reused = true;
+        assert_eq!(
+            host.resume_existing(&reused, resources, execute.clone())
+                .unwrap(),
+            container
+        );
+        let mut wrong_container = reused.clone();
+        wrong_container.container_id = Some("wrong-container".into());
+        assert!(host
+            .resume_existing(&wrong_container, resources, execute.clone())
+            .is_err());
+        assert!(host
+            .resume_existing(
+                &reused,
+                ResidentResourceUsage {
+                    pids: resources.pids + 1,
+                    ..resources
+                },
+                execute.clone(),
+            )
+            .is_err());
+        assert!(host
+            .resume_existing(
+                &reused,
+                resources,
+                EnvironmentTaskFence {
+                    controller_owner: EnvironmentTaskOwner::AgentRun {
+                        run_id: "another-run".into(),
+                    },
+                    ..execute.clone()
+                },
+            )
+            .is_err());
+        assert!(OwnedPhysicalHost::default()
+            .resume_existing(&reused, resources, execute.clone())
+            .is_err());
         let cleanup = EnvironmentTaskFence {
             controller_epoch: 2,
             controller_purpose: EnvironmentTaskControllerPurpose::Cleanup,
@@ -510,6 +604,9 @@ mod tests {
             }
         );
         assert!(host.inventory().unwrap().is_empty());
+        assert!(host
+            .resume_existing(&reused, resources, execute.clone())
+            .is_err());
         assert!(host
             .cleanup(
                 &allocation,

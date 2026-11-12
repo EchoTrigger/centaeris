@@ -305,6 +305,7 @@ struct HostedRuntimeContext {
     model_client: ApiModelClient,
     agent_runtime_config: AgentRuntimeConfig,
     tool_concurrency: ToolConcurrencyCoordinator,
+    cancellation_probe: Arc<ExecutionCancellationProbe>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -387,6 +388,18 @@ struct WorkspaceSkillDetailResult {
     schema: &'static str,
     skill: WorkspaceSkillSummary,
     content: String,
+}
+
+fn agent_run_execution_control_reason(
+    state: postgres_store::AgentRunExecutionControlState,
+) -> Option<String> {
+    if !state.lifecycle_lease_current {
+        Some("agent_run_lifecycle_lease_lost".to_string())
+    } else if state.cancellation_requested {
+        Some("agent_run_cancel_requested".to_string())
+    } else {
+        None
+    }
 }
 
 fn cached_execution_control_reason(
@@ -821,13 +834,15 @@ async fn run_hosted_subagent_batch(
     } = batch;
     let worker_id = format!("hosted-subagent-worker-{}", std::process::id());
     let runner = HostedSubagentRunner {
-        store: store.clone(),
-        job_store,
+        job_store: job_store.clone(),
         context: context.clone(),
     };
+    let projection_store =
+        RuntimeStoreActor::start(job_store.subagent_terminal_projection_view(&session_id)?)
+            .map_err(|error| error.to_string())?;
     let observer_runtime = AgentRuntime::new(
-        std::sync::Arc::new(store.clone()),
-        store.clone(),
+        Arc::new(projection_store.clone()),
+        projection_store.clone(),
         context.tool_layer.clone(),
         context.agent_runtime_config.clone(),
         context.tool_concurrency.clone(),
@@ -850,14 +865,21 @@ async fn run_hosted_subagent_batch(
             max_parallelism: limit,
         },
     )
-    .await
-    .map_err(|error| error.diagnostic_message())?;
-    persist_subagent_result_projection_from_scheduler_events(
-        store,
-        session_id.as_str(),
-        result.events.as_slice(),
-    )?;
-    Ok(())
+    .await;
+    let projection = result
+        .map_err(|error| error.diagnostic_message())
+        .and_then(|result| {
+            persist_subagent_result_projection_from_scheduler_events(
+                &projection_store,
+                session_id.as_str(),
+                result.events.as_slice(),
+            )
+        });
+    projection_store
+        .close()
+        .await
+        .map_err(|error| error.to_string())?;
+    projection.map(|_| ())
 }
 
 fn hosted_subagent_batches(
@@ -926,7 +948,6 @@ fn hosted_subagent_batches(
 }
 
 struct HostedSubagentRunner {
-    store: RuntimeStoreActor,
     job_store: Arc<PostgresRuntimeStore>,
     context: HostedRuntimeContext,
 }
@@ -942,6 +963,43 @@ impl AsyncSubagentWorkerRunner for HostedSubagentRunner {
     }
 }
 
+fn hosted_subagent_cancellation_probe(
+    store: Arc<PostgresRuntimeStore>,
+    job: &RuntimeJobRecord,
+    parent_probe: Arc<ExecutionCancellationProbe>,
+    cancel_on_parent_cancel: bool,
+) -> Result<Arc<ExecutionCancellationProbe>, String> {
+    let job_id = job.job_id.clone();
+    let lease_owner = job
+        .lease_owner
+        .clone()
+        .ok_or_else(|| format!("hosted subagent lease owner missing: {job_id}"))?;
+    Ok(Arc::new(move || {
+        let job = store
+            .get_runtime_job_execution_control(job_id.as_str())?
+            .ok_or_else(|| "hosted_subagent_job_missing".to_string())?;
+        if job.status == RuntimeJobStatus::Cancelled {
+            return Ok(Some(
+                job.last_error
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("subagent_cancelled")
+                    .to_string(),
+            ));
+        }
+        let now = now_ms()?;
+        if job.status != RuntimeJobStatus::Running
+            || job.lease_owner.as_deref() != Some(lease_owner.as_str())
+            || job.lease_expires_at_ms.is_none_or(|expires| expires <= now)
+        {
+            return Ok(Some("subagent_lease_lost".to_string()));
+        }
+        Ok(parent_probe()?
+            .filter(|reason| cancel_on_parent_cancel || reason != "agent_run_cancel_requested"))
+    }))
+}
+
 impl HostedSubagentRunner {
     async fn run(&self, req: SubagentWorkerRunRequest) -> Result<SubagentWorkerRunOutcome, String> {
         let binding = subagent_work_packet_runtime_binding(&req.work_packet, &req.job)?;
@@ -954,37 +1012,53 @@ impl HostedSubagentRunner {
             ));
         }
         let job_id = req.job.job_id.clone();
-        let lease_owner = req
-            .job
-            .lease_owner
-            .clone()
-            .ok_or_else(|| format!("hosted subagent lease owner missing: {job_id}"))?;
-        let cancellation_store = self.job_store.clone();
-        let cancellation_job_id = job_id.clone();
-        let cancellation_lease_owner = lease_owner.clone();
-        let cancellation_probe: Arc<ExecutionCancellationProbe> = Arc::new(move || {
-            let job = cancellation_store
-                .get_runtime_job_execution_control(cancellation_job_id.as_str())?
-                .ok_or_else(|| "hosted_subagent_job_missing".to_string())?;
-            if job.status == RuntimeJobStatus::Cancelled {
-                return Ok(Some(
-                    job.last_error
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or("subagent_cancelled")
-                        .to_string(),
-                ));
-            }
-            let now = now_ms()?;
-            if job.status != RuntimeJobStatus::Running
-                || job.lease_owner.as_deref() != Some(cancellation_lease_owner.as_str())
-                || job.lease_expires_at_ms.is_none_or(|expires| expires <= now)
-            {
-                return Ok(Some("subagent_lease_lost".to_string()));
-            }
-            Ok(None)
-        });
+        let cancellation_probe = hosted_subagent_cancellation_probe(
+            self.job_store.clone(),
+            &req.job,
+            self.context.cancellation_probe.clone(),
+            binding.cancel_on_parent_cancel,
+        )?;
+        let execution_store = self.job_store.hosted_execution_view(
+            &req.lifecycle.session_id,
+            &binding.child_session_id,
+            RuntimeJobLeaseFence {
+                job_id: req.job.job_id.clone(),
+                job_kind: SUBAGENT_RUN_JOB_KIND.into(),
+                lease_owner: req
+                    .job
+                    .lease_owner
+                    .clone()
+                    .ok_or("hosted subagent lease owner missing")?,
+            },
+        )?;
+        let child_store =
+            RuntimeStoreActor::start(execution_store.clone()).map_err(|error| error.to_string())?;
+        let outcome = self
+            .run_with_store(
+                req,
+                binding,
+                job_id,
+                cancellation_probe,
+                execution_store,
+                &child_store,
+            )
+            .await;
+        child_store
+            .close()
+            .await
+            .map_err(|error| error.to_string())?;
+        outcome
+    }
+
+    async fn run_with_store(
+        &self,
+        req: SubagentWorkerRunRequest,
+        binding: centaeris_core::runtime::subagent::SubagentWorkPacketRuntimeBindingV1,
+        job_id: String,
+        cancellation_probe: Arc<ExecutionCancellationProbe>,
+        execution_store: PostgresRuntimeStore,
+        child_store: &RuntimeStoreActor,
+    ) -> Result<SubagentWorkerRunOutcome, String> {
         let tool_layer = self
             .context
             .tool_layer
@@ -992,16 +1066,17 @@ impl HostedSubagentRunner {
             .with_execution_owner(job_id.clone())
             .with_session_id(binding.child_session_id.clone())
             .with_execution_cancellation_probe(cancellation_probe)
+            .with_resource_claim_store(self.job_store.clone())
             .with_file_mutation_commit_port(Arc::new(WorkspaceFileMutationCommitPort::new(
-                Arc::new(self.store.clone()),
+                Arc::new(execution_store),
                 binding.child_session_id.clone(),
                 job_id,
             )?));
         let mut config = self.context.agent_runtime_config.clone();
         config.allowed_tools = Some(binding.allowed_tools.clone());
         let runtime = AgentRuntime::new(
-            std::sync::Arc::new(self.store.clone()),
-            self.store.clone(),
+            Arc::new(child_store.clone()),
+            child_store.clone(),
             tool_layer,
             config,
             self.context.tool_concurrency.clone(),
@@ -1013,7 +1088,7 @@ impl HostedSubagentRunner {
             authorization_digest: self.context.agent_run_identity.authorization_digest.clone(),
         };
         agent_run_identity.validate()?;
-        let safe_point_store = self.store.clone();
+        let safe_point_store = child_store.clone();
         let safe_point_session_id = binding.child_session_id.clone();
         let safe_point_agent_run_id = req.job.job_id.clone();
         let tool_safe_point = Arc::new(move |safe_point| {
@@ -1943,13 +2018,7 @@ fn execute_agent_run(
                         )?;
                         return Ok(Some("agent_run_cancel_requested".to_string()));
                     }
-                    Ok(if state.cancellation_requested {
-                        Some("agent_run_cancel_requested".to_string())
-                    } else if !state.lifecycle_lease_current {
-                        Some("agent_run_lifecycle_lease_lost".to_string())
-                    } else {
-                        None
-                    })
+                    Ok(agent_run_execution_control_reason(state))
                 })
             },
         )
@@ -2633,7 +2702,7 @@ fn execute_agent_run(
     .with_execution_cancellation_probe(cancellation_probe.clone())
     .with_session_id(agent_run_start.authorization.session_id.clone())
     .with_execution_owner(agent_run_start.agent_run_id.clone())
-    .with_resource_claim_store(Arc::new((*store).clone()))
+    .with_resource_claim_store(job_store.clone())
     .with_resolved_input_manifest(resolved_inputs.clone());
     tool_layer.register_dynamic_tool_provider(Arc::new(WorkspaceArtifactToolProvider::new(
         artifact_publication,
@@ -2647,7 +2716,11 @@ fn execute_agent_run(
     }
     let tool_layer =
         tool_layer.with_file_mutation_commit_port(Arc::new(WorkspaceFileMutationCommitPort::new(
-            store.clone(),
+            Arc::new(job_store.hosted_execution_view(
+                &agent_run_start.authorization.session_id,
+                &agent_run_start.authorization.session_id,
+                terminal_lease_fence.clone(),
+            )?),
             agent_run_start.authorization.session_id.clone(),
             agent_run_start.agent_run_id.clone(),
         )?));
@@ -2673,6 +2746,7 @@ fn execute_agent_run(
                 model_client: model_client.clone(),
                 agent_runtime_config: agent_runtime_config.clone(),
                 tool_concurrency: tool_concurrency.clone(),
+                cancellation_probe: cancellation_probe.clone(),
             },
         );
     let agent_runtime = AgentRuntime::new(
@@ -7865,6 +7939,7 @@ mod tests {
             }),
             agent_runtime_config: AgentRuntimeConfig::default(),
             tool_concurrency: ToolConcurrencyCoordinator::new(2),
+            cancellation_probe: Arc::new(|| Ok(None)),
         }
     }
 

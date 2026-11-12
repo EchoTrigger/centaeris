@@ -275,6 +275,25 @@ records. Unknown selectors, including `agentId`, fail validation. Browser title
 and favicon belong to the Workspace layout, using its name and avatar (or its
 name's first character when no avatar is set) through Session and settings navigation.
 
+The feed emits `kind: "viewRevision"` initially and when its decimal-string
+`contextRevision`, `historyRevision`, `workRevision`, or `subagentsRevision`
+changes. A Session's subagent revision follows durable `subagent.run` Job
+insertion, deletion, actual status changes, and committed child snapshots;
+lease heartbeats do not advance it. Open child details refresh on this revision
+while the Job remains running. The source mutation and presentation dirty key commit atomically. The
+existing scoped notification listener and its 30-second durable reconciliation
+recover changes after a lost notification.
+
+`GET /api/sessions/{sessionId}/subagents` returns
+`workspace.session.subagents.v1` with `sessionId` and `agents`, including terminal
+history. Each agent has `runtimeJobId`, original `callId`, `childSessionId`,
+`parentAgentRunId`, `parentTurnId`, `description`, `prompt`, raw Job `status`,
+`createdAtMs`, and `updatedAtMs`. Appending `/{runtimeJobId}` returns
+`workspace.session.subagent.v1` with `sessionId`, `agent`, and typed `messages`.
+The parent Session's owner and current Workspace membership authorize both reads;
+a child identity never authorizes a separate platform Session. Responses use
+`Cache-Control: no-store`.
+
 An active Run also emits an `activity` frame with exactly `schema:
 "workspace.presentation.v1"`, `kind: "activity"`, `workspaceId`, `sessionId`,
 `agentRunId`, `sourceHighWater`, and `activity`. The activity is `thinking` for
@@ -405,7 +424,18 @@ Core-generated image fixtures protect cross-language contracts and limit parity.
 
 ## Trash pagination
 
-Session deletion immediately denies subsequent workspace snapshot and checkpoint
+`DELETE /api/sessions/{sessionId}` confirms permanent deletion only after Run
+termination, task cleanup, controller release and physical retirement are settled.
+The API records permanent deletion intent under the Session lock before
+cancellation; new Run admission then returns HTTP 409 `session_delete_pending`
+and restoration is unavailable. Cancellation still in progress or an unconfirmed
+purge returns HTTP 503; the Session remains visible and the same deletion can be
+retried. Runtime erases the
+parent and child Session bodies atomically with the permanent Session tombstone,
+retaining authorization and cleanup receipts. A repeated confirmed deletion
+returns HTTP 200.
+
+Confirmed deletion denies subsequent workspace snapshot and checkpoint
 access. Physical snapshot bytes are reclaimed by `gc_deleted_resources` after
 its retention cutoff; deletion does not perform filesystem enumeration in the
 HTTP request. On local POSIX storage an already opened authorized download can

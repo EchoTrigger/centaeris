@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from app_core.transcript_output import read_output_range, purge_session_outputs
+from app_core.transcript_output import read_output_range
 from typing import Literal
 
 from django.db import transaction
@@ -45,6 +45,7 @@ from app_core.plugin_catalog import (
 )
 from app_core.agent_run_authorization_factory import create_agent_run_authorization
 from app_core.session_model_settings import selected_session_model, SessionModelSettingsError
+from app_core.session_deletion import purge_session_runtime, record_session_purge_intent
 from app_core.agent_run_stream import encode_stream_cursor
 from app_core.runtime_client import (
     TranscriptRuntimeError,
@@ -89,6 +90,7 @@ from .response_schema import (
     AgentRunEnvironmentResponse,
     AgentRunSupplementResponse,
     SessionsEnvelope,
+    SessionSearchEnvelope,
     WorkspacesEnvelope,
     WorkspacePluginEnvelope,
     WorkspacePluginResponse,
@@ -443,15 +445,47 @@ def create_session_project(
     return Status(201, {"project": serialize_session_project(project)})
 
 
-def prepare_workspace_session_list(request, workspace_id: str):
-    """Authorize and scope navigation without loading or projecting its rows."""
+def _authorized_workspace_sessions(request, workspace_id: str):
     workspace = _workspace_for_user(request.user, workspace_id)
     if workspace is None:
         return Status(404, {"error": "workspace_not_found"})
-    if request.GET:
-        return Status(400, {"error": "session_filter_unsupported"})
     require_request_delegation(request, "sessions:read", workspace_id=workspace_id)
     return Session.objects.filter(workspace=workspace, owner=request.user, status="active", purpose="interactive")
+
+
+def prepare_workspace_session_list(request, workspace_id: str):
+    """Authorize and scope navigation without loading or projecting its rows."""
+    sessions = _authorized_workspace_sessions(request, workspace_id)
+    if isinstance(sessions, Status):
+        return sessions
+    if request.GET:
+        return Status(400, {"error": "session_filter_unsupported"})
+    return sessions
+
+
+@router.get(
+    "/workspaces/{workspace_id}/sessions/search",
+    auth=usage_auth("sessions:read"),
+    response={200: SessionSearchEnvelope} | COMMON_ERROR_RESPONSES,
+)
+def search_workspace_sessions(request, workspace_id: str):
+    sessions = _authorized_workspace_sessions(request, workspace_id)
+    if isinstance(sessions, Status):
+        return sessions
+    if not valid_query_fields(request.GET, {"query", "cursor"}, required={"query"}):
+        return Status(400, {"error": "session_search_query_invalid"})
+    query = request.GET["query"].strip()
+    cursor = request.GET.get("cursor")
+    if not query or len(query) > 256 or "\0" in query or (cursor is not None and (not cursor or len(cursor) > 4096)):
+        return Status(400, {"error": "session_search_query_invalid"})
+    from app_core.session_search import search_sessions
+    try:
+        return search_sessions(sessions.filter(archivedAt__isnull=True), user_id=request.user.pk,
+            workspace_id=workspace_id, query=query, cursor=cursor)
+    except ValueError as error:
+        if str(error) != "session_search_cursor_invalid":
+            raise
+        return Status(400, {"error": str(error)})
 
 
 @router.get(
@@ -669,8 +703,10 @@ def delete_session(request, session_id: str):
         agent, session = _locked_owned_session(request.user, session_id)
         if session is None:
             return Status(404, {"error": "session_not_found"})
-        if session.status == "deleted":
-            return Status(410, {"error": "session_deleted"})
+        try:
+            record_session_purge_intent(session)
+        except RuntimeError:
+            return Status(503, {"error": "session_delete_purge_unavailable"})
         active_agent_runs = list(
             session.agent_runs.select_for_update(of=("self",))
             .select_related("authorization", "modelConfig", "session")
@@ -695,23 +731,15 @@ def delete_session(request, session_id: str):
                 AgentRun.objects.filter(
                     id=agent_run.id, status__in={"queued", "running"}
                 ).update(transitionReason="agent_run_cancel_requested")
-        deleted_at = timezone.now()
-        session.status = "deleted"
-        session.archivedAt = None
-        session.deletedAt = deleted_at
-        session.deletedBy = request.user
-        session.purgedAt = deleted_at
-        purge_session_outputs(session, deleted_at)
-        session.save(
-            update_fields=[
-                "status",
-                "archivedAt",
-                "deletedAt",
-                "deletedBy",
-                "purgedAt",
-                "updatedAt",
-            ]
-        )
+        if session.agent_runs.filter(status__in={"queued", "running"}).exists():
+            return Status(503, {"error": "session_delete_cancel_pending"})
+    # Runtime revalidates the owner/workspace and commits tree erasure and its
+    # tombstone atomically. Release the Session lock before crossing that boundary.
+    try:
+        purge_session_runtime(session)
+    except RuntimeError:
+        logger.exception("Failed to purge Runtime tree for session %s", session.id)
+        return Status(503, {"error": "session_delete_purge_unavailable"})
     return {"deleted": True}
 
 
@@ -757,6 +785,8 @@ def restore_session(request, session_id: str):
         agent, session = _locked_owned_session(request.user, session_id)
         if session is None:
             return Status(404, {"error": "session_not_found"})
+        if session.purgeRequestedAt is not None:
+            return Status(410, {"error": "session_expired"})
         if session.status != "deleted":
             return Status(409, {"error": "session_not_deleted"})
         if not trash_is_restorable(session.deletedAt, session.purgedAt):
@@ -787,9 +817,15 @@ def permanently_delete_session(request, session_id: str):
             return Status(409, {"error": "session_not_deleted"})
         if session.purgedAt is not None:
             return Status(410, {"error": "session_purged"})
-        session.purgedAt = timezone.now()
-        purge_session_outputs(session, session.purgedAt)
-        session.save(update_fields=["purgedAt", "updatedAt"])
+        try:
+            record_session_purge_intent(session)
+        except RuntimeError:
+            return Status(503, {"error": "session_delete_purge_unavailable"})
+    try:
+        purge_session_runtime(session)
+    except RuntimeError:
+        logger.exception("Failed to purge Runtime tree for session %s", session.id)
+        return Status(503, {"error": "session_delete_purge_unavailable"})
     return {"deleted": True}
 
 
@@ -807,6 +843,22 @@ def session_transcript(request, session_id: str):
         return _transcript_json_response(
             {"error": "transcript_page_query_invalid"}, status=400
         )
+    anchor_event = None
+    if "anchorEventId" in fields:
+        if fields not in ({"anchorEventId"}, {"anchorEventId", "sourceHighWater", "projectionGeneration"}):
+            return _transcript_json_response({"error": "transcript_page_query_invalid"}, status=400)
+        event_id = request.GET["anchorEventId"]
+        if not event_id or len(event_id) > 160:
+            return _transcript_json_response({"error": "transcript_page_query_invalid"}, status=400)
+        anchor_event = SessionEvent.objects.filter(session=session, eventId=event_id).values(
+            "sequence", "payload__type", "payload__payload__stage").first()
+        if anchor_event is None or not (
+            anchor_event["payload__type"] in {"user_message", "assistant_message"}
+            or (anchor_event["payload__type"] == "phase_event"
+                and anchor_event["payload__payload__stage"] == "model_process_summary")
+        ):
+            return _transcript_json_response({"error": "transcript_target_not_found"}, status=404)
+        fields = fields - {"anchorEventId"}
     if not fields:
         source_high_water = _session_source_high_water(session.id)
         generation = None
@@ -841,6 +893,10 @@ def session_transcript(request, session_id: str):
         "sourceHighWater": str(source_high_water),
         "olderCursor": older_cursor,
     }
+    if anchor_event is not None:
+        if anchor_event["sequence"] > int(source_high_water):
+            return _transcript_json_response({"error": "transcript_page_cursor_invalid"}, status=400)
+        body["anchorSequence"] = str(anchor_event["sequence"])
     try:
         page = request_transcript_page(body)
     except TranscriptRuntimeError as error:
@@ -850,6 +906,11 @@ def session_transcript(request, session_id: str):
         return _transcript_json_response(
             {"error": "transcript_page_unavailable"}, status=503
         )
+    if anchor_event is not None:
+        block = next((block for block in page["blocks"] if block["orderKey"]["sourceSequence"] == str(anchor_event["sequence"])), None)
+        if block is None:
+            return _transcript_json_response({"error": "transcript_target_not_found"}, status=404)
+        return _transcript_json_response({"schema": "workspace.transcript.target.v1", "targetBlockId": block["blockId"], "page": page})
     return _transcript_json_response(page)
 
 
@@ -1248,8 +1309,13 @@ def create_session_message(
             id=payload.project_id, workspace=workspace, owner=request.user,
         ).exists():
             return Status(404, {"error": "session_project_not_found"})
-    elif not Session.objects.filter(id=session_id, workspace=workspace, owner=request.user, status="active", archivedAt__isnull=True, purpose="interactive").exists():
-        return Status(404, {"error": "session_not_found"})
+    else:
+        selected_session = Session.objects.filter(id=session_id, workspace=workspace, owner=request.user,
+            status="active", archivedAt__isnull=True, purpose="interactive").only("purgeRequestedAt").first()
+        if selected_session is None:
+            return Status(404, {"error": "session_not_found"})
+        if selected_session.purgeRequestedAt is not None:
+            return Status(409, {"error": "session_delete_pending"})
     try:
         selected_session_model(workspace.id, payload.model_config_ref, payload.thinking_mode)
     except SessionModelSettingsError as error:
@@ -1324,6 +1390,8 @@ def create_session_message(
             else:
                 if session is None:
                     return Status(404, {"error": "session_not_found"})
+                if session.purgeRequestedAt is not None:
+                    return Status(409, {"error": "session_delete_pending"})
                 if session.agent_runs.filter(status__in={"queued", "running"}).exists():
                     return Status(409, {"error": "session_has_active_agent_run"})
                 # Cleanup publishes the final workspace under this same Session

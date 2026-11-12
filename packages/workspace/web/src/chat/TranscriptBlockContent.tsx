@@ -1,4 +1,5 @@
 import { AnimatedDisclosure } from "./AnimatedDisclosure";
+import { TranscriptSearchQuery, HighlightedTranscriptText } from "./TranscriptSearchHighlight";
 import type { CitationSummary } from "./citationSnapshot";
 import {
   memo,
@@ -36,6 +37,8 @@ import { toolGroupIconCategory, type ToolGroupCategory } from "./toolGroupTitle"
 import type { TranscriptContentRef } from "./transcriptContract";
 import type { TranscriptToolOperationRegistry } from "./transcriptToolOperations";
 import type { TranscriptLiveOverlay, TranscriptViewStore } from "./transcriptViewStore";
+import { SessionSubagentTags } from "./SessionSubagentPresentation";
+import { matchedSubagentWait, type SessionSubagent } from "./sessionSubagents";
 
 
 const TOOL_GROUP_ICONS: Record<ToolGroupCategory, LucideIcon> = {
@@ -131,7 +134,7 @@ function ReferencedContent({ store, reference, mode = "markdown", allowVisuals =
   if (!identity.sessionId || !identity.projectionGeneration) return null;
   if (pushed !== null && !pushed.complete && coveredByLive) return null;
   if (pushed !== null) return <div ref={streamedBody}>
-    {pushed.content ? (mode === "markdown" ? <MarkdownContent text={pushed.content} allowVisuals={allowVisuals} isStreaming={!pushed.complete} /> : pushed.content) : null}
+    {pushed.content ? (mode === "markdown" ? <MarkdownContent text={pushed.content} allowVisuals={allowVisuals} isStreaming={!pushed.complete} /> : <HighlightedTranscriptText text={pushed.content} />) : null}
     {pushed.limited ? <span role="status">{t("transcriptBlockContent.contentPreviewLimited")}</span> : null}
   </div>;
   if (evicted) return <div style={retainedHeight.current ? { minHeight: retainedHeight.current } : undefined}>
@@ -251,15 +254,13 @@ function operationInlineSummary(operation: Record<string, unknown>, call: Record
   return [command, target || opText(input?.path), description, toolName].find((value) => value.length > 0) || toolName;
 }
 
-type ToolDisplayStatus = "running" | "completed" | "failed" | "interrupted" | "unconfirmed";
+export type ToolDisplayStatus = "running" | "completed" | "failed" | "interrupted" | "unconfirmed";
 
-function TranscriptToolNode({ store, call, operation, outputRef, status }: Readonly<{
-  store: TranscriptViewStore;
+export function TranscriptToolNode({ store, call, operation, outputRef, status }: Readonly<{
   call: Record<string, unknown>;
   operation: Record<string, unknown>;
-  outputRef: TranscriptContentRef | null;
   status: ToolDisplayStatus;
-}>) {
+} & ({ store: TranscriptViewStore; outputRef: TranscriptContentRef | null } | { store?: never; outputRef: null })>) {
   const { t } = useTranslation();
   const failed = status === "failed" || status === "interrupted";
   const [expanded, setExpanded] = useState(false);
@@ -331,13 +332,15 @@ function useToolOperationsSnapshot(registry: TranscriptToolOperationRegistry | u
 
 // Consecutive tool blocks share one card (desktop groups consecutive tool
 // tasks the same way); each call contributes one or more operation nodes.
-export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citations, onShowCitation, runEnded = false }: Readonly<{
+export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citations, onShowCitation, runEnded = false, subagents = [], onOpenSubagent }: Readonly<{
   store: TranscriptViewStore;
   blockIds: readonly string[];
   citations?: ReadonlyMap<string, readonly CitationSummary[]>;
   onShowCitation?(citation: CitationSummary, origin: { elementId: string }): void;
   toolOperations?: TranscriptToolOperationRegistry;
   runEnded?: boolean;
+  subagents?: readonly SessionSubagent[];
+  onOpenSubagent?(agent: SessionSubagent, origin: { elementId: string }): void;
 }>) {
   const { t } = useTranslation();
   const listIdentity = useTranscriptIdentity(store);
@@ -370,7 +373,16 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
-  if (entries.length === 0) return null;
+  const groupAgents = onOpenSubagent ? subagents.filter(agent => entries.some(entry => entry.callId === agent.callId)) : [];
+  const agentCalls = new Set(groupAgents.map(agent => agent.callId));
+  const visibleEntries = entries.filter(entry => {
+    if (agentCalls.has(entry.callId)) return false;
+    if (entry.body.toolName !== "task_output" || entry.body.status === "failed"
+      || entry.body.status === "interrupted" || ["failed", "denied", "aborted"].includes(entry.resultState)) return true;
+    const waitingFor = matchedSubagentWait(entry.call.normalizedInput, subagents);
+    return !waitingFor || !onOpenSubagent || !listIdentity.blockIds.some(blockId => store.getBlockSnapshot(blockId)?.body.callId === waitingFor.callId);
+  });
+  if (visibleEntries.length === 0 && groupAgents.length === 0) return null;
   return (
     <div className="workspaceActivityGroupRecord">
       {entries.map(entry => {
@@ -384,8 +396,9 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
           })}
         </div> : null;
       })}
-      <div className="agent-tool-node-list">
-              {entries.flatMap((entry) => {
+      {groupAgents.length && onOpenSubagent ? <SessionSubagentTags agents={groupAgents} onOpen={onOpenSubagent} /> : null}
+      {visibleEntries.length ? <div className="agent-tool-node-list">
+              {visibleEntries.flatMap((entry) => {
                 if (entry.operations.length === 0) {
                   return [
                     <TranscriptToolNode
@@ -409,7 +422,7 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
                   />
                 ));
               })}
-      </div>
+      </div> : null}
       {listIdentity.sessionId ? entries.filter(entry => entry.detailSourceEventId).map(entry => <a key={entry.callId}
               href={apiUrl(`/api/sessions/${encodeURIComponent(listIdentity.sessionId as string)}/presentation/operation?sourceEventId=${encodeURIComponent(entry.detailSourceEventId)}`)} download>
               {t("libraryObjectRoute.downloadFile")}
@@ -421,10 +434,16 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
 export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   store,
   blockId,
+  searchQuery,
 }: Readonly<{
   store: TranscriptViewStore;
   blockId: string;
+  searchQuery?: string;
 }>) {
+  return <TranscriptSearchQuery value={searchQuery ?? ""}><TranscriptBlockBody store={store} blockId={blockId} searchHit={searchQuery !== undefined} /></TranscriptSearchQuery>;
+});
+
+function TranscriptBlockBody({ store, blockId, searchHit }: { store: TranscriptViewStore; blockId: string; searchHit: boolean }) {
   const { t } = useTranslation();
   const block = useTranscriptBlock(store, blockId);
   const viewEpoch = useTranscriptViewEpoch(store);
@@ -440,9 +459,9 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   }
   if (kind === "userText") {
     return (
-      <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id={block.blockId}>
+      <div className="workspaceTranscriptBlock workspaceTranscriptUser" data-block-id={block.blockId} data-search-hit={searchHit || undefined} tabIndex={searchHit ? -1 : undefined}>
         <div className="workspaceUserMessage">
-          {text ?? (reference ? <ReferencedContent store={store} reference={reference} mode="plain" /> : null)}
+          {text !== null ? <HighlightedTranscriptText text={text} /> : (reference ? <ReferencedContent store={store} reference={reference} mode="plain" /> : null)}
         </div>
         <TranscriptMessageMeta key={`${viewEpoch}:${block.blockRevision}`} user text={text} reference={reference}
           sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} observedAtMs={block.presentation?.observedAtMs} />
@@ -451,7 +470,7 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
   }
   if (kind === "assistantText") {
     return (
-      <div className="workspaceTranscriptBlock workspaceTranscriptAssistant" data-block-id={block.blockId}>
+      <div className="workspaceTranscriptBlock workspaceTranscriptAssistant" data-block-id={block.blockId} data-search-hit={searchHit || undefined} tabIndex={searchHit ? -1 : undefined}>
         <div className="workspaceTerminalAnswer">
           {text === null
             ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" allowVisuals /> : null)
@@ -477,7 +496,7 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
     </div>;
   }
   return (
-    <div className="workspaceTranscriptBlock workspaceStageSummary" data-block-id={block.blockId}>
+    <div className="workspaceTranscriptBlock workspaceStageSummary" data-block-id={block.blockId} data-search-hit={searchHit || undefined} tabIndex={searchHit ? -1 : undefined}>
       {text === null
         ? (reference ? <ReferencedContent store={store} reference={reference} mode="markdown" allowVisuals /> : null)
         : <MarkdownContent text={text} allowVisuals />}
@@ -485,7 +504,7 @@ export const TranscriptBlockRow = memo(function TranscriptBlockRow({
         sessionId={identity.sessionId} projectionGeneration={identity.projectionGeneration} observedAtMs={block.presentation?.observedAtMs} /> : null}
     </div>
   );
-});
+}
 
 export const TranscriptLiveTail = memo(function TranscriptLiveTail({ live, mode = "all" }: Readonly<{
   live: TranscriptLiveOverlay;

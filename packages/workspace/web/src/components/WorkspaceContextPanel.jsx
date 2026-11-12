@@ -5,6 +5,8 @@ import { useId, useLayoutEffect, useRef, useState } from "react";
 import { apiUrl } from "../api";
 import { DocumentPreview } from "./DocumentPreview";
 import { TextFilePreview } from "./TextFilePreview";
+import { AgentGridMark } from "../chat/SessionSubagentPresentation";
+import { SessionSubagentPreview } from "../chat/SessionSubagentPreview";
 
 export function WorkspacePreviewToggle({ panelId, open, onToggle, ref }) {
   const { t } = useTranslation();
@@ -17,8 +19,9 @@ export function WorkspacePreviewToggle({ panelId, open, onToggle, ref }) {
   );
 }
 
-function FilePreviewPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose }) {
+function PreviewPanel({ panel, subagentsRevision, browserWidthPx, onBrowserWidthChange, onClose }) {
   const { t } = useTranslation();
+  const isSubagent = panel.mode === "subagentPreview";
   const tabId = useId();
   const contentId = useId();
   const dragRef = useRef(null);
@@ -80,7 +83,7 @@ function FilePreviewPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose
       />
       <header className="workspaceContextPanelHeader">
         <div className="filePreviewTab">
-          <div className="filePreviewTabs" role="tablist" aria-label={t("workspaceContextPanel.filePreview")}>
+          <div className="filePreviewTabs" role="tablist" aria-label={t(isSubagent ? "sessionSubagent.conversations" : "workspaceContextPanel.filePreview")}>
             <button type="button" id={tabId} role="tab" aria-selected="true" aria-controls={contentId} title={panel.displayName}
               aria-keyshortcuts="Delete" onKeyDown={(event) => {
                 if (event.key === "Delete") {
@@ -88,7 +91,7 @@ function FilePreviewPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose
                   onClose();
                 }
               }}>
-              <FileText aria-hidden="true" />
+              {isSubagent ? <AgentGridMark seed={panel.agent.childSessionId} /> : <FileText aria-hidden="true" />}
               <span>{panel.displayName}</span>
             </button>
           </div>
@@ -106,6 +109,8 @@ function FilePreviewPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose
         </div>
       </header>
       <div className="filePreviewLayout" id={contentId} role="tabpanel" aria-labelledby={tabId} tabIndex={0}>
+        {isSubagent ? <SessionSubagentPreview key={`${panel.sessionId}:${panel.agent.runtimeJobId}`}
+          sessionId={panel.sessionId} agent={panel.agent} revision={subagentsRevision} /> : null}
         {panel.status === "loading" ? <div className="filePreviewState">{t("workspaceContextPanel.loadingReferenceFile")}</div> : null}
         {panel.status === "error" ? <div className="filePreviewState isError" role="alert">{panel.error}</div> : null}
         {panel.status === "ready" ? (
@@ -124,10 +129,10 @@ function FilePreviewPanel({ panel, browserWidthPx, onBrowserWidthChange, onClose
   );
 }
 
-export function WorkspaceContextPanel({ id, panel, open, browserWidthPx, onBrowserWidthChange, onClose }) {
+export function WorkspaceContextPanel({ id, panel, open, subagentsRevision = "0", browserWidthPx, onBrowserWidthChange, onClose }) {
   const { t } = useTranslation();
-  return <aside id={id} className="workspaceContextPanel workspaceFilePreviewPanel" aria-label={t("workspaceContextPanel.filePreview")}
+  return <aside id={id} className="workspaceContextPanel workspaceFilePreviewPanel" aria-label={t(panel.mode === "subagentPreview" ? "sessionSubagent.conversations" : "workspaceContextPanel.filePreview")}
     inert={!open} aria-hidden={!open}>
-    {panel.mode === "filePreview" ? <FilePreviewPanel panel={panel} browserWidthPx={browserWidthPx} onBrowserWidthChange={onBrowserWidthChange} onClose={onClose} /> : null}
+    {panel.mode === "filePreview" || panel.mode === "subagentPreview" ? <PreviewPanel panel={panel} subagentsRevision={subagentsRevision} browserWidthPx={browserWidthPx} onBrowserWidthChange={onBrowserWidthChange} onClose={onClose} /> : null}
   </aside>;
 }

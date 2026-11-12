@@ -152,17 +152,6 @@ jobs:
       fail-fast: false
       matrix:
         stage: [Contracts, Support, RuntimePostgres, ApiPostgres]
-    services:
-      postgres-test:
-        image: ${{ contains(fromJSON('["RuntimePostgres", "ApiPostgres"]'), matrix.stage) && 'postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15' || '' }}
-        env:
-          POSTGRES_DB: centaeris
-          POSTGRES_USER: centaeris
-          POSTGRES_PASSWORD: centaeris
-        ports: ['55432:5432']
-        options: >-
-          --health-cmd "pg_isready -U centaeris -d centaeris"
-          --health-interval 5s --health-timeout 5s --health-retries 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -190,6 +179,19 @@ jobs:
           key: ${{ runner.os }}-rust-${{ hashFiles('rust-toolchain.toml') }}-workspace-python-${{ matrix.stage }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-rust-${{ hashFiles('rust-toolchain.toml') }}-workspace-python-
+      - name: Start PostgreSQL with the search extension
+        if: ${{ contains(fromJSON('["RuntimePostgres", "ApiPostgres"]'), matrix.stage) }}
+        run: |
+          docker build -t centaeris-postgres:ci -f packages/workspace/postgres/Dockerfile .
+          docker run --detach --name postgres-test -p 55432:5432 \
+            -e POSTGRES_DB=centaeris -e POSTGRES_USER=centaeris -e POSTGRES_PASSWORD=centaeris \
+            centaeris-postgres:ci
+          for attempt in {1..30}; do
+            if docker exec postgres-test pg_isready -h 127.0.0.1 -U centaeris -d centaeris; then exit 0; fi
+            sleep 1
+          done
+          docker logs postgres-test
+          exit 1
       - run: python scripts/workspace/ci.py --stage ${{ matrix.stage }}
 
   web:

@@ -60,10 +60,10 @@ export class WorkspacePresentationController {
         case 'viewRevision': {
           const previous = this.viewRevision;
           const current = { ...item };
-          for (const key of ['contextRevision', 'historyRevision', 'workRevision'] as const) {
+          for (const key of ['contextRevision', 'historyRevision', 'workRevision', 'subagentsRevision'] as const) {
             if (previous && BigInt(previous[key]) > BigInt(current[key])) current[key] = previous[key];
           }
-          if (!previous || current.contextRevision !== previous.contextRevision || current.historyRevision !== previous.historyRevision || current.workRevision !== previous.workRevision) {
+          if (!previous || current.contextRevision !== previous.contextRevision || current.historyRevision !== previous.historyRevision || current.workRevision !== previous.workRevision || current.subagentsRevision !== previous.subagentsRevision) {
             this.viewRevision = current;
             this.options.onViewRevision?.(current);
           }

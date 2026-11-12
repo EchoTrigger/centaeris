@@ -1,16 +1,13 @@
 import { t } from "../../i18n";
 import { useStreamPresentation } from "../../useStreamPresentation";
 import { memo, useMemo, type ReactNode } from "react";
-import { useShallow } from "zustand/react/shallow";
 import { CircleAlert, CornerDownLeft } from "lucide-react";
 import { runFailureDetail } from "../../runErrors";
 import { MarkdownContent } from "./MarkdownContent";
-import { useChatViewStore } from "./chatViewStore";
 import { TaskGroupTranscriptItem } from "./ToolActivityTranscript";
 import { ReasoningTranscript } from "./ReasoningTranscript";
 import type {
   AgentResultStreamProps,
-  SubagentResult,
   TranscriptItem,
   TranscriptProcessSection,
   TranscriptTextItem,
@@ -197,56 +194,7 @@ export const AgentProcessTranscript = memo(function AgentProcessTranscript({
   );
 });
 
-const SubagentTranscriptTag = memo(function SubagentTranscriptTag({
-  entry,
-  onOpenAgentSession,
-}: {
-  entry: SubagentResult;
-  onOpenAgentSession: AgentResultStreamProps["onOpenAgentSession"];
-}) {
-  const subagent = useChatViewStore(useShallow((state) => state.subagentById[entry.id] ?? entry));
-  const title = subagent.description?.trim() || subagent.title;
-  const canOpen = Boolean(subagent.childSessionId && onOpenAgentSession);
-  return (
-    <button
-      type="button"
-      className={`agentSubagentTag is-${subagent.status}`}
-      disabled={!canOpen}
-      onClick={() => {
-        if (subagent.childSessionId) {
-          onOpenAgentSession?.(subagent.childSessionId, title);
-        }
-      }}
-    >
-      <span className="agentSubagentTagMark" aria-hidden="true" />
-      <span className="agentSubagentTagRole">Agent</span>
-      <span className="agentSubagentTagTitle">{title}</span>
-    </button>
-  );
-});
-
-export const AgentSubagentTranscript = memo(function AgentSubagentTranscript({
-  subagents,
-  onOpenAgentSession,
-}: {
-  subagents: SubagentResult[];
-  onOpenAgentSession: AgentResultStreamProps["onOpenAgentSession"];
-}) {
-  if (subagents.length === 0) {
-    return null;
-  }
-  return (
-    <div className="agentSubagentTags" aria-label={t("agentTranscriptSections.agentConversation")}>
-      {subagents.map((subagent) => (
-        <SubagentTranscriptTag
-          entry={subagent}
-          key={subagent.id}
-          onOpenAgentSession={onOpenAgentSession}
-        />
-      ))}
-    </div>
-  );
-});
+export { AgentSessionTags as AgentSubagentTranscript } from "./AgentSessionTags";
 
 export const AssistantTextReader = memo(function AssistantTextReader({
   finalItem,

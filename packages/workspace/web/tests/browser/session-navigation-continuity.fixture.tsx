@@ -5,6 +5,7 @@ import { configureApi } from '../../src/api';
 import { i18n } from '../../src/i18n';
 import WorkspaceChatLayout from '../../src/routes/WorkspaceHomeRoute';
 import { RecentlyDeleted } from '../../src/routes/RecentlyDeleted';
+import SettingsRoute from '../../src/routes/SettingsRoute';
 import '../../src/globals.css';
 
 // Actual route, sidebar, transcript and transport; only the HTTP server is synthetic.
@@ -61,6 +62,8 @@ const router = createMemoryRouter([{ id: 'authenticated', loader: () => ({ user 
   loader: ({ params }) => ({ workspace, workspaces: [workspace], selectedSession: rows.find(row => row.id === params.sessionId) ?? null }),
   shouldRevalidate: () => true, Component: WorkspaceChatLayout,
   children: [{ path: 'sessions/:sessionId', element: null }, { path: 'app', element: null },
+    { path: 'library', element: <h1>Navigation library</h1> },
+    { path: 'settings/preferences', Component: SettingsRoute },
     { path: 'settings/archive', element: <RecentlyDeleted workspace={workspace} /> }],
 }] }], { initialEntries: ['/w/workspace/sessions/session-4'] });
 
@@ -84,6 +87,9 @@ function hydrate(id: string) {
 Object.assign(window, { sessionNavigationFixture: { requests, failures, ready: () => streams.has('session-4'),
   connected: (id: string) => streams.has(id), hydrate, navigate: (id: string) => router.navigate(`/w/workspace/sessions/${id}`),
   trash: () => router.navigate('/w/workspace/settings/archive?view=deleted'),
+  library: () => router.navigate('/w/workspace/library'),
+  preferences: () => router.navigate('/w/workspace/settings/preferences'),
+  back: () => router.navigate(-1),
   repeatNavigation: (id: string) => send(id, 'navigation', { snapshotId: `${id}-repeat`, offset: 0, hasMore: false, sessions: rows }),
   live: (id: string) => send(id, 'live', { agentRunId: 'run', live: { messageId: 'live-answer', turnId: 'turn', afterSequence: 1,
     revision: '1', text: 'Incremental live answer', reasoning: null } }),

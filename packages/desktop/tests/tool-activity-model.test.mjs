@@ -81,14 +81,8 @@ test("keeps settled failures visible and never requires a fake edit diff", () =>
   assert.equal(presentation.atoms[0].detailRendererKind, "diff");
   assert.equal(presentation.title, "Edited files");
 
-  assert.throws(
-    () => getToolActivityPresentation([{ ...edit, diffPreview: undefined }]),
-    /Successful edit operation is missing diffPreview/,
-  );
-  assert.throws(
-    () => getToolActivityPresentation([{ ...write, diffPreview: undefined }]),
-    /Successful write operation is missing diffPreview/,
-  );
+  assert.equal(getToolActivityPresentation([{ ...edit, diffPreview: undefined }]).title, "Edited files");
+  assert.equal(getToolActivityPresentation([{ ...write, diffPreview: undefined }]).title, "Wrote files");
   assert.throws(
     () => getToolActivityPresentation([{ ...failedEdit, diffPreview: "-not-applied" }]),
     /Failed edit operation must not include diffPreview/,

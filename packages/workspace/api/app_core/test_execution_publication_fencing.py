@@ -637,6 +637,7 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
         deleting, release_delete = Event(), Event()
         real_owned_session = workspaces._locked_owned_session
         user = self.run.user
+        body, snapshot = self._body()
 
         def paused_owned_session(*args):
             result = real_owned_session(*args)
@@ -661,7 +662,7 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
                 deletion = executor.submit(delete)
                 try:
                     self.assertTrue(deleting.wait(5))
-                    upload = executor.submit(self._thread_post, self._body()[0])
+                    upload = executor.submit(self._thread_post, body)
                     waiting = False
                     deadline = time.monotonic() + 5
                     while time.monotonic() < deadline:
@@ -680,10 +681,15 @@ class ExecutionPublicationFencingTests(ExecutionPublicationFixture, TransactionT
                 finally:
                     release_delete.set()
                 deleted = deletion.result(timeout=10)
-                rejected = upload.result(timeout=10)
-        self.assertEqual(deleted.status_code, 200, deleted.content)
-        self._assert_error(rejected, "session_workspace_session_unavailable")
-        self.assertEqual(list(self.storage_root.rglob("*.snapshot")), [])
+                published = upload.result(timeout=10)
+        self.assertEqual(deleted.status_code, 503, deleted.content)
+        self.assertEqual(deleted.json(), {"error": "session_delete_cancel_pending"})
+        self.assertEqual(published.status_code, 201, published.content)
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.status, "active")
+        self.assertIsNone(self.session.purgedAt)
+        self.assertIsNotNone(self.session.purgeRequestedAt)
+        self._assert_snapshot(snapshot)
         self._assert_no_upload_temporaries()
 
     def test_replay_keeps_one_generation_and_terminal_run_cannot_republish(self):

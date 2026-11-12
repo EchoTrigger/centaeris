@@ -11,6 +11,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, afterEach, expect, test, vi } from "vitest";
 import { WorkspaceOverview } from "../src/renderer/components/WorkspaceOverview";
 import { listProcesses } from "../src/renderer/lib/processBridge";
+import { getWorkspaceGitStatus } from "../src/renderer/lib/workspaceBridge";
 vi.mock("../src/renderer/lib/processBridge", () => ({ listProcesses: vi.fn() }));
 vi.mock("../src/renderer/lib/workspaceBridge", () => ({
 	getWorkspaceGitStatus: vi.fn(async () => ({ isGitRepository: false })),
@@ -28,6 +29,15 @@ beforeEach(() => vi.clearAllMocks());
 afterEach(() => {
 	cleanup();
 	vi.useRealTimers();
+});
+test("an ordinary workspace keeps Files available and disables Git review without an error", async () => {
+	const user = userEvent.setup();
+	render(<WorkspaceOverview {...props} />);
+	await user.click(screen.getByRole("button", { name: "Workspace overview" }));
+	await waitFor(() => expect(getWorkspaceGitStatus).toHaveBeenCalledWith("root"));
+	expect(screen.getByRole("button", { name: "Browse files" })).toHaveProperty("disabled", false);
+	expect(screen.getByRole("button", { name: "Review changes" })).toHaveProperty("disabled", true);
+	expect(screen.queryByText(/Git repository|Error:|Loading Git status/)).toBeNull();
 });
 test("Task appears only after process discovery and opens its authoritative view", async () => {
 	vi.mocked(listProcesses).mockResolvedValue({

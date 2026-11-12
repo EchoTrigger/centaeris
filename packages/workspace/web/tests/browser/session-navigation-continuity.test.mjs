@@ -80,6 +80,35 @@ test('Session switching keeps actual sidebar DOM, scroll, disclosure and focus w
       console.info(JSON.stringify({cachedSwitches:50,firstReadablePaintUpperBoundP95Ms:p95,directoryChildListChanges:switches.changes}));
       await evaluate('navigationObserver.disconnect()');
 
+      await evaluate('sessionNavigationFixture.library()');
+      await waitFor(() => evaluate("document.body.textContent.includes('Navigation library')"), 'library route');
+      await evaluate('sessionNavigationFixture.preferences()');
+      await waitFor(() => evaluate("Boolean(document.querySelector('.workspaceSettingsSections'))"), 'settings navigation');
+      await evaluate('sessionNavigationFixture.back()');
+      await waitFor(() => evaluate("Boolean(document.querySelector('.shScroll'))"), 'restored conversation navigation');
+      await frame();
+      assert.equal(await evaluate("document.querySelector('.shProjectDisclosure').open"), false);
+      assert.equal(await evaluate("document.querySelector('.shScroll').scrollTop"), state.top);
+      await evaluate('sessionNavigationFixture.back()');
+      await waitFor(() => evaluate("document.querySelector('[aria-current=page][data-session-id]')?.dataset.sessionId === 'session-4'"), 'selected Session after Back');
+      await evaluate("document.querySelector('.workspaceSidebarToggle').click()");
+      await waitFor(() => evaluate("document.querySelector('.workspaceSidebarToggle').getAttribute('aria-expanded')==='false'"), 'desktop sidebar hidden');
+      await evaluate('window.navigationBeforeReload=true');
+      await send('Page.reload', { ignoreCache: true });
+      await waitFor(() => evaluate('!window.navigationBeforeReload && window.sessionNavigationFixture?.ready()').catch(() => false), 'fresh workspace after reload');
+      await waitFor(() => evaluate("Boolean(document.querySelector('[data-session-id=\"session-20\"]'))"), 'reloaded directory');
+      assert.equal(await evaluate("document.querySelector('.workspaceSidebarToggle').getAttribute('aria-expanded')"), 'false');
+      assert.equal(await evaluate("document.querySelector('.shProjectDisclosure').open"), false);
+      await evaluate("document.querySelector('.workspaceSidebarToggle').click()");
+      await waitFor(() => evaluate("document.querySelector('.shScroll').scrollTop > 0"), 'restored sidebar scroll after opening');
+      await frame();
+      assert.equal(await evaluate("document.querySelector('.shScroll').scrollTop"), state.top);
+      await evaluate("document.querySelector('.shProjectSummary').focus()");
+      await press('Enter');
+      await waitFor(() => evaluate("document.querySelector('.shProjectDisclosure').open"), 'native keyboard opens project');
+      await press(' ', 'Space');
+      await waitFor(() => evaluate("!document.querySelector('.shProjectDisclosure').open"), 'native keyboard closes project');
+
       await evaluate('sessionNavigationFixture.trash()');
       await waitFor(()=>evaluate("Boolean(document.querySelector('[aria-label=\"Permanently delete Deleted material\"]'))"),'Recently Deleted material');
       await evaluate(`(() => { window.purgeOpener=document.querySelector('[aria-label="Permanently delete Deleted material"]'); purgeOpener.focus(); })()`);
@@ -115,6 +144,31 @@ test('Recently Deleted confirmation retains borderless styling and keyboard focu
     await runBrowser(`${server.resolvedUrls.local[0]}tests/browser/session-navigation-continuity.html?theme=dark`,
       {width:390,height:844,theme:'dark',reduced:true},profile,async({evaluate,press,send})=>{
         await waitFor(()=>evaluate('window.sessionNavigationFixture?.ready()'),'mobile workspace route');
+        assert.equal(await evaluate("document.querySelector('.workspaceDrawer').open"), false);
+        await evaluate("document.querySelector('button[aria-label=\"Show sidebar\"]').click()");
+        await waitFor(()=>evaluate("document.querySelector('.workspaceDrawer').open"),'navigation drawer opens');
+        await waitFor(()=>evaluate("Boolean(document.querySelector('.shProjectSummary'))"),'mobile project rows');
+        await evaluate("document.querySelector('.shProjectSummary').focus()");
+        await press('Enter');
+        await waitFor(()=>evaluate("!document.querySelector('.shProjectDisclosure').open"),'mobile project folds');
+        const top = await evaluate("(() => { const scroll=document.querySelector('.shScroll'); scroll.scrollTop=200; scroll.dispatchEvent(new Event('scroll')); return scroll.scrollTop; })()");
+        assert.ok(top > 0);
+        await evaluate('sessionNavigationFixture.library()');
+        await waitFor(()=>evaluate("!document.querySelector('.workspaceDrawer').open"),'navigation closes transient drawer');
+        await evaluate("document.querySelector('button[aria-label=\"Show sidebar\"]').click()");
+        await waitFor(()=>evaluate("document.querySelector('.workspaceDrawer').open && document.querySelector('.shScroll').scrollTop > 0"),'drawer position restores');
+        assert.equal(await evaluate("document.querySelector('.shScroll').scrollTop"), top);
+        assert.equal(await evaluate("document.querySelector('.shProjectDisclosure').open"), false);
+        await press('Escape');
+        await evaluate('window.navigationBeforeReload=true');
+        await send('Page.reload',{ignoreCache:true});
+        await waitFor(()=>evaluate('!window.navigationBeforeReload && window.sessionNavigationFixture?.ready()').catch(()=>false),'mobile reload');
+        assert.equal(await evaluate("document.querySelector('.workspaceDrawer').open"), false);
+        await send('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
+        await waitFor(()=>evaluate("Boolean(document.querySelector('.workspaceSidebarToggle'))"),'desktop sidebar control');
+        assert.equal(await evaluate("document.querySelector('.workspaceSidebarToggle').getAttribute('aria-expanded')"),'true');
+        await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:false});
+        await waitFor(()=>evaluate("Boolean(document.querySelector('.workspaceDrawer')) && !document.querySelector('.workspaceDrawer').open"),'compact drawer remains closed');
         await evaluate('sessionNavigationFixture.trash()');
         await waitFor(()=>evaluate("Boolean(document.querySelector('[aria-label=\"Permanently delete Deleted material\"]'))"),'deleted material action');
         await evaluate(`(() => { window.purgeOpener=document.querySelector('[aria-label="Permanently delete Deleted material"]'); purgeOpener.focus(); })()`);

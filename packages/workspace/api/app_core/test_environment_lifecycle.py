@@ -2,7 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
 
-from django.db import close_old_connections, connection, transaction
+from django.db import close_old_connections, connection, connections, transaction
 from django.test import SimpleTestCase, TransactionTestCase
 
 from .agent_run_authorization_factory import create_agent_run_authorization
@@ -54,17 +54,22 @@ class EnvironmentControllerTests(ExecutionPublicationFixture, TransactionTestCas
             cursor.execute("SHOW synchronous_commit")
             self.assertEqual(cursor.fetchone()[0], "off")
         observer = connection.copy(alias="controller-policy-observer")
+        connections[observer.alias] = observer
         try:
             with observer.cursor() as cursor:
                 cursor.execute("SELECT epoch,released,policy FROM public.environment_controller_commit_policy ORDER BY epoch,released")
                 self.assertEqual(cursor.fetchall(), [(execute["controllerEpoch"], False, "on"),
                     (cleanup["controllerEpoch"], False, "on"), (cleanup["controllerEpoch"], True, "on")])
         finally:
-            observer.close()
+            try:
+                observer.close()
+            finally:
+                del connections[observer.alias]
 
     def test_authority_receipt_cannot_escape_an_uncommitted_outer_transaction(self):
         receipt = None
         observer = connection.copy(alias="controller-rollback-observer")
+        connections[observer.alias] = observer
         try:
             with transaction.atomic():
                 try:
@@ -77,7 +82,10 @@ class EnvironmentControllerTests(ExecutionPublicationFixture, TransactionTestCas
                     self.assertEqual(cursor.fetchone()[0], 0)
                 transaction.set_rollback(True)
         finally:
-            observer.close()
+            try:
+                observer.close()
+            finally:
+                del connections[observer.alias]
         self.session.current_environment.refresh_from_db()
         self.assertEqual(self.session.current_environment.controller_epoch, 0)
         self.assertIsNone(receipt, "the service returned controller authority that its caller could roll back")
@@ -221,6 +229,7 @@ class EnvironmentControllerTests(ExecutionPublicationFixture, TransactionTestCas
             with self.assertRaisesRegex(RuntimeError, "injected receipt failure"):
                 self.release(cleanup)
         observer = connection.copy(alias="release-atomicity-observer")
+        connections[observer.alias] = observer
         try:
             with observer.cursor() as cursor:
                 cursor.execute("SELECT controller_released FROM app_core_sessionenvironment WHERE id=%s", [self.run.environment_id])
@@ -228,7 +237,10 @@ class EnvironmentControllerTests(ExecutionPublicationFixture, TransactionTestCas
                 cursor.execute("SELECT count(*) FROM app_core_agentrunenvironmentrelease WHERE agent_run_id=%s", [self.run.pk])
                 self.assertEqual(cursor.fetchone()[0], 0)
         finally:
-            observer.close()
+            try:
+                observer.close()
+            finally:
+                del connections[observer.alias]
         self.assertTrue(self.release(cleanup)["released"])
 
     def test_receipt_is_immutable_and_reads_require_current_run_lease_and_original_signature(self):

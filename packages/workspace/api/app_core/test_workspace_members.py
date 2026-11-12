@@ -1,8 +1,11 @@
+import hashlib
 import json
+from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils import timezone
 
 from app_core.models import (
     AgentRun,
@@ -96,7 +99,7 @@ class WorkspaceMemberLifecycleTests(TestCase):
         )["token"][0]
         return response, token
 
-    def test_admin_manages_peer_roles_but_not_owner_or_self(self):
+    def test_only_owner_can_promote_members_and_demote_administrators(self):
         denied = self.update_role(
             self.member,
             self.peer_admin_membership.id,
@@ -105,7 +108,7 @@ class WorkspaceMemberLifecycleTests(TestCase):
         self.assertEqual(denied.status_code, 404)
 
         promoted = self.update_role(
-            self.admin,
+            self.owner,
             self.member_membership.id,
             "admin",
         )
@@ -117,7 +120,7 @@ class WorkspaceMemberLifecycleTests(TestCase):
         )
 
         demoted = self.update_role(
-            self.admin,
+            self.owner,
             self.peer_admin_membership.id,
             "member",
         )
@@ -125,7 +128,7 @@ class WorkspaceMemberLifecycleTests(TestCase):
         self.assertEqual(demoted.json()["member"]["role"], "member")
 
         unchanged = self.update_role(
-            self.admin,
+            self.owner,
             self.peer_admin_membership.id,
             "member",
         )
@@ -269,8 +272,31 @@ class WorkspaceMemberLifecycleTests(TestCase):
             "workspace_member_not_found",
         )
 
-    def test_admin_removes_peer_admin_but_no_one_uses_management_api_on_self(self):
+    def test_admin_cannot_grant_or_change_administrator_roles(self):
+        for target, role in (
+            (self.member_membership, "admin"),
+            (self.peer_admin_membership, "member"),
+            (self.peer_admin_membership, "admin"),
+        ):
+            with self.subTest(target=target.id, role=role):
+                original_role = target.role
+                response = self.update_role(self.admin, target.id, role)
+                self.assertEqual(response.status_code, 403, response.content)
+                self.assertEqual(response.json()["error"], "workspace_member_management_forbidden")
+                target.refresh_from_db()
+                self.assertEqual(target.role, original_role)
+
+    def test_member_removal_respects_role_hierarchy_and_self_protection(self):
         removed = self.remove_member(self.admin, self.peer_admin_membership.id)
+        self.assertEqual(removed.status_code, 403, removed.content)
+        self.assertEqual(removed.json()["error"], "workspace_member_management_forbidden")
+        self.assertTrue(WorkspaceMembership.objects.filter(id=self.peer_admin_membership.id).exists())
+
+        removed = self.remove_member(self.admin, self.member_membership.id)
+        self.assertEqual(removed.status_code, 200, removed.content)
+        self.assertFalse(WorkspaceMembership.objects.filter(id=self.member_membership.id).exists())
+
+        removed = self.remove_member(self.owner, self.peer_admin_membership.id)
         self.assertEqual(removed.status_code, 200, removed.content)
 
         admin_self = self.remove_member(self.admin, self.admin_membership.id)
@@ -287,6 +313,66 @@ class WorkspaceMemberLifecycleTests(TestCase):
         )
         denied = self.remove_member(self.member, self.admin_membership.id)
         self.assertEqual(denied.status_code, 404)
+
+    def test_admin_invitation_management_stays_below_actor_role(self):
+        issued, _ = self.issue_invitation(self.owner, "candidate@example.test", "admin")
+        invitation = WorkspaceInvitation.objects.get(id=issued.json()["invitation"]["id"])
+        original_digest = invitation.token_digest
+        self.client.force_login(self.admin)
+        endpoint = f"/api/workspaces/{self.workspace.id}/invitations"
+        for email, role in (
+            ("new-admin@example.test", "admin"),
+            (invitation.email, "admin"),
+            (invitation.email, "member"),
+        ):
+            with self.subTest(email=email, role=role):
+                response = self.client.post(endpoint, data=json.dumps({"email": email, "role": role}),
+                    content_type="application/json")
+                self.assertEqual(response.status_code, 403, response.content)
+                self.assertEqual(response.json()["error"], "workspace_invitation_management_forbidden")
+        self.assertFalse(WorkspaceInvitation.objects.filter(email="new-admin@example.test").exists())
+        denied = self.client.delete(f"{endpoint}/{invitation.id}")
+        self.assertEqual(denied.status_code, 403, denied.content)
+        invitation.refresh_from_db()
+        self.assertEqual(invitation.status, "pending")
+        self.assertEqual(invitation.token_digest, original_digest)
+
+        reissued, _ = self.issue_invitation(self.owner, invitation.email, "admin")
+        invitation.refresh_from_db()
+        self.assertEqual(invitation.status, "revoked")
+        response = self.client.delete(f"{endpoint}/{reissued.json()['invitation']['id']}")
+        self.assertEqual(response.status_code, 200, response.content)
+
+        issued, _ = self.issue_invitation(self.owner, "reader@example.test")
+        reissued, _ = self.issue_invitation(self.admin, "reader@example.test")
+        self.assertEqual(WorkspaceInvitation.objects.get(id=issued.json()["invitation"]["id"]).status, "revoked")
+        response = self.client.delete(f"{endpoint}/{reissued.json()['invitation']['id']}")
+        self.assertEqual(response.status_code, 200, response.content)
+
+        expired, _ = self.issue_invitation(self.owner, "expired-admin@example.test", "admin")
+        WorkspaceInvitation.objects.filter(id=expired.json()["invitation"]["id"]).update(
+            expires_at=timezone.now() - timedelta(seconds=1))
+        self.issue_invitation(self.admin, "expired-admin@example.test", "member")
+        self.assertEqual(WorkspaceInvitation.objects.get(id=expired.json()["invitation"]["id"]).status, "expired")
+
+    def test_existing_administrator_invitation_survives_issuer_removal(self):
+        token = "existing-administrator-invitation"
+        expires_at = timezone.now() + timedelta(hours=1)
+        # An already-issued grant remains valid independently of its issuer.
+        invitation = WorkspaceInvitation.objects.create(workspace=self.workspace,
+            email="invited-admin@example.test", role="admin", invited_by=self.admin,
+            token_digest="sha256:" + hashlib.sha256(token.encode()).hexdigest(), expires_at=expires_at)
+        invitee = get_user_model().objects.create_user(username=invitation.email, email=invitation.email)
+        removed = self.remove_member(self.owner, self.admin_membership.id)
+        self.assertEqual(removed.status_code, 200, removed.content)
+        self.client.force_login(invitee)
+        response = self.client.post("/api/invitations/accept", data=json.dumps({"token": token}),
+            content_type="application/json")
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()["role"], "admin")
+        invitation.refresh_from_db()
+        self.assertEqual(invitation.status, "accepted")
+        self.assertEqual(invitation.expires_at, expires_at)
 
     def test_owner_transfer_reauthenticates_and_preserves_membership_identities(self):
         self.client.force_login(self.owner)

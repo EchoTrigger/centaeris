@@ -85,6 +85,35 @@ fn step_failure<T>(
 }
 
 pub(crate) fn step(
+    mut state: HttpServerState,
+    agent_run_step: AgentRunStepRequest,
+) -> Result<AgentRunStepOutcome, Failure> {
+    let session_id = &agent_run_step.agent_run_start.authorization.session_id;
+    let execution_store = state.job_store.hosted_execution_view(
+        session_id,
+        session_id,
+        RuntimeJobLeaseFence {
+            job_id: agent_run_step.job_id.clone(),
+            job_kind: AGENT_RUN_LIFECYCLE_JOB_KIND.into(),
+            lease_owner: agent_run_step.lease_owner.clone(),
+        },
+    )?;
+    let store = Arc::new(
+        state
+            .runtime
+            .block_on(async { RuntimeStoreActor::start(execution_store) })
+            .map_err(|error| error.to_string())?,
+    );
+    let runtime = state.runtime.clone();
+    state.store = store.clone();
+    let outcome = step_with_store(state, agent_run_step);
+    runtime
+        .block_on(store.close())
+        .map_err(|error| error.to_string())?;
+    outcome
+}
+
+fn step_with_store(
     state: HttpServerState,
     agent_run_step: AgentRunStepRequest,
 ) -> Result<AgentRunStepOutcome, Failure> {

@@ -64,6 +64,64 @@ impl PostgresRuntimeStore {
         self.with_execution_control_client(|client| load_job(client, id))
     }
 
+    pub(crate) fn wait_for_owned_runtime_job_wake(
+        &self,
+        lease: &centaeris_core::session::RuntimeJobLeaseFence,
+        max_wait: Duration,
+    ) -> Result<bool, String> {
+        self.with_listener_client(|listener| {
+            // Registration precedes the durable read, including wakes committed
+            // before this connection began listening.
+            listener
+                .batch_execute("LISTEN runtime_job_wake_v1")
+                .map_err(|error| format!("listen for owned runtime job wake failed: {error}"))?;
+            let deadline = Instant::now() + max_wait;
+            loop {
+                let consumed = self.with_execution_control_client(|client| {
+                    let mut tx = client.transaction().map_err(|error| error.to_string())?;
+                    let row = tx.query_opt(
+                        "SELECT session_id FROM runtime_jobs WHERE job_id=$1 FOR UPDATE",
+                        &[&lease.job_id],
+                    ).map_err(|error| error.to_string())?
+                        .ok_or("owned runtime job wake lease rejected")?;
+                    // Evaluate database time after acquiring the row lock; a
+                    // renewal or replacement may have owned it while we waited.
+                    let current = tx.query_opt(
+                        "SELECT (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint FROM runtime_jobs WHERE job_id=$1 AND job_kind=$2 AND status='running' AND lease_owner=$3 AND lease_purpose='execute' AND ($4::text IS NULL OR lease_host_id=$4) AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+                        &[&lease.job_id, &lease.job_kind, &lease.lease_owner, &self.dispatch_host_id()],
+                    ).map_err(|error| error.to_string())?
+                        .ok_or("owned runtime job wake lease rejected")?;
+                    let now: i64 = current.get(0);
+                    let pending = pending_runtime_job_wakes(&mut tx, &lease.job_id)?;
+                    consume_runtime_job_wakes(
+                        &mut tx,
+                        &lease.job_id,
+                        row.get::<_, Option<String>>(0).as_deref(),
+                        &pending,
+                        now,
+                        "owned_wait_observed_pending_wake",
+                    )?;
+                    tx.commit().map_err(|error| error.to_string())?;
+                    Ok(!pending.is_empty())
+                })?;
+                if consumed {
+                    return Ok(true);
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Ok(false);
+                }
+                // A notification is only a hint. Unrelated or repeated hints do
+                // not execute Core again without a new durable wake receipt.
+                let _ = listener
+                    .notifications()
+                    .timeout_iter(remaining)
+                    .next()
+                    .map_err(|error| format!("wait for owned runtime job wake failed: {error}"))?;
+            }
+        })
+    }
+
     pub(crate) fn wait_for_runtime_jobs(
         &self,
         job_kinds: &[String],
@@ -160,6 +218,7 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
             let mut tx = c
                 .transaction()
                 .map_err(|e| format!("begin Postgres job schedule failed: {e}"))?;
+            self.lock_subagent_persistence_write(&mut tx, req.job.session_id.as_deref())?;
             let inserted = insert_job(&mut tx, &req.job)?;
             let job = if inserted {
                 req.job
@@ -293,15 +352,7 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
                     job_id:r.job_id.clone(), job_kind:"agent_run.lifecycle".into(),lease_owner:r.lease_owner.clone()
                 })?;
             }
-            let pending_wake_ids = tx
-                .query(
-                    "SELECT wake.event_id FROM runtime_events AS wake WHERE wake.task_id=$1 AND wake.event_type='runtime_job_wake_requested' AND NOT EXISTS(SELECT 1 FROM runtime_events AS consumed WHERE consumed.event_id='runtime_job_wake_consumed:' || substring(wake.event_id FROM char_length('runtime_job_wake:')+1)) ORDER BY wake.at_ms,wake.event_id",
-                    &[&r.job_id],
-                )
-                .map_err(|error| format!("query pending Postgres runtime job wakes failed: {error}"))?
-                .into_iter()
-                .map(|row| row.get::<_, String>(0))
-                .collect::<Vec<_>>();
+            let pending_wake_ids = pending_runtime_job_wakes(&mut tx, &r.job_id)?;
             let effective_run_at_ms = if pending_wake_ids.is_empty() {
                 r.run_at_ms
             } else {
@@ -321,26 +372,10 @@ impl RuntimeJobStorePort for PostgresRuntimeStore {
                 &[&event_id, &session_id, &r.job_id, &r.yielded_at_ms, &payload],
             )
             .map_err(|error| format!("append Postgres runtime job yield event failed: {error}"))?;
-            for wake_event_id in pending_wake_ids {
-                let consumed_event_id = wake_event_id.replacen(
-                    "runtime_job_wake:",
-                    "runtime_job_wake_consumed:",
-                    1,
-                );
-                let consumed_payload = serde_json::json!({
-                    "schema": "runtime.job.wake_consumed.v1",
-                    "jobId": r.job_id,
-                    "wakeEventId": wake_event_id,
-                    "consumedAtMs": r.yielded_at_ms,
-                    "transitionReason": "yield_observed_pending_wake",
-                })
-                .to_string();
-                tx.execute(
-                    "INSERT INTO runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) VALUES($1,$2,$3,'runtime_job_wake_consumed',$4,'internal',$5)",
-                    &[&consumed_event_id, &session_id, &r.job_id, &r.yielded_at_ms, &consumed_payload],
-                )
-                .map_err(|error| format!("consume pending Postgres runtime job wake failed: {error}"))?;
-            }
+            consume_runtime_job_wakes(
+                &mut tx, &r.job_id, Some(&session_id), &pending_wake_ids,
+                r.yielded_at_ms, "yield_observed_pending_wake",
+            )?;
             tx.commit()
                 .map_err(|error| format!("commit Postgres runtime job yield failed: {error}"))
         })
@@ -804,6 +839,51 @@ fn dl_status_from(v: &str) -> Result<DeadLetterStatus, String> {
     }
 }
 
+fn pending_runtime_job_wakes(
+    tx: &mut impl GenericClient,
+    job_id: &str,
+) -> Result<Vec<String>, String> {
+    Ok(tx.query(
+        "SELECT wake.event_id FROM runtime_events AS wake WHERE wake.task_id=$1 AND wake.event_type='runtime_job_wake_requested' AND NOT EXISTS(SELECT 1 FROM runtime_events AS consumed WHERE consumed.event_id='runtime_job_wake_consumed:' || substring(wake.event_id FROM char_length('runtime_job_wake:')+1)) ORDER BY wake.at_ms,wake.event_id",
+        &[&job_id],
+    )
+    .map_err(|error| format!("query pending Postgres runtime job wakes failed: {error}"))?
+    .into_iter()
+    .map(|row| row.get::<_, String>(0))
+    .collect())
+}
+
+fn consume_runtime_job_wakes(
+    tx: &mut impl GenericClient,
+    job_id: &str,
+    session_id: Option<&str>,
+    pending: &[String],
+    consumed_at_ms: i64,
+    transition_reason: &str,
+) -> Result<(), String> {
+    let session_id = session_id
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("runtime_job:{job_id}"));
+    for wake_event_id in pending {
+        let consumed_event_id =
+            wake_event_id.replacen("runtime_job_wake:", "runtime_job_wake_consumed:", 1);
+        let payload = serde_json::json!({
+            "schema": "runtime.job.wake_consumed.v1",
+            "jobId": job_id,
+            "wakeEventId": wake_event_id,
+            "consumedAtMs": consumed_at_ms,
+            "transitionReason": transition_reason,
+        })
+        .to_string();
+        tx.execute(
+            "INSERT INTO runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) VALUES($1,$2,$3,'runtime_job_wake_consumed',$4,'internal',$5)",
+            &[&consumed_event_id, &session_id, &job_id, &consumed_at_ms, &payload],
+        )
+        .map_err(|error| format!("consume pending Postgres runtime job wake failed: {error}"))?;
+    }
+    Ok(())
+}
+
 pub(super) fn wake_runtime_job_in_transaction<C: GenericClient>(
     tx: &mut C,
     r: &WakeRuntimeJobRequest,
@@ -873,5 +953,9 @@ pub(super) fn wake_runtime_job_in_transaction<C: GenericClient>(
         other => return Err(format!("wake runtime job unsupported status: {other}")),
     };
 
+    if existing.is_none() && matches!(disposition, WakeRuntimeJobDisposition::Active) {
+        tx.query_one("SELECT pg_notify('runtime_job_wake_v1',$1)", &[&r.job_id])
+            .map_err(|error| format!("notify active runtime job wake failed: {error}"))?;
+    }
     Ok(disposition)
 }

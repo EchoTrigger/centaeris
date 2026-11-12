@@ -10,8 +10,12 @@ and use it for both Cargo and Docker builds.
 The platform reconciliation client shares the API image. It invokes only Django
 business reconciliation; Runtime owns Run leases, execution and completion wakeups.
 
-Required images include API, Runtime Server, Web, general execution, and
-document processor. PostgreSQL and Redis use pinned upstream image digests.
+Required images include API, Runtime Server, Web, general execution,
+document processor, and PostgreSQL. Redis uses a pinned upstream image digest.
+The PostgreSQL image builds pg_bigm on a pinned PostgreSQL base for
+[Session body search](../reference/SessionSearch.md). Deploy that image before
+running the search migration, retaining the existing PostgreSQL data volume;
+both application and test databases require the extension.
 Execution and document processing are normal runtime dependencies.
 
 ## Local start

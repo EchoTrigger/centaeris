@@ -1,7 +1,8 @@
 import { VisualMarkdown } from "@centaeris/visuals";
 import { renderTranscriptVisual } from "@centaeris/ui/visualizations";
 import { useStreamPresentation } from "../useStreamPresentation";
-import { Fragment, memo, useEffect, useMemo, useRef } from "react";
+import { memo, useEffect, useMemo, useRef } from "react";
+import { HighlightedTranscriptText } from "./TranscriptSearchHighlight";
 
 function safeHref(href) {
   const normalized = href.trim().toLowerCase();
@@ -21,23 +22,23 @@ function renderInline(text, keyPrefix) {
   let cursor = 0;
   for (const match of text.matchAll(pattern)) {
     const index = match.index || 0;
-    if (index > cursor) nodes.push(<Fragment key={`${keyPrefix}:text:${cursor}`}>{text.slice(cursor, index)}</Fragment>);
+    if (index > cursor) nodes.push(<HighlightedTranscriptText key={`${keyPrefix}:text:${cursor}`} text={text.slice(cursor, index)} />);
     const token = match[0];
     if (token.startsWith("**")) {
-      nodes.push(<strong key={`${keyPrefix}:strong:${index}`}>{token.slice(2, -2)}</strong>);
+      nodes.push(<strong key={`${keyPrefix}:strong:${index}`}><HighlightedTranscriptText text={token.slice(2, -2)} /></strong>);
     } else if (token.startsWith("`")) {
-      nodes.push(<code key={`${keyPrefix}:code:${index}`}>{token.slice(1, -1)}</code>);
+      nodes.push(<code key={`${keyPrefix}:code:${index}`}><HighlightedTranscriptText text={token.slice(1, -1)} /></code>);
     } else {
       const link = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
       if (!link) throw new Error("markdown link parser mismatch");
       const href = safeHref(link[2]);
       nodes.push(href
-        ? <a key={`${keyPrefix}:link:${index}`} href={href} target={href.startsWith("http") ? "_blank" : undefined} rel="noreferrer">{link[1]}</a>
-        : <Fragment key={`${keyPrefix}:link:${index}`}>{link[1]}</Fragment>);
+        ? <a key={`${keyPrefix}:link:${index}`} href={href} target={href.startsWith("http") ? "_blank" : undefined} rel="noreferrer"><HighlightedTranscriptText text={link[1]} /></a>
+        : <HighlightedTranscriptText key={`${keyPrefix}:link:${index}`} text={link[1]} />);
     }
     cursor = index + token.length;
   }
-  if (cursor < text.length) nodes.push(<Fragment key={`${keyPrefix}:text:${cursor}`}>{text.slice(cursor)}</Fragment>);
+  if (cursor < text.length) nodes.push(<HighlightedTranscriptText key={`${keyPrefix}:text:${cursor}`} text={text.slice(cursor)} />);
   return nodes;
 }
 
@@ -119,7 +120,7 @@ const OrdinaryMarkdownContent = memo(function OrdinaryMarkdownContent(/** @type 
       index += 1;
       while (index < lines.length && !lines[index].trim().startsWith("```")) code.push(lines[index++]);
       if (index < lines.length) index += 1;
-      nodes.push(<pre className="markdownCode" key={`code:${nodeIndex++}`}><code data-language={language || undefined}>{code.join("\n")}</code></pre>);
+      nodes.push(<pre className="markdownCode" key={`code:${nodeIndex++}`}><code data-language={language || undefined}><HighlightedTranscriptText text={code.join("\n")} /></code></pre>);
       continue;
     }
     const heading = line.match(/^(#{1,3})\s+(.+)$/);

@@ -24,6 +24,7 @@ impl RuntimeStoreTransactionPort for PostgresRuntimeStore {
             let mut tx = client
                 .transaction()
                 .map_err(|error| format!("begin Postgres save_wait_checkpoint failed: {error}"))?;
+            self.lock_subagent_persistence_write(&mut tx, Some(&req.checkpoint.session_id))?;
             let inserted = match load_checkpoint(
                 &mut tx,
                 req.checkpoint.session_id.as_str(),
@@ -53,6 +54,7 @@ impl RuntimeStoreTransactionPort for PostgresRuntimeStore {
             let mut tx = client.transaction().map_err(|error| {
                 format!("begin Postgres consume_wait_checkpoint failed: {error}")
             })?;
+            self.lock_subagent_persistence_write(&mut tx, Some(&req.checkpoint.session_id))?;
             let current = load_checkpoint(
                 &mut tx,
                 req.checkpoint.session_id.as_str(),
@@ -101,6 +103,7 @@ impl RuntimeStoreTransactionPort for PostgresRuntimeStore {
             let mut tx = client
                 .transaction()
                 .map_err(|e| format!("begin Postgres external schedule transaction failed: {e}"))?;
+            self.lock_subagent_persistence_write(&mut tx, req.job.session_id.as_deref())?;
             upsert_object(&mut tx, &req.object)?;
             let inserted = insert_job(&mut tx, &req.job)?;
             let job = if inserted {
@@ -130,6 +133,10 @@ impl RuntimeStoreTransactionPort for PostgresRuntimeStore {
             let mut tx = client
                 .transaction()
                 .map_err(|e| format!("begin Postgres external complete transaction failed: {e}"))?;
+            self.lock_subagent_persistence_write(
+                &mut tx,
+                req.link.as_ref().map(|link| link.session_id.as_str()),
+            )?;
             if let Some(object) = req.object.as_ref() {
                 upsert_object(&mut tx, object)?;
             }
@@ -160,6 +167,7 @@ impl RuntimeStoreTransactionPort for PostgresRuntimeStore {
             let mut tx = client
                 .transaction()
                 .map_err(|e| format!("begin Postgres DLQ fail transaction failed: {e}"))?;
+            self.lock_subagent_persistence_write(&mut tx, None)?;
             let inserted = insert_dead_letter(&mut tx, &req.dead_letter.dead_letter)?;
             let dead_letter = if inserted {
                 req.dead_letter.dead_letter

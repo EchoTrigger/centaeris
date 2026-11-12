@@ -16,6 +16,7 @@ import EnvironmentSettings from "./EnvironmentSettings";
 import WorkspaceProfileSettings from "./WorkspaceProfileSettings";
 import { SessionArchive } from "./SessionArchive";
 import { DEVELOPER_DOC_GROUPS, developerDocSearch, developerTopic, DeveloperSettings } from "./DeveloperSettings";
+import { useNavigationScroll, useWorkspaceNavigation } from "../shell/workspaceNavigationState";
 
 const ADMIN_ROLES = new Set(["owner", "admin"]);
 const SECTIONS = (t) => ({
@@ -124,7 +125,7 @@ function AccountSecurity() {
       {notice ? <p className="settingsEditNotice" role="status">{notice}</p> : null}
     </div>
     <ExternalIdentitySettings />
-    {editing ? <WorkspaceDialog className="settingsEditDialog" title={t("passwordResetRoute.updatePassword")} busy={busy} onClose={closeEditor}>
+    {editing ? <WorkspaceDialog className="settingsEditDialog" title={t("passwordResetRoute.updatePassword")} error={error} busy={busy} onClose={closeEditor}>
       <form onSubmit={submit}>
         <label>{t("settingsRoute.currentPassword")}<input autoFocus autoComplete="current-password" type="password" value={currentPassword} onChange={update(setCurrentPassword)} required disabled={busy} /></label>
         <label>
@@ -133,7 +134,6 @@ function AccountSecurity() {
           <small id="new-password-hint">{t("settingsRoute.atLeast15Characters")}</small>
         </label>
         <label>{t("settingsRoute.confirmNewPassword")}<input autoComplete="new-password" type="password" minLength={15} value={confirmation} onChange={update(setConfirmation)} required disabled={busy} /></label>
-        {error ? <p className="settingsEditError" role="alert">{error}</p> : null}
         <footer>
           <button className="secondary" type="button" disabled={busy} onClick={closeEditor}>{t("agentRunRow.cancel")}</button>
           <button className="isPrimary" type="submit" disabled={busy || !currentPassword || !newPassword || !confirmation}>{busy ? t("passwordResetRoute.updating") : t("passwordResetRoute.updatePassword")}</button>
@@ -176,6 +176,8 @@ export default function SettingsPage() {
     return () => playback.cancel();
   }, [showingDocs]);
   const workspace = workspaceData?.workspace || (isAccountRoute ? accountData?.workspace : null);
+  const navigation = useWorkspaceNavigation(user.id, workspace?.id ?? null);
+  useNavigationScroll(navigationRef, navigation, showingDocs ? "developerDocs" : "settings");
   const home = workspace ? `/w/${encodeURIComponent(workspace.id)}/app` : "/";
   const closeTo = safeReturnTo(location.state?.returnTo, workspace) || safeReturnTo(chat?.returnTo, workspace) || home;
   const lastDocTopic = docTopic || developerTopic(location.state?.developerTopic);

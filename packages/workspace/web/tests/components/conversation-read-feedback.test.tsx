@@ -26,13 +26,15 @@ test('snapshot structure without its body fails as first load, while a readable 
   expect(store.presentationContentReady()).toBe(false);
 });
 
-test('loading and an authoritative empty view have different messages', () => {
+test('pending conversation reads stay quiet until an empty view is authoritative', () => {
   const store = createTranscriptViewStore();
   store.openTail({ ...page, blocks: [] });
   const props = { store, placement: 'empty', error: '', paused: false, ready: false, loading: false,
     checking: false, reconnecting: false, onCheck() {}, onRetry() {} };
   const view = render(<ConversationReadFeedback {...props} />);
-  expect(screen.getByText('appRoute.loadingConversation')).toBeTruthy();
+  expect(view.container.textContent).toBe('');
   view.rerender(<ConversationReadFeedback {...props} ready />);
   expect(screen.getByText('appRoute.emptyConversation')).toBeTruthy();
+  view.rerender(<ConversationReadFeedback {...props} ready reconnecting />);
+  expect(view.container.textContent).toBe('');
 });

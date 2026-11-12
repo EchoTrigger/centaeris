@@ -4,6 +4,7 @@ import {t} from "../src/renderer/i18n";
 import {AgentResultStream} from "../src/renderer/components/chat/AgentResultStream";
 import {useChatViewStore} from "../src/renderer/components/chat/chatViewStore";
 import type {AssistantExecutionTurn} from "../src/renderer/components/chat/types";
+import {DesktopTranscriptView} from "../src/renderer/components/chat/transcriptPaging";
 const read=vi.hoisted(()=>vi.fn());
 vi.mock("../src/renderer/components/chat/transcriptContentRanges",()=>({loadTranscriptContentRange:read,readCachedTranscriptContent:()=>null}));
 globalThis.IS_REACT_ACT_ENVIRONMENT=true;
@@ -12,6 +13,21 @@ beforeEach(()=>{useChatViewStore.getState().clear();read.mockReset();});
 afterEach(async()=>{await act(async()=>renderer?.unmount());});
 const turn:AssistantExecutionTurn={id:"turn",chunks:[{id:"tool",kind:"task",task:{id:"tool",title:"read",summary:"",status:"done",provider:"tool",displayTarget:"README.md",operations:[{callId:"call",toolName:"read",status:"done"}],transcriptSessionId:"session",transcriptProjectionGeneration:"g",transcriptContentRef:{refId:"tool-output:call",revision:"1",byteLength:"90000"}}}],finalAnswer:"",isStreaming:false};
 const toggle=()=>renderer.root.findByProps({className:"agent-operation-summary agent-tool-node-summary"});
+test.each(["write", "edit"])("reopening a persisted %s summary without an inline diff renders and reads its output on demand",async toolName=>{
+ const view=DesktopTranscriptView.open({schema:"transcript.page.v1",sessionId:"session",projectionVersion:"transcript.projection.v1",projectionGeneration:"g",sourceHighWater:"2",olderCursor:null,hasOlder:false,resumeCursors:[],blocks:[{
+  blockId:"tool:mutation",blockRevision:"2",orderKey:{sourceSequence:"2",ordinal:0},
+  presentation:{agentRunId:"run",sourceType:"tool_result",observedAtMs:1,displayTarget:"notes.md",durationMs:12,operation:{callId:"mutation",toolName,status:"ok",resultState:"successWithOutput",path:"notes.md",added:1,removed:0}},
+  body:{kind:"tool",callId:"mutation",toolName,status:"completed",summary:"Saved notes.md",summaryRef:null,outputRef:{refId:"tool-output:mutation",revision:"2",byteLength:"14"}},
+ }]});
+ const message=view.materializeMessages(false)[0];
+ if(message.role!=="assistant")throw new Error("Expected tool message");
+ read.mockResolvedValue({content:"Saved notes.md",startOffset:"0",endOffset:"14",hasMore:false});
+ await act(async()=>{renderer=create(<AgentResultStream turn={message.turn}/>);});
+ expect(read).not.toHaveBeenCalled();
+ expect(renderer.root.findAllByType("span").some(node=>node.children.join("").includes("notes.md"))).toBe(true);
+ await act(async()=>toggle().props.onClick({preventDefault(){}}));
+ expect(renderer.root.findByType("pre").children).toEqual(["Saved notes.md"]);
+});
 test("single tool opens bounded output directly, pages explicitly, and preserves selection after remount",async()=>{
  read.mockImplementation(async(_identity,offset)=>({content:offset==="0"?"first":"second",startOffset:offset,endOffset:offset==="0"?"65536":"90000",hasMore:offset==="0"}));
  await act(async()=>{renderer=create(<AgentResultStream turn={turn}/>);});

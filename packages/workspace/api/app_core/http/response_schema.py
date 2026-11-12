@@ -307,6 +307,72 @@ class SessionsEnvelope(StrictSchema):
     sessions: list[SessionResponse]
 
 
+class SessionSubagentResponse(StrictSchema):
+    runtime_job_id: str
+    call_id: str
+    child_session_id: str
+    parent_agent_run_id: str
+    parent_turn_id: str
+    description: str
+    prompt: str
+    status: Literal[
+        "queued", "leased", "running", "succeeded", "failed", "dead_lettered", "cancelled"
+    ]
+    created_at_ms: int
+    updated_at_ms: int
+
+
+class SessionSubagentToolCallResponse(StrictSchema):
+    id: str
+    name: str
+    args_json: str
+
+
+class SessionSubagentMessageResponse(StrictSchema):
+    message_id: str
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str
+    created_at_ms: int
+    reasoning_content: str | None
+    tool_calls: list[SessionSubagentToolCallResponse]
+    tool_call_id: str | None
+    tool_name: str | None
+    result_state: str | None
+
+
+class SessionSubagentsEnvelope(StrictSchema):
+    schema_id: Literal["workspace.session.subagents.v1"] = Field(alias="schema")
+    session_id: str
+    agents: list[SessionSubagentResponse]
+
+
+class SessionSubagentEnvelope(StrictSchema):
+    schema_id: Literal["workspace.session.subagent.v1"] = Field(alias="schema")
+    session_id: str
+    agent: SessionSubagentResponse
+    messages: list[SessionSubagentMessageResponse]
+
+
+class SessionSearchMatch(StrictSchema):
+    kind: Literal["title", "user", "stage", "final"]
+    snippet: str
+    event_id: str | None
+    message_id: str | None
+    source_sequence: str | None
+
+
+class SessionSearchResult(StrictSchema):
+    session_id: str
+    title: str
+    updated_at: str
+    match: SessionSearchMatch
+
+
+class SessionSearchEnvelope(StrictSchema):
+    matches: list[SessionSearchResult]
+    next_cursor: str | None
+
+
 class SessionProjectResponse(StrictSchema):
     id: str
     workspace_id: str

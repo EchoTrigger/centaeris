@@ -88,6 +88,7 @@
   ],
   "pageRequest": [
     {
+      "anchorSequence": null,
       "olderCursor": null,
       "projectionGeneration": null,
       "projectionVersion": "transcript.projection.v1",

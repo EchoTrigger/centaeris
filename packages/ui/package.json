@@ -30,6 +30,7 @@
     "./motion-react": "./src/motion-react.ts",
     "./panels": "./src/panels.ts",
     "./theme-store": "./src/theme-store.ts",
+    "./state": "./src/state.ts",
     "./theme.css": "./src/theme.css",
     "./visualizations": "./src/visualizations/index.tsx",
     "./visualization-renderer": "./src/visualizations/TranscriptVisualRenderer.tsx",

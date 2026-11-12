@@ -35,10 +35,10 @@ for (const theme of ["light", "dark"]) {
   document.documentElement.dataset.theme = theme;
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   results.push({ name: `${theme}: body theme is active`, actual: getComputedStyle(document.getElementById("answer")!).color, expected: theme === "dark" ? "rgb(237, 237, 237)" : "rgb(32, 36, 40)" });
-  for (const [id, size] of Object.entries({ user: 14, answer: 14, thought: 14, thoughtLink: 14, code: 14, codeText: 14, thoughtCode: 14, tool: 14, work: 14, workingStatus: 14, liveStatusText: 14, liveElapsed: 14, summary: 14, operationSummary: 14, operationAction: 14, toolCommand: 14, toolCommandCode: 14, toolOutput: 14, toolOutputCode: 14, toolDiff: 14, toolScroll: 14, toolStatus: 14, source: 12, stage: 14, stageText: 14, stageInlineCode: 14, stagePre: 14, stageCode: 14, userTime: 12, userCopy: 12, answerTime: 12, answerCopy: 12, document: 14 })) {
+  for (const [id, size] of Object.entries({ user: 14, answer: 14, thought: 14, thoughtLink: 14, code: 13, codeText: 13, thoughtCode: 13, tool: 14, work: 14, workingStatus: 14, liveStatusText: 14, liveElapsed: 14, summary: 14, operationSummary: 14, operationAction: 14, toolCommand: 13, toolCommandCode: 13, toolOutput: 13, toolOutputCode: 13, toolDiff: 13, toolScroll: 13, toolStatus: 14, source: 12, stage: 14, stageText: 14, stageInlineCode: 13, stagePre: 13, stageCode: 13, userTime: 12, userCopy: 12, answerTime: 12, answerCopy: 12, document: 14 })) {
     results.push({ name: `${theme}: ${id} font size`, actual: getComputedStyle(document.getElementById(id)!).fontSize, expected: `${size}px` });
   }
-  for (const [id, leading] of Object.entries({ thought: 24, tool: 24, thoughtCode: 24, toolOutput: 24, stageText: 24 })) {
+  for (const [id, leading] of Object.entries({ thought: 24, tool: 24, thoughtCode: 21, toolOutput: 21, stageText: 24 })) {
     results.push({ name: `${theme}: ${id} line height`, actual: getComputedStyle(document.getElementById(id)!).lineHeight, expected: `${leading}px` });
   }
   for (const id of ["stage", "stageText"]) {

@@ -302,6 +302,12 @@
 .shSearchResults button:hover, .shSearchResults button[aria-selected="true"] { background: var(--workspace-selection); }
 .shSearchResults button > svg { width: 14px; flex: none; color: var(--process-text); }
 .shSearchResults button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shSearchResults button:has(.shSearchResultText small) { align-items: flex-start; padding-block: 9px; }
+.shSearchResultText { flex: 1; }
+.shSearchResultText strong { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 13px; font-weight: 500; }
+.shSearchResultText small { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; white-space: normal; color: var(--process-text); font-size: 12px; line-height: 18px; }
+.shSearchResultText small > span { margin-right: 8px; color: var(--on-surface); }
+.shSearchResultText mark { background: color-mix(in srgb, var(--primary-color) 18%, transparent); color: inherit; }
 .shSearchEmpty { display: grid; flex: 1; place-content: center; justify-items: center; gap: 4px; padding: 24px; color: var(--process-text); text-align: center; }
 .shSearchEmpty strong { color: var(--on-surface); font-weight: 550; }
 .shSearchEmpty span { font-size: 12px; }
@@ -491,6 +497,9 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceSettingsPage.isEmbedded .shWorkspaceSettingsHeader { align-items: center; padding-bottom: 28px; }
 .shWorkspaceSettingsPage.isEmbedded .shWorkspaceSettingsHeader h1 { margin: 0; font-size: 22px; font-weight: 500; line-height: 1.4; letter-spacing: normal; }
 .shWorkspaceSettingsHeader p { margin: 6px 0 0; color: var(--process-text); font-size: 13px; }
+.shWorkspaceSettingsHeader > .shPrimaryButton { height: auto; min-height: var(--control-height-compact); border: 1px solid var(--outline-variant); border-radius: var(--control-radius); background: var(--surface-color); color: var(--on-surface); }
+.shWorkspaceSettingsHeader > .shPrimaryButton:hover:not(:disabled) { background: var(--surface-hover); }
+:is(.shWorkspaceSettingsPage, .themeConfirmDialog) :is(button, input, select, summary):focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
 .shWorkspaceSettingsTabs { display: flex; gap: 3px; margin-bottom: 27px; border-bottom: 1px solid var(--outline-variant); }
 .shWorkspaceSettingsTabs span, .shWorkspaceSettingsTabs a { min-height: 36px; padding: 9px 11px 8px; border-bottom: 2px solid transparent; color: var(--process-text); font-size: 13px; text-decoration: none; }
 .shWorkspaceSettingsTabs a:hover { color: var(--on-surface); }
@@ -501,49 +510,52 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceSettingsSection h2 { margin: 0; color: var(--on-surface); font-size: 14px; font-weight: 550; }
 .shWorkspaceSettingsSection header p { margin: 4px 0 0; color: var(--process-text); font-size: 12px; }
 .shWorkspaceMemberRow + .shWorkspaceMemberRow, .shWorkspaceInvitationRow + .shWorkspaceInvitationRow, .shWorkspaceGroupMembers > label + label { border-top: 1px solid var(--outline-variant); }
-.shWorkspaceMemberRow { position: relative; display: grid; min-height: 62px; grid-template-columns: 34px minmax(0, 1fr) 116px 32px; align-items: center; gap: 12px; padding: 8px 0; }
+.shWorkspaceMemberRow { position: relative; display: grid; min-height: 62px; grid-template-columns: 34px minmax(0, 1fr) 116px var(--control-height-compact); align-items: center; gap: 12px; padding: 8px 0; }
 .shWorkspaceMemberAvatar { display: grid; width: 32px; height: 32px; place-items: center; border-radius: 7px; background: var(--surface-variant); color: var(--on-surface); font-size: 12px; font-weight: 600; }
 .shWorkspaceMemberIdentity { display: grid; min-width: 0; gap: 2px; }
 .shWorkspaceMemberIdentity strong, .shWorkspaceMemberIdentity small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shWorkspaceMemberIdentity strong { color: var(--on-surface); font-size: 13px; font-weight: 600; }
-.shWorkspaceMemberIdentity small { color: var(--process-text); font-size: 11px; }
-.shWorkspaceMemberRow > select { width: 100%; height: 32px; border: 1px solid var(--outline-variant); border-radius: 7px; background: var(--surface-color); color: var(--on-surface); padding: 0 8px; }
+.shWorkspaceMemberIdentity small { color: var(--process-text); font-size: 12px; line-height: 18px; }
+.shWorkspaceMemberRow > select { width: 100%; height: var(--control-height-compact); border: 1px solid var(--outline-variant); border-radius: var(--control-radius); background: var(--surface-color); color: var(--on-surface); padding: 0 8px; font-size: 13px; }
 .shWorkspaceRoleLabel { color: var(--process-text); font-size: 12px; }
 .shWorkspaceRowMenu { position: relative; }
-.shWorkspaceRowMenu > summary { display: grid; width: 30px; height: 30px; place-items: center; list-style: none; border-radius: 6px; color: var(--process-text); cursor: pointer; }
+.shWorkspaceRowMenu > summary { display: grid; width: var(--control-height-compact); height: var(--control-height-compact); place-items: center; list-style: none; border-radius: var(--control-radius); color: var(--process-text); cursor: pointer; }
 .shWorkspaceRowMenu > summary::-webkit-details-marker { display: none; }
 .shWorkspaceRowMenu > summary:hover, .shWorkspaceRowMenu[open] > summary { background: var(--surface-variant); }
 .shWorkspaceRowMenu > summary svg { width: 15px; }
-.shWorkspaceRowMenu > div { position: absolute; z-index: 10; top: 32px; right: 0; width: 150px; padding: 5px; border: 1px solid var(--outline-variant); border-radius: 8px; background: var(--surface-color); box-shadow: 0 10px 28px rgba(0, 0, 0, .14); }
-.shWorkspaceRowMenu button { display: block; width: 100%; min-height: 31px; border: 0; border-radius: 5px; background: transparent; color: var(--on-surface); padding: 0 8px; font-size: 12px; text-align: left; }
+.shWorkspaceRowMenu > div { position: absolute; z-index: 10; top: calc(var(--control-height-compact) + 2px); right: 0; width: 150px; padding: 5px; border: 1px solid var(--outline-variant); border-radius: 8px; background: var(--surface-color); box-shadow: 0 10px 28px rgba(0, 0, 0, .14); }
+.shWorkspaceRowMenu button { display: block; width: 100%; min-height: var(--control-height-compact); border: 0; border-radius: 5px; background: transparent; color: var(--on-surface); padding: 0 8px; font-size: 13px; text-align: left; }
 .shWorkspaceRowMenu button:hover { background: var(--surface-variant); }
 .shWorkspaceRowMenu button.isDanger { color: var(--danger); }
 .shWorkspaceInvitationRow { display: grid; min-height: 62px; grid-template-columns: minmax(0, 1fr) 86px 132px auto; align-items: center; gap: 12px; padding: 8px 0; color: var(--process-text); font-size: 12px; }
 .shWorkspaceInvitationRow > small { color: var(--process-text); }
 .shWorkspaceInvitationActions { display: flex; justify-content: flex-end; gap: 4px; }
-.shWorkspaceInvitationActions button { min-height: 30px; border: 0; border-radius: 6px; background: transparent; color: var(--process-text); padding: 0 7px; }
+.shWorkspaceInvitationActions button { min-height: var(--control-height-compact); border: 0; border-radius: var(--control-radius); background: transparent; color: var(--process-text); padding: 0 7px; }
 .shWorkspaceInvitationActions button:hover { background: var(--surface-variant); color: var(--on-surface); }
 .shWorkspaceSettingsEmpty, .shWorkspaceSettingsState { padding: 32px 4px; color: var(--process-text); font-size: 13px; text-align: center; }
 .shWorkspaceSettingsState.isError { color: var(--danger); }
 .shWorkspaceSettingsState button { display: block; margin: 9px auto 0; border: 0; background: transparent; color: var(--primary-color); }
 .shWorkspaceToast { position: fixed; z-index: 220; right: 24px; bottom: 24px; max-width: min(420px, calc(100vw - 48px)); padding: 10px 13px; border: 1px solid var(--outline-variant); border-radius: 8px; background: var(--solid-surface); color: var(--solid-text); box-shadow: 0 10px 28px rgba(0, 0, 0, .18); font-size: 12px; }
-.shWorkspaceToast.isError { background: var(--danger); }
+.shWorkspaceNotice { margin: 0 0 18px; color: var(--error); font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
 
 .themeConfirmDialog.shWorkspaceDialog { width: min(440px, 100%); }
 .themeConfirmDialog.shWorkspaceDialog.isWide { width: min(720px, 100%); }
 .shWorkspaceDialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .shWorkspaceDialog > header p { margin: 7px 0 18px; }
-.shWorkspaceDialog > header > button { display: grid; width: 30px; min-height: 30px; flex: none; place-items: center; padding: 0; border: 0; }
+.shWorkspaceDialog > header > button { display: grid; width: var(--control-height-compact); min-height: var(--control-height-compact); flex: none; place-items: center; padding: 0; border: 0; }
 .shWorkspaceDialog > header > button svg { width: 15px; }
 .shWorkspaceDialog form { display: grid; gap: 13px; }
-.shWorkspaceDialog form label { display: grid; gap: 6px; color: var(--process-text); font-size: 11px; }
-.shWorkspaceDialog form input, .shWorkspaceDialog form select { width: 100%; height: 38px; border: 1px solid var(--outline-variant); border-radius: 7px; background: var(--surface-color); color: var(--on-surface); padding: 0 10px; font-size: 13px; }
+.shWorkspaceDialog form label { display: grid; gap: 6px; color: var(--on-surface); font-size: 13px; line-height: 20px; }
+.shWorkspaceDialog form input, .shWorkspaceDialog form select { width: 100%; height: var(--control-height); border: 1px solid var(--outline-variant); border-radius: var(--control-radius); background: var(--surface-color); color: var(--on-surface); padding: 0 10px; font-size: 13px; }
 .shWorkspaceDialog form footer, .shWorkspaceInviteResult footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .shWorkspaceDialog button.isPrimary { background: var(--solid-surface); color: var(--solid-text); }
 .shWorkspaceInviteResult { display: grid; gap: 11px; }
 .shWorkspaceInviteResult > strong { font-size: 13px; }
-.shWorkspaceInviteResult code { padding: 11px; border-radius: 7px; background: var(--surface-variant); color: var(--process-text); font: 11px/1.55 "Google Sans Code", monospace; overflow-wrap: anywhere; }
-.shWorkspaceInviteResult p { margin: 0; font-size: 11px; }
+.shWorkspaceInviteResult code { padding: 11px; border-radius: var(--control-radius); background: var(--surface-variant); color: var(--on-surface); font: var(--chat-code-size)/var(--chat-code-leading) var(--font-mono); overflow-wrap: anywhere; }
+.shWorkspaceInviteResult p { margin: 0; font-size: 12px; line-height: 18px; }
+@media (pointer: coarse) {
+  .shWorkspaceDialog form input, .shWorkspaceDialog form select, .shWorkspaceMemberRow > select { font-size: 16px; }
+}
 .shWorkspaceGroupLayout { display: grid; grid-template-columns: 230px minmax(0, 1fr); min-height: 440px; border-top: 1px solid var(--outline-variant); }
 .shWorkspaceGroupLayout > aside { padding: 16px 15px 0 0; border-right: 1px solid var(--outline-variant); }
 .shWorkspaceGroupLayout > aside > header { display: flex; align-items: center; justify-content: space-between; padding: 0 5px 10px; font-size: 12px; }
@@ -697,7 +709,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
   .shWorkspaceSettingsHeader { align-items: flex-start; flex-direction: column; }
   .shWorkspaceSettingsTabs { overflow-x: auto; }
   .shWorkspaceSettingsTabs span, .shWorkspaceSettingsTabs a { flex: none; }
-  .shWorkspaceMemberRow { grid-template-columns: 34px minmax(0, 1fr) 32px; }
+  .shWorkspaceMemberRow { grid-template-columns: 34px minmax(0, 1fr) var(--control-height-compact); }
   .shWorkspaceMemberRow > select, .shWorkspaceMemberRow > .shWorkspaceRoleLabel { grid-column: 2; width: min(160px, 100%); }
   .shWorkspaceMemberRow > .shWorkspaceRowMenu, .shWorkspaceMemberRow > span:last-child { grid-column: 3; grid-row: 1; }
   .shWorkspaceInvitationRow { grid-template-columns: minmax(0, 1fr) auto; }

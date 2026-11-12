@@ -54,3 +54,9 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## pg_bigm
+
+The Workspace PostgreSQL image includes pg_bigm v1.2-20250903 from
+https://github.com/pgbigm/pg_bigm, under the PostgreSQL License. Its upstream
+license is included at `/usr/share/licenses/pg_bigm/LICENSE` in that image.

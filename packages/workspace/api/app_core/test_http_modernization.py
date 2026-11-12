@@ -9,6 +9,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.handlers.asgi import ASGIHandler
 from django.test import Client, SimpleTestCase, TestCase, override_settings
+from django.utils import timezone
 from pydantic import ValidationError
 from jsonschema import Draft202012Validator
 
@@ -450,13 +451,51 @@ class NinjaContractTests(TestCase):
         client.force_login(user)
         token = client.get("/api/csrf").json()["csrfToken"]
 
-        response = client.delete(
-            f"/api/sessions/{session.id}",
-            HTTP_X_CSRFTOKEN=token,
-        )
+        with patch("app_core.session_deletion.request_json") as runtime:
+            rejected = client.delete(f"/api/sessions/{session.id}")
+        self.assertEqual(rejected.status_code, 403)
+        self.assertEqual(rejected.json(), {"error": "csrf_failed"})
+        runtime.assert_not_called()
+
+        with patch("app_core.session_deletion.request_json", side_effect=TimeoutError):
+            pending = client.delete(
+                f"/api/sessions/{session.id}",
+                HTTP_X_CSRFTOKEN=token,
+            )
+        self.assertEqual(pending.status_code, 503)
+        self.assertEqual(pending.json(), {"error": "session_delete_purge_unavailable"})
+        session.refresh_from_db()
+        self.assertEqual(session.status, "active")
+        self.assertIsNone(session.purgedAt)
+        self.assertIsNotNone(session.purgeRequestedAt)
+
+        def runtime_commits_purge(*args, **kwargs):
+            at = timezone.now()
+            Session.objects.filter(pk=session.pk).update(
+                status="deleted", deletedAt=at, deletedBy=user, purgedAt=at,
+            )
+            return {
+                "schema": "runtime.session.purged.v1", "sessionId": session.id,
+                "workspaceId": workspace.id, "purged": True,
+            }
+
+        with patch("app_core.session_deletion.request_json", side_effect=runtime_commits_purge) as runtime:
+            response = client.delete(
+                f"/api/sessions/{session.id}",
+                HTTP_X_CSRFTOKEN=token,
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"deleted": True})
+        self.assertEqual(runtime.call_args.args, (
+            "/internal/sessions/purge", {
+                "schema": "runtime.session.purge.v1", "sessionId": session.id,
+                "workspaceId": workspace.id, "ownerId": user.id,
+            },
+        ))
+        session.refresh_from_db()
+        self.assertEqual(session.status, "deleted")
+        self.assertEqual(session.purgedAt, session.deletedAt)
 
     def test_browser_redis_pools_share_one_process_connection_budget(self):
         self.assertEqual(

@@ -1,5 +1,6 @@
 import { useWorkspaceDocumentIdentity } from "./shell/useWorkspaceDocumentIdentity";
 import { clearWorkspaceIdentityCache } from "./shell/workspaceIdentityCache";
+import { WorkspaceSearchHistory } from "./shell/workspaceSearchState";
 
 import { useTranslation } from "./i18n";
 import { useEffect, useState } from "react";
@@ -84,7 +85,7 @@ function WorkspaceLayout() {
     }
   }, [user.id, workspace.id]);
 
-  return <Outlet key={`${user.id}:${workspace.id}`} />;
+  return <WorkspaceSearchHistory key={`${user.id}:${workspace.id}`}><Outlet /></WorkspaceSearchHistory>;
 }
 
 function RootLayout() {
@@ -117,8 +118,7 @@ function RootLayout() {
 }
 
 function RouteLoading() {
-  const { t } = useTranslation();
-  return <main className="routeLoading" aria-live="polite">{t("router.loadingWorkspace")}</main>;
+  return <main className="routeLoading" aria-busy />;
 }
 
 function RouteError() {

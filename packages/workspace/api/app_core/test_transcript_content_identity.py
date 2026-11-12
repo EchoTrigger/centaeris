@@ -7,10 +7,13 @@ import tempfile
 from django.contrib.auth.models import User
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
+from django.db import transaction
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
-from .models import AgentRun, ModelConfig, SessionEvent, Workspace
+from .models import AgentRun, ModelConfig, Session, SessionEvent, Workspace
 from .testing import create_session
+from .transcript_output import purge_session_outputs
 
 
 class TranscriptContentIdentityTests(TestCase):
@@ -208,13 +211,19 @@ class TranscriptContentIdentityTests(TestCase):
         capture.chunks.all().delete()
         self.assert_unavailable(self.client.get(self.url, query))
 
-    def test_deleting_session_purges_capture_bytes(self):
+    def purge_capture_owner(self):
+        """Exercise the storage owner boundary; public deletion has a Runtime contract test."""
+        with transaction.atomic():
+            session = Session.objects.select_for_update().get(pk=self.session.pk)
+            at = timezone.now()
+            purge_session_outputs(session, at)
+            session.status, session.deletedAt, session.purgedAt = "deleted", at, at
+            session.save(update_fields=["status", "deletedAt", "purgedAt"])
+
+    def test_purged_capture_owner_reclaims_bytes_and_denies_reads(self):
         query = self.commit_output("a" * 70000, spilled=True)
         capture = self.archive("a" * 70000)
-        self.run.status = "completed"
-        self.run.save(update_fields=["status"])
-        response = self.client.delete(f"/api/sessions/{self.session.id}")
-        self.assertEqual(response.status_code, 200, response.content)
+        self.purge_capture_owner()
         capture.refresh_from_db()
         self.assertIsNotNone(capture.purgedAt)
         self.assertFalse(capture.chunks.exists())

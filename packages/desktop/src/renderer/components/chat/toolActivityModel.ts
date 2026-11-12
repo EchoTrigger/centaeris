@@ -46,9 +46,8 @@ export const getToolActivityAtom = (
     if (isFailedResult(operation.resultState) && operation.diffPreview) {
       throw new Error(t("toolActivityModel.failedValueOperationMustNotIncludeDiffpreview", { value1: operation.toolName }));
     }
-    if (!isFailedResult(operation.resultState) && !operation.diffPreview) {
-      throw new Error(t("toolActivityModel.successfulValueOperationIsMissingDiffpreview", { value1: operation.toolName }));
-    }
+    // Persisted transcript summaries omit inline previews. The operation's
+    // result remains valid even when its diff is not part of this view.
   }
   return { ...atomDefinition, iconToken: atomDefinition.kind };
 };

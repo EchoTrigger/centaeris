@@ -1,10 +1,4 @@
-import { getToolActivityDefinition } from "../../lib/toolPresentation";
-import type { ChatMessage, TaskResult } from "./types";
-
-export function taskFamily(task: TaskResult): string {
-  const name = task.operations?.[0]?.toolName;
-  return name ? getToolActivityDefinition(name).kind : task.title;
-}
+import type { ChatMessage } from "./types";
 
 // Group display records, never reorder or mutate authoritative transcript blocks.
 export function historyProcessEntries(messages: readonly ChatMessage[]): ChatMessage[] {
@@ -16,8 +10,7 @@ export function historyProcessEntries(messages: readonly ChatMessage[]): ChatMes
       ? message.turn.chunks[0] : undefined;
     const last = previous?.role === "assistant" ? previous.turn.chunks.at(-1) : undefined;
     if (chunk?.kind === "task" && previous?.role === "assistant" && !previous.turn.finalAnswer
-      && previous.turn.chunks.every(item => item.kind === "task") && last?.kind === "task"
-      && taskFamily(last.task) === taskFamily(chunk.task)) {
+      && previous.turn.chunks.every(item => item.kind === "task") && last?.kind === "task") {
       entries[entries.length - 1] = { ...previous, turn: { ...previous.turn, chunks: [...previous.turn.chunks, chunk] } };
     } else entries.push(message);
   }

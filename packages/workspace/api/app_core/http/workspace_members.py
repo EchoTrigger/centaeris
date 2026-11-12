@@ -142,6 +142,12 @@ def _locked_workspace_and_actor_membership(
     return actor_membership.workspace, actor_membership
 
 
+def _can_manage_role(actor_role: str, target_role: str) -> bool:
+    return (actor_role == "owner" and target_role in {"admin", "member"}) or (
+        actor_role == "admin" and target_role == "member"
+    )
+
+
 @router.get(
     "/workspaces/{workspace_id}/members",
     auth=session_auth,
@@ -392,6 +398,10 @@ def update_workspace_member_role(
             return Status(409, {"error": "workspace_member_self_operation_forbidden"})
         if target.role == "owner":
             return Status(409, {"error": "workspace_owner_transfer_required"})
+        if not _can_manage_role(actor_membership.role, target.role) or not _can_manage_role(
+            actor_membership.role, payload.role
+        ):
+            return Status(403, {"error": "workspace_member_management_forbidden"})
         if target.role == payload.role:
             return Status(409, {"error": "workspace_member_role_unchanged"})
 
@@ -423,6 +433,8 @@ def remove_workspace_member(request, workspace_id: str, membership_id: str):
             return Status(409, {"error": "workspace_member_self_operation_forbidden"})
         if target.role == "owner":
             return Status(409, {"error": "workspace_owner_transfer_required"})
+        if not _can_manage_role(actor_membership.role, target.role):
+            return Status(403, {"error": "workspace_member_management_forbidden"})
 
         target.delete()
     return {"ok": True}
@@ -511,7 +523,9 @@ def create_workspace_invitation(
         locked = _locked_workspace_and_actor_membership(request.user, workspace_id)
         if locked is None:
             return Status(404, {"error": "workspace_not_found"})
-        workspace, _actor_membership = locked
+        workspace, actor_membership = locked
+        if not _can_manage_role(actor_membership.role, payload.role):
+            return Status(403, {"error": "workspace_invitation_management_forbidden"})
         account = get_user_model().objects.filter(
             username__iexact=payload.email
         ).first()
@@ -526,6 +540,9 @@ def create_workspace_invitation(
             email=payload.email,
             status="pending",
         )
+        current = pending.filter(expires_at__gt=now).first()
+        if current is not None and not _can_manage_role(actor_membership.role, current.role):
+            return Status(403, {"error": "workspace_invitation_management_forbidden"})
         pending.filter(expires_at__lte=now).update(
             status="expired",
             updated_at=now,
@@ -571,13 +588,15 @@ def revoke_workspace_invitation(
         locked = _locked_workspace_and_actor_membership(request.user, workspace_id)
         if locked is None:
             return Status(404, {"error": "workspace_not_found"})
-        workspace, _actor_membership = locked
+        workspace, actor_membership = locked
         invitation = WorkspaceInvitation.objects.select_for_update().filter(
             id=invitation_id,
             workspace=workspace,
         ).first()
         if invitation is None:
             return Status(404, {"error": "invitation_not_found"})
+        if not _can_manage_role(actor_membership.role, invitation.role):
+            return Status(403, {"error": "workspace_invitation_management_forbidden"})
         if invitation.status != "pending":
             return Status(409, {"error": "invitation_not_pending"})
         if invitation.expires_at <= now:

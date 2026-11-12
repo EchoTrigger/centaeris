@@ -15,6 +15,7 @@ afterEach(() => {
 });
 
 async function openDeveloper(role: "owner" | "member", query = "") {
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   await changeLanguage("en");
   configureApi({ apiBaseUrl: "https://workspace.example" });
   const router = createMemoryRouter([{

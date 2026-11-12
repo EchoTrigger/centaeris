@@ -1549,32 +1549,48 @@ mod tests {
 
     #[test]
     fn cancellation_targets_only_the_registered_run_task_and_waits_for_confirmation() {
-        let mut replies = VecDeque::from([
-            started(),
-            EnvironmentTaskResult::Mutated {
-                task: snapshot(false),
-            },
-            EnvironmentTaskResult::Mutated {
-                task: snapshot(false),
-            },
-            finished(false),
-        ]);
-        let mut requests = Vec::new();
-        let probe = || Ok(Some("cancelled".to_string()));
-        let result = run_command(&fence(), "tool-1", command(), Some(&probe), "/bin", |r| {
-            requests.push(r);
-            replies.pop_front().ok_or("unexpected request".into())
-        })
-        .unwrap();
-        assert_eq!(result.failure_kind, ExecutionHostFailureKind::Cancelled);
-        assert_eq!(result.process.exit_code, None);
-        assert_eq!(requests.len(), 4);
-        assert!(
-            matches!(&requests[2], EnvironmentTaskRequest::Terminate {task_id, fence: actual,..} if task_id=="task-1" && actual==&fence())
-        );
-        assert!(
-            matches!(&requests[3], EnvironmentTaskRequest::Query {task_id,..} if task_id=="task-1")
-        );
+        for cancel_while_running in [false, true] {
+            let mut replies = VecDeque::from([
+                started(),
+                EnvironmentTaskResult::Mutated {
+                    task: snapshot(false),
+                },
+                EnvironmentTaskResult::Mutated {
+                    task: snapshot(false),
+                },
+                finished(false),
+            ]);
+            if cancel_while_running {
+                replies.insert(2, started());
+            }
+            let mut requests = Vec::new();
+            let cancelled =
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(!cancel_while_running));
+            let observed_cancelled = cancelled.clone();
+            let probe = move || {
+                Ok(observed_cancelled
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    .then(|| "cancelled".to_string()))
+            };
+            let result = run_command(&fence(), "tool-1", command(), Some(&probe), "/bin", |r| {
+                if matches!(&r, EnvironmentTaskRequest::Query { .. }) {
+                    cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                requests.push(r);
+                replies.pop_front().ok_or("unexpected request".into())
+            })
+            .unwrap();
+            assert_eq!(result.failure_kind, ExecutionHostFailureKind::Cancelled);
+            assert_eq!(result.process.exit_code, None);
+            let termination_index = if cancel_while_running { 3 } else { 2 };
+            assert_eq!(requests.len(), termination_index + 2);
+            assert!(
+                matches!(&requests[termination_index], EnvironmentTaskRequest::Terminate {task_id, fence: actual,..} if task_id=="task-1" && actual==&fence())
+            );
+            assert!(
+                matches!(&requests[termination_index + 1], EnvironmentTaskRequest::Query {task_id,..} if task_id=="task-1")
+            );
+        }
     }
 
     #[test]

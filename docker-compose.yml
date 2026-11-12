@@ -24,10 +24,17 @@ x-material-broker-url: &material-broker-url redis://material-broker:6379/0
 
 x-workspace-general-image: &workspace-general-image centaeris-workspace-general:local
 
+x-postgres-image: &postgres-image centaeris-postgres:local
+x-postgres-build: &postgres-build
+  context: .
+  dockerfile: packages/workspace/postgres/Dockerfile
+  labels: *release-image-labels
+
 services:
   postgres:
     restart: unless-stopped
-    image: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+    image: *postgres-image
+    build: *postgres-build
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -42,7 +49,8 @@ services:
 
   postgres-test:
     profiles: ["test"]
-    image: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+    image: *postgres-image
+    build: *postgres-build
     environment:
       POSTGRES_DB: centaeris
       POSTGRES_USER: centaeris

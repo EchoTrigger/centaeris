@@ -25,9 +25,11 @@ use super::{
     PostgresRuntimeStore,
 };
 
+pub(crate) mod session_deletion;
+
 // Lock by identity first, then evaluate time after any lock wait. A WHERE
 // predicate evaluated before waiting cannot authorize a later commit.
-fn lock_current_append_lease(
+pub(super) fn lock_current_append_lease(
     tx: &mut Transaction<'_>,
     session: &str,
     fence: &RuntimeJobLeaseFence,
@@ -340,6 +342,7 @@ impl RuntimeStore for PostgresRuntimeStore {
             let mut tx = client
                 .transaction()
                 .map_err(|error| format!("begin checkpoint save failed: {error}"))?;
+            self.lock_subagent_persistence_write(&mut tx, Some(&checkpoint.session_id))?;
             save_checkpoint(&mut tx, &checkpoint)?;
             tx.commit()
                 .map_err(|error| format!("commit checkpoint save failed: {error}"))
@@ -395,11 +398,25 @@ impl RuntimeStore for PostgresRuntimeStore {
     }
 
     fn append_event(&self, event: RuntimeEvent) -> Result<(), RuntimeStoreError> {
+        if self.subagent_persistence_scope.is_some() {
+            return self
+                .with_subagent_persistence_transaction(Some(&event.session_id), |tx| {
+                    append_runtime_event(tx, &event)
+                })
+                .map_err(RuntimeStoreError::backend);
+        }
         self.with_client(|client| append_runtime_event(client, &event))
             .map_err(RuntimeStoreError::backend)
     }
 
     fn append_event_idempotent(&self, event: RuntimeEvent) -> Result<(), RuntimeStoreError> {
+        if self.subagent_persistence_scope.is_some() {
+            return self
+                .with_subagent_persistence_transaction(Some(&event.session_id), |tx| {
+                    append_runtime_event_idempotent(tx, &event).map(|_| ())
+                })
+                .map_err(RuntimeStoreError::backend);
+        }
         self.with_client(|client| append_runtime_event_idempotent(client, &event).map(|_| ()))
             .map_err(RuntimeStoreError::backend)
     }
@@ -465,7 +482,7 @@ pub(super) fn delete_session_records(
     }
     for object_id in object_ids {
         tx.execute(
-            "DELETE FROM external_context_objects WHERE object_id=$1 AND NOT EXISTS (SELECT 1 FROM external_context_links WHERE object_id=$1)",
+            "DELETE FROM external_context_objects o WHERE o.object_id=$1 AND NOT EXISTS (SELECT 1 FROM external_context_links l WHERE l.object_id=o.object_id) AND NOT EXISTS (SELECT 1 FROM runtime_jobs j WHERE j.payload_ref=o.object_id OR j.output_refs_json::jsonb ? o.object_id)",
             &[&object_id],
         )
         .map_err(|error| {
@@ -483,18 +500,29 @@ impl AgentRuntimeSnapshotStorePort for PostgresRuntimeStore {
         snapshot_json: &str,
         updated_at_ms: i64,
     ) -> Result<bool, String> {
+        if self.subagent_persistence_scope.is_some() {
+            return self.with_subagent_persistence_transaction(Some(session_id), |tx| {
+                let written = compare_and_save_snapshot(
+                    tx,
+                    session_id,
+                    expected_snapshot,
+                    snapshot_json,
+                    updated_at_ms,
+                )?;
+                if written {
+                    self.notify_subagent_snapshot(tx)?;
+                }
+                Ok(written)
+            });
+        }
         self.with_client(|client| {
-            let written = match expected_snapshot {
-                Some(expected) => client.execute(
-                    "UPDATE session_runtime_snapshots SET snapshot_json=$3,updated_at_ms=$4 WHERE session_id=$1 AND snapshot_json=$2",
-                    &[&session_id, &expected, &snapshot_json, &updated_at_ms],
-                ),
-                None => client.execute(
-                    "INSERT INTO session_runtime_snapshots(session_id,snapshot_json,updated_at_ms) VALUES($1,$2,$3) ON CONFLICT(session_id) DO NOTHING",
-                    &[&session_id, &snapshot_json, &updated_at_ms],
-                ),
-            }.map_err(|error| format!("compare and save Postgres session snapshot failed: {error}"))?;
-            Ok(written == 1)
+            compare_and_save_snapshot(
+                client,
+                session_id,
+                expected_snapshot,
+                snapshot_json,
+                updated_at_ms,
+            )
         })
     }
 
@@ -516,8 +544,43 @@ impl AgentRuntimeSnapshotStorePort for PostgresRuntimeStore {
         snapshot: &str,
         updated_at_ms: i64,
     ) -> Result<(), String> {
-        self.with_client(|client| client.execute("INSERT INTO session_runtime_snapshots(session_id,snapshot_json,updated_at_ms) VALUES($1,$2,$3) ON CONFLICT(session_id) DO UPDATE SET snapshot_json=excluded.snapshot_json,updated_at_ms=excluded.updated_at_ms", &[&session_id,&snapshot,&updated_at_ms]).map(|_| ()).map_err(|error| format!("save Postgres session snapshot failed: {error}")))
+        if self.subagent_persistence_scope.is_some() {
+            return self.with_subagent_persistence_transaction(Some(session_id), |tx| {
+                save_snapshot(tx, session_id, snapshot, updated_at_ms)?;
+                self.notify_subagent_snapshot(tx)
+            });
+        }
+        self.with_client(|client| save_snapshot(client, session_id, snapshot, updated_at_ms))
     }
+}
+
+fn compare_and_save_snapshot(
+    client: &mut impl GenericClient,
+    session_id: &str,
+    expected_snapshot: Option<&str>,
+    snapshot_json: &str,
+    updated_at_ms: i64,
+) -> Result<bool, String> {
+    let written = match expected_snapshot {
+        Some(expected) => client.execute(
+            "UPDATE session_runtime_snapshots SET snapshot_json=$3,updated_at_ms=$4 WHERE session_id=$1 AND snapshot_json=$2",
+            &[&session_id, &expected, &snapshot_json, &updated_at_ms],
+        ),
+        None => client.execute(
+            "INSERT INTO session_runtime_snapshots(session_id,snapshot_json,updated_at_ms) VALUES($1,$2,$3) ON CONFLICT(session_id) DO NOTHING",
+            &[&session_id, &snapshot_json, &updated_at_ms],
+        ),
+    }.map_err(|error| format!("compare and save Postgres session snapshot failed: {error}"))?;
+    Ok(written == 1)
+}
+
+fn save_snapshot(
+    client: &mut impl GenericClient,
+    session_id: &str,
+    snapshot: &str,
+    updated_at_ms: i64,
+) -> Result<(), String> {
+    client.execute("INSERT INTO session_runtime_snapshots(session_id,snapshot_json,updated_at_ms) VALUES($1,$2,$3) ON CONFLICT(session_id) DO UPDATE SET snapshot_json=excluded.snapshot_json,updated_at_ms=excluded.updated_at_ms", &[&session_id,&snapshot,&updated_at_ms]).map(|_| ()).map_err(|error| format!("save Postgres session snapshot failed: {error}"))
 }
 
 pub(super) fn save_checkpoint<C: postgres::GenericClient>(

@@ -307,7 +307,7 @@ async def _produce(scope, loader, cursor, read_timeout):
             if live != last_live:
                 yield _encode(scope, "live", agentRunId=run["agentRunId"], live=live)
                 last_live = live
-        view_revision = {f"{kind}Revision": str(versions[kind]) for kind in ("context", "history", "work")}
+        view_revision = {f"{kind}Revision": str(versions[kind]) for kind in ("context", "history", "work", "subagents")}
         if view_revision != last_view_revision:
             yield _encode(scope, "viewRevision", **view_revision)
             last_view_revision = view_revision

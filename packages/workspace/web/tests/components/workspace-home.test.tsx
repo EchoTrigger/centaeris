@@ -32,7 +32,10 @@ vi.mock("../../src/routes/AppRoute", () => ({
   },
 }));
 
-beforeEach(() => configureApi({ apiBaseUrl: window.location.origin }));
+beforeEach(() => {
+  configureApi({ apiBaseUrl: window.location.origin });
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+});
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -151,11 +154,11 @@ test("workspace search reports a failed source and can retry the same query", as
       if (libraryRequests === 1) return new Response(null, { status: 503 });
       return Response.json({ objects: [{ id: "guide", objectKind: "note", displayName: "Field guide" }] });
     }
-    return Response.json({ sessions: [] });
+    return Response.json({ matches: [], nextCursor: null });
   });
   const router = createMemoryRouter([{
     path: "/",
-    element: <WorkspaceSearch workspaceId="research" sessions={[]} onClose={() => {}} />,
+    element: <WorkspaceSearch workspaceId="research" onClose={() => {}} />,
   }]);
   render(<RouterProvider router={router} />);
 

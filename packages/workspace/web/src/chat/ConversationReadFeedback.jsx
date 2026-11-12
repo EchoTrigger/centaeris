@@ -18,8 +18,7 @@ export function ConversationReadFeedback({ store, placement, error, paused, reco
   const hasBlocks = list.blockIds.length > 0 || live !== null;
   if ((placement === 'content') !== hasBlocks) return null;
   const message = error || (paused ? hasContent ? 'appRoute.streamPaused' : 'appRoute.initialHistoryFailed'
-    : !ready && !hasContent || reconnecting && !hasContent ? 'appRoute.loadingConversation'
-      : !hasBlocks && ready ? 'appRoute.emptyConversation' : null);
+    : !hasBlocks && ready && !reconnecting ? 'appRoute.emptyConversation' : null);
   if (!message || loading && !hasContent && !reconnecting) return null;
   return <div className={`workspaceConversationFeedback workspaceToolOutputStatus ${error || paused ? 'isError' : ''}`} role={error || paused ? 'alert' : 'status'}>
     <span>{t(message)}</span>

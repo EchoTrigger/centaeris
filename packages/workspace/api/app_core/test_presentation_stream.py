@@ -86,7 +86,7 @@ class PresentationStreamTests(SimpleTestCase):
         self.loader.content_stream = Mock()
         self.loader.operations = AsyncMock(return_value=[])
         self.loader.live = AsyncMock(return_value=None)
-        self.loader.revisions = AsyncMock(return_value=dict(navigation=0, state=0, context=0, history=0, work=0, live=0))
+        self.loader.revisions = AsyncMock(return_value=dict(navigation=0, state=0, context=0, history=0, work=0, subagents=0, live=0))
         async def wait_for_change(_previous):
             await asyncio.Event().wait()
         self.loader.wait_for_change = AsyncMock(side_effect=wait_for_change)
@@ -141,10 +141,15 @@ class PresentationStreamTests(SimpleTestCase):
         try:
             initial = await self.until(source, lambda item, _frame: item["kind"] == "viewRevision")
             self.assertEqual(data(initial[-1])["contextRevision"], "0")
+            self.assertEqual(data(initial[-1])["subagentsRevision"], "0")
             versions["context"] = 1
             changed.set()
             update = await self.until(source, lambda item, _frame: item["kind"] == "viewRevision")
             self.assertEqual(data(update[-1])["contextRevision"], "1")
+            versions["subagents"] = 1
+            changed.set()
+            update = await self.until(source, lambda item, _frame: item["kind"] == "viewRevision")
+            self.assertEqual(data(update[-1])["subagentsRevision"], "1")
             self.assertEqual(self.loader.state.await_count, 1)
             self.assertEqual(self.loader.navigation.await_count, 1)
             self.assertEqual(self.loader.page.await_count, 1)
@@ -740,7 +745,7 @@ class PresentationRouteContractTests(SimpleTestCase):
             ready.set()
             await asyncio.Event().wait()
             yield PresentationHint(None, True)
-        hub = PresentationObserverHub(AsyncMock(return_value=dict(navigation=0, state=0, context=0, history=0, work=0)), hints, lambda _: ())
+        hub = PresentationObserverHub(AsyncMock(return_value=dict(navigation=0, state=0, context=0, history=0, work=0, subagents=0)), hints, lambda _: ())
         with patch.object(ProductSessionAuth, "authenticate", authenticate), \
                 patch("app_core.http.presentation.create_presentation_hub", return_value=hub), \
                 patch.object(PresentationLoader, "authorized", AsyncMock(return_value=True)), \

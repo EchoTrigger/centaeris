@@ -12,8 +12,11 @@
 | Waiter reconciliation | `outbox::reconcile`, same durable checkpoint cursor |
 
 The native dispatcher invokes execution and cleanup directly. Platform requests
-remain HTTP authorization/projection boundaries. Waiting still yields the lease;
-the next claim receives a fresh owner. Unconfirmed handoffs remain reclaimable.
+remain HTTP authorization/projection boundaries. Waiting keeps the current lease
+while active children use the parent's shared environment controller. Child Jobs
+retain independent execution leases and cancellation. Durable wakes resume that
+owner, with notifications for latency and timed checks for recovery. Other waits
+yield the lease; the next claim receives a fresh owner. Unconfirmed handoffs remain reclaimable.
 No terminal result substitutes for cleanup or release evidence. Retained mode
 confirms Run task cleanup without requiring environment destruction.
 

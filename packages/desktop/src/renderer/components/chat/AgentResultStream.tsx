@@ -7,6 +7,7 @@ import type { AgentResultStreamProps, SubagentChunk } from "./types";
 
 export function AgentResultStream({
   turn,
+  subagents: sessionSubagents,
   onOpenAgentSession,
   onOpenWorkspacePath,
 }: AgentResultStreamProps) {
@@ -18,10 +19,10 @@ export function AgentResultStream({
   );
   const subagents = useMemo(
     () =>
-      chunks
+      sessionSubagents ?? chunks
         .filter((chunk): chunk is SubagentChunk => chunk.kind === "subagent")
         .map((chunk) => chunk.subagent),
-    [chunks],
+    [chunks, sessionSubagents],
   );
   const process = (
     <>

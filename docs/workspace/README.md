@@ -30,6 +30,8 @@ boundaries, and release verification.
   framework reuse and transport-refactor verification.
 - [Web chat presentation](reference/WebChatPresentation.md): typography roles,
   motion inventory, disclosure rules and focused browser checks.
+- [Session search](reference/SessionSearch.md): authorized message search,
+  PostgreSQL bigram indexes, snippets and result pagination.
 - [Configuration](reference/Configuration.md): environment variables and secret
   boundaries.
 

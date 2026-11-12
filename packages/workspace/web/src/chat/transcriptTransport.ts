@@ -148,6 +148,31 @@ export function createWorkspaceTranscriptTransport({
     return page;
   }
 
+  async function loadTarget(sessionId: string, eventId: string, signal: AbortSignal) {
+    let frozen: { sourceHighWater: string; projectionGeneration: string } | null = null;
+    while (true) {
+      const entries: [string, string][] = [["anchorEventId", eventId]];
+      if (frozen) entries.push(["sourceHighWater", frozen.sourceHighWater], ["projectionGeneration", frozen.projectionGeneration]);
+      try {
+        const raw = await json(pathWithQuery(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`, entries), signal);
+        if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("invalid transcript target");
+        const value = raw as Record<string, unknown>;
+        if (value.schema !== "workspace.transcript.target.v1" || typeof value.targetBlockId !== "string"
+          || Object.keys(value).sort().join("|") !== "page|schema|targetBlockId") throw new Error("invalid transcript target");
+        const targetBlockId = value.targetBlockId;
+        const page = validateTranscriptPage(value.page, { sessionId });
+        if (!page.blocks.some(block => block.blockId === targetBlockId)) throw new Error("transcript target missing from page");
+        return { page, targetBlockId };
+      } catch (error) {
+        const progress = projectionProgress(error, frozen?.projectionGeneration);
+        if (progress !== null) frozen = progress;
+        else if (error instanceof ApiError && error.status === 409 && error.message === "transcript_view_invalidated") frozen = null;
+        else throw error;
+        await wait(PROJECTION_RETRY_DELAY_MS, signal);
+      }
+    }
+  }
+
   async function loadPatches(
     identity: TranscriptPatchIdentity,
     signal: AbortSignal,
@@ -225,5 +250,5 @@ export function createWorkspaceTranscriptTransport({
     return validateTranscriptContentRange(await json(path, signal), { ...identity, offset });
   }
 
-  return { loadTail, loadOlder, loadPatches, loadActiveAgentRun, loadContentRange };
+  return { loadTail, loadTarget, loadOlder, loadPatches, loadActiveAgentRun, loadContentRange };
 }

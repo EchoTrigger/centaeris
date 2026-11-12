@@ -1,7 +1,10 @@
 # Web chat presentation
 
 Applies to the transcript, composer and source preview. Shared desktop
-`typography.css` remains unchanged; Web roles live in `transcript-theme.css`.
+`typography.css` remains unchanged. Body, metadata and code values live in
+`chat-typography.css` and match Desktop; Web-specific element mappings live in
+`transcript-theme.css`. UI control and feedback roles are defined in
+`docs/development/FrontendFoundations.md`.
 
 ## Type roles
 

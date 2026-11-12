@@ -5,7 +5,8 @@ import { AnimatedDisclosure } from "./AnimatedDisclosure";
 import { initialWorkDisclosure, observeFinalAnswer, toggleWorkDisclosure, preserveWorkDisclosure, type WorkDisclosure } from "./workDisclosure";
 import { formatWorkDuration } from "./workDuration";
 
-export function WorkProgress({ running, finalStarted, startedAtMs, completedAtMs, children, response, responseIsProcess = false, initialDisclosure, onDisclosureChange }: {
+export function WorkProgress({ running, finalStarted, startedAtMs, completedAtMs, children, response, responseIsProcess = false, initialDisclosure, onDisclosureChange, revealKey }: {
+  revealKey?: string;
   initialDisclosure?: WorkDisclosure;
   onDisclosureChange?(value: WorkDisclosure): void;
   running: boolean;
@@ -23,6 +24,9 @@ export function WorkProgress({ running, finalStarted, startedAtMs, completedAtMs
   // A terminal timestamp may arrive after a later second was already displayed.
   useLayoutEffect(() => { displayedElapsedRef.current = elapsedMs; }, [elapsedMs]);
   const [disclosure, setDisclosure] = useState(() => initialDisclosure ?? initialWorkDisclosure(finalStarted));
+  useLayoutEffect(() => {
+    if (revealKey) setDisclosure(value => ({ ...value, expanded: true }));
+  }, [revealKey]);
   useLayoutEffect(() => { onDisclosureChange?.(disclosure); }, [disclosure, onDisclosureChange]);
   const nextDisclosure = observeFinalAnswer(disclosure, finalStarted);
   if (nextDisclosure !== disclosure) setDisclosure(nextDisclosure);

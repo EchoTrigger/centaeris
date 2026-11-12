@@ -34,6 +34,65 @@ position, close/reopen continuity and reduced motion. Both product gates check
 the shared package; the Web image and standalone build install its workspace
 dependency closure.
 
+Web navigation preferences are owned by `workspaceNavigationState.ts`, scoped by
+authenticated user and Workspace. The shared `@centaeris/ui/state` entry exposes
+upstream Zustand; it owns no navigation policy. Native `details` retain their
+keyboard behavior. Group/project folding and desktop sidebar visibility use a
+versioned localStorage record. Scroll offsets use a separate sessionStorage
+record for the conversation directory, settings categories and developer docs.
+Only opaque identities, flags and offsets are stored; selected Sessions and
+categories continue to follow the authorized URL.
+
+Scroll tracking stays outside reactive state and flushes on page hide, document
+hide or reader unmount. Restoring waits for navigation rows and visible geometry;
+a hidden/collapsed sidebar must not overwrite its last readable offset. Desktop
+visibility survives reloads. Compact chat drawers remain transient, start closed
+and close on navigation; they share folding and scroll without changing the
+desktop preference. Account settings without a Workspace have their own user
+scope. Storage restrictions retain usable state in the current document.
+
+## Web interface roles
+
+This document defines the intended roles and host boundaries. Exact color values
+come from `packages/ui/src/theme.css`. Web control geometry comes from
+`packages/workspace/web/src/styles/theme.css`; conversation type values come from
+`styles/chat-typography.css` and map to elements in `styles/transcript-theme.css`.
+`docs/workspace/reference/WebChatPresentation.md` describes those reading roles
+and motion rules. Update a changed role's implementation, documentation and
+existing acceptance fixture together.
+
+Web's settings and member-administration surfaces use these control roles:
+
+| Role | Geometry or treatment | Uses |
+| --- | --- | --- |
+| Compact control | 32px minimum height | Row actions, page entry actions, dialog footer buttons |
+| Form control | 36px height | Text fields and selects in Workspace dialogs |
+| Coarse-pointer control | 44px minimum target; 16px editable text | The same controls on touch devices |
+| Entry action | Outline | Invite and edit entry points |
+| Commit action | Neutral solid surface | Save, create and copy |
+| Secondary action | Ghost | Cancel, close and return |
+| Destructive action | Existing danger colors and explicit consequences | Member removal, ownership transfer, invitation replacement and revocation |
+
+The page heading stays left aligned and entry actions share its header. Personal
+settings forms use a 720px maximum content column; member lists retain the wider
+Web content column. Narrow layouts reflow the existing content and actions.
+Keyboard focus uses the shared semantic focus color in both themes. Existing
+dialog focus containment, opener restoration and busy dismissal rules remain
+owned by their current components.
+
+Feedback stays with the action that needs a response. Field validation stays in
+the form. Member invitation, copy, transfer, removal, reissue and revoke failures
+stay in the active dialog with its input and target retained. Editing the input,
+retrying, or opening a new dialog clears the previous dialog error. Role-change
+failures remain on the member page. Only successful member-operation notices
+auto-dismiss. Submission keeps controls busy until its request settles; it never
+silently closes the dialog or discards a rejected draft.
+
+The first examples are account security, member administration and chat/tool
+reading. Desktop retains its existing host-specific layout and interactions;
+Web uses the same body, metadata and code type values without importing Desktop
+page CSS.
+
 ## Capability ownership
 
 | Capability | Implementation | Product-owned boundary |
@@ -189,9 +248,12 @@ whole history. Referenced content readers share in-flight reads for the same
 content range. Clearing the view invalidates those reads; a late completion
 cannot erase the replacement request or repopulate the cache.
 
-Conversation loading exposes one generic loading status. Internal projection,
-replay and materialization stages are not UI copy. A selected view stays in the
-loading state until its snapshot resolves, including the first render.
+Initial route and conversation reads keep their layout without loading copy.
+Pending titles and conversation content stay blank while data is loading;
+an empty-conversation message requires an authoritative snapshot. Errors and
+paused reads retain their existing feedback and recovery actions. Internal
+projection, replay and materialization stages are not UI copy. A selected view
+stays internally loading until its snapshot resolves, including the first render.
 
 The first snapshot waits for the bounded transcript, active runs and pending
 questions. Runtime configuration and context usage refresh independently after

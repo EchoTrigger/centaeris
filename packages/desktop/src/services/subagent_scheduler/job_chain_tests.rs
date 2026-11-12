@@ -157,8 +157,16 @@ impl MockModel {
                     );
                     ("200 OK", "text/event-stream", response)
                 };
-                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
-                stream.flush().unwrap();
+                let sent = write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len())
+                    .and_then(|()| stream.flush());
+                if let Err(error) = sent {
+                    // Cancellation can close the held request before its delayed reply.
+                    assert!(
+                        body.contains("held-worker")
+                            && error.kind() == std::io::ErrorKind::BrokenPipe,
+                        "mock model response failed: {error}"
+                    );
+                }
             }
         });
         Self {

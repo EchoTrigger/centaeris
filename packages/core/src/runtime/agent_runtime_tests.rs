@@ -11051,11 +11051,225 @@ async fn subagent_tool_call_uses_the_durable_commit_port_once() {
     let _ = std::fs::remove_dir_all(workspace_root);
 }
 
+#[tokio::test]
+async fn subagent_multiple_tool_rounds_persist_and_return_to_parent() {
+    const FILE_CONTENT: &str = "name,value\nexample,42\n";
+    const FINAL_REPLY: &str = "Created and verified the CSV: example has value 42.";
+
+    #[derive(Debug, Default)]
+    struct WriteThenReadModelClient {
+        request_count: AtomicUsize,
+    }
+
+    impl ModelClient for WriteThenReadModelClient {
+        fn generate<'a>(
+            &'a self,
+            request: &'a ModelClientRequest,
+        ) -> ModelClientFuture<'a, ModelClientResponse> {
+            Box::pin(async move {
+                let request_index = self.request_count.fetch_add(1, Ordering::SeqCst);
+                let mut result = read_generate_result("call-subagent-read-back", "result.csv");
+                match request_index {
+                    0 => {
+                        result.tool_calls = vec![ToolCallEnvelope {
+                            id: "call-subagent-write".to_string(),
+                            name: "write".to_string(),
+                            args_json: json!({
+                                "path": "result.csv",
+                                "content": FILE_CONTENT,
+                            })
+                            .to_string(),
+                        }];
+                    }
+                    1 => assert!(request.prepared_prompt.messages.iter().any(|message| {
+                        message.tool_call_id.as_deref() == Some("call-subagent-write")
+                    })),
+                    2 => {
+                        assert!(request.prepared_prompt.messages.iter().any(|message| {
+                            message.tool_call_id.as_deref() == Some("call-subagent-read-back")
+                                && message.content.contains("example,42")
+                        }));
+                        result.content = FINAL_REPLY.to_string();
+                        result.tool_calls.clear();
+                    }
+                    _ => panic!("unexpected extra subagent model request"),
+                }
+                Ok(ModelClientResponse {
+                    request_timings: None,
+                    generate_result: result,
+                    provider_request_id: None,
+                    provider_latency_ms: None,
+                    provider_attempts: 1,
+                })
+            })
+        }
+    }
+
+    let workspace_root = temp_dir_path("subagent_multiple_tool_rounds");
+    std::fs::create_dir_all(&workspace_root).expect("create workspace");
+    let store = AgentRuntimeTestStore::new();
+    let req = sample_subagent_worker_run_request();
+    let mut packet = decode_subagent_work_packet(&req.work_packet.content_json)
+        .expect("decode subagent work packet");
+    packet.run_context.cwd = workspace_root.to_string_lossy().into_owned();
+    packet.allowed_tools = vec!["write".to_string(), "read".to_string()];
+    packet.delegated_tool_contracts = test_delegated_tool_contracts(&packet.allowed_tools);
+    store
+        .upsert_external_context_and_schedule_job(UpsertExternalContextAndScheduleJobRequest {
+            object: ExternalContextObject {
+                schema_version: EXTERNAL_CONTEXT_SCHEMA_VERSION.to_string(),
+                object_id: req.work_packet.ref_id,
+                object_kind: "subagent_work_packet".to_string(),
+                source_provider_id: "centaeris.core".to_string(),
+                source_tool_name: "agent".to_string(),
+                title: "Write and verify CSV".to_string(),
+                content: json!({ "workPacket": packet }).to_string(),
+                metadata: json!({}),
+                updated_at_ms: 3,
+            },
+            job: req.job.clone(),
+        })
+        .expect("schedule subagent");
+    let claimed = subagent::claim_subagent_run_jobs(
+        &store,
+        subagent::ClaimSubagentRunJobsRequest {
+            now_ms: 4,
+            worker_id: "worker-multiple-tool-rounds".to_string(),
+            session_id: Some(req.lifecycle.session_id.clone()),
+            limit: 1,
+            lease_ms: 5_000,
+        },
+    )
+    .expect("claim subagent")
+    .pop()
+    .expect("claimed subagent");
+    let mutations = crate::tool::layer::test_support::RecordingFileMutationCommitPort::shared();
+    let tool_layer = ToolLayer::new()
+        .with_cwd(workspace_root.clone())
+        .expect("workspace tool layer")
+        .with_execution_owner(req.job.job_id.clone())
+        .with_file_mutation_commit_port(mutations.clone());
+    let engine = AgentRuntime::new_for_test_with_tools(
+        store.clone(),
+        tool_layer,
+        AgentRuntimeConfig {
+            allowed_tools: Some(vec!["write".to_string(), "read".to_string()]),
+            ..AgentRuntimeConfig::default()
+        },
+    );
+    let model_client = WriteThenReadModelClient::default();
+    let config_store = StaticModelSessionConfigStore {
+        config: Some(ModelSessionConfig::default()),
+    };
+    let safe_points = Arc::new(Mutex::new((Vec::new(), Vec::new())));
+    let recorded_safe_points = Arc::clone(&safe_points);
+    let runner = ModelClientSubagentRunner::new(
+        &engine,
+        &model_client,
+        &config_store,
+        AgentRuntimeSubagentRunnerConfig {
+            auto_continue_after_resume_wait: Some(false),
+            agent_run_identity: Some(RuntimeAgentRunIdentityV1 {
+                agent_run_id: req.job.job_id.clone(),
+                execution_id: "execution-subagent-multiple-tool-rounds".to_string(),
+                authorization_digest: format!("sha256:{}", "2".repeat(64)),
+            }),
+        },
+    )
+    .with_tool_safe_point(Arc::new(move |safe_point| {
+        let mut recorded = recorded_safe_points.lock().expect("safe point records");
+        match safe_point {
+            ToolSafePoint::DurableToolCall { call, .. } => recorded.0.push(call.id),
+            ToolSafePoint::DurableReceipt { call, .. } => recorded.1.push(call.id),
+            _ => {}
+        }
+        Ok(())
+    }));
+    let result = subagent::run_claimed_subagent_job_async(
+        engine.job_store.as_ref(),
+        claimed,
+        &runner,
+        &subagent::NoopSubagentLifecycleObserver,
+        subagent::RunClaimedSubagentJobRequest {
+            worker_id: "worker-multiple-tool-rounds".to_string(),
+            started_at_ms: 5,
+            finished_at_ms: 6,
+        },
+    )
+    .await
+    .expect("run and publish subagent result");
+
+    assert_eq!(
+        result.final_lifecycle.status,
+        SubagentLifecycleStatus::Succeeded
+    );
+    assert_eq!(model_client.request_count.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        std::fs::read_to_string(workspace_root.join("result.csv")).expect("read created file"),
+        FILE_CONTENT
+    );
+    assert_eq!(mutations.requests().len(), 1);
+    let expected_calls = vec!["call-subagent-write", "call-subagent-read-back"];
+    let recorded = safe_points.lock().expect("safe point records");
+    assert_eq!(recorded.0, expected_calls);
+    assert_eq!(recorded.1, expected_calls);
+    drop(recorded);
+
+    let snapshot: SessionStateSnapshot = serde_json::from_str(
+        &store
+            .load_agent_runtime_snapshot("chat-parent:subagent:agent-one")
+            .expect("load child snapshot")
+            .expect("persisted child snapshot"),
+    )
+    .expect("decode child snapshot");
+    for call_id in expected_calls {
+        assert!(snapshot.model_semantics.values().any(|semantics| {
+            matches!(semantics, crate::session::state::ModelMessageSemanticsV1::ToolResult {
+                tool_call_id,
+                status,
+                ..
+            } if tool_call_id == call_id && status == "ok")
+        }));
+    }
+    assert!(snapshot.messages.iter().any(|message| {
+        message.role == MessageRole::Assistant && message.content == FINAL_REPLY
+    }));
+
+    let completed = store
+        .get_runtime_job(&req.job.job_id)
+        .expect("load completed subagent")
+        .expect("completed subagent");
+    let collected = engine
+        .runtime_job_terminal_tool_result(
+            &req.lifecycle.session_id,
+            &req.lifecycle.parent_turn_id,
+            &RuntimeJobWaitV1 {
+                tool_call_id: "call-task-output-multiple-rounds".to_string(),
+                source_tool_name: "task_output".to_string(),
+                tool_definition_digest: format!("sha256:{}", "a".repeat(64)),
+                job_id: req.job.job_id,
+                job_kind: subagent::SUBAGENT_RUN_JOB_KIND.to_string(),
+            },
+            &completed,
+        )
+        .expect("collect child result in parent");
+    assert_eq!(collected.status, "ok");
+    assert_eq!(collected.content, FINAL_REPLY);
+    assert_eq!(
+        collected.details["externalObjects"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    std::fs::remove_dir_all(workspace_root).expect("cleanup workspace");
+}
+
 #[tokio::test(start_paused = true)]
 async fn query_loop_subagent_cancel_ack_prevents_immediate_late_tool_dispatch() {
     struct CancelBeforeReply {
         store: AgentRuntimeTestStore,
         job_id: String,
+        host_cancelled: Option<Arc<AtomicBool>>,
         model: SubagentReadModelClient,
     }
     impl ModelClient for CancelBeforeReply {
@@ -11064,91 +11278,112 @@ async fn query_loop_subagent_cancel_ack_prevents_immediate_late_tool_dispatch() 
             request: &'a ModelClientRequest,
         ) -> ModelClientFuture<'a, ModelClientResponse> {
             Box::pin(async move {
-                RuntimeJobStorePort::cancel_runtime_job(
-                    &self.store,
-                    crate::session::reliability::CancelRuntimeJobRequest {
-                        job_id: self.job_id.clone(),
-                        expected_lease_owner: None,
-                        expected_status: None,
-                        reason: "cancel-before-late-reply".into(),
-                        cancelled_at_ms: 4,
-                    },
-                )
-                .map_err(|error| {
-                    ModelClientError::new(ModelClientErrorKind::Network, error, false)
-                })?;
+                if let Some(cancelled) = &self.host_cancelled {
+                    cancelled.store(true, Ordering::SeqCst);
+                } else {
+                    RuntimeJobStorePort::cancel_runtime_job(
+                        &self.store,
+                        crate::session::reliability::CancelRuntimeJobRequest {
+                            job_id: self.job_id.clone(),
+                            expected_lease_owner: None,
+                            expected_status: None,
+                            reason: "cancel-before-late-reply".into(),
+                            cancelled_at_ms: 4,
+                        },
+                    )
+                    .map_err(|error| {
+                        ModelClientError::new(ModelClientErrorKind::Network, error, false)
+                    })?;
+                }
                 self.model.generate(request).await
             })
         }
     }
-    let workspace = temp_dir_path("subagent_cancel_before_late_reply");
-    std::fs::create_dir_all(&workspace).unwrap();
-    std::fs::write(workspace.join("fixture.txt"), "must not be dispatched").unwrap();
-    let store = AgentRuntimeTestStore::new();
-    let request = sample_subagent_worker_run_request();
-    let job_id = request.job.job_id.clone();
-    store
-        .state()
-        .unwrap()
-        .jobs
-        .insert(job_id.clone(), request.job.clone());
-    let engine = AgentRuntime::new_for_test_with_tools(
-        store.clone(),
-        ToolLayer::new().with_cwd(workspace.clone()).unwrap(),
-        AgentRuntimeConfig {
-            allowed_tools: Some(vec!["read".into()]),
-            ..AgentRuntimeConfig::default()
-        },
-    );
-    let model = CancelBeforeReply {
-        store,
-        job_id: job_id.clone(),
-        model: SubagentReadModelClient {
-            request_count: AtomicUsize::new(0),
-        },
-    };
-    let config_store = StaticModelSessionConfigStore {
-        config: Some(ModelSessionConfig::default()),
-    };
-    let runner_config = AgentRuntimeSubagentRunnerConfig {
-        auto_continue_after_resume_wait: Some(false),
-        agent_run_identity: Some(RuntimeAgentRunIdentityV1 {
-            agent_run_id: job_id,
-            execution_id: "execution-cancel-late-reply".into(),
-            authorization_digest: format!("sha256:{}", "3".repeat(64)),
-        }),
-    };
-    let mut durable_tools = 0;
-    let mut durable_receipts = 0;
-    let outcome = engine
-        .run_subagent_worker_with_model_client_async(
-            request,
-            &model,
-            &config_store,
-            &runner_config,
-            None,
-            Some(&mut |point| {
-                match point {
-                    ToolSafePoint::DurableToolCall { .. } => durable_tools += 1,
-                    ToolSafePoint::DurableReceipt { .. } => durable_receipts += 1,
-                    _ => {}
-                }
-                Ok(())
+    for host_cancellation in [false, true] {
+        let workspace = temp_dir_path("subagent_cancel_before_late_reply");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("fixture.txt"), "must not be dispatched").unwrap();
+        let store = AgentRuntimeTestStore::new();
+        let request = sample_subagent_worker_run_request();
+        let job_id = request.job.job_id.clone();
+        store
+            .state()
+            .unwrap()
+            .jobs
+            .insert(job_id.clone(), request.job.clone());
+        let host_cancelled = Arc::new(AtomicBool::new(false));
+        let observed_host_cancelled = host_cancelled.clone();
+        let engine = AgentRuntime::new_for_test_with_tools(
+            store.clone(),
+            ToolLayer::new()
+                .with_cwd(workspace.clone())
+                .unwrap()
+                .with_execution_cancellation_probe(Arc::new(move || {
+                    Ok(observed_host_cancelled
+                        .load(Ordering::SeqCst)
+                        .then(|| "agent_run_cancel_requested".to_string()))
+                })),
+            AgentRuntimeConfig {
+                allowed_tools: Some(vec!["read".into()]),
+                ..AgentRuntimeConfig::default()
+            },
+        );
+        let model = CancelBeforeReply {
+            store,
+            job_id: job_id.clone(),
+            host_cancelled: host_cancellation.then_some(host_cancelled),
+            model: SubagentReadModelClient {
+                request_count: AtomicUsize::new(0),
+            },
+        };
+        let config_store = StaticModelSessionConfigStore {
+            config: Some(ModelSessionConfig::default()),
+        };
+        let runner_config = AgentRuntimeSubagentRunnerConfig {
+            auto_continue_after_resume_wait: Some(false),
+            agent_run_identity: Some(RuntimeAgentRunIdentityV1 {
+                agent_run_id: job_id,
+                execution_id: "execution-cancel-late-reply".into(),
+                authorization_digest: format!("sha256:{}", "3".repeat(64)),
             }),
-        )
-        .await;
-    assert!(
-        matches!(outcome, SubagentWorkerRunOutcome::Cancelled { ref reason }
-        if reason == "cancel-before-late-reply"),
-        "{outcome:?}"
-    );
-    assert_eq!(model.model.request_count.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        durable_tools, 0,
-        "acknowledged cancellation fences tool dispatch"
-    );
-    assert_eq!(durable_receipts, 0);
-    let _ = std::fs::remove_dir_all(workspace);
+        };
+        let mut durable_tools = 0;
+        let mut durable_receipts = 0;
+        let outcome = engine
+            .run_subagent_worker_with_model_client_async(
+                request,
+                &model,
+                &config_store,
+                &runner_config,
+                None,
+                Some(&mut |point| {
+                    match point {
+                        ToolSafePoint::DurableToolCall { .. } => durable_tools += 1,
+                        ToolSafePoint::DurableReceipt { .. } => durable_receipts += 1,
+                        _ => {}
+                    }
+                    Ok(())
+                }),
+            )
+            .await;
+        let expected_reason = if host_cancellation {
+            "agent_run_cancel_requested"
+        } else {
+            "cancel-before-late-reply"
+        };
+        assert!(
+            matches!(outcome, SubagentWorkerRunOutcome::Cancelled { ref reason }
+        if reason == expected_reason),
+            "{outcome:?}"
+        );
+        assert_eq!(model.model.request_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            durable_tools, 0,
+            "acknowledged cancellation fences tool dispatch"
+        );
+        assert_eq!(durable_receipts, 0);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
 }
 
 fn sample_subagent_worker_run_request() -> SubagentWorkerRunRequest {

@@ -4,7 +4,8 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use futures::FutureExt;
 
@@ -416,6 +417,7 @@ pub struct SubagentWorkPacketRuntimeBindingV1 {
     pub subagent_id: String,
     pub parent_agent_run_id: String,
     pub parent_turn_id: String,
+    pub cancel_on_parent_cancel: bool,
     pub description: String,
     pub allowed_tools: Vec<String>,
     pub delegated_tool_contracts: Vec<DelegatedToolContractV1>,
@@ -504,6 +506,7 @@ pub fn subagent_work_packet_runtime_binding(
         subagent_id,
         parent_agent_run_id,
         parent_turn_id,
+        cancel_on_parent_cancel: packet.run_context.cancel_on_parent_cancel,
         description,
         allowed_tools: packet.allowed_tools,
         delegated_tool_contracts: packet.delegated_tool_contracts,
@@ -1155,9 +1158,10 @@ where
             req.started_at_ms,
         )?)
         .await?;
-    let lease_ms = running_job
+    let lease_ms = claimed
+        .job
         .lease_expires_at_ms
-        .zip(running_job.heartbeat_at_ms)
+        .zip(claimed.job.heartbeat_at_ms)
         .and_then(|(expires_at_ms, heartbeat_at_ms)| {
             expires_at_ms
                 .checked_sub(heartbeat_at_ms)
@@ -1387,6 +1391,7 @@ where
     R: AsyncSubagentWorkerRunner,
     O: AsyncSubagentLifecycleObserver,
 {
+    let round_started = Instant::now();
     let claimed = claim_subagent_run_jobs_async(
         store,
         ClaimSubagentRunJobsRequest {
@@ -1405,20 +1410,28 @@ where
     let mut cancelled = 0usize;
     let mut requeued = 0usize;
 
-    for claimed_job in claimed {
+    let mut pending = claimed.into_iter().enumerate().collect::<VecDeque<_>>();
+    while let Some((_, claimed_job)) = pending.pop_front() {
         events.push(claimed_job.event.clone());
-        let result = run_claimed_subagent_job_async(
+        let started_at_ms = subagent_worker_timestamp(req.started_at_ms, round_started);
+        let result = await_with_pending_subagent_leases(
             store,
-            claimed_job,
-            runner,
-            observer,
-            RunClaimedSubagentJobRequest {
-                worker_id: req.worker_id.clone(),
-                started_at_ms: req.started_at_ms,
-                finished_at_ms: req.finished_at_ms,
-            },
+            &mut pending,
+            &req,
+            round_started,
+            run_claimed_subagent_job_async(
+                store,
+                claimed_job,
+                runner,
+                observer,
+                RunClaimedSubagentJobRequest {
+                    worker_id: req.worker_id.clone(),
+                    started_at_ms,
+                    finished_at_ms: req.finished_at_ms.max(started_at_ms),
+                },
+            ),
         )
-        .await?;
+        .await??;
         for event in &result.events {
             match event.kind {
                 SubagentSchedulerEventKind::Succeeded => succeeded = succeeded.saturating_add(1),
@@ -1459,6 +1472,7 @@ where
         return run_due_subagent_jobs_async(store, runner, observer, req).await;
     }
 
+    let round_started = Instant::now();
     let claimed = claim_subagent_run_jobs_async(
         store,
         ClaimSubagentRunJobsRequest {
@@ -1480,12 +1494,12 @@ where
     let mut pending = claimed.into_iter().enumerate().collect::<VecDeque<_>>();
     while !pending.is_empty() {
         let batch = next_subagent_worker_batch_async(store, &mut pending, max_parallelism).await?;
+        let started_at_ms = subagent_worker_timestamp(req.started_at_ms, round_started);
         let futures = batch
             .into_iter()
             .map(|(index, claimed_job)| {
                 let worker_id = req.worker_id.clone();
-                let started_at_ms = req.started_at_ms;
-                let finished_at_ms = req.finished_at_ms;
+                let finished_at_ms = req.finished_at_ms.max(started_at_ms);
                 async move {
                     let result = match AssertUnwindSafe(run_claimed_subagent_job_async(
                         store,
@@ -1517,7 +1531,15 @@ where
                 }
             })
             .collect::<Vec<_>>();
-        for (index, result) in futures::future::join_all(futures).await {
+        let completed = await_with_pending_subagent_leases(
+            store,
+            &mut pending,
+            &req,
+            round_started,
+            futures::future::join_all(futures),
+        )
+        .await?;
+        for (index, result) in completed {
             indexed_results.push((index, result?));
         }
     }
@@ -1551,6 +1573,95 @@ where
         events,
         results,
     })
+}
+
+fn subagent_worker_timestamp(started_at_ms: i64, started: Instant) -> i64 {
+    started_at_ms.saturating_add(i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX))
+}
+
+async fn await_with_pending_subagent_leases<S, F>(
+    store: &S,
+    pending: &mut VecDeque<(usize, ClaimedSubagentRunJob)>,
+    req: &RunDueSubagentJobsRequest,
+    round_started: Instant,
+    work: F,
+) -> Result<F::Output, JobStoreError>
+where
+    S: AsyncJobStorePort + ?Sized,
+    F: Future,
+{
+    if pending.is_empty() {
+        return Ok(work.await);
+    }
+    let outcome = {
+        let renewals = async {
+            let mut heartbeat =
+                tokio::time::interval(Duration::from_millis((req.lease_ms / 3).max(1)));
+            loop {
+                heartbeat.tick().await;
+                if let Err(error) =
+                    renew_pending_subagent_leases(store, pending, req, round_started).await
+                {
+                    break error;
+                }
+            }
+        };
+        tokio::pin!(work, renewals);
+        tokio::select! {
+            result = &mut work => Ok(result),
+            error = &mut renewals => Err(error),
+        }
+    };
+    // Selecting one future cancels the other's confirmation wait, not any SQL
+    // it has already submitted. Settle those writes before the next dispatch.
+    match (outcome, store.settle_job_operations().await) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(settlement)) => {
+            let message = format!("{error}; pending lease settlement failed: {settlement}");
+            Err(error.with_message(message))
+        }
+    }
+}
+
+async fn renew_pending_subagent_leases<S: AsyncJobStorePort + ?Sized>(
+    store: &S,
+    pending: &mut VecDeque<(usize, ClaimedSubagentRunJob)>,
+    req: &RunDueSubagentJobsRequest,
+    round_started: Instant,
+) -> Result<(), JobStoreError> {
+    for (_, claimed) in pending.iter_mut() {
+        if claimed.job.status == RuntimeJobStatus::Cancelled {
+            continue;
+        }
+        let renewal = store
+            .renew_runtime_job_lease(RenewRuntimeJobLeaseRequest {
+                job_id: claimed.job.job_id.clone(),
+                lease_owner: subagent_job_lease_owner(&claimed.job)?.to_string(),
+                heartbeat_at_ms: subagent_worker_timestamp(req.started_at_ms, round_started),
+                lease_ms: req.lease_ms,
+            })
+            .await;
+        if let Err(error) = renewal {
+            settle_before_reconciliation(store, &error).await?;
+            if cancelled_subagent_event_if_requested_async(
+                store,
+                &claimed.job.job_id,
+                subagent_worker_timestamp(req.started_at_ms, round_started),
+            )
+            .await?
+            .is_some()
+            {
+                // Preserve cancellation for ordinary start reconciliation; it
+                // must never reach the runner or receive another renewal.
+                claimed.job.status = RuntimeJobStatus::Cancelled;
+            } else {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn load_subagent_work_packet<S: ExternalContextStorePort>(
@@ -2216,6 +2327,7 @@ mod tests {
             subagent_id: "agent-child".to_string(),
             parent_agent_run_id: "agent-run-parent".to_string(),
             parent_turn_id: "turn-parent".to_string(),
+            cancel_on_parent_cancel: true,
             description: "Inspect one issue".to_string(),
             allowed_tools: vec!["read".to_string()],
             delegated_tool_contracts,
@@ -2265,7 +2377,7 @@ mod tests {
         packet.allowed_tools = vec!["read".to_string()];
         packet.delegated_tool_contracts =
             test_delegated_tool_contracts(packet.allowed_tools.as_slice());
-        let envelope = SubagentWorkPacketEnvelope {
+        let mut envelope = SubagentWorkPacketEnvelope {
             ref_id: "external_context:work_packet_1".to_string(),
             content_json: serde_json::json!({ "workPacket": packet }),
         };
@@ -2305,6 +2417,16 @@ mod tests {
                 .parent_turn_id,
             "turn-1:2"
         );
+        for inherited_cancellation in [true, false] {
+            envelope.content_json["workPacket"]["run_context"]["cancelOnParentCancel"] =
+                inherited_cancellation.into();
+            assert_eq!(
+                subagent_work_packet_runtime_binding(&envelope, &job)
+                    .unwrap()
+                    .cancel_on_parent_cancel,
+                inherited_cancellation
+            );
+        }
 
         let mut mismatched_job = job;
         mismatched_job.branch_id = Some("banana".to_string());

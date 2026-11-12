@@ -75,7 +75,7 @@ test("Escape cancels without saving, blank titles remain editable, and failed sa
 	await f.user.type(input, "Retry name");
 	await f.user.click(screen.getByRole("button", { name: "Save" }));
 	expect((await screen.findByRole("alert")).textContent).toContain(
-		"Save unavailable",
+		"The conversation could not be updated. Try again.",
 	);
 	expect((input as HTMLInputElement).value).toBe("Retry name");
 	await f.user.click(screen.getByRole("button", { name: "Save" }));

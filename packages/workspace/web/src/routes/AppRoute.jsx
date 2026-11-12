@@ -1,5 +1,6 @@
 import { animate } from "@centaeris/ui/motion";
 import { useTranslation } from "../i18n";
+import { useCompactWorkspaceLayout, useSidebarOpen, useWorkspaceNavigation } from "../shell/workspaceNavigationState";
 import { useCallback, useEffect, useEffectEvent, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { matchPath, useNavigate, useRouteLoaderData } from "react-router";
 import { apiJson, apiResponse } from "../api";
@@ -18,6 +19,7 @@ import { compareTranscriptBlocks } from "../chat/transcriptContract";
 import { hasCommittedPendingMessage } from "../chat/transcriptTurns";
 import { TranscriptToolOperationRegistry } from "../chat/transcriptToolOperations";
 import { createWorkspaceTranscriptTransport } from "../chat/transcriptTransport";
+import { useTranscriptSearchTarget } from "../chat/useTranscriptSearchTarget";
 import { WorkspacePresentationController } from "../chat/workspacePresentationController";
 import { TranscriptBlockList } from "../chat/TranscriptBlockList";
 import { clearTranscriptContentRangeCache } from "../chat/transcriptContentRanges";
@@ -73,15 +75,6 @@ const ARTIFACT_PREVIEW_CONTENT_TYPES = new Set([
   "image/jpeg",
   "image/webp",
 ]);
-
-function subscribeViewport(onResize) {
-  window.addEventListener("resize", onResize);
-  return () => window.removeEventListener("resize", onResize);
-}
-
-function isCompactViewport() {
-  return window.innerWidth <= 760;
-}
 
 function useWorkbenchProgress(ref, property, open, { initial, duration, immediate = false }) {
   useLayoutEffect(() => {
@@ -175,6 +168,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const { t } = useTranslation();
   const { user } = useRouteLoaderData("authenticated");
   const { workspace } = useRouteLoaderData("workspace");
+  const workspaceNavigation = useWorkspaceNavigation(user.id, workspace.id);
   const operations = useMemo(() => new OperationClient({ userId: user.id, workspaceId: workspace.id, command: "submitMessage" }), [user.id, workspace.id]);
   const questionOperations = useMemo(() => new OperationClient({ userId: user.id, workspaceId: workspace.id, command: "respondQuestion" }), [user.id, workspace.id]);
   const cancelSubmission = useCallback(async (target) => {
@@ -230,6 +224,14 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const transcriptTransportRef = useRef(null);
   if (!transcriptTransportRef.current) transcriptTransportRef.current = createWorkspaceTranscriptTransport();
   const transcriptTransport = transcriptTransportRef.current;
+  const searchEventId = requestedSessionId ? searchParams.get("at") || "" : "";
+  const searchHighlight = (searchParams.get("highlight") || "").slice(0, 256);
+  const focusedTranscript = useTranscriptSearchTarget(requestedSessionId, searchEventId, transcriptTransport);
+  function returnToLatest() {
+    const params = new URLSearchParams(location.search);
+    params.delete("at"); params.delete("highlight");
+    navigate({ pathname: location.pathname, search: params.size ? `?${params}` : "", hash: location.hash }, { replace: true });
+  }
   const fileInputRef = useRef(null);
   const composerRef = useRef(null);
   const composerStartRectRef = useRef(null);
@@ -241,6 +243,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const [presentationAttempt, setPresentationAttempt] = useState(0);
   const [runControlAttempt, setRunControlAttempt] = useState(0);
   const [contextVersion, setContextVersion] = useState(null);
+  const [subagentsVersion, setSubagentsVersion] = useState(null);
   const [readableThrough, setReadableThrough] = useState("0");
   const [readingLatest, setReadingLatest] = useState(true);
   const [pageVisible, setPageVisible] = useState(() => typeof document === "undefined" || !document.hidden);
@@ -266,6 +269,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const [composerError, setComposerError] = useState("");
   const [conversationError, setConversationError] = useState("");
   const [navigationError, setNavigationError] = useState(false);
+  const [navigationLoaded, setNavigationLoaded] = useState(false);
   const [olderHistoryError, setOlderHistoryError] = useState(false);
   const [streamIssue, setStreamIssue] = useState(null);
   const [sending, setSending] = useState(false);
@@ -283,8 +287,10 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const previewPanelId = useId();
   const previewToggleRef = useRef(null);
   const [browserPanelWidthPx, setBrowserPanelWidthPx] = useState(null);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const compactLayout = useSyncExternalStore(subscribeViewport, isCompactViewport);
+  const isSidebarOpen = useSidebarOpen(workspaceNavigation);
+  const setIsSidebarOpen = workspaceNavigation.setDesktopOpen;
+  const initialSidebarProgress = useRef(isSidebarOpen ? 1 : 0).current;
+  const compactLayout = useCompactWorkspaceLayout();
   const [drawerFor, setDrawerFor] = useState(null);
   const workbenchRef = useRef(null);
   const transcriptRef = useRef(null);
@@ -292,7 +298,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const search = useWorkspaceSearch(navigationKey, visible || Boolean(catalogContent));
   const drawerOpen = compactLayout && drawerFor === navigationKey && !search.open && (visible || Boolean(catalogContent));
   useWorkbenchProgress(workbenchRef, "--workspace-sidebar-progress", isSidebarOpen,
-    { initial: 1, duration: 0.22, immediate: compactLayout });
+    { initial: initialSidebarProgress, duration: 0.22, immediate: compactLayout });
   useWorkbenchProgress(workbenchRef, "--workspace-preview-progress", visible && filePreviewOpen,
     { initial: 0, duration: 0.24, immediate: !visible });
   useLayoutEffect(() => {
@@ -577,6 +583,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
         const navigation = navigationSnapshotRef.current.sessions ?? data.sessions;
         if (navigationSnapshotRef.current.sessions === null) setSessions(navigation);
         setProjects(projectData.projects);
+        setNavigationLoaded(true);
         // Only an entry without an explicit Session chooses a first row.
         // A late workspace response never changes an explicit current selection.
         selectInitialDirectory(navigation);
@@ -622,7 +629,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     return () => { visibilityTarget.removeEventListener("visibilitychange", update); focusTarget.removeEventListener("focus", update); };
   }, []);
   useEffect(() => {
-    const canObserve = visible && pageVisible && !loadingHistory;
+    const canObserve = visible && pageVisible && !loadingHistory && !searchEventId;
     if (activeSession && canObserve && readingLatest && BigInt(readableThrough) >= BigInt(activeSession.latestAttentionSequence)) {
       const entered = enteredReadRef.current;
       if (entered.sessionId === sessionId && !entered.handled) {
@@ -631,7 +638,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       }
     }
     readController.observe({ session: activeSession ?? null, visible: canObserve, readingLatest, appliedSourceHighWater: readableThrough });
-  }, [activeSession, loadingHistory, pageVisible, readingLatest, readableThrough, readController, sessionId, visible]);
+  }, [activeSession, loadingHistory, pageVisible, readingLatest, readableThrough, readController, sessionId, visible, searchEventId]);
 
   const handlePresentationFailure = useCallback((errorValue, targetSessionId) => {
     if (errorValue?.name === "AbortError" || (targetSessionId || "") !== activeSessionIdRef.current) return;
@@ -746,7 +753,11 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           setSessionId(next.find(session => session.id === requestedSessionId)?.id || next[0]?.id || "");
         }
       },
-      onViewRevision: revision => { if (isCurrent()) setContextVersion({ sessionId: selectedSessionId, revision: revision.contextRevision }); },
+      onViewRevision: revision => {
+        if (!isCurrent()) return;
+        setContextVersion({ sessionId: selectedSessionId, revision: revision.contextRevision });
+        setSubagentsVersion({ sessionId: selectedSessionId, revision: revision.subagentsRevision });
+      },
       onOperation: detail => { if (isCurrent()) toolOperations.applyPresentationDetail(detail); },
       onCheckpoint: checkpoint => {
         if (!isCurrent() || selectedSessionId === null) return;
@@ -939,6 +950,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     const text = submittedDraft.trim();
     if (!workspace) return;
     if (!text) { document.getElementById?.("messageDraft")?.focus(); return; }
+    if (searchEventId) returnToLatest();
     if (messageRequestRef.current || auxiliaryRequestRef.current) return;
     if (loadingHistory) { setPresentationAttempt(value => value + 1); return; }
     const requestScope = requestScopeRef.current;
@@ -1295,13 +1307,21 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   }
 
   function closeFilePreview() {
-    if (contextPanel.mode !== "filePreview") return;
+    if (contextPanel.mode === "closed") return;
     const { origin } = contextPanel;
     transcriptRef.current?.preserveReadingPosition();
     clearContextPanel();
     window.requestAnimationFrame(() => {
       document.getElementById(origin.elementId)?.focus({ preventScroll: true });
     });
+  }
+
+  function showSubagent(agent, origin) {
+    if (!sessionId) return;
+    transcriptRef.current?.preserveReadingPosition();
+    previewRequestIdRef.current += 1;
+    setContextPanel({ mode: "subagentPreview", sessionId, agent, displayName: agent.description, origin });
+    setFilePreviewOpen(true);
   }
 
   async function showCitation(citation, origin) {
@@ -1493,8 +1513,8 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const runControlUnknown = currentRunIdentityRef.current === undefined;
   const renderSessionRow = useCallback((session, options = {}) => <SessionNavigationRow key={session.id} workspaceId={workspace.id} session={session} actions={rowActions} active={session.id === sessionId} running={session.id === sessionId ? hasActiveAgentRun || runControlUnknown && session.hasActiveAgentRun : session.hasActiveAgentRun} onSelect={selectNavigationSession} {...options} />,
     [workspace.id, rowActions, sessionId, hasActiveAgentRun, runControlUnknown, selectNavigationSession]);
-  const sidebarSessions = useMemo(() => ({ sessions, projects, groupedSessions, renderSessionRow, onCreateProject: createNavigationProject }),
-    [sessions, projects, groupedSessions, renderSessionRow, createNavigationProject]);
+  const sidebarSessions = useMemo(() => ({ sessions, projects, groupedSessions, renderSessionRow, onCreateProject: createNavigationProject, ready: navigationLoaded }),
+    [sessions, projects, groupedSessions, renderSessionRow, createNavigationProject, navigationLoaded]);
   const recentNavigation = useMemo(() => navigationError ? { error: true } : undefined, [navigationError]);
 
   async function answerQuestion(question, answer) {
@@ -1517,7 +1537,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     <main
       ref={workbenchRef}
       className={`workspaceWorkbench ${isSidebarOpen ? "withSidebar" : "withoutSidebar"}${catalogContent ? " isBrowsing" : ""}${search.open ? " isSearching" : ""}`}
-      style={{ "--browser-panel-width": browserPanelWidthPx == null ? undefined : `${browserPanelWidthPx}px` }}
+      style={{ "--workspace-sidebar-progress": initialSidebarProgress, "--browser-panel-width": browserPanelWidthPx == null ? undefined : `${browserPanelWidthPx}px` }}
     >
       {!compactLayout ? <button
         className="workspaceSidebarToggle shAvatarToggle"
@@ -1536,6 +1556,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
         onClick={compactLayout ? event => { if (event.target === event.currentTarget) setDrawerFor(null); } : undefined}>
         <ShellSidebar
           workspace={workspace}
+          navigationVisible={compactLayout ? drawerOpen : isSidebarOpen}
           menuContainer={compactLayout ? sidebarRef : undefined}
           search={compactLayout ? undefined : search}
           onCollapse={compactLayout ? collapseNavigation : undefined}
@@ -1557,39 +1578,47 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           >
             <PanelLeft aria-hidden="true" />
           </button> : null}
-          {!catalogContent && activeSession ? <ConversationTitle key={activeSession.id} session={activeSession} actions={sessionActions} running={hasActiveAgentRun} />
-            : !catalogContent && requestedSessionId && loadingHistory ? <span className="workspaceConversationTitle" role="status">{t("agentChat.loading")}</span> : null}
+          {!catalogContent && activeSession ? <ConversationTitle key={activeSession.id} session={activeSession} actions={sessionActions} running={hasActiveAgentRun} /> : null}
           {compactLayout ? <button className="workspacePanelToggle" ref={search.triggerRef} type="button" onClick={search.toggle}
             aria-label={t("searchOverlay.searchConversationsAndNotes")} title={t("shellSidebar.searchCtrlK")}><Search aria-hidden="true" /></button> : null}
         </div>
-        {visible && contextPanel.mode === "filePreview" ? <WorkspacePreviewToggle
+        {visible && contextPanel.mode !== "closed" ? <WorkspacePreviewToggle
           ref={previewToggleRef} panelId={previewPanelId} open={filePreviewOpen} onToggle={toggleFilePreview}
         /> : null}
       </header>
 
       <section className="workspaceChatColumn" inert={search.open || Boolean(catalogContent)}>
         <div className={`workspaceConversationPlane ${isHome ? "isEmpty" : ""}`}>
+          {searchEventId && focusedTranscript.error ? <div className="workspaceToolOutputStatus" role="alert">
+            <span>{t("searchOverlay.targetUnavailable")}</span>
+            <button type="button" onClick={focusedTranscript.retry}>{t("agentChat.retry")}</button>
+            <button type="button" onClick={returnToLatest}>{t("virtualAgentRunList.jumpToLatest")}</button>
+          </div> : null}
           <TranscriptBlockList
+            key={searchEventId ? `search:${sessionId}:${searchEventId}` : "live"}
             ref={transcriptRef}
-            store={transcriptStore}
+            store={searchEventId ? focusedTranscript.store : transcriptStore}
+            searchTarget={searchEventId ? { blockId: focusedTranscript.blockId, query: searchHighlight, onReturnLatest: returnToLatest } : undefined}
           onReadingLatestChange={(targetSessionId, following) => { if (targetSessionId === activeSessionIdRef.current) setReadingLatest(following); }}
             toolOperations={toolOperations}
             sessionId={sessionId || null}
-            loadingHistory={loadingHistory}
-            loadingOlderHistory={loadingOlderHistory}
-            onLoadOlderHistory={loadOlderHistory}
-            olderHistoryError={olderHistoryError}
+            subagentsRevision={subagentsVersion?.sessionId === sessionId ? subagentsVersion.revision : "0"}
+            loadingHistory={searchEventId ? focusedTranscript.loading : loadingHistory}
+            loadingOlderHistory={searchEventId ? focusedTranscript.loadingOlder : loadingOlderHistory}
+            onLoadOlderHistory={searchEventId ? focusedTranscript.loadOlder : loadOlderHistory}
+            olderHistoryError={searchEventId ? focusedTranscript.olderError : olderHistoryError}
             emptyState={isHome ? <HomePlane /> : <ConversationReadFeedback {...readFeedbackProps} placement="empty" />}
             onShowCitation={showCitation}
             onShowArtifact={showArtifact}
-            pendingUserMessage={visiblePendingMessage}
-            submissionRejected={rejectedSubmissionScopes.has(requestScopeKey)}
-            onReleaseLoadedHistory={releaseLoadedTranscriptHistory}
-            running={hasActiveAgentRun || Boolean(sending && visiblePendingMessage && !["failed", "cancelled", "completed"].includes(visiblePendingMessage.status))}
-            activity={controlApplies && controlSnapshot.stopRequested && controlPending ? "stopping" : workActivity?.sessionId === sessionId
+            onOpenSubagent={showSubagent}
+            pendingUserMessage={searchEventId ? null : visiblePendingMessage}
+            submissionRejected={!searchEventId && rejectedSubmissionScopes.has(requestScopeKey)}
+            onReleaseLoadedHistory={searchEventId ? undefined : releaseLoadedTranscriptHistory}
+            running={!searchEventId && (hasActiveAgentRun || Boolean(sending && visiblePendingMessage && !["failed", "cancelled", "completed"].includes(visiblePendingMessage.status)))}
+            activity={searchEventId ? undefined : controlApplies && controlSnapshot.stopRequested && controlPending ? "stopping" : workActivity?.sessionId === sessionId
               && workActivity.agentRunId === activeAgentRunId ? workActivity.activity : undefined}
-            startedAtMs={workTime?.sessionId === sessionId ? workTime.startedAtMs : undefined}
-            completedAtMs={workTime?.sessionId === sessionId ? workTime.completedAtMs : undefined}
+            startedAtMs={!searchEventId && workTime?.sessionId === sessionId ? workTime.startedAtMs : undefined}
+            completedAtMs={!searchEventId && workTime?.sessionId === sessionId ? workTime.completedAtMs : undefined}
           />
 
           <div className="workspaceComposerDock">
@@ -1650,10 +1679,11 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       {catalogContent ? <section className="workspaceCatalog" inert={search.open}>
         {catalogContent}
       </section> : null}
-      {search.open ? <WorkspaceSearch workspaceId={workspace.id} sessions={sessions} onClose={search.close} inputRef={search.inputRef} /> : null}
+      {search.open ? <WorkspaceSearch workspaceId={workspace.id} onClose={search.close} inputRef={search.inputRef} /> : null}
       {visible ? <WorkspaceContextPanel
         id={previewPanelId}
         panel={contextPanel}
+        subagentsRevision={subagentsVersion?.sessionId === sessionId ? subagentsVersion.revision : "0"}
         open={filePreviewOpen}
         browserWidthPx={browserPanelWidthPx}
         onBrowserWidthChange={updateBrowserPanelWidth}

@@ -1,6 +1,6 @@
 import { Menu } from "@centaeris/ui/primitives/menu";
 import { useTranslation } from "../i18n";
-import { memo, useState } from "react";
+import { memo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link, useLocation, useNavigate, useRouteLoaderData } from "react-router";
 import {
@@ -18,6 +18,7 @@ import { apiResponse, clearCsrfToken } from "../api";
 import { useModalDialog } from "../components/useModalDialog";
 import { WorkspaceAvatar } from "../components/WorkspaceAvatar";
 import { clearWorkspaceIdentityCache } from "./workspaceIdentityCache";
+import { useCollapsedNavigation, useNavigationScroll, useWorkspaceNavigation } from "./workspaceNavigationState";
 
 function WorkspaceHeader({ workspace, workspaces, logoutBusy, logoutError, onLogout, onCollapse, search, returnTo, menuContainer }) {
   const { t } = useTranslation();
@@ -105,9 +106,14 @@ function ProjectCreateDialog({ onClose, onCreate }) {
   </div>, document.body);
 }
 
-function ConversationSections({ base, sessionProps, recentNavigation, onStartNewChat }) {
+function ConversationSections({ base, sessionProps, recentNavigation, onStartNewChat, navigation, visible }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const collapsed = useCollapsedNavigation(navigation);
+  const scrollRef = useRef(null);
+  useNavigationScroll(scrollRef, navigation, "conversations", visible && Boolean(sessionProps) && (sessionProps.ready ?? !recentNavigation?.loading));
+  const disclosure = key => ({ open: !collapsed.includes(key),
+    onToggle: event => navigation.setCollapsed(key, !event.currentTarget.open) });
   const startNewChat = (projectId = "") => {
     if (onStartNewChat) onStartNewChat(projectId);
     else {
@@ -117,10 +123,10 @@ function ConversationSections({ base, sessionProps, recentNavigation, onStartNew
     }
   };
   return (
-    <div className="shScroll">
+    <div className="shScroll" ref={scrollRef}>
       {sessionProps ? <>
         <section className="shSection shCollapsibleSection shSessionSection">
-          <details className="shDisclosure" open>
+          <details className="shDisclosure" {...disclosure("pinned")}>
             <summary className="shSectionHeader shDisclosureSummary"><span>{t("appRoute.pin")}</span><ChevronDown aria-hidden="true" /></summary>
             <nav className="workspaceSessionList" aria-label={t("shellSidebar.pinnedConversations")}>
               {sessionProps.groupedSessions.pinned.map((session) => sessionProps.renderSessionRow(session, { icon: true }))}
@@ -129,11 +135,11 @@ function ConversationSections({ base, sessionProps, recentNavigation, onStartNew
         </section>
 
         <section className="shSection shCollapsibleSection shSessionSection">
-          <details className="shDisclosure" open>
+          <details className="shDisclosure" {...disclosure("projects")}>
             <summary className="shSectionHeader shDisclosureSummary"><span>{t("shellSidebar.projects")}</span><ChevronDown aria-hidden="true" /></summary>
             <div className="shProjectTree">
               {sessionProps.projects.map((project) => <section className="shProject" key={project.id}>
-                <details className="shProjectDisclosure" open>
+                <details className="shProjectDisclosure" {...disclosure(`project:${project.id}`)}>
                   <summary className="shProjectSummary"><ChevronDown aria-hidden="true" /><Folder aria-hidden="true" /><span>{project.name}</span></summary>
                   <nav className="workspaceSessionList isProject" aria-label={t("shellSidebar.valueConversations", { value1: project.name })}>
                     {sessionProps.groupedSessions.projectSessions[project.id].map((session) => sessionProps.renderSessionRow(session, { nested: true }))}
@@ -147,7 +153,7 @@ function ConversationSections({ base, sessionProps, recentNavigation, onStartNew
         </section>
 
         <section className="shSection shCollapsibleSection shSessionSection">
-          <details className="shDisclosure" open>
+          <details className="shDisclosure" {...disclosure("recent")}>
             <summary className="shSectionHeader shDisclosureSummary"><span>{t("shellSidebar.recent")}</span><ChevronDown aria-hidden="true" /></summary>
             <nav className="workspaceSessionList" aria-label={t("shellSidebar.recentConversations")}>
               {sessionProps.groupedSessions.recent.map((session) => sessionProps.renderSessionRow(session))}
@@ -164,12 +170,14 @@ function ConversationSections({ base, sessionProps, recentNavigation, onStartNew
   );
 }
 
-export const ShellSidebar = memo(function ShellSidebar({ workspace, sessionProps, recentNavigation, onStartNewChat, onCollapse, search, menuContainer }) {
+export const ShellSidebar = memo(function ShellSidebar({ workspace, sessionProps, recentNavigation, onStartNewChat, onCollapse, search, menuContainer, navigationVisible = true }) {
   const { t } = useTranslation();
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [logoutError, setLogoutError] = useState("");
   const [projectCreateOpen, setProjectCreateOpen] = useState(false);
   const { workspaces = [workspace] } = useRouteLoaderData("workspace");
+  const { user } = useRouteLoaderData("authenticated");
+  const navigation = useWorkspaceNavigation(user.id, workspace.id);
   const location = useLocation();
   const navigate = useNavigate();
   const base = `/w/${encodeURIComponent(workspace.id)}`;
@@ -227,7 +235,7 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, sessionProps
         </Link>
       </nav>
 
-      <ConversationSections base={base} sessionProps={sessionProps ? { ...sessionProps, onOpenProjectCreate: () => setProjectCreateOpen(true) } : null} recentNavigation={recentNavigation} onStartNewChat={onStartNewChat} />
+      <ConversationSections base={base} sessionProps={sessionProps ? { ...sessionProps, onOpenProjectCreate: () => setProjectCreateOpen(true) } : null} recentNavigation={recentNavigation} onStartNewChat={onStartNewChat} navigation={navigation} visible={navigationVisible} />
 
       {projectCreateOpen ? <ProjectCreateDialog onClose={() => setProjectCreateOpen(false)} onCreate={sessionProps.onCreateProject} /> : null}
     </aside>

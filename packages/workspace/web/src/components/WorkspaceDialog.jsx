@@ -4,7 +4,7 @@ import { useId } from "react";
 import { X } from "lucide-react";
 import { useModalDialog } from "./useModalDialog";
 
-export function WorkspaceDialog({ title, description, children, busy = false, wide = false, className = "", onClose }) {
+export function WorkspaceDialog({ title, description, children, error = "", busy = false, wide = false, className = "", onClose }) {
   const { t } = useTranslation();
   const titleId = useId();
   const dialogRef = useModalDialog({ busy, onClose });
@@ -14,6 +14,7 @@ export function WorkspaceDialog({ title, description, children, busy = false, wi
         <div><h2 id={titleId}>{title}</h2>{description ? <p>{description}</p> : null}</div>
         <button type="button" disabled={busy} aria-label={t("workspaceContextPanel.close")} onClick={onClose}><X aria-hidden="true" /></button>
       </header>
+      {error ? <p className="dialogError" role="alert">{error}</p> : null}
       {children}
     </section>
   </div>;

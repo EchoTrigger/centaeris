@@ -166,6 +166,23 @@ class PresentationChangeTests(TransactionTestCase):
         self.assertGreater(self.versions()["state"], 0)
         self.assertEqual(session_change_key(self.session.pk, "state"), f"session:{self.session.pk}:state")
 
+    def test_subagent_source_key_projects_only_the_parent_session_revision(self):
+        before = self.versions()
+        other = create_session(workspace=self.workspace, owner=self.user)
+        other_before = self.versions(session=other)
+        key = session_change_key(self.session.pk, "subagents")
+        self.assertIn(key, presentation_change_keys(self.workspace.pk, self.session.pk).values())
+        self.assertNotIn(key, presentation_change_keys(self.workspace.pk, other.pk).values())
+        self.assertNotIn(key, presentation_change_keys(self.workspace.pk).values())
+        with transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute("SELECT public.workspace_presentation_bump_v1(%s)", [key])
+            cursor.execute("SELECT public.workspace_presentation_bump_v1(%s)", [key])
+        self.assertEqual(PresentationChangeOutbox.objects.filter(key=key).count(), 1)
+        self.assertEqual(read_presentation_versions(self.workspace.pk, self.session.pk)["subagents"], before["subagents"])
+        self.assertEqual(drain_pending_changes(), 1)
+        self.assertEqual(read_presentation_versions(self.workspace.pk, self.session.pk)["subagents"], before["subagents"] + 1)
+        self.assertEqual(read_presentation_versions(self.workspace.pk, other.pk), other_before)
+
     def test_relay_is_bounded_and_durable_when_wake_notifications_are_lost(self):
         self.versions()
         for index in range(4):
@@ -353,11 +370,12 @@ class PresentationChangeGcTests(TransactionTestCase):
 
 
 class PresentationChangeBackendTests(SimpleTestCase):
-    def test_display_scope_tracks_only_its_five_data_views(self):
+    def test_display_scope_tracks_only_its_six_data_views(self):
         self.assertEqual(presentation_change_keys('workspace', 'session'), {
             'navigation': 'workspace:workspace:navigation', 'history': 'workspace:workspace:history',
             'work': 'workspace:workspace:work', 'state': 'session:session:state',
             'context': 'session:session:context',
+            'subagents': 'session:session:subagents',
         })
 
     def test_live_readers_reject_non_postgres_backends_before_querying(self):
