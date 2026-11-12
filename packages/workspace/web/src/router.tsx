@@ -231,8 +231,9 @@ export function createRouter() {
                     { path: "work/*", Component: WorkPrototypeRoute },
                     { path: "sessions/:sessionId", element: <></> },
                     { path: "library", loader: ({ request, params }) => new URL(request.url).searchParams.get("view") === "skills"
-                      ? redirect(`/w/${encodeURIComponent(params.workspaceId || "")}/extensions?view=skills`) : null, element: <LibraryRoute embedded /> },
-                    { path: "library/:libraryObjectId", element: <LibraryObjectRoute embedded /> },
+                      ? redirect(`/w/${encodeURIComponent(params.workspaceId || "")}/extensions?view=skills`) : null, element: <LibraryRoute embedded />, children: [
+                        { path: ":libraryObjectId", element: <LibraryObjectRoute embedded inline /> },
+                      ] },
                     { path: "extensions", Component: ExtensionsRoute },
                     { path: "settings/plugins", loader: ({ params }) => redirect(`/w/${encodeURIComponent(params.workspaceId || "")}/extensions`) },
                     ...["preferences", "security", "general", "workspace-profile", "members", "groups", "models", "environment", "developer", "archive"].map((section) => ({ path: `settings/${section}`, Component: SettingsRoute })),

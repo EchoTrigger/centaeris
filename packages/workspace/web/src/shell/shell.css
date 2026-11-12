@@ -467,7 +467,6 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shFooterMark { width: 16px; height: 16px; flex: none; border-radius: 4px; }
 
 .shEmbeddedLibrary { min-height: 100%; }
-.shEmbeddedLibrary .libraryHeader { padding-top: 48px; }
 
 .shPluginPage { position: fixed; z-index: 70; inset: 0 0 0 270px; display: flex; flex-direction: column; overflow: hidden; background: var(--surface-color); }
 .shPluginHeader { display: flex; width: min(1040px, calc(100% - 64px)); align-items: flex-end; justify-content: space-between; margin: 0 auto; padding: 52px 0 18px; }

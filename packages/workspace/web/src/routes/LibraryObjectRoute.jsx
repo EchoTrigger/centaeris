@@ -27,7 +27,7 @@ function isMarkdownFile(item) {
   return contentType === "text/markdown" || /\.(md|markdown)$/i.test(item?.displayName || "");
 }
 
-function LibraryPreviewPageContent() {
+function LibraryPreviewPageContent({ inline = false } = {}) {
   const { t } = useTranslation();
   const params = useParams();
   const location = useLocation();
@@ -269,8 +269,7 @@ function LibraryPreviewPageContent() {
     <span className="srOnly" role="status" aria-live="polite">{saveStatus}</span>
     <header className="libraryPreviewHeader">
       {isNote ? <nav className="libraryNoteIdentity" aria-label={t("libraryObjectRoute.notePath")}>
-        <button type="button" onClick={backToLibrary}>{t("agentRoute.private")}</button>
-        <span aria-hidden="true">/</span>
+        {!inline ? <><button type="button" onClick={backToLibrary}>{t("agentRoute.private")}</button><span aria-hidden="true">/</span></> : null}
         {renamingTitle
           ? <input
             autoFocus
@@ -289,7 +288,7 @@ function LibraryPreviewPageContent() {
         <small><LockKeyhole aria-hidden="true" />{t("agentRoute.private")}</small>
         <small>{saveStatus}</small>
         <button type="button" disabled={loading || saveState?.status === "syncing" || saveState?.status === "conflict"} onClick={() => void controllerRef.current?.flush()}>{t("libraryObjectRoute.saveNow")}</button>
-      </nav> : <nav aria-label={t("libraryObjectRoute.libraryPath")}><button type="button" onClick={backToLibrary}><ArrowLeft aria-hidden="true" />{t("libraryObjectRoute.library")}</button>{item && <><span>/</span><strong>{displayedTitle}</strong></>}</nav>}
+      </nav> : inline ? <div className="libraryFileTitle"><strong>{displayedTitle || t("libraryObjectRoute.openingFile")}</strong></div> : <nav aria-label={t("libraryObjectRoute.libraryPath")}><button type="button" onClick={backToLibrary}><ArrowLeft aria-hidden="true" />{t("libraryObjectRoute.library")}</button>{item && <><span>/</span><strong>{displayedTitle}</strong></>}</nav>}
       {item && !isNote && <div className="libraryPreviewActions">{error ? <small className="error" role="alert">{error}</small> : null}<a href={apiUrl(`/api/library/${item.id}/download`)} aria-label={t("workspaceContextPanel.download")}><Download aria-hidden="true" /></a><button type="button" disabled={deleting} onClick={() => void deleteItem()} aria-label={t("agentRoute.moveToTrash")}><Trash2 aria-hidden="true" /></button></div>}
     </header>
     <section className={`libraryPreviewBody${isNote ? " libraryNotePreview" : ""}${isMarkdown ? " isMarkdown" : ""}${isCode ? " isCode" : ""}`}>
@@ -303,7 +302,7 @@ function LibraryPreviewPageContent() {
   </div><ConfirmDialog open={blocker.state === "blocked"} title={t("libraryObjectRoute.leaveTitle")} message={t("libraryObjectRoute.leaveHelp")} confirmLabel={t("libraryObjectRoute.leaveWithoutDraft")} cancelLabel={t("libraryObjectRoute.stay")} onCancel={() => blocker.reset()} onConfirm={() => blocker.proceed()} /></>;
 }
 
-export default function LibraryPreviewPage({ embedded = false } = {}) {
+export default function LibraryPreviewPage({ embedded = false, inline = false } = {}) {
   useTranslation();
-  return embedded ? <LibraryPreviewPageContent /> : <ShellPage><LibraryPreviewPageContent /></ShellPage>;
+  return embedded ? <LibraryPreviewPageContent inline={inline} /> : <ShellPage><LibraryPreviewPageContent inline={inline} /></ShellPage>;
 }

@@ -7,7 +7,7 @@ const url = source => `data:text/javascript;base64,${Buffer.from(source).toStrin
 const api = url(`import {context,ApiError} from ${JSON.stringify(harness)}; export {ApiError}; export const apiJson=(...args)=>context.request(...args); export const apiUrl=path=>path; export const jsonOptions=(method,value)=>({method,body:JSON.stringify(value)});`);
 const load = subjectLoader({ extraOverrides: [
   ["../api.ts", api], ["../api", api],
-  ["react-router", url(`import {context} from ${JSON.stringify(harness)}; export const Link=()=>null; export const useNavigate=()=>context.navigate; export const useRouteLoaderData=id=>id==="authenticated"?{user:context.user}:{workspace:context.workspace}; export const useSearchParams=()=>[new URLSearchParams()];`)],
+  ["react-router", url(`import {context} from ${JSON.stringify(harness)}; export const Link=()=>null; export const Outlet=()=>null; export const useParams=()=>({}); export const useNavigate=()=>context.navigate; export const useRouteLoaderData=id=>id==="authenticated"?{user:context.user}:{workspace:context.workspace}; export const useSearchParams=()=>[new URLSearchParams()];`)],
   ["../i18n", url('export const t=key=>key; export const useTranslation=()=>({t}); export const i18n={resolvedLanguage:"en"};')],
   ["../chat/MarkdownContent", url('export const MarkdownContent=()=>null;')],
 ] });

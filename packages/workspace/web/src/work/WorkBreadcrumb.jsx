@@ -1,7 +1,7 @@
 import { Link } from "react-router";
 import { useTranslation } from "../i18n";
 
-export function WorkBreadcrumb({ parents = [], current, count }) {
+export function WorkBreadcrumb({ parents = [], current, count = undefined }) {
   const { t } = useTranslation();
   return <nav className="workBreadcrumb" aria-label={t("work.breadcrumb")}>
     <ol>

@@ -8,6 +8,9 @@ import { displayWorkText, workText, exampleProjects, useWorkPrototype, workStatu
 import { ChoiceMenu, Property, StatusIcon } from "./WorkControls";
 import { WorkBreadcrumb } from "./WorkBreadcrumb";
 import "./work-prototype.css";
+import "../catalog.css";
+import { DemoInbox } from "./DemoInbox";
+import { WorkHome } from "./WorkHome";
 
 function useWorkCopy() {
   const { t } = useTranslation();
@@ -38,6 +41,7 @@ export default function WorkPrototypeRoute() {
   const dock = useContext(ConversationDockContext);
   const { t, text, statusOptions, priorityOptions, projectOptions, ownerOptions } = useWorkCopy();
   const { workspace } = useRouteLoaderData("workspace");
+  const { user } = useRouteLoaderData("authenticated");
   const state = useWorkPrototype();
   const location = useLocation();
   const navigate = useNavigate();
@@ -76,7 +80,9 @@ export default function WorkPrototypeRoute() {
   function discussions(items) { return items.length ? items.map((item, i) => <button className="workResource" key={i} onClick={() => openConversation(item)}><MessageSquare /><span>{text(item.title)}<small>{text(item.state)}</small></span><ArrowUpRight /></button>) : <p className="workEmptyText">{t("work.noConversations")}</p>; }
   let content;
   if ((page === "tasks" || page === "projects") && path[1] && !task && !project) content = <div className="workEmpty"><h2>{t("work.notFound")}</h2><Link to={`${base}/work`}>{t("work.backToWork")}</Link></div>;
-  else if (["inbox", "reviews", "home", "views"].includes(page)) {
+  else if (page === "inbox") content = <DemoInbox key={`${user.id}:${workspace.id}`} userId={user.id} workspaceId={workspace.id} />;
+  else if (page === "home") content = <WorkHome workspace={workspace} />;
+  else if (["reviews", "views"].includes(page)) {
     content = <><header className="workHeader"><WorkBreadcrumb current={t(`work.${page}`)} /></header>
       {page === "views" ? <div className="workListControls">{tabs([["issues", t("work.issues")], ["projects", t("work.projects")]])}</div> : null}
     </>;
