@@ -17,6 +17,8 @@ use std::time::Duration;
 
 #[path = "core_subagent/call_chain.rs"]
 mod call_chain;
+#[path = "core_subagent/pending_leases.rs"]
+mod pending_leases;
 
 #[derive(Debug)]
 struct RecordingRunner {
