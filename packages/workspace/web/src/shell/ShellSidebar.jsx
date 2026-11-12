@@ -14,9 +14,8 @@ import {
   ListTodo,
   House,
   MessageSquare,
-  Settings,
 } from "lucide-react";
-import { exampleProjects, useWorkPrototype } from "../work/workPrototype";
+import { displayWorkText, exampleProjects, useWorkPrototype } from "../work/workPrototype";
 import { apiResponse, clearCsrfToken } from "../api";
 import { WorkspaceAvatar } from "../components/WorkspaceAvatar";
 import { clearWorkspaceIdentityCache } from "./workspaceIdentityCache";
@@ -125,23 +124,21 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
       <WorkspaceHeader onNewConversation={newConversation} workspace={workspace} workspaces={workspaces} logoutBusy={logoutBusy} logoutError={logoutError} onLogout={logout} menuContainer={menuContainer}
         search={search} onCollapse={onCollapse} returnTo={location.pathname + location.search + location.hash} />
       <nav className="shPrimaryNav workPrimaryNav" aria-label={t("shellSidebar.mainView")}>
-        <Link className="shRow" to={`${base}/work`} aria-current={location.pathname === `${base}/work` && !location.search ? "page" : undefined}><House aria-hidden="true" /><span>我的工作</span></Link>
-        <Link className="shRow" to={`${base}/work/projects`} aria-current={location.pathname.startsWith(`${base}/work/projects`) ? "page" : undefined}><Folder aria-hidden="true" /><span>项目</span></Link>
-        <Link className="shRow" to={`${base}/work/tasks`} aria-current={location.pathname.startsWith(`${base}/work/tasks`) ? "page" : undefined}><ListTodo aria-hidden="true" /><span>任务</span></Link>
+        <Link className="shRow" to={`${base}/work`} aria-current={location.pathname === `${base}/work` && !location.search ? "page" : undefined}><House aria-hidden="true" /><span>{t("work.myWork")}</span></Link>
+        <Link className="shRow" to={`${base}/work/projects`} aria-current={location.pathname.startsWith(`${base}/work/projects`) ? "page" : undefined}><Folder aria-hidden="true" /><span>{t("work.projects")}</span></Link>
+        <Link className="shRow" to={`${base}/work/tasks`} aria-current={location.pathname.startsWith(`${base}/work/tasks`) ? "page" : undefined}><ListTodo aria-hidden="true" /><span>{t("work.tasks")}</span></Link>
+        <Link className="shRow" to={base + "/extensions"} aria-current={inExtensions ? "page" : undefined}><Blocks aria-hidden="true" /><span>{t("extensions.title")}</span></Link>
         <Link className="shRow" to={base + "/library"} aria-current={inLibrary ? "page" : undefined}><Library aria-hidden="true" /><span>{t("libraryObjectRoute.library")}</span></Link>
         <Link className="shRow" to={`${base}/app`} aria-current={isHome || location.pathname.startsWith(`${base}/sessions/`) ? "page" : undefined}><MessageSquare aria-hidden="true" /><span>Agent</span></Link>
       </nav>
-      <nav className="workRailViews" aria-label="收藏与视图">
-        <p className="workRailHeading">收藏</p>
-        {exampleProjects.filter(project => work?.favorites.includes(project.id)).map(project => <Link className="shRow" key={project.id} to={`${base}/work/projects/${project.id}`}><span className="workRailProjectIcon">{project.icon}</span><span>{project.name}</span></Link>)}
-        {!work?.favorites.length ? <p className="workRailEmpty">收藏项目，方便下次访问</p> : null}
-        <p className="workRailHeading">视图</p>
-        <Link className="shRow" to={`${base}/work?tab=attention`} aria-current={location.pathname === `${base}/work` && location.search.includes("tab=attention") ? "page" : undefined}><ListTodo aria-hidden="true" /><span>需要回应</span><span className="workRailCount">{work?.tasks.filter(task => task.owner === "我" && task.attention && !["已完成", "已取消"].includes(task.status)).length || 0}</span></Link>
+      <nav className="workRailViews" aria-label={t("work.favoritesAndViews")}>
+        <p className="workRailHeading">{t("work.favorites")}</p>
+        {exampleProjects.filter(project => work?.favorites.includes(project.id)).map(project => <Link className="shRow" key={project.id} to={`${base}/work/projects/${project.id}`}><span className="workRailProjectIcon">{project.icon}</span><span>{displayWorkText(project.name, t)}</span></Link>)}
+        {!work?.favorites.length ? <p className="workRailEmpty">{t("work.favoriteHint")}</p> : null}
+        <p className="workRailHeading">{t("work.views")}</p>
+        <Link className="shRow" to={`${base}/work?tab=attention`} aria-current={location.pathname === `${base}/work` && location.search.includes("tab=attention") ? "page" : undefined}><ListTodo aria-hidden="true" /><span>{t("work.needsAttention")}</span><span className="workRailCount">{work?.tasks.filter(task => task.owner === "me" && task.attention && !["done", "cancelled"].includes(task.status)).length || 0}</span></Link>
       </nav>
-      <nav className="shPrimaryNav workRailFooter" aria-label="工作区工具">
-        <Link className="shRow" to={base + "/extensions"} aria-current={inExtensions ? "page" : undefined}><Blocks aria-hidden="true" /><span>{t("extensions.title")}</span></Link>
-        <Link className="shRow" to={`${base}/settings/preferences`} state={{ returnTo: location.pathname + location.search }}><Settings aria-hidden="true" /><span>{t("shellSidebar.settings")}</span></Link>
-      </nav>
+
     </aside>
   );
 });

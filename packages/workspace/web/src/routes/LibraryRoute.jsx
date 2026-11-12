@@ -6,7 +6,7 @@ import { Link, useNavigate, useRouteLoaderData, useSearchParams } from "react-ro
 import {
   BookOpen, ChevronDown, ChevronRight, Download, FileText, Folder, FolderInput,
   Image as ImageIcon, LoaderCircle, MessageSquarePlus, Minus,
-  Search, Trash2, Upload, X,
+  Trash2, Upload, X,
 } from "lucide-react";
 import { ApiError, apiJson as api, apiUrl, jsonOptions } from "../api";
 import { OperationClient } from "../chat/operationReceipts";
@@ -71,7 +71,6 @@ function LibraryPageContent({ embedded = false } = {}) {
   const [objects, setObjects] = useState([]);
   const [folderPath, setFolderPath] = useState([]);
   const [filter, setFilter] = useState("all");
-  const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [newMenuOpen, setNewMenuOpen] = useState(false);
   const [templatesOpen, setTemplatesOpen] = useState(false);
@@ -140,9 +139,8 @@ function LibraryPageContent({ embedded = false } = {}) {
     loadLibrary();
   }, [folderId]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: Changing catalogs intentionally clears view-local search and selection state.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Changing catalogs intentionally clears view-local selection state.
   useEffect(() => {
-    setQuery("");
     setSelectedIds([]);
   }, [libraryView]);
 
@@ -410,13 +408,12 @@ function LibraryPageContent({ embedded = false } = {}) {
   }
 
   const visibleObjects = useMemo(() => {
-    const normalizedQuery = query.trim().toLocaleLowerCase();
     return objects.filter((item) => {
       if (filter === "images" && !isImage(item)) return false;
       if (filter === "files" && (isImage(item) || isFolder(item))) return false;
-      return !normalizedQuery || item.displayName.toLocaleLowerCase().includes(normalizedQuery);
+      return true;
     });
-  }, [filter, objects, query]);
+  }, [filter, objects]);
   const visibleObjectIds = visibleObjects.map((item) => item.id);
   const allVisibleSelected = visibleObjectIds.length > 0 && visibleObjectIds.every((itemId) => selectedIds.includes(itemId));
   const selectionContainsFolder = selectedItems.some(isFolder);
@@ -482,7 +479,6 @@ function LibraryPageContent({ embedded = false } = {}) {
             </div> : libraryView === "materials" ? <div className="libraryFilters" role="tablist" aria-label={t("libraryRoute.materialType")}>
               {[["all", t("libraryRoute.all")], ["images", t("attachmentCard.image")], ["files", t("libraryRoute.files")]].map(([value, label]) => <button className={filter === value ? "active" : ""} type="button" key={value} role="tab" aria-selected={filter === value} onClick={() => setFilter(value)}>{label}</button>)}
             </div> : <span className="libraryCatalogAll">{t("libraryRoute.all")}</span>}
-            <label className="librarySearch"><Search aria-hidden="true" /><span className="srOnly">{t("libraryRoute.searchThisLibrary")}</span><input aria-label={t("libraryRoute.searchThisLibrary")} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("libraryRoute.search")} /></label>
           </div>
 
           {libraryView === "materials" ? <>

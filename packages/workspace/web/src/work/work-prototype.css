@@ -24,8 +24,6 @@
 .workTabs button[aria-pressed=true] { border-color:var(--outline-variant); background:var(--surface-container); color:var(--on-surface); font-weight:500; }
 .workTabs button:hover { background:var(--surface-hover); color:var(--on-surface); }
 .workToolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 16px; min-height:44px; }
-.workSearch { display:flex; align-items:center; gap:7px; color:var(--process-text); }
-.workSearch input { width:160px; border:0; background:transparent; min-height:30px; padding-inline:0; font-size:12px; }
 .workPrototype .workFilter { color:var(--process-text); border:1px solid var(--outline-variant); min-height:28px; font-size:12px; }
 .workGroup { margin:0 0 14px; }
 .workGroup > summary { list-style:none; display:flex; align-items:center; gap:9px; padding:9px 12px; border-radius:8px; background:var(--surface-container); font-size:12px; font-weight:500; cursor:pointer; }
@@ -150,6 +148,7 @@
 .workDialog header h2 { font-size:12px; color:var(--on-surface); }
 .workDialog label { display:grid; gap:8px; margin:16px 0; font-size:12px; }
 .workDialog footer { margin:24px -24px -20px; padding:14px 24px; border-top:1px solid var(--outline-variant); }
+.workDialog footer button { flex-shrink:0; white-space:nowrap; }
 .workDialog footer span { font-size:12px; color:var(--process-text); }
 .workDialog .workTitleField input { border:0; padding:4px 0; font-size:20px; font-weight:500; }
 .workDialog .workDescriptionField textarea { border:0; padding:4px 0; font-size:14px; }
@@ -173,7 +172,6 @@
   .workProperty > span { display:block; padding:0 7px; }
   .workPropertySection { flex:1 1 140px; margin:0; padding:12px 0 0; } .workPropertySection:last-child { flex-basis:100%; }
   .workTabs,.workToolbar { padding-inline:18px; gap:14px; } .workToolbar { flex-wrap:wrap; }
-  .workSearch { flex:1; min-width:140px; } .workSearch input { width:100%; min-width:0; }
   .workRow { padding:12px 18px; gap:8px; min-height:48px; } .workGroup > summary { padding-inline:18px; }
   .workRowLabel { display:none; } .workRowTitle small { display:block; margin:4px 0 0; } .workRowPriority { display:none; }
   .workListFoot { padding:16px 18px; } .workDetailMain,.workProjectBody { padding:25px 20px; }
@@ -211,7 +209,6 @@
 .workChecks { display:grid; gap:10px; }
 .workResourceList { padding:4px; border:1px solid var(--outline-variant); border-radius:12px; }
 .workActivityDot { width:5px; height:5px; flex:none; border-radius:50%; background:var(--outline); }
-.shPrimaryNav.workRailFooter { margin-top:auto; padding-top:20px; padding-bottom:4px; }
 .workRailViews .shRow { min-height:30px; font-size:12px; }
 @media (max-width:760px) {
   .workPrototype { padding:6px; }
@@ -230,10 +227,8 @@
   .workExecutionSummary > div { flex-basis:calc(100% - 42px); }
   .workExecutionSummary > button { margin-left:42px; }
   .workProjectList { padding:0 10px; }
-  .workRailFooter { padding-top:4px; }
-  .shSidebar > .workRailViews,.shSidebar > .workRailFooter { display:none; }
-  .workspaceDrawer .shSidebar > .workRailViews,.workspaceDrawer .shSidebar > .workRailFooter { display:block; }
-  .workspaceDrawer .shSidebar > .shPrimaryNav.workRailFooter { margin-top:auto; }
+  .shSidebar > .workRailViews { display:none; }
+  .workspaceDrawer .shSidebar > .workRailViews { display:block; }
 }
 
 .conversationDock .workConversationTab { order:-1; max-width:210px; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; display:block; }

@@ -208,7 +208,7 @@ test("workspace settings replace the work navigation and return to the same draf
   render(<RouterProvider router={router} />);
 
   await user.type(await screen.findByRole("textbox", { name: "Session draft" }), "Keep this draft");
-  await user.click(screen.getByRole("link", { name: "我的工作" }));
+  await user.click(screen.getByRole("link", { name: "work.myWork" }));
   expect(await screen.findByRole("heading", { name: "Work prototype" })).toBeTruthy();
   await router.navigate(-1);
   expect((await screen.findByRole("textbox", { name: "Session draft" }) as HTMLTextAreaElement).value).toBe("Keep this draft");
@@ -301,7 +301,7 @@ test("a conversation keeps its draft while floating above work, minimizing and e
   const router = createMemoryRouter([{ id: "authenticated", loader: () => ({ user: { id: "dock-user" } }), HydrateFallback: () => null, children: [{ id: "workspace", path: "/w/dock", loader: () => ({ workspace, selectedSession: null }), Component: WorkspaceHomeRoute, children: [{ path: "app", element: <></> }, { path: "work", element: <h1>工作列表</h1> }] }] }], { initialEntries: ["/w/dock/app"] });
   render(<RouterProvider router={router} />);
   await user.type(await screen.findByRole("textbox", { name: "Session draft" }), "保留这段草稿");
-  await user.click(screen.getByRole("link", { name: "我的工作" }));
+  await user.click(screen.getByRole("link", { name: "work.myWork" }));
   await screen.findByRole("heading", { name: "工作列表" });
   await user.click(screen.getByRole("button", { name: "打开浮窗" }));
   expect(screen.getByText("浮窗已打开")).toBeTruthy();

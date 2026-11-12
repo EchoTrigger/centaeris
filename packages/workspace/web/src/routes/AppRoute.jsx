@@ -1549,7 +1549,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     else navigate(sessionChatPath(workspace.id, target.id));
   }
   const historyProps = { sessionProps: sidebarSessions, recentNavigation: navigationError ? { error: true } : { loading: !navigationLoaded }, onStartNewChat: startNavigationChat, onOpenSession: openHistorySession };
-  const chatTitleControl = <ConversationHistory {...historyProps} label="切换会话" className="conversationSwitcher" side="bottom"><span>{activeSession?.title || "新会话"}</span><ChevronDown /></ConversationHistory>;
+  const chatTitleControl = <ConversationHistory {...historyProps} label={t("work.conversation.switch")} className="conversationSwitcher" side="bottom"><span>{activeSession?.title || t("work.conversation.untitled")}</span><ChevronDown /></ConversationHistory>;
 
   return (
     <main
@@ -1601,7 +1601,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
             aria-label={t("searchOverlay.searchConversationsAndNotes")} title={t("shellSidebar.searchCtrlK")}><Search aria-hidden="true" /></button> : null}
         </div>
         <div className="conversationWindowActions">
-          {chatFloating ? <><button className="workspacePanelToggle" aria-label="最小化会话" onClick={onMinimizeChat}><Minus /></button><button className="workspacePanelToggle" aria-label="展开会话" onClick={onExpandChat}><Maximize2 /></button></> : !catalogContent ? <button className="workspacePanelToggle" aria-label="收起到工具栏" onClick={onDockChat}><Minimize2 /></button> : null}
+          {chatFloating ? <><button className="workspacePanelToggle" aria-label={t("work.conversation.minimize")} onClick={onMinimizeChat}><Minus /></button><button className="workspacePanelToggle" aria-label={t("work.conversation.expand")} onClick={onExpandChat}><Maximize2 /></button></> : !catalogContent ? <button className="workspacePanelToggle" aria-label={t("work.conversation.dock")} onClick={onDockChat}><Minimize2 /></button> : null}
         </div>
         {visible && contextPanel.mode !== "closed" ? <WorkspacePreviewToggle
           ref={previewToggleRef} panelId={previewPanelId} open={filePreviewOpen} onToggle={toggleFilePreview}
@@ -1693,7 +1693,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           </div>
           {isHome ? <div className="shHomeFollowups">
             <HomeQuickActions onQuickAction={handleQuickAction} />
-            {sessions.length ? <nav className="conversationRecent" aria-label="最近会话">{sessions.slice(0, 3).map(item => <button key={item.id} onClick={() => openHistorySession(item)}><span>{item.title}</span><span>继续会话</span></button>)}</nav> : null}
+            {sessions.length ? <nav className="conversationRecent" aria-label={t("work.conversation.recent")}>{sessions.slice(0, 3).map(item => <button key={item.id} onClick={() => openHistorySession(item)}><span>{item.title}</span><span>{t("work.conversation.continue")}</span></button>)}</nav> : null}
           </div> : null}
         </div>
       </section>
@@ -1701,7 +1701,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       {catalogContent ? <section className="workspaceCatalog" inert={search.open}>
         <ConversationDockContext.Provider value={conversationDock}>{catalogContent}</ConversationDockContext.Provider>
       </section> : null}
-      <nav className="conversationDock" ref={setConversationDock} aria-label="会话工具栏" inert={search.open}>
+      <nav className="conversationDock" ref={setConversationDock} aria-label={t("work.conversation.toolbar")} inert={search.open}>
         {catalogContent && activeSession && !chatFloating ? <button className="conversationDockSession" aria-pressed={chatFloating} onClick={chatFloating ? onMinimizeChat : onShowChat}><span className={hasActiveAgentRun ? "isRunning" : ""} />{activeSession.title}</button> : null}
       </nav>
       {search.open ? <WorkspaceSearch workspaceId={workspace.id} onClose={search.close} inputRef={search.inputRef} /> : null}

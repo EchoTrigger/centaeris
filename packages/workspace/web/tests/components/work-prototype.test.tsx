@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, Outlet, RouterProvider } from "react-router";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { i18n } from "../../src/i18n";
 import WorkPrototypeRoute from "../../src/work/WorkPrototypeRoute";
 import { WorkPrototypeProvider } from "../../src/work/workPrototype";
 
-beforeEach(() => { vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} }); });
+beforeEach(async () => { await i18n.changeLanguage("zh-CN"); vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} }); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 function mount(path = "/w/demo/work") {
   const router = createMemoryRouter([{ id: "workspace", path: "/w/demo", loader: () => ({ workspace: { id: "demo" } }), HydrateFallback: () => null,
@@ -72,4 +73,29 @@ test("filter menu supports keyboard dismissal and keeps the selected filter in t
   expect(router.state.location.search).toContain("status=");
   expect(screen.queryByRole("link", { name: /核查工具包发布材料/ })).toBeNull();
   expect(screen.getByRole("link", { name: /撰写工具包发布说明/ })).toBeTruthy();
+});
+
+
+test("locale changes translate sample content while retaining correction progress and authored text", async () => {
+  const user = userEvent.setup();
+  await i18n.changeLanguage("en");
+  mount();
+  await user.click(await screen.findByRole("link", { name: /Review toolkit release materials/ }));
+  await user.click(screen.getByRole("button", { name: "Add sample file" }));
+  expect(screen.getByText("Ready for review")).toBeTruthy();
+  const draft = "保留我的原始说明";
+  await user.type(screen.getByRole("textbox", { name: "Add discussion" }), draft);
+  await act(() => i18n.changeLanguage("zh-CN"));
+  expect(screen.getByText("待复核")).toBeTruthy();
+  expect((screen.getByRole("textbox", { name: "添加讨论" }) as HTMLTextAreaElement).value).toBe(draft);
+  await act(() => i18n.changeLanguage("en"));
+  expect(screen.getByText("Ready for review")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Simulate review" }));
+  expect(screen.getByText("3 / 3 passed")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Status: In progress" })).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Post" }));
+  expect(within(screen.getByRole("list", { name: "Activity log" })).getByText(`Me: ${draft}`)).toBeTruthy();
+  await act(() => i18n.changeLanguage("zh-CN"));
+  expect(screen.getByText("3 / 3 项通过")).toBeTruthy();
+  expect(within(screen.getByRole("list", { name: "活动记录" })).getByText(`我：${draft}`)).toBeTruthy();
 });

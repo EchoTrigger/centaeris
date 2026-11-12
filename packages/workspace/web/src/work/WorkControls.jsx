@@ -1,15 +1,18 @@
+import { useTranslation } from "../i18n";
 import { Menu } from "@centaeris/ui/primitives/menu";
 import { Check, CheckCircle2, ChevronDown, Circle, CircleDashed, Clock3, XCircle } from "lucide-react";
 
 export function StatusIcon({ status }) {
-  const Icon = status === "已完成" ? CheckCircle2 : status === "已取消" ? XCircle : status === "进行中" ? Clock3 : status === "待开始" ? CircleDashed : Circle;
-  return <Icon className={`workStatusIcon ${status === "已完成" ? "isDone" : status === "进行中" ? "isStarted" : ""}`} aria-label={status} />;
+  const { t } = useTranslation();
+  const Icon = status === "done" ? CheckCircle2 : status === "cancelled" ? XCircle : status === "in_progress" ? Clock3 : status === "todo" ? CircleDashed : Circle;
+  return <Icon className={`workStatusIcon ${status === "done" ? "isDone" : status === "in_progress" ? "isStarted" : ""}`} aria-label={t(`work.status.${status}`)} />;
 }
 
 export function ChoiceMenu({ label, value, options, onChange, icon, className = "" }) {
+  const { t } = useTranslation();
   const selected = options.find(option => option.value === value);
   return <Menu.Root modal={false}>
-    <Menu.Trigger className={`workChoice ${className}`} aria-label={`${label}：${selected?.label || value}`}>
+    <Menu.Trigger className={`workChoice ${className}`} aria-label={t("work.propertyLabel", { label, value: selected?.label || value })}>
       {selected?.icon || icon}<span>{selected?.label || value}</span><ChevronDown className="workChoiceChevron" aria-hidden="true" />
     </Menu.Trigger>
     <Menu.Portal><Menu.Positioner className="workMenuPositioner" align="start" sideOffset={5}>

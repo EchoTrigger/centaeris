@@ -17,8 +17,8 @@ test("history opens on demand and selects a conversation without replacing the w
   render(<RouterProvider router={router}/>);
   expect(screen.queryByText("调研记录")).toBeNull();
   await user.click(screen.getByRole("button",{name:"会话历史"}));
-  await user.type(await screen.findByRole("textbox",{name:"筛选会话"}),"调研");
-  expect(screen.queryByText("随手笔记")).toBeNull();
+  expect(await screen.findByRole("link", { name: "随手笔记" })).toBeTruthy();
+  expect(screen.queryByRole("textbox")).toBeNull();
   await user.click(screen.getByRole("link",{name:"调研记录"}));
   expect(onOpenSession).toHaveBeenCalledWith(sessions[0]);
   expect(router.state.location.pathname).toBe("/w/demo/work");
