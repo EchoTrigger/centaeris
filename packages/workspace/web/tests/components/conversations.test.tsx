@@ -21,6 +21,7 @@ test("history opens on demand and selects a conversation without replacing the w
   expect(screen.queryByRole("textbox")).toBeNull();
   expect(screen.getByRole("link", { name: /调研记录/ }).getAttribute("aria-current")).toBe("page");
   expect(screen.getByText("当前")).toBeTruthy();
+  expect(screen.getAllByRole("heading").map(heading => heading.textContent)).toEqual(["上周"]);
   await user.click(screen.getByRole("link",{name:/调研记录/}));
   expect(onOpenSession).toHaveBeenCalledWith(sessions[0]);
   expect(router.state.location.pathname).toBe("/w/demo/work");
