@@ -31,7 +31,7 @@ export default function WorkspaceChooserRoute() {
         {!workspaces.length ? <p>{t("workspaceChooserRoute.yourAccountDoesNotHaveAccessToAnyWorkspaces")}</p> : null}
         <nav aria-label={t("workspaceChooserRoute.workspace")}>
           {workspaces.map((workspace) => (
-            <Link to={`/w/${encodeURIComponent(workspace.id)}/app`} key={workspace.id}>
+            <Link to={`/w/${encodeURIComponent(workspace.id)}/work`} key={workspace.id}>
               <WorkspaceAvatar workspace={workspace} />
               <strong>{workspace.name}</strong>
               <small>{WORKSPACE_ROLE_LABELS()[workspace.role]}</small>

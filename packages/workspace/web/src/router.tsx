@@ -17,6 +17,8 @@ import SettingsRoute from "./routes/SettingsRoute";
 import WorkspaceChooserRoute from "./routes/WorkspaceChooserRoute";
 import WorkspaceHomeRoute from "./routes/WorkspaceHomeRoute";
 import TrashSessionRoute from "./routes/TrashSessionRoute";
+import WorkPrototypeRoute from "./work/WorkPrototypeRoute";
+import { WorkPrototypeProvider } from "./work/workPrototype";
 
 export type AuthenticatedUser = {
   id: string;
@@ -65,7 +67,7 @@ function WorkspaceEntry() {
     return <Navigate
       replace
       state={location.state}
-      to={`/w/${encodeURIComponent(destination.id)}/app`}
+      to={`/w/${encodeURIComponent(destination.id)}/work`}
     />;
   }
   return <WorkspaceChooserRoute />;
@@ -85,7 +87,7 @@ function WorkspaceLayout() {
     }
   }, [user.id, workspace.id]);
 
-  return <WorkspaceSearchHistory key={`${user.id}:${workspace.id}`}><Outlet /></WorkspaceSearchHistory>;
+  return <WorkspaceSearchHistory key={`${user.id}:${workspace.id}`}><WorkPrototypeProvider><Outlet /></WorkPrototypeProvider></WorkspaceSearchHistory>;
 }
 
 function RootLayout() {
@@ -221,11 +223,12 @@ export function createRouter() {
               shouldRevalidate: ({ currentParams, nextParams, defaultShouldRevalidate }) => defaultShouldRevalidate || currentParams.sessionId !== nextParams.sessionId,
               Component: WorkspaceLayout,
               children: [
-                { index: true, loader: ({ params }) => redirect(`/w/${encodeURIComponent(params.workspaceId || "")}/app`) },
+                { index: true, loader: ({ params }) => redirect(`/w/${encodeURIComponent(params.workspaceId || "")}/work`) },
                 {
                   Component: WorkspaceHomeRoute,
                   children: [
                     { path: "app", element: <></> },
+                    { path: "work/*", Component: WorkPrototypeRoute },
                     { path: "sessions/:sessionId", element: <></> },
                     { path: "library", loader: ({ request, params }) => new URL(request.url).searchParams.get("view") === "skills"
                       ? redirect(`/w/${encodeURIComponent(params.workspaceId || "")}/extensions?view=skills`) : null, element: <LibraryRoute embedded /> },

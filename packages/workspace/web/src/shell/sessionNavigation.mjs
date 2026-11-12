@@ -37,5 +37,5 @@ export function sessionChatPath(workspaceId, sessionId) {
 }
 
 export function isWorkspaceCatalogPath(base, pathname) {
-  return pathname === `${base}/library` || pathname.startsWith(`${base}/library/`) || pathname === `${base}/extensions`;
+  return pathname === `${base}/library` || pathname.startsWith(`${base}/library/`) || pathname === `${base}/extensions` || pathname === `${base}/work` || pathname.startsWith(`${base}/work/`);
 }

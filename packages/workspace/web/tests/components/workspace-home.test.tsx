@@ -193,6 +193,7 @@ test("workspace settings replace the work navigation and return to the same draf
       Component: WorkspaceHomeRoute,
       children: [
         { path: "app", element: <></> },
+        { path: "work/*", element: <h1>Work prototype</h1> },
         { path: "library", element: <h1>Library contents</h1> },
         { path: "extensions", element: <h1>Extension catalog</h1> },
         { path: "settings/preferences", Component: SettingsRoute },
@@ -205,6 +206,10 @@ test("workspace settings replace the work navigation and return to the same draf
   render(<RouterProvider router={router} />);
 
   await user.type(await screen.findByRole("textbox", { name: "Session draft" }), "Keep this draft");
+  await user.click(screen.getByRole("link", { name: "我的工作" }));
+  expect(await screen.findByRole("heading", { name: "Work prototype" })).toBeTruthy();
+  await router.navigate(-1);
+  expect((await screen.findByRole("textbox", { name: "Session draft" }) as HTMLTextAreaElement).value).toBe("Keep this draft");
   await user.click(screen.getByRole("button", { name: "shellSidebar.newConversation" }));
   expect(screen.getByRole("textbox", { name: "Session draft" })).toBe(document.activeElement);
   screen.getByRole("button", { name: "shellSidebar.valueWorkspaceMenu" }).focus();
@@ -215,7 +220,7 @@ test("workspace settings replace the work navigation and return to the same draf
   switchWorkspace.focus();
   await user.keyboard("{ArrowRight}");
   const workspaceChoices = await screen.findByRole("menu", { name: "shellSidebar.switchWorkspace" });
-  expect(within(workspaceChoices).getByRole("menuitem", { name: /Design/ }).getAttribute("href")).toBe("/w/design/app");
+  expect(within(workspaceChoices).getByRole("menuitem", { name: /Design/ }).getAttribute("href")).toBe("/w/design/work");
   await user.keyboard("{ArrowLeft}");
   expect(screen.queryByRole("menu", { name: "shellSidebar.switchWorkspace" })).toBeNull();
   await user.click(within(workspaceActions).getByRole("menuitem", { name: "shellSidebar.settings" }));

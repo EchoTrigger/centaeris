@@ -13,7 +13,11 @@ import {
   Plus,
   Search,
   SquarePen,
+  ListTodo,
+  House,
+  Star,
 } from "lucide-react";
+import { exampleProjects, useWorkPrototype } from "../work/workPrototype";
 import { apiResponse, clearCsrfToken } from "../api";
 import { useModalDialog } from "../components/useModalDialog";
 import { WorkspaceAvatar } from "../components/WorkspaceAvatar";
@@ -47,7 +51,7 @@ function WorkspaceHeader({ workspace, workspaces, logoutBusy, logoutError, onLog
                   <Menu.Positioner side="right" align="start" sideOffset={7} alignOffset={-5} className="shWsMenuPositioner">
                     <Menu.Popup className="shWsMenuPopover shWsMenuWorkspaces" aria-label={t("shellSidebar.switchWorkspace")}>
                       {otherWorkspaces.map(item => <Menu.LinkItem key={item.id} className="shWsMenuItem shWsMenuWorkspace" closeOnClick
-                        render={<Link to={`/w/${encodeURIComponent(item.id)}/app`} />}>
+                        render={<Link to={`/w/${encodeURIComponent(item.id)}/work`} />}>
                         <WorkspaceAvatar workspace={item} />
                         <span>{item.name}</span>
                       </Menu.LinkItem>)}
@@ -171,6 +175,7 @@ function ConversationSections({ base, sessionProps, recentNavigation, onStartNew
 }
 
 export const ShellSidebar = memo(function ShellSidebar({ workspace, sessionProps, recentNavigation, onStartNewChat, onCollapse, search, menuContainer, navigationVisible = true }) {
+  const work = useWorkPrototype();
   const { t } = useTranslation();
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [logoutError, setLogoutError] = useState("");
@@ -224,6 +229,9 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, sessionProps
       <WorkspaceHeader workspace={workspace} workspaces={workspaces} logoutBusy={logoutBusy} logoutError={logoutError} onLogout={logout} menuContainer={menuContainer}
         search={search} onCollapse={onCollapse} returnTo={location.pathname + location.search + location.hash} />
       <nav className="shPrimaryNav" aria-label={t("shellSidebar.mainView")}>
+        <Link className="shRow" to={`${base}/work`} aria-current={location.pathname === `${base}/work` ? "page" : undefined}><House aria-hidden="true" /><span>我的工作</span></Link>
+        <Link className="shRow" to={`${base}/work/projects`} aria-current={location.pathname.startsWith(`${base}/work/projects`) ? "page" : undefined}><Folder aria-hidden="true" /><span>项目</span></Link>
+        <Link className="shRow" to={`${base}/work/tasks`} aria-current={location.pathname.startsWith(`${base}/work/tasks`) ? "page" : undefined}><ListTodo aria-hidden="true" /><span>任务</span></Link>
         <button className="shRow" type="button" onClick={newConversation}>
           <SquarePen aria-hidden="true" /><span>{t("shellSidebar.newConversation")}</span>
         </button>
@@ -235,7 +243,8 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, sessionProps
         </Link>
       </nav>
 
-      <ConversationSections base={base} sessionProps={sessionProps ? { ...sessionProps, onOpenProjectCreate: () => setProjectCreateOpen(true) } : null} recentNavigation={recentNavigation} onStartNewChat={onStartNewChat} navigation={navigation} visible={navigationVisible} />
+      {location.pathname.startsWith(`${base}/work`) ? <><p className="workRailHeading">收藏</p>{exampleProjects.filter(project => work?.favorites.includes(project.id)).map(project => <Link className="shRow" key={project.id} to={`${base}/work/projects/${project.id}`}><Star aria-hidden="true" /><span>{project.name}</span></Link>)}<p className="workRailHeading">快捷视图</p><Link className="shRow" to={`${base}/work?tab=attention`}><ListTodo aria-hidden="true" /><span>需要回应</span></Link></> : null}
+      {!location.pathname.startsWith(`${base}/work`) ? <ConversationSections base={base} sessionProps={sessionProps ? { ...sessionProps, onOpenProjectCreate: () => setProjectCreateOpen(true) } : null} recentNavigation={recentNavigation} onStartNewChat={onStartNewChat} navigation={navigation} visible={navigationVisible} /> : null}
 
       {projectCreateOpen ? <ProjectCreateDialog onClose={() => setProjectCreateOpen(false)} onCreate={sessionProps.onCreateProject} /> : null}
     </aside>
