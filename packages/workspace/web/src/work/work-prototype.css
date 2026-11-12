@@ -243,3 +243,12 @@
 .workFloatingConversation textarea { width:100%; border:0; padding:2px; resize:none; }
 .workFloatingConversation footer { display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:11px; color:var(--process-text); }
 @media(max-width:760px) { .workFloatingConversation { right:12px; } .conversationDock .workConversationTab { max-width:140px; } }
+
+@media (min-width:761px) {
+  .workPrototype { padding-top:0; }
+  .workspaceWorkbench .workHeader {
+    min-height:var(--workspace-header-height);
+    padding-block:6px;
+    padding-inline-start:calc(16px + 28px * (1 - var(--workspace-sidebar-progress)));
+  }
+}
