@@ -6,6 +6,7 @@ import { ArrowUpRight, CheckCircle2, ChevronRight, Clock3, FileText, Folder, Lis
 import { useModalDialog } from "../components/useModalDialog";
 import { displayWorkText, workText, exampleProjects, useWorkPrototype, workStatuses } from "./workPrototype";
 import { ChoiceMenu, Property, StatusIcon } from "./WorkControls";
+import { WorkBreadcrumb } from "./WorkBreadcrumb";
 import "./work-prototype.css";
 
 function useWorkCopy() {
@@ -25,7 +26,7 @@ function NewTask({ onClose, onCreate, project }) {
     event.preventDefault(); const data = new FormData(event.currentTarget); const title = String(data.get("title")).trim();
     if (title) onCreate({ title, project: String(data.get("project")), description: String(data.get("description")).trim(), deliverable: "" });
   }}>
-    <header><div className="workBreadcrumb"><Folder /><span>{t("work.workspace")}</span><ChevronRight /><h2 id="work-new-title">{t("work.newTask")}</h2></div><button className="workIconButton" type="button" aria-label={t("work.cancel")} onClick={onClose}><X /></button></header>
+    <header><div className="workDialogBreadcrumb"><span>{t("work.workspace")}</span><span aria-hidden="true">/</span><h2 id="work-new-title">{t("work.newTask")}</h2></div><button className="workIconButton" type="button" aria-label={t("work.cancel")} onClick={onClose}><X /></button></header>
     <label className="workTitleField"><span className="workSrOnly">{t("work.taskName")}</span><input name="title" required maxLength={160} autoFocus placeholder={t("work.taskPlaceholder")} /></label>
     <label className="workDescriptionField"><span className="workSrOnly">{t("work.description")}</span><textarea name="description" rows={4} placeholder={t("work.descriptionPlaceholder")} /></label>
     <label>{t("work.project")}<select name="project" defaultValue={project || ""}><option value="">{t("work.noProjectMembership")}</option>{exampleProjects.map(item => <option key={item.id} value={item.id}>{text(item.name)}</option>)}</select></label>
@@ -62,7 +63,7 @@ export default function WorkPrototypeRoute() {
   function update(change, event) { state.updateTask(task.id, change, event); setNotice(event || workText("work.updated")); }
   function tabs(items) { return <nav className="workTabs" aria-label={t("work.contentViews")}>{items.map(([id, name]) => <button key={id} type="button" aria-pressed={tab === id} onClick={() => changeParam("tab", id)}>{text(name)}</button>)}</nav>; }
   function rows(items) {
-    return items.length ? <div className="workRows">{items.map(item => <Link className="workRow" key={item.id} to={`${base}/work/tasks/${item.id}`}>
+    return items.length ? <div className="workRows">{items.map(item => <Link className="workRow" key={item.id} to={`${base}/work/tasks/${item.id}`} state={{ workOrigin: { pathname: location.pathname, search: location.search } }}>
       <StatusIcon status={item.status} /><span className="workId">{item.id}</span><span className="workRowTitle">{text(item.title)}{item.attention && item.status !== "done" ? <small>{t("work.needsAttention")}</small> : null}</span><span className="workRowProject"><Folder />{text(exampleProjects.find(p => p.id === item.project)?.name || t("work.standalone"))}</span><span className="workAvatar" aria-label={t("work.ownerLabel", { owner: t(`work.owner.${item.owner}`) })}>{t(`work.owner.${item.owner}`).slice(0, 1)}</span>
     </Link>)}</div> : <div className="workEmpty"><CheckCircle2 /><h3>{t("work.emptyTitle")}</h3><p>{t("work.emptyHint")}</p><button onClick={() => setCreating(true)}>{t("work.newTask")}</button></div>;
   }
@@ -76,19 +77,24 @@ export default function WorkPrototypeRoute() {
   let content;
   if ((page === "tasks" || page === "projects") && path[1] && !task && !project) content = <div className="workEmpty"><h2>{t("work.notFound")}</h2><Link to={`${base}/work`}>{t("work.backToWork")}</Link></div>;
   else if (["inbox", "reviews", "home", "views"].includes(page)) {
-    content = <><header className="workHeader"><h1>{t(`work.${page}`)}</h1></header>
+    content = <><header className="workHeader"><WorkBreadcrumb current={t(`work.${page}`)} /></header>
       {page === "views" ? <div className="workListControls">{tabs([["issues", t("work.issues")], ["projects", t("work.projects")]])}</div> : null}
     </>;
   }
   else if (task) {
     const taskProject = exampleProjects.find(item => item.id === task.project);
+    const origin = location.state?.workOrigin;
+    const originProject = exampleProjects.find(item => origin?.pathname === `${base}/work/projects/${item.id}`);
+    const parents = originProject
+      ? [{ label: t("work.projects"), to: `${base}/work/projects` }, { label: text(originProject.name), to: origin }]
+      : [{ label: t(origin?.pathname === `${base}/work` ? "work.myIssues" : "work.issues"), to: origin?.pathname === `${base}/work` || origin?.pathname === `${base}/work/tasks` ? origin : `${base}/work/tasks` }];
     function simulateRun() {
       update({ run: workText("work.run.simulated"), conversations: [...task.conversations, { title: workText("work.executionTitle"), state: workText("work.run.simulated"), text: workText("work.executionText") }] }, workText("work.event.simulated"));
     }
     const latestConversation = task.conversations.at(-1);
     content = <>
       <header className="workHeader">
-        <div className="workBreadcrumb"><Link to={`${base}/work/tasks`}>{t("work.issues")}</Link><ChevronRight /><span>{task.id}</span></div>
+        <WorkBreadcrumb parents={parents} current={task.id} />
         <button className="workQuiet" onClick={() => {
           const item = { title: workText("work.discussionTitle"), state: workText("work.run.discussion"), text: workText("work.discussionText", { title: task.title }) };
           update({ conversations: [...task.conversations, item] }, workText("work.event.linkedDiscussion")); openConversation(item);
@@ -136,17 +142,17 @@ export default function WorkPrototypeRoute() {
     </>;
   } else if (project) {
     const items = state.tasks.filter(item => item.project === project.id);
-    content = <><header className="workHeader"><div className="workBreadcrumb"><Link to={`${base}/work/projects`}>{t("work.projects")}</Link><span>/</span><span>{text(project.name)}</span></div><button aria-label={state.favorites.includes(project.id) ? t("work.unfavoriteProject") : t("work.favoriteProject")} aria-pressed={state.favorites.includes(project.id)} onClick={() => state.toggleFavorite(project.id)}><Star /></button></header><div className="workProjectBody"><div className="workProjectTitle"><span className="workProjectMark">{project.icon}</span><div><h1>{text(project.name)}</h1><p>{text(project.description)}</p></div></div>{tabs([["overview", t("work.overview")], ["tasks", t("work.taskCount", { count: items.length })], ["materials", t("work.materials")], ["conversations", t("work.conversations")]])}
+    content = <><header className="workHeader"><WorkBreadcrumb parents={[{ label: t("work.projects"), to: `${base}/work/projects` }]} current={text(project.name)} /><button aria-label={state.favorites.includes(project.id) ? t("work.unfavoriteProject") : t("work.favoriteProject")} aria-pressed={state.favorites.includes(project.id)} onClick={() => state.toggleFavorite(project.id)}><Star /></button></header><div className="workProjectBody"><div className="workProjectTitle"><span className="workProjectMark">{project.icon}</span><div><h1>{text(project.name)}</h1><p>{text(project.description)}</p></div></div>{tabs([["overview", t("work.overview")], ["tasks", t("work.taskCount", { count: items.length })], ["materials", t("work.materials")], ["conversations", t("work.conversations")]])}
     {tab === "overview" ? <><section className="workProjectOverview"><div className="workProse"><h2>{t("work.projectGoal")}</h2><p>{text(project.outcome)}</p><h2>{t("work.linkedMaterials")}</h2>{project.materials.map(name => <button key={name.key || name} className="workResource" onClick={() => setDocument(name)}><FileText /><span>{text(name)}</span><ArrowUpRight /></button>)}</div><dl><dt>{t("work.owner")}</dt><dd>{t(`work.owner.${project.owner}`)}</dd><dt>{t("work.progress")}</dt><dd>{t("work.completedCount", { completed: items.filter(item => item.status === "done").length, total: items.length })}</dd><dt>{t("work.capabilities")}</dt><dd>{text(project.skill)}</dd></dl></section><div className="workSectionHeading"><h2>{t("work.activeTasks")}</h2><button onClick={() => setCreating(true)}><Plus />{t("work.newTask")}</button></div>{rows(items.filter(item => item.status === "in_progress"))}</> : null}
     {tab === "tasks" ? <><div className="workToolbar"><span>{t("work.itemCount", { count: items.length })}</span><button onClick={() => setCreating(true)}><Plus />{t("work.newTask")}</button></div>{grouped(items)}</> : null}
     {tab === "materials" ? <section className="workSection">{project.materials.map(name => <button key={name.key || name} className="workResource" onClick={() => setDocument(name)}><FileText /><span>{text(name)}<small>{t("work.sampleMaterial")}</small></span><ArrowUpRight /></button>)}<Link className="workTextLink" to={`${base}/library`}>{t("work.openLibrary")}<ArrowUpRight /></Link></section> : null}
     {tab === "conversations" ? <section className="workSection">{discussions(items.flatMap(item => item.conversations))}</section> : null}</div></>;
-  } else if (page === "projects") content = <><header className="workHeader"><h1><Folder />{t("work.projects")}<span className="workCount">{exampleProjects.length}</span></h1></header><div className="workProjectList"><div className="workProjectColumns"><span>{t("work.name")}</span><span>{t("work.progressColumn")}</span><span>{t("work.owner")}</span></div>{exampleProjects.map(item => { const tasks = state.tasks.filter(task => task.project === item.id); return <Link to={`${base}/work/projects/${item.id}`} className="workProjectRow" key={item.id}><span className="workProjectMark">{item.icon}</span><div><h2>{text(item.name)}</h2><p>{text(item.description)}</p></div><span className="workProjectProgress"><span className="workProgressTrack"><span style={{ width: `${tasks.length ? tasks.filter(task => task.status === "done").length / tasks.length * 100 : 0}%` }} /></span><span>{tasks.filter(task => task.status === "done").length} / {tasks.length}</span></span><span className="workAvatar">{t(`work.owner.${item.owner}`).slice(0, 1)}</span></Link>; })}</div></>;
+  } else if (page === "projects") content = <><header className="workHeader"><WorkBreadcrumb current={t("work.projects")} count={exampleProjects.length} /></header><div className="workProjectList"><div className="workProjectColumns"><span>{t("work.name")}</span><span>{t("work.progressColumn")}</span><span>{t("work.owner")}</span></div>{exampleProjects.map(item => { const tasks = state.tasks.filter(task => task.project === item.id); return <Link to={`${base}/work/projects/${item.id}`} className="workProjectRow" key={item.id}><span className="workProjectMark">{item.icon}</span><div><h2>{text(item.name)}</h2><p>{text(item.description)}</p></div><span className="workProjectProgress"><span className="workProgressTrack"><span style={{ width: `${tasks.length ? tasks.filter(task => task.status === "done").length / tasks.length * 100 : 0}%` }} /></span><span>{tasks.filter(task => task.status === "done").length} / {tasks.length}</span></span><span className="workAvatar">{t(`work.owner.${item.owner}`).slice(0, 1)}</span></Link>; })}</div></>;
   else {
     let items = state.tasks.filter(item => page !== "mine" || item.owner === "me");
     if (page === "mine") items = items.filter(item => tab === "attention" ? item.attention && !["done", "cancelled"].includes(item.status) : tab === "completed" ? item.status === "done" : !["done", "cancelled"].includes(item.status));
     items = items.filter(item => (statusFilter === "all" || item.status === statusFilter));
-    content = <><header className="workHeader"><h1>{page === "mine" ? t("work.myIssues") : t("work.issues")}</h1><button className="workPrimary" onClick={() => setCreating(true)}><Plus />{t("work.newTask")}</button></header><div className="workListControls">{page === "mine" ? tabs([["active", t("work.active")], ["attention", t("work.needsAttention")], ["completed", t("work.status.done")]]) : <span className="workMuted">{t("work.workspaceTasks")}</span>}<div className="workToolbar"><ChoiceMenu label={t("work.filterStatus")} value={statusFilter} options={[{ value: "all", label: t("work.allStatuses"), icon: <ListFilter /> }, ...statusOptions]} onChange={value => changeParam("status", value)} className="workFilter" /></div></div><div className="workListBody">{items.length ? grouped(items) : rows([])}</div><div className="workListFoot">{t("work.itemCount", { count: items.length })}</div></>;
+    content = <><header className="workHeader"><WorkBreadcrumb current={page === "mine" ? t("work.myIssues") : t("work.issues")} /><button className="workPrimary" onClick={() => setCreating(true)}><Plus />{t("work.newTask")}</button></header><div className="workListControls">{page === "mine" ? tabs([["active", t("work.active")], ["attention", t("work.needsAttention")], ["completed", t("work.status.done")]]) : <span className="workMuted">{t("work.workspaceTasks")}</span>}<div className="workToolbar"><ChoiceMenu label={t("work.filterStatus")} value={statusFilter} options={[{ value: "all", label: t("work.allStatuses"), icon: <ListFilter /> }, ...statusOptions]} onChange={value => changeParam("status", value)} className="workFilter" /></div></div><div className="workListBody">{items.length ? grouped(items) : rows([])}</div><div className="workListFoot">{t("work.itemCount", { count: items.length })}</div></>;
   }
   return <div className="workPrototype"><div className="workPrototypeNotice"><button onClick={() => { state.reset(); setNotice(workText("work.resetDone")); navigate(`${base}/work`); }}><RotateCcw />{t("work.reset")}</button></div>{notice ? <div className="workToast" role="status"><CheckCircle2 />{text(notice)}<button aria-label={t("work.closeNotice")} onClick={() => setNotice("")}><X /></button></div> : null}{content}
     {creating ? <NewTask project={project?.id} onClose={() => setCreating(false)} onCreate={values => { const id = state.createTask(values); setCreating(false); navigate(`${base}/work/tasks/${id}`); setNotice(workText("work.created")); }} /> : null}

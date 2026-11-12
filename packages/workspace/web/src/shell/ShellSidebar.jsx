@@ -1,6 +1,7 @@
 import { Menu } from "@centaeris/ui/primitives/menu";
 import { useTranslation } from "../i18n";
-import { memo, useState } from "react";
+import { memo, useId, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "@centaeris/ui/motion-react";
 import { Link, useLocation, useNavigate, useRouteLoaderData } from "react-router";
 import {
   ChevronDown,
@@ -78,6 +79,10 @@ function WorkspaceHeader({ onNewConversation, workspace, workspaces, logoutBusy,
 }
 
 export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewChat, onCollapse, search, menuContainer, sessionProps }) {
+  const [favoritesOpen, setFavoritesOpen] = useState(true);
+  const favoritesId = useId();
+  const reducedMotion = useReducedMotion();
+  const favoritesTransition = { duration: reducedMotion ? 0 : 0.2, ease: [0.16, 1, 0.3, 1] };
   const work = useWorkPrototype();
   const { t } = useTranslation();
   const [logoutBusy, setLogoutBusy] = useState(false);
@@ -138,9 +143,14 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
           <Link className="shRow" to={`${base}/work/reviews`} aria-current={location.pathname === `${base}/work/reviews` ? "page" : undefined}><GitPullRequest aria-hidden="true" /><span>{t("work.reviews")}</span></Link>
           <Link className="shRow" to={`${base}/app`} aria-current={isHome || location.pathname.startsWith(`${base}/sessions/`) ? "page" : undefined}><Orbit aria-hidden="true" /><span>Agent</span></Link>
         </div>
-        {favoriteProjects.length || favoriteSessions.length ? <details className="workRailViews shFavorites" open>
-          <summary><span>{t("work.favorites")}</span><ChevronDown aria-hidden="true" /></summary>
-          <div>
+        <AnimatePresence initial={false}>
+        {favoriteProjects.length || favoriteSessions.length ? <motion.section key="favorites" className="workRailViews shFavorites"
+          initial={{ height: 0, opacity: 0, marginTop: 0 }} animate={{ height: "auto", opacity: 1, marginTop: 18 }} exit={{ height: 0, opacity: 0, marginTop: 0 }} transition={favoritesTransition}>
+          <button className="shFavoritesToggle" type="button" aria-expanded={favoritesOpen} aria-controls={favoritesId} onClick={() => setFavoritesOpen(value => !value)}>
+            <span>{t("work.favorites")}</span><motion.span aria-hidden="true" animate={{ rotate: favoritesOpen ? 0 : -90 }} transition={favoritesTransition}><ChevronDown /></motion.span>
+          </button>
+          <motion.div id={favoritesId} className="shFavoritesContent" initial={false} animate={{ height: favoritesOpen ? "auto" : 0, opacity: favoritesOpen ? 1 : 0 }} transition={favoritesTransition} aria-hidden={!favoritesOpen} inert={!favoritesOpen}>
+          <div className="shFavoritesRows">
             {favoriteProjects.map(project => <Link className="shRow" key={project.id} to={`${base}/work/projects/${project.id}`}><span className="workRailProjectIcon">{project.icon}</span><span>{displayWorkText(project.name, t)}</span></Link>)}
             {favoriteSessions.map(session => <Link className="shRow" key={session.id} to={sessionChatPath(workspace.id, session.id)} aria-current={location.pathname === sessionChatPath(workspace.id, session.id) ? "page" : undefined} title={session.title}
               onClick={event => {
@@ -150,7 +160,9 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
                 }
               }}><span>{session.title || t("work.conversation.untitled")}</span></Link>)}
           </div>
-        </details> : null}
+          </motion.div>
+        </motion.section> : null}
+        </AnimatePresence>
         <div className="shNavGroup">
           <Link className="shRow" to={`${base}/work/home`} aria-current={location.pathname === `${base}/work/home` ? "page" : undefined}><House aria-hidden="true" /><span>{t("work.home")}</span></Link>
           <Link className="shRow" to={`${base}/work/tasks`} aria-current={location.pathname.startsWith(`${base}/work/tasks`) ? "page" : undefined}><Copy aria-hidden="true" /><span>{t("work.issues")}</span></Link>

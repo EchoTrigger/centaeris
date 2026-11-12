@@ -1351,5 +1351,6 @@
   "work.myIssues": "My issues",
   "work.reviews": "Reviews",
   "work.home": "Home",
-  "work.issues": "Issues"
+  "work.issues": "Issues",
+  "work.breadcrumb": "Breadcrumb"
 }

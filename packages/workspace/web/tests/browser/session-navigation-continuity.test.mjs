@@ -226,6 +226,7 @@ test('docked chat tabs preserve drafts, open one window and reserve space on set
         return label.scrollWidth > label.clientWidth && tab.title === label.textContent
           && tab.getBoundingClientRect().width < innerWidth / 2;
       })()`), 'a long title stays bounded while its full text remains available');
+      assert(await evaluate("(() => { const widths=Array.from(document.querySelectorAll('[role=tab]')).map(el=>el.getBoundingClientRect().width); return widths.length===2 && Math.abs(widths[0]-widths[1])<1; })()"), 'short and long chat titles use equal tab widths');
       await evaluate('sessionNavigationFixture.task()');
       await waitFor(() => evaluate("Array.from(document.querySelectorAll('button')).some(button => button.textContent.trim() === 'Continue')"), 'sample task');
       await evaluate("Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'Continue').click()");
@@ -327,15 +328,16 @@ test('navigation groups keep favorites between personal and workspace entries an
       await evaluate("sessionNavigationFixture.hydrate('session-4')");
       await evaluate('sessionNavigationFixture.task()');
       await waitFor(() => evaluate("Boolean(document.querySelector('.workPrototype'))"), 'work page');
-      const labels = await evaluate("Array.from(document.querySelector('.workPrimaryNav').querySelectorAll('a,summary')).map(el=>el.textContent.trim())");
+      const labels = await evaluate("Array.from(document.querySelector('.workPrimaryNav').querySelectorAll('a,.shFavoritesToggle')).map(el=>el.textContent.trim())");
       assert.deepEqual(labels, ['Inbox', 'My issues', 'Reviews', 'Agent', 'Favorites', 'KKnowledge discovery improvements', 'Home', 'Issues', 'Projects', 'Views', 'Extensions', 'Library']);
       assert(await evaluate("(() => {const nav=document.querySelector('.workPrimaryNav'); return nav.scrollWidth <= nav.clientWidth;})()"), 'long favorite titles fit the navigation');
-      const favoriteVisible = () => evaluate("document.querySelector('.shFavorites a')?.checkVisibility() ?? false");
+      const favoriteVisible = () => evaluate("(() => {const content=document.querySelector('.shFavoritesContent');return Boolean(content && content.getAttribute('aria-hidden')==='false' && content.getBoundingClientRect().height>0);})()");
       assert(await favoriteVisible());
-      await evaluate("document.querySelector('.shFavorites summary').click()"); await frame();
+      await evaluate("document.querySelector('.shFavoritesToggle').click()"); await frame();
       assert.equal(await favoriteVisible(), false);
-      await evaluate("document.querySelector('.shFavorites summary').click()"); await frame();
-      assert(await favoriteVisible());
+      await waitFor(() => evaluate("document.querySelector('.shFavoritesContent').getBoundingClientRect().height === 0"), 'favorites finish collapsing');
+      await evaluate("document.querySelector('.shFavoritesToggle').click()"); await frame();
+      await waitFor(favoriteVisible, "favorites expanded");
       await evaluate("document.querySelector('.shFavorites a').click()");
       await waitFor(() => evaluate(`Boolean(document.querySelector('[aria-label="Unfavorite project"]'))`), 'favorite project');
       await evaluate(`document.querySelector('[aria-label="Unfavorite project"]').click()`);
@@ -352,6 +354,55 @@ test('navigation groups keep favorites between personal and workspace entries an
       if (process.env.NAVIGATION_SCREENSHOT_PATH) {
         const shot = await send('Page.captureScreenshot', { format: 'png' });
         await writeFile(process.env.NAVIGATION_SCREENSHOT_PATH, Buffer.from(shot.data, 'base64'));
+      }
+      assert.deepEqual(await evaluate('sessionNavigationFixture.failures'), []);
+    });
+  } finally {
+    await server.close(); const actual = await realpath(profile);
+    assert.equal(dirname(actual), await realpath(tmpdir())); assert.ok(basename(actual).startsWith('centaeris-navigation-'));
+    await rm(actual, { recursive: true, force: true });
+  }
+});
+
+
+test('breadcrumbs keep their parent position and preserve route history and project tabs', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'centaeris-navigation-'));
+  const server = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), server: { port: 0, host: '127.0.0.1' } });
+  try {
+    await server.listen();
+    await runBrowser(`${server.resolvedUrls.local[0]}tests/browser/session-navigation-continuity.html`, { width: 1280, height: 900 }, profile, async ({ evaluate, frame, send }) => {
+      await waitFor(() => evaluate('window.sessionNavigationFixture?.ready()'), 'workspace');
+      await evaluate("sessionNavigationFixture.hydrate('session-4')");
+      await evaluate("Array.from(document.querySelectorAll('.workPrimaryNav a')).find(el=>el.textContent.trim()==='Projects').click()");
+      await waitFor(() => evaluate("Boolean(document.querySelector('.workProjectList'))"), 'project list');
+      const parentBox = () => evaluate(`(() => {const e=document.querySelector('.workBreadcrumb li:first-child').firstElementChild; const r=e.getBoundingClientRect(); const s=getComputedStyle(e); return {x:r.x,y:r.y,height:r.height,font:s.fontSize,weight:s.fontWeight};})()`);
+      const listBox = await parentBox();
+      await evaluate("document.querySelector('.workProjectRow').click()");
+      await waitFor(() => evaluate("Boolean(document.querySelector('.workProjectBody'))"), 'project detail');
+      assert.deepEqual(await parentBox(), listBox, 'parent text stays on the same baseline');
+      assert.equal(await evaluate("document.querySelector('.workBreadcrumb svg')"), null);
+      await evaluate("Array.from(document.querySelectorAll('.workTabs button')).find(el=>el.textContent==='3 tasks').click()");
+      await waitFor(() => evaluate("sessionNavigationFixture.search()==='?tab=tasks'"), 'project issues tab');
+      await evaluate("document.querySelector('.workRow').click()");
+      await waitFor(() => evaluate("sessionNavigationFixture.pathname().endsWith('/tasks/CW-11')"), 'project issue');
+      assert.equal(await evaluate("document.querySelector('.workBreadcrumb a:nth-child(1)').textContent"), 'Projects');
+      assert.equal(await evaluate("document.querySelectorAll('.workBreadcrumb a')[1].getAttribute('href')"), '/w/workspace/work/projects/knowledge?tab=tasks');
+      assert.deepEqual(await parentBox(), listBox);
+      await evaluate("document.querySelectorAll('.workBreadcrumb a')[1].click()");
+      await waitFor(() => evaluate("sessionNavigationFixture.search()==='?tab=tasks' && Boolean(document.querySelector('.workProjectBody'))"), 'parent link restores project tab');
+      await evaluate('sessionNavigationFixture.back()');
+      await waitFor(() => evaluate("sessionNavigationFixture.pathname().endsWith('/tasks/CW-11')"), 'back to issue');
+      await evaluate('sessionNavigationFixture.back()');
+      await waitFor(() => evaluate("sessionNavigationFixture.search()==='?tab=tasks'"), 'back to project tab');
+      await evaluate('sessionNavigationFixture.back()');
+      await waitFor(() => evaluate("sessionNavigationFixture.search()==='' && Boolean(document.querySelector('.workProjectBody'))"), 'back to project overview');
+      await evaluate('sessionNavigationFixture.forward()');
+      await waitFor(() => evaluate("sessionNavigationFixture.search()==='?tab=tasks'"), 'forward restores project tab');
+      await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false }); await frame();
+      assert(await evaluate("(() => {const b=document.querySelector('.workBreadcrumb');return b.scrollWidth<=b.clientWidth;})()"), 'long breadcrumb stays within narrow header');
+      if (process.env.NAVIGATION_SCREENSHOT_PATH) {
+        const shot = await send('Page.captureScreenshot', { format: 'png' });
+        await writeFile(process.env.NAVIGATION_SCREENSHOT_PATH.replace('.png', '-breadcrumb.png'), Buffer.from(shot.data, 'base64'));
       }
       assert.deepEqual(await evaluate('sessionNavigationFixture.failures'), []);
     });

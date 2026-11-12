@@ -32,7 +32,7 @@ test("material correction records evidence progress without completing the busin
   await user.click(await screen.findByRole("link", { name: /核查工具包发布材料/ }));
   await screen.findByRole("heading", { name: "核查工具包发布材料" });
   expect(within(screen.getByRole("list", { name: "活动记录" })).getByText("补充了示例文件 quick-start.md。")).toBeTruthy();
-  expect(within(screen.getByRole("list")).getByText("状态变更为已完成。")).toBeTruthy();
+  expect(within(screen.getByRole("list", { name: "活动记录" })).getByText("状态变更为已完成。")).toBeTruthy();
 });
 
 test("new tasks belong to the chosen project and remain available across views", async () => {

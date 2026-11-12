@@ -94,7 +94,7 @@ Object.assign(window, { sessionNavigationFixture: { requests, failures, mutation
   task: () => router.navigate('/w/workspace/work/tasks/CW-12'),
   reports: () => router.navigate('/w/workspace/reports'),
   preferences: () => router.navigate('/w/workspace/settings/preferences'),
-  back: () => router.navigate(-1),
+  back: () => router.navigate(-1), forward: () => router.navigate(1), search: () => router.state.location.search,
   repeatNavigation: (id: string) => send(id, 'navigation', { snapshotId: `${id}-repeat`, offset: 0, hasMore: false, sessions: rows }),
   live: (id: string) => send(id, 'live', { agentRunId: 'run', live: { messageId: 'live-answer', turnId: 'turn', afterSequence: 1,
     revision: '1', text: 'Incremental live answer', reasoning: null } }),

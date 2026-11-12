@@ -1351,5 +1351,6 @@
   "work.myIssues": "我的事项",
   "work.reviews": "审阅",
   "work.home": "主页",
-  "work.issues": "事项"
+  "work.issues": "事项",
+  "work.breadcrumb": "面包屑"
 }
