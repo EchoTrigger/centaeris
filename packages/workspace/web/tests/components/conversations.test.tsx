@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, Link, RouterProvider } from "react-router";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -21,7 +21,7 @@ test("history opens on demand and selects a conversation without replacing the w
   expect(screen.queryByRole("textbox")).toBeNull();
   expect(screen.getByRole("link", { name: /调研记录/ }).getAttribute("aria-current")).toBe("page");
   expect(screen.getByText("当前")).toBeTruthy();
-  expect(screen.getAllByRole("heading").map(heading => heading.textContent)).toEqual(["上周"]);
+  expect(within(screen.getByRole("navigation")).getAllByRole("heading").map(heading => heading.textContent)).toEqual(["上周"]);
   await user.click(screen.getByRole("link",{name:/调研记录/}));
   expect(onOpenSession).toHaveBeenCalledWith(sessions[0]);
   expect(router.state.location.pathname).toBe("/w/demo/work");
