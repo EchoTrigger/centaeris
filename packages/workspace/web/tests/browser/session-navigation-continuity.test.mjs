@@ -242,6 +242,25 @@ test('docked chat tabs preserve drafts, open one window and reserve space on set
       await click('.conversationTabItem:first-child [role=tab]');
       await waitFor(() => evaluate("Boolean(document.querySelector('.isChatFloating')) && Boolean(document.querySelector('.workspaceSettingsPage'))"), 'tab opens from settings');
       assert.equal(await evaluate('sessionNavigationFixture.pathname()'), '/w/workspace/settings/preferences');
+      await evaluate("document.activeElement?.blur()");
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 10, y: 10 }); await frame();
+      const tabStyle = () => evaluate(`(() => {
+        const item = document.querySelector('.conversationTabItem');
+        const title = item.querySelector('[role=tab] > span');
+        const close = item.querySelector('.conversationTabClose');
+        const rect = item.getBoundingClientRect();
+        return { width: rect.width, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2,
+          closeOpacity: getComputedStyle(close).opacity, mask: getComputedStyle(title).maskImage,
+          textOverflow: getComputedStyle(title).textOverflow, fullTitle: title.clientWidth >= title.scrollWidth,
+          shadow: getComputedStyle(item).boxShadow, background: getComputedStyle(item).backgroundColor };
+      })()`);
+      const resting = await tabStyle();
+      assert.equal(resting.closeOpacity, '0'); assert.equal(resting.mask, 'none'); assert(resting.fullTitle);
+      assert.equal(resting.shadow, 'none'); assert.equal(resting.background, 'rgba(0, 0, 0, 0)');
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: resting.x, y: resting.y }); await frame();
+      const hovering = await tabStyle();
+      assert.equal(hovering.closeOpacity, '1'); assert.notEqual(hovering.mask, 'none');
+      assert.equal(hovering.textOverflow, 'clip'); assert.equal(hovering.width, resting.width);
       if (process.env.NAVIGATION_SCREENSHOT_PATH) {
         const shot = await send('Page.captureScreenshot', { format: 'png' });
         await writeFile(process.env.NAVIGATION_SCREENSHOT_PATH, Buffer.from(shot.data, 'base64'));

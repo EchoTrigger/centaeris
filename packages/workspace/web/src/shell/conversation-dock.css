@@ -2,13 +2,13 @@
 .workspaceChatLayout:has(> .conversationDock > *) { --workspace-bottom-space:36px; }
 .conversationTabs { min-width:0; }
 .conversationTabList { display:flex; align-items:center; justify-content:flex-end; gap:4px; overflow-x:auto; scrollbar-width:none; }
-.conversationDock button[data-active] { background:var(--workspace-selection); color:var(--on-surface); }
-.conversationDockSession > span { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.conversationDock button[data-active] { color:var(--on-surface); }
+.conversationDockSession > span,.workConversationTab > span { display:block; overflow:hidden; text-overflow:clip; white-space:nowrap; }
 .conversationDock:empty { display:none; }
 .conversationDock { position:fixed; z-index:35; right:10px; bottom:4px; display:flex; align-items:center; gap:4px; height:28px; max-width:calc(100vw - 24px); }
 .conversationDock button { flex-shrink:0; display:inline-flex; align-items:center; justify-content:center; gap:7px; min-width:28px; height:28px; padding:4px 9px; border:0; border-radius:6px; background:transparent; color:var(--process-text); font:inherit; font-size:12px; cursor:pointer; }
-.conversationDock button:hover,.conversationDock button[aria-pressed=true] { background:var(--workspace-selection); color:var(--on-surface); }
-.conversationDock .conversationDockSession { flex-shrink:1; min-width:0; display:block; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.conversationDock button:hover,.conversationDock button[aria-pressed=true] { background:transparent; color:var(--on-surface); }
+.conversationDock .conversationDockSession { flex-shrink:1; min-width:0; display:block; max-width:none; overflow:hidden; text-overflow:clip; white-space:nowrap; }
 .conversationDockSession > .isRunning { display:inline-block; width:5px; height:5px; border-radius:50%; background:var(--primary-color); margin-right:7px; }
 .conversationDock svg { width:14px; height:14px; }
 .conversationWindowActions { flex:none; display:flex; align-items:center; gap:2px; margin-left:auto; }
@@ -57,7 +57,6 @@
 .conversationDock button:focus-visible,.conversationSwitcher:focus-visible,.conversationHistory button:focus-visible { outline:2px solid var(--primary-color); outline-offset:1px; }
 @media(max-width:760px) {
   .workspaceWorkbench.isBrowsing.isChatFloating > .workspaceTopbar,.workspaceWorkbench.isBrowsing.isChatFloating > .workspaceChatColumn { right:12px; }
-  .conversationDock .conversationDockSession { max-width:170px; }
 }
 
 .workspaceWorkbench.isBrowsing.isChatFloating.isSearching > :is(.workspaceTopbar,.workspaceChatColumn) { visibility:hidden; }
@@ -73,10 +72,12 @@
 .workspaceWorkbench.isChatFloating .shHome { display:none; }
 .conversationHistory .workspaceSessionRow { height:32px; contain-intrinsic-size:auto 32px; }
 
-.conversationTabItem { display:flex; align-items:center; min-width:0; max-width:220px; border-radius:6px; }
-.conversationTabItem[data-selected],.conversationTabItem:hover { background:var(--workspace-selection); }
-.conversationDock .conversationTabItem .conversationDockSession { padding-right:4px; background:transparent; }
-.conversationDock .conversationTabClose { width:22px; min-width:22px; padding:0; }
+.conversationTabItem { position:relative; display:flex; align-items:center; min-width:0; max-width:100%; border-radius:6px; box-shadow:none; }
+.conversationTabItem:is(:hover,:focus-within) { background:var(--workspace-selection); }
+.conversationDock .conversationTabItem :is(.conversationDockSession,.workConversationTab) { background:transparent; box-shadow:none; }
+.conversationDock .conversationTabClose { position:absolute; right:0; width:22px; min-width:22px; padding:0; background:transparent; opacity:0; pointer-events:none; color:var(--on-surface); }
+.conversationTabItem:is(:hover,:focus-within) .conversationTabClose { opacity:1; pointer-events:auto; }
+.conversationTabItem:is(:hover,:focus-within) :is(.conversationDockSession,.workConversationTab) > span { mask-image:linear-gradient(to right,black calc(100% - 36px),transparent calc(100% - 14px)); }
 .conversationTabClose svg { width:12px; height:12px; }
 .workspaceWorkbench.isOverlayOnly { position:fixed; inset:0; z-index:51; background:transparent; pointer-events:none; }
 .workspaceWorkbench.isOverlayOnly::before { display:none; }

@@ -1235,8 +1235,6 @@
   "work.workspaceTasks": "工作区的全部任务",
   "work.filterStatus": "筛选状态",
   "work.allStatuses": "所有状态",
-  "work.preview": "交互预览",
-  "work.sampleNotice": "示例数据 · 刷新后重置",
   "work.reset": "重置示例",
   "work.resetDone": "示例已重置",
   "work.closeNotice": "关闭提示",

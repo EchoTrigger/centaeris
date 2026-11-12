@@ -1235,8 +1235,6 @@
   "work.workspaceTasks": "All tasks in this workspace",
   "work.filterStatus": "Filter status",
   "work.allStatuses": "All statuses",
-  "work.preview": "Interactive preview",
-  "work.sampleNotice": "Sample data · Resets on refresh",
   "work.reset": "Reset samples",
   "work.resetDone": "Samples reset",
   "work.closeNotice": "Dismiss notification",

@@ -134,8 +134,6 @@
 .workProjectOverview dt { color:var(--process-text); margin-bottom:8px; font-size:12px; }
 .workProjectOverview dd { margin:0 0 20px; }
 .workPrototypeNotice { order:99; margin-top:auto; display:flex; align-items:center; gap:12px; padding:8px 16px; color:var(--process-text); font-size:11px; }
-.workPreviewBadge { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
-.workPreviewBadge > span { width:5px; height:5px; border-radius:50%; background:var(--warning); }
 .workPrototypeNotice button { margin-left:auto; border:0; background:transparent; font-size:11px; min-height:26px; padding:2px 5px; }
 .workPrototypeNotice button svg { width:12px; height:12px; }
 .workToast { position:fixed; bottom:30px; left:50%; transform:translateX(-50%); z-index:100; display:flex; align-items:center; gap:10px; max-width:calc(100vw - 32px); padding:10px 12px; border:1px solid var(--outline-variant); border-radius:8px; background:var(--surface-color); box-shadow:0 4px 24px var(--scrim); font-size:12px; }
@@ -163,7 +161,7 @@
 .workRailCount { margin-left:auto; font-size:11px; color:var(--process-text); font-variant-numeric:tabular-nums; }
 @media (max-width:1100px) { .workRowProject { display:none; } .workDetail { grid-template-columns:minmax(0,1fr) 218px; } .workDetailMain { padding-inline:28px; } }
 @media (max-width:760px) {
-  .workHeader { padding:10px 18px; flex-wrap:wrap; } .workNoticeDetail { display:none; }
+  .workHeader { padding:10px 18px; flex-wrap:wrap; }
   .workDetail { display:flex; flex-direction:column; }
   .workProperties { display:flex; flex-wrap:wrap; gap:12px; padding:18px; border-left:0; border-top:1px solid var(--outline-variant); }
   .workProperties > h2 { width:100%; margin:0; }
@@ -230,7 +228,7 @@
   .workspaceDrawer .shSidebar > .workRailViews { display:block; }
 }
 
-.conversationDock .workConversationTab { order:-1; max-width:210px; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; display:block; }
+.conversationDock .workConversationTab { order:-1; max-width:none; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:clip; display:block; }
 .workFloatingConversation { position:fixed; z-index:60; right:20px; bottom:44px; display:flex; flex-direction:column; width:min(420px,calc(100vw - 24px)); height:min(560px,calc(100dvh - 96px)); border:1px solid var(--outline-variant); border-radius:12px; background:var(--surface-color); box-shadow:0 12px 36px var(--scrim); }
 .workFloatingConversation > header { display:flex; align-items:center; gap:5px; min-height:48px; padding:8px 10px 8px 16px; }
 .workFloatingConversation > header h2 { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -241,7 +239,7 @@
 .workFloatingConversation > form { margin:12px; padding:10px; border:1px solid var(--outline-variant); border-radius:10px; }
 .workFloatingConversation textarea { width:100%; border:0; padding:2px; resize:none; }
 .workFloatingConversation footer { display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:11px; color:var(--process-text); }
-@media(max-width:760px) { .workFloatingConversation { right:12px; } .conversationDock .workConversationTab { max-width:140px; } }
+@media(max-width:760px) { .workFloatingConversation { right:12px; } }
 
 @media (min-width:761px) {
   .workPrototype { padding-top:0; }
