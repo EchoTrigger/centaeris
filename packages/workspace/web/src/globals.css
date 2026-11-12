@@ -556,7 +556,7 @@ button.workspaceActivityGroup:hover { color: var(--on-surface); }
 .agent-tool-node:last-child { border-bottom: 0; }
 .agent-operation-summary { display: flex; width: 100%; min-width: 0; box-sizing: border-box; align-items: center; gap: 7px; border: 0; background: transparent; color: var(--process-text); padding: 8px 12px; font: inherit; text-align: left; }
 button.agent-operation-summary { cursor: pointer; }
-button.agent-operation-summary:hover { background: var(--surface-container); color: var(--text); }
+button.agent-operation-summary:hover { color: var(--text); }
 button.agent-operation-summary:focus-visible { outline: 2px solid var(--outline); outline-offset: -2px; }
 .agent-tool-node-icon { width: 16px; height: 16px; flex: none; color: var(--process-text); }
 .agent-tool-node-action.is-inline-summary { display: block; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
