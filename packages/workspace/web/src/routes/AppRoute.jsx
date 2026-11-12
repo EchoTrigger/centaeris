@@ -1,4 +1,5 @@
 import { ConversationDockContext } from "../shell/ConversationDock";
+import { ChatTitle } from "../shell/ChatTitle";
 import { ConversationHistory } from "../shell/ConversationHistory";
 import { animate } from "@centaeris/ui/motion";
 import { useTranslation } from "../i18n";
@@ -14,7 +15,6 @@ import { officePreviewUrl } from "../chat/attachments.mjs";
 import { codePreviewCanRender } from "../chat/codePreviewFormats.mjs";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useModalDialog } from "../components/useModalDialog";
-import { dismissDetailsOnOutsideInteraction } from "../components/detailsDismissal";
 import { streamWorkspacePresentation } from "../chat/workspacePresentationTransport";
 import { createTranscriptViewStore } from "../chat/transcriptViewStore";
 import { compareTranscriptBlocks } from "../chat/transcriptContract";
@@ -44,7 +44,7 @@ import {
   writeModelThinkingMode,
   writePreferredModelIdentity,
 } from "../preferences";
-import { HomePlane, HomeQuickActions } from "../shell/HomePlane";
+import { HomePlane } from "../shell/HomePlane";
 import { ShellSidebar } from "../shell/ShellSidebar";
 import { useWorkspaceSearch, WorkspaceSearch } from "../shell/WorkspaceSearch";
 import { isWorkspaceCatalogPath, sessionChatPath, groupSessionNavigation, sortSessionNavigation as sortSessions } from "../shell/sessionNavigation.mjs";
@@ -54,19 +54,13 @@ import { SessionReadController, mergeSessionAttention } from "../shell/sessionRe
 import { createSessionNavigationStore } from "../shell/sessionNavigationStore";
 import { useNavigationRowActions, useLatestCallback } from "../shell/useNavigationRowActions";
 import {
-  Archive,
   Image as ImageIcon,
   ChevronDown,
   Minimize2,
   Minus,
   Maximize2,
-  Ellipsis,
-  Pencil,
-  Pin,
-  PinOff,
   PanelLeft,
   Search,
-  Trash2,
   X,
 } from "lucide-react";
 
@@ -118,56 +112,6 @@ function upsertBy(items, key, value) {
   const index = items.findIndex((item) => item[key] === value[key]);
   if (index < 0) return [...items, value];
   return items.map((item, itemIndex) => (itemIndex === index ? value : item));
-}
-
-function ConversationTitle({ session, actions, running, titleControl }) {
-  const { t } = useTranslation();
-  const menuRef = useRef(null);
-  const titleRef = useRef(null);
-  const [renaming, setRenaming] = useState(false);
-  useEffect(() => {
-    if (!renaming) return dismissDetailsOnOutsideInteraction(menuRef.current);
-  }, [renaming]);
-
-  function closeMenu() {
-    menuRef.current.open = false;
-    titleRef.current?.focus();
-  }
-
-  function finishRename(value, returnFocus = false) {
-    setRenaming(false);
-    if (value !== undefined) void actions.renameSession(session, value);
-    if (returnFocus) window.requestAnimationFrame(() => titleRef.current?.focus());
-  }
-
-  if (renaming) return <form className="workspaceConversationRename" onSubmit={event => {
-    event.preventDefault();
-    finishRename(event.currentTarget.elements.title.value, true);
-  }}>
-    <input name="title" aria-label={t("appRoute.renameValue", { value1: session.title })} autoFocus maxLength={200}
-      defaultValue={session.title} onFocus={event => event.currentTarget.select()}
-      onBlur={event => finishRename(event.currentTarget.value)}
-      onKeyDown={event => {
-        if (event.nativeEvent.isComposing) return;
-        if (event.key === "Escape") {
-          event.preventDefault();
-          finishRename(undefined, true);
-        }
-      }} />
-  </form>;
-
-  return <div className="workspaceConversationHeading">
-    <h1 className="workspaceConversationTitle" title={session.title}>{titleControl || session.title || t("searchOverlay.untitledConversation")}</h1>
-    <details className="workspaceConversationActions" ref={menuRef}>
-      <summary ref={titleRef} className="workspacePanelToggle" role="button" aria-label={t("appRoute.conversationActionsForValue", { value1: session.title })}><Ellipsis aria-hidden="true" /></summary>
-      <div className="workspaceSessionMenu">
-        <button type="button" disabled={Boolean(actions.savingSessionId)} onClick={() => { closeMenu(); setRenaming(true); }}><Pencil aria-hidden="true" />{t("appRoute.rename")}</button>
-        <button type="button" disabled={Boolean(actions.savingSessionId)} onClick={() => { closeMenu(); actions.onTogglePin(session); }}>{session.isPinned ? <PinOff aria-hidden="true" /> : <Pin aria-hidden="true" />}{t(session.isPinned ? "appRoute.unpin" : "appRoute.pin")}</button>
-        <button type="button" disabled={running || Boolean(actions.archivingSessionId)} onClick={() => { closeMenu(); void actions.onArchive(session); }}><Archive aria-hidden="true" />{t("archive.title")}</button>
-        <button type="button" className="isDanger" disabled={Boolean(actions.deletingSessionId)} onClick={() => { closeMenu(); actions.onRequestDelete(session); }}><Trash2 aria-hidden="true" />{t("appRoute.delete")}</button>
-      </div>
-    </details>
-  </div>;
 }
 
 export function AppPageContent({ initialSession = null, workspaceDraft, visible = true, location, navigationKey = location.key, catalogContent = null, chatFloating = false, onShowChat, onMinimizeChat, onExpandChat, onDockChat, onOpenFloatingSession, modelsVersion, onSessionAccepted }) {
@@ -1509,13 +1453,6 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   }
   const groupedSessions = useMemo(() => groupSessionNavigation(sessions, projects), [projects, sessions]);
   const SidebarContainer = compactLayout ? "dialog" : "div";
-  function handleQuickAction(prompt) {
-    setDraft(prompt);
-    window.requestAnimationFrame(() => {
-      document.getElementById("messageDraft")?.focus();
-    });
-  }
-
   const selectNavigationSession = useLatestCallback(selectSession);
   const startNavigationChat = useLatestCallback(startNewChat);
   const createNavigationProject = useLatestCallback(createProject);
@@ -1548,7 +1485,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     if (catalogContent) onOpenFloatingSession(target);
     else navigate(sessionChatPath(workspace.id, target.id));
   }
-  const historyProps = { sessionProps: sidebarSessions, recentNavigation: navigationError ? { error: true } : { loading: !navigationLoaded }, onStartNewChat: startNavigationChat, onOpenSession: openHistorySession };
+  const historyProps = { workspaceId: workspace.id, currentSessionId: activeSession?.id, sessionProps: sidebarSessions, recentNavigation: navigationError ? { error: true } : { loading: !navigationLoaded }, onStartNewChat: startNavigationChat, onOpenSession: openHistorySession };
   const chatTitleControl = <ConversationHistory {...historyProps} label={t("work.conversation.switch")} className="conversationSwitcher" side="bottom"><span>{activeSession?.title || t("work.conversation.untitled")}</span><ChevronDown /></ConversationHistory>;
 
   return (
@@ -1596,7 +1533,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           >
             <PanelLeft aria-hidden="true" />
           </button> : null}
-          {!catalogContent || chatFloating ? activeSession ? <ConversationTitle key={activeSession.id} session={activeSession} actions={sessionActions} running={hasActiveAgentRun} titleControl={chatTitleControl} /> : chatTitleControl : null}
+          {!catalogContent || chatFloating ? activeSession ? <ChatTitle key={activeSession.id} session={activeSession} actions={sessionActions} running={hasActiveAgentRun} titleControl={chatTitleControl} /> : chatTitleControl : null}
           {compactLayout ? <button className="workspacePanelToggle" ref={search.triggerRef} type="button" onClick={search.toggle}
             aria-label={t("searchOverlay.searchConversationsAndNotes")} title={t("shellSidebar.searchCtrlK")}><Search aria-hidden="true" /></button> : null}
         </div>
@@ -1691,10 +1628,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
             onCancelActiveAgentRun={cancelActiveAgentRun}
           />
           </div>
-          {isHome ? <div className="shHomeFollowups">
-            <HomeQuickActions onQuickAction={handleQuickAction} />
-            {sessions.length ? <nav className="conversationRecent" aria-label={t("work.conversation.recent")}>{sessions.slice(0, 3).map(item => <button key={item.id} onClick={() => openHistorySession(item)}><span>{item.title}</span><span>{t("work.conversation.continue")}</span></button>)}</nav> : null}
-          </div> : null}
+
         </div>
       </section>
 

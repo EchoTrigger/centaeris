@@ -39,7 +39,7 @@ vi.mock("react-router", async original => ({
 }));
 vi.mock("../../src/i18n", () => {
   const t = (key: string) => key;
-  return { t, i18n: { language: "en" }, useTranslation: () => ({ t }) };
+  return { t, i18n: { language: "en" }, useTranslation: () => ({ t, i18n: { language: "en" } }) };
 });
 vi.mock("../../src/preferences", () => ({
   useEnterStartsNewLine: () => false, readModelThinkingMode: () => "", readPreferredModelIdentity: () => "",
@@ -174,10 +174,10 @@ test("the home page opens an existing conversation from the sidebar", async () =
 
   render(<MemoryRouter initialEntries={[home]}><Workspace /></MemoryRouter>);
   const navigation = await screen.findByRole("navigation", { name: "Session navigation" });
-  const link = await within(navigation).findByRole("link", { name: "Synthetic" });
-  expect(screen.getAllByRole("link", { name: "Synthetic" })).toHaveLength(1);
+  const link = await within(navigation).findByRole("link", { name: /^Synthetic/ });
+  expect(screen.getAllByRole("link", { name: /^Synthetic/ })).toHaveLength(1);
   await user.click(link);
-  expect(await screen.findByRole("heading", { name: "Synthetic", level: 1 })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: /^Synthetic/, level: 1 })).toBeTruthy();
   expect(screen.queryByRole("region", { name: "shellSidebar.recentConversations" })).toBeNull();
   expect(callsFor("/messages")).toHaveLength(0);
 });
@@ -390,7 +390,7 @@ test("a retained Session displays its original history and continues with the us
   expect(screen.queryByRole("alert")).toBeNull();
   expect(fixture.subscriptions.every(item => item.sessionId === "session")).toBe(true);
   await act(async () => { navigation.resolve({ sessions: [row] }); });
-  const historyLink = screen.getByRole("link", { name: "Synthetic" });
+  const historyLink = screen.getByRole("link", { name: /^Synthetic/ });
   expect(historyLink.getAttribute("href")).toBe("/w/workspace/sessions/session");
   await user.type(screen.getByRole("textbox", { name: "appRoute.message" }), "Continue this original Session");
   await user.click(screen.getByRole("button", { name: "appRoute.send" }));
@@ -443,7 +443,7 @@ test("sending immediately after opening a Session targets that Session while nav
   const initial = fixture.request.getMockImplementation()!;
   render(<MemoryRouter initialEntries={["/w/workspace/app"]}><WorkspaceChatLayout /></MemoryRouter>);
   await chooseModel();
-  const oldSession = await screen.findByRole("link", { name: "Synthetic" });
+  const oldSession = await screen.findByRole("link", { name: /^Synthetic/ });
   fixture.request.mockImplementation((path, options) => path === "/api/workspaces/workspace/sessions" ? navigation.promise
     : path.endsWith("/messages") ? accepted.promise : initial(path, options));
   fixture.selectedSession = row;

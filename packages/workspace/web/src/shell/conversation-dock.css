@@ -20,26 +20,38 @@ main.workspaceWorkbench:has(.conversationDock > button) { padding-bottom:36px; }
 .isChatFloating .shHomeFollowups { display:none; }
 .isChatFloating .workspaceTopbarStart { flex:1; min-width:0; }
 .conversationHistoryPositioner { z-index:100; }
-.conversationHistory { width:320px; max-width:calc(100vw - 24px); padding:6px; border:1px solid var(--outline-variant); border-radius:10px; background:var(--surface-color); box-shadow:0 6px 18px color-mix(in srgb,var(--on-surface) 10%,transparent); color:var(--on-surface); outline:none; }
-.conversationHistory select { width:100%; margin-bottom:6px; padding:6px 8px; border:0; border-radius:6px; background:var(--surface-container); color:inherit; font:inherit; font-size:12px; }
-.conversationHistoryList { max-height:min(240px, 45dvh); overflow:auto; padding-bottom:4px; }
-.conversationHistory .workspaceSessionRow { width:100%; min-height:32px; }
-.conversationHistory .workspaceSessionButton { display:flex; align-items:center; gap:8px; min-height:32px; text-decoration:none; font-size:12px; }
+.conversationHistory { width:320px; max-width:calc(100vw - 24px); padding:6px; border:1px solid var(--outline-variant); border-radius:12px; background:var(--surface-color); box-shadow:0 6px 18px color-mix(in srgb,var(--on-surface) 10%,transparent); color:var(--on-surface); outline:none; font-size:13px; }
+.conversationHistoryNew { display:flex; align-items:center; gap:9px; width:100%; min-height:32px; border:0; border-radius:6px; padding:0 10px; background:transparent; color:inherit; font:inherit; text-align:left; }
+.conversationHistoryNew svg { width:14px; height:14px; }
+.conversationHistoryList { max-height:min(320px,45dvh); overflow:auto; margin-top:6px; padding-top:5px; border-top:1px solid var(--outline-variant); scrollbar-width:thin; scrollbar-color:transparent transparent; }
+.conversationHistoryList:is(:hover,:focus-within) { scrollbar-color:var(--outline) transparent; }
+.conversationHistoryList::-webkit-scrollbar { width:4px; }
+.conversationHistoryList::-webkit-scrollbar-track { background:transparent; }
+.conversationHistoryList::-webkit-scrollbar-thumb { background:transparent; border-radius:4px; }
+.conversationHistoryList:is(:hover,:focus-within)::-webkit-scrollbar-thumb { background:var(--outline); }
+.conversationHistoryList::-webkit-scrollbar-button { display:none; width:0; height:0; }
+.conversationHistoryGroup h2 { margin:5px 8px 3px; color:var(--process-text); font-size:12px; line-height:22px; font-weight:400; }
+.conversationHistoryRow { display:flex; align-items:center; gap:10px; min-height:32px; padding:0 10px 0 32px; border-radius:6px; color:inherit; text-decoration:none; }
+.conversationHistoryRow[aria-current=page],.conversationHistoryRow:hover,.conversationHistoryNew:hover { background:var(--surface-container); }
+.conversationHistoryTitle { min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.conversationHistoryCurrent,.conversationHistoryRow time { flex:none; color:var(--process-text); font-size:12px; }
 .conversationHistory > p { padding:8px; color:var(--process-text); font-size:12px; }
-.conversationHistory footer { display:flex; justify-content:space-between; padding-top:6px; }
-.conversationHistory footer button { display:flex; align-items:center; gap:7px; padding:7px 8px; border:0; border-radius:6px; background:transparent; color:var(--process-text); font:inherit; font-size:12px; cursor:pointer; }
-.conversationHistory footer button:hover { background:var(--surface-hover); color:var(--on-surface); }
+.conversationHistory a:focus-visible { outline:2px solid var(--primary-color); outline-offset:-2px; }
+.chatFavorite[aria-pressed=true] svg { fill:currentColor; }
+.chatActionsPositioner { z-index:100; }
+.chatActionsMenu { min-width:176px; max-width:calc(100vw - 24px); padding:5px; background:var(--surface-color); color:var(--on-surface); border:1px solid var(--outline-variant); border-radius:12px; box-shadow:0 6px 18px color-mix(in srgb,var(--on-surface) 10%,transparent); font-size:13px; outline:none; }
+.chatActionsMenu [role=menuitem] { display:flex; align-items:center; gap:9px; padding:0 9px; min-height:32px; border-radius:6px; cursor:pointer; }
+.chatActionsMenu [role=menuitem][data-highlighted] { background:var(--surface-container); outline:none; }
+.chatActionsMenu [role=menuitem][data-disabled] { opacity:.5; cursor:default; }
+.chatActionsMenu svg { width:14px; height:14px; color:var(--process-text); }
+.chatActionsMenu [role=separator] { height:1px; margin:5px -5px; background:var(--outline-variant); }
+.chatActionsMenu p { margin:5px 9px; font-size:12px; color:var(--error); }
+@media(pointer:coarse) { .conversationHistoryNew,.conversationHistoryRow,.chatActionsMenu [role=menuitem] { min-height:44px; } }
 .conversationDock button:focus-visible,.conversationSwitcher:focus-visible,.conversationHistory button:focus-visible { outline:2px solid var(--primary-color); outline-offset:1px; }
 @media(max-width:760px) {
   .workspaceWorkbench.isBrowsing.isChatFloating > .workspaceTopbar,.workspaceWorkbench.isBrowsing.isChatFloating > .workspaceChatColumn { right:12px; }
   .conversationDock .conversationDockSession { max-width:170px; }
 }
-
-.conversationRecent { width:min(700px,100%); margin:16px auto 0; display:grid; gap:2px; }
-.conversationRecent button { display:flex; align-items:center; justify-content:space-between; gap:16px; width:100%; padding:9px 12px; border:0; border-radius:7px; background:transparent; color:var(--process-text); font:inherit; font-size:12px; text-align:left; cursor:pointer; }
-.conversationRecent button:hover { background:var(--surface-hover); color:var(--on-surface); }
-.conversationRecent button > span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.conversationRecent button > span:last-child { flex:none; font-size:11px; }
 
 .workspaceWorkbench.isBrowsing.isChatFloating.isSearching > :is(.workspaceTopbar,.workspaceChatColumn) { visibility:hidden; }
 
