@@ -15,7 +15,6 @@ import {
   SquarePen,
   ListTodo,
   House,
-  Star,
 } from "lucide-react";
 import { exampleProjects, useWorkPrototype } from "../work/workPrototype";
 import { apiResponse, clearCsrfToken } from "../api";
@@ -228,22 +227,22 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, sessionProps
     <aside className="workspaceSidebar shSidebar" aria-label={t("shellSidebar.conversationNavigation")}>
       <WorkspaceHeader workspace={workspace} workspaces={workspaces} logoutBusy={logoutBusy} logoutError={logoutError} onLogout={logout} menuContainer={menuContainer}
         search={search} onCollapse={onCollapse} returnTo={location.pathname + location.search + location.hash} />
-      <nav className="shPrimaryNav" aria-label={t("shellSidebar.mainView")}>
-        <Link className="shRow" to={`${base}/work`} aria-current={location.pathname === `${base}/work` ? "page" : undefined}><House aria-hidden="true" /><span>我的工作</span></Link>
+      <nav className="shPrimaryNav workPrimaryNav" aria-label={t("shellSidebar.mainView")}>
+        <Link className="shRow" to={`${base}/work`} aria-current={location.pathname === `${base}/work` && !location.search ? "page" : undefined}><House aria-hidden="true" /><span>我的工作</span></Link>
+        <button className="shRow" type="button" onClick={newConversation}><SquarePen aria-hidden="true" /><span>{t("shellSidebar.newConversation")}</span></button>
+        <p className="workRailHeading">工作区</p>
         <Link className="shRow" to={`${base}/work/projects`} aria-current={location.pathname.startsWith(`${base}/work/projects`) ? "page" : undefined}><Folder aria-hidden="true" /><span>项目</span></Link>
         <Link className="shRow" to={`${base}/work/tasks`} aria-current={location.pathname.startsWith(`${base}/work/tasks`) ? "page" : undefined}><ListTodo aria-hidden="true" /><span>任务</span></Link>
-        <button className="shRow" type="button" onClick={newConversation}>
-          <SquarePen aria-hidden="true" /><span>{t("shellSidebar.newConversation")}</span>
-        </button>
-        <Link className="shRow" to={base + "/library"} aria-current={inLibrary ? "page" : undefined}>
-          <Library aria-hidden="true" /><span>{t("libraryObjectRoute.library")}</span>
-        </Link>
-        <Link className="shRow" to={base + "/extensions"} aria-current={inExtensions ? "page" : undefined}>
-          <Blocks aria-hidden="true" /><span>{t("extensions.title")}</span>
-        </Link>
+        <Link className="shRow" to={base + "/library"} aria-current={inLibrary ? "page" : undefined}><Library aria-hidden="true" /><span>{t("libraryObjectRoute.library")}</span></Link>
+        <Link className="shRow" to={base + "/extensions"} aria-current={inExtensions ? "page" : undefined}><Blocks aria-hidden="true" /><span>{t("extensions.title")}</span></Link>
       </nav>
-
-      {location.pathname.startsWith(`${base}/work`) ? <><p className="workRailHeading">收藏</p>{exampleProjects.filter(project => work?.favorites.includes(project.id)).map(project => <Link className="shRow" key={project.id} to={`${base}/work/projects/${project.id}`}><Star aria-hidden="true" /><span>{project.name}</span></Link>)}<p className="workRailHeading">快捷视图</p><Link className="shRow" to={`${base}/work?tab=attention`}><ListTodo aria-hidden="true" /><span>需要回应</span></Link></> : null}
+      {location.pathname.startsWith(`${base}/work`) ? <nav className="workRailViews" aria-label="收藏与视图">
+        <p className="workRailHeading">收藏</p>
+        {exampleProjects.filter(project => work?.favorites.includes(project.id)).map(project => <Link className="shRow" key={project.id} to={`${base}/work/projects/${project.id}`}><span className="workRailProjectIcon">{project.icon}</span><span>{project.name}</span></Link>)}
+        {!work?.favorites.length ? <p className="workRailEmpty">收藏项目，方便下次访问</p> : null}
+        <p className="workRailHeading">视图</p>
+        <Link className="shRow" to={`${base}/work?tab=attention`} aria-current={location.pathname === `${base}/work` && location.search.includes("tab=attention") ? "page" : undefined}><ListTodo aria-hidden="true" /><span>需要回应</span><span className="workRailCount">{work?.tasks.filter(task => task.owner === "我" && task.attention && !["已完成", "已取消"].includes(task.status)).length || 0}</span></Link>
+      </nav> : null}
       {!location.pathname.startsWith(`${base}/work`) ? <ConversationSections base={base} sessionProps={sessionProps ? { ...sessionProps, onOpenProjectCreate: () => setProjectCreateOpen(true) } : null} recentNavigation={recentNavigation} onStartNewChat={onStartNewChat} navigation={navigation} visible={navigationVisible} /> : null}
 
       {projectCreateOpen ? <ProjectCreateDialog onClose={() => setProjectCreateOpen(false)} onCreate={sessionProps.onCreateProject} /> : null}
