@@ -226,6 +226,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
   const [navigationError, setNavigationError] = useState(false);
   const chatPanelId = useId();
   const browsing = Boolean(catalogContent) || overlayOnly;
+  const contextPanelAvailable = visible && !chatFloating && !browsing;
   const [navigationLoaded, setNavigationLoaded] = useState(false);
   const [olderHistoryError, setOlderHistoryError] = useState(false);
   const [streamIssue, setStreamIssue] = useState(null);
@@ -256,8 +257,8 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
   const drawerOpen = compactLayout && drawerFor === navigationKey && !search.open && (visible || Boolean(catalogContent));
   useWorkbenchProgress(workbenchRef, "--workspace-sidebar-progress", isSidebarOpen,
     { initial: initialSidebarProgress, duration: 0.22, immediate: compactLayout });
-  useWorkbenchProgress(workbenchRef, "--workspace-preview-progress", visible && filePreviewOpen,
-    { initial: 0, duration: 0.24, immediate: !visible });
+  useWorkbenchProgress(workbenchRef, "--workspace-preview-progress", contextPanelAvailable && filePreviewOpen,
+    { initial: 0, duration: 0.24, immediate: !contextPanelAvailable });
   useLayoutEffect(() => {
     if (!compactLayout) return;
     const drawer = sidebarRef.current;
@@ -475,7 +476,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
   }, [contextPanel]);
 
   useEffect(() => {
-    if (!visible || search.open || !filePreviewOpen) return undefined;
+    if (!contextPanelAvailable || search.open || !filePreviewOpen) return undefined;
     const closeOnEscape = (event) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
       if (document.getElementById(previewPanelId)?.contains(document.activeElement)) {
@@ -485,7 +486,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [visible, search.open, filePreviewOpen, previewPanelId, toggleFilePreview]);
+  }, [contextPanelAvailable, search.open, filePreviewOpen, previewPanelId, toggleFilePreview]);
 
   useEffect(() => {
     requestScopeRef.current.active = true;
@@ -1543,7 +1544,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
 
       <header className="workspaceTopbar" inert={search.open}>
         <div className="workspaceTopbarStart">
-          {compactLayout && !overlayOnly ? <button
+          {compactLayout && !overlayOnly && !chatFloating ? <button
             className="workspacePanelToggle"
             type="button"
             onClick={() => setDrawerFor(navigationKey)}
@@ -1554,13 +1555,13 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
             <PanelLeft aria-hidden="true" />
           </button> : null}
           {!browsing || chatFloating ? activeSession ? <ChatTitle key={activeSession.id} session={activeSession} actions={sessionActions} running={hasActiveAgentRun} titleControl={chatTitleControl} /> : chatTitleControl : null}
-          {compactLayout && !overlayOnly ? <button className="workspacePanelToggle" ref={search.triggerRef} type="button" onClick={search.toggle}
+          {compactLayout && !overlayOnly && !chatFloating ? <button className="workspacePanelToggle" ref={search.triggerRef} type="button" onClick={search.toggle}
             aria-label={t("searchOverlay.searchConversationsAndNotes")} title={t("shellSidebar.searchCtrlK")}><Search aria-hidden="true" /></button> : null}
         </div>
         <div className="conversationWindowActions">
           {chatFloating ? <><button className="workspacePanelToggle" aria-label={t("work.conversation.minimize")} onClick={() => { keepChatTab(); onMinimizeChat(); }}><Minus /></button><button className="workspacePanelToggle" aria-label={t("work.conversation.expand")} onClick={onExpandChat}><Maximize2 /></button><button className="workspacePanelToggle" aria-label={t("work.conversation.close")} onClick={() => onCloseChatTab(activeSession?.id || "draft")}><X /></button></> : !browsing ? <button className="workspacePanelToggle" aria-label={t("work.conversation.dock")} onClick={() => { keepChatTab(); onDockChat(); }}><Minimize2 /></button> : null}
         </div>
-        {visible && contextPanel.mode !== "closed" ? <WorkspacePreviewToggle
+        {contextPanelAvailable && contextPanel.mode !== "closed" ? <WorkspacePreviewToggle
           ref={previewToggleRef} panelId={previewPanelId} open={filePreviewOpen} onToggle={toggleFilePreview}
         /> : null}
       </header>
@@ -1657,7 +1658,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
       </section> : null}
       {dockContainer ? createPortal(<ConversationTabs panelId={chatPanelId} sessions={dockedSessions} activeId={activeSession?.id || "draft"} expanded={chatFloating && !search.open} onSelect={openDockedSession} onMinimize={onMinimizeChat} onClose={onCloseChatTab} />, dockContainer) : null}
       {search.open ? <WorkspaceSearch workspaceId={workspace.id} onClose={search.close} inputRef={search.inputRef} /> : null}
-      {visible ? <WorkspaceContextPanel
+      {contextPanelAvailable ? <WorkspaceContextPanel
         id={previewPanelId}
         panel={contextPanel}
         subagentsRevision={subagentsVersion?.sessionId === sessionId ? subagentsVersion.revision : "0"}

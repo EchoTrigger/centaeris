@@ -4,6 +4,12 @@
   --control-height: 36px;
   --control-radius: 7px;
   --settings-form-width: 720px;
+  --navigation-font-size: 14px;
+  --navigation-font-weight: 400;
+  --navigation-selected-weight: 500;
+  --navigation-icon-size: 14px;
+  --navigation-icon-stroke: 1.8;
+  --navigation-row-height: 30px;
 }
 @media (pointer: coarse) {
   :root {

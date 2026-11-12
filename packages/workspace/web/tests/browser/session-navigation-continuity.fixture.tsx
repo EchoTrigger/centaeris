@@ -17,7 +17,7 @@ await i18n.changeLanguage('en');
 const workspace = { id: 'workspace', name: 'Navigation fixture', role: 'owner', avatarUrl: null };
 const user = { id: 'user', email: 'synthetic@example.invalid' };
 const rows = Array.from({ length: 48 }, (_, index) => ({ id: `session-${index}`, workspaceId: workspace.id,
-  projectId: index < 4 ? 'project' : null, currentEnvironmentId: null, executionMode: null, title: `Conversation ${index}`,
+  projectId: index < 4 ? 'project' : null, currentEnvironmentId: null, executionMode: null, title: index === 5 ? `Conversation 5 ${"long title ".repeat(20)}`.trim() : `Conversation ${index}`,
   origin: 'user', status: 'active', deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: false,
   updatedAt: '2026-11-07T00:00:00Z', latestAttentionSequence: '0', readThroughSequence: '0', attentionRevision: '0', isManuallyUnread: false }));
 const requests: string[] = [], failures: string[] = [], mutations: string[] = [];

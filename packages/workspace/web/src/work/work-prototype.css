@@ -154,10 +154,10 @@
 .workPreview { line-height:1.85; }
 .workPreview h3 { margin:22px 0 10px; }
 .workSrOnly { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
-.workRailHeading { margin:22px 10px 6px; color:var(--process-text); font-size:11px; }
+.workRailHeading { margin:22px 10px 6px; color:var(--process-text); font-size:12px; font-weight:400; }
 .workRailViews { padding:0 10px; min-height:0; overflow-y:auto; }
 .workRailViews .shRow { margin:0; }
-.workRailProjectIcon { display:inline-grid; place-items:center; width:16px; height:16px; border:1px solid var(--outline-variant); border-radius:4px; color:var(--process-text); font-size:10px; }
+.workRailProjectIcon { display:inline-grid; place-items:center; width:var(--navigation-icon-size); height:var(--navigation-icon-size); border:1px solid var(--outline-variant); border-radius:4px; color:var(--process-text); font-size:10px; }
 .workRailCount { margin-left:auto; font-size:11px; color:var(--process-text); font-variant-numeric:tabular-nums; }
 @media (max-width:1100px) { .workRowProject { display:none; } .workDetail { grid-template-columns:minmax(0,1fr) 218px; } .workDetailMain { padding-inline:28px; } }
 @media (max-width:760px) {
@@ -206,7 +206,7 @@
 .workChecks { display:grid; gap:10px; }
 .workResourceList { padding:4px; border:1px solid var(--outline-variant); border-radius:12px; }
 .workActivityDot { width:5px; height:5px; flex:none; border-radius:50%; background:var(--outline); }
-.workRailViews .shRow { min-height:30px; font-size:12px; }
+.workRailViews .shRow { min-height:var(--navigation-row-height); font-size:var(--navigation-font-size); }
 @media (max-width:760px) {
   .workPrototype { padding:6px; }
   .workHeader { padding:8px 12px; }

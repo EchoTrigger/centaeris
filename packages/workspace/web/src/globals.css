@@ -832,14 +832,14 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
   background: var(--workspace-rail);
 }
 .workspaceSettingsNav { display: flex; min-height: 0; flex: 0 0 var(--workspace-sidebar-width); flex-direction: column; overflow: hidden; padding: 6px 10px 20px; }
-.workspaceSettingsNav a { display: flex; min-height: 32px; align-items: center; gap: 8px; border-radius: 6px; color: var(--on-surface); padding: 0 8px; font-size: 14px; text-decoration: none; }
+.workspaceSettingsNav a { display: flex; min-height: var(--navigation-row-height); align-items: center; gap: 8px; border-radius: 6px; color: var(--on-surface); padding: 0 8px; font-size: var(--navigation-font-size); font-weight: var(--navigation-font-weight); text-decoration: none; }
 .workspaceSettingsNav a:hover, .workspaceSettingsNav a[aria-current="page"] { background: var(--workspace-selection); }
-.workspaceSettingsNav a[aria-current="page"] { font-weight: 600; }
-.workspaceSettingsNav svg { width: 15px; flex: none; color: var(--process-text); }
+.workspaceSettingsNav a[aria-current="page"] { font-weight: var(--navigation-selected-weight); }
+.workspaceSettingsNav svg { width: var(--navigation-icon-size); height: var(--navigation-icon-size); stroke-width: var(--navigation-icon-stroke); flex: none; color: var(--process-text); }
 .workspaceSettingsNav .workspaceSettingsBack { flex: none; color: var(--process-text); white-space: nowrap; }
 .workspaceSettingsSections { min-height: 0; flex: 1; margin-top: 22px; overflow-y: auto; scrollbar-gutter: stable; }
 .workspaceSettingsSections > section + section { margin-top: 20px; }
-.workspaceSettingsSections h2 { margin: 0 8px 5px; color: var(--process-text); font-size: 12px; font-weight: 600; }
+.workspaceSettingsSections h2 { margin: 0 8px 5px; color: var(--process-text); font-size: 12px; font-weight: 400; }
 .workspaceSettingsSections > section > a + a { margin-block-start: var(--workspace-list-row-gap); }
 .workspaceSettingsSectionPicker { display: none; }
 .workspaceSettingsContent { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; overflow: hidden; border: 1px solid var(--workspace-frame-edge); border-radius: var(--workspace-frame-radius); background: var(--surface-color); }

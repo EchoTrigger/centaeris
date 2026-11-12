@@ -220,6 +220,12 @@ test('docked chat tabs preserve drafts, open one window and reserve space on set
       await send('Input.insertText', { text: 'Draft for chat five' });
       await click('[aria-label="Move to toolbar"]');
       await waitFor(() => evaluate("document.querySelectorAll('[role=tab]').length === 2"), 'two tabs');
+      assert(await evaluate(`(() => {
+        const tab = document.querySelector('.conversationTabItem:last-child [role=tab]');
+        const label = tab.querySelector('span');
+        return label.scrollWidth > label.clientWidth && tab.title === label.textContent
+          && tab.getBoundingClientRect().width < innerWidth / 2;
+      })()`), 'a long title stays bounded while its full text remains available');
       await evaluate('sessionNavigationFixture.task()');
       await waitFor(() => evaluate("Array.from(document.querySelectorAll('button')).some(button => button.textContent.trim() === 'Continue')"), 'sample task');
       await evaluate("Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'Continue').click()");
@@ -281,7 +287,7 @@ test('docked chat tabs preserve drafts, open one window and reserve space on set
       await waitFor(() => evaluate("Boolean(document.querySelector('.workspaceSettingsContent'))"), 'back to settings');
       await click('.conversationTabItem:first-child [role=tab]');
       await waitFor(() => evaluate("document.querySelector('[role=tab][aria-selected=true]')?.textContent === 'Conversation 4'"), 'first chat selected');
-      await click('[aria-label="Close Conversation 5 tab"]');
+      await click('.conversationTabItem:last-child .conversationTabClose');
       await waitFor(() => evaluate("document.querySelectorAll('[role=tab]').length === 1"), 'inactive tab closed');
       assert(await evaluate("Boolean(document.querySelector('.isChatFloating'))"));
       await click('[aria-label="Close chat"]');
@@ -293,7 +299,7 @@ test('docked chat tabs preserve drafts, open one window and reserve space on set
       await evaluate("sessionNavigationFixture.navigate('session-5')");
       await waitFor(() => evaluate("document.querySelector('.conversationSwitcher')?.textContent.includes('Conversation 5')"), 'closed chat still available');
       await click('[aria-label="Move to toolbar"]');
-      await waitFor(() => evaluate("document.querySelector('[role=tab][aria-selected=true]')?.textContent === 'Conversation 5'"), 'reopened chat');
+      await waitFor(() => evaluate("document.querySelector('[role=tab][aria-selected=true]')?.textContent.startsWith('Conversation 5 ')"), 'reopened chat');
 
       await click('[aria-label="Expand chat"]');
       await waitFor(() => evaluate("!document.querySelector('[role=tab]')"), 'all expanded');
