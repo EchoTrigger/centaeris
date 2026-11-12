@@ -72,7 +72,7 @@
 .workspaceWorkbench.isChatFloating .shHome { display:none; }
 .conversationHistory .workspaceSessionRow { height:32px; contain-intrinsic-size:auto 32px; }
 
-.conversationTabItem { position:relative; display:flex; flex:0 1 220px; width:220px; align-items:center; min-width:0; max-width:min(220px,calc(100vw - 24px)); border-radius:6px; box-shadow:none; }
+.conversationTabItem { position:relative; display:flex; flex:0 1 var(--workspace-tab-width); width:var(--workspace-tab-width); align-items:center; min-width:0; max-width:min(var(--workspace-tab-width),calc(100vw - 24px)); border-radius:6px; box-shadow:none; }
 .conversationTabItem:is(:hover,:has(:focus-visible)) { background:var(--workspace-selection); }
 .conversationDock .conversationTabItem :is(.conversationDockSession,.workConversationTab) { width:100%; text-align:left; background:transparent; box-shadow:none; }
 .conversationDock .conversationTabClose { position:absolute; right:0; width:22px; min-width:22px; padding:0; background:transparent; opacity:0; pointer-events:none; color:var(--on-surface); }

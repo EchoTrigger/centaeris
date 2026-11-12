@@ -23,7 +23,8 @@
 
 :root {
   --workspace-content-width: 820px;
-  --workspace-sidebar-width: 238px;
+  --workspace-tab-width: 200px;
+  --workspace-sidebar-width: calc(var(--workspace-tab-width) + 20px);
   --workspace-list-row-gap: 2px;
   --workspace-rail: #f5f5f6;
   --workspace-frame-inset: 8px;

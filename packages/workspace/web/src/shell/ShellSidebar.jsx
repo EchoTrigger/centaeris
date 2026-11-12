@@ -18,7 +18,7 @@ import {
   House,
   Copy,
   Layers2,
-  Orbit,
+  MousePointer2,
 } from "lucide-react";
 import { displayWorkText, exampleProjects, useWorkPrototype } from "../work/workPrototype";
 import { apiResponse, clearCsrfToken } from "../api";
@@ -141,7 +141,7 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
           <Link className="shRow" to={`${base}/work/inbox`} aria-current={location.pathname === `${base}/work/inbox` ? "page" : undefined}><Inbox aria-hidden="true" /><span>{t("work.inbox")}</span></Link>
           <Link className="shRow" to={`${base}/work`} aria-current={location.pathname === `${base}/work` ? "page" : undefined}><Focus aria-hidden="true" /><span>{t("work.myIssues")}</span></Link>
           <Link className="shRow" to={`${base}/work/reviews`} aria-current={location.pathname === `${base}/work/reviews` ? "page" : undefined}><GitPullRequest aria-hidden="true" /><span>{t("work.reviews")}</span></Link>
-          <Link className="shRow" to={`${base}/app`} aria-current={isHome || location.pathname.startsWith(`${base}/sessions/`) ? "page" : undefined}><Orbit aria-hidden="true" /><span>Agent</span></Link>
+          <Link className="shRow" to={`${base}/app`} aria-current={isHome || location.pathname.startsWith(`${base}/sessions/`) ? "page" : undefined}><MousePointer2 aria-hidden="true" /><span>Agent</span></Link>
         </div>
         <AnimatePresence initial={false}>
         {favoriteProjects.length || favoriteSessions.length ? <motion.section key="favorites" className="workRailViews shFavorites"
