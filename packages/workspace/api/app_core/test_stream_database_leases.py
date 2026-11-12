@@ -486,7 +486,7 @@ class HttpDatabaseLeaseFixture:
                         while item["event"]["type"] != "agent_run_completed":
                             item = self._read_item(response)
                             self.assertIsNotNone(item, "public stream ended before terminal")
-                        self.assertTrue(state["terminalSent"].is_set())
+                        self.assertTrue(state["terminalSent"].wait(5), "server did not acknowledge terminal send")
                     if mode == "normal":
                         self.assertIsNone(self._read_item(response), "normal terminal stream must reach EOF")
                     else:
