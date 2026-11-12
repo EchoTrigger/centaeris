@@ -1,4 +1,5 @@
-main.workspaceWorkbench.hasConversationDock { padding-bottom:36px; }
+main.workspaceWorkbench:has(.conversationDock > button) { padding-bottom:36px; }
+.conversationDock:empty { display:none; }
 .conversationDock { position:fixed; z-index:35; right:10px; bottom:4px; display:flex; align-items:center; gap:4px; height:28px; max-width:calc(100vw - 24px); }
 .conversationDock button { flex-shrink:0; display:inline-flex; align-items:center; justify-content:center; gap:7px; min-width:28px; height:28px; padding:4px 9px; border:0; border-radius:6px; background:transparent; color:var(--process-text); font:inherit; font-size:12px; cursor:pointer; }
 .conversationDock button:hover,.conversationDock button[aria-pressed=true] { background:var(--workspace-selection); color:var(--on-surface); }

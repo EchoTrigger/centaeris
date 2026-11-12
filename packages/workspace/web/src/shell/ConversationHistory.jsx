@@ -41,7 +41,7 @@ function ProjectCreateDialog({ onClose, onCreate }) {
   </div>, document.body);
 }
 
-export function ConversationHistory({ sessionProps, recentNavigation, onStartNewChat, onOpenSession, children, label = "会话历史", className = "workspacePanelToggle", side = "top", onOpen }) {
+export function ConversationHistory({ sessionProps, recentNavigation, onStartNewChat, onOpenSession, children, label = "会话历史", className = "workspacePanelToggle", side = "top" }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("");
@@ -55,7 +55,7 @@ export function ConversationHistory({ sessionProps, recentNavigation, onStartNew
     event.preventDefault(); event.stopPropagation(); setOpen(false); onOpenSession(session);
   }
   return <>
-    <Popover.Root open={open} onOpenChange={nextOpen => { setOpen(nextOpen); if (nextOpen) onOpen?.(); }}>
+    <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger className={className} aria-label={label}>{children}</Popover.Trigger>
       <Popover.Portal><Popover.Positioner side={side} align="end" sideOffset={8} className="conversationHistoryPositioner">
         <Popover.Popup className="conversationHistory" aria-label="会话历史">

@@ -57,8 +57,6 @@ import {
   Archive,
   Image as ImageIcon,
   ChevronDown,
-  History,
-  MessageSquare,
   Minimize2,
   Minus,
   Maximize2,
@@ -1556,7 +1554,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   return (
     <main
       ref={workbenchRef}
-      className={`workspaceWorkbench hasConversationDock${chatFloating ? " isChatFloating" : ""} ${isSidebarOpen ? "withSidebar" : "withoutSidebar"}${catalogContent ? " isBrowsing" : ""}${search.open ? " isSearching" : ""}`}
+      className={`workspaceWorkbench${chatFloating ? " isChatFloating" : ""} ${isSidebarOpen ? "withSidebar" : "withoutSidebar"}${catalogContent ? " isBrowsing" : ""}${search.open ? " isSearching" : ""}`}
       style={{ "--workspace-sidebar-progress": initialSidebarProgress, "--browser-panel-width": browserPanelWidthPx == null ? undefined : `${browserPanelWidthPx}px` }}
     >
       {!compactLayout ? <button
@@ -1704,9 +1702,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
         <ConversationDockContext.Provider value={conversationDock}>{catalogContent}</ConversationDockContext.Provider>
       </section> : null}
       <nav className="conversationDock" ref={setConversationDock} aria-label="会话工具栏" inert={search.open}>
-        {activeSession ? <button className="conversationDockSession" aria-pressed={chatFloating} onClick={chatFloating ? onMinimizeChat : onShowChat}><span className={hasActiveAgentRun ? "isRunning" : ""} />{activeSession.title}</button> : null}
-        <button onClick={chatFloating ? onMinimizeChat : onShowChat}><MessageSquare />Agent</button>
-        <ConversationHistory {...historyProps} onOpen={onMinimizeChat}><History /></ConversationHistory>
+        {catalogContent && activeSession && !chatFloating ? <button className="conversationDockSession" aria-pressed={chatFloating} onClick={chatFloating ? onMinimizeChat : onShowChat}><span className={hasActiveAgentRun ? "isRunning" : ""} />{activeSession.title}</button> : null}
       </nav>
       {search.open ? <WorkspaceSearch workspaceId={workspace.id} onClose={search.close} inputRef={search.inputRef} /> : null}
       {visible ? <WorkspaceContextPanel
