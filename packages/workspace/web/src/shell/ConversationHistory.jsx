@@ -60,7 +60,7 @@ export function ConversationHistory({ sessionProps, recentNavigation, onStartNew
       <Popover.Portal><Popover.Positioner side={side} align="end" sideOffset={8} className="conversationHistoryPositioner">
         <Popover.Popup className="conversationHistory" aria-label={t("work.conversation.history")}>
           {sessionProps.projects.length ? <select aria-label={t("work.conversation.group")} value={group} onChange={event => setGroup(event.target.value)}><option value="">{t("work.conversation.all")}</option><option value="pinned">{t("work.conversation.pinned")}</option>{sessionProps.projects.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select> : null}
-          <nav className="conversationHistoryList" aria-label={t("work.conversation.list")} onClickCapture={select}>{sessions.map(item => sessionProps.renderSessionRow(item, { icon: true }))}</nav>
+          <nav className="conversationHistoryList" aria-label={t("work.conversation.list")} onClickCapture={select}>{sessions.map(item => sessionProps.renderSessionRow(item))}</nav>
           {recentNavigation?.loading ? <p role="status">{t("work.conversation.loading")}</p> : recentNavigation?.error ? <p role="alert">{t("work.conversation.error")}</p> : !sessions.length ? <p>{t("work.conversation.empty")}</p> : null}
           <footer><button onClick={() => { setOpen(false); onStartNewChat(); }}><SquarePen />{t("work.conversation.new")}</button><button onClick={() => { setOpen(false); setCreating(true); }}><Plus />{t("work.conversation.newGroup")}</button></footer>
         </Popover.Popup>
