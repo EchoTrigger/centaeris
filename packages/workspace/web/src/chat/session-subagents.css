@@ -9,14 +9,8 @@
 .sessionSubagentStatus.is-succeeded { color:var(--success); }
 .sessionSubagentStatus:is(.is-failed,.is-dead_lettered) { color:var(--error); }
 .sessionSubagentStatus.is-cancelled { color:#d9ad71; }
-.sessionSubagentDialog { max-height:calc(100dvh - 48px); display:flex; flex-direction:column; gap:16px; }
-.sessionSubagentMessages { display:grid; gap:22px; min-height:64px; min-width:0; overflow:auto; padding-right:4px; overscroll-behavior:contain; }
-.sessionSubagentPrompt { padding:10px 13px; border-radius:12px; background:var(--surface-variant); white-space:pre-wrap; overflow-wrap:anywhere; }
-.sessionSubagentMessage { display:grid; min-width:0; gap:10px; }
-.sessionSubagentMessageText { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; }
-.sessionSubagentReasoning { color:var(--process-text); }
-.sessionSubagentReasoning summary { cursor:pointer; margin-bottom:8px; }
-.sessionSubagentTool > summary { display:flex; align-items:center; justify-content:space-between; gap:12px; cursor:pointer; }
-.sessionSubagentTool pre { white-space:pre-wrap; overflow-wrap:anywhere; }
+.sessionSubagentConversation { min-width:0; min-height:0; overflow:auto; overscroll-behavior:contain; padding:24px 20px 40px; }
+.sessionSubagentTaskContext { min-width:0; color:var(--process-text); }
+.sessionSubagentTaskContext summary { cursor:pointer; margin-bottom:8px; }
 @media (prefers-reduced-motion:no-preference) { .sessionSubagentSpinner { animation:session-subagent-spin 1s linear infinite; } }
 @keyframes session-subagent-spin { to { transform:rotate(360deg); } }

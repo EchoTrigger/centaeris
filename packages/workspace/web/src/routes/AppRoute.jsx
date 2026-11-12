@@ -1307,13 +1307,21 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   }
 
   function closeFilePreview() {
-    if (contextPanel.mode !== "filePreview") return;
+    if (contextPanel.mode === "closed") return;
     const { origin } = contextPanel;
     transcriptRef.current?.preserveReadingPosition();
     clearContextPanel();
     window.requestAnimationFrame(() => {
       document.getElementById(origin.elementId)?.focus({ preventScroll: true });
     });
+  }
+
+  function showSubagent(agent, origin) {
+    if (!sessionId) return;
+    transcriptRef.current?.preserveReadingPosition();
+    previewRequestIdRef.current += 1;
+    setContextPanel({ mode: "subagentPreview", sessionId, agent, displayName: agent.description, origin });
+    setFilePreviewOpen(true);
   }
 
   async function showCitation(citation, origin) {
@@ -1574,7 +1582,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           {compactLayout ? <button className="workspacePanelToggle" ref={search.triggerRef} type="button" onClick={search.toggle}
             aria-label={t("searchOverlay.searchConversationsAndNotes")} title={t("shellSidebar.searchCtrlK")}><Search aria-hidden="true" /></button> : null}
         </div>
-        {visible && contextPanel.mode === "filePreview" ? <WorkspacePreviewToggle
+        {visible && contextPanel.mode !== "closed" ? <WorkspacePreviewToggle
           ref={previewToggleRef} panelId={previewPanelId} open={filePreviewOpen} onToggle={toggleFilePreview}
         /> : null}
       </header>
@@ -1602,6 +1610,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
             emptyState={isHome ? <HomePlane /> : <ConversationReadFeedback {...readFeedbackProps} placement="empty" />}
             onShowCitation={showCitation}
             onShowArtifact={showArtifact}
+            onOpenSubagent={showSubagent}
             pendingUserMessage={searchEventId ? null : visiblePendingMessage}
             submissionRejected={!searchEventId && rejectedSubmissionScopes.has(requestScopeKey)}
             onReleaseLoadedHistory={searchEventId ? undefined : releaseLoadedTranscriptHistory}
@@ -1674,6 +1683,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       {visible ? <WorkspaceContextPanel
         id={previewPanelId}
         panel={contextPanel}
+        subagentsRevision={subagentsVersion?.sessionId === sessionId ? subagentsVersion.revision : "0"}
         open={filePreviewOpen}
         browserWidthPx={browserPanelWidthPx}
         onBrowserWidthChange={updateBrowserPanelWidth}

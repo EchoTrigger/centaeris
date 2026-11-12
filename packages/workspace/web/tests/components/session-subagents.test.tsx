@@ -2,15 +2,18 @@
 import { act, cleanup, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
+import { useState } from "react";
 import { configureApi } from "../../src/api";
 import { TranscriptToolGroupCard } from "../../src/chat/TranscriptBlockContent";
-import { SessionSubagentDialog } from "../../src/chat/SessionSubagentPresentation";
+import { SessionSubagentTags } from "../../src/chat/SessionSubagentPresentation";
+import { SessionSubagentPreview } from "../../src/chat/SessionSubagentPreview";
+import { WorkspaceContextPanel } from "../../src/components/WorkspaceContextPanel";
 import { parseSessionSubagent, parseSessionSubagents, type SessionSubagent } from "../../src/chat/sessionSubagents";
 import { useSessionSubagents } from "../../src/chat/useSessionSubagents";
 import { createTranscriptViewStore } from "../../src/chat/transcriptViewStore";
 import { TranscriptToolOperationRegistry } from "../../src/chat/transcriptToolOperations";
 
-vi.mock("../../src/i18n", () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
+vi.mock("../../src/i18n", () => ({ useTranslation: () => ({ t: (key: string) => key, i18n: { language: "en" } }) }));
 vi.mock("../../src/chat/MarkdownContent", () => ({ MarkdownContent: ({ text }: { text: string }) => <div>{text}</div> }));
 vi.mock("../../src/chat/AnimatedDisclosure", () => ({ AnimatedDisclosure: ({ expanded, children }: { expanded: boolean; children: React.ReactNode }) => expanded ? children : null }));
 
@@ -56,7 +59,7 @@ test("durable children stay at their creator group, with running children first 
   const last = within(screen.getByRole("region", { name: "Later group" }));
   expect(last.getAllByRole("button")).toHaveLength(1);
   await userEvent.click(last.getByRole("button", { name: /Inspect later/ }));
-  expect(open).toHaveBeenCalledWith(later);
+  expect(open).toHaveBeenCalledWith(later, { elementId: `subagent-${later.runtimeJobId}` });
 });
 
 test("only a successful canonical wait for the exact known child is folded into its visible Agent", () => {
@@ -86,7 +89,7 @@ test("a wait remains visible when its creator is outside the loaded transcript",
   expect(screen.getByText(/completed wait/)).toBeTruthy();
 });
 
-test("opening a child shows its task, reasoning, all tool rounds and final answer", async () => {
+test("opening an Agent tag shows a read-only conversation tab with every tool round and final answer", async () => {
   configureApi({ apiBaseUrl: "https://example.test" });
   const agent = child("detail");
   const message = (messageId: string, role: string, content: string, more = {}) => ({ messageId, role, content, createdAtMs: 100,
@@ -100,20 +103,42 @@ test("opening a child shows its task, reasoning, all tool rounds and final answe
     message("answer", "assistant", "All done"),
   ] })));
   vi.stubGlobal("fetch", fetcher);
-  render(<SessionSubagentDialog sessionId="session" agent={agent} revision="0" onClose={() => {}} />);
-  const dialog = screen.getByRole("dialog", { name: agent.description });
-  await waitFor(() => expect(within(dialog).getByText("All done")).toBeTruthy());
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  function PreviewWorkbench() {
+    const [panel, setPanel] = useState<{ mode: "subagentPreview"; sessionId: string; agent: SessionSubagent; displayName: string; origin: { elementId: string } } | { mode: "closed" }>({ mode: "closed" });
+    return <div className="workspaceWorkbench"><div className="workspaceChatColumn">
+      <p>Parent conversation stays open</p>
+      <SessionSubagentTags agents={[agent]} onOpen={(selected, origin) => setPanel({ mode: "subagentPreview", sessionId: "session", agent: selected, displayName: selected.description, origin })} />
+    </div><WorkspaceContextPanel panel={panel} open={panel.mode !== "closed"} onBrowserWidthChange={() => {}} onClose={() => {
+      if (panel.mode === "subagentPreview") document.getElementById(panel.origin.elementId)?.focus();
+      setPanel({ mode: "closed" });
+    }} /></div>;
+  }
+  render(<PreviewWorkbench />);
+  const trigger = screen.getByRole("button", { name: /Agent Inspect detail/ });
+  await userEvent.click(trigger);
+  const tabpanel = screen.getByRole("tabpanel", { name: agent.description });
+  await waitFor(() => expect(within(tabpanel).getByText("All done")).toBeTruthy());
+  expect(screen.getByText("Parent conversation stays open")).toBeTruthy();
+  expect(screen.getByRole("tab", { name: agent.description }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(within(tabpanel).queryByRole("textbox")).toBeNull();
+  expect(within(tabpanel).queryByRole("combobox")).toBeNull();
   expect(fetcher.mock.calls[0][0]).toBe("https://example.test/api/sessions/session/subagents/subagent.run%3Adetail");
-  expect(within(dialog).getByText("Task detail")).toBeTruthy();
-  expect(within(dialog).getAllByText("transcriptTool.status.completed")).toHaveLength(2);
-  await userEvent.click(within(dialog).getByText("sessionSubagent.taskContext"));
-  expect(within(dialog).getByText("internal WorkPacket envelope")).toBeTruthy();
-  await userEvent.click(within(dialog).getByText("reasoningBlock.thoughts"));
-  expect(within(dialog).getByText("First reasoning")).toBeTruthy();
-  await userEvent.click(within(dialog).getByText("write"));
-  expect(within(dialog).getByText("File written")).toBeTruthy();
-  await userEvent.click(within(dialog).getByText("read"));
-  expect(within(dialog).getByText("Verified contents")).toBeTruthy();
+  expect(within(tabpanel).getByText("Task detail")).toBeTruthy();
+  await userEvent.click(within(tabpanel).getByRole("button", { name: /^workProgress.worked/ }));
+  expect(within(tabpanel).getAllByText("transcriptTool.status.completed")).toHaveLength(2);
+  await userEvent.click(within(tabpanel).getByText("sessionSubagent.taskContext"));
+  expect(within(tabpanel).getByText("internal WorkPacket envelope")).toBeTruthy();
+  await userEvent.click(within(tabpanel).getByRole("button", { name: "reasoningBlock.thoughts" }));
+  expect(within(tabpanel).getByRole("region", { name: "reasoningBlock.thinkingContent" }).textContent).toBe("First reasoning");
+  for (const tool of within(tabpanel).getAllByRole("button", { name: /demo.txt/ })) await userEvent.click(tool);
+  expect(within(tabpanel).getByText("File written")).toBeTruthy();
+  expect(within(tabpanel).getByText("Verified contents")).toBeTruthy();
+  await userEvent.keyboard("{Escape}");
+  await userEvent.click(screen.getByRole("button", { name: "workspaceContextPanel.closeTabValue" }));
+  expect(screen.queryByRole("tabpanel")).toBeNull();
+  expect(document.activeElement).toBe(trigger);
 });
 
 test("a committed child revision refreshes open tools and text while its Job stays running", async () => {
@@ -128,15 +153,43 @@ test("a committed child revision refreshes open tools and text while its Job sta
     .mockResolvedValueOnce(detail([assistant("First child step")]))
     .mockResolvedValueOnce(detail([assistant("Reading back the created file", [{ id: "verify", name: "read", argsJson: '{"path":"demo.txt"}' }]) ]));
   vi.stubGlobal("fetch", fetcher);
-  const onClose = () => {};
-  const view = render(<SessionSubagentDialog sessionId="session" agent={agent} revision="1" onClose={onClose} />);
+  const view = render(<SessionSubagentPreview sessionId="session" agent={agent} revision="1" />);
   await waitFor(() => expect(screen.getByText("First child step")).toBeTruthy());
-  view.rerender(<SessionSubagentDialog sessionId="session" agent={agent} revision="2" onClose={onClose} />);
+  view.rerender(<SessionSubagentPreview sessionId="session" agent={agent} revision="2" />);
   await waitFor(() => expect(screen.getByText("Reading back the created file")).toBeTruthy());
-  expect(screen.getByText("read")).toBeTruthy();
+  expect(screen.getByText(/demo.txt/)).toBeTruthy();
   expect(screen.queryByText("First child step")).toBeNull();
   expect(screen.getByText("sessionSubagent.status.running")).toBeTruthy();
   expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+test("malformed model arguments remain inspectable without hiding other tools or the final answer", async () => {
+  configureApi({ apiBaseUrl: "https://example.test" });
+  const agent = child("malformed");
+  const message = (messageId: string, role: string, content: string, more = {}) => ({ messageId, role, content, createdAtMs: 100,
+    reasoningContent: null, toolCalls: [], toolCallId: null, toolName: null, resultState: null, ...more });
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ schema: "workspace.session.subagent.v1", sessionId: "session", agent, messages: [
+    message("calls", "assistant", "Trying the tools", { toolCalls: [
+      { id: "bad", name: "read", argsJson: '{"path": broken' },
+      { id: "unresolved", name: "write", argsJson: '{"path": unfinished' },
+      { id: "valid", name: "read", argsJson: '{"path":"valid.txt"}' },
+    ] }),
+    message("failure", "tool", "malformed_tool_call_arguments: rejected", { toolCallId: "bad", toolName: "read", resultState: "failed" }),
+    message("success", "tool", "Valid file contents", { toolCallId: "valid", toolName: "read", resultState: "successWithOutput" }),
+    message("final", "assistant", "The remaining answer is readable"),
+  ] }))));
+  render(<SessionSubagentPreview sessionId="session" agent={agent} revision="0" />);
+  await waitFor(() => expect(screen.getByText("The remaining answer is readable")).toBeTruthy());
+  await userEvent.click(screen.getByRole("button", { name: /^workProgress.worked/ }));
+  expect(screen.getByText("transcriptTool.status.failed")).toBeTruthy();
+  expect(screen.getByText("transcriptTool.status.unconfirmed")).toBeTruthy();
+  const calls = screen.getAllByRole("button").filter(button => button.textContent?.includes("transcriptTool.status."));
+  for (const call of calls) await userEvent.click(call);
+  expect(screen.getByText(/\{"path": broken/)).toBeTruthy();
+  expect(screen.getByText(/\{"path": unfinished/)).toBeTruthy();
+  expect(screen.getByText("malformed_tool_call_arguments: rejected")).toBeTruthy();
+  expect(screen.getByText("Valid file contents")).toBeTruthy();
+  expect(screen.getByText(/valid.txt/)).toBeTruthy();
 });
 
 test("child list reads coalesce parent changes and discard results from a departed Session", async () => {
@@ -159,6 +212,30 @@ test("child list reads coalesce parent changes and discard results from a depart
   expect(view.result.current.agents[0]?.description).toBe("Inspect two");
   await act(async () => window.dispatchEvent(new Event("focus")));
   await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(4));
+});
+
+test("switching the parent Session aborts the departed preview and rejects its late detail", async () => {
+  configureApi({ apiBaseUrl: "https://example.test" });
+  const resolvers: ((value: Response) => void)[] = [];
+  const fetcher = vi.fn().mockImplementation(() => new Promise<Response>(resolve => resolvers.push(resolve)));
+  vi.stubGlobal("fetch", fetcher);
+  const one = child("one", "running");
+  const two = child("two", "running");
+  const detail = (sessionId: string, agent: SessionSubagent, content: string) => new Response(JSON.stringify({ schema: "workspace.session.subagent.v1", sessionId, agent, messages: [{
+    messageId: "step", role: "assistant", content, createdAtMs: 100, reasoningContent: null, toolCalls: [], toolCallId: null, toolName: null, resultState: null,
+  }] }));
+  const view = render(<SessionSubagentPreview sessionId="one" agent={one} revision="1" />);
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+  const firstSignal = fetcher.mock.calls[0][1].signal as AbortSignal;
+  view.rerender(<SessionSubagentPreview sessionId="two" agent={two} revision="1" />);
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+  expect(firstSignal.aborted).toBe(true);
+  expect(screen.queryByText("Task one")).toBeNull();
+  await act(async () => resolvers[1](detail("two", two, "Current child response")));
+  await waitFor(() => expect(screen.getByText("Current child response")).toBeTruthy());
+  await act(async () => resolvers[0](detail("one", one, "Departed child response")));
+  expect(screen.queryByText("Departed child response")).toBeNull();
+  expect(screen.getByText("Current child response")).toBeTruthy();
 });
 
 test("child read contracts reject unknown schemas, fields and mismatched parents or jobs", () => {

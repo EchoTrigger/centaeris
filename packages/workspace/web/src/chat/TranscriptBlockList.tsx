@@ -25,7 +25,6 @@ import { TranscriptBlockRow, TranscriptFailureNotice, TranscriptLiveTail, Transc
 import type { TranscriptToolOperationRegistry } from "./transcriptToolOperations";
 import type { TranscriptViewStore } from "./transcriptViewStore";
 import { useSessionSubagents } from "./useSessionSubagents";
-import { SessionSubagentDialog } from "./SessionSubagentPresentation";
 import type { SessionSubagent } from "./sessionSubagents";
 
 
@@ -47,6 +46,7 @@ type Props = Readonly<{
   onReadingLatestChange?(sessionId: string | null, readingLatest: boolean): void;
   onShowCitation?(citation: CitationSummary, origin: { elementId: string }): void;
   onShowArtifact?(artifact: import("./useTranscriptTurnMetadata").PublishedArtifact, origin: { elementId: string }): void;
+  onOpenSubagent?(agent: SessionSubagent, origin: { elementId: string }): void;
   running?: boolean;
   activity?: TranscriptActivityState;
   startedAtMs?: number;
@@ -126,6 +126,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
   onReadingLatestChange,
   onShowArtifact,
   onShowCitation,
+  onOpenSubagent,
   running = false,
   activity,
   startedAtMs,
@@ -141,11 +142,6 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
     return body?.kind === "tool" && (body.toolName === "agent" || body.toolName === "task_output");
   });
   const { agents: subagents } = useSessionSubagents(hasAgentTools ? sessionId : null, `${sourceHighWater}:${subagentsRevision}`, running);
-  const [selectedSubagent, setSelectedSubagent] = useState<{ sessionId: string; agent: SessionSubagent } | null>(null);
-  const openSubagent = useCallback((agent: SessionSubagent) => {
-    if (sessionId) setSelectedSubagent({ sessionId, agent });
-  }, [sessionId]);
-  const closeSubagent = useCallback(() => setSelectedSubagent(null), []);
   const targetBlockId = searchTarget?.blockId ?? "";
   const targetQuery = searchTarget?.query ?? "";
   const locatedTarget = useRef({ store, key: "", block: false, word: false });
@@ -635,7 +631,7 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
                 response={turnLive ? <TranscriptLiveTail live={turnLive} mode="text" /> : null}
                 startedAtMs={isPending || (runKey && runKey === pendingRunKey) ? pendingStartedAt : submitted?.startedAtMs ?? time?.startedAtMs ?? (isLast ? startedAtMs : undefined)} completedAtMs={isPending ? pendingUserMessage?.completedAtMs : turnCompletedAt}>
                 {groupTranscriptBlocks(store, turn.processIds).map((entry) => entry.kind === "tool"
-                  ? <TranscriptToolGroupCard store={store} blockIds={entry.blockIds} toolOperations={toolOperations} citations={citations.citations} onShowCitation={onShowCitation} runEnded={runEnded} subagents={subagents} onOpenSubagent={openSubagent} key={`tool:${entry.blockIds[0]}`} />
+                  ? <TranscriptToolGroupCard store={store} blockIds={entry.blockIds} toolOperations={toolOperations} citations={citations.citations} onShowCitation={onShowCitation} runEnded={runEnded} subagents={subagents} onOpenSubagent={onOpenSubagent} key={`tool:${entry.blockIds[0]}`} />
                   : <TranscriptBlockRow store={store} blockId={entry.blockId} searchQuery={entry.blockId === targetBlockId ? targetQuery : undefined} key={entry.blockId} />)}
                 {turnLive ? <TranscriptLiveTail live={turnLive} mode="reasoning" /> : null}
               </WorkProgress> : null}
@@ -667,11 +663,6 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
           <ChevronDown aria-hidden="true" />
         </button>
       ) : null}
-      {selectedSubagent && selectedSubagent.sessionId === sessionId ? <SessionSubagentDialog
-        key={`${sessionId}:${selectedSubagent.agent.runtimeJobId}`} sessionId={sessionId as string}
-        revision={subagentsRevision}
-        agent={subagents.find(agent => agent.runtimeJobId === selectedSubagent.agent.runtimeJobId) ?? selectedSubagent.agent}
-        onClose={closeSubagent} /> : null}
     </div>
   );
 });

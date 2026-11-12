@@ -254,15 +254,13 @@ function operationInlineSummary(operation: Record<string, unknown>, call: Record
   return [command, target || opText(input?.path), description, toolName].find((value) => value.length > 0) || toolName;
 }
 
-type ToolDisplayStatus = "running" | "completed" | "failed" | "interrupted" | "unconfirmed";
+export type ToolDisplayStatus = "running" | "completed" | "failed" | "interrupted" | "unconfirmed";
 
-function TranscriptToolNode({ store, call, operation, outputRef, status }: Readonly<{
-  store: TranscriptViewStore;
+export function TranscriptToolNode({ store, call, operation, outputRef, status }: Readonly<{
   call: Record<string, unknown>;
   operation: Record<string, unknown>;
-  outputRef: TranscriptContentRef | null;
   status: ToolDisplayStatus;
-}>) {
+} & ({ store: TranscriptViewStore; outputRef: TranscriptContentRef | null } | { store?: never; outputRef: null })>) {
   const { t } = useTranslation();
   const failed = status === "failed" || status === "interrupted";
   const [expanded, setExpanded] = useState(false);
@@ -342,7 +340,7 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
   toolOperations?: TranscriptToolOperationRegistry;
   runEnded?: boolean;
   subagents?: readonly SessionSubagent[];
-  onOpenSubagent?(agent: SessionSubagent): void;
+  onOpenSubagent?(agent: SessionSubagent, origin: { elementId: string }): void;
 }>) {
   const { t } = useTranslation();
   const listIdentity = useTranscriptIdentity(store);
