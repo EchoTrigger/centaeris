@@ -228,7 +228,7 @@
   .workspaceDrawer .shSidebar > .workRailViews { display:block; }
 }
 
-.conversationDock .workConversationTab { order:-1; max-width:none; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:clip; display:block; }
+.conversationDock .workConversationTab { order:-1; flex-shrink:1; max-width:100%; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:clip; display:block; }
 .workFloatingConversation { position:fixed; z-index:60; right:20px; bottom:44px; display:flex; flex-direction:column; width:min(420px,calc(100vw - 24px)); height:min(560px,calc(100dvh - 96px)); border:1px solid var(--outline-variant); border-radius:12px; background:var(--surface-color); box-shadow:0 12px 36px var(--scrim); }
 .workFloatingConversation > header { display:flex; align-items:center; gap:5px; min-height:48px; padding:8px 10px 8px 16px; }
 .workFloatingConversation > header h2 { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
