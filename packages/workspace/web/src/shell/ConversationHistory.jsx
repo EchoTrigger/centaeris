@@ -42,7 +42,7 @@ export function ConversationHistory({ sessionProps, workspaceId, currentSessionI
                 if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
                 event.preventDefault(); setOpen(false); onOpenSession(session);
               }}>
-              <span className="conversationHistoryTitle" title={session.title}>{session.title || t("work.conversation.untitled")}</span>
+              <span className="conversationHistoryTitle">{session.title || t("work.conversation.untitled")}</span>
               {session.id === currentSessionId ? <span className="conversationHistoryCurrent">{t("chat.current")}</span> : null}
               {session.updatedAt ? <time dateTime={session.updatedAt} title={new Date(session.updatedAt).toLocaleString(i18n.language)}>{elapsedTime(session.updatedAt, now, t)}</time> : null}
             </Link>)}

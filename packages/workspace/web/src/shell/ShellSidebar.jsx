@@ -11,9 +11,9 @@ import {
   PanelLeft,
   Search,
   SquarePen,
-  ListTodo,
-  House,
-  MessageSquare,
+  SquareCheckBig,
+  CircleUserRound,
+  Orbit,
 } from "lucide-react";
 import { displayWorkText, exampleProjects, useWorkPrototype } from "../work/workPrototype";
 import { apiResponse, clearCsrfToken } from "../api";
@@ -128,12 +128,12 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
       <WorkspaceHeader onNewConversation={newConversation} workspace={workspace} workspaces={workspaces} logoutBusy={logoutBusy} logoutError={logoutError} onLogout={logout} menuContainer={menuContainer}
         search={search} onCollapse={onCollapse} returnTo={location.pathname + location.search + location.hash} />
       <nav className="shPrimaryNav workPrimaryNav" aria-label={t("shellSidebar.mainView")}>
-        <Link className="shRow" to={`${base}/work`} aria-current={location.pathname === `${base}/work` && !location.search ? "page" : undefined}><House aria-hidden="true" /><span>{t("work.myWork")}</span></Link>
+        <Link className="shRow" to={`${base}/work`} aria-current={location.pathname === `${base}/work` && !location.search ? "page" : undefined}><CircleUserRound aria-hidden="true" /><span>{t("work.myWork")}</span></Link>
         <Link className="shRow" to={`${base}/work/projects`} aria-current={location.pathname.startsWith(`${base}/work/projects`) ? "page" : undefined}><Box aria-hidden="true" /><span>{t("work.projects")}</span></Link>
-        <Link className="shRow" to={`${base}/work/tasks`} aria-current={location.pathname.startsWith(`${base}/work/tasks`) ? "page" : undefined}><ListTodo aria-hidden="true" /><span>{t("work.tasks")}</span></Link>
+        <Link className="shRow" to={`${base}/work/tasks`} aria-current={location.pathname.startsWith(`${base}/work/tasks`) ? "page" : undefined}><SquareCheckBig aria-hidden="true" /><span>{t("work.tasks")}</span></Link>
         <Link className="shRow" to={base + "/extensions"} aria-current={inExtensions ? "page" : undefined}><Blocks aria-hidden="true" /><span>{t("extensions.title")}</span></Link>
         <Link className="shRow" to={base + "/library"} aria-current={inLibrary ? "page" : undefined}><Library aria-hidden="true" /><span>{t("libraryObjectRoute.library")}</span></Link>
-        <Link className="shRow" to={`${base}/app`} aria-current={isHome || location.pathname.startsWith(`${base}/sessions/`) ? "page" : undefined}><MessageSquare aria-hidden="true" /><span>Agent</span></Link>
+        <Link className="shRow" to={`${base}/app`} aria-current={isHome || location.pathname.startsWith(`${base}/sessions/`) ? "page" : undefined}><Orbit aria-hidden="true" /><span>Agent</span></Link>
       </nav>
       <nav className="workRailViews" aria-label={t("work.favorites")}>
         <p className="workRailHeading">{t("work.favorites")}</p>
