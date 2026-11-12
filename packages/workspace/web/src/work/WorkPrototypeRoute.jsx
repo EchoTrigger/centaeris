@@ -2,7 +2,7 @@ import { useTranslation } from "../i18n";
 import { ConversationDockContext, ConversationDockItem } from "../shell/ConversationDock";
 import { useContext, useEffect, useState } from "react";
 import { Link, useLocation, useNavigate, useRouteLoaderData, useSearchParams } from "react-router";
-import { ArrowUpRight, CheckCircle2, ChevronRight, Clock3, FileText, Folder, ListFilter, MessageSquare, Minus, Plus, Star, SignalHigh, SignalMedium, SignalLow, RotateCcw, X } from "lucide-react";
+import { ArrowUpRight, CheckCircle2, ChevronRight, Clock3, FileText, Folder, ListFilter, MessageSquare, Minus, Plus, Star, SignalHigh, SignalMedium, SignalLow, X } from "lucide-react";
 import { useModalDialog } from "../components/useModalDialog";
 import { displayWorkText, workText, exampleProjects, useWorkPrototype, workStatuses } from "./workPrototype";
 import { ChoiceMenu, Property, StatusIcon } from "./WorkControls";
@@ -30,7 +30,7 @@ function NewTask({ onClose, onCreate, project }) {
     <label className="workTitleField"><span className="workSrOnly">{t("work.taskName")}</span><input name="title" required maxLength={160} autoFocus placeholder={t("work.taskPlaceholder")} /></label>
     <label className="workDescriptionField"><span className="workSrOnly">{t("work.description")}</span><textarea name="description" rows={4} placeholder={t("work.descriptionPlaceholder")} /></label>
     <label>{t("work.project")}<select name="project" defaultValue={project || ""}><option value="">{t("work.noProjectMembership")}</option>{exampleProjects.map(item => <option key={item.id} value={item.id}>{text(item.name)}</option>)}</select></label>
-    <footer><span>{t("work.createPreview")}</span><button className="workPrimary" type="submit">{t("work.createTask")}</button></footer>
+    <footer><button className="workPrimary" type="submit">{t("work.createTask")}</button></footer>
   </form></div>;
 }
 
@@ -154,10 +154,10 @@ export default function WorkPrototypeRoute() {
     items = items.filter(item => (statusFilter === "all" || item.status === statusFilter));
     content = <><header className="workHeader"><WorkBreadcrumb current={page === "mine" ? t("work.myIssues") : t("work.issues")} /><button className="workPrimary" onClick={() => setCreating(true)}><Plus />{t("work.newTask")}</button></header><div className="workListControls">{page === "mine" ? tabs([["active", t("work.active")], ["attention", t("work.needsAttention")], ["completed", t("work.status.done")]]) : <span className="workMuted">{t("work.workspaceTasks")}</span>}<div className="workToolbar"><ChoiceMenu label={t("work.filterStatus")} value={statusFilter} options={[{ value: "all", label: t("work.allStatuses"), icon: <ListFilter /> }, ...statusOptions]} onChange={value => changeParam("status", value)} className="workFilter" /></div></div><div className="workListBody">{items.length ? grouped(items) : rows([])}</div><div className="workListFoot">{t("work.itemCount", { count: items.length })}</div></>;
   }
-  return <div className="workPrototype"><div className="workPrototypeNotice"><button onClick={() => { state.reset(); setNotice(workText("work.resetDone")); navigate(`${base}/work`); }}><RotateCcw />{t("work.reset")}</button></div>{notice ? <div className="workToast" role="status"><CheckCircle2 />{text(notice)}<button aria-label={t("work.closeNotice")} onClick={() => setNotice("")}><X /></button></div> : null}{content}
+  return <div className="workPrototype">{notice ? <div className="workToast" role="status"><CheckCircle2 />{text(notice)}<button aria-label={t("work.closeNotice")} onClick={() => setNotice("")}><X /></button></div> : null}{content}
     {creating ? <NewTask project={project?.id} onClose={() => setCreating(false)} onCreate={values => { const id = state.createTask(values); setCreating(false); navigate(`${base}/work/tasks/${id}`); setNotice(workText("work.created")); }} /> : null}
     {conversation ? <FloatingConversation key={conversation.title.key || conversation.title} conversation={conversation} onClose={() => setConversation(null)} /> : null}
-    {document ? <Preview onClose={() => setDocument(null)} title={document}><p className="workMuted">{t("work.sampleDocument")}</p><h3>{t("work.quotedContent")}</h3><p>{t(document.key === "work.example.document.checklist" || document.key === "work.example.check.exampleEvidence" ? "work.excerpt.release" : document.key === "work.example.document.interviews" || document.key === "work.example.document.requirements" ? "work.excerpt.retrieval" : "work.excerpt.generic")}</p></Preview> : null}
+    {document ? <Preview onClose={() => setDocument(null)} title={document}><h3>{t("work.quotedContent")}</h3><p>{t(document.key === "work.example.document.checklist" || document.key === "work.example.check.exampleEvidence" ? "work.excerpt.release" : document.key === "work.example.document.interviews" || document.key === "work.example.document.requirements" ? "work.excerpt.retrieval" : "work.excerpt.generic")}</p></Preview> : null}
   </div>;
 }
 
@@ -179,7 +179,7 @@ function FloatingConversation({ conversation, onClose }) {
     {!minimized && !dock?.chatFloating ? <section className="workFloatingConversation" role="dialog" aria-label={text(conversation.title)} onKeyDown={event => { if(event.key === "Escape") { event.stopPropagation(); onClose(); } }}>
       <header><h2>{text(conversation.title)}</h2><button aria-label={t("work.minimizeSample")} onClick={() => setMinimized(true)}><Minus /></button><button autoFocus aria-label={t("work.closeSample")} onClick={onClose}><X /></button></header>
       <div className="workFloatingMessages"><p className="workMuted">{t("work.conversation.sampleState", { state: text(conversation.state) })}</p><h3>Agent</h3><p>{text(conversation.text)}</p>{messages.map((message,index) => <p className="workExampleReply" key={index}>{message}</p>)}</div>
-      <form onSubmit={event => { event.preventDefault(); if(draft.trim()) { setMessages(items => [...items,draft.trim()]); setDraft(""); } }}><textarea aria-label={t("work.sampleMessage")} placeholder={t("work.messagePlaceholder")} value={draft} onChange={event => setDraft(event.target.value)} rows={2} /><footer><span>{t("work.interactionOnly")}</span><button type="submit" disabled={!draft.trim()}>{t("work.send")}</button></footer></form>
+      <form onSubmit={event => { event.preventDefault(); if(draft.trim()) { setMessages(items => [...items,draft.trim()]); setDraft(""); } }}><textarea aria-label={t("work.sampleMessage")} placeholder={t("work.messagePlaceholder")} value={draft} onChange={event => setDraft(event.target.value)} rows={2} /><footer><button type="submit" disabled={!draft.trim()}>{t("work.send")}</button></footer></form>
     </section> : null}
   </>;
 }

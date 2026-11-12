@@ -141,9 +141,6 @@
 .workProjectOverview dl { font-size:13px; margin-top:28px; }
 .workProjectOverview dt { color:var(--process-text); margin-bottom:8px; font-size:12px; }
 .workProjectOverview dd { margin:0 0 20px; }
-.workPrototypeNotice { order:99; margin-top:auto; display:flex; align-items:center; gap:12px; padding:8px 16px; color:var(--process-text); font-size:11px; }
-.workPrototypeNotice button { margin-left:auto; border:0; background:transparent; font-size:11px; min-height:26px; padding:2px 5px; }
-.workPrototypeNotice button svg { width:12px; height:12px; }
 .workToast { position:fixed; bottom:30px; left:50%; transform:translateX(-50%); z-index:100; display:flex; align-items:center; gap:10px; max-width:calc(100vw - 32px); padding:10px 12px; border:1px solid var(--outline-variant); border-radius:8px; background:var(--surface-color); box-shadow:0 4px 24px var(--scrim); font-size:12px; }
 .workToast > svg { color:var(--success); }
 .workToast button { border:0; background:transparent; min-height:24px; padding:2px; }
@@ -188,7 +185,7 @@
 }
 @media (pointer:coarse) {
   .workPrototype input,.workPrototype select,.workPrototype textarea { font-size:16px; }
-  .workGroup > summary,.workPrototype .workTabs button,.workPrototype .workFilter,.workPrototype .workEvidence,.workPrototypeNotice button { min-height:44px; }
+  .workGroup > summary,.workPrototype .workTabs button,.workPrototype .workFilter,.workPrototype .workEvidence { min-height:44px; }
   .workChoiceChevron { opacity:1; }
 }
 @media (prefers-reduced-motion:reduce) { .workPrototype button,.workRow,.workGroupChevron { transition:none; } }
