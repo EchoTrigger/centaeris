@@ -305,6 +305,7 @@ struct HostedRuntimeContext {
     model_client: ApiModelClient,
     agent_runtime_config: AgentRuntimeConfig,
     tool_concurrency: ToolConcurrencyCoordinator,
+    cancellation_probe: Arc<ExecutionCancellationProbe>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -387,6 +388,18 @@ struct WorkspaceSkillDetailResult {
     schema: &'static str,
     skill: WorkspaceSkillSummary,
     content: String,
+}
+
+fn agent_run_execution_control_reason(
+    state: postgres_store::AgentRunExecutionControlState,
+) -> Option<String> {
+    if !state.lifecycle_lease_current {
+        Some("agent_run_lifecycle_lease_lost".to_string())
+    } else if state.cancellation_requested {
+        Some("agent_run_cancel_requested".to_string())
+    } else {
+        None
+    }
 }
 
 fn cached_execution_control_reason(
@@ -953,6 +966,8 @@ impl AsyncSubagentWorkerRunner for HostedSubagentRunner {
 fn hosted_subagent_cancellation_probe(
     store: Arc<PostgresRuntimeStore>,
     job: &RuntimeJobRecord,
+    parent_probe: Arc<ExecutionCancellationProbe>,
+    cancel_on_parent_cancel: bool,
 ) -> Result<Arc<ExecutionCancellationProbe>, String> {
     let job_id = job.job_id.clone();
     let lease_owner = job
@@ -980,7 +995,8 @@ fn hosted_subagent_cancellation_probe(
         {
             return Ok(Some("subagent_lease_lost".to_string()));
         }
-        Ok(None)
+        Ok(parent_probe()?
+            .filter(|reason| cancel_on_parent_cancel || reason != "agent_run_cancel_requested"))
     }))
 }
 
@@ -996,8 +1012,12 @@ impl HostedSubagentRunner {
             ));
         }
         let job_id = req.job.job_id.clone();
-        let cancellation_probe =
-            hosted_subagent_cancellation_probe(self.job_store.clone(), &req.job)?;
+        let cancellation_probe = hosted_subagent_cancellation_probe(
+            self.job_store.clone(),
+            &req.job,
+            self.context.cancellation_probe.clone(),
+            binding.cancel_on_parent_cancel,
+        )?;
         let execution_store = self.job_store.hosted_execution_view(
             &req.lifecycle.session_id,
             &binding.child_session_id,
@@ -1998,13 +2018,7 @@ fn execute_agent_run(
                         )?;
                         return Ok(Some("agent_run_cancel_requested".to_string()));
                     }
-                    Ok(if state.cancellation_requested {
-                        Some("agent_run_cancel_requested".to_string())
-                    } else if !state.lifecycle_lease_current {
-                        Some("agent_run_lifecycle_lease_lost".to_string())
-                    } else {
-                        None
-                    })
+                    Ok(agent_run_execution_control_reason(state))
                 })
             },
         )
@@ -2732,6 +2746,7 @@ fn execute_agent_run(
                 model_client: model_client.clone(),
                 agent_runtime_config: agent_runtime_config.clone(),
                 tool_concurrency: tool_concurrency.clone(),
+                cancellation_probe: cancellation_probe.clone(),
             },
         );
     let agent_runtime = AgentRuntime::new(
@@ -7924,6 +7939,7 @@ mod tests {
             }),
             agent_runtime_config: AgentRuntimeConfig::default(),
             tool_concurrency: ToolConcurrencyCoordinator::new(2),
+            cancellation_probe: Arc::new(|| Ok(None)),
         }
     }
 

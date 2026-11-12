@@ -5,7 +5,7 @@ use centaeris_core::session::reliability::{
     RuntimeJobRecord, RuntimeJobStorePort, WakeRuntimeJobDisposition, WakeRuntimeJobRequest,
 };
 use postgres::fallible_iterator::FallibleIterator;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -51,7 +51,13 @@ fn postgres_subagent_shared_parent_authority_preserves_parallel_multistep_execut
     let probes = (0..3)
         .map(|index| {
             let child = running_child(&store, &format!("subagent-parallel-{index}"));
-            crate::hosted_subagent_cancellation_probe(Arc::new(store.clone()), &child).unwrap()
+            crate::hosted_subagent_cancellation_probe(
+                Arc::new(store.clone()),
+                &child,
+                Arc::new(|| Ok(None)),
+                true,
+            )
+            .unwrap()
         })
         .collect::<Vec<_>>();
     let calls = AtomicUsize::new(0);
@@ -119,8 +125,32 @@ fn postgres_subagent_stable_parent_authority_does_not_bypass_child_fences() {
     let physical = Arc::new(Mutex::new(Vec::new()));
     let allocation = prepare(&store, &parent, "subagent-shared-execution", &physical).unwrap();
     let sibling = running_child(&store, "subagent-current-sibling");
-    let sibling_probe =
-        crate::hosted_subagent_cancellation_probe(Arc::new(store.clone()), &sibling).unwrap();
+    let parent_cancelled = Arc::new(AtomicBool::new(false));
+    let parent_lease_current = Arc::new(AtomicBool::new(true));
+    let observed_parent_cancelled = parent_cancelled.clone();
+    let observed_parent_lease_current = parent_lease_current.clone();
+    let parent_probe: Arc<ExecutionCancellationProbe> = Arc::new(move || {
+        Ok(crate::agent_run_execution_control_reason(
+            crate::postgres_store::AgentRunExecutionControlState {
+                cancellation_requested: observed_parent_cancelled.load(Ordering::SeqCst),
+                lifecycle_lease_current: observed_parent_lease_current.load(Ordering::SeqCst),
+            },
+        ))
+    });
+    let sibling_probe = crate::hosted_subagent_cancellation_probe(
+        Arc::new(store.clone()),
+        &sibling,
+        parent_probe.clone(),
+        true,
+    )
+    .unwrap();
+    let independent_probe = crate::hosted_subagent_cancellation_probe(
+        Arc::new(store.clone()),
+        &sibling,
+        parent_probe.clone(),
+        false,
+    )
+    .unwrap();
     let calls = AtomicUsize::new(0);
     for (id, update, expected) in [
         (
@@ -140,8 +170,13 @@ fn postgres_subagent_stable_parent_authority_does_not_bypass_child_fences() {
         ),
     ] {
         let child = running_child(&store, id);
-        let probe =
-            crate::hosted_subagent_cancellation_probe(Arc::new(store.clone()), &child).unwrap();
+        let probe = crate::hosted_subagent_cancellation_probe(
+            Arc::new(store.clone()),
+            &child,
+            parent_probe.clone(),
+            true,
+        )
+        .unwrap();
         dispatch(&store, &parent, &allocation, probe.as_ref(), |_| {
             calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -163,6 +198,33 @@ fn postgres_subagent_stable_parent_authority_does_not_bypass_child_fences() {
     }
     assert_eq!(calls.load(Ordering::SeqCst), 6);
     assert_eq!(physical.lock().unwrap().len(), 1);
+    parent_cancelled.store(true, Ordering::SeqCst);
+    assert_eq!(
+        sibling_probe().unwrap().as_deref(),
+        Some("agent_run_cancel_requested")
+    );
+    assert_eq!(independent_probe().unwrap(), None);
+    parent_lease_current.store(false, Ordering::SeqCst);
+    for cancellation_requested in [false, true] {
+        parent_cancelled.store(cancellation_requested, Ordering::SeqCst);
+        assert_eq!(
+            independent_probe().unwrap().as_deref(),
+            Some("agent_run_lifecycle_lease_lost")
+        );
+        assert_eq!(
+            sibling_probe().unwrap().as_deref(),
+            Some("agent_run_lifecycle_lease_lost")
+        );
+    }
+    assert_eq!(
+        store
+            .get_runtime_job(&sibling.job_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        RuntimeJobStatus::Running,
+        "the running child retains its lease until execution has settled"
+    );
 }
 
 #[test]
