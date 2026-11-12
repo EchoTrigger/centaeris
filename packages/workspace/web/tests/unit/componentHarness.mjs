@@ -66,10 +66,10 @@ export function environment(overrides = {}) {
   const state = {
     workspace: { id: "workspace", name: "Synthetic workspace", role: "member", avatarUrl: null },
     user: { id: "user" },
-    location: { pathname: "/w/workspace/app", search: "", hash: "", key: "fixture", state: null },
     navigations: [], revalidationCount: 0, modal: null,
     blocker: { state: "unblocked", resets: 0, proceeds: 0, reset() { this.state = "unblocked"; this.resets++; }, proceed() { this.state = "proceeding"; this.proceeds++; } },
     ...overrides,
+    location: { pathname: "/w/workspace/app", search: "", hash: "", key: "fixture", state: null, ...overrides.location },
   };
   state.navigate = overrides.navigate || (path => state.navigations.push(path));
   state.revalidator = { revalidate: async () => { state.revalidationCount++; } };
@@ -86,7 +86,7 @@ const dataUrl = source => `data:text/javascript;base64,${Buffer.from(source).toS
 const stub = (specifier, source) => [specifier, dataUrl(`import {context,useRef} from ${JSON.stringify(moduleUrl)}; ${source}`)];
 export function subjectLoader({ realModal = false, realDocumentPreview = false, extraOverrides = [] } = {}) {
   const overrides = new Map([
-    ["react", dataUrl(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useLayoutEffect,useId} from ${JSON.stringify(moduleUrl)};`)],
+    ["react", dataUrl(`export * from ${JSON.stringify(import.meta.resolve("react"))}; export {useState,useRef,useMemo,useCallback,useEffect,useLayoutEffect,useId} from ${JSON.stringify(moduleUrl)}; export const useSyncExternalStore=(_subscribe,getSnapshot)=>getSnapshot();`)],
     ["@centaeris/ui/state", dataUrl(`export {createStore} from ${JSON.stringify(import.meta.resolve("@centaeris/ui/state"))}; export const useStore=(store,select)=>select(store.getState());`)],
     stub("react-router", 'export const Link=()=>null; export const useRouteLoaderData=id=>id==="authenticated"?{user:context.user}:({workspace:context.workspace}); export const useNavigate=()=>context.navigate; export const useLocation=()=>context.location; export const useRevalidator=()=>context.revalidator; export const useBlocker=value=>{context.blocker.predicate=value;context.blocker.shouldBlock=typeof value==="function"?value({currentLocation:context.location,nextLocation:context.nextLocation||{...context.location,search:"?new=1"}}):Boolean(value);return context.router?context.router.getBlocker("model-draft",value):context.blocker;};'),
     stub("../api", `export {ApiError} from ${JSON.stringify(moduleUrl)}; export const apiJson=(...args)=>context.request(...args); export const apiResponse=(...args)=>context.request(...args); export const clearCsrfToken=()=>{}; export const apiUrl=path=>path; export const jsonOptions=(method,value)=>({method,body:JSON.stringify(value)});`),
