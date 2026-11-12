@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Menu } from "@centaeris/ui/primitives/menu";
-import { Clipboard, Ellipsis, Pencil, Star, Trash2 } from "lucide-react";
+import { Archive, Clipboard, Ellipsis, Pencil, Star } from "lucide-react";
 import { useTranslation } from "../i18n";
 import { createWorkspaceTranscriptTransport } from "../chat/transcriptTransport";
 import { readChatMarkdown } from "../chat/chatMarkdown";
 
-export function ChatTitle({ session, actions, titleControl }) {
+export function ChatTitle({ session, actions, running, titleControl }) {
   const { t } = useTranslation();
   const trigger = useRef(null);
   const copyingRequest = useRef(null);
@@ -54,7 +54,7 @@ export function ChatTitle({ session, actions, titleControl }) {
           <Menu.Item closeOnClick={false} disabled={copyState === "copying"} onClick={() => void copy()}><Clipboard aria-hidden="true" />{t(copyState === "copying" || copyState === "copied" ? `chat.${copyState}` : "chat.copyMarkdown")}</Menu.Item>
           {copyState === "copyFailed" ? <p role="alert">{t("chat.copyFailed")}</p> : null}
           <Menu.Separator />
-          <Menu.Item disabled={Boolean(actions.deletingSessionId)} onClick={() => actions.onRequestDelete(session)}><Trash2 aria-hidden="true" />{t("appRoute.delete")}</Menu.Item>
+          <Menu.Item disabled={running || Boolean(actions.archivingSessionId)} onClick={() => void actions.onArchive(session)}><Archive aria-hidden="true" />{t("archive.title")}</Menu.Item>
         </Menu.Popup>
       </Menu.Positioner></Menu.Portal>
     </Menu.Root>

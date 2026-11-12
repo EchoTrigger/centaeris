@@ -23,7 +23,7 @@ main.workspaceWorkbench:has(.conversationDock > button) { padding-bottom:36px; }
 .conversationHistory { width:320px; max-width:calc(100vw - 24px); padding:6px; border:1px solid var(--outline-variant); border-radius:12px; background:var(--surface-color); box-shadow:0 6px 18px color-mix(in srgb,var(--on-surface) 10%,transparent); color:var(--on-surface); outline:none; font-size:13px; }
 .conversationHistoryNew { display:flex; align-items:center; gap:9px; width:100%; min-height:32px; border:0; border-radius:6px; padding:0 10px; background:transparent; color:inherit; font:inherit; text-align:left; }
 .conversationHistoryNew svg { width:14px; height:14px; }
-.conversationHistoryList { max-height:min(320px,45dvh); overflow:auto; margin-top:6px; padding-top:5px; border-top:1px solid var(--outline-variant); scrollbar-width:thin; scrollbar-color:transparent transparent; }
+.conversationHistoryList { max-height:min(320px,45dvh); overflow:auto; margin-top:6px; padding-top:5px; border-top:1px solid color-mix(in srgb,var(--on-surface) 8%,transparent); scrollbar-width:thin; scrollbar-color:transparent transparent; }
 .conversationHistoryList:is(:hover,:focus-within) { scrollbar-color:var(--outline) transparent; }
 .conversationHistoryList::-webkit-scrollbar { width:4px; }
 .conversationHistoryList::-webkit-scrollbar-track { background:transparent; }
@@ -44,7 +44,7 @@ main.workspaceWorkbench:has(.conversationDock > button) { padding-bottom:36px; }
 .chatActionsMenu [role=menuitem][data-highlighted] { background:var(--surface-container); outline:none; }
 .chatActionsMenu [role=menuitem][data-disabled] { opacity:.5; cursor:default; }
 .chatActionsMenu svg { width:14px; height:14px; color:var(--process-text); }
-.chatActionsMenu [role=separator] { height:1px; margin:5px -5px; background:var(--outline-variant); }
+.chatActionsMenu [role=separator] { height:1px; margin:5px 9px; background:color-mix(in srgb,var(--on-surface) 8%,transparent); }
 .chatActionsMenu p { margin:5px 9px; font-size:12px; color:var(--error); }
 @media(pointer:coarse) { .conversationHistoryNew,.conversationHistoryRow,.chatActionsMenu [role=menuitem] { min-height:44px; } }
 .conversationDock button:focus-visible,.conversationSwitcher:focus-visible,.conversationHistory button:focus-visible { outline:2px solid var(--primary-color); outline-offset:1px; }

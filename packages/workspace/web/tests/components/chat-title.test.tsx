@@ -14,12 +14,12 @@ beforeEach(async () => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); });
 const session = { id: "s", title: "Research notes", isPinned: false };
 function mount() {
-  const actions = { renameSession: vi.fn(), onTogglePin: vi.fn(), onRequestDelete: vi.fn() };
+  const actions = { renameSession: vi.fn(), onTogglePin: vi.fn(), onArchive: vi.fn() };
   render(<ChatTitle session={session} actions={actions} titleControl={<button>Research notes</button>} />);
   return actions;
 }
 
-test("favorite stays beside the title; rename and delete use existing actions and restore focus", async () => {
+test("favorite stays beside the title; rename and archive use existing actions and restore focus", async () => {
   const user = userEvent.setup(); const actions = mount();
   await user.click(screen.getByRole("button", { name: "Favorite chat" }));
   expect(actions.onTogglePin).toHaveBeenCalledWith(session);
@@ -31,8 +31,8 @@ test("favorite stays beside the title; rename and delete use existing actions an
   expect(actions.renameSession).toHaveBeenCalledWith(session, "Edited");
   await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Chat actions for Research notes" })));
   await user.click(screen.getByRole("button", { name: "Chat actions for Research notes" }));
-  await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
-  expect(actions.onRequestDelete).toHaveBeenCalledWith(session);
+  await user.click(await screen.findByRole("menuitem", { name: "Archive" }));
+  expect(actions.onArchive).toHaveBeenCalledWith(session);
 });
 
 test("copy reports failure in the menu and retries without writing partial content", async () => {
