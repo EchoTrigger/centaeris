@@ -1,0 +1,22 @@
+.sessionSubagentTags { display:flex; flex-wrap:wrap; align-items:flex-start; gap:8px; margin:4px 0; }
+.sessionSubagentTag { display:inline-flex; align-items:center; gap:7px; min-width:0; max-width:100%; padding:7px 10px; border:1px solid var(--outline-variant); border-radius:9px; background:transparent; color:var(--on-surface); cursor:pointer; font:inherit; text-align:left; }
+.sessionSubagentTag:hover { background:var(--surface-variant); }
+.sessionSubagentTag:focus-visible { outline:2px solid var(--primary-color); outline-offset:2px; }
+.sessionSubagentMark { width:15px; height:15px; flex:none; }
+.sessionSubagentRole { font-size:var(--chat-meta-size); font-weight:650; }
+.sessionSubagentTitle { min-width:0; overflow:hidden; color:var(--process-text); font-size:var(--chat-meta-size); text-overflow:ellipsis; white-space:nowrap; }
+.sessionSubagentStatus { display:inline-flex; align-items:center; gap:4px; flex:none; color:var(--process-text); font-size:var(--chat-meta-size); }
+.sessionSubagentStatus.is-succeeded { color:var(--success); }
+.sessionSubagentStatus:is(.is-failed,.is-dead_lettered) { color:var(--error); }
+.sessionSubagentStatus.is-cancelled { color:#d9ad71; }
+.sessionSubagentDialog { max-height:calc(100dvh - 48px); display:flex; flex-direction:column; gap:16px; }
+.sessionSubagentMessages { display:grid; gap:22px; min-height:64px; min-width:0; overflow:auto; padding-right:4px; overscroll-behavior:contain; }
+.sessionSubagentPrompt { padding:10px 13px; border-radius:12px; background:var(--surface-variant); white-space:pre-wrap; overflow-wrap:anywhere; }
+.sessionSubagentMessage { display:grid; min-width:0; gap:10px; }
+.sessionSubagentMessageText { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; }
+.sessionSubagentReasoning { color:var(--process-text); }
+.sessionSubagentReasoning summary { cursor:pointer; margin-bottom:8px; }
+.sessionSubagentTool > summary { display:flex; align-items:center; justify-content:space-between; gap:12px; cursor:pointer; }
+.sessionSubagentTool pre { white-space:pre-wrap; overflow-wrap:anywhere; }
+@media (prefers-reduced-motion:no-preference) { .sessionSubagentSpinner { animation:session-subagent-spin 1s linear infinite; } }
+@keyframes session-subagent-spin { to { transform:rotate(360deg); } }

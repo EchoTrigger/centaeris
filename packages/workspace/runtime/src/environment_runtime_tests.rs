@@ -4,6 +4,7 @@ use serde_json::Value;
 
 mod lifecycle_measurement;
 mod owned_execution;
+mod subagent_wait;
 pub(super) use owned_execution::{
     cleanup_owned_physical_execution, owned_host_context, owned_inventory, prepare_owned_allocation,
 };
@@ -76,6 +77,7 @@ fn environment_runtime_server() {
     };
     let server = runtime.spawn(serve_http(listener, state.clone()));
     let mut lifecycle: Option<crate::lifecycle_executor::Executor> = None;
+    let mut subagent_worker: Option<tokio::task::JoinHandle<()>> = None;
     let mut physical_pin = None;
     println!("environment-runtime-ready:http://{address}");
     io::stdout().flush().unwrap();
@@ -88,6 +90,27 @@ fn environment_runtime_server() {
             assert!(lifecycle.is_none());
             lifecycle = Some(crate::lifecycle_executor::start(state.clone()).unwrap());
             println!("environment-runtime-lifecycle:{}", json!({"started":true}));
+            io::stdout().flush().unwrap();
+            continue;
+        }
+        if command == "start-subagent-worker" {
+            assert!(subagent_worker.is_none());
+            subagent_worker = Some(runtime.spawn(run_hosted_subagent_worker(
+                store.clone(),
+                backend.clone(),
+                state.tool_layers.clone(),
+            )));
+            println!(
+                "environment-runtime-subagent-worker:{}",
+                json!({"started":true})
+            );
+            io::stdout().flush().unwrap();
+            continue;
+        }
+        if command == "seed-read-only-subagents" {
+            let run = value["agentRunId"].as_str().unwrap();
+            let jobs = subagent_wait::seed(&backend, &state.tool_layers, run).unwrap();
+            println!("environment-runtime-read-only-subagents:{jobs}");
             io::stdout().flush().unwrap();
             continue;
         }
@@ -148,11 +171,26 @@ fn environment_runtime_server() {
             io::stdout().flush().unwrap();
             continue;
         }
+        if command == "finish-host-retirements" {
+            let processed = owned_execution::finish_host_retirements(backend.as_ref()).unwrap();
+            println!(
+                "environment-runtime-host-retirements:{}",
+                json!({"processed": processed})
+            );
+            io::stdout().flush().unwrap();
+            continue;
+        }
         panic!("unsupported environment fixture command");
     }
     if let Some((release, operation)) = physical_pin {
         let _ = release.send(());
         operation.join().unwrap().unwrap();
+    }
+    if let Some(worker) = subagent_worker {
+        worker.abort();
+        runtime.block_on(async {
+            let _ = worker.await;
+        });
     }
     if let Some(executor) = lifecycle.as_mut() {
         runtime.block_on(executor.shutdown());

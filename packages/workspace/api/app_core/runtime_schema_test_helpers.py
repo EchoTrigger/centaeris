@@ -31,7 +31,7 @@ def isolate_runtime_schema(test):
 def remove_runtime_trigger_functions(cursor):
     # Tables (and their triggers) must already be removed. Deliberately avoid
     # CASCADE: unexpected dependencies or functions must still block cleanup.
-    for name in ("notify_runtime_job_ready_v1", "verify_execution_allocation",
+    for name in ("notify_runtime_job_ready_v1", "notify_subagent_presentation_v1", "verify_execution_allocation",
                  "verify_resident_allocation", "protect_environment_retirement",
                  "protect_environment_maintenance_completion",
                  "protect_agent_run_cleanup_receipt",

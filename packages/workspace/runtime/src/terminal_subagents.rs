@@ -1,4 +1,7 @@
 use centaeris_core::runtime::subagent::SubagentSchedulerEvent;
+use centaeris_core::session::reliability::{
+    ListRuntimeJobsRequest, RuntimeJobRecord, RuntimeJobStatus,
+};
 use centaeris_core::session::store::RuntimeStoreActor;
 
 async fn active_job_snapshot<T, Fetch, FetchFuture>(mut fetch: Fetch) -> Result<Vec<T>, String>
@@ -20,6 +23,51 @@ where
     }
 }
 
+async fn active_subagent_jobs(
+    store: &RuntimeStoreActor,
+    session_id: &str,
+) -> Result<Vec<RuntimeJobRecord>, String> {
+    use centaeris_core::runtime::subagent::SUBAGENT_RUN_JOB_KIND;
+
+    active_job_snapshot(|limit, offset| {
+        store.list_runtime_jobs(ListRuntimeJobsRequest {
+            statuses: vec![
+                RuntimeJobStatus::Queued,
+                RuntimeJobStatus::Leased,
+                RuntimeJobStatus::Running,
+            ],
+            job_kind: Some(SUBAGENT_RUN_JOB_KIND.to_string()),
+            session_id: Some(session_id.to_string()),
+            branch_id: None,
+            limit,
+            offset,
+        })
+    })
+    .await
+}
+
+pub(crate) async fn has_active_parent_subagent_jobs(
+    store: &RuntimeStoreActor,
+    session_id: &str,
+    parent_agent_run_id: &str,
+) -> Result<bool, String> {
+    use centaeris_core::runtime::subagent::{
+        load_subagent_work_packet_async, subagent_work_packet_runtime_binding,
+    };
+
+    for job in active_subagent_jobs(store, session_id).await? {
+        let packet = load_subagent_work_packet_async(store, &job)
+            .await
+            .map_err(|error| error.diagnostic_message())?;
+        if subagent_work_packet_runtime_binding(&packet, &job)?.parent_agent_run_id
+            == parent_agent_run_id
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The host calls this only after an authoritative parent terminal fact.
 /// Core owns child cancellation; the host supplies the exact parent identity.
 pub(crate) async fn settle_terminal_parent_subagent_jobs(
@@ -30,30 +78,15 @@ pub(crate) async fn settle_terminal_parent_subagent_jobs(
 ) -> Result<Vec<SubagentSchedulerEvent>, String> {
     use centaeris_core::runtime::subagent::{
         cancel_subagent_run_job_async, load_subagent_work_packet_async,
-        subagent_work_packet_runtime_binding, CancelSubagentRunJobRequest, SUBAGENT_RUN_JOB_KIND,
+        subagent_work_packet_runtime_binding, CancelSubagentRunJobRequest,
     };
-    use centaeris_core::session::reliability::{ListRuntimeJobsRequest, RuntimeJobStatus};
 
     if session_id.trim().is_empty() || parent_agent_run_id.trim().is_empty() {
         return Err("terminal_parent_identity_missing".to_string());
     }
     let mut events = Vec::new();
     loop {
-        let jobs = active_job_snapshot(|limit, offset| {
-            store.list_runtime_jobs(ListRuntimeJobsRequest {
-                statuses: vec![
-                    RuntimeJobStatus::Queued,
-                    RuntimeJobStatus::Leased,
-                    RuntimeJobStatus::Running,
-                ],
-                job_kind: Some(SUBAGENT_RUN_JOB_KIND.to_string()),
-                session_id: Some(session_id.to_string()),
-                branch_id: None,
-                limit,
-                offset,
-            })
-        })
-        .await?;
+        let jobs = active_subagent_jobs(store, session_id).await?;
         let mut owned_seen = false;
         for job in jobs {
             let packet = load_subagent_work_packet_async(store, &job)
@@ -206,6 +239,57 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(snapshot, vec![999]);
+    }
+
+    #[test]
+    fn active_parent_subagents_use_exact_run_and_session_and_nonterminal_states() {
+        let root = tempfile::tempdir().unwrap();
+        let backend =
+            centaeris_runtime_sqlite::SqliteRuntimeStore::new(root.path().join("runtime.sqlite"))
+                .unwrap();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let store = RuntimeStoreActor::start(backend).unwrap();
+            for (name, status) in [
+                ("queued", RuntimeJobStatus::Queued),
+                ("leased", RuntimeJobStatus::Leased),
+                ("running", RuntimeJobStatus::Running),
+                ("completed", RuntimeJobStatus::Succeeded),
+            ] {
+                let parent = format!("parent-{name}");
+                let active = !status.is_terminal();
+                child(&store, "session", &parent, "turn", name, status).await;
+                assert_eq!(
+                    has_active_parent_subagent_jobs(&store, "session", &parent)
+                        .await
+                        .unwrap(),
+                    active
+                );
+            }
+            for (session, parent) in [
+                ("session", "parent"),
+                ("another-session", "parent-running"),
+                ("session", "parent-running-newer"),
+            ] {
+                assert!(!has_active_parent_subagent_jobs(&store, session, parent)
+                    .await
+                    .unwrap());
+            }
+            settle_terminal_parent_subagent_jobs(&store, "session", "parent-running", 300)
+                .await
+                .unwrap();
+            assert!(
+                !has_active_parent_subagent_jobs(&store, "session", "parent-running")
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                has_active_parent_subagent_jobs(&store, "session", "parent-queued")
+                    .await
+                    .unwrap()
+            );
+            store.close().await.unwrap();
+        });
+        root.close().unwrap();
     }
 
     #[test]

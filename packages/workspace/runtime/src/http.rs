@@ -10,6 +10,8 @@ mod catalogs;
 pub(crate) mod environment_maintenance;
 mod environment_provision;
 mod environment_retirement;
+mod session_subagents;
+mod sessions;
 
 type Operation = fn(HttpServerState, Request<Bytes>) -> Result<Response<Body>, String>;
 
@@ -73,6 +75,18 @@ pub(super) fn router(state: HttpServerState) -> Router {
         .route(
             "/internal/agent-runs/api-run-purge",
             on_blocking(MethodFilter::POST, agent_runs::agent_run_api_purge),
+        )
+        .route(
+            "/internal/sessions/purge",
+            on_blocking(MethodFilter::POST, sessions::purge),
+        )
+        .route(
+            "/internal/sessions/subagents",
+            on_blocking(MethodFilter::POST, session_subagents::list),
+        )
+        .route(
+            "/internal/sessions/subagent",
+            on_blocking(MethodFilter::POST, session_subagents::detail),
         )
         .route(
             "/internal/model-catalog",

@@ -94,6 +94,23 @@ fn decode_transcript_content_source(row: &Row) -> Result<serde_json::Value, Stri
     Ok(wire)
 }
 
+fn lock_transcript_projection_session(
+    tx: &mut postgres::Transaction<'_>,
+    session_id: &str,
+) -> Result<(), String> {
+    let active = tx
+        .query_opt(
+            "SELECT status='active' AND \"purgedAt\" IS NULL FROM public.app_core_session WHERE id=$1 FOR SHARE",
+            &[&session_id],
+        )
+        .map_err(|error| format!("lock transcript projection Session failed: {error}"))?
+        .is_some_and(|row| row.get::<_, bool>(0));
+    if !active {
+        return Err("transcript_projection_session_unavailable".into());
+    }
+    Ok(())
+}
+
 impl PostgresRuntimeStore {
     pub(crate) fn transcript_anchor_cursor(
         &self,
@@ -201,6 +218,7 @@ impl PostgresRuntimeStore {
             let mut tx = client.transaction().map_err(|error| {
                 format!("begin initial transcript generation publication failed: {error}")
             })?;
+            lock_transcript_projection_session(&mut tx, session_id)?;
             tx.execute(
                 "INSERT INTO runtime.transcript_projection_heads(session_id,projection_version,projection_generation,source_high_water,invalidation_reason) VALUES($1,$2,$3,0,NULL) ON CONFLICT DO NOTHING",
                 &[&session_id, &TRANSCRIPT_PROJECTION_VERSION_V1, &initial_generation],
@@ -238,6 +256,7 @@ impl PostgresRuntimeStore {
             let mut tx = client
                 .transaction()
                 .map_err(|error| format!("begin transcript invalidation failed: {error}"))?;
+            lock_transcript_projection_session(&mut tx, session_id)?;
             for table in [
                 "transcript_projection_current_recoveries",
                 "transcript_resume_cursors",
@@ -369,6 +388,7 @@ impl PostgresRuntimeStore {
             next_projected_high_water) = self.with_client(|client| {
             let mut tx = client.transaction()
                 .map_err(|error| format!("begin transcript catch-up batch failed: {error}"))?;
+            lock_transcript_projection_session(&mut tx, session_id)?;
             let event_limit = i64::try_from(TRANSCRIPT_PROJECTION_SLICE_MAX_EVENTS)
                 .map_err(|_| "transcript projection event limit overflow".to_string())?;
             let byte_limit = i64::try_from(TRANSCRIPT_PROJECTION_SLICE_MAX_BYTES)
@@ -693,6 +713,7 @@ impl TranscriptProjectionStorePort for PostgresRuntimeStore {
             let mut tx = client
                 .transaction()
                 .map_err(|error| format!("begin transcript projection commit failed: {error}"))?;
+            lock_transcript_projection_session(&mut tx, &commit.session_id)?;
             let disposition =
                 PostgresTranscriptStore::new(&mut tx).commit_transcript_projection(commit)?;
             tx.commit()
@@ -1070,6 +1091,7 @@ impl TranscriptProjectionGenerationStorePortV1 for PostgresRuntimeStore {
             let mut tx = client
                 .transaction()
                 .map_err(|error| format!("begin transcript generation rotation failed: {error}"))?;
+            lock_transcript_projection_session(&mut tx, &rotation.session_id)?;
             let next_head = tx
                 .query_opt(
                     "SELECT source_high_water,invalidation_reason FROM runtime.transcript_projection_heads WHERE session_id=$1 AND projection_version=$2 AND projection_generation=$3",

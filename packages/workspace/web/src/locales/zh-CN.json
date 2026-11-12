@@ -1120,5 +1120,15 @@
   "searchOverlay.match.stage": "Agent 阶段回复",
   "searchOverlay.match.final": "Agent 最终回复",
   "searchOverlay.loadMoreConversations": "更多会话",
-  "searchOverlay.targetUnavailable": "暂时无法加载这条命中消息。"
+  "searchOverlay.targetUnavailable": "暂时无法加载这条命中消息。",
+  "sessionSubagent.conversations": "子 Agent 会话",
+  "sessionSubagent.taskContext": "任务上下文",
+  "sessionSubagent.unavailable": "暂时无法读取这个子 Agent 会话。",
+  "sessionSubagent.status.queued": "等待中",
+  "sessionSubagent.status.leased": "等待中",
+  "sessionSubagent.status.running": "运行中",
+  "sessionSubagent.status.succeeded": "已完成",
+  "sessionSubagent.status.failed": "失败",
+  "sessionSubagent.status.dead_lettered": "失败",
+  "sessionSubagent.status.cancelled": "已取消"
 }

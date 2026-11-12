@@ -519,10 +519,6 @@ impl DockerExecutionHostRunner {
         #[cfg(test)]
         if crate::environment_runtime_tests::owns_identity(&request.user_id, &request.workspace_id)
         {
-            assert!(
-                !request.has_execution_fact,
-                "fresh execution required by native fixture"
-            );
             validate_plugin_activation_snapshot(request.plugin_activation)?;
             assert!(request.plugin_activation.packages.is_empty());
             let allocation = crate::environment_runtime_tests::prepare_owned_allocation(

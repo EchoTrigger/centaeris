@@ -23,6 +23,7 @@ from app_core.http.presentation import router as presentation_router
 from app_core.http.trash import router as trash_router
 from app_core.http.workspace_members import router as workspace_members_router
 from app_core.http.workspaces import router as workspaces_router
+from app_core.http.session_subagents import router as session_subagents_router
 from app_core.http.workspace_profile import router as workspace_profile_router
 from app_core.http.workspace_resources import plugin_upload_router
 from app_core.http.environment_settings import router as environment_settings_router
@@ -44,6 +45,7 @@ api.add_router("/api", sso_router)
 api.add_router("/api", jobs_router)
 api.add_router("/api", plugin_upload_router)
 api.add_router("/api", workspaces_router)
+api.add_router("/api", session_subagents_router)
 api.add_router("/api", workspace_profile_router)
 api.add_router("/api", environment_settings_router)
 api.add_router("/api", workspace_members_router)

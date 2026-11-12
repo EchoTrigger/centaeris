@@ -217,9 +217,9 @@ fn postgres_tool_result_control_bytes_preserve_receipts_and_allow_run_completion
     db.batch_execute(r#"
         DROP TABLE IF EXISTS public.app_core_sessionevent CASCADE;
         DROP TABLE IF EXISTS public.app_core_session CASCADE;
-        CREATE TABLE public.app_core_session(id text PRIMARY KEY, workspace_id text NOT NULL);
+        CREATE TABLE public.app_core_session(id text PRIMARY KEY, workspace_id text NOT NULL,status text NOT NULL DEFAULT 'active',"purgedAt" timestamptz);
         CREATE TABLE public.app_core_sessionevent("eventId" text PRIMARY KEY,workspace_id text NOT NULL,session_id text NOT NULL,agent_run_id text NOT NULL,sequence integer NOT NULL,agent_run_sequence integer,session_level boolean NOT NULL DEFAULT false,projects_to_agent_run_stream boolean NOT NULL,payload jsonb NOT NULL,"createdAtMs" bigint NOT NULL,"insertedAt" timestamptz NOT NULL DEFAULT clock_timestamp(),UNIQUE(session_id,sequence),UNIQUE(agent_run_id,agent_run_sequence));
-        INSERT INTO public.app_core_session VALUES('session_control_bytes','workspace_control_bytes');
+        INSERT INTO public.app_core_session(id,workspace_id) VALUES('session_control_bytes','workspace_control_bytes');
     "#).unwrap();
     let session = "session_control_bytes";
     let run = "run_control_bytes";

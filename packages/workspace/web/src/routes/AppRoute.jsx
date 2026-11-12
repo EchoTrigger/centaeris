@@ -243,6 +243,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
   const [presentationAttempt, setPresentationAttempt] = useState(0);
   const [runControlAttempt, setRunControlAttempt] = useState(0);
   const [contextVersion, setContextVersion] = useState(null);
+  const [subagentsVersion, setSubagentsVersion] = useState(null);
   const [readableThrough, setReadableThrough] = useState("0");
   const [readingLatest, setReadingLatest] = useState(true);
   const [pageVisible, setPageVisible] = useState(() => typeof document === "undefined" || !document.hidden);
@@ -752,7 +753,11 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           setSessionId(next.find(session => session.id === requestedSessionId)?.id || next[0]?.id || "");
         }
       },
-      onViewRevision: revision => { if (isCurrent()) setContextVersion({ sessionId: selectedSessionId, revision: revision.contextRevision }); },
+      onViewRevision: revision => {
+        if (!isCurrent()) return;
+        setContextVersion({ sessionId: selectedSessionId, revision: revision.contextRevision });
+        setSubagentsVersion({ sessionId: selectedSessionId, revision: revision.subagentsRevision });
+      },
       onOperation: detail => { if (isCurrent()) toolOperations.applyPresentationDetail(detail); },
       onCheckpoint: checkpoint => {
         if (!isCurrent() || selectedSessionId === null) return;
@@ -1589,6 +1594,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           onReadingLatestChange={(targetSessionId, following) => { if (targetSessionId === activeSessionIdRef.current) setReadingLatest(following); }}
             toolOperations={toolOperations}
             sessionId={sessionId || null}
+            subagentsRevision={subagentsVersion?.sessionId === sessionId ? subagentsVersion.revision : "0"}
             loadingHistory={searchEventId ? focusedTranscript.loading : loadingHistory}
             loadingOlderHistory={searchEventId ? focusedTranscript.loadingOlder : loadingOlderHistory}
             onLoadOlderHistory={searchEventId ? focusedTranscript.loadOlder : loadOlderHistory}

@@ -1967,11 +1967,56 @@ class ApiVerticalSliceTests(TransactionTestCase):
             },
         ) as cancel:
             deleted = self.client.delete(f"/api/sessions/{activeSession.id}")
-        self.assertEqual(deleted.status_code, 200)
-        self.assertEqual(deleted.json(), {"deleted": True})
+        self.assertEqual(deleted.status_code, 503)
+        self.assertEqual(deleted.json(), {"error": "session_delete_cancel_pending"})
         cancel.assert_called_once()
         agent_run.refresh_from_db()
         self.assertEqual(agent_run.transitionReason, "agent_run_cancel_requested")
+        activeSession.refresh_from_db()
+        self.assertEqual(activeSession.status, "active")
+        self.assertIsNone(activeSession.deletedAt)
+        self.assertIsNone(activeSession.purgedAt)
+        self.assertIsNotNone(activeSession.purgeRequestedAt)
+        with patch("app_core.http.workspaces.request_execution_profile") as profile:
+            rejected = self.client.post(
+                f"/api/workspaces/{workspace.id}/sessions/{activeSession.pk}/messages",
+                data=json.dumps({"operationId": "message-after-delete-intent", "text": "new work",
+                    "modelConfigRef": model.pk}), content_type="application/json",
+            )
+        self.assertEqual(rejected.status_code, 409, rejected.content)
+        self.assertEqual(rejected.json(), {"error": "session_delete_pending"})
+        profile.assert_not_called()
+        self.assertEqual(activeSession.agent_runs.count(), 1)
+        cannot_restore = self.client.post(f"/api/sessions/{activeSession.pk}/restore")
+        self.assertEqual(cannot_restore.status_code, 410)
+        self.assertEqual(cannot_restore.json(), {"error": "session_expired"})
+
+        agent_run.status = "cancelled"
+        agent_run.save(update_fields=["status", "updatedAt"])
+        with patch(
+            "app_core.http.workspaces.purge_session_runtime",
+            side_effect=RuntimeError("session_purge_liabilities_pending"),
+        ):
+            pending = self.client.delete(f"/api/sessions/{activeSession.id}")
+        self.assertEqual(pending.status_code, 503)
+        activeSession.refresh_from_db()
+        self.assertEqual(activeSession.status, "active")
+        self.assertIsNone(activeSession.purgedAt)
+
+        def runtime_commits_purge(session):
+            at = timezone.now()
+            Session.objects.filter(pk=session.pk).update(
+                status="deleted", deletedAt=at, deletedBy=user, purgedAt=at,
+            )
+
+        with patch(
+            "app_core.http.workspaces.purge_session_runtime",
+            side_effect=runtime_commits_purge,
+        ) as purge:
+            deleted = self.client.delete(f"/api/sessions/{activeSession.id}")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json(), {"deleted": True})
+        purge.assert_called_once()
         activeSession.refresh_from_db()
         self.assertEqual(activeSession.status, "deleted")
         self.assertIsNotNone(activeSession.deletedAt)
@@ -1989,9 +2034,11 @@ class ApiVerticalSliceTests(TransactionTestCase):
             self.client.get(f"/api/sessions/{activeSession.id}/transcript").status_code,
             404,
         )
-        repeated = self.client.delete(f"/api/sessions/{activeSession.id}")
-        self.assertEqual(repeated.status_code, 410)
-        self.assertEqual(repeated.json(), {"error": "session_deleted"})
+        with patch("app_core.http.workspaces.purge_session_runtime") as purge:
+            repeated = self.client.delete(f"/api/sessions/{activeSession.id}")
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(repeated.json(), {"deleted": True})
+        purge.assert_called_once()
         self.assertEqual(
             [
                 session["id"]
@@ -2027,6 +2074,114 @@ class ApiVerticalSliceTests(TransactionTestCase):
                 owner=user,
                 status="deleted",
             )
+
+    def test_session_direct_delete_requires_current_membership_and_exact_owner(self):
+        owner = User.objects.create_user(username="delete-owner@example.com")
+        other = User.objects.create_user(username="delete-other@example.com")
+        workspace = Workspace.objects.create(name="Delete scope", createdBy=owner)
+        workspace.members.add(owner, other)
+        session = create_session(workspace=workspace, owner=owner)
+        Session.objects.filter(pk=session.pk).update(purgeRequestedAt=timezone.now())
+        with patch("app_core.http.workspaces.purge_session_runtime") as purge:
+            self.client.force_login(other)
+            self.assertEqual(self.client.delete(f"/api/sessions/{session.id}").status_code, 404)
+            unavailable = self.client.post(
+                f"/api/workspaces/{workspace.pk}/sessions/{session.pk}/messages",
+                data=json.dumps({"operationId": "foreign-session-delete-intent", "text": "new work",
+                    "modelConfigRef": "unavailable-model"}), content_type="application/json",
+            )
+            self.assertEqual(unavailable.status_code, 404)
+            workspace.members.remove(owner)
+            self.client.force_login(owner)
+            self.assertEqual(self.client.delete(f"/api/sessions/{session.id}").status_code, 404)
+        purge.assert_not_called()
+
+    def test_session_purge_transport_requires_the_exact_runtime_receipt(self):
+        from .session_deletion import purge_session_runtime
+
+        session = Mock(id="session-delete", workspace_id="workspace-delete", owner_id=7)
+        receipt = {
+            "schema": "runtime.session.purged.v1", "sessionId": session.id,
+            "workspaceId": session.workspace_id, "purged": True,
+        }
+        with patch("app_core.session_deletion.request_json", return_value=receipt) as request:
+            purge_session_runtime(session)
+        self.assertEqual(request.call_args.args, (
+            "/internal/sessions/purge", {
+                "schema": "runtime.session.purge.v1", "sessionId": session.id,
+                "workspaceId": session.workspace_id, "ownerId": 7,
+            },
+        ))
+        for malformed in (
+            {**receipt, "workspaceId": "another-workspace"},
+            {**receipt, "sessionId": "another-session"},
+            {**receipt, "purged": 1},
+            {**receipt, "unexpected": True},
+        ):
+            with self.subTest(receipt=malformed), patch(
+                "app_core.session_deletion.request_json", return_value=malformed,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "session_purge_runtime_receipt_invalid"):
+                    purge_session_runtime(session)
+        with patch("app_core.session_deletion.request_json", side_effect=TimeoutError):
+            with self.assertRaisesRegex(RuntimeError, "session_purge_runtime_unavailable"):
+                purge_session_runtime(session)
+
+    def test_session_trash_purge_delegates_and_preserves_existing_rejections(self):
+        owner = User.objects.create_user(username="trash-purge-owner@example.com")
+        workspace = Workspace.objects.create(name="Trash purge", createdBy=owner)
+        workspace.members.add(owner)
+        session = create_session(workspace=workspace, owner=owner)
+        self.client.force_login(owner)
+        url = f"/api/sessions/{session.pk}/trash"
+        with patch("app_core.http.workspaces.purge_session_runtime") as purge:
+            self.assertEqual(self.client.delete(url).status_code, 409)
+        purge.assert_not_called()
+        session.status, session.deletedAt = "deleted", timezone.now()
+        session.save(update_fields=["status", "deletedAt"])
+        with patch("app_core.http.workspaces.purge_session_runtime", side_effect=RuntimeError("pending")):
+            self.assertEqual(self.client.delete(url).status_code, 503)
+        session.refresh_from_db()
+        self.assertIsNone(session.purgedAt)
+        self.assertIsNotNone(session.purgeRequestedAt)
+        self.assertEqual(self.client.post(f"/api/sessions/{session.pk}/restore").status_code, 410)
+        with patch("app_core.http.workspaces.purge_session_runtime") as purge:
+            response = self.client.delete(url)
+        self.assertEqual(response.status_code, 200)
+        purge.assert_called_once()
+        self.assertEqual(purge.call_args.args[0].pk, session.pk)
+        session.purgedAt = timezone.now()
+        session.save(update_fields=["purgedAt"])
+        with patch("app_core.http.workspaces.purge_session_runtime") as purge:
+            self.assertEqual(self.client.delete(url).status_code, 410)
+        purge.assert_not_called()
+
+    def test_session_message_admission_rechecks_purge_intent_under_the_session_lock(self):
+        owner = User.objects.create_user(username="purge-admission-race@example.com")
+        workspace = Workspace.objects.create(name="Purge admission", createdBy=owner)
+        workspace.members.add(owner)
+        model = ModelConfig.objects.create(displayName="Purge admission")
+        session = create_session(workspace=workspace, owner=owner)
+        self.client.force_login(owner)
+
+        def delete_after_early_validation():
+            with patch("app_core.http.workspaces.purge_session_runtime", side_effect=RuntimeError("pending")):
+                deletion = self.client.delete(f"/api/sessions/{session.pk}")
+            self.assertEqual(deletion.status_code, 503)
+            return {"schema": "runtime.execution_profile.v1", "imageDigest": "sha256:" + "a" * 64}
+
+        with patch("app_core.http.workspaces.request_execution_profile", side_effect=delete_after_early_validation), patch(
+            "app_core.http.workspaces.schedule_agent_run_lifecycle",
+        ) as schedule:
+            response = self.client.post(
+                f"/api/workspaces/{workspace.pk}/sessions/{session.pk}/messages",
+                data=json.dumps({"operationId": "submit-before-delete-intent", "text": "new work",
+                    "modelConfigRef": model.pk}), content_type="application/json",
+            )
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertEqual(response.json(), {"error": "session_delete_pending"})
+        schedule.assert_not_called()
+        self.assertFalse(session.agent_runs.exists())
 
     @patch("app_core.http.workspaces.schedule_agent_run_lifecycle", return_value="inserted")
     def test_session_project_groups_first_message_without_becoming_a_source_folder(

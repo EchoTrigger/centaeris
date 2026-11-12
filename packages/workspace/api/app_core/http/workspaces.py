@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from app_core.transcript_output import read_output_range, purge_session_outputs
+from app_core.transcript_output import read_output_range
 from typing import Literal
 
 from django.db import transaction
@@ -45,6 +45,7 @@ from app_core.plugin_catalog import (
 )
 from app_core.agent_run_authorization_factory import create_agent_run_authorization
 from app_core.session_model_settings import selected_session_model, SessionModelSettingsError
+from app_core.session_deletion import purge_session_runtime, record_session_purge_intent
 from app_core.agent_run_stream import encode_stream_cursor
 from app_core.runtime_client import (
     TranscriptRuntimeError,
@@ -702,8 +703,10 @@ def delete_session(request, session_id: str):
         agent, session = _locked_owned_session(request.user, session_id)
         if session is None:
             return Status(404, {"error": "session_not_found"})
-        if session.status == "deleted":
-            return Status(410, {"error": "session_deleted"})
+        try:
+            record_session_purge_intent(session)
+        except RuntimeError:
+            return Status(503, {"error": "session_delete_purge_unavailable"})
         active_agent_runs = list(
             session.agent_runs.select_for_update(of=("self",))
             .select_related("authorization", "modelConfig", "session")
@@ -728,23 +731,15 @@ def delete_session(request, session_id: str):
                 AgentRun.objects.filter(
                     id=agent_run.id, status__in={"queued", "running"}
                 ).update(transitionReason="agent_run_cancel_requested")
-        deleted_at = timezone.now()
-        session.status = "deleted"
-        session.archivedAt = None
-        session.deletedAt = deleted_at
-        session.deletedBy = request.user
-        session.purgedAt = deleted_at
-        purge_session_outputs(session, deleted_at)
-        session.save(
-            update_fields=[
-                "status",
-                "archivedAt",
-                "deletedAt",
-                "deletedBy",
-                "purgedAt",
-                "updatedAt",
-            ]
-        )
+        if session.agent_runs.filter(status__in={"queued", "running"}).exists():
+            return Status(503, {"error": "session_delete_cancel_pending"})
+    # Runtime revalidates the owner/workspace and commits tree erasure and its
+    # tombstone atomically. Release the Session lock before crossing that boundary.
+    try:
+        purge_session_runtime(session)
+    except RuntimeError:
+        logger.exception("Failed to purge Runtime tree for session %s", session.id)
+        return Status(503, {"error": "session_delete_purge_unavailable"})
     return {"deleted": True}
 
 
@@ -790,6 +785,8 @@ def restore_session(request, session_id: str):
         agent, session = _locked_owned_session(request.user, session_id)
         if session is None:
             return Status(404, {"error": "session_not_found"})
+        if session.purgeRequestedAt is not None:
+            return Status(410, {"error": "session_expired"})
         if session.status != "deleted":
             return Status(409, {"error": "session_not_deleted"})
         if not trash_is_restorable(session.deletedAt, session.purgedAt):
@@ -820,9 +817,15 @@ def permanently_delete_session(request, session_id: str):
             return Status(409, {"error": "session_not_deleted"})
         if session.purgedAt is not None:
             return Status(410, {"error": "session_purged"})
-        session.purgedAt = timezone.now()
-        purge_session_outputs(session, session.purgedAt)
-        session.save(update_fields=["purgedAt", "updatedAt"])
+        try:
+            record_session_purge_intent(session)
+        except RuntimeError:
+            return Status(503, {"error": "session_delete_purge_unavailable"})
+    try:
+        purge_session_runtime(session)
+    except RuntimeError:
+        logger.exception("Failed to purge Runtime tree for session %s", session.id)
+        return Status(503, {"error": "session_delete_purge_unavailable"})
     return {"deleted": True}
 
 
@@ -1306,8 +1309,13 @@ def create_session_message(
             id=payload.project_id, workspace=workspace, owner=request.user,
         ).exists():
             return Status(404, {"error": "session_project_not_found"})
-    elif not Session.objects.filter(id=session_id, workspace=workspace, owner=request.user, status="active", archivedAt__isnull=True, purpose="interactive").exists():
-        return Status(404, {"error": "session_not_found"})
+    else:
+        selected_session = Session.objects.filter(id=session_id, workspace=workspace, owner=request.user,
+            status="active", archivedAt__isnull=True, purpose="interactive").only("purgeRequestedAt").first()
+        if selected_session is None:
+            return Status(404, {"error": "session_not_found"})
+        if selected_session.purgeRequestedAt is not None:
+            return Status(409, {"error": "session_delete_pending"})
     try:
         selected_session_model(workspace.id, payload.model_config_ref, payload.thinking_mode)
     except SessionModelSettingsError as error:
@@ -1382,6 +1390,8 @@ def create_session_message(
             else:
                 if session is None:
                     return Status(404, {"error": "session_not_found"})
+                if session.purgeRequestedAt is not None:
+                    return Status(409, {"error": "session_delete_pending"})
                 if session.agent_runs.filter(status__in={"queued", "running"}).exists():
                     return Status(409, {"error": "session_has_active_agent_run"})
                 # Cleanup publishes the final workspace under this same Session

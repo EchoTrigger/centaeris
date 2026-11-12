@@ -2,7 +2,24 @@ use std::collections::BTreeSet;
 
 use postgres::{Client, GenericClient};
 
-const STORE_SCHEMA_VERSION: i64 = 19;
+const STORE_SCHEMA_VERSION: i64 = 20;
+const SUBAGENT_PRESENTATION_DDL: &str = r#"
+CREATE FUNCTION runtime.notify_subagent_presentation_v1() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF OLD.job_kind = 'subagent.run' AND OLD.session_id IS NOT NULL THEN
+            PERFORM public.workspace_presentation_bump_v1('session:' || OLD.session_id || ':subagents');
+        END IF;
+        RETURN OLD;
+    END IF;
+    IF NEW.job_kind <> 'subagent.run' OR NEW.session_id IS NULL THEN RETURN NEW; END IF;
+    IF TG_OP = 'UPDATE' AND NEW.status IS NOT DISTINCT FROM OLD.status THEN RETURN NEW; END IF;
+    PERFORM public.workspace_presentation_bump_v1('session:' || NEW.session_id || ':subagents');
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER runtime_subagent_presentation_v1 AFTER INSERT OR DELETE OR UPDATE OF status ON runtime.runtime_jobs FOR EACH ROW EXECUTE FUNCTION runtime.notify_subagent_presentation_v1();
+"#;
 const WORKER_DISPATCH_HOST_DDL: &str = "ALTER TABLE runtime.runtime_jobs
     ADD COLUMN lease_host_id text CHECK (lease_host_id IS NULL OR btrim(lease_host_id)<>'');";
 const SANDBOX_DEPLOYMENT_DDL: &str = "
@@ -296,6 +313,7 @@ pub(super) fn ensure_schema(client: &mut Client) -> Result<(), String> {
         upgrade_runsc_rotation(client)?;
         upgrade_sandbox_deployment(client)?;
         upgrade_worker_dispatch_host(client)?;
+        upgrade_subagent_presentation(client)?;
     } else {
         create_schema(client)?;
     }
@@ -499,6 +517,10 @@ fn upgrade_environment_retirements(client: &mut Client) -> Result<(), String> {
 
 fn upgrade_worker_dispatch_host(client: &mut Client) -> Result<(), String> {
     upgrade_dispatch_schema(client, 19, WORKER_DISPATCH_HOST_DDL)
+}
+
+fn upgrade_subagent_presentation(client: &mut Client) -> Result<(), String> {
+    upgrade_dispatch_schema(client, 20, SUBAGENT_PRESENTATION_DDL)
 }
 
 fn upgrade_sandbox_deployment(client: &mut Client) -> Result<(), String> {
@@ -778,6 +800,8 @@ fn create_schema(client: &mut Client) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     tx.batch_execute(WORKER_DISPATCH_HOST_DDL)
         .map_err(|e| e.to_string())?;
+    tx.batch_execute(SUBAGENT_PRESENTATION_DDL)
+        .map_err(|e| e.to_string())?;
     for version in 1..=STORE_SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO runtime.schema_migrations(version, applied_at_ms) VALUES($1, $2)",
@@ -810,7 +834,9 @@ pub(super) fn restore_sandbox_deployment_fixture(client: &mut Client) {
         .transaction()
         .expect("begin sandbox deployment fixture downgrade");
     tx.batch_execute(
-        "DROP TABLE IF EXISTS runtime.sandbox_deployment;
+        "DROP TRIGGER IF EXISTS runtime_subagent_presentation_v1 ON runtime.runtime_jobs;
+         DROP FUNCTION IF EXISTS runtime.notify_subagent_presentation_v1();
+         DROP TABLE IF EXISTS runtime.sandbox_deployment;
          ALTER TABLE runtime.runtime_jobs DROP COLUMN IF EXISTS lease_host_id;
          DELETE FROM runtime.schema_migrations WHERE version>=18;",
     )
@@ -846,6 +872,7 @@ fn validate_schema_with_resource_budgets(
     let runsc_rotation = versions.contains(&17);
     let sandbox_deployment = versions.contains(&18);
     let worker_dispatch_host = versions.contains(&19);
+    let subagent_presentation = versions.contains(&20);
     let tables = object_names(client, "BASE TABLE")?;
     let expected_tables = RUNTIME_TABLES
         .iter()
@@ -1172,6 +1199,25 @@ fn validate_schema_with_resource_budgets(
         .map(|row| row.get::<_, String>(0))
         .collect::<BTreeSet<_>>();
     let mut expected_functions = BTreeSet::from(["notify_runtime_job_ready_v1".to_string()]);
+    if subagent_presentation {
+        expected_functions.insert("notify_subagent_presentation_v1".into());
+        let expected = SUBAGENT_PRESENTATION_DDL
+            .split_once("CREATE FUNCTION runtime.notify_subagent_presentation_v1() RETURNS trigger LANGUAGE plpgsql AS $$")
+            .ok_or("subagent presentation function declaration missing")?.1
+            .split_once("$$;").ok_or("subagent presentation function body missing")?.0;
+        let actual = client.query_one(
+            "SELECT prosrc FROM pg_proc WHERE oid='runtime.notify_subagent_presentation_v1()'::regprocedure", &[],
+        ).map_err(|error| error.to_string())?.get::<_, String>(0);
+        if actual != expected {
+            return Err("Postgres subagent presentation function mismatch".into());
+        }
+        let valid = client.query_opt(
+            "SELECT tgenabled='O' AND NOT tgisinternal AND tgtype=29 AND tgfoid='runtime.notify_subagent_presentation_v1()'::regprocedure AND tgqual IS NULL AND tgnargs=0 AND tgattr::text=(SELECT attnum::text FROM pg_attribute WHERE attrelid='runtime.runtime_jobs'::regclass AND attname='status') FROM pg_trigger WHERE tgrelid='runtime.runtime_jobs'::regclass AND tgname='runtime_subagent_presentation_v1'", &[],
+        ).map_err(|error| error.to_string())?;
+        if !valid.is_some_and(|row| row.get::<_, bool>(0)) {
+            return Err("Postgres subagent presentation trigger mismatch".into());
+        }
+    }
     if typed_owners {
         expected_functions.insert("protect_environment_provision_completion".into());
         expected_functions.insert("protect_agent_run_cleanup_receipt".into());
@@ -1299,6 +1345,9 @@ fn validate_schema_with_resource_budgets(
         .map(|row| row.get::<_, String>(0))
         .collect::<BTreeSet<_>>();
     let mut expected_triggers = BTreeSet::from(["runtime_jobs_ready_notify_v1".to_string()]);
+    if subagent_presentation {
+        expected_triggers.insert("runtime_subagent_presentation_v1".into());
+    }
     if control_leases {
         expected_triggers.insert("lifecycle_lease_purpose_facts".into());
     }
@@ -1472,7 +1521,7 @@ mod tests {
 
     #[test]
     fn transcript_read_model_and_wait_handoff_have_explicit_store_schema() {
-        assert_eq!(STORE_SCHEMA_VERSION, 19);
+        assert_eq!(STORE_SCHEMA_VERSION, 20);
         for table in [
             "transcript_projection_heads",
             "transcript_projection_current_generations",

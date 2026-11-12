@@ -1,5 +1,6 @@
 use postgres::{Client, NoTls};
 mod session_payload;
+pub(crate) mod session_subagents;
 pub(crate) use session_payload::decode as decode_session_payload;
 use std::cell::Cell;
 use std::fmt;
@@ -108,7 +109,9 @@ pub(crate) mod residency;
 mod resource_commit;
 pub(crate) mod runsc_rotation;
 mod runtime;
+pub(crate) use runtime::session_deletion;
 mod schema;
+mod subagent_persistence;
 mod transactions;
 mod transcript;
 pub(crate) mod turn_supplement;
@@ -117,6 +120,7 @@ pub(crate) mod workspace_snapshot_roots;
 #[derive(Clone)]
 pub struct PostgresRuntimeStore {
     dispatch_host: Option<Arc<execution_capacity::DispatchHost>>,
+    subagent_persistence_scope: Option<subagent_persistence::SubagentPersistenceScope>,
     ordinary_connections: Arc<PostgresConnectionPool>,
     control_connections: Arc<PostgresConnectionPool>,
     cleanup_connections: Arc<PostgresConnectionPool>,
@@ -171,6 +175,7 @@ impl PostgresRuntimeStore {
         ));
         Self {
             dispatch_host: None,
+            subagent_persistence_scope: None,
             ordinary_connections: pool.clone(),
             control_connections: pool.clone(),
             cleanup_connections: pool.clone(),
@@ -183,6 +188,7 @@ impl PostgresRuntimeStore {
     pub(crate) fn execution_control_view(&self) -> Self {
         Self {
             dispatch_host: self.dispatch_host.clone(),
+            subagent_persistence_scope: self.subagent_persistence_scope.clone(),
             ordinary_connections: self.control_connections.clone(),
             cleanup_connections: self.cleanup_connections.clone(),
             control_connections: self.control_connections.clone(),
@@ -192,6 +198,7 @@ impl PostgresRuntimeStore {
     pub(crate) fn cleanup_view(&self) -> Self {
         Self {
             dispatch_host: self.dispatch_host.clone(),
+            subagent_persistence_scope: self.subagent_persistence_scope.clone(),
             ordinary_connections: self.cleanup_connections.clone(),
             control_connections: self.control_connections.clone(),
             cleanup_connections: self.cleanup_connections.clone(),
@@ -226,6 +233,7 @@ impl PostgresRuntimeStore {
         }
         let store = Self {
             dispatch_host: None,
+            subagent_persistence_scope: None,
             ordinary_connections: Arc::new(PostgresConnectionPool::new(
                 postgres_config(
                     database_url,
@@ -281,6 +289,7 @@ impl PostgresRuntimeStore {
         }
         let store = Self {
             dispatch_host: None,
+            subagent_persistence_scope: None,
             ordinary_connections: Arc::new(PostgresConnectionPool::new(
                 postgres_config(
                     database_url,

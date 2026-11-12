@@ -10,6 +10,10 @@ use super::PostgresRuntimeStore;
 
 impl ExternalContextStorePort for PostgresRuntimeStore {
     fn upsert_external_context_object(&self, object: ExternalContextObject) -> Result<(), String> {
+        if self.subagent_persistence_scope.is_some() {
+            return self
+                .with_subagent_persistence_transaction(None, |tx| upsert_object(tx, &object));
+        }
         self.with_client(|client| upsert_object(client, &object))
     }
 
@@ -24,6 +28,11 @@ impl ExternalContextStorePort for PostgresRuntimeStore {
     }
 
     fn link_external_context_object(&self, link: ExternalContextObjectLink) -> Result<(), String> {
+        if self.subagent_persistence_scope.is_some() {
+            return self.with_subagent_persistence_transaction(Some(&link.session_id), |tx| {
+                link_object(tx, &link)
+            });
+        }
         self.with_client(|client| link_object(client, &link))
     }
 

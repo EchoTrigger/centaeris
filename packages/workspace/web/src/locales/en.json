@@ -1120,5 +1120,15 @@
   "searchOverlay.match.stage": "Agent update",
   "searchOverlay.match.final": "Agent answer",
   "searchOverlay.loadMoreConversations": "More conversations",
-  "searchOverlay.targetUnavailable": "This matching message could not be loaded."
+  "searchOverlay.targetUnavailable": "This matching message could not be loaded.",
+  "sessionSubagent.conversations": "Agent conversations",
+  "sessionSubagent.taskContext": "Task context",
+  "sessionSubagent.unavailable": "This Agent conversation could not be read.",
+  "sessionSubagent.status.queued": "Queued",
+  "sessionSubagent.status.leased": "Queued",
+  "sessionSubagent.status.running": "Running",
+  "sessionSubagent.status.succeeded": "Completed",
+  "sessionSubagent.status.failed": "Failed",
+  "sessionSubagent.status.dead_lettered": "Failed",
+  "sessionSubagent.status.cancelled": "Cancelled"
 }

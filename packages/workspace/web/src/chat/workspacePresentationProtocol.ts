@@ -10,7 +10,7 @@ export type PresentationOperation = Readonly<{
   resultState: string | null; operations: readonly Record<string, unknown>[]; previewTruncated: boolean; sourceEventId: string;
 }>;
 type Common = PresentationIdentity & Readonly<{ schema: 'workspace.presentation.v1' }>;
-export type PresentationViewRevision = Common & Readonly<{ kind: 'viewRevision'; contextRevision: string; historyRevision: string; workRevision: string }>;
+export type PresentationViewRevision = Common & Readonly<{ kind: 'viewRevision'; contextRevision: string; historyRevision: string; workRevision: string; subagentsRevision: string }>;
 export type PresentationCheckpoint = Common & Readonly<{ kind: 'checkpoint'; projectionGeneration: string | null; sourceHighWater: string; agentRun: PresentationAgentRun | null }>;
 export type PresentationActivity = Common & Readonly<{ kind: 'activity'; agentRunId: string; sourceHighWater: string; activity: 'thinking' | 'working' | 'waitingInput' | 'retrying' | 'preserving' | null }>;
 export type PendingSessionQuestion = Readonly<{ questionId: string; continuationId: string; turnId: string; question: string; options: readonly string[] }>;
@@ -30,7 +30,7 @@ export type PresentationFrame =
 export type PresentationEntry = Readonly<{ cursor: string | null; item: PresentationFrame }>;
 const COMMON = ['schema', 'kind', 'workspaceId', 'sessionId'];
 const FIELDS: Record<PresentationFrame['kind'], readonly string[]> = {
-  viewRevision: ['contextRevision', 'historyRevision', 'workRevision'],
+  viewRevision: ['contextRevision', 'historyRevision', 'workRevision', 'subagentsRevision'],
   activity: ['agentRunId', 'sourceHighWater', 'activity'],
   question: ['agentRunId', 'sourceHighWater', 'question'],
   navigation: ['snapshotId', 'offset', 'hasMore', 'sessions'], snapshot: ['page'], patches: ['page'], content: ['range'],
@@ -63,7 +63,7 @@ export function validatePresentationFrame(value: unknown, identity: Presentation
         || (value.activity !== null && (typeof value.activity !== 'string' || !['thinking', 'working', 'waitingInput', 'retrying', 'preserving'].includes(value.activity)))) invalid('invalid presentation activity');
       break;
     case 'viewRevision':
-      if (![value.contextRevision, value.historyRevision, value.workRevision].every(isPresentationWater)) invalid('invalid presentation view revision');
+      if (![value.contextRevision, value.historyRevision, value.workRevision, value.subagentsRevision].every(isPresentationWater)) invalid('invalid presentation view revision');
       break;
     case 'navigation': {
       if (!Array.isArray(value.sessions) || typeof value.snapshotId !== 'string' || !value.snapshotId

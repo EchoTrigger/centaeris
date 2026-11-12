@@ -41,7 +41,7 @@ class PresentationNotificationsTests(SimpleTestCase):
     async def test_notification_keys_and_empty_wait_reconciliation(self):
         from .presentation_changes import CHANNEL
         batches = [[SimpleNamespace(channel="other", payload="ignored"),
-                    SimpleNamespace(channel=CHANNEL, payload="agent:agent:history")], []]
+                    SimpleNamespace(channel=CHANNEL, payload="session:session:subagents")], []]
         timeouts = []
         async def notifies(*, timeout):
             timeouts.append(timeout)
@@ -50,7 +50,7 @@ class PresentationNotificationsTests(SimpleTestCase):
         connection = SimpleNamespace(execute=AsyncMock(), close=AsyncMock(), notifies=notifies)
         stream = self.listener(asyncio.Event(), connect=AsyncMock(return_value=connection))
         self.assertEqual(await anext(stream), PresentationHint(None, True))
-        self.assertEqual(await anext(stream), PresentationHint("agent:agent:history", True))
+        self.assertEqual(await anext(stream), PresentationHint("session:session:subagents", True))
         self.assertEqual(await anext(stream), PresentationHint(None, True))
         self.assertEqual(timeouts, [30, 30])
         await stream.aclose()

@@ -972,6 +972,7 @@ class Session(models.Model):
         blank=True,
     )
     purgedAt = models.DateTimeField(null=True, blank=True)
+    purgeRequestedAt = models.DateTimeField(null=True, blank=True, editable=False)
     isPinned = models.BooleanField(default=False)
     # Explicit owner action only; automatic notification state is derived from watermarks.
     isManuallyUnread = models.BooleanField(default=False)

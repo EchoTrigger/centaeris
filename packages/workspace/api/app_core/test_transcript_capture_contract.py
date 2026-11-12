@@ -20,6 +20,7 @@ class TranscriptCaptureContractTests(TransactionTestCase):
 
     setUp = identity.TranscriptContentIdentityTests.setUp
     replace_snapshot = identity.TranscriptContentIdentityTests.replace_snapshot
+    purge_capture_owner = identity.TranscriptContentIdentityTests.purge_capture_owner
 
     def commit_output(self, content, *, spilled, model_content=None):
         query = identity.TranscriptContentIdentityTests.commit_output(self, content, spilled=spilled,
@@ -50,8 +51,11 @@ class TranscriptCaptureContractTests(TransactionTestCase):
             fixture.write_text(json.dumps({"record": {"sequence": event.sequence, "event": wire},
                 "text": text, "prefix": self.prefix.decode(), "executionId": execution_id,
                 "succeeds": succeeds}), encoding="utf-8")
-            result = subprocess.run(["cargo", "test", "--locked", "-p", "runtime_server",
-                "transcript_capture::tests::transcript_capture_django_contract", "--", "--exact",
+            name = "transcript_capture::tests::transcript_capture_django_contract"
+            executable = os.environ.get("CENTAERIS_TEST_RUNTIME_EXECUTABLE")
+            command = ([executable, name] if executable else
+                       ["cargo", "test", "--locked", "-p", "runtime_server", name, "--"])
+            result = subprocess.run([*command, "--exact",
                 "--ignored", "--nocapture"], cwd=Path(__file__).resolve().parents[4],
                 env={**os.environ, "CENTAERIS_CAPTURE_TEST_FIXTURE": str(fixture),
                     "CENTAERIS_CAPTURE_TEST_DATABASE": url, "CARGO_BUILD_JOBS": "1"},
@@ -80,9 +84,7 @@ class TranscriptCaptureContractTests(TransactionTestCase):
                 break
             query["offset"] = response.json()["endOffset"]
         self.assertEqual("".join(parts), original)
-        self.run.status = "completed"
-        self.run.save(update_fields=["status"])
-        self.assertEqual(self.client.delete(f"/api/sessions/{self.session.id}").status_code, 200)
+        self.purge_capture_owner()
         self.publish(original, succeeds=False)
         capture = TranscriptOutputCapture.objects.get()
         self.assertIsNotNone(capture.purgedAt)
@@ -129,12 +131,11 @@ class TranscriptCaptureContractTests(TransactionTestCase):
         from django.db import connections
         # Compilation is outside the concurrency window; the barrier measures
         # database behavior, never the machine's Rust build time.
-        subprocess.run(["cargo", "test", "--locked", "-p", "runtime_server", "--no-run"],
-            cwd=Path(__file__).resolve().parents[4], capture_output=True, check=True, timeout=240)
+        if not os.environ.get("CENTAERIS_TEST_RUNTIME_EXECUTABLE"):
+            subprocess.run(["cargo", "test", "--locked", "-p", "runtime_server", "--no-run"],
+                cwd=Path(__file__).resolve().parents[4], capture_output=True, check=True, timeout=240)
         original = "a" * 70000
         self.commit_output(original, spilled=True)
-        self.run.status = "completed"
-        self.run.save(update_fields=["status"])
         with connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_lock(71001)")
             cursor.execute("""CREATE FUNCTION capture_test_wait() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -166,7 +167,7 @@ class TranscriptCaptureContractTests(TransactionTestCase):
                     time.sleep(0.02)
                 with connection.cursor() as cursor:
                     cursor.execute("SET statement_timeout='1s'")
-                self.assertEqual(self.client.delete(f"/api/sessions/{self.session.id}").status_code, 200)
+                self.purge_capture_owner()
             finally:
                 with connection.cursor() as cursor:
                     cursor.execute("SET statement_timeout=0")

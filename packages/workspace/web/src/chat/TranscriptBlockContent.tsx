@@ -37,6 +37,8 @@ import { toolGroupIconCategory, type ToolGroupCategory } from "./toolGroupTitle"
 import type { TranscriptContentRef } from "./transcriptContract";
 import type { TranscriptToolOperationRegistry } from "./transcriptToolOperations";
 import type { TranscriptLiveOverlay, TranscriptViewStore } from "./transcriptViewStore";
+import { SessionSubagentTags } from "./SessionSubagentPresentation";
+import { matchedSubagentWait, type SessionSubagent } from "./sessionSubagents";
 
 
 const TOOL_GROUP_ICONS: Record<ToolGroupCategory, LucideIcon> = {
@@ -332,13 +334,15 @@ function useToolOperationsSnapshot(registry: TranscriptToolOperationRegistry | u
 
 // Consecutive tool blocks share one card (desktop groups consecutive tool
 // tasks the same way); each call contributes one or more operation nodes.
-export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citations, onShowCitation, runEnded = false }: Readonly<{
+export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citations, onShowCitation, runEnded = false, subagents = [], onOpenSubagent }: Readonly<{
   store: TranscriptViewStore;
   blockIds: readonly string[];
   citations?: ReadonlyMap<string, readonly CitationSummary[]>;
   onShowCitation?(citation: CitationSummary, origin: { elementId: string }): void;
   toolOperations?: TranscriptToolOperationRegistry;
   runEnded?: boolean;
+  subagents?: readonly SessionSubagent[];
+  onOpenSubagent?(agent: SessionSubagent): void;
 }>) {
   const { t } = useTranslation();
   const listIdentity = useTranscriptIdentity(store);
@@ -371,7 +375,16 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
-  if (entries.length === 0) return null;
+  const groupAgents = onOpenSubagent ? subagents.filter(agent => entries.some(entry => entry.callId === agent.callId)) : [];
+  const agentCalls = new Set(groupAgents.map(agent => agent.callId));
+  const visibleEntries = entries.filter(entry => {
+    if (agentCalls.has(entry.callId)) return false;
+    if (entry.body.toolName !== "task_output" || entry.body.status === "failed"
+      || entry.body.status === "interrupted" || ["failed", "denied", "aborted"].includes(entry.resultState)) return true;
+    const waitingFor = matchedSubagentWait(entry.call.normalizedInput, subagents);
+    return !waitingFor || !onOpenSubagent || !listIdentity.blockIds.some(blockId => store.getBlockSnapshot(blockId)?.body.callId === waitingFor.callId);
+  });
+  if (visibleEntries.length === 0 && groupAgents.length === 0) return null;
   return (
     <div className="workspaceActivityGroupRecord">
       {entries.map(entry => {
@@ -385,8 +398,9 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
           })}
         </div> : null;
       })}
-      <div className="agent-tool-node-list">
-              {entries.flatMap((entry) => {
+      {groupAgents.length && onOpenSubagent ? <SessionSubagentTags agents={groupAgents} onOpen={onOpenSubagent} /> : null}
+      {visibleEntries.length ? <div className="agent-tool-node-list">
+              {visibleEntries.flatMap((entry) => {
                 if (entry.operations.length === 0) {
                   return [
                     <TranscriptToolNode
@@ -410,7 +424,7 @@ export function TranscriptToolGroupCard({ store, blockIds, toolOperations, citat
                   />
                 ));
               })}
-      </div>
+      </div> : null}
       {listIdentity.sessionId ? entries.filter(entry => entry.detailSourceEventId).map(entry => <a key={entry.callId}
               href={apiUrl(`/api/sessions/${encodeURIComponent(listIdentity.sessionId as string)}/presentation/operation?sourceEventId=${encodeURIComponent(entry.detailSourceEventId)}`)} download>
               {t("libraryObjectRoute.downloadFile")}

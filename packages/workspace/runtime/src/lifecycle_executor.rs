@@ -316,29 +316,46 @@ fn run_claimed(
             })?,
         }
         let lease = lease::Lease::acquire(state.job_store.clone(), &job, config.lease, shutdown)?;
-        let next = if job.job_kind == "worker.noop" {
-            Ok(Next::Complete)
-        } else if let Some(stage) = lane.stage() {
-            advance_control(&state, &platform, &config, &job, stage, &lease)
-        } else {
-            advance(&state, &platform, &config, &job, &lease)
-        };
-        let next = match next {
-            Ok(next) => next,
-            Err(error) => {
-                lease.require()?;
-                if let Some(reason) =
-                    wait_reason(&error).or_else(|| lane.stage().map(|_| "control_retry_pending"))
-                {
-                    Next::Yield {
-                        at: now_ms()?.saturating_add(1000),
-                        reason: reason.into(),
+        let mut cancellation_observed = false;
+        let next = loop {
+            let next = if job.job_kind == "worker.noop" {
+                Ok(Next::Complete)
+            } else if let Some(stage) = lane.stage() {
+                advance_control(&state, &platform, &config, &job, stage, &lease)
+            } else {
+                advance(&state, &platform, &config, &job, &lease)
+            };
+            let next = match next {
+                Ok(next) => next,
+                Err(error) => {
+                    lease.require()?;
+                    if let Some(reason) = wait_reason(&error)
+                        .or_else(|| lane.stage().map(|_| "control_retry_pending"))
+                    {
+                        Next::Yield {
+                            at: now_ms()?.saturating_add(1000),
+                            reason: reason.into(),
+                        }
+                    } else {
+                        lease.handoff()?;
+                        return fail(&state, &platform, &job, error);
                     }
-                } else {
-                    lease.handoff()?;
-                    return fail(&state, &platform, &job, error);
+                }
+            };
+            if lane.stage().is_none() && job.job_kind == AGENT_RUN_LIFECYCLE_JOB_KIND {
+                if let Next::Yield { at, .. } = &next {
+                    if wait_with_active_subagents(
+                        &state,
+                        &job,
+                        &lease,
+                        *at,
+                        &mut cancellation_observed,
+                    )? {
+                        continue;
+                    }
                 }
             }
+            break next;
         };
         lease.handoff()?;
         match next {
@@ -365,6 +382,69 @@ fn run_claimed(
     })();
     if result.is_err() {
         eprintln!("Run lifecycle attempt stopped; jobId={}", job.job_id);
+    }
+}
+
+fn wait_with_active_subagents(
+    state: &HttpServerState,
+    job: &RuntimeJobRecord,
+    lease: &lease::Lease,
+    retry_at_ms: i64,
+    cancellation_observed: &mut bool,
+) -> Result<bool, Failure> {
+    let binding = binding(job)?;
+    let session_id = job
+        .session_id
+        .as_deref()
+        .ok_or("lifecycle Session missing")?;
+    let fence = RuntimeJobLeaseFence {
+        job_id: job.job_id.clone(),
+        job_kind: job.job_kind.clone(),
+        lease_owner: owner(job)?.to_string(),
+    };
+    loop {
+        lease.require()?;
+        let now = now_ms()?;
+        let control = state.job_store.agent_run_execution_control_state(
+            binding.run,
+            &job.job_id,
+            &fence.lease_owner,
+            now,
+        )?;
+        if !control.lifecycle_lease_current {
+            return Err(Failure::rejected(409, "agent_run_lifecycle_lease_lost"));
+        }
+        // Deliver cancellation once; a retryable finalization failure must
+        // still respect its existing retry deadline.
+        if control.cancellation_requested && !*cancellation_observed {
+            *cancellation_observed = true;
+            return Ok(true);
+        }
+        if !state
+            .runtime
+            .block_on(terminal_subagents::has_active_parent_subagent_jobs(
+                state.store.as_ref(),
+                session_id,
+                binding.run,
+            ))?
+        {
+            return Ok(false);
+        }
+        if now >= retry_at_ms {
+            return Ok(true);
+        }
+        // Children share the parent's resource controller, but keep their own
+        // execution leases. Do not invalidate that controller while they run.
+        // This short slice observes cancellation and children without waiter
+        // edges; durable wakes normally return earlier through NOTIFY.
+        let max_wait = Duration::from_millis((retry_at_ms - now).min(1000) as u64);
+        if state
+            .job_store
+            .wait_for_owned_runtime_job_wake(&fence, max_wait)?
+        {
+            lease.require()?;
+            return Ok(true);
+        }
     }
 }
 
