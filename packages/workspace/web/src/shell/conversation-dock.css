@@ -6,9 +6,10 @@ main.workspaceWorkbench:has(.conversationDock > button) { padding-bottom:36px; }
 .conversationDock .conversationDockSession { flex-shrink:1; min-width:0; display:block; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .conversationDockSession > .isRunning { display:inline-block; width:5px; height:5px; border-radius:50%; background:var(--primary-color); margin-right:7px; }
 .conversationDock svg { width:14px; height:14px; }
-.conversationWindowActions { display:flex; align-items:center; gap:2px; margin-left:auto; }
-.conversationSwitcher { display:flex; align-items:center; gap:7px; min-width:0; max-width:100%; padding:5px 8px; border:0; border-radius:6px; background:transparent; color:var(--on-surface); font:inherit; font-size:13px; cursor:pointer; }
-.conversationSwitcher > span { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.conversationWindowActions { flex:none; display:flex; align-items:center; gap:2px; margin-left:auto; }
+.conversationSwitcher { display:flex; align-items:center; gap:7px; min-width:0; max-width:min(320px,100%); padding:5px 8px; border:0; border-radius:6px; background:transparent; color:var(--on-surface); font:inherit; font-size:13px; cursor:pointer; }
+.workspaceConversationHeading { max-width:100%; }
+.conversationSwitcher > span { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 .conversationSwitcher > svg { width:12px; height:12px; flex:none; color:var(--process-text); }
 .conversationSwitcher:hover { background:var(--surface-hover); }
 .workspaceWorkbench.isBrowsing.isChatFloating > .workspaceTopbar { position:fixed; z-index:52; display:flex; right:20px; bottom:calc(44px + var(--conversation-float-height)); top:auto; width:min(440px, calc(100vw - 24px)); height:44px; min-height:44px; padding:0 8px; border:1px solid var(--outline-variant); border-bottom:0; border-radius:12px 12px 0 0; background:var(--surface-color); }

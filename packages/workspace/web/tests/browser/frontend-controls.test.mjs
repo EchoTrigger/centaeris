@@ -12,10 +12,10 @@ test("shared controls retain Web composer proportions, floating menus, draft and
   const profiles = [];
   try {
     await server.listen();
-    for (const scenario of [{ width: 1280, theme: "light" }, { width: 390, theme: "dark", reduced: true }]) {
+    for (const scenario of [{ width: 1280, theme: "light" }, { width: 390, theme: "dark", reduced: true }, { width: 1280, theme: "light", floating: true }, { width: 390, theme: "dark", floating: true }]) {
       const profile = await mkdtemp(join(tmpdir(), "centaeris-frontend-controls-"));
       profiles.push(profile);
-      await runBrowser(`${server.resolvedUrls.local[0]}tests/browser/frontend-controls.html?theme=${scenario.theme}`, scenario, profile, async ({ evaluate, frame, press, send }) => {
+      await runBrowser(`${server.resolvedUrls.local[0]}tests/browser/frontend-controls.html?theme=${scenario.theme}${scenario.floating ? "&floating=1" : ""}`, scenario, profile, async ({ evaluate, frame, press, send }) => {
         const click = async selector => {
           const point = await evaluate(`(() => { const bounds=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return {x:bounds.left+bounds.width/2,y:bounds.top+bounds.height/2}; })()`);
           await send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...point });
@@ -23,6 +23,14 @@ test("shared controls retain Web composer proportions, floating menus, draft and
           await frame();
         };
         await waitFor(() => evaluate("Boolean(document.querySelector('.workspaceComposerThinking button'))"), "composer controls");
+        if (scenario.floating) {
+          assert(await evaluate(`(() => {
+            const title = document.querySelector('.conversationSwitcher > span');
+            const favorite = document.querySelector('.chatFavorite').getBoundingClientRect();
+            const actions = document.querySelector('.conversationWindowActions').getBoundingClientRect();
+            return title.scrollWidth > title.clientWidth && favorite.right <= actions.left && actions.right <= innerWidth;
+          })()`), "long titles truncate without displacing chat actions");
+        }
         const proportions = await evaluate(`(() => {
           const add = document.querySelector('.workspaceComposerIconButton');
           const effort = document.querySelector('.workspaceComposerThinking button');
@@ -41,6 +49,11 @@ test("shared controls retain Web composer proportions, floating menus, draft and
             contained: menu.left >= 0 && menu.right <= innerWidth && menu.top >= 0 };
         })()`);
         assert.deepEqual(floating, { visible: true, above: true, contained: true });
+        assert(await evaluate(`(() => {
+          const choice = document.querySelector('[role=menuitemradio]:last-child');
+          const rect = choice.getBoundingClientRect();
+          return choice.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
+        })()`), "model choice is visible and receives pointer input above the chat window");
         await click("[role=menuitemradio]:last-child");
         await waitFor(() => evaluate("!document.querySelector('[role=menu]')"), "choice closes only the model menu");
         await click(".workspaceComposerThinking button");

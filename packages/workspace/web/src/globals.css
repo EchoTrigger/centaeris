@@ -1386,7 +1386,7 @@ button.activityOperationSummary:hover { color: var(--on-surface); }
 :root:not([data-theme="dark"]) .workspaceUserMessage { background: #eceff0; }
 
 /* Floating positioning belongs to the shared primitive; Web retains its visual controls. */
-.workspaceComposerPickerPositioner { z-index:22; outline:none; }
+.workspaceComposerPickerPositioner { z-index:100; outline:none; }
 .workspaceComposerPickerPanel { position:relative; inset:auto; }
 .workspaceComposerPickerTrigger { border:0; background:transparent; font:inherit; }
 .workspaceComposerPickerTrigger:disabled { cursor:default; opacity:.55; }

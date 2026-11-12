@@ -1486,7 +1486,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
     else navigate(sessionChatPath(workspace.id, target.id));
   }
   const historyProps = { workspaceId: workspace.id, currentSessionId: activeSession?.id, sessionProps: sidebarSessions, recentNavigation: navigationError ? { error: true } : { loading: !navigationLoaded }, onStartNewChat: startNavigationChat, onOpenSession: openHistorySession };
-  const chatTitleControl = <ConversationHistory {...historyProps} label={t("work.conversation.switch")} className="conversationSwitcher" side="bottom"><span>{activeSession?.title || t("work.conversation.untitled")}</span><ChevronDown /></ConversationHistory>;
+  const chatTitleControl = <ConversationHistory {...historyProps} label={t("work.conversation.switch")} className="conversationSwitcher" side="bottom"><span title={activeSession?.title}>{activeSession?.title || t("work.conversation.untitled")}</span><ChevronDown /></ConversationHistory>;
 
   return (
     <main
@@ -1580,7 +1580,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
           />
 
           <div className="workspaceComposerDock">
-          {(!isSidebarOpen || compactLayout && !drawerOpen) && sessionActions.actionError?.sessionId === sessionId && deleteConfirmationSessionId !== sessionId
+          {sessionActions.actionError?.sessionId === sessionId && deleteConfirmationSessionId !== sessionId
             ? <div className="workspaceConversationFeedback workspaceToolOutputStatus isError" role="alert">{sessionActions.actionError.message}</div> : null}
           <ConversationReadFeedback {...readFeedbackProps} placement="content" />
           {pendingQuestion?.sessionId === sessionId && pendingQuestion.agentRunId === activeAgentRunId ? <SessionQuestionCard

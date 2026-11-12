@@ -18,6 +18,7 @@ import {
 import { displayWorkText, exampleProjects, useWorkPrototype } from "../work/workPrototype";
 import { apiResponse, clearCsrfToken } from "../api";
 import { WorkspaceAvatar } from "../components/WorkspaceAvatar";
+import { sessionChatPath } from "./sessionNavigation.mjs";
 import { clearWorkspaceIdentityCache } from "./workspaceIdentityCache";
 
 function WorkspaceHeader({ onNewConversation, workspace, workspaces, logoutBusy, logoutError, onLogout, onCollapse, search, returnTo, menuContainer }) {
@@ -72,7 +73,7 @@ function WorkspaceHeader({ onNewConversation, workspace, workspaces, logoutBusy,
   );
 }
 
-export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewChat, onCollapse, search, menuContainer }) {
+export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewChat, onCollapse, search, menuContainer, sessionProps }) {
   const work = useWorkPrototype();
   const { t } = useTranslation();
   const [logoutBusy, setLogoutBusy] = useState(false);
@@ -84,6 +85,9 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
   const inSettings = location.pathname.startsWith(`${base}/settings/`);
   const isHome = location.pathname === `${base}/app`;
   const inLibrary = location.pathname === `${base}/library` || location.pathname.startsWith(`${base}/library/`);
+
+  const favoriteSessions = (sessionProps?.sessions || []).filter(session => session.isPinned);
+  const favoriteProjects = exampleProjects.filter(project => work?.favorites.includes(project.id));
 
   const inExtensions = location.pathname === base + "/extensions";
 
@@ -133,8 +137,9 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
       </nav>
       <nav className="workRailViews" aria-label={t("work.favoritesAndViews")}>
         <p className="workRailHeading">{t("work.favorites")}</p>
-        {exampleProjects.filter(project => work?.favorites.includes(project.id)).map(project => <Link className="shRow" key={project.id} to={`${base}/work/projects/${project.id}`}><span className="workRailProjectIcon">{project.icon}</span><span>{displayWorkText(project.name, t)}</span></Link>)}
-        {!work?.favorites.length ? <p className="workRailEmpty">{t("work.favoriteHint")}</p> : null}
+        {favoriteProjects.map(project => <Link className="shRow" key={project.id} to={`${base}/work/projects/${project.id}`}><span className="workRailProjectIcon">{project.icon}</span><span>{displayWorkText(project.name, t)}</span></Link>)}
+        {favoriteSessions.map(session => <Link className="shRow" key={session.id} to={sessionChatPath(workspace.id, session.id)} aria-current={location.pathname === sessionChatPath(workspace.id, session.id) ? "page" : undefined} title={session.title}><span>{session.title || t("work.conversation.untitled")}</span></Link>)}
+        {!favoriteProjects.length && !favoriteSessions.length ? <p className="workRailEmpty">{t("work.favoriteHint")}</p> : null}
         <p className="workRailHeading">{t("work.views")}</p>
         <Link className="shRow" to={`${base}/work?tab=attention`} aria-current={location.pathname === `${base}/work` && location.search.includes("tab=attention") ? "page" : undefined}><ListTodo aria-hidden="true" /><span>{t("work.needsAttention")}</span><span className="workRailCount">{work?.tasks.filter(task => task.owner === "me" && task.attention && !["done", "cancelled"].includes(task.status)).length || 0}</span></Link>
       </nav>

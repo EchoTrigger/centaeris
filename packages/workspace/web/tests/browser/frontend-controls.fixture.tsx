@@ -2,6 +2,8 @@ import { createRoot } from "react-dom/client";
 import { useRef, useState } from "react";
 import { FrontendProvider } from "@centaeris/ui/provider";
 import { WorkspaceComposer } from "../../src/chat/WorkspaceComposer";
+import { ChatTitle } from "../../src/shell/ChatTitle";
+import "../../src/shell/conversation-dock.css";
 import { ConfirmDialog } from "../../src/components/ConfirmDialog";
 import { i18n } from "../../src/i18n";
 import "../../src/globals.css";
@@ -9,6 +11,8 @@ import "../../src/globals.css";
 const parameters = new URLSearchParams(location.search);
 document.documentElement.dataset.theme = parameters.get("theme") ?? "light";
 await i18n.changeLanguage("en");
+const floating = parameters.has("floating");
+const longTitle = "Review the complete release materials and permissions across all departments before publication";
 const choices: string[] = [], failures: string[] = [];
 window.addEventListener("error", event => failures.push(event.message));
 window.addEventListener("unhandledrejection", event => failures.push(String(event.reason)));
@@ -22,7 +26,9 @@ function Fixture() {
   const [modelId, setModelId] = useState("a"), [effort, setEffort] = useState("high");
   const [draft, setDraft] = useState("Retained Web draft"), [confirm, setConfirm] = useState(false);
   return <FrontendProvider iconStrokeWidth={2}>
-    <main className="workspaceWorkbench withoutSidebar"><section className="workspaceChatColumn"><div className="workspaceConversationPlane">
+    <main className={`workspaceWorkbench withoutSidebar${floating ? " isBrowsing isChatFloating" : ""}`}>
+      {floating ? <header className="workspaceTopbar"><div className="workspaceTopbarStart"><ChatTitle session={{ id: "test", title: longTitle }} actions={{ onTogglePin: noop }} titleControl={<button className="conversationSwitcher"><span title={longTitle}>{longTitle}</span></button>} /></div><div className="conversationWindowActions"><button className="workspacePanelToggle" aria-label="Expand chat">↗</button></div></header> : null}
+      <section className="workspaceChatColumn"><div className="workspaceConversationPlane">
       <div className="workspaceMessages"><button type="button" onClick={() => setConfirm(true)}>Open confirmation</button></div>
       <WorkspaceComposer fileInputRef={input} isHome={false} onSubmit={event => event.preventDefault()}
         pendingAttachments={[]} pendingUploadFiles={[]} draft={draft} onDraftChange={setDraft} enterStartsNewLine={false}
