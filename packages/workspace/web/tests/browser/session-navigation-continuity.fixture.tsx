@@ -68,7 +68,7 @@ const router = createMemoryRouter([{ id: 'authenticated', loader: () => ({ user 
     { path: 'library', element: <h1>Navigation library</h1> },
     { path: 'settings/preferences', Component: SettingsRoute }, { path: 'reports', element: <main data-report-page><input aria-label="Report filter" defaultValue="Keep this filter" /></main> },
     { path: 'settings/archive', element: <RecentlyDeleted workspace={workspace} /> }],
-}] }], { initialEntries: ['/w/workspace/sessions/session-4'] });
+}] }], { initialEntries: [new URLSearchParams(location.search).get('route') || '/w/workspace/sessions/session-4'] });
 
 function send(id: string, kind: string, body: object, cursor?: string) {
   const stream = streams.get(id);

@@ -1,4 +1,5 @@
 import { ConversationDockContext } from "../shell/ConversationDock";
+import { createChatDraft } from "../shell/workspaceChatState";
 import { createPortal } from "react-dom";
 import { ConversationTabs } from "../shell/ConversationTabs";
 import { ChatTitle } from "../shell/ChatTitle";
@@ -208,10 +209,9 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
   const [assetsUnavailable, setAssetsUnavailable] = useState(false);
   const [pendingAttachmentIds, setPendingAttachmentIds] = useState([]);
   const [pendingUploadFiles, setPendingUploadFiles] = useState([]);
-  const [draft, setDraft] = useState("");
-  const draftCache = useRef(new Map());
-  const draftScope = useRef(requestScopeKey);
-  const latestDraft = useRef(draft); latestDraft.current = draft;
+  const draftStore = useMemo(() => createChatDraft(user.id, workspace.id, requestScopeKey), [user.id, workspace.id, requestScopeKey]);
+  const draft = useSyncExternalStore(draftStore.subscribe, draftStore.getSnapshot, draftStore.getSnapshot);
+  const { setDraft } = draftStore;
   const [rejectedSubmissionScopes, setRejectedSubmissionScopes] = useState(() => new Set());
   const [pendingUserMessage, setPendingUserMessage] = useState(null);
   const pendingUserMessageRef = useRef(null);
@@ -502,8 +502,6 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
       setLoadingHistory(false);
       return undefined;
     }
-    draftCache.current.set(draftScope.current, latestDraft.current);
-    draftScope.current = requestScopeKey;
     const previousController = chatControllerRef.current;
     const previousView = previousController?.captureAppliedView();
     if (previousView && previousController.identity.sessionId) sessionViewCache.set(previousController.identity.sessionId, previousView);
@@ -518,12 +516,11 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
     setPresentationReady(Boolean(resumedViewRef.current));
     setReadableThrough("0");
     setReadingLatest(true);
-    setDraft(draftCache.current.get(requestScopeKey) || "");
     setSending(false);
     setEditingSessionId("");
     setOpenSessionMenuId("");
     clearContextPanel();
-  }, [workspaceDraft, requestedSessionId, requestScopeKey, startFresh, sessionViewCache, clearConversationProjection, clearContextPanel, clearRunControl, setEditingSessionId, setOpenSessionMenuId]);
+  }, [workspaceDraft, requestedSessionId, startFresh, sessionViewCache, clearConversationProjection, clearContextPanel, clearRunControl, setEditingSessionId, setOpenSessionMenuId]);
 
   const selectInitialDirectory = useEffectEvent(navigation => {
     if (!workspaceDraft && !startFresh && !requestedSessionId && !activeSessionIdRef.current) {
@@ -558,8 +555,8 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
   }, [workspace.id, setSessions, setProjects]);
 
   useEffect(() => {
-    if (requestedPrompt) setDraft(requestedPrompt);
-  }, [requestedPrompt]);
+    if (requestedPrompt && !draftStore.getSnapshot()) draftStore.setDraft(requestedPrompt);
+  }, [requestedPrompt, draftStore]);
 
   useEffect(() => {
     if (!startFresh || loadingHistory || !workspace || !modelId) return;

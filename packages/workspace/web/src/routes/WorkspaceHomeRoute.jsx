@@ -4,29 +4,35 @@ import { Outlet, matchPath, useLocation, useNavigate, useRouteLoaderData } from 
 import { useTranslation } from "../i18n";
 import { AppPageContent } from "./AppRoute";
 import { isWorkspaceCatalogPath } from "../shell/sessionNavigation.mjs";
+import { readChatLayout, writeChatLayout } from "../shell/workspaceChatState";
 
 export default function WorkspaceChatLayout() {
   const { t } = useTranslation();
   const [dockContainer, setDockContainer] = useState(null);
   const { workspace, selectedSession } = useRouteLoaderData("workspace");
+  const { user } = useRouteLoaderData("authenticated");
+  const [restored] = useState(() => readChatLayout(user.id, workspace.id));
   const location = useLocation();
   const locationRef = useRef(location);
   locationRef.current = location;
   const navigate = useNavigate();
   const [notice, setNotice] = useState("");
-  const [floating, setFloating] = useState(false);
-  const [dockedSessionIds, setDockedSessionIds] = useState([]);
+  const [floating, setFloating] = useState(restored.floating);
+  const [dockedSessionIds, setDockedSessionIds] = useState(restored.dockedSessionIds);
   const keepChatTab = useCallback(id => setDockedSessionIds(ids => ids.includes(id) ? ids : [...ids, id]), []);
   const replaceDraftTab = useCallback(id => setDockedSessionIds(ids => [...new Set(ids.map(value => value === "draft" ? id : value))]), []);
-  const lastCatalog = useRef("");
+  const lastCatalog = useRef(restored.lastCatalog);
   const pendingFloatingSession = useRef(undefined);
   const base = `/w/${encodeURIComponent(workspace.id)}`;
   const isChatRoute = Boolean(matchPath(`${base}/app`, location.pathname) || matchPath(`${base}/sessions/:sessionId`, location.pathname));
   const isCatalogRoute = isWorkspaceCatalogPath(base, location.pathname);
   const overlayOnly = !isChatRoute && !isCatalogRoute;
-  if (isCatalogRoute) lastCatalog.current = location.pathname + location.search;
-  const [chatLocation, setChatLocation] = useState(() => isChatRoute ? location : null);
-  const [chatSession, setChatSession] = useState(() => isChatRoute ? selectedSession : null);
+  const currentCatalog = isCatalogRoute ? location.pathname + location.search : lastCatalog.current;
+  lastCatalog.current = currentCatalog;
+  const [chatLocation, setChatLocation] = useState(() => isChatRoute ? location : restored.activeSessionId ? {
+    pathname: restored.activeSessionId === "draft" ? `${base}/app` : `${base}/sessions/${encodeURIComponent(restored.activeSessionId)}`, search: "", state: null,
+  } : null);
+  const [chatSession, setChatSession] = useState(() => isChatRoute ? selectedSession : restored.activeSessionId && restored.activeSessionId !== "draft" ? { id: restored.activeSessionId } : null);
   const [modelsVersion, setModelsVersion] = useState(0);
   const onModelsChanged = useCallback(() => setModelsVersion((version) => version + 1), []);
 
@@ -42,6 +48,13 @@ export default function WorkspaceChatLayout() {
     setChatLocation({ pathname: session?.id ? `${base}/sessions/${encodeURIComponent(session.id)}` : `${base}/app`, search: "", state: null });
   }
   const sessionRoute = Boolean(chatLocation && matchPath(`${base}/sessions/:sessionId`, chatLocation.pathname));
+
+  useEffect(() => {
+    writeChatLayout(user.id, workspace.id, {
+      dockedSessionIds, activeSessionId: chatSession?.id || (chatLocation ? "draft" : null),
+      floating: !isChatRoute && floating, lastCatalog: currentCatalog,
+    });
+  }, [user.id, workspace.id, dockedSessionIds, chatSession, chatLocation, floating, isChatRoute, currentCatalog]);
 
   function closeChatTab(id) {
     setDockedSessionIds(ids => ids.filter(value => value !== id));

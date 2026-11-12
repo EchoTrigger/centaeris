@@ -417,3 +417,68 @@ test('breadcrumbs keep their parent position and preserve route history and proj
     await rm(actual, { recursive: true, force: true });
   }
 });
+
+
+test('refresh restores chat tabs, drafts and floating state without changing the page or sending messages', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'centaeris-navigation-'));
+  const server = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), server: { port: 0, host: '127.0.0.1' } });
+  try {
+    await server.listen();
+    await runBrowser(`${server.resolvedUrls.local[0]}tests/browser/session-navigation-continuity.html`, { width: 1280, height: 900 }, profile, async ({ evaluate, send, frame }) => {
+      const click = selector => evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+      const reload = async route => {
+        const previous = await evaluate('performance.timeOrigin');
+        await evaluate(`(() => { const url = new URL(location.href); url.searchParams.set('route', ${JSON.stringify(route)}); history.replaceState(null, '', url); })()`);
+        await send('Page.reload', {});
+        await waitFor(async () => (await evaluate('performance.timeOrigin')) !== previous && await evaluate('Boolean(window.sessionNavigationFixture)'), 'new document');
+      };
+      await waitFor(() => evaluate('window.sessionNavigationFixture?.ready()'), 'workspace');
+      await evaluate("sessionNavigationFixture.hydrate('session-4')");
+      await waitFor(() => evaluate("Boolean(document.querySelector('#messageDraft'))"), 'composer');
+      await evaluate("document.querySelector('#messageDraft').focus()");
+      await send('Input.insertText', { text: 'Keep draft four after refresh' });
+      await click('[aria-label="Move to toolbar"]');
+      await evaluate("sessionNavigationFixture.navigate('session-5')");
+      await waitFor(() => evaluate("sessionNavigationFixture.connected('session-5')"), 'second chat');
+      await evaluate("sessionNavigationFixture.hydrate('session-5')");
+      await evaluate("document.querySelector('#messageDraft').focus()");
+      await send('Input.insertText', { text: 'Keep draft five after refresh' });
+      await click('[aria-label="Move to toolbar"]');
+      await evaluate('sessionNavigationFixture.preferences()');
+      await waitFor(() => evaluate("Boolean(document.querySelector('.workspaceSettingsContent'))"), 'settings');
+      await frame();
+      await reload('/w/workspace/settings/preferences');
+      await waitFor(() => evaluate("sessionNavigationFixture.connected('session-5') && document.querySelectorAll('[role=tab]').length === 2"), 'restored tabs');
+      await evaluate("sessionNavigationFixture.hydrate('session-5')");
+      assert.equal(await evaluate('sessionNavigationFixture.pathname()'), '/w/workspace/settings/preferences');
+      assert.equal(await evaluate("document.querySelectorAll('.isChatFloating').length"), 1);
+      assert.equal(await evaluate("document.querySelector('#messageDraft').value"), 'Keep draft five after refresh');
+      assert.deepEqual(await evaluate('sessionNavigationFixture.mutations'), []);
+      await click('.conversationTabItem:first-child [role=tab]');
+      await waitFor(() => evaluate("sessionNavigationFixture.connected('session-4')"), 'first restored chat');
+      await evaluate("sessionNavigationFixture.hydrate('session-4')");
+      assert.equal(await evaluate("document.querySelector('#messageDraft').value"), 'Keep draft four after refresh');
+      await click('[aria-label="Minimize chat"]'); await frame();
+      await reload('/w/workspace/settings/preferences');
+      await waitFor(() => evaluate("document.querySelectorAll('[role=tab]').length === 2"), 'minimized tabs restored');
+      assert.equal(await evaluate("document.querySelectorAll('.isChatFloating').length"), 0);
+      await click('.conversationTabItem:last-child [role=tab]');
+      await waitFor(() => evaluate("sessionNavigationFixture.connected('session-5')"), 'reopened chat');
+      await evaluate("sessionNavigationFixture.hydrate('session-5')");
+      await click('.conversationTabItem:last-child .conversationTabClose'); await frame();
+      await reload('/w/workspace/settings/preferences');
+      await waitFor(() => evaluate("document.querySelectorAll('[role=tab]').length === 1"), 'closed tab remains closed');
+      await reload('/w/workspace/sessions/session-4');
+      await waitFor(() => evaluate("sessionNavigationFixture.connected('session-4')"), 'URL overrides saved selection');
+      await evaluate("sessionNavigationFixture.hydrate('session-4')");
+      assert.equal(await evaluate("document.querySelectorAll('.isChatFloating').length"), 0);
+      assert.equal(await evaluate("document.querySelector('#messageDraft').value"), 'Keep draft four after refresh');
+      assert.deepEqual(await evaluate('sessionNavigationFixture.mutations'), []);
+      assert.deepEqual(await evaluate('sessionNavigationFixture.failures'), []);
+    });
+  } finally {
+    await server.close(); const actual = await realpath(profile);
+    assert.equal(dirname(actual), await realpath(tmpdir())); assert.ok(basename(actual).startsWith('centaeris-navigation-'));
+    await rm(actual, { recursive: true, force: true });
+  }
+});

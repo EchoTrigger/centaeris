@@ -1,3 +1,5 @@
+import { clearBrowserChatState } from "./workspaceChatState";
+
 export const WORKSPACE_IDENTITY_CACHE_KEY = "centaeris:workspace-identity:v1";
 
 export function cacheWorkspaceIdentity(workspace: Readonly<{ id: string; name: string; avatarUrl: string | null }>) {
@@ -10,6 +12,7 @@ export function cacheWorkspaceIdentity(workspace: Readonly<{ id: string; name: s
 }
 
 export function clearWorkspaceIdentityCache() {
+  clearBrowserChatState();
   try { sessionStorage.removeItem(WORKSPACE_IDENTITY_CACHE_KEY); } catch { /* Storage may be unavailable. */ }
   const bootstrapIcon = document.head.querySelector<HTMLLinkElement>("link[data-workspace-identity]");
   if (bootstrapIcon) {
