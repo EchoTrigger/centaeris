@@ -186,6 +186,16 @@
 .shPrimaryNav .shRow > svg { width: var(--navigation-icon-size); height: var(--navigation-icon-size); stroke-width: var(--navigation-icon-stroke); }
 .shPrimaryNav .shRow:hover, .shPrimaryNav .shRow[aria-current="page"], .shPrimaryNav .shRow[aria-expanded="true"] { background: var(--workspace-selection); color: var(--on-surface); }
 .shRow[aria-current="page"] { font-weight: var(--navigation-selected-weight); }
+.workPrimaryNav { min-height:0; flex:1; grid-template-columns:minmax(0,1fr); overflow-y:auto; align-content:start; gap:18px; }
+.shNavGroup { display:grid; min-width:0; gap:var(--workspace-list-row-gap); }
+.workPrimaryNav > .shFavorites { min-width:0; padding:0; overflow:visible; }
+.shFavorites > summary { display:flex; align-items:center; gap:5px; min-height:30px; padding:0 8px; list-style:none; border-radius:6px; font-size:12px; color:var(--process-text); cursor:pointer; }
+.shFavorites > summary::-webkit-details-marker { display:none; }
+.shFavorites > summary:hover { background:var(--workspace-selection); }
+.shFavorites > summary:focus-visible { outline:2px solid var(--primary-color); outline-offset:-2px; }
+.shFavorites > summary svg { width:10px; height:10px; transform:rotate(-90deg); }
+.shFavorites[open] > summary svg { transform:none; }
+.shFavorites > div { display:grid; grid-template-columns:minmax(0,1fr); gap:var(--workspace-list-row-gap); }
 .shAgentGlyph {
   display: inline-grid;
   width: 20px;
@@ -663,6 +673,9 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
   .workspaceSidebar.shSidebar { display: grid; width: 100%; min-width: 0; min-height: 91px; height: 91px; grid-template-columns: 1fr; grid-template-rows: 44px 47px; padding: 0 7px; }
   .shSidebar .shWs { grid-row: 1; margin: 5px 1px; }
   .shSidebar .shPrimaryNav { display: flex; grid-row: 2; align-items: center; gap: 4px; margin: 0 1px; }
+  .shSidebar .workPrimaryNav { overflow-x:auto; }
+  .shSidebar .shNavGroup { display:contents; }
+  .shSidebar .shFavorites { display:none; }
   .shSidebar .shPrimaryNav .shRow { width: auto; min-height: var(--navigation-row-height); }
   .shSidebar .shScroll { display: none; }
   .workspaceDrawer { position: fixed; inset: 0 auto 0 0; width: min(300px, calc(100% - 40px)); max-width: none; height: 100dvh; max-height: none; margin: 0; padding: 0; border: 0; background: var(--workspace-rail); color: var(--on-surface); overflow: visible; }
@@ -670,6 +683,9 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
   .workspaceDrawer .shSidebar { display: flex; width: 100%; height: 100%; }
   .workspaceDrawer .shWs { margin-top: max(16px, env(safe-area-inset-top)); }
   .workspaceDrawer .shPrimaryNav { display: grid; margin: 4px 1px; }
+  .workspaceDrawer .workPrimaryNav { align-content:start; gap:18px; }
+  .workspaceDrawer .shNavGroup { display:grid; }
+  .workspaceDrawer .shFavorites { display:block; }
   .workspaceDrawer .shScroll { display: block; }
   .workspaceDrawer .workspaceSessionList { display: grid; }
   .workspaceDrawer .workspaceSessionRow { width: 100%; }

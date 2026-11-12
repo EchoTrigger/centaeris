@@ -315,3 +315,49 @@ test('docked chat tabs preserve drafts, open one window and reserve space on set
     await rm(actual, { recursive: true, force: true });
   }
 });
+
+
+test('navigation groups keep favorites between personal and workspace entries and hide empty favorites', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'centaeris-navigation-'));
+  const server = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), server: { port: 0, host: '127.0.0.1' } });
+  try {
+    await server.listen();
+    await runBrowser(`${server.resolvedUrls.local[0]}tests/browser/session-navigation-continuity.html`, { width: 1280, height: 900 }, profile, async ({ evaluate, frame, send }) => {
+      await waitFor(() => evaluate('window.sessionNavigationFixture?.ready()'), 'workspace');
+      await evaluate("sessionNavigationFixture.hydrate('session-4')");
+      await evaluate('sessionNavigationFixture.task()');
+      await waitFor(() => evaluate("Boolean(document.querySelector('.workPrototype'))"), 'work page');
+      const labels = await evaluate("Array.from(document.querySelector('.workPrimaryNav').querySelectorAll('a,summary')).map(el=>el.textContent.trim())");
+      assert.deepEqual(labels, ['Inbox', 'My issues', 'Reviews', 'Agent', 'Favorites', 'KKnowledge discovery improvements', 'Home', 'Issues', 'Projects', 'Views', 'Extensions', 'Library']);
+      assert(await evaluate("(() => {const nav=document.querySelector('.workPrimaryNav'); return nav.scrollWidth <= nav.clientWidth;})()"), 'long favorite titles fit the navigation');
+      const favoriteVisible = () => evaluate("document.querySelector('.shFavorites a')?.checkVisibility() ?? false");
+      assert(await favoriteVisible());
+      await evaluate("document.querySelector('.shFavorites summary').click()"); await frame();
+      assert.equal(await favoriteVisible(), false);
+      await evaluate("document.querySelector('.shFavorites summary').click()"); await frame();
+      assert(await favoriteVisible());
+      await evaluate("document.querySelector('.shFavorites a').click()");
+      await waitFor(() => evaluate(`Boolean(document.querySelector('[aria-label="Unfavorite project"]'))`), 'favorite project');
+      await evaluate(`document.querySelector('[aria-label="Unfavorite project"]').click()`);
+      await waitFor(() => evaluate("!document.querySelector('.shFavorites')"), 'empty favorites hidden');
+      await evaluate(`document.querySelector('[aria-label="Favorite project"]').click()`);
+      await waitFor(() => evaluate("Boolean(document.querySelector('.shFavorites'))"), 'favorites restored');
+      for (const title of ['Inbox', 'My issues', 'Reviews', 'Home', 'Issues', 'Projects', 'Views']) {
+        await evaluate(`Array.from(document.querySelectorAll('.workPrimaryNav a')).find(el=>el.textContent.trim()===${JSON.stringify(title)}).click()`);
+        await waitFor(() => evaluate(`document.querySelector('.workHeader h1')?.textContent.startsWith(${JSON.stringify(title)})`), title);
+        assert.equal(await evaluate("document.querySelector('.workPrimaryNav a[aria-current=page]')?.textContent.trim()"), title);
+      }
+      await evaluate("Array.from(document.querySelectorAll('.workPrimaryNav a')).find(el=>el.textContent.trim()==='My issues').click()");
+      await frame();
+      if (process.env.NAVIGATION_SCREENSHOT_PATH) {
+        const shot = await send('Page.captureScreenshot', { format: 'png' });
+        await writeFile(process.env.NAVIGATION_SCREENSHOT_PATH, Buffer.from(shot.data, 'base64'));
+      }
+      assert.deepEqual(await evaluate('sessionNavigationFixture.failures'), []);
+    });
+  } finally {
+    await server.close(); const actual = await realpath(profile);
+    assert.equal(dirname(actual), await realpath(tmpdir())); assert.ok(basename(actual).startsWith('centaeris-navigation-'));
+    await rm(actual, { recursive: true, force: true });
+  }
+});

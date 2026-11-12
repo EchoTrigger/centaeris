@@ -11,8 +11,12 @@ import {
   PanelLeft,
   Search,
   SquarePen,
-  SquareCheckBig,
-  CircleUserRound,
+  Inbox,
+  Focus,
+  GitPullRequest,
+  House,
+  Copy,
+  Layers2,
   Orbit,
 } from "lucide-react";
 import { displayWorkText, exampleProjects, useWorkPrototype } from "../work/workPrototype";
@@ -128,23 +132,33 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
       <WorkspaceHeader onNewConversation={newConversation} workspace={workspace} workspaces={workspaces} logoutBusy={logoutBusy} logoutError={logoutError} onLogout={logout} menuContainer={menuContainer}
         search={search} onCollapse={onCollapse} returnTo={location.pathname + location.search + location.hash} />
       <nav className="shPrimaryNav workPrimaryNav" aria-label={t("shellSidebar.mainView")}>
-        <Link className="shRow" to={`${base}/work`} aria-current={location.pathname === `${base}/work` && !location.search ? "page" : undefined}><CircleUserRound aria-hidden="true" /><span>{t("work.myWork")}</span></Link>
-        <Link className="shRow" to={`${base}/work/projects`} aria-current={location.pathname.startsWith(`${base}/work/projects`) ? "page" : undefined}><Box aria-hidden="true" /><span>{t("work.projects")}</span></Link>
-        <Link className="shRow" to={`${base}/work/tasks`} aria-current={location.pathname.startsWith(`${base}/work/tasks`) ? "page" : undefined}><SquareCheckBig aria-hidden="true" /><span>{t("work.tasks")}</span></Link>
-        <Link className="shRow" to={base + "/extensions"} aria-current={inExtensions ? "page" : undefined}><Blocks aria-hidden="true" /><span>{t("extensions.title")}</span></Link>
-        <Link className="shRow" to={base + "/library"} aria-current={inLibrary ? "page" : undefined}><Library aria-hidden="true" /><span>{t("libraryObjectRoute.library")}</span></Link>
-        <Link className="shRow" to={`${base}/app`} aria-current={isHome || location.pathname.startsWith(`${base}/sessions/`) ? "page" : undefined}><Orbit aria-hidden="true" /><span>Agent</span></Link>
-      </nav>
-      <nav className="workRailViews" aria-label={t("work.favorites")}>
-        <p className="workRailHeading">{t("work.favorites")}</p>
-        {favoriteProjects.map(project => <Link className="shRow" key={project.id} to={`${base}/work/projects/${project.id}`}><span className="workRailProjectIcon">{project.icon}</span><span>{displayWorkText(project.name, t)}</span></Link>)}
-        {favoriteSessions.map(session => <Link className="shRow" key={session.id} to={sessionChatPath(workspace.id, session.id)} aria-current={location.pathname === sessionChatPath(workspace.id, session.id) ? "page" : undefined} title={session.title}
-          onClick={event => {
-            if (sessionProps?.onOpenSession && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
-              event.preventDefault();
-              sessionProps.onOpenSession(session);
-            }
-          }}><span>{session.title || t("work.conversation.untitled")}</span></Link>)}
+        <div className="shNavGroup">
+          <Link className="shRow" to={`${base}/work/inbox`} aria-current={location.pathname === `${base}/work/inbox` ? "page" : undefined}><Inbox aria-hidden="true" /><span>{t("work.inbox")}</span></Link>
+          <Link className="shRow" to={`${base}/work`} aria-current={location.pathname === `${base}/work` ? "page" : undefined}><Focus aria-hidden="true" /><span>{t("work.myIssues")}</span></Link>
+          <Link className="shRow" to={`${base}/work/reviews`} aria-current={location.pathname === `${base}/work/reviews` ? "page" : undefined}><GitPullRequest aria-hidden="true" /><span>{t("work.reviews")}</span></Link>
+          <Link className="shRow" to={`${base}/app`} aria-current={isHome || location.pathname.startsWith(`${base}/sessions/`) ? "page" : undefined}><Orbit aria-hidden="true" /><span>Agent</span></Link>
+        </div>
+        {favoriteProjects.length || favoriteSessions.length ? <details className="workRailViews shFavorites" open>
+          <summary><span>{t("work.favorites")}</span><ChevronDown aria-hidden="true" /></summary>
+          <div>
+            {favoriteProjects.map(project => <Link className="shRow" key={project.id} to={`${base}/work/projects/${project.id}`}><span className="workRailProjectIcon">{project.icon}</span><span>{displayWorkText(project.name, t)}</span></Link>)}
+            {favoriteSessions.map(session => <Link className="shRow" key={session.id} to={sessionChatPath(workspace.id, session.id)} aria-current={location.pathname === sessionChatPath(workspace.id, session.id) ? "page" : undefined} title={session.title}
+              onClick={event => {
+                if (sessionProps?.onOpenSession && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+                  event.preventDefault();
+                  sessionProps.onOpenSession(session);
+                }
+              }}><span>{session.title || t("work.conversation.untitled")}</span></Link>)}
+          </div>
+        </details> : null}
+        <div className="shNavGroup">
+          <Link className="shRow" to={`${base}/work/home`} aria-current={location.pathname === `${base}/work/home` ? "page" : undefined}><House aria-hidden="true" /><span>{t("work.home")}</span></Link>
+          <Link className="shRow" to={`${base}/work/tasks`} aria-current={location.pathname.startsWith(`${base}/work/tasks`) ? "page" : undefined}><Copy aria-hidden="true" /><span>{t("work.issues")}</span></Link>
+          <Link className="shRow" to={`${base}/work/projects`} aria-current={location.pathname.startsWith(`${base}/work/projects`) ? "page" : undefined}><Box aria-hidden="true" /><span>{t("work.projects")}</span></Link>
+          <Link className="shRow" to={`${base}/work/views`} aria-current={location.pathname === `${base}/work/views` ? "page" : undefined}><Layers2 aria-hidden="true" /><span>{t("work.views")}</span></Link>
+          <Link className="shRow" to={base + "/extensions"} aria-current={inExtensions ? "page" : undefined}><Blocks aria-hidden="true" /><span>{t("extensions.title")}</span></Link>
+          <Link className="shRow" to={base + "/library"} aria-current={inLibrary ? "page" : undefined}><Library aria-hidden="true" /><span>{t("libraryObjectRoute.library")}</span></Link>
+        </div>
       </nav>
 
     </aside>

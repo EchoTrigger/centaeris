@@ -63,8 +63,8 @@ window.fetch = async (input, options) => {
 };
 const router = createMemoryRouter([{ id: 'authenticated', loader: () => ({ user }), children: [{ id: 'workspace', path: '/w/:workspaceId',
   loader: ({ params }) => ({ workspace, workspaces: [workspace], selectedSession: rows.find(row => row.id === params.sessionId) ?? null }),
-  shouldRevalidate: () => true, Component: WorkspaceChatLayout,
-  children: [{ path: 'work/*', element: <WorkPrototypeProvider><WorkPrototypeRoute /></WorkPrototypeProvider> }, { path: 'sessions/:sessionId', element: null }, { path: 'app', element: null },
+  shouldRevalidate: () => true, Component: () => <WorkPrototypeProvider><WorkspaceChatLayout /></WorkPrototypeProvider>,
+  children: [{ path: 'work/*', element: <WorkPrototypeRoute /> }, { path: 'sessions/:sessionId', element: null }, { path: 'app', element: null },
     { path: 'library', element: <h1>Navigation library</h1> },
     { path: 'settings/preferences', Component: SettingsRoute }, { path: 'reports', element: <main data-report-page><input aria-label="Report filter" defaultValue="Keep this filter" /></main> },
     { path: 'settings/archive', element: <RecentlyDeleted workspace={workspace} /> }],

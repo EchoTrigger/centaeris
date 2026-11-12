@@ -1346,5 +1346,10 @@
   "chat.copyMarkdown": "复制为 Markdown",
   "chat.copying": "正在复制…",
   "chat.copied": "已复制",
-  "chat.copyFailed": "无法复制，请重试。"
+  "chat.copyFailed": "无法复制，请重试。",
+  "work.inbox": "收件箱",
+  "work.myIssues": "我的事项",
+  "work.reviews": "审阅",
+  "work.home": "主页",
+  "work.issues": "事项"
 }

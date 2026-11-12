@@ -1346,5 +1346,10 @@
   "chat.copyMarkdown": "Copy as Markdown",
   "chat.copying": "Copying…",
   "chat.copied": "Copied",
-  "chat.copyFailed": "Could not copy. Try again."
+  "chat.copyFailed": "Could not copy. Try again.",
+  "work.inbox": "Inbox",
+  "work.myIssues": "My issues",
+  "work.reviews": "Reviews",
+  "work.home": "Home",
+  "work.issues": "Issues"
 }

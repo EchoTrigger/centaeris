@@ -56,7 +56,7 @@ export default function WorkPrototypeRoute() {
     const timer = window.setTimeout(() => setNotice(""), 4200);
     return () => window.clearTimeout(timer);
   }, [notice]);
-  const tab = params.get("tab") || (task ? "overview" : project ? "overview" : "active");
+  const tab = params.get("tab") || (page === "views" ? "issues" : task ? "overview" : project ? "overview" : "active");
   const statusFilter = params.get("status") || "all";
   function changeParam(key, value) { setParams(previous => { const next = new URLSearchParams(previous); if(value) next.set(key, value); else next.delete(key); return next; }); }
   function update(change, event) { state.updateTask(task.id, change, event); setNotice(event || workText("work.updated")); }
@@ -75,6 +75,11 @@ export default function WorkPrototypeRoute() {
   function discussions(items) { return items.length ? items.map((item, i) => <button className="workResource" key={i} onClick={() => openConversation(item)}><MessageSquare /><span>{text(item.title)}<small>{text(item.state)}</small></span><ArrowUpRight /></button>) : <p className="workEmptyText">{t("work.noConversations")}</p>; }
   let content;
   if ((page === "tasks" || page === "projects") && path[1] && !task && !project) content = <div className="workEmpty"><h2>{t("work.notFound")}</h2><Link to={`${base}/work`}>{t("work.backToWork")}</Link></div>;
+  else if (["inbox", "reviews", "home", "views"].includes(page)) {
+    content = <><header className="workHeader"><h1>{t(`work.${page}`)}</h1></header>
+      {page === "views" ? <div className="workListControls">{tabs([["issues", t("work.issues")], ["projects", t("work.projects")]])}</div> : null}
+    </>;
+  }
   else if (task) {
     const taskProject = exampleProjects.find(item => item.id === task.project);
     function simulateRun() {
@@ -83,7 +88,7 @@ export default function WorkPrototypeRoute() {
     const latestConversation = task.conversations.at(-1);
     content = <>
       <header className="workHeader">
-        <div className="workBreadcrumb"><Link to={`${base}/work/tasks`}>{t("work.tasks")}</Link><ChevronRight /><span>{task.id}</span></div>
+        <div className="workBreadcrumb"><Link to={`${base}/work/tasks`}>{t("work.issues")}</Link><ChevronRight /><span>{task.id}</span></div>
         <button className="workQuiet" onClick={() => {
           const item = { title: workText("work.discussionTitle"), state: workText("work.run.discussion"), text: workText("work.discussionText", { title: task.title }) };
           update({ conversations: [...task.conversations, item] }, workText("work.event.linkedDiscussion")); openConversation(item);
@@ -141,7 +146,7 @@ export default function WorkPrototypeRoute() {
     let items = state.tasks.filter(item => page !== "mine" || item.owner === "me");
     if (page === "mine") items = items.filter(item => tab === "attention" ? item.attention && !["done", "cancelled"].includes(item.status) : tab === "completed" ? item.status === "done" : !["done", "cancelled"].includes(item.status));
     items = items.filter(item => (statusFilter === "all" || item.status === statusFilter));
-    content = <><header className="workHeader"><h1>{page === "mine" ? t("work.myWork") : t("work.allTasks")}</h1><button className="workPrimary" onClick={() => setCreating(true)}><Plus />{t("work.newTask")}</button></header><div className="workListControls">{page === "mine" ? tabs([["active", t("work.active")], ["attention", t("work.needsAttention")], ["completed", t("work.status.done")]]) : <span className="workMuted">{t("work.workspaceTasks")}</span>}<div className="workToolbar"><ChoiceMenu label={t("work.filterStatus")} value={statusFilter} options={[{ value: "all", label: t("work.allStatuses"), icon: <ListFilter /> }, ...statusOptions]} onChange={value => changeParam("status", value)} className="workFilter" /></div></div><div className="workListBody">{items.length ? grouped(items) : rows([])}</div><div className="workListFoot">{t("work.itemCount", { count: items.length })}</div></>;
+    content = <><header className="workHeader"><h1>{page === "mine" ? t("work.myIssues") : t("work.issues")}</h1><button className="workPrimary" onClick={() => setCreating(true)}><Plus />{t("work.newTask")}</button></header><div className="workListControls">{page === "mine" ? tabs([["active", t("work.active")], ["attention", t("work.needsAttention")], ["completed", t("work.status.done")]]) : <span className="workMuted">{t("work.workspaceTasks")}</span>}<div className="workToolbar"><ChoiceMenu label={t("work.filterStatus")} value={statusFilter} options={[{ value: "all", label: t("work.allStatuses"), icon: <ListFilter /> }, ...statusOptions]} onChange={value => changeParam("status", value)} className="workFilter" /></div></div><div className="workListBody">{items.length ? grouped(items) : rows([])}</div><div className="workListFoot">{t("work.itemCount", { count: items.length })}</div></>;
   }
   return <div className="workPrototype"><div className="workPrototypeNotice"><button onClick={() => { state.reset(); setNotice(workText("work.resetDone")); navigate(`${base}/work`); }}><RotateCcw />{t("work.reset")}</button></div>{notice ? <div className="workToast" role="status"><CheckCircle2 />{text(notice)}<button aria-label={t("work.closeNotice")} onClick={() => setNotice("")}><X /></button></div> : null}{content}
     {creating ? <NewTask project={project?.id} onClose={() => setCreating(false)} onCreate={values => { const id = state.createTask(values); setCreating(false); navigate(`${base}/work/tasks/${id}`); setNotice(workText("work.created")); }} /> : null}
