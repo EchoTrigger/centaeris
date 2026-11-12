@@ -333,15 +333,15 @@ test('navigation groups keep favorites between personal and workspace entries an
       await evaluate("sessionNavigationFixture.hydrate('session-4')");
       await evaluate('sessionNavigationFixture.task()');
       await waitFor(() => evaluate("Boolean(document.querySelector('.workPrototype'))"), 'work page');
-      const labels = await evaluate("Array.from(document.querySelector('.workPrimaryNav').querySelectorAll('a,.shFavoritesToggle')).map(el=>el.textContent.trim())");
-      assert.deepEqual(labels, ['Inbox', 'My issues', 'Reviews', 'Agent', 'Favorites', 'KKnowledge discovery improvements', 'Home', 'Issues', 'Projects', 'Views', 'Extensions', 'Library']);
+      const labels = await evaluate("Array.from(document.querySelector('.workPrimaryNav').querySelectorAll('a,.shNavGroupToggle')).map(el=>el.textContent.trim())");
+      assert.deepEqual(labels, ['Inbox', 'My issues', 'Reviews', 'Space', 'Plugins', 'Agent', 'Favorites', 'KKnowledge discovery improvements', 'Your teams', 'Home', 'Issues', 'Projects', 'Views']);
       assert(await evaluate("(() => {const nav=document.querySelector('.workPrimaryNav'); return nav.scrollWidth <= nav.clientWidth;})()"), 'long favorite titles fit the navigation');
-      const favoriteVisible = () => evaluate("(() => {const content=document.querySelector('.shFavoritesContent');return Boolean(content && content.getAttribute('aria-hidden')==='false' && content.getBoundingClientRect().height>0);})()");
+      const favoriteVisible = () => evaluate("(() => {const content=document.querySelector('.shFavorites .shNavGroupContent');return Boolean(content && content.getAttribute('aria-hidden')==='false' && content.getBoundingClientRect().height>0);})()");
       assert(await favoriteVisible());
-      await evaluate("document.querySelector('.shFavoritesToggle').click()"); await frame();
+      await evaluate("document.querySelector('.shFavorites .shNavGroupToggle').click()"); await frame();
       assert.equal(await favoriteVisible(), false);
-      await waitFor(() => evaluate("document.querySelector('.shFavoritesContent').getBoundingClientRect().height === 0"), 'favorites finish collapsing');
-      await evaluate("document.querySelector('.shFavoritesToggle').click()"); await frame();
+      await waitFor(() => evaluate("document.querySelector('.shFavorites .shNavGroupContent').getBoundingClientRect().height === 0"), 'favorites finish collapsing');
+      await evaluate("document.querySelector('.shFavorites .shNavGroupToggle').click()"); await frame();
       await waitFor(favoriteVisible, "favorites expanded");
       await evaluate("document.querySelector('.shFavorites a').click()");
       await waitFor(() => evaluate(`Boolean(document.querySelector('[aria-label="Unfavorite project"]'))`), 'favorite project');
@@ -349,6 +349,16 @@ test('navigation groups keep favorites between personal and workspace entries an
       await waitFor(() => evaluate("!document.querySelector('.shFavorites')"), 'empty favorites hidden');
       await evaluate(`document.querySelector('[aria-label="Favorite project"]').click()`);
       await waitFor(() => evaluate("Boolean(document.querySelector('.shFavorites'))"), 'favorites restored');
+      assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('.shTeams a')).map(el=>el.textContent.trim())"), ['Home', 'Issues', 'Projects', 'Views']);
+      await evaluate("document.querySelector('.shTeams .shNavGroupToggle').click()");
+      await waitFor(() => evaluate("document.querySelector('.shTeams .shNavGroupContent').getBoundingClientRect().height === 0"), 'team links collapsed');
+      assert(await evaluate("document.querySelector('.shTeams .shNavGroupContent').inert"));
+      const previousDocument = await evaluate('performance.timeOrigin');
+      await send('Page.reload', {});
+      await waitFor(async () => (await evaluate('performance.timeOrigin')) !== previousDocument && await evaluate('window.sessionNavigationFixture?.ready()'), 'reload navigation');
+      assert.equal(await evaluate("document.querySelector('.shTeams .shNavGroupToggle').getAttribute('aria-expanded')"), 'false');
+      await evaluate("document.querySelector('.shTeams .shNavGroupToggle').click()"); await frame();
+      await waitFor(() => evaluate("document.querySelector('.shTeams .shNavGroupContent').getBoundingClientRect().height > 0"), 'team links expanded');
       for (const title of ['Inbox', 'My issues', 'Reviews', 'Home', 'Issues', 'Projects', 'Views']) {
         await evaluate(`Array.from(document.querySelectorAll('.workPrimaryNav a')).find(el=>el.textContent.trim()===${JSON.stringify(title)}).click()`);
         await waitFor(() => evaluate(`document.querySelector('.workHeader h1')?.textContent.startsWith(${JSON.stringify(title)})`), title);

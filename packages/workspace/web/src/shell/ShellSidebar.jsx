@@ -8,7 +8,7 @@ import {
   ChevronRight,
   Blocks,
   Box,
-  Library,
+  PanelsTopLeft,
   PanelLeft,
   Search,
   SquarePen,
@@ -23,6 +23,7 @@ import {
 import { displayWorkText, exampleProjects, useWorkPrototype } from "../work/workPrototype";
 import { apiResponse, clearCsrfToken } from "../api";
 import { WorkspaceAvatar } from "../components/WorkspaceAvatar";
+import { useCollapsedNavigation, useWorkspaceNavigation } from "./workspaceNavigationState";
 import { sessionChatPath } from "./sessionNavigation.mjs";
 import { clearWorkspaceIdentityCache } from "./workspaceIdentityCache";
 
@@ -79,8 +80,11 @@ function WorkspaceHeader({ onNewConversation, workspace, workspaces, logoutBusy,
 }
 
 export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewChat, onCollapse, search, menuContainer, sessionProps }) {
-  const [favoritesOpen, setFavoritesOpen] = useState(true);
-  const favoritesId = useId();
+  const { user } = useRouteLoaderData("authenticated");
+  const navigation = useWorkspaceNavigation(user.id, workspace.id);
+  const collapsed = useCollapsedNavigation(navigation);
+  const favoritesOpen = !collapsed.includes("favorites");
+  const teamsOpen = !collapsed.includes("teams");
   const reducedMotion = useReducedMotion();
   const favoritesTransition = { duration: reducedMotion ? 0 : 0.2, ease: [0.16, 1, 0.3, 1] };
   const work = useWorkPrototype();
@@ -141,16 +145,14 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
           <Link className="shRow" to={`${base}/work/inbox`} aria-current={location.pathname === `${base}/work/inbox` ? "page" : undefined}><Inbox aria-hidden="true" /><span>{t("work.inbox")}</span></Link>
           <Link className="shRow" to={`${base}/work`} aria-current={location.pathname === `${base}/work` ? "page" : undefined}><Focus aria-hidden="true" /><span>{t("work.myIssues")}</span></Link>
           <Link className="shRow" to={`${base}/work/reviews`} aria-current={location.pathname === `${base}/work/reviews` ? "page" : undefined}><GitPullRequest aria-hidden="true" /><span>{t("work.reviews")}</span></Link>
+          <Link className="shRow" to={base + "/library"} aria-current={inLibrary ? "page" : undefined}><PanelsTopLeft aria-hidden="true" /><span>{t("libraryObjectRoute.library")}</span></Link>
+          <Link className="shRow" to={base + "/extensions"} aria-current={inExtensions ? "page" : undefined}><Blocks aria-hidden="true" /><span>{t("extensions.title")}</span></Link>
           <Link className="shRow" to={`${base}/app`} aria-current={isHome || location.pathname.startsWith(`${base}/sessions/`) ? "page" : undefined}><MousePointer2 aria-hidden="true" /><span>Agent</span></Link>
         </div>
         <AnimatePresence initial={false}>
         {favoriteProjects.length || favoriteSessions.length ? <motion.section key="favorites" className="workRailViews shFavorites"
           initial={{ height: 0, opacity: 0, marginTop: 0 }} animate={{ height: "auto", opacity: 1, marginTop: 18 }} exit={{ height: 0, opacity: 0, marginTop: 0 }} transition={favoritesTransition}>
-          <button className="shFavoritesToggle" type="button" aria-expanded={favoritesOpen} aria-controls={favoritesId} onClick={() => setFavoritesOpen(value => !value)}>
-            <span>{t("work.favorites")}</span><motion.span aria-hidden="true" animate={{ rotate: favoritesOpen ? 0 : -90 }} transition={favoritesTransition}><ChevronDown /></motion.span>
-          </button>
-          <motion.div id={favoritesId} className="shFavoritesContent" initial={false} animate={{ height: favoritesOpen ? "auto" : 0, opacity: favoritesOpen ? 1 : 0 }} transition={favoritesTransition} aria-hidden={!favoritesOpen} inert={!favoritesOpen}>
-          <div className="shFavoritesRows">
+          <SidebarGroup label={t("work.favorites")} open={favoritesOpen} onToggle={() => navigation.setCollapsed("favorites", favoritesOpen)} transition={favoritesTransition}>
             {favoriteProjects.map(project => <Link className="shRow" key={project.id} to={`${base}/work/projects/${project.id}`}><span className="workRailProjectIcon">{project.icon}</span><span>{displayWorkText(project.name, t)}</span></Link>)}
             {favoriteSessions.map(session => <Link className="shRow" key={session.id} to={sessionChatPath(workspace.id, session.id)} aria-current={location.pathname === sessionChatPath(workspace.id, session.id) ? "page" : undefined} title={session.title}
               onClick={event => {
@@ -159,20 +161,32 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
                   sessionProps.onOpenSession(session);
                 }
               }}><span>{session.title || t("work.conversation.untitled")}</span></Link>)}
-          </div>
-          </motion.div>
+          </SidebarGroup>
         </motion.section> : null}
         </AnimatePresence>
-        <div className="shNavGroup">
+        <section className="shTeams">
+          <SidebarGroup label={t("work.yourTeams")} open={teamsOpen} onToggle={() => navigation.setCollapsed("teams", teamsOpen)} transition={favoritesTransition}>
           <Link className="shRow" to={`${base}/work/home`} aria-current={location.pathname === `${base}/work/home` ? "page" : undefined}><House aria-hidden="true" /><span>{t("work.home")}</span></Link>
           <Link className="shRow" to={`${base}/work/tasks`} aria-current={location.pathname.startsWith(`${base}/work/tasks`) ? "page" : undefined}><Copy aria-hidden="true" /><span>{t("work.issues")}</span></Link>
           <Link className="shRow" to={`${base}/work/projects`} aria-current={location.pathname.startsWith(`${base}/work/projects`) ? "page" : undefined}><Box aria-hidden="true" /><span>{t("work.projects")}</span></Link>
           <Link className="shRow" to={`${base}/work/views`} aria-current={location.pathname === `${base}/work/views` ? "page" : undefined}><Layers2 aria-hidden="true" /><span>{t("work.views")}</span></Link>
-          <Link className="shRow" to={base + "/extensions"} aria-current={inExtensions ? "page" : undefined}><Blocks aria-hidden="true" /><span>{t("extensions.title")}</span></Link>
-          <Link className="shRow" to={base + "/library"} aria-current={inLibrary ? "page" : undefined}><Library aria-hidden="true" /><span>{t("libraryObjectRoute.library")}</span></Link>
-        </div>
+          </SidebarGroup>
+        </section>
       </nav>
 
     </aside>
   );
 });
+
+
+function SidebarGroup({ label, open, onToggle, transition, children }) {
+  const id = useId();
+  return <>
+    <button className="shNavGroupToggle" type="button" aria-expanded={open} aria-controls={id} onClick={onToggle}>
+      <span>{label}</span><motion.span aria-hidden="true" animate={{ rotate: open ? 0 : -90 }} transition={transition}><ChevronDown /></motion.span>
+    </button>
+    <motion.div id={id} className="shNavGroupContent" initial={false} animate={{ height: open ? "auto" : 0, opacity: open ? 1 : 0 }} transition={transition} aria-hidden={!open} inert={!open}>
+      <div className="shNavGroupRows">{children}</div>
+    </motion.div>
+  </>;
+}
