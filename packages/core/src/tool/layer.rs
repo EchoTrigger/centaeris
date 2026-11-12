@@ -725,6 +725,10 @@ impl ToolLayer {
         self
     }
 
+    pub(crate) fn execution_cancellation_probe(&self) -> Option<&ExecutionCancellationProbe> {
+        self.runtime_context.execution_cancellation_probe.as_deref()
+    }
+
     pub fn with_sandbox_filesystem_paths(
         mut self,
         additional_writable_roots: Vec<PathBuf>,

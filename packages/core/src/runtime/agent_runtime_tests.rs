@@ -11269,6 +11269,7 @@ async fn query_loop_subagent_cancel_ack_prevents_immediate_late_tool_dispatch() 
     struct CancelBeforeReply {
         store: AgentRuntimeTestStore,
         job_id: String,
+        host_cancelled: Option<Arc<AtomicBool>>,
         model: SubagentReadModelClient,
     }
     impl ModelClient for CancelBeforeReply {
@@ -11277,91 +11278,112 @@ async fn query_loop_subagent_cancel_ack_prevents_immediate_late_tool_dispatch() 
             request: &'a ModelClientRequest,
         ) -> ModelClientFuture<'a, ModelClientResponse> {
             Box::pin(async move {
-                RuntimeJobStorePort::cancel_runtime_job(
-                    &self.store,
-                    crate::session::reliability::CancelRuntimeJobRequest {
-                        job_id: self.job_id.clone(),
-                        expected_lease_owner: None,
-                        expected_status: None,
-                        reason: "cancel-before-late-reply".into(),
-                        cancelled_at_ms: 4,
-                    },
-                )
-                .map_err(|error| {
-                    ModelClientError::new(ModelClientErrorKind::Network, error, false)
-                })?;
+                if let Some(cancelled) = &self.host_cancelled {
+                    cancelled.store(true, Ordering::SeqCst);
+                } else {
+                    RuntimeJobStorePort::cancel_runtime_job(
+                        &self.store,
+                        crate::session::reliability::CancelRuntimeJobRequest {
+                            job_id: self.job_id.clone(),
+                            expected_lease_owner: None,
+                            expected_status: None,
+                            reason: "cancel-before-late-reply".into(),
+                            cancelled_at_ms: 4,
+                        },
+                    )
+                    .map_err(|error| {
+                        ModelClientError::new(ModelClientErrorKind::Network, error, false)
+                    })?;
+                }
                 self.model.generate(request).await
             })
         }
     }
-    let workspace = temp_dir_path("subagent_cancel_before_late_reply");
-    std::fs::create_dir_all(&workspace).unwrap();
-    std::fs::write(workspace.join("fixture.txt"), "must not be dispatched").unwrap();
-    let store = AgentRuntimeTestStore::new();
-    let request = sample_subagent_worker_run_request();
-    let job_id = request.job.job_id.clone();
-    store
-        .state()
-        .unwrap()
-        .jobs
-        .insert(job_id.clone(), request.job.clone());
-    let engine = AgentRuntime::new_for_test_with_tools(
-        store.clone(),
-        ToolLayer::new().with_cwd(workspace.clone()).unwrap(),
-        AgentRuntimeConfig {
-            allowed_tools: Some(vec!["read".into()]),
-            ..AgentRuntimeConfig::default()
-        },
-    );
-    let model = CancelBeforeReply {
-        store,
-        job_id: job_id.clone(),
-        model: SubagentReadModelClient {
-            request_count: AtomicUsize::new(0),
-        },
-    };
-    let config_store = StaticModelSessionConfigStore {
-        config: Some(ModelSessionConfig::default()),
-    };
-    let runner_config = AgentRuntimeSubagentRunnerConfig {
-        auto_continue_after_resume_wait: Some(false),
-        agent_run_identity: Some(RuntimeAgentRunIdentityV1 {
-            agent_run_id: job_id,
-            execution_id: "execution-cancel-late-reply".into(),
-            authorization_digest: format!("sha256:{}", "3".repeat(64)),
-        }),
-    };
-    let mut durable_tools = 0;
-    let mut durable_receipts = 0;
-    let outcome = engine
-        .run_subagent_worker_with_model_client_async(
-            request,
-            &model,
-            &config_store,
-            &runner_config,
-            None,
-            Some(&mut |point| {
-                match point {
-                    ToolSafePoint::DurableToolCall { .. } => durable_tools += 1,
-                    ToolSafePoint::DurableReceipt { .. } => durable_receipts += 1,
-                    _ => {}
-                }
-                Ok(())
+    for host_cancellation in [false, true] {
+        let workspace = temp_dir_path("subagent_cancel_before_late_reply");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("fixture.txt"), "must not be dispatched").unwrap();
+        let store = AgentRuntimeTestStore::new();
+        let request = sample_subagent_worker_run_request();
+        let job_id = request.job.job_id.clone();
+        store
+            .state()
+            .unwrap()
+            .jobs
+            .insert(job_id.clone(), request.job.clone());
+        let host_cancelled = Arc::new(AtomicBool::new(false));
+        let observed_host_cancelled = host_cancelled.clone();
+        let engine = AgentRuntime::new_for_test_with_tools(
+            store.clone(),
+            ToolLayer::new()
+                .with_cwd(workspace.clone())
+                .unwrap()
+                .with_execution_cancellation_probe(Arc::new(move || {
+                    Ok(observed_host_cancelled
+                        .load(Ordering::SeqCst)
+                        .then(|| "agent_run_cancel_requested".to_string()))
+                })),
+            AgentRuntimeConfig {
+                allowed_tools: Some(vec!["read".into()]),
+                ..AgentRuntimeConfig::default()
+            },
+        );
+        let model = CancelBeforeReply {
+            store,
+            job_id: job_id.clone(),
+            host_cancelled: host_cancellation.then_some(host_cancelled),
+            model: SubagentReadModelClient {
+                request_count: AtomicUsize::new(0),
+            },
+        };
+        let config_store = StaticModelSessionConfigStore {
+            config: Some(ModelSessionConfig::default()),
+        };
+        let runner_config = AgentRuntimeSubagentRunnerConfig {
+            auto_continue_after_resume_wait: Some(false),
+            agent_run_identity: Some(RuntimeAgentRunIdentityV1 {
+                agent_run_id: job_id,
+                execution_id: "execution-cancel-late-reply".into(),
+                authorization_digest: format!("sha256:{}", "3".repeat(64)),
             }),
-        )
-        .await;
-    assert!(
-        matches!(outcome, SubagentWorkerRunOutcome::Cancelled { ref reason }
-        if reason == "cancel-before-late-reply"),
-        "{outcome:?}"
-    );
-    assert_eq!(model.model.request_count.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        durable_tools, 0,
-        "acknowledged cancellation fences tool dispatch"
-    );
-    assert_eq!(durable_receipts, 0);
-    let _ = std::fs::remove_dir_all(workspace);
+        };
+        let mut durable_tools = 0;
+        let mut durable_receipts = 0;
+        let outcome = engine
+            .run_subagent_worker_with_model_client_async(
+                request,
+                &model,
+                &config_store,
+                &runner_config,
+                None,
+                Some(&mut |point| {
+                    match point {
+                        ToolSafePoint::DurableToolCall { .. } => durable_tools += 1,
+                        ToolSafePoint::DurableReceipt { .. } => durable_receipts += 1,
+                        _ => {}
+                    }
+                    Ok(())
+                }),
+            )
+            .await;
+        let expected_reason = if host_cancellation {
+            "agent_run_cancel_requested"
+        } else {
+            "cancel-before-late-reply"
+        };
+        assert!(
+            matches!(outcome, SubagentWorkerRunOutcome::Cancelled { ref reason }
+        if reason == expected_reason),
+            "{outcome:?}"
+        );
+        assert_eq!(model.model.request_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            durable_tools, 0,
+            "acknowledged cancellation fences tool dispatch"
+        );
+        assert_eq!(durable_receipts, 0);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
 }
 
 fn sample_subagent_worker_run_request() -> SubagentWorkerRunRequest {

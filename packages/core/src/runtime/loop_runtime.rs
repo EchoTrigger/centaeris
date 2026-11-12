@@ -40,7 +40,7 @@ async fn poll_loop_cancellation_async(
             })
             .map(|job| cancelled_job_reason(&job))
         });
-    observed.map_err(|error| {
+    let reason = observed.map_err(|error| {
         let message = error.diagnostic_message();
         worker
             .storage_error
@@ -48,7 +48,11 @@ async fn poll_loop_cancellation_async(
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get_or_insert(error);
         message
-    })
+    })?;
+    if reason.is_some() {
+        return Ok(reason);
+    }
+    poll_loop_cancellation(cancellation_probe)
 }
 
 async fn wait_for_loop_cancellation(
@@ -1529,6 +1533,10 @@ impl<
             jobs: self.job_store.as_ref(),
             storage_error: Mutex::new(None),
         };
+        let cancellation_probe: Option<&(dyn Fn() -> Result<Option<String>, String> + Sync)> = self
+            .tools_port
+            .execution_cancellation_probe()
+            .map(|probe| probe as _);
         let result = if let Some(tool_safe_point) = tool_safe_point {
             let mut commit_with_compaction_ack = |point: ToolSafePoint| {
                 let receipt = match &point {
@@ -1568,7 +1576,7 @@ impl<
                 request,
                 &driver,
                 stream_sink,
-                None,
+                cancellation_probe,
                 None,
                 Some(&tool_safe_point),
                 Some(&worker_cancellation),
@@ -1580,7 +1588,7 @@ impl<
                 request,
                 &driver,
                 stream_sink,
-                None,
+                cancellation_probe,
                 None,
                 None,
                 Some(&worker_cancellation),

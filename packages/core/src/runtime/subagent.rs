@@ -417,6 +417,7 @@ pub struct SubagentWorkPacketRuntimeBindingV1 {
     pub subagent_id: String,
     pub parent_agent_run_id: String,
     pub parent_turn_id: String,
+    pub cancel_on_parent_cancel: bool,
     pub description: String,
     pub allowed_tools: Vec<String>,
     pub delegated_tool_contracts: Vec<DelegatedToolContractV1>,
@@ -505,6 +506,7 @@ pub fn subagent_work_packet_runtime_binding(
         subagent_id,
         parent_agent_run_id,
         parent_turn_id,
+        cancel_on_parent_cancel: packet.run_context.cancel_on_parent_cancel,
         description,
         allowed_tools: packet.allowed_tools,
         delegated_tool_contracts: packet.delegated_tool_contracts,
@@ -2325,6 +2327,7 @@ mod tests {
             subagent_id: "agent-child".to_string(),
             parent_agent_run_id: "agent-run-parent".to_string(),
             parent_turn_id: "turn-parent".to_string(),
+            cancel_on_parent_cancel: true,
             description: "Inspect one issue".to_string(),
             allowed_tools: vec!["read".to_string()],
             delegated_tool_contracts,
@@ -2374,7 +2377,7 @@ mod tests {
         packet.allowed_tools = vec!["read".to_string()];
         packet.delegated_tool_contracts =
             test_delegated_tool_contracts(packet.allowed_tools.as_slice());
-        let envelope = SubagentWorkPacketEnvelope {
+        let mut envelope = SubagentWorkPacketEnvelope {
             ref_id: "external_context:work_packet_1".to_string(),
             content_json: serde_json::json!({ "workPacket": packet }),
         };
@@ -2414,6 +2417,16 @@ mod tests {
                 .parent_turn_id,
             "turn-1:2"
         );
+        for inherited_cancellation in [true, false] {
+            envelope.content_json["workPacket"]["run_context"]["cancelOnParentCancel"] =
+                inherited_cancellation.into();
+            assert_eq!(
+                subagent_work_packet_runtime_binding(&envelope, &job)
+                    .unwrap()
+                    .cancel_on_parent_cancel,
+                inherited_cancellation
+            );
+        }
 
         let mut mismatched_job = job;
         mismatched_job.branch_id = Some("banana".to_string());
