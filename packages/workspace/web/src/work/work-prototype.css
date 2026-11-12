@@ -9,31 +9,29 @@
 .workPrototype a { color:inherit; text-decoration:none; }
 .workPrototype button,.workPrototype input,.workPrototype select,.workPrototype textarea { font:inherit; color:inherit; }
 .workPrototype button { display:inline-flex; gap:7px; align-items:center; justify-content:center; min-height:var(--control-height-compact); padding:4px 10px; border:1px solid var(--outline-variant); border-radius:var(--control-radius); background:var(--surface-color); cursor:pointer; font-size:13px; transition:background 120ms,color 120ms; }
-.workPrototype button:hover { background:var(--surface-hover); }
 .workPrototype svg,.workMenu svg { width:16px; height:16px; flex-shrink:0; stroke-width:2; }
 .workPrototype button.workPrimary { background:var(--solid-surface); color:var(--solid-text); border-color:var(--solid-surface); box-shadow:0 1px 2px color-mix(in srgb,var(--on-surface) 8%,transparent); }
 .workPrototype input,.workPrototype select,.workPrototype textarea { background:var(--surface-color); border:1px solid var(--outline-variant); border-radius:6px; min-height:var(--control-height); padding:7px 10px; max-width:100%; }
 .workPrototype textarea { resize:vertical; line-height:1.7; }
-.workPrototype :is(button,a,input,select,textarea):focus-visible { outline:2px solid var(--primary-color); outline-offset:2px; }
+.workPrototype :is(button,a,input,select,textarea):focus-visible { outline: 1px solid var(--outline); outline-offset:2px; }
 .workHeader { min-height:52px; padding:8px 16px; display:flex; justify-content:space-between; align-items:center; gap:16px; }
 .workHeader h1 { display:flex; align-items:center; gap:10px; font-size:14px; letter-spacing:0; font-weight:500; }
 .workHeader h1 > svg { color:var(--process-text); }
 .workCount { color:var(--process-text); font-size:12px; font-variant-numeric:tabular-nums; }
 .workTabs { display:flex; align-items:center; gap:4px; padding:0; flex-wrap:wrap; }
 .workTabs button { min-height:30px; padding:5px 12px; border:1px solid transparent; border-radius:16px; background:transparent; color:var(--process-text); font-size:12px; }
-.workTabs button[aria-pressed=true] { border-color:var(--outline-variant); background:var(--surface-container); color:var(--on-surface); font-weight:500; }
-.workTabs button:hover { background:var(--surface-hover); color:var(--on-surface); }
+.workTabs button[aria-pressed=true] { border-color:var(--outline-variant); color:var(--on-surface); font-weight:500; }
+.workTabs button:hover { color:var(--on-surface); }
 .workToolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 16px; min-height:44px; }
 .workPrototype .workFilter { color:var(--process-text); border:1px solid var(--outline-variant); min-height:28px; font-size:12px; }
 .workGroup { margin:0 0 14px; }
 .workGroup > summary { list-style:none; display:flex; align-items:center; gap:9px; padding:9px 12px; border-radius:8px; background:var(--surface-container); font-size:12px; font-weight:500; cursor:pointer; }
 .workGroup > summary::-webkit-details-marker { display:none; }
-.workGroup > summary:focus-visible { outline:2px solid var(--primary-color); outline-offset:-2px; }
+.workGroup > summary:focus-visible { outline: 1px solid var(--outline); outline-offset:-2px; }
 .workGroup > summary small { color:var(--process-text); font-size:12px; font-weight:400; margin-left:2px; }
 .workGroupChevron { width:12px !important; height:12px !important; color:var(--process-text); transition:transform 120ms; }
 .workGroup[open] .workGroupChevron { transform:rotate(90deg); }
 .workRow { display:flex; align-items:center; gap:12px; min-height:46px; margin:3px 0; padding:10px 16px 10px 34px; border-radius:8px; font-size:13px; transition:background 120ms; }
-.workRow:hover { background:color-mix(in srgb,var(--on-surface) 3%,transparent); }
 .workStatusIcon { color:var(--process-text); width:14px !important; height:14px !important; }
 .workStatusIcon.isDone { color:var(--success); }
 .workStatusIcon.isStarted { color:var(--warning); }
@@ -70,7 +68,6 @@
 .workProperty > span { color:var(--process-text); font-size:12px; padding-left:3px; }
 .workPrototype .workChoice { min-width:0; text-align:left; border:1px solid transparent; background:transparent; justify-content:flex-start; padding:5px 7px; font-size:13px; }
 .workChoice > span:not(.workAvatar) { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.workPrototype .workChoice:hover,.workPrototype .workChoice[data-popup-open] { background:var(--surface-hover); }
 .workChoiceChevron { margin-left:auto; width:12px !important; height:12px !important; color:var(--process-text); opacity:0; }
 .workChoice:is(:hover,:focus-visible,[data-popup-open]) .workChoiceChevron { opacity:1; }
 .workPropertySection { padding-top:16px; margin-top:8px; }
@@ -86,7 +83,7 @@
 .workMenuItem { display:flex; align-items:center; gap:8px; width:100%; min-height:var(--control-height-compact); padding:5px 8px; background:transparent; color:inherit; font:inherit; border:0; border-radius:5px; text-align:left; cursor:pointer; }
 .workMenuItem > span:not(.workAvatar) { flex:1; }
 .workMenuItem > svg:last-child:not(:first-child) { margin-left:auto; width:14px; }
-.workMenuItem[data-highlighted] { background:var(--surface-hover); outline:none; }
+.workMenuItem[data-highlighted] { outline: 1px solid var(--outline); font-weight: 500; }
 .workProse { padding-top:16px; line-height:1.85; }
 .workProse h2 { margin-bottom:9px; color:var(--process-text); }
 .workProse p { margin-bottom:20px; max-width:70ch; }
@@ -207,7 +204,7 @@
 .workLinkedConversations summary > svg { width:12px; height:12px; }
 .workLinkedConversations[open] summary > svg { transform:rotate(90deg); }
 .workLinkedConversations summary > span { margin-left:4px; }
-.workLinkedConversations summary:focus-visible { outline:2px solid var(--primary-color); outline-offset:3px; border-radius:4px; }
+.workLinkedConversations summary:focus-visible { outline: 1px solid var(--outline); outline-offset:3px; border-radius:4px; }
 .workChecks { display:grid; gap:10px; }
 .workResourceList { padding:4px; border:1px solid var(--outline-variant); border-radius:12px; }
 .workActivityDot { width:5px; height:5px; flex:none; border-radius:50%; background:var(--outline); }

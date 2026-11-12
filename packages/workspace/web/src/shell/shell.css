@@ -22,7 +22,6 @@
   font: inherit;
   font-weight: 600;
 }
-.shWsButton:hover, .shWsButton[data-popup-open] { background: color-mix(in srgb, var(--on-surface) 4.5%, transparent); }
 .shWsButton > svg { width: 13px; flex: none; margin-inline-start: auto; color: var(--process-text); opacity: 0; }
 .shWsButton:is(:hover, :focus-visible, [data-popup-open]) > svg { opacity: 1; }
 .shWsAvatar, .shAccountAvatar {
@@ -42,7 +41,7 @@
 .shWsMenuPositioner { z-index: 65; }
 .shWsMenuPopover { width: min(calc(var(--workspace-sidebar-width) - 20px), calc(100vw - 20px)); padding: 4px; border: 1px solid var(--workspace-frame-edge); border-radius: 7px; background: var(--surface-color); box-shadow: 0 6px 18px rgba(0, 0, 0, .14); font-size: 14px; outline: none; }
 .shWsMenuItem { display: flex; width: 100%; min-height: 30px; align-items: center; gap: 9px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--on-surface); font: inherit; text-align: left; text-decoration: none; cursor: pointer; }
-.shWsMenuItem[data-highlighted], .shWsMenuItem[data-popup-open] { background: color-mix(in srgb, var(--on-surface) 4.5%, transparent); outline: none; }
+.shWsMenuItem[data-highlighted], .shWsMenuItem[data-popup-open] { outline: 1px solid var(--outline); font-weight: 500; }
 .shWsMenuItem[data-disabled] { opacity: .55; cursor: default; }
 .shWsMenuSwitch { justify-content: space-between; }
 .shWsMenuSwitch > svg { width: 13px; flex: none; color: var(--process-text); }
@@ -54,7 +53,6 @@
 .shWsMenuError { margin: 5px 9px 3px; color: var(--danger); font-size: 11px; }
 .shAvatarToggle { display: grid; width: var(--workspace-toggle-target); height: var(--workspace-toggle-target); place-items: center; padding: 0; border: 0; background: transparent; color: var(--process-text); }
 .shAvatarToggle::before { content: ""; grid-area: 1 / 1; width: var(--workspace-avatar-size); height: var(--workspace-avatar-size); border-radius: var(--workspace-avatar-radius); }
-.shAvatarToggle:is(:hover, :focus-visible):not(:disabled)::before { background: var(--workspace-selection); }
 .shAvatarToggle:is(:hover, :focus-visible):not(:disabled) { color: var(--on-surface); }
 .shAvatarToggle svg { position: relative; grid-area: 1 / 1; width: var(--workspace-avatar-size); height: var(--workspace-avatar-size); stroke-width: 1.7; }
 .shSidebarCollapse { position: absolute; inset-inline-start: var(--workspace-toggle-offset); inset-block-start: 50%; transform: translateY(-50%); opacity: 0; }
@@ -77,7 +75,7 @@
   color: var(--process-text);
 }
 .shSearchButton { width: 29px; flex: none; padding: 0; }
-.shSearchButton:hover, .shSearchButton[aria-pressed="true"] { background: var(--workspace-selection); color: var(--on-surface); }
+.shSearchButton:hover, .shSearchButton[aria-pressed="true"] { color: var(--on-surface); }
 .shSearchButton svg { width: 15px; height: 15px; stroke-width: 1.7; }
 .shWsButton:focus-visible, .shPrimaryNav .shRow:focus-visible { outline-offset: -2px; }
 
@@ -107,13 +105,11 @@
 .shSectionAction, .shProjectAction { padding: 0; }
 .shSection .shSectionAction { opacity: 0; transition: opacity 120ms ease; }
 .shSection:hover .shSectionAction, .shSectionAction:focus-visible { opacity: 1; }
-.shSectionAction:hover { background: color-mix(in srgb, var(--on-surface) 6%, transparent); }
 .shSectionAction svg { width: 13px; height: 13px; }
 .shCollapsibleSection { position: relative; }
 .shDisclosure > summary { list-style: none; cursor: pointer; }
 .shDisclosure > summary::-webkit-details-marker { display: none; }
 .shDisclosureSummary { height: 30px; border-radius: 6px; padding-right: 34px; }
-.shDisclosureSummary:hover { background: color-mix(in srgb, var(--on-surface) 6.5%, transparent); }
 .shDisclosureSummary > svg { width: 12px; height: 12px; margin-left: 4px; transition: transform 120ms ease; }
 .shDisclosure:not([open]) .shDisclosureSummary > svg { transform: rotate(-90deg); }
 .shCollapsibleSection > .shSectionAction { position: absolute; top: 4px; right: 8px; }
@@ -133,7 +129,6 @@
   text-align: left;
   text-decoration: none;
 }
-.shRow:hover { background: color-mix(in srgb, var(--on-surface) 4.5%, transparent); }
 .shRow > svg { width: var(--navigation-icon-size); height: var(--navigation-icon-size); stroke-width: var(--navigation-icon-stroke); flex: none; color: var(--process-text); }
 .shRow > span:not(.shAgentGlyph) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -147,12 +142,12 @@
 .shSessionSection .workspaceSessionList { padding: 0 0 2px; }
 .shSessionSection .workspaceSessionRow { height: 30px; contain-intrinsic-size: auto 30px; }
 .shSessionSection .workspaceSessionButton { text-decoration: none; display: flex; align-items: center; gap: 8px; border-radius: 6px; color: var(--on-surface); font-size: 14px; }
-.shSessionSection .workspaceSessionButton:hover, .shSessionSection .workspaceSessionButton.isActive { background: color-mix(in srgb, var(--on-surface) 6%, transparent); color: var(--on-surface); }
+.shSessionSection .workspaceSessionButton.isActive { font-weight: var(--navigation-selected-weight); }
+.shSessionSection .workspaceSessionButton:hover, .shSessionSection .workspaceSessionButton.isActive { color: var(--on-surface); }
 .workspaceSessionKindIcon { width: 15px; height: 15px; flex: none; color: var(--process-text); }
 .shProject { position: relative; }
 .shProjectSummary { display: flex; height: 30px; align-items: center; gap: 7px; border-radius: 6px; color: var(--on-surface); padding: 0 34px 0 8px; font-size: 13px; list-style: none; cursor: pointer; }
 .shProjectSummary::-webkit-details-marker { display: none; }
-.shProjectSummary:hover { background: color-mix(in srgb, var(--on-surface) 4.5%, transparent); }
 .shProjectSummary > svg { width: 14px; height: 14px; flex: none; color: var(--process-text); }
 .shProjectSummary > svg:first-child { width: 11px; height: 11px; opacity: 0; transition: opacity 120ms ease, transform 120ms ease; }
 .shProject:hover .shProjectSummary > svg:first-child,
@@ -161,7 +156,6 @@
 .shProjectSummary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shProjectAction { position: absolute; z-index: 1; top: 4px; right: 5px; display: inline-grid; width: 22px; height: 22px; place-items: center; border: 0; border-radius: 5px; background: transparent; color: var(--process-text); opacity: 0; }
 .shProject:hover .shProjectAction, .shProjectAction:focus-visible { opacity: 1; }
-.shProjectAction:hover { background: color-mix(in srgb, var(--on-surface) 6%, transparent); }
 .shProjectAction svg { width: 13px; height: 13px; }
 .shProject .workspaceSessionList.isProject { padding-left: 22px; }
 
@@ -172,11 +166,10 @@
 .shProjectCreateDialog > label { display: grid; gap: 6px; color: var(--on-surface); font-size: 12px; font-weight: 600; }
 .shProjectNameInput { min-width: 0; width: 100%; height: 40px; border: 1px solid var(--outline-variant); border-radius: 9px; outline: 0; background: var(--surface-color); color: var(--on-surface); padding: 0 11px; font-size: 13px; }
 .shProjectNameInput:focus-visible { outline: 0; }
-.shProjectNameInput:focus { border-color: var(--primary-color); box-shadow: 0 0 0 1px #6e91c4; }
+.shProjectNameInput:focus { border-color: var(--outline); box-shadow: none; }
 .shProjectCreateDialog > p { margin: -5px 0 0; color: var(--error); font-size: 11px; }
 .shProjectCreateDialog > footer { display: flex; justify-content: flex-end; gap: 8px; }
 .shProjectCreateDialog > footer button { min-width: 64px; height: 32px; border: 0; border-radius: 8px; background: var(--surface-variant); color: var(--on-surface); padding: 0 12px; }
-.shProjectCreateDialog > footer button:hover:not(:disabled) { background: var(--surface-container); }
 .shProjectCreateDialog > footer .isPrimary { background: var(--solid-surface); color: var(--solid-text); }
 .shProjectCreateDialog > footer .isPrimary:hover:not(:disabled) { background: var(--solid-surface); }
 .shNavGap { height: 18px; }
@@ -184,15 +177,15 @@
 .shPrimaryNav { display: grid; gap: var(--workspace-list-row-gap); flex: none; margin: 0 10px 12px; }
 .shPrimaryNav .shRow { min-height: var(--navigation-row-height); color: var(--process-text); font-weight: var(--navigation-font-weight); }
 .shPrimaryNav .shRow > svg { width: var(--navigation-icon-size); height: var(--navigation-icon-size); stroke-width: var(--navigation-icon-stroke); }
-.shPrimaryNav .shRow:hover, .shPrimaryNav .shRow[aria-current="page"], .shPrimaryNav .shRow[aria-expanded="true"] { background: var(--workspace-selection); color: var(--on-surface); }
-.shRow[aria-current="page"] { font-weight: var(--navigation-selected-weight); }
+.shPrimaryNav .shRow:hover, .shPrimaryNav .shRow[aria-current="page"], .shPrimaryNav .shRow[aria-expanded="true"] { color: var(--on-surface); }
+.shPrimaryNav .shRow[aria-expanded="true"], .shSearchButton[aria-pressed="true"], .shSearchFilters button[aria-pressed="true"], .shSearchResults button[aria-selected="true"] { font-weight: var(--navigation-selected-weight); }
+.shRow.isActive, .shRow[aria-current="page"] { font-weight: var(--navigation-selected-weight); }
 .workPrimaryNav { min-height:0; flex:1; grid-template-columns:minmax(0,1fr); overflow-y:auto; align-content:start; gap:0; }
 .shNavGroup { display:grid; min-width:0; gap:var(--workspace-list-row-gap); }
 .shTeams { min-width:0; margin-top:18px; }
 .workPrimaryNav > .shFavorites { min-width:0; padding:0; overflow:hidden; }
 .shNavGroupToggle { display:flex; width:100%; align-items:center; gap:5px; height:30px; padding:0 8px; border:0; background:transparent; border-radius:6px; font:inherit; font-size:12px; color:var(--process-text); cursor:pointer; text-align:left; }
-.shNavGroupToggle:hover { background:var(--workspace-selection); }
-.shNavGroupToggle:focus-visible { outline:2px solid var(--primary-color); outline-offset:-2px; }
+.shNavGroupToggle:focus-visible { outline: 1px solid var(--outline); outline-offset:-2px; }
 .shNavGroupToggle > span:last-child { display:flex; }
 .shNavGroupToggle svg { width:10px; height:10px; }
 .shNavGroupContent { overflow:hidden; }
@@ -214,13 +207,15 @@
 .shAgentStrip > a > span:last-child { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shAgentStrip .shAgentGlyph { width: 18px; height: 18px; flex: none; border-radius: 5px; }
 .shNewAgentTile > svg { padding: 13px; border: 1px dashed var(--outline-variant); color: var(--process-text); }
-.shAgentStrip > a:hover, .shAgentStrip > a.isActive { color: var(--on-surface); background: var(--surface-hover); }
-.shNewAgentTile:hover > svg { background: var(--surface-color); box-shadow: 0 3px 10px rgba(0, 0, 0, .08); }
+.shAgentStrip > a.isActive { font-weight: var(--navigation-selected-weight); }
+.shAgentStrip > a:hover, .shAgentStrip > a.isActive { color: var(--on-surface); }
+.shNewAgentTile:hover > svg { box-shadow: 0 3px 10px rgba(0, 0, 0, .08); }
 .shAgentLink small { margin-left: auto; color: var(--process-text); font-size: 10px; }
 .shEmptyHint { margin: 5px 8px; color: var(--process-text); font-size: 12px; }
 .shSidebar .workspaceSessionList { padding: 0; }
 .shSidebar .workspaceSessionButton { color: var(--on-surface); font-size: 14px; }
-.shSidebar .workspaceSessionButton:hover, .shSidebar .workspaceSessionButton.isActive { background: color-mix(in srgb, var(--on-surface) 6%, transparent); color: var(--on-surface); }
+.shSidebar .workspaceSessionButton.isActive { font-weight: var(--navigation-selected-weight); }
+.shSidebar .workspaceSessionButton:hover, .shSidebar .workspaceSessionButton.isActive { color: var(--on-surface); }
 
 .shPrivateCreateBackdrop { position: fixed; z-index: 120; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(20, 20, 20, .56); }
 .shPrivateCreateDialog { display: flex; width: min(1000px, calc(100vw - 48px)); height: min(650px, calc(100vh - 48px)); flex-direction: column; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: 13px; background: var(--surface-color); box-shadow: 0 28px 90px rgba(0, 0, 0, .3); }
@@ -230,14 +225,13 @@
 .shPrivateCreateHeader > div > strong { display: inline-flex; align-items: center; gap: 4px; color: var(--on-surface); font-weight: 550; }
 .shPrivateCreateHeader > div > strong svg { width: 12px; }
 .shPrivateCreateHeader > label { grid-column: 2; display: flex; height: 38px; align-items: center; gap: 8px; border: 1px solid var(--outline-variant); border-radius: 8px; background: var(--surface-color); padding: 0 12px; }
-.shPrivateCreateHeader > label:focus-within { border-color: var(--outline-variant); box-shadow: 0 0 0 1px rgba(55, 53, 47, .08); }
+.shPrivateCreateHeader > label:focus-within { border-color: var(--outline); box-shadow: none; }
 .shPrivateCreateHeader > label svg { width: 15px; color: var(--process-text); }
 .shPrivateCreateHeader > label input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--on-surface); font: inherit; }
 .shPrivateCreateScroll { min-height: 0; flex: 1; overflow-y: auto; scrollbar-width: thin; }
 .shPrivateCreateContent { width: min(600px, calc(100% - 40px)); margin: 0 auto; padding: 16px 0 64px; }
 .shPrivateCreateQuick { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .shPrivateCreateQuick > button { display: grid; min-height: 80px; align-content: center; justify-items: start; gap: 10px; border: 0; border-radius: 10px; background: var(--surface-container); padding: 15px 18px; color: var(--on-surface); text-align: left; }
-.shPrivateCreateQuick > button:hover { background: var(--surface-variant); }
 .shPrivateCreateQuick > button svg { width: 17px; color: var(--process-text); }
 .shPrivateCreateQuick > button strong { font-size: 13px; font-weight: 550; }
 .shPrivateCreateContent > h2 { display: flex; align-items: center; gap: 6px; margin: 26px 0 12px; color: var(--process-text); font-size: 13px; font-weight: 550; }
@@ -247,7 +241,6 @@
 .shPrivateTemplateCard:nth-child(4n+2) { --template-tint: #edf2f7; }
 .shPrivateTemplateCard:nth-child(4n+3) { --template-tint: #f5f1ec; }
 .shPrivateTemplateCard:nth-child(4n+4) { --template-tint: #f6eeee; }
-.shPrivateTemplateCard:hover { background: color-mix(in srgb, var(--template-tint) 88%, var(--on-surface)); }
 .shPrivateTemplateCard > span { display: block; min-height: 67px; padding: 14px 18px 10px; }
 .shPrivateTemplateCard > span > strong { display: block; font-size: 14px; font-weight: 550; }
 .shPrivateTemplateCard > span > small { display: block; margin-top: 3px; color: var(--process-text); font-size: 11px; }
@@ -284,7 +277,7 @@
   color: var(--process-text);
   font-size: 12px;
 }
-.shQuickAction:hover { background: var(--workspace-selection); color: var(--on-surface); }
+.shQuickAction:hover { color: var(--on-surface); }
 .shQuickAction svg { width: 15px; color: var(--process-text); }
 .workspaceComposer.shComposerHero { min-height: 108px; padding: 12px; }
 .workspaceComposer.shComposerHero textarea { min-height: 54px; font-size: 15px; }
@@ -302,16 +295,15 @@
 .shSearchInputRow { display: flex; min-height: var(--workspace-header-height); flex: none; align-items: center; gap: 9px; border-bottom: 1px solid var(--workspace-frame-edge); padding: 0 14px; }
 .shSearchInputRow input { min-width: 0; align-self: stretch; flex: 1; border: 0; outline: 0; background: transparent; color: var(--on-surface); font: inherit; font-size: 14px; }
 .shSearchInputRow input::placeholder { color: var(--process-text); }
-.shSearchInputRow input:focus-visible { outline: none; }
-.shSearchInputRow:has(input:focus-visible) { border-bottom-color: color-mix(in srgb, var(--primary-color) 42%, var(--outline-variant)); }
+.shSearchInputRow input:focus-visible { outline: 1px solid var(--outline); }
+.shSearchInputRow:has(input:focus-visible) { border-bottom-color: var(--outline); }
 .shSearchFilters { display: flex; flex: none; flex-wrap: wrap; gap: 6px; padding: 8px 14px; }
 .shSearchFilters button { min-height: 26px; border: 0; border-radius: 999px; background: var(--surface-container); color: var(--process-text); padding: 0 10px; font-size: 12px; }
-.shSearchFilters button:hover, .shSearchFilters button[aria-pressed="true"] { background: var(--workspace-selection); color: var(--on-surface); }
+.shSearchFilters button:hover, .shSearchFilters button[aria-pressed="true"] { color: var(--on-surface); }
 .shSearchResults { min-height: 0; overflow-y: auto; padding: 0 14px 10px; }
 .shSearchResults:empty { display: none; }
 .shSearchGroupLabel { padding: 10px 9px 5px; color: var(--process-text); font-size: 11px; font-weight: 600; }
 .shSearchResults button { display: flex; width: 100%; min-height: 34px; align-items: center; gap: 9px; border: 0; border-radius: 5px; background: transparent; color: var(--on-surface); padding: 0 9px; text-align: left; }
-.shSearchResults button:hover, .shSearchResults button[aria-selected="true"] { background: var(--workspace-selection); }
 .shSearchResults button > svg { width: 14px; flex: none; color: var(--process-text); }
 .shSearchResults button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shSearchResults button:has(.shSearchResultText small) { align-items: flex-start; padding-block: 9px; }
@@ -335,7 +327,7 @@
 @media (prefers-reduced-motion: reduce) { .shShellPage { --shell-sidebar-duration: 0ms; } }
 .shMain { position: relative; grid-column: 2; min-width: 0; min-height: 0; overflow-y: auto; border: 1px solid var(--workspace-frame-edge); border-radius: var(--workspace-frame-radius); background: var(--surface-color); }
 .shSidebarOpen { position: sticky; z-index: 20; top: 2px; left: 4px; display: grid; width: 40px; height: 40px; place-items: center; margin-bottom: -40px; border: 0; border-radius: 0; background: transparent; color: var(--process-text); box-shadow: none; }
-.shSidebarOpen:hover { background: transparent; color: var(--on-surface); }
+.shSidebarOpen:hover { color: var(--on-surface); }
 .shSidebarOpen svg { width: 16px; }
 .shShellPage.isSidebarClosed .libraryPreviewHeader,
 .shShellPage.isSidebarClosed .shAgentTopbar,
@@ -357,7 +349,6 @@
 .shLibrarySearch input { min-width: 0; flex: 1; border: 0; outline: 0; font-size: 12px; }
 .shLibraryTable { display: grid; }
 .shLibraryRow { display: grid; min-height: 44px; grid-template-columns: minmax(0, 1.4fr) 100px 100px minmax(0, 1.2fr); align-items: center; gap: 14px; border-bottom: 1px solid var(--outline-variant); color: var(--on-surface); font-size: 13px; text-decoration: none; }
-a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, transparent); }
 .shLibraryRow.isHead { min-height: 32px; color: var(--process-text); font-size: 11.5px; font-weight: 600; }
 .shLibraryRow > span { min-width: 0; overflow: hidden; color: var(--process-text); text-overflow: ellipsis; white-space: nowrap; }
 .shLibraryRow > span:first-child { display: flex; align-items: center; gap: 9px; color: var(--on-surface); font-weight: 550; }
@@ -391,7 +382,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shAgentCreate { position: relative; display: grid; width: min(720px, calc(100vw - 40px)); max-height: min(880px, calc(100vh - 40px)); gap: 18px; overflow-y: auto; overscroll-behavior: contain; padding: 42px 46px 28px; border-radius: 18px; background: var(--surface-color); box-shadow: 0 28px 80px rgba(0, 0, 0, .26); }
 .shAgentCreate h1 { margin: 0 0 4px; color: var(--on-surface); font-size: 27px; line-height: 1.2; text-align: center; text-wrap: balance; }
 .shModalClose { position: absolute; z-index: 1; top: 14px; left: 14px; }
-.shAgentCreate button:focus-visible, .shAgentCreate input:focus-visible, .shAgentCreate textarea:focus-visible { outline: 2px solid #2f6fbd; outline-offset: 2px; }
+.shAgentCreate button:focus-visible, .shAgentCreate input:focus-visible, .shAgentCreate textarea:focus-visible { outline: 1px solid var(--outline); outline-offset: 2px; }
 .shAgentIdentity { display: grid; justify-items: center; gap: 9px; padding-top: 2px; }
 .shAgentHeroMark { width: 112px; height: 112px; border-radius: 24px !important; box-shadow: 0 14px 30px rgba(3, 32, 67, .14); }
 .shAgentAvatarEdit { position: relative; display: grid; border: 0; border-radius: 24px; background: transparent; padding: 0; cursor: pointer; }
@@ -401,21 +392,19 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shAvatarUpload { display: grid; justify-items: center; gap: 8px; margin-top: -8px; }
 .shAvatarUpload > div { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; }
 .shAvatarUpload button { display: inline-flex; min-height: 32px; align-items: center; gap: 6px; border: 0; border-radius: 6px; background: var(--surface-container); color: var(--on-surface); padding: 0 10px; font: inherit; font-size: 11px; cursor: pointer; }
-.shAvatarUpload button:hover:not(:disabled) { background: var(--surface-variant); }
 .shAvatarUpload button:disabled { opacity: .6; cursor: default; }
 .shAvatarUpload button svg { width: 13px; height: 13px; }
 .shAvatarUpload > small { color: var(--process-text); font-size: 10px; line-height: 1.5; text-align: center; }
 .shAvatarUpload > p { margin: 0; }
 .shAgentNameInput { width: min(420px, 100%); height: 46px; margin: 0 auto; border: 0; border-bottom: 1px solid var(--outline-variant); border-radius: 0; background: transparent; color: var(--on-surface); padding: 0 10px; font: inherit; font-size: 21px; font-weight: 600; line-height: 1.2; text-align: center; }
 .shAgentNameInput::placeholder { color: var(--process-text); }
-.shAgentNameInput:focus-visible { border-bottom-color: var(--primary-color); outline: 0; box-shadow: 0 1px #2f6fbd; }
+.shAgentNameInput:focus-visible { border-bottom-color: var(--outline); outline: 1px solid var(--outline); box-shadow: none; }
 .shAgentPrivate { display: inline-flex; align-items: center; gap: 4px; color: var(--process-text); font-size: 11px; }
 .shAgentPrivate svg { width: 11px; }
 .shAvatarChoices { display: flex; justify-content: center; gap: 8px; margin: 0; border: 0; padding: 0; }
 .shAvatarChoices legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .shAvatarChoices button { display: grid; width: 72px; justify-items: center; gap: 5px; border: 0; border-radius: 10px; background: transparent; color: var(--process-text); padding: 6px; font: inherit; font-size: 10px; }
-.shAvatarChoices button:hover { background: var(--surface-variant); }
-.shAvatarChoices button.isActive { background: var(--surface-variant); color: var(--on-surface); }
+.shAvatarChoices button.isActive { outline: 1px solid var(--outline); color: var(--on-surface); }
 .shAvatarChoices .shAgentMark { width: 42px; height: 42px; border-radius: 10px !important; }
 .shCreateLabel, .shInstructionsSection > small { color: var(--process-text); font-size: 11px; font-weight: 600; letter-spacing: .02em; }
 .shCreateLabel { margin: 4px 0 -12px; }
@@ -423,7 +412,6 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shAgentDescriptionInput::placeholder { color: var(--process-text); }
 .shInstructionsSection { display: grid; gap: 8px; }
 .shSoulCard { display: grid; width: 100%; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; gap: 12px; border: 0; border-radius: 12px; background: var(--surface-variant); color: var(--on-surface); padding: 12px; text-align: left; }
-.shSoulCard:hover { background: var(--surface-hover); }
 .shSoulCardIcon, .shAgentSoulPreview header > span { display: grid; width: 40px; height: 40px; place-items: center; border: 1px solid var(--outline-variant); border-radius: 9px; background: var(--surface-color); color: var(--process-text); }
 .shSoulCardIcon svg, .shAgentSoulPreview header svg { width: 18px; }
 .shSoulCardCopy { display: grid; min-width: 0; gap: 3px; }
@@ -447,7 +435,6 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shAgentTopbar > span:nth-child(2) { display: flex; align-items: center; gap: 4px; color: var(--process-text); }
 .shAgentTopbar svg { width: 12px; }
 .shAgentTopbar button { display: inline-flex; height: 28px; align-items: center; gap: 5px; margin-left: auto; border: 0; border-radius: 6px; background: transparent; color: var(--process-text); font-size: 12px; }
-.shAgentTopbar button:hover { background: var(--surface-variant); }
 .shAgentTopbar button svg { width: 13px; }
 .shAgentBanner { display: flex; min-height: 78px; align-items: center; justify-content: center; gap: 12px; padding: 12px 24px; background: var(--surface-variant); color: var(--primary-color); font-size: 13px; }
 .shAgentBannerIcon { display: grid; width: 42px; height: 42px; flex: none; place-items: center; border: 1px solid var(--outline-variant); border-radius: 50%; background: var(--surface-color); font-size: 19px; }
@@ -473,7 +460,6 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shPluginHeader h1 { margin: 0; color: var(--on-surface); font-size: 30px; letter-spacing: -.025em; }
 .shPluginHeader p { margin: 6px 0 0; color: var(--on-surface-variant); }
 .shPluginHeader button { display: grid; width: 32px; height: 32px; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--on-surface); }
-.shPluginHeader button:hover { background: var(--surface-container); }
 .shPluginBody { width: min(1040px, calc(100% - 64px)); min-height: 0; flex: 1; margin: 0 auto; padding: 18px 0 60px; }
 .shPluginBody .capabilitySettings { border: 1px solid var(--outline-variant); border-radius: 10px; overflow: hidden; }
 .shPluginBody .capabilitySettingsList { background: var(--surface-variant); }
@@ -494,7 +480,6 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceChooser p { margin: 5px 0 13px; color: var(--process-text); font-size: 12px; }
 .shWorkspaceChooser nav { display: grid; gap: 2px; }
 .shWorkspaceChooser nav a { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 34px; padding: 3px 6px; border-radius: 6px; color: var(--on-surface); text-decoration: none; }
-.shWorkspaceChooser nav a:hover { background: var(--surface-variant); }
 .shWorkspaceChooser nav a > span { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 5px; background: var(--surface-variant); }
 .shWorkspaceChooser nav a > span svg { width: 13px; }
 .shWorkspaceChooser nav small { color: var(--process-text); font-size: 11px; }
@@ -509,8 +494,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceSettingsPage.isEmbedded .shWorkspaceSettingsHeader h1 { margin: 0; font-size: 22px; font-weight: 500; line-height: 1.4; letter-spacing: normal; }
 .shWorkspaceSettingsHeader p { margin: 6px 0 0; color: var(--process-text); font-size: 13px; }
 .shWorkspaceSettingsHeader > .shPrimaryButton { height: auto; min-height: var(--control-height-compact); border: 1px solid var(--outline-variant); border-radius: var(--control-radius); background: var(--surface-color); color: var(--on-surface); }
-.shWorkspaceSettingsHeader > .shPrimaryButton:hover:not(:disabled) { background: var(--surface-hover); }
-:is(.shWorkspaceSettingsPage, .themeConfirmDialog) :is(button, input, select, summary):focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+:is(.shWorkspaceSettingsPage, .themeConfirmDialog) :is(button, input, select, summary):focus-visible { outline: 1px solid var(--outline); outline-offset: 2px; }
 .shWorkspaceSettingsTabs { display: flex; gap: 3px; margin-bottom: 27px; }
 .shWorkspaceSettingsTabs span, .shWorkspaceSettingsTabs a { min-height: 36px; padding: 9px 11px 8px; border-bottom: 2px solid transparent; color: var(--process-text); font-size: 13px; text-decoration: none; }
 .shWorkspaceSettingsTabs a:hover { color: var(--on-surface); }
@@ -532,17 +516,15 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceRowMenu { position: relative; }
 .shWorkspaceRowMenu > summary { display: grid; width: var(--control-height-compact); height: var(--control-height-compact); place-items: center; list-style: none; border-radius: var(--control-radius); color: var(--process-text); cursor: pointer; }
 .shWorkspaceRowMenu > summary::-webkit-details-marker { display: none; }
-.shWorkspaceRowMenu > summary:hover, .shWorkspaceRowMenu[open] > summary { background: var(--surface-variant); }
 .shWorkspaceRowMenu > summary svg { width: 15px; }
 .shWorkspaceRowMenu > div { position: absolute; z-index: 10; top: calc(var(--control-height-compact) + 2px); right: 0; width: 150px; padding: 5px; border: 1px solid var(--outline-variant); border-radius: 8px; background: var(--surface-color); box-shadow: 0 10px 28px rgba(0, 0, 0, .14); }
 .shWorkspaceRowMenu button { display: block; width: 100%; min-height: var(--control-height-compact); border: 0; border-radius: 5px; background: transparent; color: var(--on-surface); padding: 0 8px; font-size: 13px; text-align: left; }
-.shWorkspaceRowMenu button:hover { background: var(--surface-variant); }
 .shWorkspaceRowMenu button.isDanger { color: var(--danger); }
 .shWorkspaceInvitationRow { display: grid; min-height: 62px; grid-template-columns: minmax(0, 1fr) 86px 132px auto; align-items: center; gap: 12px; padding: 8px 0; color: var(--process-text); font-size: 12px; }
 .shWorkspaceInvitationRow > small { color: var(--process-text); }
 .shWorkspaceInvitationActions { display: flex; justify-content: flex-end; gap: 4px; }
 .shWorkspaceInvitationActions button { min-height: var(--control-height-compact); border: 0; border-radius: var(--control-radius); background: transparent; color: var(--process-text); padding: 0 7px; }
-.shWorkspaceInvitationActions button:hover { background: var(--surface-variant); color: var(--on-surface); }
+.shWorkspaceInvitationActions button:hover { color: var(--on-surface); }
 .shWorkspaceSettingsEmpty, .shWorkspaceSettingsState { padding: 32px 4px; color: var(--process-text); font-size: 13px; text-align: center; }
 .shWorkspaceSettingsState.isError { color: var(--danger); }
 .shWorkspaceSettingsState button { display: block; margin: 9px auto 0; border: 0; background: transparent; color: var(--primary-color); }
@@ -571,7 +553,6 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceGroupLayout > aside { padding: 16px 15px 0 0; border-right: 1px solid var(--outline-variant); }
 .shWorkspaceGroupLayout > aside > header { display: flex; align-items: center; justify-content: space-between; padding: 0 5px 10px; font-size: 12px; }
 .shWorkspaceGroupLayout > aside > header button { display: grid; width: 28px; height: 28px; place-items: center; border: 0; border-radius: 6px; background: transparent; }
-.shWorkspaceGroupLayout > aside > header button:hover { background: var(--surface-variant); }
 .shWorkspaceGroupLayout > aside > header svg { width: 14px; }
 .shWorkspaceGroupLayout > aside > form { display: grid; gap: 6px; padding: 0 4px 10px; }
 .shWorkspaceGroupLayout > aside > form input, .shWorkspaceGroupDetail form input { min-width: 0; height: 34px; border: 1px solid var(--outline-variant); border-radius: 7px; padding: 0 8px; }
@@ -580,7 +561,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceGroupLayout button { border: 0; background: transparent; }
 .shWorkspaceGroupLayout > aside > nav { display: grid; gap: 2px; }
 .shWorkspaceGroupLayout > aside > nav > button { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 8px; border-radius: 7px; color: var(--on-surface); padding: 0 8px; text-align: left; }
-.shWorkspaceGroupLayout > aside > nav > button:hover, .shWorkspaceGroupLayout > aside > nav > button.isActive { background: var(--surface-variant); }
+.shWorkspaceGroupLayout > aside > nav > button.isActive { font-weight: var(--navigation-selected-weight); }
 .shWorkspaceGroupLayout > aside > nav span { display: flex; min-width: 0; align-items: center; gap: 7px; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .shWorkspaceGroupLayout > aside > nav svg { width: 14px; flex: none; color: var(--process-text); }
 .shWorkspaceGroupLayout > aside > nav small { color: var(--process-text); font-size: 10px; }
@@ -590,7 +571,6 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceGroupDetail header p { margin: 5px 0 0; color: var(--process-text); font-size: 11px; }
 .shWorkspaceGroupDetail header > span { display: flex; gap: 5px; }
 .shWorkspaceGroupDetail header button { min-height: 30px; border-radius: 6px; color: var(--process-text); padding: 0 8px; }
-.shWorkspaceGroupDetail header button:hover { background: var(--surface-variant); }
 .shWorkspaceGroupDetail header button.isDanger { display: inline-flex; align-items: center; gap: 4px; color: var(--danger); }
 .shWorkspaceGroupDetail header button svg { width: 13px; }
 .shWorkspaceGroupMembers { margin-top: 12px; }
@@ -604,28 +584,25 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shWorkspaceHome > section > p { margin: 0 0 12px; color: var(--process-text); text-align: center; }
 .shWorkspaceAgentGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
 .shWorkspaceAgentGrid > a { display: flex; min-width: 0; align-items: center; gap: 12px; padding: 13px; border: 1px solid var(--outline-variant); border-radius: 12px; color: var(--on-surface); text-decoration: none; }
-.shWorkspaceAgentGrid > a:hover { background: var(--surface-variant); }
 .shWorkspaceAgentMark { width: 42px; height: 42px; flex: none; }
 .shWorkspaceAgentGrid span:last-child { display: grid; min-width: 0; }
 .shWorkspaceAgentGrid small { overflow: hidden; color: var(--process-text); text-overflow: ellipsis; white-space: nowrap; }
 .shWorkspaceAgentEmpty { display: grid; justify-items: center; gap: 12px; color: var(--process-text); text-align: center; }
 .shWorkspaceAgentEmpty > svg { width: 32px; height: 32px; }
 .shWorkspaceAgentEmpty > div { display: flex; gap: 8px; }
-
-.shRow.isActive { background: color-mix(in srgb, var(--on-surface) 5.5%, transparent); }
 .shTrashPage { min-width: 0; color: var(--on-surface); font-size: 14px; }
 .shTrashTools { display: grid; flex: none; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--outline-variant); }
 .shTrashSearch { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 0 9px; border: 1px solid transparent; border-radius: 7px; background: var(--surface-variant); }
 .shTrashSearch > svg { width: 14px; height: 14px; flex: none; color: var(--process-text); }
 .shTrashSearch > input { min-width: 0; width: 100%; height: 32px; border: 0; outline: 0; background: transparent; color: var(--on-surface); padding: 0; font: inherit; }
-.shTrashSearch:focus-within { border-color: var(--outline-variant); background: var(--surface-color); }
+.shTrashSearch:focus-within { border-color: var(--outline); }
 .shTrashFilters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 9px 10px; }
 .shTrashFilters > label { display: grid; position: relative; min-width: 0; gap: 4px; }
 .shTrashFilters > label > span { padding-left: 1px; color: var(--process-text); font-size: 12px; }
 .shTrashFilters select { appearance: none; width: 100%; min-width: 0; height: 29px; border: 1px solid transparent; border-radius: 6px; background: var(--surface-variant); color: var(--process-text); padding: 0 23px 0 8px; font: inherit; font-size: 12px; text-overflow: ellipsis; cursor: pointer; }
 .shTrashFilters > label > svg { position: absolute; right: 7px; bottom: 8px; width: 12px; height: 12px; pointer-events: none; color: var(--process-text); }
-.shTrashFilters > label[data-active="true"] select { border-color: var(--outline-variant); background: var(--surface-color); color: var(--on-surface); }
-.shTrashFilters select:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+.shTrashFilters > label[data-active="true"] select { font-weight: 500; border-color: var(--outline-variant); color: var(--on-surface); }
+.shTrashFilters select:focus-visible { outline: 1px solid var(--outline); outline-offset: 2px; }
 .shTrashPopoverBody { min-height: 0; padding: 6px 0; }
 .shTrashPage > footer { padding: 7px 0 10px; color: var(--process-text); font-size: 12px; }
 .shTrashLoading { display: flex; min-height: 96px; align-items: center; justify-content: center; gap: 7px; color: var(--process-text); }
@@ -633,7 +610,6 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shTrashSection { margin: 0; }
 .shTrashSectionBody { display: grid; }
 .shTrashRow { display: flex; min-height: 44px; align-items: center; gap: 5px; border-radius: 6px; }
-.shTrashRow:hover { background: color-mix(in srgb, var(--on-surface) 4.5%, transparent); }
 .shTrashOpenRow, .shTrashFolderToggle { display: flex; min-width: 0; flex: 1; align-items: center; gap: 9px; border: 0; background: transparent; color: var(--on-surface); padding: 5px 7px; text-align: left; text-decoration: none; }
 .shTrashOpenRow > svg, .shTrashFolderToggle > svg { flex: none; color: var(--process-text); }
 .shTrashOpenRow > span, .shTrashFolderToggle > span { display: grid; min-width: 0; }
@@ -642,7 +618,7 @@ a.shLibraryRow:hover { background: color-mix(in srgb, var(--on-surface) 2.8%, tr
 .shTrashActions { display: flex; flex: none; padding-right: 5px; opacity: .6; }
 .shTrashRow:hover .shTrashActions, .shTrashActions:focus-within { opacity: 1; }
 .shTrashActions button, .shTrashChild > button { display: grid; width: 27px; height: 27px; place-items: center; border: 0; border-radius: 5px; background: transparent; color: var(--process-text); }
-.shTrashActions button:hover, .shTrashChild > button:hover { background: color-mix(in srgb, var(--on-surface) 7%, transparent); color: var(--on-surface); }
+.shTrashActions button:hover, .shTrashChild > button:hover { color: var(--on-surface); }
 .shTrashActions svg, .shTrashChild > button svg { width: 13px; }
 .shTrashFolderToggle > svg:first-child { width: 14px; }
 .shTrashChildren { display: grid; margin-left: 28px; padding: 0 0 4px 15px; border-left: 1px solid var(--outline-variant); }

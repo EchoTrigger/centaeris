@@ -1,7 +1,6 @@
 .sessionSubagentTags { display:flex; flex-wrap:wrap; align-items:flex-start; gap:8px; margin:4px 0; }
 .sessionSubagentTag { display:inline-flex; align-items:center; gap:7px; min-width:0; max-width:100%; padding:7px 10px; border:1px solid var(--outline-variant); border-radius:9px; background:transparent; color:var(--on-surface); cursor:pointer; font:inherit; text-align:left; }
-.sessionSubagentTag:hover { background:var(--surface-variant); }
-.sessionSubagentTag:focus-visible { outline:2px solid var(--primary-color); outline-offset:2px; }
+.sessionSubagentTag:focus-visible { outline:1px solid var(--outline); outline-offset:2px; }
 .sessionSubagentMark { width:15px; height:15px; flex:none; }
 .sessionSubagentRole { font-size:var(--chat-meta-size); font-weight:650; }
 .sessionSubagentTitle { min-width:0; overflow:hidden; color:var(--process-text); font-size:var(--chat-meta-size); text-overflow:ellipsis; white-space:nowrap; }

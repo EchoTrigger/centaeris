@@ -76,7 +76,12 @@ Web's settings and member-administration surfaces use these control roles:
 The page heading stays left aligned and entry actions share its header. Personal
 settings forms use a 720px maximum content column; member lists retain the wider
 Web content column. Narrow layouts reflow the existing content and actions.
-Keyboard focus uses the shared semantic focus color in both themes. Existing
+Web hover, current and selected states do not add a background fill. Use text
+weight, a check or the existing icon state to distinguish the current entry.
+Keyboard focus uses a thin neutral outline in both themes, without an accent
+glow. Catalogs in Plugins and Home use permanently visible bordered cards with
+gaps; Inbox uses the same treatment in a single column. Card collections do not
+also draw separators between adjacent entries. Existing
 dialog focus containment, opener restoration and busy dismissal rules remain
 owned by their current components.
 

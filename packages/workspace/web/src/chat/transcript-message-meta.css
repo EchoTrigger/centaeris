@@ -6,7 +6,7 @@
 .transcriptMessageMeta.isFailed { opacity: 1; pointer-events: auto; }
 .transcriptMessageMeta { flex-wrap: wrap; }
 .workspaceTranscriptUser > .transcriptMessageMeta { justify-content: flex-end; }
-.transcriptMessageMeta button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+.transcriptMessageMeta button:focus-visible { outline: 1px solid var(--outline); outline-offset: 2px; }
 .transcriptMessageMeta button[aria-disabled="true"] { cursor: progress; }
 .transcriptMessageCopyStatus { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .transcriptMessageCopyError { color: var(--danger); }

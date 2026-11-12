@@ -2,10 +2,9 @@
 .issuesSurface .workHeader { height:44px; min-height:44px; flex-wrap:nowrap; }
 .issuesSurface svg { width:14px; height:14px; stroke-width:1.8; }
 .issueFilters { display:flex; gap:8px; padding:8px 16px; }
-.issueFilters [aria-pressed=true] { font-weight:500; background:var(--surface-container); }
+.issueFilters [aria-pressed=true] { font-weight:500; }
 .issueList { padding:0 12px; }
 .issueRow { display:flex; align-items:center; gap:12px; min-height:42px; padding:10px 12px; border-radius:6px; }
-.issueRow:hover { background:var(--surface-hover); }
 .issueRow > span { flex:1; overflow-wrap:anywhere; }
 .issueRow small { color:var(--process-text); font-size:12px; }
 .issueEmpty { padding:32px 12px; color:var(--process-text); }

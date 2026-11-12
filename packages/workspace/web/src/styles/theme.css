@@ -1,4 +1,5 @@
 @import "@centaeris/ui/theme.css";
+@import "./interaction.css";
 :root {
   --control-height-compact: 32px;
   --control-height: 36px;
@@ -21,4 +22,4 @@
 .themeToggle button { border:0; background:transparent; color:var(--process-text); display:grid; place-items:center; width:28px; height:28px; border-radius:6px; cursor:pointer; }
 .themeToggle button:hover { color:var(--on-surface); }
 .themeToggle svg { width:16px; height:16px; }
-.themeToggle button:focus-visible { outline:2px solid var(--primary-color); outline-offset:2px; }
+.themeToggle button:focus-visible { outline:1px solid var(--outline); outline-offset:2px; }

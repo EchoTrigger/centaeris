@@ -1,0 +1,28 @@
+/* Web interaction states use text, checks and thin focus lines, never a fill. */
+:root [data-slot="button"] {
+  --web-control-fill: transparent;
+  background-color: var(--web-control-fill);
+}
+:root [data-slot="button"]:is([data-variant="default"], [data-variant="solid"], [data-variant="composerSend"]) {
+  --web-control-fill: var(--solid-surface);
+  color: var(--solid-text);
+}
+:root [data-slot="button"][data-variant="destructive"] {
+  --web-control-fill: var(--danger-button-fill);
+}
+:root :is([role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [data-slot="tabs-trigger"], [data-slot="select-trigger"]) {
+  background-color: transparent;
+}
+:root :is([role="option"][aria-selected="true"], [data-slot="tabs-trigger"][data-active], [data-highlighted]) {
+  font-weight: 500;
+}
+:root [data-slot="tabs-trigger"][data-active] { box-shadow: none; }
+:root .themeSelector select:hover { background-color: var(--surface-color); }
+:root :is(button, a, input, textarea, select, summary, [tabindex]):focus-visible {
+  outline: 1px solid var(--outline);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+:root :is([data-slot="input"], [data-slot="textarea"], [data-slot="select-trigger"]):focus-visible {
+  border-color: var(--outline);
+}
