@@ -73,11 +73,11 @@
 .conversationHistory .workspaceSessionRow { height:32px; contain-intrinsic-size:auto 32px; }
 
 .conversationTabItem { position:relative; display:flex; align-items:center; min-width:0; max-width:100%; border-radius:6px; box-shadow:none; }
-.conversationTabItem:is(:hover,:focus-within) { background:var(--workspace-selection); }
+.conversationTabItem:is(:hover,:has(:focus-visible)) { background:var(--workspace-selection); }
 .conversationDock .conversationTabItem :is(.conversationDockSession,.workConversationTab) { background:transparent; box-shadow:none; }
 .conversationDock .conversationTabClose { position:absolute; right:0; width:22px; min-width:22px; padding:0; background:transparent; opacity:0; pointer-events:none; color:var(--on-surface); }
-.conversationTabItem:is(:hover,:focus-within) .conversationTabClose { opacity:1; pointer-events:auto; }
-.conversationTabItem:is(:hover,:focus-within) :is(.conversationDockSession,.workConversationTab) > span { mask-image:linear-gradient(to right,black calc(100% - 36px),transparent calc(100% - 14px)); }
+.conversationTabItem:is(:hover,:has(:focus-visible)) .conversationTabClose { opacity:1; pointer-events:auto; }
+.conversationTabItem:is(:hover,:has(:focus-visible)) :is(.conversationDockSession,.workConversationTab) > span { mask-image:linear-gradient(to right,black calc(100% - 36px),transparent calc(100% - 14px)); }
 .conversationTabClose svg { width:12px; height:12px; }
 .workspaceWorkbench.isOverlayOnly { position:fixed; inset:0; z-index:51; background:transparent; pointer-events:none; }
 .workspaceWorkbench.isOverlayOnly::before { display:none; }

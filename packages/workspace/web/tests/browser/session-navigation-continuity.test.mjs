@@ -242,7 +242,12 @@ test('docked chat tabs preserve drafts, open one window and reserve space on set
       await click('.conversationTabItem:first-child [role=tab]');
       await waitFor(() => evaluate("Boolean(document.querySelector('.isChatFloating')) && Boolean(document.querySelector('.workspaceSettingsPage'))"), 'tab opens from settings');
       assert.equal(await evaluate('sessionNavigationFixture.pathname()'), '/w/workspace/settings/preferences');
-      await evaluate("document.activeElement?.blur()");
+      const tabPoint = await evaluate("(() => { const r = document.querySelector('[role=tab]').getBoundingClientRect(); return { x:r.x + r.width/2, y:r.y + r.height/2 }; })()");
+      for (let clickIndex = 0; clickIndex < 2; clickIndex++) {
+        await send('Input.dispatchMouseEvent', { type:'mousePressed', button:'left', clickCount:1, ...tabPoint });
+        await send('Input.dispatchMouseEvent', { type:'mouseReleased', button:'left', clickCount:1, ...tabPoint });
+        await frame();
+      }
       await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 10, y: 10 }); await frame();
       const tabStyle = () => evaluate(`(() => {
         const item = document.querySelector('.conversationTabItem');
