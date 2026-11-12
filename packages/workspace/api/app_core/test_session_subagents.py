@@ -5,6 +5,9 @@ from unittest.mock import patch
 from django.contrib.auth.models import User
 from django.test import TestCase
 from django.utils import timezone
+from jsonschema import Draft202012Validator
+
+from api.ninja_api import api
 
 from .models import Workspace
 from .testing import create_session
@@ -30,12 +33,25 @@ class SessionSubagentReadTests(TestCase):
             "agents": [self.agent],
         }
 
+    def _assert_response_contract(self, response, *, detail=False):
+        schema = api.get_openapi_schema()
+        path = "/api/sessions/{session_id}/subagents"
+        if detail:
+            path += "/{runtime_job_id}"
+        operation = schema["paths"][path]["get"]
+        responses = {str(code): value for code, value in operation["responses"].items()}
+        for status in ("200", "400", "401", "404", "503"):
+            self.assertIn("application/json", responses[status]["content"])
+        payload_schema = responses[str(response.status_code)]["content"]["application/json"]["schema"]
+        Draft202012Validator({**payload_schema, "components": schema["components"]}).validate(response.json())
+        self.assertEqual(response["Cache-Control"], "no-store")
+
     def test_history_list_is_scoped_by_parent_owner_and_workspace(self):
         with patch("app_core.session_subagents.request_json", return_value=self.list_receipt) as runtime:
             response = self.client.get(self.url)
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(response.json(), self.list_receipt)
-        self.assertEqual(response["Cache-Control"], "no-store")
+        self._assert_response_contract(response)
         self.assertEqual(runtime.call_args.args, ("/internal/sessions/subagents", {
             "schema": "runtime.session.subagents.read.v1", "sessionId": self.session.id,
             "workspaceId": self.workspace.id, "ownerId": self.owner.id,
@@ -44,7 +60,8 @@ class SessionSubagentReadTests(TestCase):
     def test_child_content_uses_job_identity_without_a_platform_child_session(self):
         message = {
             "messageId": "child-message", "role": "assistant", "content": "Read complete",
-            "createdAtMs": 2, "reasoningContent": None, "toolCalls": [],
+            "createdAtMs": 2, "reasoningContent": None,
+            "toolCalls": [{"id": "child-call", "name": "read_file", "argsJson": '{"path":"README.md"}'}],
             "toolCallId": None, "toolName": None, "resultState": None,
         }
         receipt = {"schema": "workspace.session.subagent.v1", "sessionId": self.session.id,
@@ -54,7 +71,7 @@ class SessionSubagentReadTests(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(response.json(), receipt)
         self.assertEqual(runtime.call_args.args[1]["runtimeJobId"], "subagent.run:child")
-        self.assertEqual(response["Cache-Control"], "no-store")
+        self._assert_response_contract(response, detail=True)
 
     def test_membership_revocation_and_other_owner_cannot_read_child_content(self):
         with patch("app_core.session_subagents.request_json") as runtime:
@@ -87,6 +104,7 @@ class SessionSubagentReadTests(TestCase):
                 response = self.client.get(self.url)
                 self.assertEqual(response.status_code, 503)
                 self.assertEqual(response.json(), {"error": "session_subagent_unavailable"})
+                self._assert_response_contract(response)
 
     def test_missing_job_and_runtime_timeout_are_not_successful_empty_results(self):
         for error, status in (
@@ -94,10 +112,13 @@ class SessionSubagentReadTests(TestCase):
             (TimeoutError("runtime timed out"), 503),
         ):
             with self.subTest(status=status), patch("app_core.session_subagents.request_json", side_effect=error):
-                self.assertEqual(self.client.get(self.url + "/subagent.run%3Achild").status_code, status)
+                response = self.client.get(self.url + "/subagent.run%3Achild")
+                self.assertEqual(response.status_code, status)
+                self._assert_response_contract(response, detail=True)
 
     def test_query_cannot_select_an_arbitrary_child(self):
         with patch("app_core.session_subagents.request_json") as runtime:
             response = self.client.get(self.url, {"childSessionId": "other-child"})
             self.assertEqual(response.status_code, 400)
+            self._assert_response_contract(response)
             runtime.assert_not_called()
