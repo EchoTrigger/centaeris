@@ -20,7 +20,7 @@ const rows = Array.from({ length: 48 }, (_, index) => ({ id: `session-${index}`,
   projectId: index < 4 ? 'project' : null, currentEnvironmentId: null, executionMode: null, title: `Conversation ${index}`,
   origin: 'user', status: 'active', deletedAt: null, isPinned: false, isUnread: false, hasActiveAgentRun: false,
   updatedAt: '2026-11-07T00:00:00Z', latestAttentionSequence: '0', readThroughSequence: '0', attentionRevision: '0', isManuallyUnread: false }));
-const requests: string[] = [], failures: string[] = [];
+const requests: string[] = [], failures: string[] = [], mutations: string[] = [];
 const streams = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
 const encoder = new TextEncoder();
 window.addEventListener('error', event => failures.push(event.message));
@@ -28,6 +28,7 @@ window.addEventListener('unhandledrejection', event => failures.push(String(even
 window.fetch = async (input, options) => {
   const url = new URL(String(input), location.href);
   requests.push(url.pathname);
+  if (options?.method && options.method !== "GET") mutations.push(options.method + " " + url.pathname);
   if (url.pathname.endsWith('/presentation/events')) {
     const id = url.searchParams.get('sessionId') ?? '';
     let closed = false;
@@ -65,7 +66,7 @@ const router = createMemoryRouter([{ id: 'authenticated', loader: () => ({ user 
   shouldRevalidate: () => true, Component: WorkspaceChatLayout,
   children: [{ path: 'work/*', element: <WorkPrototypeProvider><WorkPrototypeRoute /></WorkPrototypeProvider> }, { path: 'sessions/:sessionId', element: null }, { path: 'app', element: null },
     { path: 'library', element: <h1>Navigation library</h1> },
-    { path: 'settings/preferences', Component: SettingsRoute },
+    { path: 'settings/preferences', Component: SettingsRoute }, { path: 'reports', element: <main data-report-page><input aria-label="Report filter" defaultValue="Keep this filter" /></main> },
     { path: 'settings/archive', element: <RecentlyDeleted workspace={workspace} /> }],
 }] }], { initialEntries: ['/w/workspace/sessions/session-4'] });
 
@@ -86,11 +87,12 @@ function hydrate(id: string) {
     projectionGeneration: 'generation', ...reference, startOffset: '0', endOffset: reference.byteLength, content, hasMore: false } });
   send(id, 'checkpoint', { projectionGeneration: 'generation', sourceHighWater: '1', agentRun: null }, `checkpoint:${id}`);
 }
-Object.assign(window, { sessionNavigationFixture: { requests, failures, ready: () => streams.has('session-4'),
+Object.assign(window, { sessionNavigationFixture: { requests, failures, mutations, pathname: () => router.state.location.pathname, ready: () => streams.has('session-4'),
   connected: (id: string) => streams.has(id), hydrate, navigate: (id: string) => router.navigate(`/w/workspace/sessions/${id}`),
   trash: () => router.navigate('/w/workspace/settings/archive?view=deleted'),
   library: () => router.navigate('/w/workspace/library'),
   task: () => router.navigate('/w/workspace/work/tasks/CW-12'),
+  reports: () => router.navigate('/w/workspace/reports'),
   preferences: () => router.navigate('/w/workspace/settings/preferences'),
   back: () => router.navigate(-1),
   repeatNavigation: (id: string) => send(id, 'navigation', { snapshotId: `${id}-repeat`, offset: 0, hasMore: false, sessions: rows }),

@@ -138,7 +138,13 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
       <nav className="workRailViews" aria-label={t("work.favoritesAndViews")}>
         <p className="workRailHeading">{t("work.favorites")}</p>
         {favoriteProjects.map(project => <Link className="shRow" key={project.id} to={`${base}/work/projects/${project.id}`}><span className="workRailProjectIcon">{project.icon}</span><span>{displayWorkText(project.name, t)}</span></Link>)}
-        {favoriteSessions.map(session => <Link className="shRow" key={session.id} to={sessionChatPath(workspace.id, session.id)} aria-current={location.pathname === sessionChatPath(workspace.id, session.id) ? "page" : undefined} title={session.title}><span>{session.title || t("work.conversation.untitled")}</span></Link>)}
+        {favoriteSessions.map(session => <Link className="shRow" key={session.id} to={sessionChatPath(workspace.id, session.id)} aria-current={location.pathname === sessionChatPath(workspace.id, session.id) ? "page" : undefined} title={session.title}
+          onClick={event => {
+            if (sessionProps?.onOpenSession && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+              event.preventDefault();
+              sessionProps.onOpenSession(session);
+            }
+          }}><span>{session.title || t("work.conversation.untitled")}</span></Link>)}
         {!favoriteProjects.length && !favoriteSessions.length ? <p className="workRailEmpty">{t("work.favoriteHint")}</p> : null}
         <p className="workRailHeading">{t("work.views")}</p>
         <Link className="shRow" to={`${base}/work?tab=attention`} aria-current={location.pathname === `${base}/work` && location.search.includes("tab=attention") ? "page" : undefined}><ListTodo aria-hidden="true" /><span>{t("work.needsAttention")}</span><span className="workRailCount">{work?.tasks.filter(task => task.owner === "me" && task.attention && !["done", "cancelled"].includes(task.status)).length || 0}</span></Link>

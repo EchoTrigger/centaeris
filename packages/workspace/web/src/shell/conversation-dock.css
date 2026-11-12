@@ -72,3 +72,14 @@
 .workspaceWorkbench.isChatFloating:has(.workspaceConversationPlane.isEmpty) { --conversation-float-height:min(180px, calc(100dvh - 140px)); }
 .workspaceWorkbench.isChatFloating .shHome { display:none; }
 .conversationHistory .workspaceSessionRow { height:32px; contain-intrinsic-size:auto 32px; }
+
+.conversationTabItem { display:flex; align-items:center; min-width:0; max-width:220px; border-radius:6px; }
+.conversationTabItem[data-selected],.conversationTabItem:hover { background:var(--workspace-selection); }
+.conversationDock .conversationTabItem .conversationDockSession { padding-right:4px; background:transparent; }
+.conversationDock .conversationTabClose { width:22px; min-width:22px; padding:0; }
+.conversationTabClose svg { width:12px; height:12px; }
+.workspaceWorkbench.isOverlayOnly { position:fixed; inset:0; z-index:51; background:transparent; pointer-events:none; }
+.workspaceWorkbench.isOverlayOnly::before { display:none; }
+.workspaceWorkbench.isOverlayOnly > :is(.workspaceTopbar,.workspaceChatColumn,.workspaceContextPanel) { pointer-events:auto; }
+
+.conversationDock > .conversationTabItem { order:-1; }

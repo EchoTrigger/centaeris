@@ -1316,6 +1316,8 @@
   "work.conversation.untitled": "New chat",
   "work.conversation.minimize": "Minimize chat",
   "work.conversation.expand": "Expand chat",
+  "work.conversation.close": "Close chat",
+  "work.conversation.closeTab": "Close {{title}} tab",
   "work.conversation.dock": "Move to toolbar",
   "work.conversation.recent": "Recent chats",
   "work.conversation.continue": "Continue chat",

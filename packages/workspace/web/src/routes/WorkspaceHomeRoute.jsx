@@ -15,11 +15,15 @@ export default function WorkspaceChatLayout() {
   const navigate = useNavigate();
   const [notice, setNotice] = useState("");
   const [floating, setFloating] = useState(false);
+  const [dockedSessionIds, setDockedSessionIds] = useState([]);
+  const keepChatTab = useCallback(id => setDockedSessionIds(ids => ids.includes(id) ? ids : [...ids, id]), []);
+  const replaceDraftTab = useCallback(id => setDockedSessionIds(ids => [...new Set(ids.map(value => value === "draft" ? id : value))]), []);
   const lastCatalog = useRef("");
   const pendingFloatingSession = useRef(undefined);
   const base = `/w/${encodeURIComponent(workspace.id)}`;
   const isChatRoute = Boolean(matchPath(`${base}/app`, location.pathname) || matchPath(`${base}/sessions/:sessionId`, location.pathname));
   const isCatalogRoute = isWorkspaceCatalogPath(base, location.pathname);
+  const overlayOnly = !isChatRoute && !isCatalogRoute;
   if (isCatalogRoute) lastCatalog.current = location.pathname + location.search;
   const [chatLocation, setChatLocation] = useState(() => isChatRoute ? location : null);
   const [chatSession, setChatSession] = useState(() => isChatRoute ? selectedSession : null);
@@ -38,6 +42,11 @@ export default function WorkspaceChatLayout() {
     setChatLocation({ pathname: session?.id ? `${base}/sessions/${encodeURIComponent(session.id)}` : `${base}/app`, search: "", state: null });
   }
   const sessionRoute = Boolean(chatLocation && matchPath(`${base}/sessions/:sessionId`, chatLocation.pathname));
+
+  function closeChatTab(id) {
+    setDockedSessionIds(ids => ids.filter(value => value !== id));
+    if (id === (chatSession?.id || "draft")) setFloating(false);
+  }
 
   function acceptSession(path, session) {
     const currentLocation = locationRef.current;
@@ -70,22 +79,27 @@ export default function WorkspaceChatLayout() {
   }, [notice]);
 
   return <div className="workspaceChatLayout">
-    {chatLocation || isCatalogRoute ? <div hidden={!isChatRoute && !isCatalogRoute}>
+    {chatLocation || isCatalogRoute ? <div hidden={overlayOnly && !floating}>
       <AppPageContent
         dockContainer={dockContainer}
+        dockedSessionIds={dockedSessionIds}
+        onKeepChatTab={keepChatTab}
+        onCloseChatTab={closeChatTab}
+        onReplaceDraftTab={replaceDraftTab}
+        overlayOnly={overlayOnly}
         initialSession={chatSession}
         workspaceDraft={!sessionRoute}
-        visible={isChatRoute || (isCatalogRoute && floating)}
-        chatFloating={isCatalogRoute && floating}
+        visible={isChatRoute || floating}
+        chatFloating={!isChatRoute && floating}
         onShowChat={() => {
           if (isChatRoute) return;
           setFloating(true);
         }}
         onMinimizeChat={() => setFloating(false)}
         onDockChat={() => { setFloating(true); navigate(lastCatalog.current || `${base}/work`); }}
-        onExpandChat={() => { setFloating(false); navigate(chatLocation ? chatLocation.pathname + chatLocation.search : `${base}/app`); }}
+        onExpandChat={() => { closeChatTab(chatSession?.id || "draft"); setFloating(false); navigate(chatLocation ? chatLocation.pathname + chatLocation.search : `${base}/app`); }}
         onOpenFloatingSession={session => {
-          if (isCatalogRoute) {
+          if (!isChatRoute) {
             setChatSession(session);
             setChatLocation({ pathname: session?.id ? `${base}/sessions/${encodeURIComponent(session.id)}` : `${base}/app`, search: "", state: null });
           } else {

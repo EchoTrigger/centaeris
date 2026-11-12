@@ -116,7 +116,7 @@ function upsertBy(items, key, value) {
   return items.map((item, itemIndex) => (itemIndex === index ? value : item));
 }
 
-export function AppPageContent({ initialSession = null, dockContainer = null, workspaceDraft, visible = true, location, navigationKey = location.key, catalogContent = null, chatFloating = false, onShowChat, onMinimizeChat, onExpandChat, onDockChat, onOpenFloatingSession, modelsVersion, onSessionAccepted }) {
+export function AppPageContent({ initialSession = null, dockContainer = null, dockedSessionIds = [], onKeepChatTab, onCloseChatTab, onReplaceDraftTab, overlayOnly = false, workspaceDraft, visible = true, location, navigationKey = location.key, catalogContent = null, chatFloating = false, onShowChat, onMinimizeChat, onExpandChat, onDockChat, onOpenFloatingSession, modelsVersion, onSessionAccepted }) {
   const { t } = useTranslation();
   const { user } = useRouteLoaderData("authenticated");
   const { workspace } = useRouteLoaderData("workspace");
@@ -225,7 +225,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, wo
   const [conversationError, setConversationError] = useState("");
   const [navigationError, setNavigationError] = useState(false);
   const chatPanelId = useId();
-  const [dockedSessionIds, setDockedSessionIds] = useState([]);
+  const browsing = Boolean(catalogContent) || overlayOnly;
   const [navigationLoaded, setNavigationLoaded] = useState(false);
   const [olderHistoryError, setOlderHistoryError] = useState(false);
   const [streamIssue, setStreamIssue] = useState(null);
@@ -398,8 +398,8 @@ export function AppPageContent({ initialSession = null, dockContainer = null, wo
   );
   const activeSession = sessions.find((candidate) => candidate.id === sessionId);
   useEffect(() => {
-    if (workspaceDraft && sessionId) setDockedSessionIds(ids => ids.map(id => id === "draft" ? sessionId : id).filter((id, index, all) => all.indexOf(id) === index));
-  }, [workspaceDraft, sessionId]);
+    if (workspaceDraft && sessionId) onReplaceDraftTab?.(sessionId);
+  }, [workspaceDraft, sessionId, onReplaceDraftTab]);
 
   const acceptModels = useCallback((nextModels) => {
     const previousModels = modelsRef.current;
@@ -842,7 +842,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, wo
     setOpenSessionMenuId("");
     clearContextPanel();
     const path = `${workspaceBase}/app${projectId ? `?${new URLSearchParams({ projectId })}` : ""}`;
-    if (catalogContent && chatFloating) onSessionAccepted(path, null);
+    if (browsing && chatFloating) onSessionAccepted(path, null);
     else navigate(path);
   }
 
@@ -877,7 +877,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, wo
       setDraft("");
       setLoadingHistory(true);
       const next = remainingSessions[0];
-      if (catalogContent && chatFloating) onSessionAccepted(next ? sessionChatPath(workspace.id, next.id) : `${workspaceBase}/app`, next || null);
+      if (browsing && chatFloating) onSessionAccepted(next ? sessionChatPath(workspace.id, next.id) : `${workspaceBase}/app`, next || null);
       else if (visible) navigate(next ? sessionChatPath(workspace.id, next.id) : `${workspaceBase}/app`);
       else setSessionId("");
       if (!visible || !next) setLoadingHistory(false);
@@ -1470,8 +1470,9 @@ export function AppPageContent({ initialSession = null, dockContainer = null, wo
   const runControlUnknown = currentRunIdentityRef.current === undefined;
   const renderSessionRow = useCallback((session, options = {}) => <SessionNavigationRow key={session.id} workspaceId={workspace.id} session={session} actions={rowActions} active={session.id === sessionId} running={session.id === sessionId ? hasActiveAgentRun || runControlUnknown && session.hasActiveAgentRun : session.hasActiveAgentRun} onSelect={selectNavigationSession} {...options} />,
     [workspace.id, rowActions, sessionId, hasActiveAgentRun, runControlUnknown, selectNavigationSession]);
-  const sidebarSessions = useMemo(() => ({ sessions, projects, groupedSessions, renderSessionRow, onCreateProject: createNavigationProject, ready: navigationLoaded }),
-    [sessions, projects, groupedSessions, renderSessionRow, createNavigationProject, navigationLoaded]);
+  const openSidebarSession = useLatestCallback(openHistorySession);
+  const sidebarSessions = useMemo(() => ({ sessions, projects, groupedSessions, renderSessionRow, onOpenSession: openSidebarSession, onCreateProject: createNavigationProject, ready: navigationLoaded }),
+    [sessions, projects, groupedSessions, renderSessionRow, openSidebarSession, createNavigationProject, navigationLoaded]);
   const recentNavigation = useMemo(() => navigationError ? { error: true } : undefined, [navigationError]);
 
   async function answerQuestion(question, answer) {
@@ -1493,7 +1494,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, wo
   const dockedSessions = dockedSessionIds.flatMap(id => id === "draft" ? [{ id: "draft", title: t("work.conversation.untitled") }] : sessions.filter(session => session.id === id));
   function keepChatTab() {
     const id = activeSession?.id || "draft";
-    setDockedSessionIds(ids => ids.includes(id) ? ids : [...ids, id]);
+    onKeepChatTab(id);
   }
   function openDockedSession(target) {
     selectSession(target.id === "draft" ? null : target);
@@ -1501,7 +1502,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, wo
   }
   function openHistorySession(target) {
     selectSession(target);
-    if (catalogContent) onOpenFloatingSession(target);
+    if (browsing) onOpenFloatingSession(target);
     else navigate(sessionChatPath(workspace.id, target.id));
   }
   const historyProps = { workspaceId: workspace.id, currentSessionId: activeSession?.id, sessionProps: sidebarSessions, recentNavigation: navigationError ? { error: true } : { loading: !navigationLoaded }, onStartNewChat: startNavigationChat, onOpenSession: openHistorySession };
@@ -1510,10 +1511,10 @@ export function AppPageContent({ initialSession = null, dockContainer = null, wo
   return (
     <main
       ref={workbenchRef}
-      className={`workspaceWorkbench${chatFloating ? " isChatFloating" : ""} ${isSidebarOpen ? "withSidebar" : "withoutSidebar"}${catalogContent ? " isBrowsing" : ""}${search.open ? " isSearching" : ""}`}
+      className={`workspaceWorkbench${chatFloating ? " isChatFloating" : ""} ${isSidebarOpen ? "withSidebar" : "withoutSidebar"}${browsing ? " isBrowsing" : ""}${overlayOnly ? " isOverlayOnly" : ""}${search.open ? " isSearching" : ""}`}
       style={{ "--workspace-sidebar-progress": initialSidebarProgress, "--browser-panel-width": browserPanelWidthPx == null ? undefined : `${browserPanelWidthPx}px` }}
     >
-      {!compactLayout ? <button
+      {!compactLayout && !overlayOnly ? <button
         className="workspaceSidebarToggle shAvatarToggle"
         type="button"
         onClick={() => setWorkbenchSidebar(!isSidebarOpen)}
@@ -1523,7 +1524,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, wo
         disabled={search.open}
       ><PanelLeft aria-hidden="true" /></button> : null}
 
-      <SidebarContainer className={compactLayout ? "workspaceDrawer" : "workspaceSidebarSlot"} ref={sidebarRef}
+      {!overlayOnly ? <SidebarContainer className={compactLayout ? "workspaceDrawer" : "workspaceSidebarSlot"} ref={sidebarRef}
         inert={!compactLayout && !isSidebarOpen}
         aria-label={compactLayout ? t("shellSidebar.conversationNavigation") : undefined}
         onCancel={compactLayout ? () => setDrawerFor(null) : undefined}
@@ -1538,11 +1539,11 @@ export function AppPageContent({ initialSession = null, dockContainer = null, wo
           recentNavigation={recentNavigation}
           sessionProps={sidebarSessions}
         />
-      </SidebarContainer>
+      </SidebarContainer> : null}
 
       <header className="workspaceTopbar" inert={search.open}>
         <div className="workspaceTopbarStart">
-          {compactLayout ? <button
+          {compactLayout && !overlayOnly ? <button
             className="workspacePanelToggle"
             type="button"
             onClick={() => setDrawerFor(navigationKey)}
@@ -1552,19 +1553,19 @@ export function AppPageContent({ initialSession = null, dockContainer = null, wo
           >
             <PanelLeft aria-hidden="true" />
           </button> : null}
-          {!catalogContent || chatFloating ? activeSession ? <ChatTitle key={activeSession.id} session={activeSession} actions={sessionActions} running={hasActiveAgentRun} titleControl={chatTitleControl} /> : chatTitleControl : null}
-          {compactLayout ? <button className="workspacePanelToggle" ref={search.triggerRef} type="button" onClick={search.toggle}
+          {!browsing || chatFloating ? activeSession ? <ChatTitle key={activeSession.id} session={activeSession} actions={sessionActions} running={hasActiveAgentRun} titleControl={chatTitleControl} /> : chatTitleControl : null}
+          {compactLayout && !overlayOnly ? <button className="workspacePanelToggle" ref={search.triggerRef} type="button" onClick={search.toggle}
             aria-label={t("searchOverlay.searchConversationsAndNotes")} title={t("shellSidebar.searchCtrlK")}><Search aria-hidden="true" /></button> : null}
         </div>
         <div className="conversationWindowActions">
-          {chatFloating ? <><button className="workspacePanelToggle" aria-label={t("work.conversation.minimize")} onClick={() => { keepChatTab(); onMinimizeChat(); }}><Minus /></button><button className="workspacePanelToggle" aria-label={t("work.conversation.expand")} onClick={() => { setDockedSessionIds(ids => ids.filter(id => id !== (activeSession?.id || "draft"))); onExpandChat(); }}><Maximize2 /></button></> : !catalogContent ? <button className="workspacePanelToggle" aria-label={t("work.conversation.dock")} onClick={() => { keepChatTab(); onDockChat(); }}><Minimize2 /></button> : null}
+          {chatFloating ? <><button className="workspacePanelToggle" aria-label={t("work.conversation.minimize")} onClick={() => { keepChatTab(); onMinimizeChat(); }}><Minus /></button><button className="workspacePanelToggle" aria-label={t("work.conversation.expand")} onClick={onExpandChat}><Maximize2 /></button><button className="workspacePanelToggle" aria-label={t("work.conversation.close")} onClick={() => onCloseChatTab(activeSession?.id || "draft")}><X /></button></> : !browsing ? <button className="workspacePanelToggle" aria-label={t("work.conversation.dock")} onClick={() => { keepChatTab(); onDockChat(); }}><Minimize2 /></button> : null}
         </div>
         {visible && contextPanel.mode !== "closed" ? <WorkspacePreviewToggle
           ref={previewToggleRef} panelId={previewPanelId} open={filePreviewOpen} onToggle={toggleFilePreview}
         /> : null}
       </header>
 
-      <section className="workspaceChatColumn" id={chatPanelId} role={dockedSessions.length ? "tabpanel" : undefined} aria-label={dockedSessions.length ? activeSession?.title || t("work.conversation.untitled") : undefined} inert={search.open || Boolean(catalogContent && !chatFloating)}>
+      <section className="workspaceChatColumn" id={chatPanelId} role={dockedSessions.length ? "tabpanel" : undefined} aria-label={dockedSessions.length ? activeSession?.title || t("work.conversation.untitled") : undefined} inert={search.open || Boolean(browsing && !chatFloating)}>
         <div className={`workspaceConversationPlane ${isHome ? "isEmpty" : ""}`}>
           {searchEventId && focusedTranscript.error ? <div className="workspaceToolOutputStatus" role="alert">
             <span>{t("searchOverlay.targetUnavailable")}</span>
@@ -1654,7 +1655,7 @@ export function AppPageContent({ initialSession = null, dockContainer = null, wo
       {catalogContent ? <section className="workspaceCatalog" inert={search.open}>
         <ConversationDockContext.Provider value={{ container: dockContainer, chatFloating, minimizeChat: () => { if (chatFloating) keepChatTab(); onMinimizeChat(); } }}>{catalogContent}</ConversationDockContext.Provider>
       </section> : null}
-      {dockContainer ? createPortal(<ConversationTabs panelId={chatPanelId} sessions={dockedSessions} activeId={activeSession?.id || "draft"} expanded={chatFloating && !search.open} onSelect={openDockedSession} onMinimize={onMinimizeChat} />, dockContainer) : null}
+      {dockContainer ? createPortal(<ConversationTabs panelId={chatPanelId} sessions={dockedSessions} activeId={activeSession?.id || "draft"} expanded={chatFloating && !search.open} onSelect={openDockedSession} onMinimize={onMinimizeChat} onClose={onCloseChatTab} />, dockContainer) : null}
       {search.open ? <WorkspaceSearch workspaceId={workspace.id} onClose={search.close} inputRef={search.inputRef} /> : null}
       {visible ? <WorkspaceContextPanel
         id={previewPanelId}

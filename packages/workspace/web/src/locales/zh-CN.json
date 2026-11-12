@@ -1316,6 +1316,8 @@
   "work.conversation.untitled": "新会话",
   "work.conversation.minimize": "最小化会话",
   "work.conversation.expand": "展开会话",
+  "work.conversation.close": "关闭会话窗口",
+  "work.conversation.closeTab": "关闭 {{title}} 标签",
   "work.conversation.dock": "收起到工具栏",
   "work.conversation.recent": "最近会话",
   "work.conversation.continue": "继续会话",

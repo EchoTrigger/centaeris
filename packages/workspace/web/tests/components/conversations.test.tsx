@@ -56,11 +56,11 @@ test("only the previous calendar week has a heading; recent and older chats stay
 
 
 test("chat tabs select one window, minimize in place, and support keyboard selection", async () => {
-  const sessions = [{ id: "first", title: "First chat" }, { id: "second", title: "Second chat" }];
   function Fixture() {
+    const [sessions, setSessions] = useState([{ id: "first", title: "First chat" }, { id: "second", title: "Second chat" }]);
     const [activeId, setActiveId] = useState("first");
     const [expanded, setExpanded] = useState(false);
-    return <><ConversationTabs sessions={sessions} activeId={activeId} expanded={expanded} panelId="chat-window" onSelect={session => { setActiveId(session.id); setExpanded(true); }} onMinimize={() => setExpanded(false)} />
+    return <><ConversationTabs sessions={sessions} activeId={activeId} expanded={expanded} panelId="chat-window" onSelect={session => { setActiveId(session.id); setExpanded(true); }} onMinimize={() => setExpanded(false)} onClose={id => { setSessions(items => items.filter(item => item.id !== id)); if (id === activeId) setExpanded(false); }} />
       {expanded ? <section id="chat-window" role="tabpanel">{activeId}</section> : null}</>;
   }
   render(<Fixture />); const user = userEvent.setup();
@@ -75,4 +75,10 @@ test("chat tabs select one window, minimize in place, and support keyboard selec
   screen.getByRole("tab", { name: "First chat" }).focus();
   await user.keyboard("{ArrowRight}{Enter}");
   expect(screen.getByRole("tabpanel").textContent).toBe("second");
+  await user.click(screen.getByRole("button", { name: "关闭 First chat 标签" }));
+  expect(screen.getByRole("tabpanel").textContent).toBe("second");
+  expect(screen.getAllByRole("tab")).toHaveLength(1);
+  await user.click(screen.getByRole("button", { name: "关闭 Second chat 标签" }));
+  expect(screen.queryByRole("tabpanel")).toBeNull();
+  expect(screen.queryByRole("tablist")).toBeNull();
 });

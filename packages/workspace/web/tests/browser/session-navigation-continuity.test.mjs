@@ -224,31 +224,53 @@ test('docked chat tabs preserve drafts, open one window and reserve space on set
       await waitFor(() => evaluate("Array.from(document.querySelectorAll('button')).some(button => button.textContent.trim() === 'Continue')"), 'sample task');
       await evaluate("Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'Continue').click()");
       await waitFor(() => evaluate("Boolean(document.querySelector('.workFloatingConversation')) && !document.querySelector('.isChatFloating')"), 'sample takes the window');
-      await click('[role=tab]:first-child'); await frame();
+      await click('.conversationTabItem:first-child [role=tab]'); await frame();
       assert.equal(await evaluate("document.querySelectorAll('.workFloatingConversation').length"), 0);
       await waitFor(() => evaluate("document.querySelector('#messageDraft').value === 'Draft for chat four'"), 'first draft restored');
       assert.equal(await evaluate("document.querySelectorAll('.isChatFloating .workspaceChatColumn').length"), 1);
-      await click('[role=tab]:last-child'); await frame();
+      await click('.conversationTabItem:last-child [role=tab]'); await frame();
       await waitFor(() => evaluate("document.querySelector('#messageDraft').value === 'Draft for chat five'"), 'second draft restored');
-      if (process.env.NAVIGATION_SCREENSHOT_PATH) {
-        const shot = await send('Page.captureScreenshot', { format: 'png' });
-        await writeFile(process.env.NAVIGATION_SCREENSHOT_PATH, Buffer.from(shot.data, 'base64'));
-      }
       await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false }); await frame();
       assert(await evaluate("(() => { const r = document.querySelector('.conversationDock').getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth; })()"));
       await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }); await frame();
-      await click('[role=tab]:last-child');
+      await click('.conversationTabItem:last-child [role=tab]');
       await waitFor(() => evaluate("!document.querySelector('.isChatFloating')"), 'minimized window');
       assert.equal(await evaluate("document.querySelectorAll('[role=tab]').length"), 2);
       await evaluate('sessionNavigationFixture.preferences()');
       await waitFor(() => evaluate("Boolean(document.querySelector('.workspaceSettingsContent'))"), 'settings');
       assert.equal(await padding('.workspaceSettingsPage'), dockPadding);
-      await click('[role=tab]:first-child');
-      await waitFor(() => evaluate("Boolean(document.querySelector('.isChatFloating')) && !document.querySelector('.workspaceSettingsPage')"), 'tab opens from settings');
-      await click('[aria-label="Expand chat"]');
-      await waitFor(() => evaluate("document.querySelectorAll('[role=tab]').length === 1"), 'expanded tab removed');
-      await click('[role=tab]');
-      await waitFor(() => evaluate("document.querySelector('[role=tab][aria-selected=true]')?.textContent === 'Conversation 5'"), 'last minimized chat selected');
+      await click('.conversationTabItem:first-child [role=tab]');
+      await waitFor(() => evaluate("Boolean(document.querySelector('.isChatFloating')) && Boolean(document.querySelector('.workspaceSettingsPage'))"), 'tab opens from settings');
+      assert.equal(await evaluate('sessionNavigationFixture.pathname()'), '/w/workspace/settings/preferences');
+      if (process.env.NAVIGATION_SCREENSHOT_PATH) {
+        const shot = await send('Page.captureScreenshot', { format: 'png' });
+        await writeFile(process.env.NAVIGATION_SCREENSHOT_PATH, Buffer.from(shot.data, 'base64'));
+      }
+
+      await evaluate('sessionNavigationFixture.reports()');
+      await waitFor(() => evaluate("Boolean(document.querySelector('[data-report-page]'))"), 'another standalone page');
+      await click('.conversationTabItem:last-child [role=tab]');
+      await waitFor(() => evaluate("document.querySelector('#messageDraft').value === 'Draft for chat five'"), 'chat on another page');
+      assert.equal(await evaluate('sessionNavigationFixture.pathname()'), '/w/workspace/reports');
+      assert.equal(await evaluate("document.querySelector('[aria-label=\"Report filter\"]').value"), 'Keep this filter');
+      await evaluate('sessionNavigationFixture.preferences()');
+      await waitFor(() => evaluate("Boolean(document.querySelector('.workspaceSettingsContent'))"), 'back to settings');
+      await click('.conversationTabItem:first-child [role=tab]');
+      await waitFor(() => evaluate("document.querySelector('[role=tab][aria-selected=true]')?.textContent === 'Conversation 4'"), 'first chat selected');
+      await click('[aria-label="Close Conversation 5 tab"]');
+      await waitFor(() => evaluate("document.querySelectorAll('[role=tab]').length === 1"), 'inactive tab closed');
+      assert(await evaluate("Boolean(document.querySelector('.isChatFloating'))"));
+      await click('[aria-label="Close chat"]');
+      await waitFor(() => evaluate("!document.querySelector('[role=tab]') && !document.querySelector('.isChatFloating')"), 'active window closed');
+      assert.equal(await evaluate('sessionNavigationFixture.pathname()'), '/w/workspace/settings/preferences');
+      assert.equal(await padding('.workspaceSettingsPage'), originalPadding);
+      assert.deepEqual(await evaluate('sessionNavigationFixture.mutations'), []);
+      // Closing tabs preserves the original chats; reopen one through its existing route.
+      await evaluate("sessionNavigationFixture.navigate('session-5')");
+      await waitFor(() => evaluate("document.querySelector('.conversationSwitcher')?.textContent.includes('Conversation 5')"), 'closed chat still available');
+      await click('[aria-label="Move to toolbar"]');
+      await waitFor(() => evaluate("document.querySelector('[role=tab][aria-selected=true]')?.textContent === 'Conversation 5'"), 'reopened chat');
+
       await click('[aria-label="Expand chat"]');
       await waitFor(() => evaluate("!document.querySelector('[role=tab]')"), 'all expanded');
       assert.equal(await padding('.workspaceWorkbench'), originalPadding);
