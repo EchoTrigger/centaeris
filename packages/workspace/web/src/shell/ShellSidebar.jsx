@@ -8,7 +8,7 @@ import {
   ChevronRight,
   Blocks,
   Box,
-  PanelsTopLeft,
+  LibraryBig,
   PanelLeft,
   Search,
   SquarePen,
@@ -145,7 +145,7 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
           <Link className="shRow" to={`${base}/work/inbox`} aria-current={location.pathname === `${base}/work/inbox` ? "page" : undefined}><Inbox aria-hidden="true" /><span>{t("work.inbox")}</span></Link>
           <Link className="shRow" to={`${base}/work`} aria-current={location.pathname === `${base}/work` ? "page" : undefined}><Focus aria-hidden="true" /><span>{t("work.myIssues")}</span></Link>
           <Link className="shRow" to={`${base}/work/reviews`} aria-current={location.pathname === `${base}/work/reviews` ? "page" : undefined}><GitPullRequest aria-hidden="true" /><span>{t("work.reviews")}</span></Link>
-          <Link className="shRow" to={base + "/library"} aria-current={inLibrary ? "page" : undefined}><PanelsTopLeft aria-hidden="true" /><span>{t("libraryObjectRoute.library")}</span></Link>
+          <Link className="shRow" to={base + "/library"} aria-current={inLibrary ? "page" : undefined}><LibraryBig aria-hidden="true" /><span>{t("libraryObjectRoute.library")}</span></Link>
           <Link className="shRow" to={base + "/extensions"} aria-current={inExtensions ? "page" : undefined}><Blocks aria-hidden="true" /><span>{t("extensions.title")}</span></Link>
           <Link className="shRow" to={`${base}/app`} aria-current={isHome || location.pathname.startsWith(`${base}/sessions/`) ? "page" : undefined}><MousePointer2 aria-hidden="true" /><span>Agent</span></Link>
         </div>
