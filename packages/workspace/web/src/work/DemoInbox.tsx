@@ -6,10 +6,10 @@ import { Inbox, type InboxItem, type InboxView } from "./Inbox";
 type Receipt = { readAt: string | null; archivedAt: string | null };
 type DemoState = { startedAt: number; receipts: Record<string, Receipt> };
 const examples = [
-  { id: "review", actor: "Agent", title: "work.example.review.title", age: 12 * 60_000, target: "tasks/CW-12", label: "CW-12" },
-  { id: "permissions", actor: "Agent", title: "work.example.permissions.title", age: 2 * 3_600_000, target: "tasks/CW-11", label: "CW-11" },
-  { id: "assignment", actor: "Chen Yue", title: "work.example.releaseNotes.title", age: 6 * 3_600_000, target: "tasks/CW-9", label: "CW-9" },
-  { id: "sources", actor: "Agent", title: "work.example.sources.title", age: 26 * 3_600_000, target: "tasks/CW-7", label: "CW-7" },
+  { id: "review", actor: "Agent", title: "work.example.review.title", age: 12 * 60_000 },
+  { id: "permissions", actor: "Agent", title: "work.example.permissions.title", age: 2 * 3_600_000 },
+  { id: "assignment", actor: "Chen Yue", title: "work.example.releaseNotes.title", age: 6 * 3_600_000 },
+  { id: "sources", actor: "Agent", title: "work.example.sources.title", age: 26 * 3_600_000 },
 ];
 function readState(key: string): DemoState {
   try {
@@ -43,7 +43,7 @@ export function DemoInbox({ userId, workspaceId }: { userId: string; workspaceId
     id: item.id, actor: item.actor, title: t(item.title), summary: t(`inbox.demo.${item.id}.summary`), body: t(`inbox.demo.${item.id}.body`),
     occurredAt: new Date(state.startedAt - item.age).toISOString(),
     ...(state.receipts[item.id] ?? { readAt: null, archivedAt: null }),
-    target: { label: item.label, href: `/w/${encodeURIComponent(workspaceId)}/work/${item.target}` },
+    target: null,
   }));
   function change(id: string, values: Partial<Receipt>) {
     setState(current => ({ ...current, receipts: { ...current.receipts, [id]: { ...(current.receipts[id] ?? { readAt: null, archivedAt: null }), ...values } } }));

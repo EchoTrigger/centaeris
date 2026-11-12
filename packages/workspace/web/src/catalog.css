@@ -141,3 +141,7 @@
 @media(max-width:760px) {
   .catalogDetailView { margin-top:0; }
 }
+
+.libraryCreateMenu { min-width:184px; font-size:14px; }
+.libraryCreateMenu .workMenuItem { min-height:30px; gap:8px; }
+.libraryCreateMenu .workMenuItem svg { width:14px; height:14px; stroke-width:1.8; }

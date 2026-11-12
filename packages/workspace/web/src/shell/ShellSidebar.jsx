@@ -20,7 +20,6 @@ import {
   Layers2,
   MousePointer2,
 } from "lucide-react";
-import { displayWorkText, exampleProjects, useWorkPrototype } from "../work/workPrototype";
 import { apiResponse, clearCsrfToken } from "../api";
 import { WorkspaceAvatar } from "../components/WorkspaceAvatar";
 import { useCollapsedNavigation, useWorkspaceNavigation } from "./workspaceNavigationState";
@@ -87,7 +86,6 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
   const teamsOpen = !collapsed.includes("teams");
   const reducedMotion = useReducedMotion();
   const favoritesTransition = { duration: reducedMotion ? 0 : 0.2, ease: [0.16, 1, 0.3, 1] };
-  const work = useWorkPrototype();
   const { t } = useTranslation();
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [logoutError, setLogoutError] = useState("");
@@ -100,7 +98,6 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
   const inLibrary = location.pathname === `${base}/library` || location.pathname.startsWith(`${base}/library/`);
 
   const favoriteSessions = (sessionProps?.sessions || []).filter(session => session.isPinned);
-  const favoriteProjects = exampleProjects.filter(project => work?.favorites.includes(project.id));
 
   const inExtensions = location.pathname === base + "/extensions";
 
@@ -150,10 +147,9 @@ export const ShellSidebar = memo(function ShellSidebar({ workspace, onStartNewCh
           <Link className="shRow" to={`${base}/app`} aria-current={isHome || location.pathname.startsWith(`${base}/sessions/`) ? "page" : undefined}><MousePointer2 aria-hidden="true" /><span>Agent</span></Link>
         </div>
         <AnimatePresence initial={false}>
-        {favoriteProjects.length || favoriteSessions.length ? <motion.section key="favorites" className="workRailViews shFavorites"
+        {favoriteSessions.length ? <motion.section key="favorites" className="workRailViews shFavorites"
           initial={{ height: 0, opacity: 0, marginTop: 0 }} animate={{ height: "auto", opacity: 1, marginTop: 18 }} exit={{ height: 0, opacity: 0, marginTop: 0 }} transition={favoritesTransition}>
           <SidebarGroup label={t("work.favorites")} open={favoritesOpen} onToggle={() => navigation.setCollapsed("favorites", favoritesOpen)} transition={favoritesTransition}>
-            {favoriteProjects.map(project => <Link className="shRow" key={project.id} to={`${base}/work/projects/${project.id}`}><span className="workRailProjectIcon">{project.icon}</span><span>{displayWorkText(project.name, t)}</span></Link>)}
             {favoriteSessions.map(session => <Link className="shRow" key={session.id} to={sessionChatPath(workspace.id, session.id)} aria-current={location.pathname === sessionChatPath(workspace.id, session.id) ? "page" : undefined} title={session.title}
               onClick={event => {
                 if (sessionProps?.onOpenSession && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {

@@ -6,7 +6,6 @@ import { i18n } from '../../src/i18n';
 import WorkspaceChatLayout from '../../src/routes/WorkspaceHomeRoute';
 import { RecentlyDeleted } from '../../src/routes/RecentlyDeleted';
 import WorkPrototypeRoute from '../../src/work/WorkPrototypeRoute';
-import { WorkPrototypeProvider } from '../../src/work/workPrototype';
 import SettingsRoute from '../../src/routes/SettingsRoute';
 import '../../src/globals.css';
 
@@ -63,7 +62,7 @@ window.fetch = async (input, options) => {
 };
 const router = createMemoryRouter([{ id: 'authenticated', loader: () => ({ user }), children: [{ id: 'workspace', path: '/w/:workspaceId',
   loader: ({ params }) => ({ workspace, workspaces: [workspace], selectedSession: rows.find(row => row.id === params.sessionId) ?? null }),
-  shouldRevalidate: () => true, Component: () => <WorkPrototypeProvider><WorkspaceChatLayout /></WorkPrototypeProvider>,
+  shouldRevalidate: () => true, Component: () => <WorkspaceChatLayout />,
   children: [{ path: 'work/*', element: <WorkPrototypeRoute /> }, { path: 'sessions/:sessionId', element: null }, { path: 'app', element: null },
     { path: 'library', element: <h1>Navigation library</h1> },
     { path: 'settings/preferences', Component: SettingsRoute }, { path: 'reports', element: <main data-report-page><input aria-label="Report filter" defaultValue="Keep this filter" /></main> },
@@ -91,6 +90,7 @@ Object.assign(window, { sessionNavigationFixture: { requests, failures, mutation
   connected: (id: string) => streams.has(id), hydrate, navigate: (id: string) => router.navigate(`/w/workspace/sessions/${id}`),
   trash: () => router.navigate('/w/workspace/settings/archive?view=deleted'),
   library: () => router.navigate('/w/workspace/library'),
+  pin: (id: string, pinned: boolean) => { rows.find(row => row.id === id)!.isPinned = pinned; send('session-4', 'navigation', { snapshotId: `pin-${Date.now()}`, offset: 0, hasMore: false, sessions: rows }); },
   task: () => router.navigate('/w/workspace/work/tasks/CW-12'),
   reports: () => router.navigate('/w/workspace/reports'),
   preferences: () => router.navigate('/w/workspace/settings/preferences'),

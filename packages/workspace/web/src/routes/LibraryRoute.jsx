@@ -462,11 +462,11 @@ function LibraryPageContent({ embedded = false } = {}) {
           {libraryView === "materials" ? <div className="libraryHeaderActions">
             <Menu.Root open={newMenuOpen} onOpenChange={setNewMenuOpen}>
               <Menu.Trigger className="libraryNewButton">{t("libraryRoute.new")}<ChevronDown aria-hidden="true" /></Menu.Trigger>
-              <Menu.Portal><Menu.Positioner side="bottom" align="end" sideOffset={6}><Menu.Popup className="workMenu">
-                <Menu.Item disabled={uploading} onClick={openUploadDialog}><Upload aria-hidden="true" />{t("libraryRoute.uploadFiles")}</Menu.Item>
-                <Menu.Item onClick={() => { setNewMenuOpen(false); setDialogTitle(""); setError(""); setDialog("folder"); }}><Folder aria-hidden="true" />{t("libraryRoute.folder")}</Menu.Item>
-                <Menu.Item onClick={() => createNote()}><FileText aria-hidden="true" />{t("libraryRoute.note")}</Menu.Item>
-                <Menu.Item onClick={() => { setNewMenuOpen(false); setTemplatesOpen(true); }}><BookOpen aria-hidden="true" />{t("shellSidebar.templates")}</Menu.Item>
+              <Menu.Portal><Menu.Positioner className="workMenuPositioner" side="bottom" align="end" sideOffset={6}><Menu.Popup className="workMenu libraryCreateMenu">
+                <Menu.Item className="workMenuItem" disabled={uploading} onClick={openUploadDialog}><Upload aria-hidden="true" />{t("libraryRoute.uploadFiles")}</Menu.Item>
+                <Menu.Item className="workMenuItem" onClick={() => { setNewMenuOpen(false); setDialogTitle(""); setError(""); setDialog("folder"); }}><Folder aria-hidden="true" />{t("libraryRoute.folder")}</Menu.Item>
+                <Menu.Item className="workMenuItem" onClick={() => createNote()}><FileText aria-hidden="true" />{t("libraryRoute.note")}</Menu.Item>
+                <Menu.Item className="workMenuItem" onClick={() => { setNewMenuOpen(false); setTemplatesOpen(true); }}><BookOpen aria-hidden="true" />{t("shellSidebar.templates")}</Menu.Item>
               </Menu.Popup></Menu.Positioner></Menu.Portal>
             </Menu.Root>
           </div> : null}

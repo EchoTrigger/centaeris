@@ -249,7 +249,6 @@ export default function PluginSettings({ workspace, isSuperuser, filter = "", ca
         </li>))}</ul>
         {plugins?.length > 0 && plugins.every(plugin => plugin.mcpServers?.length === 0 && !plugin.errors.length) ? <p className="catalogEmpty">{t("catalog.noConnections")}</p> : null}
     </div> : <>
-      {canManage ? <details className="extensionUploadHelp"><summary>{t("extensions.packageHelp")}</summary>{uploadHints}</details> : null}
       <ul className="catalogRows">{(plugins || []).map(plugin => <li key={plugin.name}>
         <Link to={`${catalog.base}?plugin=${encodeURIComponent(plugin.name)}`} aria-current={catalog.selectedName === plugin.name ? "true" : undefined}>
           <span><strong>{plugin.displayName}</strong><small>{plugin.shortDescription || plugin.name}</small></span>

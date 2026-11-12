@@ -13,13 +13,13 @@ function mount(workspaceId = "one", route = "/inbox") {
   render(<RouterProvider router={router} />);
   return router;
 }
-test("Inbox acknowledges, archives and restores notifications without changing their linked issue", async () => {
+test("Inbox acknowledges, archives and restores notifications without navigating to a fabricated issue", async () => {
   const user = userEvent.setup();
   const router = mount();
   const list = () => within(screen.getByRole("region", { name: "Notifications" }));
   await user.click(list().getByRole("button", { name: /Review toolkit release materials/ }));
   expect(router.state.location.search).toBe("?notification=review");
-  expect(screen.getByRole("link", { name: "Open CW-12" }).getAttribute("href")).toBe("/w/one/work/tasks/CW-12");
+  expect(screen.queryByRole("link")).toBeNull();
   expect(screen.getByRole("button", { name: "Mark as unread" })).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Archive notification" }));
   expect(list().queryByRole("button", { name: /Review toolkit release materials/ })).toBeNull();

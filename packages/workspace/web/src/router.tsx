@@ -18,7 +18,6 @@ import WorkspaceChooserRoute from "./routes/WorkspaceChooserRoute";
 import WorkspaceHomeRoute from "./routes/WorkspaceHomeRoute";
 import TrashSessionRoute from "./routes/TrashSessionRoute";
 import WorkPrototypeRoute from "./work/WorkPrototypeRoute";
-import { WorkPrototypeProvider } from "./work/workPrototype";
 
 export type AuthenticatedUser = {
   id: string;
@@ -87,7 +86,7 @@ function WorkspaceLayout() {
     }
   }, [user.id, workspace.id]);
 
-  return <WorkspaceSearchHistory key={`${user.id}:${workspace.id}`}><WorkPrototypeProvider><Outlet /></WorkPrototypeProvider></WorkspaceSearchHistory>;
+  return <WorkspaceSearchHistory key={`${user.id}:${workspace.id}`}><Outlet /></WorkspaceSearchHistory>;
 }
 
 function RootLayout() {

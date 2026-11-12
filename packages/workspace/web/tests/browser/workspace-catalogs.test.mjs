@@ -14,7 +14,7 @@ test("Inbox and catalogs keep navigation, acknowledged state and usable controls
     await server.listen();
     await runBrowser(`${server.resolvedUrls.local[0]}tests/browser/workspace-catalogs.html`, { width: 1280, height: 900 }, profile, async ({ evaluate, send, frame }) => {
       const text = value => evaluate(`document.body.textContent.includes(${JSON.stringify(value)})`);
-      const click = value => evaluate(`([...document.querySelectorAll('button,a')].find(element => element.textContent.trim() === ${JSON.stringify(value)})).click()`);
+      const click = value => evaluate(`([...document.querySelectorAll('button,a,[role=menuitem]')].find(element => element.textContent.trim() === ${JSON.stringify(value)})).click()`);
       async function capture(name) {
         if (!process.env.CENTAERIS_CATALOG_SCREENSHOT_DIR) return;
         await waitFor(() => evaluate("[...document.querySelectorAll('.catalogDetailView')].every(element => getComputedStyle(element).opacity === '1')"), "settled detail view");
@@ -24,7 +24,7 @@ test("Inbox and catalogs keep navigation, acknowledged state and usable controls
       }
       await waitFor(() => text("The release review needs one more example."), "Inbox items");
       await evaluate("document.querySelector('.inboxItem').click()");
-      await waitFor(() => text("Open CW-12"), "notification detail");
+      await waitFor(() => text("The guide and license checks passed."), "notification detail");
       await capture("inbox");
       await evaluate("document.querySelector('[aria-label=\"Archive notification\"]').click()");
       await click("Archived");
@@ -37,6 +37,13 @@ test("Inbox and catalogs keep navigation, acknowledged state and usable controls
       await evaluate("catalogFixture.navigate('library')");
       await waitFor(() => text("Research brief.pdf"), "Space materials");
       await capture("space");
+      await click("New");
+      await waitFor(() => evaluate("document.querySelectorAll('[role=menuitem]').length === 4"), "Space creation menu");
+      assert.ok(await evaluate("[...document.querySelectorAll('[role=menuitem]')].every((item, index, items) => index === 0 || item.getBoundingClientRect().top >= items[index-1].getBoundingClientRect().bottom)"), "menu actions occupy separate rows");
+      await capture("space-create-menu");
+      await click("Upload files");
+      await waitFor(() => evaluate("Boolean(document.querySelector('[role=dialog]'))"), "upload dialog");
+      await click("Cancel");
       await click("Review notes");
       await waitFor(() => evaluate("Boolean(document.querySelector('.libraryFileView textarea'))"), "same-area note editor");
       assert.equal(await evaluate("document.querySelector('.libraryFileView textarea').value"), "Review the evidence before publishing.");

@@ -8,7 +8,6 @@ import LibraryObjectRoute from "../../src/routes/LibraryObjectRoute";
 import LibraryPage from "../../src/routes/LibraryRoute";
 import ExtensionsRoute from "../../src/routes/ExtensionsRoute";
 import WorkPrototypeRoute from "../../src/work/WorkPrototypeRoute";
-import { WorkPrototypeProvider } from "../../src/work/workPrototype";
 import "../../src/globals.css";
 
 configureApi({ apiBaseUrl: location.origin });
@@ -43,7 +42,7 @@ window.fetch = async (input, options) => {
   throw new Error(`Unexpected catalog request: ${url.pathname}`);
 };
 const router = createMemoryRouter([{ id: "authenticated", loader: () => ({ user }), children: [{ id: "workspace", path: "/w/:workspaceId", loader: () => ({ workspace, workspaces: [workspace], selectedSession: null }),
-  Component: () => <WorkPrototypeProvider><WorkspaceChatLayout /></WorkPrototypeProvider>, children: [
+  Component: () => <WorkspaceChatLayout />, children: [
     { path: "work/*", Component: WorkPrototypeRoute }, { path: "library", element: <LibraryPage embedded />, children: [{ path: ":libraryObjectId", element: <LibraryObjectRoute embedded inline /> }] }, { path: "extensions", Component: ExtensionsRoute },
   ],
 }] }], { initialEntries: [new URLSearchParams(location.search).get("route") || "/w/workspace/work/inbox"] });
