@@ -9,6 +9,7 @@ main.workspaceWorkbench:has(.conversationDock > button) { padding-bottom:36px; }
 .conversationWindowActions { flex:none; display:flex; align-items:center; gap:2px; margin-left:auto; }
 .conversationSwitcher { display:flex; align-items:center; gap:7px; min-width:0; max-width:min(320px,100%); padding:5px 8px; border:0; border-radius:6px; background:transparent; color:var(--on-surface); font:inherit; font-size:13px; cursor:pointer; }
 .workspaceConversationHeading { max-width:100%; }
+.workspaceConversationTitle { max-width:320px; }
 .conversationSwitcher > span { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 .conversationSwitcher > svg { width:12px; height:12px; flex:none; color:var(--process-text); }
 .conversationSwitcher:hover { background:var(--surface-hover); }

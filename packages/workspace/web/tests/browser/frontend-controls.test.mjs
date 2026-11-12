@@ -23,13 +23,15 @@ test("shared controls retain Web composer proportions, floating menus, draft and
           await frame();
         };
         await waitFor(() => evaluate("Boolean(document.querySelector('.workspaceComposerThinking button'))"), "composer controls");
-        if (scenario.floating) {
+        {
           assert(await evaluate(`(() => {
             const title = document.querySelector('.conversationSwitcher > span');
             const favorite = document.querySelector('.chatFavorite').getBoundingClientRect();
+            const titleControl = document.querySelector('.conversationSwitcher').getBoundingClientRect();
+            const gap = parseFloat(getComputedStyle(document.querySelector('.workspaceConversationHeading')).columnGap);
             const actions = document.querySelector('.conversationWindowActions').getBoundingClientRect();
-            return title.scrollWidth > title.clientWidth && favorite.right <= actions.left && actions.right <= innerWidth;
-          })()`), "long titles truncate without displacing chat actions");
+            return title.scrollWidth > title.clientWidth && Math.abs(favorite.left - titleControl.right - gap) < 1 && favorite.right <= actions.left && actions.right <= innerWidth;
+          })()`), "chat actions stay beside truncated titles in full and floating layouts");
         }
         const proportions = await evaluate(`(() => {
           const add = document.querySelector('.workspaceComposerIconButton');

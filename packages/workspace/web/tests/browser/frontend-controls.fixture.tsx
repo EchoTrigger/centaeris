@@ -27,7 +27,7 @@ function Fixture() {
   const [draft, setDraft] = useState("Retained Web draft"), [confirm, setConfirm] = useState(false);
   return <FrontendProvider iconStrokeWidth={2}>
     <main className={`workspaceWorkbench withoutSidebar${floating ? " isBrowsing isChatFloating" : ""}`}>
-      {floating ? <header className="workspaceTopbar"><div className="workspaceTopbarStart"><ChatTitle session={{ id: "test", title: longTitle }} actions={{ onTogglePin: noop }} titleControl={<button className="conversationSwitcher"><span title={longTitle}>{longTitle}</span></button>} /></div><div className="conversationWindowActions"><button className="workspacePanelToggle" aria-label="Expand chat">↗</button></div></header> : null}
+      <header className="workspaceTopbar"><div className="workspaceTopbarStart"><ChatTitle session={{ id: "test", title: longTitle }} actions={{ onTogglePin: noop }} titleControl={<button className="conversationSwitcher"><span title={longTitle}>{longTitle}</span></button>} /></div><div className="conversationWindowActions"><button className="workspacePanelToggle" aria-label="Expand chat">↗</button></div></header>
       <section className="workspaceChatColumn"><div className="workspaceConversationPlane">
       <div className="workspaceMessages"><button type="button" onClick={() => setConfirm(true)}>Open confirmation</button></div>
       <WorkspaceComposer fileInputRef={input} isHome={false} onSubmit={event => event.preventDefault()}
