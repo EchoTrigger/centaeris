@@ -1706,7 +1706,7 @@ export function AppPageContent({ initialSession = null, workspaceDraft, visible 
       <nav className="conversationDock" ref={setConversationDock} aria-label="会话工具栏" inert={search.open}>
         {activeSession ? <button className="conversationDockSession" aria-pressed={chatFloating} onClick={chatFloating ? onMinimizeChat : onShowChat}><span className={hasActiveAgentRun ? "isRunning" : ""} />{activeSession.title}</button> : null}
         <button onClick={chatFloating ? onMinimizeChat : onShowChat}><MessageSquare />Agent</button>
-        <ConversationHistory {...historyProps}><History /></ConversationHistory>
+        <ConversationHistory {...historyProps} onOpen={onMinimizeChat}><History /></ConversationHistory>
       </nav>
       {search.open ? <WorkspaceSearch workspaceId={workspace.id} onClose={search.close} inputRef={search.inputRef} /> : null}
       {visible ? <WorkspaceContextPanel
