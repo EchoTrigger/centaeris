@@ -261,18 +261,23 @@ test('docked chat tabs preserve drafts, open one window and reserve space on set
         const title = item.querySelector('[role=tab] > span');
         const close = item.querySelector('.conversationTabClose');
         const rect = item.getBoundingClientRect();
+        const closeRect = close.getBoundingClientRect();
         return { width: rect.width, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2,
+          closeX: closeRect.x + closeRect.width / 2, closeY: closeRect.y + closeRect.height / 2,
           closeOpacity: getComputedStyle(close).opacity, mask: getComputedStyle(title).maskImage,
           textOverflow: getComputedStyle(title).textOverflow, fullTitle: title.clientWidth >= title.scrollWidth,
           shadow: getComputedStyle(item).boxShadow, background: getComputedStyle(item).backgroundColor };
       })()`);
       const resting = await tabStyle();
-      assert.equal(resting.closeOpacity, '0'); assert.equal(resting.mask, 'none'); assert(resting.fullTitle);
+      assert(Number(resting.closeOpacity) > 0 && Number(resting.closeOpacity) < 1); assert(resting.fullTitle);
       assert.equal(resting.shadow, 'none'); assert.equal(resting.background, 'rgba(0, 0, 0, 0)');
       await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: resting.x, y: resting.y }); await frame();
       const hovering = await tabStyle();
-      assert.equal(hovering.closeOpacity, '1'); assert.notEqual(hovering.mask, 'none');
+      assert.equal(hovering.closeOpacity, resting.closeOpacity); assert.notEqual(hovering.mask, 'none');
+      assert.equal(hovering.shadow, 'none'); assert.equal(hovering.background, resting.background);
       assert.equal(hovering.textOverflow, 'clip'); assert.equal(hovering.width, resting.width);
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: resting.closeX, y: resting.closeY }); await frame();
+      assert(Number((await tabStyle()).closeOpacity) > Number(resting.closeOpacity));
       if (process.env.NAVIGATION_SCREENSHOT_PATH) {
         const shot = await send('Page.captureScreenshot', { format: 'png' });
         await writeFile(process.env.NAVIGATION_SCREENSHOT_PATH, Buffer.from(shot.data, 'base64'));
