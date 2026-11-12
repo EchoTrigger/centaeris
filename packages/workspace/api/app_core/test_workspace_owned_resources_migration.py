@@ -189,6 +189,17 @@ class WorkspaceOwnedResourceUpgradeTests(TransactionTestCase):
                 self.assertIsNone(objects("OneShotCredential").get(pk=one_shot[1].pk).revokedAt)
                 self.assertEqual(objects("OneShotCredential").get(pk=already_revoked.pk).revokedAt, revoked_at)
 
+                applied = set(MigrationExecutor(database).loader.applied_migrations)
+                with self.assertRaises(IrreversibleError):
+                    MigrationExecutor(database).migrate(self.previous)
+                self.assertEqual(set(MigrationExecutor(database).loader.applied_migrations), applied)
+                self.assertFalse(objects("ProviderCredential").filter(pk=provider_keys[0].pk).exists())
+
+                # Current consumers require the current schema; the 0046 facts
+                # and irreversible boundary have already been checked above.
+                executor = MigrationExecutor(database)
+                executor.migrate(executor.loader.graph.leaf_nodes())
+
                 for workspace, config, package, path in zip(workspaces, configs[1:], (legacy, pinned), (legacy_root, pinned_root)):
                     current_workspace = Workspace.objects.get(pk=workspace.pk)
                     self.assertEqual(workspace_plugin_catalog(current_workspace)["packages"], [package])
@@ -205,9 +216,3 @@ class WorkspaceOwnedResourceUpgradeTests(TransactionTestCase):
                 self.assertEqual(serialize_model(ModelConfig.objects.get(pk=configs[0].pk))["providerId"], providers[0].pk)
                 self.assertEqual({path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()},
                                  original_bytes)
-
-                applied = set(MigrationExecutor(database).loader.applied_migrations)
-                with self.assertRaises(IrreversibleError):
-                    MigrationExecutor(database).migrate(self.previous)
-                self.assertEqual(set(MigrationExecutor(database).loader.applied_migrations), applied)
-                self.assertFalse(objects("ProviderCredential").filter(pk=provider_keys[0].pk).exists())
