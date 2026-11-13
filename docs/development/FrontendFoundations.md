@@ -68,7 +68,13 @@ Workspace Models exposes one optional Default purpose model selection. Clearing
 it disables asynchronous session titles; selecting it uses low reasoning when
 supported, independently of conversation model preferences. Issue execution opens
 a caller-owned interactive conversation through the same acceptance and navigation
-contracts as chat. Generated titles preserve the first prompt's language, never
+contracts as chat. Delegation accepts optional instructions; continuing or
+answering an Agent reopens that same conversation and reuses its existing question
+interaction. The authorized Issue origin provides a return link that restores the
+selected execution's results. Execution status follows the latest Run, while Issue
+status and human ownership remain independent. Result sharing is optional, and
+business-specific fields and rules remain installed template data.
+Generated titles preserve the first prompt's language, never
 replace manual names, and do not change navigation order. Archive titles stay on
 one line and fade at the end while their action buttons remain visible.
 

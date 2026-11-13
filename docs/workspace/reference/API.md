@@ -1029,7 +1029,7 @@ Failed completion checks or persistence do not acknowledge a dismissal.
 ## Issue executions
 
 `POST /api/workspaces/{workspaceId}/issues/{issueId}/executions` accepts strict
-`{operationId, version, modelConfigRef, thinkingMode?}` and returns the existing
+`{operationId, version, modelConfigRef, thinkingMode?, instructions?}` and returns the existing
 202 hosted operation receipt (`submitMessage`, `sessionId`, `agentRunId`, `turnId`).
 It requires browser authentication, CSRF and current workspace membership. Issue
 version conflicts and archived Issues reject new acceptance. Replaying accepted
@@ -1040,9 +1040,27 @@ path owns execution and lifecycle scheduling. Issue status is not completed by
 starting or finishing an AgentRun.
 
 `GET` on the same URL accepts `limit` and `offset`, returning `{executions,total}`.
-Each entry contains `id`, `sessionId`, `agentRunId`, `title`, `status`, `createdAt`.
+Each entry contains `id`, `sessionId`, `agentRunId`, `latestAgentRunId`, `title`,
+`status`, `waitingForInput`, `createdAt`. `agentRunId` identifies the immutable
+initial execution; status and `latestAgentRunId` describe the latest Run in the
+same conversation. `waitingForInput` reuses the current Runtime question authority
+and response receipt; a historical pause event does not establish a current wait.
 Only the requesting user's accessible active, unarchived linked conversations are
 returned. Issue visibility does not grant access to another member's transcript.
+
+Execution creation also accepts optional `instructions`, at most 8192 characters,
+appended to the accepted Issue context. Empty instructions preserve the existing
+operation identity. Ordinary follow-up messages and question responses use the
+existing conversation endpoints, retaining the same Session and Issue origin.
+Agent results are readable through the linked execution without submitting a
+deliverable. Sharing a selected result remains an optional separate action.
+
+`GET /api/workspaces/{workspaceId}/sessions/{sessionId}/issue-origin` returns
+`{origin:{issueId,executionId,title}}`, or `{origin:null}` for an unrelated or no
+longer visible Issue. It requires browser authentication, current membership and
+an owned active, unarchived interactive Session. The title is read from the
+currently visible Issue, not from an old snapshot. Web uses this origin to return
+to the Issue and expand the corresponding execution's results after refresh.
 
 ## Workspace model defaults
 

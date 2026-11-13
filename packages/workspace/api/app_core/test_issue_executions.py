@@ -2,12 +2,12 @@ import json
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
-from django.db import DatabaseError
+from django.db import DatabaseError, connection
 from django.test import Client, TestCase
 from django.utils import timezone
 
 from app_core.models import (
-    AgentRun, HostedOperationReceipt, Issue, IssueExecution, ModelConfig,
+    AgentRun, AgentRunEnvironmentRelease, HostedOperationReceipt, Issue, IssueExecution, ModelConfig,
     RunMaterialScope, Session, Workspace, WorkspaceMembership,
 )
 from app_core.test_hosted_operations import PROFILE
@@ -136,6 +136,91 @@ class IssueExecutionTests(TestCase):
         result = client.post(self.url, json.dumps({"operationId": "csrf", "version": 1,
             "modelConfigRef": self.model.id}), content_type="application/json")
         self.assertEqual(result.status_code, 403, result.content)
+
+    def test_optional_instructions_are_frozen_and_replay_requires_the_same_request(self):
+        accepted = self.accept(instructions="  Inspect only the public API.  ")
+        run = AgentRun.objects.get(pk=accepted["agentRunId"])
+        self.assertEqual(run.prompt, f"{self.issue.title}\n\n{self.issue.description}\n\nInspect only the public API.")
+        self.assertEqual(self.accept(instructions="Inspect only the public API."), accepted)
+        self.assertEqual(self.post(instructions="Different work").status_code, 409)
+        self.assertEqual(self.post(operationId="invalid", instructions="x" * 8193).status_code, 400)
+        self.assertEqual(IssueExecution.objects.count(), 1)
+
+    def test_followup_reuses_the_session_and_list_reports_the_latest_run(self):
+        accepted = self.accept()
+        first = AgentRun.objects.get(pk=accepted["agentRunId"])
+        AgentRun.objects.filter(pk=first.pk).update(status="completed")
+        AgentRunEnvironmentRelease.objects.create(agent_run=first, environment=first.environment,
+            authorization_digest=first.authorization.digest, controller_epoch=1,
+            controller_lease_digest="sha256:" + "a" * 64)
+        followup = self.client.post(f"/api/workspaces/{self.workspace.pk}/sessions/{first.session_id}/messages",
+            json.dumps({"operationId": "followup", "text": "Compare the revised requirements.",
+                "modelConfigRef": self.model.pk}), content_type="application/json")
+        self.assertEqual(followup.status_code, 202, followup.content)
+        self.assertEqual(followup.json()["sessionId"], first.session_id)
+        self.assertNotEqual(followup.json()["agentRunId"], first.pk)
+        row = self.client.get(self.url).json()["executions"][0]
+        self.assertEqual((row["agentRunId"], row["latestAgentRunId"], row["status"]),
+            (first.pk, followup.json()["agentRunId"], "queued"))
+        self.assertFalse(row["waitingForInput"])
+        self.assertEqual((Session.objects.count(), IssueExecution.objects.count()), (1, 1))
+        self.issue.refresh_from_db()
+        self.assertEqual((self.issue.assignee_id, self.issue.status), (None, "todo"))
+
+    def test_waiting_state_uses_current_checkpoint_and_answer_receipt(self):
+        from .test_presentation_stream import create_question_authority_tables
+        accepted = self.accept()
+        run = AgentRun.objects.get(pk=accepted["agentRunId"])
+        AgentRun.objects.filter(pk=run.pk).update(status="running")
+        create_question_authority_tables()
+        checkpoint = {"schema": "runtime.await_question.v2", "continuationId": "continuation",
+            "agentRunId": run.pk, "authorizationDigest": run.authorization.digest,
+            "turnId": run.turn_id, "questionId": "question",
+            "question": {"question": "Which revision should I use?", "options": ["Current", "Previous"]},
+            "toolCall": {"id": "question", "name": "request_user_input", "argsJson": "{}"}}
+        with connection.cursor() as cursor:
+            cursor.execute("INSERT INTO runtime.checkpoints(checkpoint_id,kind,session_id,turn_id,status,done_reason,updated_at_ms,payload_json) "
+                "VALUES('issue-question','wait',%s,%s,'paused_question','question',1,%s)",
+                [run.session_id, run.turn_id, json.dumps(checkpoint)])
+        self.assertTrue(self.client.get(self.url).json()["executions"][0]["waitingForInput"])
+        answer_url = f"/api/sessions/{run.session_id}/agent-runs/{run.pk}/questions/question/responses"
+        body = {"operationId": "answer", "continuationId": "continuation", "action": "answer", "answer": "Current"}
+        with patch("app_core.http.workspaces.request_agent_run_question_response") as respond:
+            response = self.client.post(answer_url, json.dumps(body), content_type="application/json")
+            self.assertEqual(response.status_code, 202, response.content)
+            self.assertEqual(response.json()["agentRunId"], run.pk)
+            respond.assert_called_once()
+        with connection.cursor() as cursor:
+            cursor.execute("INSERT INTO runtime.runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) "
+                "VALUES(%s,%s,%s,'runtime.question.response.v1',2,'internal',%s)",
+                ["runtime_question_response:continuation", run.session_id, run.turn_id,
+                    json.dumps({"schema": "runtime.question.response.v1", "agentRunId": run.pk,
+                        "authorizationDigest": run.authorization.digest, "continuationId": "continuation", "questionId": "question"})])
+        self.assertFalse(self.client.get(self.url).json()["executions"][0]["waitingForInput"])
+        self.assertEqual((AgentRun.objects.count(), IssueExecution.objects.count()), (1, 1))
+
+    def test_origin_is_current_and_requires_both_session_and_issue_access(self):
+        accepted = self.accept()
+        origin_url = f"/api/workspaces/{self.workspace.pk}/sessions/{accepted['sessionId']}/issue-origin"
+        execution = IssueExecution.objects.get(session_id=accepted["sessionId"])
+        Issue.objects.filter(pk=self.issue.pk).update(title="Updated title")
+        self.assertEqual(self.client.get(origin_url).json(), {"origin": {"issueId": self.issue.pk,
+            "executionId": str(execution.pk), "title": "Updated title"}})
+        self.assertEqual(self.client.get(origin_url + "?extra=true").status_code, 400)
+        self.client.force_login(self.other)
+        self.assertEqual(self.client.get(origin_url).status_code, 404)
+        self.client.force_login(self.user)
+        Issue.objects.filter(pk=self.issue.pk).update(visibility="participants", creator=self.other)
+        self.assertEqual(self.client.get(origin_url).json(), {"origin": None})
+        WorkspaceMembership.objects.filter(workspace=self.workspace, user=self.user).delete()
+        self.assertEqual(self.client.get(origin_url).status_code, 404)
+
+    def test_ordinary_conversations_have_no_issue_origin(self):
+        session = Session.objects.create(workspace=self.workspace, owner=self.user)
+        url = f"/api/workspaces/{self.workspace.pk}/sessions/{session.pk}/issue-origin"
+        self.assertEqual(self.client.get(url).json(), {"origin": None})
+        Session.objects.filter(pk=session.pk).update(archivedAt=timezone.now())
+        self.assertEqual(self.client.get(url).status_code, 404)
 
     def test_profile_failure_creates_nothing_and_schedule_failure_keeps_receipt(self):
         self.request_execution_profile.side_effect = RuntimeError("offline")

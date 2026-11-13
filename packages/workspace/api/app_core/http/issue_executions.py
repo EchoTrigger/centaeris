@@ -1,16 +1,18 @@
-from app_core.issue_templates import issue_execution_prompt
-from app_core.issue_access import visible_issues
 """Issue origins for caller-owned interactive sessions."""
 from django.db import transaction
+from django.db.models import OuterRef, Subquery
 from ninja import Router, Status
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app_core.hosted_operations import (
     OPERATION_ID_PATTERN, HostedOperationError, lock_operation_identity,
     replay_operation, request_digest, serialize_operation,
 )
-from app_core.models import Issue, IssueExecution, Session
+from app_core.models import AgentRun, Issue, IssueExecution, Session
+from app_core.issue_templates import issue_execution_prompt
+from app_core.issue_access import visible_issues
 from app_core.issue_materials import bind_issue_materials
+from app_core.presentation_activity import presentation_question
 from app_core.workspace_access import shared_submission_membership_for, workspace_membership_for
 from . import workspaces
 from .issues import _pagination
@@ -26,20 +28,56 @@ class IssueExecutionRequest(StrictSchema):
     version: int = Field(ge=1)
     model_config_ref: str = Field(min_length=1)
     thinking_mode: str | None = None
+    instructions: str = Field(default="", max_length=8192, exclude_if=lambda value: not value)
+
+    @field_validator("instructions")
+    @classmethod
+    def normalize_instructions(cls, value):
+        return value.strip()
 
 
 class IssueExecutionResponse(StrictSchema):
     id: str
     session_id: str
     agent_run_id: str
+    latest_agent_run_id: str
     title: str
     status: str
+    waiting_for_input: bool
     created_at: str
 
 
 class IssueExecutionsEnvelope(StrictSchema):
     executions: list[IssueExecutionResponse]
     total: int
+
+
+class IssueSessionOrigin(StrictSchema):
+    issue_id: str
+    execution_id: str
+    title: str
+
+
+class IssueSessionOriginEnvelope(StrictSchema):
+    origin: IssueSessionOrigin | None
+
+
+@router.get("/workspaces/{workspace_id}/sessions/{session_id}/issue-origin", auth=session_auth,
+    response={200: IssueSessionOriginEnvelope} | COMMON_ERROR_RESPONSES)
+def session_issue_origin(request, workspace_id: str, session_id: str):
+    if request.GET:
+        return Status(400, {"error": "request_invalid"})
+    if workspace_membership_for(request.user, workspace_id) is None:
+        return Status(404, {"error": "workspace_not_found"})
+    session = Session.objects.filter(id=session_id, workspace_id=workspace_id, owner=request.user,
+        status="active", purpose="interactive", archivedAt__isnull=True,
+        purgeRequestedAt__isnull=True, purgedAt__isnull=True).first()
+    if session is None:
+        return Status(404, {"error": "session_not_found"})
+    execution = IssueExecution.objects.filter(session=session, issuer=request.user,
+        issue__in=visible_issues(request.user, workspace_id)).select_related("issue").first()
+    return {"origin": {"issueId": execution.issue_id, "executionId": str(execution.pk),
+        "title": execution.issue.title} if execution else None}
 
 
 def _execution_context(request, workspace_id, issue_id, payload, digest):
@@ -89,6 +127,8 @@ def create_issue_execution(request, workspace_id: str, issue_id: str, payload: I
             if receipt is not None:
                 return Status(202, serialize_operation(receipt))
             prompt = issue_execution_prompt(issue)
+            if payload.instructions:
+                prompt += "\n\n" + payload.instructions
             message = workspaces.SessionMessageRequest.model_validate({
                 "operationId": payload.operation_id, "text": prompt,
                 "modelConfigRef": payload.model_config_ref, "thinkingMode": payload.thinking_mode,
@@ -124,7 +164,13 @@ def list_issue_executions(request, workspace_id: str, issue_id: str):
         session__status="active", session__purpose="interactive", session__archivedAt__isnull=True,
         session__purgeRequestedAt__isnull=True, agent_run__user=request.user,
         agent_run__workspace_id=workspace_id).select_related("session", "agent_run").order_by("-createdAt", "id")
+    latest = AgentRun.objects.filter(session_id=OuterRef("session_id"), user=request.user,
+        workspace_id=workspace_id).order_by("-createdAt", "-id").values("id")[:1]
+    selected = list(executions.annotate(latest_run_id=Subquery(latest))[offset:offset + limit])
+    runs = AgentRun.objects.select_related("authorization").in_bulk(item.latest_run_id for item in selected)
     return {"executions": [{"id": str(item.pk), "sessionId": item.session_id,
         "agentRunId": item.agent_run_id, "title": item.session.title,
-        "status": item.agent_run.status, "createdAt": item.createdAt.isoformat()}
-        for item in executions[offset:offset + limit]], "total": executions.count()}
+        "latestAgentRunId": item.latest_run_id, "status": runs[item.latest_run_id].status,
+        "waitingForInput": presentation_question(runs[item.latest_run_id])[0] is not None,
+        "createdAt": item.createdAt.isoformat()}
+        for item in selected], "total": executions.count()}

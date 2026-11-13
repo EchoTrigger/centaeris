@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import { Button } from "@centaeris/ui/button";
+import { Textarea } from "@centaeris/ui/textarea";
 import { apiJson } from "../api";
 import { OperationClient } from "../chat/operationReceipts";
 import { MarkdownContent } from "../chat/MarkdownContent";
@@ -12,12 +13,14 @@ import { DeliverableSubmit } from "./IssueDeliverables";
 export function IssueExecutions({ workspaceId, userId, issue, onChanged }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
   const endpoint = `/api/workspaces/${encodeURIComponent(workspaceId)}/issues/${encodeURIComponent(issue.id)}/executions`;
   const operations = useMemo(() => new OperationClient({ userId, workspaceId, command: "submitMessage" }), [userId, workspaceId]);
   const [executions, setExecutions] = useState([]);
   const [total, setTotal] = useState(0);
   const [expanded, setExpanded] = useState(false);
-  const [activeExecution, setActiveExecution] = useState("");
+  const activeExecution = params.get("execution") || "";
+  const [instructions, setInstructions] = useState("");
   const [models, setModels] = useState([]);
   const [modelId, setModelId] = useState("");
   const [thinkingMode, setThinkingMode] = useState("");
@@ -27,14 +30,14 @@ export function IssueExecutions({ workspaceId, userId, issue, onChanged }) {
   const [revision, setRevision] = useState(0);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: Revision reloads execution records on explicit retry.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Revision reloads execution records on explicit retry; Issue edits refresh accepted context.
   useEffect(() => {
     const controller = new AbortController();
     apiJson(`${endpoint}?limit=20&offset=0`, { signal: controller.signal }).then(result => {
       if (!controller.signal.aborted) { setExecutions(result.executions); setTotal(result.total); }
-    }).catch(failure => { if (!controller.signal.aborted) setError(["issue_material_unavailable", "issue_material_version_changed"].includes(failure.message) ? t("issues.materialsChanged") : failure.message); });
+    }).catch(failure => { if (!controller.signal.aborted) { setExecutions([]); setTotal(0); setError(["issue_material_unavailable", "issue_material_version_changed"].includes(failure.message) ? t("issues.materialsChanged") : failure.message); } });
     return () => controller.abort();
-  }, [endpoint, revision]);
+  }, [endpoint, issue.version, revision]);
   useEffect(() => {
     if (!expanded) return;
     const controller = new AbortController();
@@ -63,14 +66,15 @@ export function IssueExecutions({ workspaceId, userId, issue, onChanged }) {
     if (pending || !modelId) return;
     setPending(true); setError(null);
     try {
-      const receipt = await operations.submit(endpoint, { version: issue.version, modelConfigRef: modelId, ...(thinkingMode ? { thinkingMode } : {}) });
+      const receipt = await operations.submit(endpoint, { version: issue.version, modelConfigRef: modelId, ...(thinkingMode ? { thinkingMode } : {}), ...(instructions.trim() ? { instructions: instructions.trim() } : {}) });
       await openReceipt(receipt);
     } catch (failure) { if (mounted.current) setError(["issue_material_unavailable", "issue_material_version_changed"].includes(failure.message) ? t("issues.materialsChanged") : failure.message); }
     finally { if (mounted.current) setPending(false); }
   }
   return <section className="issueExecutions" aria-busy={pending}>
-    {!issue.archivedAt ? <Button variant="ghost" disabled={pending} onClick={() => setExpanded(value => !value)}>{t("issues.runWithAgent")}</Button> : null}
+    {!issue.archivedAt ? <Button variant="ghost" aria-expanded={expanded} disabled={pending} onClick={() => setExpanded(value => !value)}>{t(executions.length ? "issues.newExecution" : "issues.runWithAgent")}</Button> : null}
     {expanded && !issue.archivedAt ? <form className="issueExecutionForm" onSubmit={event => { event.preventDefault(); void launch(); }}>
+      <label className="issueExecutionInstructions">{t("issues.executionInstructions")}<Textarea rows={3} maxLength={8192} value={instructions} disabled={pending} onChange={event => setInstructions(event.target.value)} /></label>
       <label>{t("issues.executionModel")}<select value={modelId} disabled={pending || loadingModels} onChange={event => {
         const model = models.find(item => item.id === event.target.value);
         setModelId(event.target.value); setThinkingMode(model ? readModelThinkingMode(userId, workspaceId, model) : "");
@@ -78,14 +82,18 @@ export function IssueExecutions({ workspaceId, userId, issue, onChanged }) {
       {selectedModel?.thinkingModes?.length ? <label>{t("issues.executionThinking")}<select value={thinkingMode} disabled={pending} onChange={event => setThinkingMode(event.target.value)}>{selectedModel.thinkingModes.map(mode => <option key={mode} value={mode}>{mode}</option>)}</select></label> : null}
       <Button type="submit" variant="ghost" disabled={!modelId || pending || loadingModels}>{t("issues.startExecution")}</Button>
     </form> : null}
-    <Button variant="ghost" disabled={pending} onClick={() => setRevision(value => value + 1)}>{t("issues.refreshExecutions")}</Button>
+    {executions.length ? <Button variant="ghost" disabled={pending} onClick={() => { setError(null); setRevision(value => value + 1); }}>{t("issues.refreshExecutions")}</Button> : null}
     {error ? <div className="issueExecutionError" role="alert"><span>{error}</span>{error === t("issues.materialsChanged") ? <Button variant="ghost" disabled={pending} onClick={onChanged}>{t("issues.reload")}</Button> : null}<Button variant="ghost" disabled={pending} onClick={async () => {
       setPending(true); setError(null);
       try { const receipt = await operations.recover(); if (receipt) await openReceipt(receipt); else setRevision(value => value + 1); }
       catch (failure) { if (mounted.current) setError(["issue_material_unavailable", "issue_material_version_changed"].includes(failure.message) ? t("issues.materialsChanged") : failure.message); }
       finally { if (mounted.current) setPending(false); }
     }}>{t("agentChat.retry")}</Button></div> : null}
-    {executions.length ? <><h2>{t("issues.conversations")}</h2><ul className="issueExecutionList">{executions.map(execution => <li key={execution.id}><Button variant="ghost" aria-expanded={activeExecution === execution.id} onClick={() => setActiveExecution(value => value === execution.id ? "" : execution.id)}>{execution.title}</Button><Link to={sessionChatPath(workspaceId, execution.sessionId)}><span>{t("issues.openConversation")}</span><small>{t(`issues.execution.${execution.status}`)}</small></Link>{activeExecution === execution.id ? <ExecutionResults key={`${execution.id}:${revision}`} endpoint={`${endpoint}/${encodeURIComponent(execution.id)}`} executionId={execution.id} workspaceId={workspaceId} userId={userId} issue={issue} onChanged={onChanged} /> : null}</li>)}</ul>
+    {executions.length ? <><h2>{t("issues.conversations")}</h2><ul className="issueExecutionList">{executions.map(execution => <li key={execution.id}><Button variant="ghost" aria-expanded={activeExecution === execution.id} onClick={() => setParams(previous => {
+      const next = new URLSearchParams(previous);
+      if (activeExecution === execution.id) next.delete("execution"); else next.set("execution", execution.id);
+      return next;
+    }, { replace: true })}>{execution.title}</Button><Link to={sessionChatPath(workspaceId, execution.sessionId)}><span>{t(execution.waitingForInput ? "issues.answerAgent" : "issues.continueConversation")}</span><small>{t(execution.waitingForInput ? "issues.execution.waitingForInput" : `issues.execution.${execution.status}`)}</small></Link>{activeExecution === execution.id ? <ExecutionResults key={`${execution.id}:${revision}`} endpoint={`${endpoint}/${encodeURIComponent(execution.id)}`} execution={execution} workspaceId={workspaceId} userId={userId} issue={issue} onChanged={onChanged} /> : null}</li>)}</ul>
       {executions.length < total ? <Button variant="ghost" disabled={pending} onClick={async () => {
         setPending(true); setError(null);
         try { const result = await apiJson(`${endpoint}?limit=20&offset=${executions.length}`); if (mounted.current) { setExecutions(items => [...items, ...result.executions]); setTotal(result.total); } }
@@ -95,7 +103,7 @@ export function IssueExecutions({ workspaceId, userId, issue, onChanged }) {
   </section>;
 }
 
-function ExecutionResults({ endpoint, executionId, workspaceId, userId, issue, onChanged }) {
+function ExecutionResults({ endpoint, execution, workspaceId, userId, issue, onChanged }) {
   const { t } = useTranslation();
   const [data, setData] = useState({ runs: [], total: 0 });
   const [submittingRun, setSubmittingRun] = useState("");
@@ -116,12 +124,12 @@ function ExecutionResults({ endpoint, executionId, workspaceId, userId, issue, o
     {error ? <p role="alert">{error}</p> : null}
     {loading ? <p role="status">{t("agentChat.loading")}</p> : null}
     {data.runs.map(run => <article key={run.id}>
-      <small>{t(`issues.execution.${run.status}`, { defaultValue: run.status })}</small>
+      <small>{t(execution.waitingForInput && execution.latestAgentRunId === run.id ? "issues.execution.waitingForInput" : `issues.execution.${run.status}`, { defaultValue: run.status })}</small>
       {run.summary ? <MarkdownContent text={`${run.summary}${run.summaryTruncated ? "…" : ""}`} /> : null}
       <ol>{run.activity.map(activity => <li key={activity.id}><p>{activity.text}{activity.textTruncated ? "…" : ""}</p><time dateTime={activity.createdAt}>{new Date(activity.createdAt).toLocaleString()}</time></li>)}</ol>
       {run.artifacts.length ? <ul>{run.artifacts.map(artifact => <li key={artifact.id}><a href={artifact.downloadUrl} download>{artifact.displayName}</a></li>)}</ul> : null}
       {!issue.archivedAt && (run.summary || run.artifacts.length) ? <Button variant="ghost" aria-expanded={submittingRun === run.id} onClick={() => setSubmittingRun(value => value === run.id ? "" : run.id)}>{t("deliverables.submit")}</Button> : null}
-      {submittingRun === run.id ? <DeliverableSubmit key={run.id} workspaceId={workspaceId} userId={userId} issue={issue} executionId={executionId} run={run} onChanged={onChanged} onCancel={() => setSubmittingRun("")} /> : null}
+      {submittingRun === run.id ? <DeliverableSubmit key={run.id} workspaceId={workspaceId} userId={userId} issue={issue} executionId={execution.id} run={run} onChanged={onChanged} onCancel={() => setSubmittingRun("")} /> : null}
     </article>)}
     {data.runs.length < data.total ? <Button variant="ghost" disabled={loading} onClick={() => void more()}>{t("issues.moreResults")}</Button> : null}
   </div>;

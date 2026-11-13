@@ -28,6 +28,8 @@
 .issueExecutions h2 { margin-top: 24px; font-size: 14px; font-weight: 500; }
 .issueExecutionForm { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; padding-block: 12px; }
 .issueExecutionForm label { display: grid; gap: 6px; color: var(--process-text); }
+.issueExecutionForm .issueExecutionInstructions { flex-basis:100%; min-width:0; }
+.issueExecutionInstructions textarea { width:100%; resize:vertical; }
 .issueExecutionForm select { color: var(--on-surface); background: var(--surface-input); border: 0; border-radius: 6px; padding: 8px; font: inherit; max-width: 100%; }
 .issueExecutionError { display: flex; align-items: center; gap: 8px; color: var(--error); }
 .issueExecutionList { display: grid; gap: 6px; list-style: none; padding: 0; }

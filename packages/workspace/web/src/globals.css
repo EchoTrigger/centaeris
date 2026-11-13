@@ -137,6 +137,8 @@ svg { width: 16px; height: 16px; stroke-width: 1.9; }
 .workspaceTopbarStart, .workspaceConversationHeading { display: flex; min-width: 0; align-items: center; gap: 6px; }
 .workspaceConversationTitle { min-width: 0; margin: 0; overflow: hidden; color: var(--on-surface); font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .workspaceConversationActions { position: relative; flex: none; }
+.issueConversationBack { flex:none; border:0; background:transparent; color:var(--process-text); padding:4px 6px; font:inherit; font-size:12px; white-space:nowrap; }
+.issueConversationBack:hover { color:var(--on-surface); }
 .workspaceConversationActions summary::-webkit-details-marker { display: none; }
 .workspaceConversationActions .workspaceSessionMenu { right: auto; left: 0; }
 .workspaceConversationActions:not([open]) .workspaceSessionMenu { display: none; }

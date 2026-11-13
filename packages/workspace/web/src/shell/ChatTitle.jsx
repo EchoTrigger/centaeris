@@ -4,6 +4,7 @@ import { Archive, Clipboard, Ellipsis, Pencil, Star } from "lucide-react";
 import { useTranslation } from "../i18n";
 import { createWorkspaceTranscriptTransport } from "../chat/transcriptTransport";
 import { readChatMarkdown } from "../chat/chatMarkdown";
+import { IssueConversationLink } from "../work/IssueConversationLink";
 
 export function ChatTitle({ session, actions, running, titleControl }) {
   const { t } = useTranslation();
@@ -44,6 +45,7 @@ export function ChatTitle({ session, actions, running, titleControl }) {
 
   return <div className="workspaceConversationHeading">
     <h1 className="workspaceConversationTitle">{titleControl}</h1>
+    <IssueConversationLink workspaceId={session.workspaceId} sessionId={session.id} />
     <button className="workspacePanelToggle chatFavorite" type="button" aria-label={t(session.isPinned ? "chat.unfavorite" : "chat.favorite")}
       aria-pressed={session.isPinned} disabled={Boolean(actions.savingSessionId)} onClick={() => actions.onTogglePin(session)}><Star aria-hidden="true" /></button>
     <Menu.Root onOpenChange={open => { if (open && copyState !== "copying") setCopyState(""); }}>

@@ -128,5 +128,5 @@ test("execution results load on expansion and retain the full conversation and a
   await screen.findByText("Delivered analysis");
   expect(screen.getByText("Read the brief")).toBeTruthy();
   expect(screen.getByRole("link", { name: "Report.pdf" }).getAttribute("href")).toBe("/report");
-  expect(screen.getByRole("link", { name: /Open conversation/ }).getAttribute("href")).toContain("session");
+  expect(screen.getByRole("link", { name: /Continue conversation/ }).getAttribute("href")).toContain("session");
 });
