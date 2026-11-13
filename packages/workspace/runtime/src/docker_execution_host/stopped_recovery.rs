@@ -8,7 +8,7 @@ use centaeris_core::session::RuntimeJobLeaseFence;
 const ARCHIVE_METADATA_BUDGET: u64 = 32 * 1024 * 1024;
 
 enum RecoveryContent {
-    Captured(ImmutableWorkspaceSnapshot),
+    Captured(Box<ImmutableWorkspaceSnapshot>),
     Absent,
     PreAdmissionFailed,
 }
@@ -72,7 +72,7 @@ fn prepare_instance_with(
                 .workspace_bytes
                 .checked_add(ARCHIVE_METADATA_BUDGET)
                 .ok_or("stopped_workspace_archive_budget_overflow")?;
-            RecoveryContent::Captured(capture(allocation, profile, limit)?)
+            RecoveryContent::Captured(Box::new(capture(allocation, profile, limit)?))
         }
         None => RecoveryContent::Absent,
     };

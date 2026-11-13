@@ -1910,15 +1910,19 @@ fn hosted_agent_runtime_config(start: &AgentRunStart) -> AgentRuntimeConfig {
 
 fn execute_agent_run(
     agent_run_start: AgentRunStart,
-    runtime: Arc<tokio::runtime::Runtime>,
-    store: Arc<RuntimeStoreActor>,
-    job_store: Arc<PostgresRuntimeStore>,
+    state: HttpServerState,
     lifecycle_job_id: String,
     lifecycle_lease_owner: String,
-    tool_layers: ToolLayerRegistry,
-    tool_concurrency_registry: Arc<centaeris_core::runtime::ToolConcurrencyRegistry>,
-    native_model: Option<native_model::NativeModelGateway>,
 ) -> Result<AgentRunStepOutcome, String> {
+    let HttpServerState {
+        runtime,
+        store,
+        job_store,
+        tool_layers,
+        tool_concurrency_registry,
+        native_model,
+        ..
+    } = state;
     let startup_started = Instant::now();
     let redis_url = env::var("REDIS_URL").map_err(|_| "REDIS_URL is required".to_string())?;
     let ttl_seconds = env::var("RUNTIME_STREAM_TTL_SECONDS")
@@ -4998,9 +5002,7 @@ fn model_process_state_transition<'a>(
     event: &'a TurnUpdate,
     sequence: &AgentRunSessionState,
 ) -> Option<(&'a str, RuntimeProcessState)> {
-    let Some((turn_id, process_state)) = model_process_state_update(event) else {
-        return None;
-    };
+    let (turn_id, process_state) = model_process_state_update(event)?;
     let previous = sequence.model_process_state(turn_id);
     if previous == Some(process_state)
         || (process_state != RuntimeProcessState::Retrying

@@ -45,64 +45,6 @@ fn pending_revocation(
     Ok(revocation)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::material_execution::PendingInput;
-
-    fn pending(state: &str) -> PendingInput {
-        serde_json::from_value(serde_json::json!({
-            "state":state,"reservations":[],"resolvedInput":{
-                "schema":"runtime.resolved_input.v1","inputRef":"library-original",
-                "objectRef":"library-file","ownerKind":"userLibraryObject",
-                "virtualPath":"inputs/library-original/file.zip","displayName":"file.zip",
-                "contentType":"application/zip","sizeBytes":3,"sourceVersion":"1",
-                "sha256":format!("sha256:{:x}",Sha256::digest(b"zip")),
-                "evidenceKind":"userProvided","citationAllowed":false
-            }
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn material_output_consumers_separate_versions_and_stable_execution_paths() {
-        let first = pending("access_revoked").resolved_input;
-        let consumer = material_input_consumer(&first);
-        assert_eq!(consumer, material_input_consumer(&first.clone()));
-        let mut other = first.clone();
-        other.source_version = "2".into();
-        assert_ne!(consumer, material_input_consumer(&other));
-        other = first;
-        other.input_ref = "other-original".into();
-        assert_ne!(consumer, material_input_consumer(&other));
-    }
-
-    #[test]
-    fn confirmed_invalid_input_without_reservations_requires_physical_revocation() {
-        for state in [
-            "asset_removed",
-            "access_revoked",
-            "stale_generation",
-            "asset_unavailable",
-        ] {
-            assert_eq!(
-                pending_revocation(&pending(state)).unwrap(),
-                Some(ExecutionInputState::AccessRevoked),
-                "state {state}"
-            );
-        }
-    }
-
-    #[test]
-    fn active_or_unknown_pending_without_reservations_remains_rejected() {
-        assert!(pending_revocation(&pending("active")).is_err());
-        assert!(pending_revocation(&pending("unknown")).is_err());
-        let mut invalid_identity = pending("access_revoked");
-        invalid_identity.resolved_input.sha256 = "changed".into();
-        assert!(pending_revocation(&invalid_identity).is_err());
-    }
-}
-
 impl DockerExecutionHostRunner {
     pub(crate) fn reconcile_material_inputs(
         &self,
@@ -369,5 +311,63 @@ impl DockerExecutionHostRunner {
             self.workspace_root().trim_end_matches('/'),
             input.virtual_path
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::material_execution::PendingInput;
+
+    fn pending(state: &str) -> PendingInput {
+        serde_json::from_value(serde_json::json!({
+            "state":state,"reservations":[],"resolvedInput":{
+                "schema":"runtime.resolved_input.v1","inputRef":"library-original",
+                "objectRef":"library-file","ownerKind":"userLibraryObject",
+                "virtualPath":"inputs/library-original/file.zip","displayName":"file.zip",
+                "contentType":"application/zip","sizeBytes":3,"sourceVersion":"1",
+                "sha256":format!("sha256:{:x}",Sha256::digest(b"zip")),
+                "evidenceKind":"userProvided","citationAllowed":false
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn material_output_consumers_separate_versions_and_stable_execution_paths() {
+        let first = pending("access_revoked").resolved_input;
+        let consumer = material_input_consumer(&first);
+        assert_eq!(consumer, material_input_consumer(&first.clone()));
+        let mut other = first.clone();
+        other.source_version = "2".into();
+        assert_ne!(consumer, material_input_consumer(&other));
+        other = first;
+        other.input_ref = "other-original".into();
+        assert_ne!(consumer, material_input_consumer(&other));
+    }
+
+    #[test]
+    fn confirmed_invalid_input_without_reservations_requires_physical_revocation() {
+        for state in [
+            "asset_removed",
+            "access_revoked",
+            "stale_generation",
+            "asset_unavailable",
+        ] {
+            assert_eq!(
+                pending_revocation(&pending(state)).unwrap(),
+                Some(ExecutionInputState::AccessRevoked),
+                "state {state}"
+            );
+        }
+    }
+
+    #[test]
+    fn active_or_unknown_pending_without_reservations_remains_rejected() {
+        assert!(pending_revocation(&pending("active")).is_err());
+        assert!(pending_revocation(&pending("unknown")).is_err());
+        let mut invalid_identity = pending("access_revoked");
+        invalid_identity.resolved_input.sha256 = "changed".into();
+        assert!(pending_revocation(&invalid_identity).is_err());
     }
 }

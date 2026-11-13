@@ -448,7 +448,7 @@ fn postgres_session_purge_erases_descendants_atomically_and_preserves_receipts()
     );
     assert_eq!(db.query_one("SELECT to_jsonb(a)::text FROM public.app_core_agentrunauthorization a WHERE agent_run_id='run-purge'",&[]).unwrap().get::<_,String>(0),authorization_before);
     assert_eq!(db.query_one("SELECT to_jsonb(c)::text FROM runtime.agent_run_cleanup_receipts c WHERE agent_run_id='run-purge'",&[]).unwrap().get::<_,String>(0),cleanup_before);
-    assert_eq!(db.query_one("SELECT status='deleted' AND \"purgedAt\" IS NOT NULL FROM public.app_core_session WHERE id='sess_1'",&[]).unwrap().get::<_,bool>(0),true);
+    assert!(db.query_one("SELECT status='deleted' AND \"purgedAt\" IS NOT NULL FROM public.app_core_session WHERE id='sess_1'",&[]).unwrap().get::<_,bool>(0));
     assert_eq!(
         store.purge_interactive_session(&request).unwrap(),
         vec!["sess_1"]
