@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { IssueForm } from "../../src/work/IssueForm";
+import { IssueTemplateValues } from "../../src/work/IssueTemplateFields";
 import { i18n } from "../../src/i18n";
 
 beforeEach(async () => { await i18n.changeLanguage("en"); });
@@ -34,4 +35,17 @@ test("editing retains the captured template and removes only the selected item",
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   expect(save).toHaveBeenCalledWith(expect.objectContaining({ properties: { start: "2026-11-13", entries: [{ amount: "8.00" }] } }));
   expect(save.mock.calls[0][0]).not.toHaveProperty("templateKey");
+});
+
+test("detail properties and structured content retain every captured template value", () => {
+  const captured = { fields: [...definition.fields, { key: "notes", label: "Notes", type: "textarea" }] };
+  const values = { start: "2026-11-13", notes: "Check the evidence", entries: [{ amount: "12.50" }, { amount: "8.00" }] };
+  render(<><aside aria-label="Properties"><IssueTemplateValues definition={captured} values={values} placement="properties" /></aside><section aria-label="Details"><IssueTemplateValues definition={captured} values={values} placement="content" /></section></>);
+  expect(within(screen.getByRole("complementary", { name: "Properties" })).getByText("2026-11-13")).toBeTruthy();
+  const content = within(screen.getByRole("region", { name: "Details" }));
+  expect(content.getByText("Check the evidence")).toBeTruthy();
+  const table = within(content.getByRole("table", { name: "Expense items" }));
+  expect(table.getByRole("columnheader", { name: "Amount" })).toBeTruthy();
+  expect(table.getByRole("cell", { name: "12.50" })).toBeTruthy();
+  expect(table.getByRole("cell", { name: "8.00" })).toBeTruthy();
 });

@@ -18,10 +18,23 @@ export function IssueTemplateFields({ fields, values, onChange, disabled }) {
   })}</div>;
 }
 
-export function IssueTemplateValues({ definition, values }) {
-  return <dl className="issueTemplateValues">{definition.fields.map(field => {
+function TemplateValue({ field, value }) {
+  if (field.type !== "items") return value;
+  return <div className="issueTemplateItems"><table aria-label={field.label}>
+    <thead><tr>{field.fields.map(column => <th key={column.key} scope="col" data-field-type={column.type}>{column.label}</th>)}</tr></thead>
+    <tbody>{value.map((row, index) => <tr key={index}>{field.fields.map(column => <td key={column.key} data-field-type={column.type}>{row[column.key] === undefined || row[column.key] === "" ? null : <TemplateValue field={column} value={row[column.key]} />}</td>)}</tr>)}</tbody>
+  </table></div>;
+}
+
+export function IssueTemplateValues({ definition, values, placement = "all" }) {
+  const fields = definition.fields.filter(field => {
     const value = values[field.key];
-    if (value === undefined || value === "") return null;
-    return <div key={field.key}><dt>{field.label}</dt><dd>{field.type === "items" ? <ol>{value.map((row, index) => <li key={index}><IssueTemplateValues definition={{ fields: field.fields }} values={row} /></li>)}</ol> : value}</dd></div>;
+    const content = field.type === "items" || field.type === "textarea";
+    return value !== undefined && value !== "" && (placement === "all" || placement === (content ? "content" : "properties"));
+  });
+  if (!fields.length) return null;
+  return <dl className={`issueTemplateValues ${placement === "content" ? "isContent" : ""}`}>{fields.map(field => {
+    const value = values[field.key];
+    return <div key={field.key} data-field-type={field.type}><dt>{field.label}</dt><dd><TemplateValue field={field} value={value} /></dd></div>;
   })}</dl>;
 }

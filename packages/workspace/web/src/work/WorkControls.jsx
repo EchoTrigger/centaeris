@@ -8,18 +8,18 @@ export function StatusIcon({ status }) {
   return <Icon className={`workStatusIcon ${status === "done" ? "isDone" : status === "in_progress" ? "isStarted" : ""}`} aria-label={t(`work.status.${status}`)} />;
 }
 
-export function ChoiceMenu({ label, value, options, onChange, icon, className = "" }) {
+export function ChoiceMenu({ label, value, options, onChange, icon, className = "", disabled = false }) {
   const { t } = useTranslation();
   const selected = options.find(option => option.value === value);
   return <Menu.Root modal={false}>
-    <Menu.Trigger className={`workChoice ${className}`} aria-label={t("work.propertyLabel", { label, value: selected?.label || value })}>
+    <Menu.Trigger className={`workChoice ${className}`} disabled={disabled} aria-label={t("work.propertyLabel", { label, value: selected?.label || value })}>
       {selected?.icon || icon}<span>{selected?.label || value}</span><ChevronDown className="workChoiceChevron" aria-hidden="true" />
     </Menu.Trigger>
     <Menu.Portal><Menu.Positioner className="workMenuPositioner" align="start" sideOffset={5}>
       <Menu.Popup className="workMenu" aria-label={label}>
         <div className="workMenuHeading">{label}</div>
         <Menu.RadioGroup value={value}>
-          {options.map(option => <Menu.RadioItem key={option.value} value={option.value} className="workMenuItem" nativeButton closeOnClick render={<button type="button" />} onClick={() => onChange(option.value)}>
+          {options.map(option => <Menu.RadioItem key={option.value} value={option.value} disabled={disabled} className="workMenuItem" nativeButton closeOnClick render={<button type="button" />} onClick={() => onChange(option.value)}>
             {option.icon}<span>{option.label}</span>{option.value === value ? <Check aria-hidden="true" /> : null}
           </Menu.RadioItem>)}
         </Menu.RadioGroup>

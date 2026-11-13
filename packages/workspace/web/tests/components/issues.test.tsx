@@ -75,10 +75,26 @@ test("edit conflicts retain the draft until explicit reload; activity renders ac
   await user.click(screen.getByRole("button", { name: "Reload" }));
   await screen.findByRole("heading", { name: "First issue" });
   conflict = false;
-  await user.click(screen.getByRole("button", { name: "Archive issue" }));
-  await screen.findByRole("button", { name: "Restore issue" });
-  await user.click(screen.getByRole("button", { name: "Restore issue" }));
-  await screen.findByRole("button", { name: "Archive issue" });
+  await user.click(screen.getByRole("button", { name: "More issue actions" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Archive issue" }));
+  await screen.findByText("Archived");
+  await user.click(screen.getByRole("button", { name: "More issue actions" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Restore issue" }));
+  await waitFor(() => expect(issue.archivedAt).toBe(null));
+  await user.click(screen.getByRole("button", { name: "More issue actions" }));
+  await screen.findByRole("menuitem", { name: "Archive issue" });
+});
+
+test("detail property menus submit the current version and preserve the selected human assignee", async () => {
+  const user = userEvent.setup(); mount("/w/one/work/mine/issue-one");
+  await user.click(await screen.findByRole("button", { name: "Status: Todo" }));
+  await user.click(await screen.findByRole("menuitemradio", { name: /In progress/i }));
+  await screen.findByRole("button", { name: "Status: In progress" });
+  expect(requests.find(request => request.body?.status === "inProgress")?.body).toEqual({ status: "inProgress", version: 1 });
+  await user.click(screen.getByRole("button", { name: "Assignee: Taylor" }));
+  await user.click(await screen.findByRole("menuitemradio", { name: "Morgan" }));
+  await screen.findByRole("button", { name: "Assignee: Morgan" });
+  expect(requests.find(request => request.body?.assigneeId === "other")?.body).toEqual({ assigneeId: "other", version: 2 });
 });
 test("archive filtering is recorded in the URL and survives detail navigation", async () => {
   const user = userEvent.setup(); const router = mount();

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { Button } from "@centaeris/ui/button";
+import { ChevronDown, MessagesSquare, Plus, RefreshCw } from "lucide-react";
 import { Textarea } from "@centaeris/ui/textarea";
 import { apiJson } from "../api";
 import { OperationClient } from "../chat/operationReceipts";
@@ -72,7 +73,10 @@ export function IssueExecutions({ workspaceId, userId, issue, onChanged }) {
     finally { if (mounted.current) setPending(false); }
   }
   return <section className="issueExecutions" aria-busy={pending}>
-    {!issue.archivedAt ? <Button variant="ghost" aria-expanded={expanded} disabled={pending} onClick={() => setExpanded(value => !value)}>{t(executions.length ? "issues.newExecution" : "issues.runWithAgent")}</Button> : null}
+    <header className="issueExecutionsHeader"><h2>{t("issues.conversations")}</h2><div className="issueExecutionActions">
+      {executions.length ? <Button variant="ghost" size="icon" aria-label={t("issues.refreshExecutions")} title={t("issues.refreshExecutions")} disabled={pending} onClick={() => { setError(null); setRevision(value => value + 1); }}><RefreshCw aria-hidden="true" /></Button> : null}
+      {!issue.archivedAt ? <Button variant="ghost" className="issueExecutionNew" aria-expanded={expanded} disabled={pending} onClick={() => setExpanded(value => !value)}><Plus aria-hidden="true" />{t(executions.length ? "issues.newExecution" : "issues.runWithAgent")}</Button> : null}
+    </div></header>
     {expanded && !issue.archivedAt ? <form className="issueExecutionForm" onSubmit={event => { event.preventDefault(); void launch(); }}>
       <label className="issueExecutionInstructions">{t("issues.executionInstructions")}<Textarea rows={3} maxLength={8192} value={instructions} disabled={pending} onChange={event => setInstructions(event.target.value)} /></label>
       <label>{t("issues.executionModel")}<select value={modelId} disabled={pending || loadingModels} onChange={event => {
@@ -82,18 +86,17 @@ export function IssueExecutions({ workspaceId, userId, issue, onChanged }) {
       {selectedModel?.thinkingModes?.length ? <label>{t("issues.executionThinking")}<select value={thinkingMode} disabled={pending} onChange={event => setThinkingMode(event.target.value)}>{selectedModel.thinkingModes.map(mode => <option key={mode} value={mode}>{mode}</option>)}</select></label> : null}
       <Button type="submit" variant="ghost" disabled={!modelId || pending || loadingModels}>{t("issues.startExecution")}</Button>
     </form> : null}
-    {executions.length ? <Button variant="ghost" disabled={pending} onClick={() => { setError(null); setRevision(value => value + 1); }}>{t("issues.refreshExecutions")}</Button> : null}
     {error ? <div className="issueExecutionError" role="alert"><span>{error}</span>{error === t("issues.materialsChanged") ? <Button variant="ghost" disabled={pending} onClick={onChanged}>{t("issues.reload")}</Button> : null}<Button variant="ghost" disabled={pending} onClick={async () => {
       setPending(true); setError(null);
       try { const receipt = await operations.recover(); if (receipt) await openReceipt(receipt); else setRevision(value => value + 1); }
       catch (failure) { if (mounted.current) setError(["issue_material_unavailable", "issue_material_version_changed"].includes(failure.message) ? t("issues.materialsChanged") : failure.message); }
       finally { if (mounted.current) setPending(false); }
     }}>{t("agentChat.retry")}</Button></div> : null}
-    {executions.length ? <><h2>{t("issues.conversations")}</h2><ul className="issueExecutionList">{executions.map(execution => <li key={execution.id}><Button variant="ghost" aria-expanded={activeExecution === execution.id} onClick={() => setParams(previous => {
+    {executions.length ? <><ul className="issueExecutionList">{executions.map(execution => <li key={execution.id}><div className="issueExecutionRow"><Button variant="ghost" className="issueExecutionTitle" aria-expanded={activeExecution === execution.id} onClick={() => setParams(previous => {
       const next = new URLSearchParams(previous);
       if (activeExecution === execution.id) next.delete("execution"); else next.set("execution", execution.id);
       return next;
-    }, { replace: true })}>{execution.title}</Button><Link to={sessionChatPath(workspaceId, execution.sessionId)}><span>{t(execution.waitingForInput ? "issues.answerAgent" : "issues.continueConversation")}</span><small>{t(execution.waitingForInput ? "issues.execution.waitingForInput" : `issues.execution.${execution.status}`)}</small></Link>{activeExecution === execution.id ? <ExecutionResults key={`${execution.id}:${revision}`} endpoint={`${endpoint}/${encodeURIComponent(execution.id)}`} execution={execution} workspaceId={workspaceId} userId={userId} issue={issue} onChanged={onChanged} /> : null}</li>)}</ul>
+    }, { replace: true })}><MessagesSquare aria-hidden="true" /><span>{execution.title}</span><ChevronDown aria-hidden="true" /></Button><Link to={sessionChatPath(workspaceId, execution.sessionId)}><span>{t(execution.waitingForInput ? "issues.answerAgent" : "issues.continueConversation")}</span><small>{t(execution.waitingForInput ? "issues.execution.waitingForInput" : `issues.execution.${execution.status}`)}</small></Link></div>{activeExecution === execution.id ? <ExecutionResults key={`${execution.id}:${revision}`} endpoint={`${endpoint}/${encodeURIComponent(execution.id)}`} execution={execution} workspaceId={workspaceId} userId={userId} issue={issue} onChanged={onChanged} /> : null}</li>)}</ul>
       {executions.length < total ? <Button variant="ghost" disabled={pending} onClick={async () => {
         setPending(true); setError(null);
         try { const result = await apiJson(`${endpoint}?limit=20&offset=${executions.length}`); if (mounted.current) { setExecutions(items => [...items, ...result.executions]); setTotal(result.total); } }

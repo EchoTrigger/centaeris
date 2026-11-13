@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button } from "@centaeris/ui/button";
+import { FileText, Plus } from "lucide-react";
 import { apiJson, jsonOptions } from "../api";
 import { useTranslation } from "../i18n";
 
@@ -60,9 +61,9 @@ export function IssueMaterials({ workspaceId, issue, onChanged }) {
     finally { setPending(false); if (changed) onChanged(); }
   }
   return <section className="issueMaterials" aria-busy={pending}>
-    <header><h2>{t("issues.materials")}</h2>{!issue.archivedAt ? <Button variant="ghost" disabled={!data || pending} onClick={() => setChoosing(value => !value)} aria-expanded={choosing}>{t("issues.addMaterials")}</Button> : null}</header>
+    <header><h2>{t("issues.materials")}</h2>{!issue.archivedAt ? <Button variant="ghost" disabled={!data || pending} onClick={() => setChoosing(value => !value)} aria-expanded={choosing}><Plus aria-hidden="true" />{t("issues.addMaterials")}</Button> : null}</header>
     {error ? <div role="alert" className="issueExecutionError">{error}<Button variant="ghost" disabled={pending} onClick={() => { setError(""); setRevision(value => value + 1); onChanged(); }}>{t("issues.reload")}</Button></div> : null}
-    {data ? <ul className="issueMaterialList">{data.materials.map(material => <li key={material.id}><span>{material.available ? material.displayName : t("issues.materialUnavailable")}</span>{!issue.archivedAt ? <Button variant="ghost" disabled={pending} aria-label={t("issues.removeMaterial", { name: material.available ? material.displayName : t("issues.materialUnavailable") })} onClick={() => void mutate(`${endpoint}/${encodeURIComponent(material.id)}`, "DELETE", {})}>{t("issues.remove")}</Button> : null}</li>)}</ul> : null}
+    {data ? data.materials.length ? <ul className="issueMaterialList">{data.materials.map(material => <li key={material.id}><FileText aria-hidden="true" /><span>{material.available ? material.displayName : t("issues.materialUnavailable")}</span>{!issue.archivedAt ? <Button variant="ghost" disabled={pending} aria-label={t("issues.removeMaterial", { name: material.available ? material.displayName : t("issues.materialUnavailable") })} onClick={() => void mutate(`${endpoint}/${encodeURIComponent(material.id)}`, "DELETE", {})}>{t("issues.remove")}</Button> : null}</li>)}</ul> : <p className="issueMaterialsEmpty">{t("issues.noMaterials")}</p> : null}
     {choosing && !issue.archivedAt ? <div className="issueMaterialChooser">
       <label>{t("issues.materialLocation")}<select value={sourceId} disabled={pending} onChange={event => setSourceId(event.target.value)}><option value="">{t("space.materials")}</option>{sources.map(source => <option value={source.id} key={source.id}>{source.name}</option>)}</select></label>
       {!sourceId ? <><label className="issueUpload">{t("issues.uploadMaterials")}<input type="file" multiple disabled={pending} onChange={event => { void upload(Array.from(event.target.files)); event.target.value = ""; }} /></label>{folderId ? <Button variant="ghost" disabled={pending} onClick={() => setFolderPath(path => path.slice(0, -1))}>{t("issues.parentFolder")}</Button> : null}</> : null}

@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { Button } from "@centaeris/ui/button";
-import { Plus } from "lucide-react";
+import { Archive, Ellipsis, Pencil, Plus, UserRound } from "lucide-react";
+import { Menu } from "@centaeris/ui/primitives/menu";
 import { apiJson, jsonOptions } from "../api";
 import { useTranslation } from "../i18n";
 import { WorkBreadcrumb } from "./WorkBreadcrumb";
-import { IssueForm, IssueStatus } from "./IssueForm";
+import { IssueForm, IssueStatus, issueStatuses } from "./IssueForm";
+import { ChoiceMenu } from "./WorkControls";
 import { IssueMaterials } from "./IssueMaterials";
 import { IssueExecutions } from "./IssueExecutions";
 import { IssueTemplateValues } from "./IssueTemplateFields";
@@ -84,17 +86,31 @@ export function Issues({ workspaceId, userId, mine, issueId }) {
       {data ? <div className="issueList">{data.issues.map(item => <Link className="issueRow" key={item.id} to={`${base}/${encodeURIComponent(item.id)}${query}`}><IssueStatus status={item.status} /><span>{item.title}</span><small>{personName(item.assigneeId)}</small></Link>)}
         {data.total > pageSize ? <nav className="issuePagination" aria-label={t("issues.pages")}><Button variant="ghost" disabled={!offset} onClick={() => setParams({ ...(archived ? { archived: "true" } : {}), offset: String(Math.max(0, offset - pageSize)) })}>{t("issues.previous")}</Button><Button variant="ghost" disabled={offset + pageSize >= data.total} onClick={() => setParams({ ...(archived ? { archived: "true" } : {}), offset: String(offset + pageSize) })}>{t("issues.next")}</Button></nav> : null}
       </div> : null}
-    </> : data ? <div className="issueDetail">
+    </> : data ? <div className={`issueDetail ${detail && !editing ? "isReading" : ""}`}>
       {creating || editing ? <IssueForm key={issue?.version || "new"} issue={issue} assignees={assignees} defaultAssigneeId={mine ? userId : null} templates={templates} initialTemplateKey={params.get("template") || ""} pending={pending} onSave={mutate} onCancel={() => creating ? navigate(listUrl) : setEditing(false)} /> : issue ? <>
-        <h1>{issue.title}</h1><div className="issueMetadata"><IssueStatus status={issue.status} /><span>{t(`issues.status.${issue.status}`)}</span><span>{personName(issue.assigneeId)}</span>{issue.archivedAt ? <span>{t("issues.archived")}</span> : null}</div>
-        {issue.description ? <p className="issueDescription">{issue.description}</p> : null}
-        {issue.templateKey ? <IssueTemplateValues definition={issue.templateSnapshot.definition} values={issue.properties} /> : null}
-        <div className="issueActions"><Button variant="ghost" onClick={() => setEditing(true)}>{t("issues.edit")}</Button><Button variant="ghost" disabled={pending} onClick={() => mutate({ archived: !issue.archivedAt })}>{t(issue.archivedAt ? "issues.restore" : "issues.archive")}</Button></div>
-        <IssueMaterials workspaceId={workspaceId} issue={issue} onChanged={() => setRevision(value => value + 1)} />
-        <IssueExecutions key={issue.id} workspaceId={workspaceId} userId={userId} issue={issue} onChanged={() => setRevision(value => value + 1)} />
-        <IssueDeliverables workspaceId={workspaceId} userId={userId} issue={issue} onChanged={() => setRevision(value => value + 1)} />
+        <div className="issueHeading"><h1>{issue.title}</h1><div className="issueActions">
+          <Button variant="ghost" size="icon" aria-label={t("issues.edit")} title={t("issues.edit")} onClick={() => setEditing(true)}><Pencil aria-hidden="true" /></Button>
+          <Menu.Root modal={false}><Menu.Trigger className="issueMoreActions" aria-label={t("issues.moreActions")}><Ellipsis aria-hidden="true" /></Menu.Trigger>
+            <Menu.Portal><Menu.Positioner className="workMenuPositioner" align="end" sideOffset={5}><Menu.Popup className="workMenu">
+              <Menu.Item className="workMenuItem" disabled={pending} onClick={() => void mutate({ archived: !issue.archivedAt })}><Archive aria-hidden="true" /><span>{t(issue.archivedAt ? "issues.restore" : "issues.archive")}</span></Menu.Item>
+            </Menu.Popup></Menu.Positioner></Menu.Portal>
+          </Menu.Root>
+        </div></div>
+        <aside className="issueProperties" aria-label={t("issues.properties")}><h2>{t("issues.properties")}</h2>
+          <ChoiceMenu label={t("issues.status")} value={issue.status} options={issueStatuses.map(value => ({ value, label: t(`issues.status.${value}`), icon: <IssueStatus status={value} /> }))} disabled={pending} onChange={status => void mutate({ status })} />
+          <ChoiceMenu label={t("issues.assignee")} value={issue.assigneeId || ""} options={[{ value: "", label: t("issues.unassigned") }, ...assignees.map(person => ({ value: person.id, label: person.name }))]} icon={<UserRound aria-hidden="true" />} disabled={pending} onChange={assigneeId => void mutate({ assigneeId: assigneeId || null })} />
+          {issue.archivedAt ? <span className="issueArchived">{t("issues.archived")}</span> : null}
+          {issue.templateKey ? <IssueTemplateValues definition={issue.templateSnapshot.definition} values={issue.properties} placement="properties" /> : null}
+        </aside>
+        <div className="issueDetailBody">
+          {issue.description ? <p className="issueDescription">{issue.description}</p> : null}
+          {issue.templateKey ? <IssueTemplateValues definition={issue.templateSnapshot.definition} values={issue.properties} placement="content" /> : null}
+          <IssueMaterials workspaceId={workspaceId} issue={issue} onChanged={() => setRevision(value => value + 1)} />
+          <IssueExecutions key={issue.id} workspaceId={workspaceId} userId={userId} issue={issue} onChanged={() => setRevision(value => value + 1)} />
+          <IssueDeliverables workspaceId={workspaceId} userId={userId} issue={issue} onChanged={() => setRevision(value => value + 1)} />
+        </div>
       </> : null}
-      {issue ? <section className="issueActivity"><h2>{t("issues.activity")}</h2><ol>{events.events.map(event => <li key={event.id}><div><span>{event.actor.name}</span><span>{t(`issues.event.${event.type}`)}</span><time dateTime={event.createdAt}>{time(event.createdAt)}</time></div>{Object.entries(event.changes).filter(([field]) => field !== "deliverableId").map(([field, change]) => <p key={field}>{t(`issues.field.${field}`)}: <span>{fieldValue(field, change.before)}</span> → <span>{fieldValue(field, change.after)}</span></p>)}</li>)}</ol>{events.events.length < events.total ? <Button variant="ghost" disabled={pending} onClick={async () => { setPending(true); setError(null); try { const next = await apiJson(`${root}/${encodeURIComponent(issueId)}/events?limit=${pageSize}&offset=${events.events.length}`); if (mounted.current) setEvents(previous => ({ ...next, events: [...previous.events, ...next.events] })); } catch (failure) { if (mounted.current) setError(failure); } finally { if (mounted.current) setPending(false); } }}>{t("issues.moreActivity")}</Button> : null}</section> : null}
+      {issue ? <details className="issueActivity"><summary>{t("issues.activity")}</summary><ol>{events.events.map(event => <li key={event.id}><div><span>{event.actor.name}</span><span>{t(`issues.event.${event.type}`)}</span><time dateTime={event.createdAt}>{time(event.createdAt)}</time></div>{Object.entries(event.changes).filter(([field]) => field !== "deliverableId").map(([field, change]) => <p key={field}>{t(`issues.field.${field}`)}: <span>{fieldValue(field, change.before)}</span> → <span>{fieldValue(field, change.after)}</span></p>)}</li>)}</ol>{events.events.length < events.total ? <Button variant="ghost" disabled={pending} onClick={async () => { setPending(true); setError(null); try { const next = await apiJson(`${root}/${encodeURIComponent(issueId)}/events?limit=${pageSize}&offset=${events.events.length}`); if (mounted.current) setEvents(previous => ({ ...next, events: [...previous.events, ...next.events] })); } catch (failure) { if (mounted.current) setError(failure); } finally { if (mounted.current) setPending(false); } }}>{t("issues.moreActivity")}</Button> : null}</details> : null}
     </div> : null}
   </section>;
 }
