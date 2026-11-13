@@ -555,6 +555,17 @@ class PasswordResetMail(models.Model):
         return super().save(*args, **kwargs)
 
 
+class UserWorkspaceGuideState(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE)
+    dismissedAt = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=["user", "workspace"], name="user_workspace_guide_unique",
+        )]
+
+
 class WorkspacePluginEnablement(models.Model):
     workspace = models.ForeignKey(
         Workspace, on_delete=models.CASCADE, related_name="pluginEnablements"

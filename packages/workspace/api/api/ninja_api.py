@@ -76,3 +76,6 @@ api.add_router('/api', issues_router)
 
 from app_core.http.notifications import router as notifications_router
 api.add_router("/api", notifications_router)
+
+from app_core.http.workspace_guide import router as workspace_guide_router
+api.add_router("/api", workspace_guide_router)

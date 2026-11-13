@@ -985,3 +985,40 @@ through their existing authenticated download endpoints.
 The response carries `resultRef`, `resultSha256`, and `continuation` (either null or an exact `tool` / `arguments` pair). `read_material_result(result_ref, cursor)` retrieves the next page of the same saved result. Treat its cursor as opaque. It does not rerun a search. When a document window is exhausted, continuation can point to `read_material` with the next zero-based line offset. Single long lines are paged at UTF-8 character boundaries. Only the returned content is eligible for a citation.
 
 Snapshots remain with the source SessionEvent and survive API/runtime restarts. Every continuation rechecks the current run's source permissions, generation, processing identity, and session ownership. Corrupt snapshots, revoked access, and invalid cursors fail explicitly; they are not reported as a successful partial result. Existing citation projections are retained during the schema migration. Roll out API migrations and the matching Runtime tool catalog together, after active runs drain.
+
+## Workspace guide
+
+`GET /api/workspaces/{workspaceId}/guide` returns
+`{ "guide": { "dismissed": false, "steps": [{ "id": "materials", "completed": false }] } }`.
+Owners and administrators receive steps in this order: `models`, `materials`,
+`plugins`, `connections`, `conversation`, `issue`. Members receive `materials`,
+`conversation`, `issue`. Both methods require browser session authentication and
+current membership in an active workspace; missing membership returns
+`404 workspace_not_found`, including for platform operators.
+
+`PATCH` on the same URL requires the strict JSON body `{ "dismissed": true }`
+(or `false`) and CSRF, and returns the same envelope. Unknown fields, query
+parameters, missing fields and non-boolean values are rejected. The user is
+always the authenticated recipient. Dismissal persists independently for each
+user/workspace and survives application updates. Repeated identical PATCHes
+preserve the dismissal timestamp. GET never creates a state record.
+
+Completion is recomputed from authoritative records:
+
+- `models`: a current, enabled workspace model with an enabled, unarchived
+  provider and a saved provider credential; diagnostic models do not count.
+- `materials`: a non-deleted personal file/image owned by the recipient, or a
+  non-deleted file in a ready workspace source that the recipient may read.
+  Owner/admin source access and member group grants follow existing source rules.
+- `plugins`: an installed, enabled package with readable, valid package and
+  connector metadata.
+- `connections`: an installed service whose declaration requires no credentials,
+  or whose required credential is saved in this workspace. This indicates
+  configuration only; no live service connection is tested.
+- `conversation`: an interactive AgentRun by the recipient in an active session
+  they own in this workspace. Empty sessions and Agent Run API sessions do not count.
+- `issue`: an issue created by the recipient in this workspace.
+
+Invalid package metadata returns `503 plugin_catalog_invalid`; an enablement
+without an installation returns `409 workspace_plugin_enablement_invalid`.
+Failed completion checks or persistence do not acknowledge a dismissal.
