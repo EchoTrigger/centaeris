@@ -408,8 +408,7 @@ impl PostgresConnectionPool {
             pool: self,
             client: Some(self.checkout().map_err(E::from)?),
         };
-        apply_request_timeout(connection.client.as_mut().expect("checked out client"))
-            .map_err(E::from)?;
+        remaining_request_time().map_err(E::from)?;
         let result = operation(connection.client.as_mut().expect("checked out client"));
         if result.is_ok()
             && remaining_request_time().is_ok()
@@ -440,9 +439,14 @@ impl PostgresConnectionPool {
             if let Some(client) = state.idle.pop() {
                 drop(state);
                 let mut client = client;
-                if apply_request_timeout(&mut client).is_ok()
-                    && client.simple_query("SELECT 1").is_ok()
-                {
+                // Setting request timeouts also proves this idle connection is
+                // alive. Background work still needs its explicit health probe.
+                let healthy = if REQUEST_DEADLINE.with(Cell::get).is_some() {
+                    apply_request_timeout(&mut client).is_ok()
+                } else {
+                    client.simple_query("SELECT 1").is_ok()
+                };
+                if healthy {
                     return Ok(client);
                 }
                 drop(client);
@@ -465,7 +469,10 @@ impl PostgresConnectionPool {
                         .unwrap_or(remaining)
                         .min(remaining),
                 );
-                return match connect(&config) {
+                return match connect(&config).and_then(|mut client| {
+                    apply_request_timeout(&mut client)?;
+                    Ok(client)
+                }) {
                     Ok(client) => Ok(client),
                     Err(error) => {
                         self.discard();
@@ -725,6 +732,95 @@ mod tests {
             error,
             "Postgres connection pool checkout timeout is too large"
         );
+    }
+
+    #[test]
+    #[ignore = "requires dedicated Postgres test database"]
+    fn postgres_deadline_checkout_configures_and_replaces_connections_without_replay() {
+        fn settings(client: &mut postgres::Client) -> Result<(i32, i64, i64), String> {
+            client
+                .query_one(
+                    "SELECT pg_backend_pid(),\
+                     (SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'),\
+                     (SELECT setting::bigint FROM pg_settings WHERE name='lock_timeout')",
+                    &[],
+                )
+                .map(|row| (row.get(0), row.get(1), row.get(2)))
+                .map_err(|error| error.to_string())
+        }
+
+        let _guard = super::integration_tests::TEST_LOCK
+            .lock()
+            .expect("Postgres test lock");
+        let url = std::env::var("CENTAERIS_TEST_POSTGRES_URL")
+            .expect("CENTAERIS_TEST_POSTGRES_URL is required");
+        let mut administrator =
+            postgres::Client::connect(&url, postgres::NoTls).expect("connect test administrator");
+        super::integration_tests::owned_database::require_owned_database(&mut administrator);
+        let defaults = settings(&mut administrator).expect("read default SQL timeouts");
+        let pool = PostgresConnectionPool::new(
+            postgres_config(
+                &url,
+                DEFAULT_POSTGRES_CONNECT_TIMEOUT,
+                "centaeris-runtime-pool-test",
+            )
+            .expect("test Postgres config"),
+            1,
+            DEFAULT_POSTGRES_CHECKOUT_TIMEOUT,
+        );
+        let first = {
+            let _deadline = super::RequestDeadline::limit(Duration::from_secs(10));
+            pool.with_client(settings)
+                .expect("configure new connection before operation")
+        };
+        assert!(first.1 > 0 && first.1 <= 10_000);
+        assert_eq!(first.1, first.2);
+        let reused = {
+            let _deadline = super::RequestDeadline::limit(Duration::from_secs(5));
+            pool.with_client(settings)
+                .expect("configure reused connection before operation")
+        };
+        assert_eq!(first.0, reused.0, "healthy connection must be reused");
+        assert!(reused.1 > 0 && reused.1 <= 5_000);
+        assert_eq!(reused.1, reused.2);
+
+        assert!(administrator
+            .query_one("SELECT pg_terminate_backend($1)", &[&first.0])
+            .expect("terminate idle pooled backend")
+            .get::<_, bool>(0));
+        let stopped_by = std::time::Instant::now() + Duration::from_secs(5);
+        while administrator
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)",
+                &[&first.0],
+            )
+            .expect("observe terminated backend exit")
+            .get::<_, bool>(0)
+        {
+            assert!(
+                std::time::Instant::now() < stopped_by,
+                "terminated backend must exit before replacement checkout"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let mut calls = 0;
+        let replacement = {
+            let _deadline = super::RequestDeadline::limit(Duration::from_secs(5));
+            pool.with_client(|client| {
+                calls += 1;
+                settings(client)
+            })
+            .expect("replace closed idle connection before operation")
+        };
+        assert_eq!(calls, 1, "business operation must not be replayed");
+        assert_ne!(first.0, replacement.0);
+        assert!(replacement.1 > 0 && replacement.1 <= 5_000);
+        assert_eq!(replacement.1, replacement.2);
+        let clean = pool
+            .with_client(settings)
+            .expect("background work gets restored SQL defaults");
+        assert_eq!(replacement.0, clean.0);
+        assert_eq!((clean.1, clean.2), (defaults.1, defaults.2));
     }
 
     #[test]
