@@ -87,6 +87,12 @@ test("failed delivery explains whether the Agent omitted its reply or exhausted 
     assert.ok(render("assistantText", "agent_run_failed", reason).includes(reason));
   }
 });
+
+test("workspace save failures identify the recovery boundary without exposing helper diagnostics", () => {
+  const html = render("notice", "agent_run_failed", "private helper diagnostic", "workspace_snapshot_failed");
+  assert.match(html, /modelErrors.workspaceSnapshotFailed/);
+  assert.doesNotMatch(html, /private helper diagnostic/);
+});
 test("user, assistant and ordinary notice content is never rewritten as an error code", () => {
   for (const [kind, source] of [["userText", "agent_run_failed"], ["assistantText", "agent_run_failed"], ["notice", null]]) {
     assert.ok(render(kind, source).includes("model_quota_domain_required"));

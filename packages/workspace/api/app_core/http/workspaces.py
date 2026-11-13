@@ -1460,11 +1460,14 @@ def create_session_message(
                     return Status(409, {"error": "session_has_active_agent_run"})
                 # Cleanup publishes the final workspace under this same Session
                 # lock. Do not freeze the next Run's baseline before its release.
-                if session.agent_runs.filter(
+                pending_preservation = session.agent_runs.filter(
                     environment_id=session.current_environment_id,
                     status__in={"completed", "failed", "cancelled"},
                     environment_release__isnull=True,
-                ).exists():
+                )
+                if pending_preservation.filter(transitionReason="workspace_preservation_blocked").exists():
+                    return Status(409, {"error": "session_workspace_preservation_blocked"})
+                if pending_preservation.exists():
                     return Status(409, {"error": "session_workspace_preservation_pending"})
                 linked_attachment_refs = set(
                     session.assetLinks.filter(id__in=attachment_refs).values_list(

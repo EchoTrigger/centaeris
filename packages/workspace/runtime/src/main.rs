@@ -3569,12 +3569,16 @@ fn execute_agent_run(
                             "recoveryWorkspacePrepare",
                             &agent_run_start.agent_run_id,
                             || {
-                                docker_execution.prepare_recovery_workspace(
-                                    &workspace_lease,
-                                    checkpoint_id.as_str(),
-                                    &recovery_workspace_snapshot,
-                                    workspace_input_upper_bound_bytes,
-                                )
+                                docker_execution
+                                    .prepare_recovery_workspace(
+                                        &workspace_lease,
+                                        checkpoint_id.as_str(),
+                                        &recovery_workspace_snapshot,
+                                        workspace_input_upper_bound_bytes,
+                                    )
+                                    .map_err(|error| {
+                                        format!("workspace snapshot capture failed: {error}")
+                                    })
                             },
                         )?
                         else {
@@ -3797,6 +3801,9 @@ fn execute_agent_run(
                                     &baseline,
                                     workspace_input_upper_bound_bytes,
                                 )
+                                .map_err(|error| {
+                                    format!("workspace snapshot capture failed: {error}")
+                                })
                             },
                         )?
                         .ok_or("initial recovery checkpoint could not seal the workspace")?;
@@ -5573,6 +5580,16 @@ fn provider_response_was_interrupted(error: &str) -> bool {
 }
 
 fn public_agent_failure_reason<'a>(internal_error: &'a str, transition_reason: &'a str) -> &'a str {
+    if transition_reason == "session_workspace_commit_failed"
+        || internal_error.starts_with("sandbox helper snapshot-capture failed (")
+        || internal_error.starts_with("snapshot capture ")
+        || internal_error.starts_with("read snapshot capture ")
+        || internal_error.starts_with("decode snapshot capture ")
+        || internal_error.starts_with("wait for snapshot capture helper failed:")
+        || internal_error.starts_with("workspace snapshot ")
+    {
+        return "workspace_snapshot_failed";
+    }
     if let Some(reason) = internal_error
         .strip_prefix("read AGENTS.md failed: ")
         .or_else(|| internal_error.strip_prefix("resolve execution model input image failed: "))
@@ -5649,6 +5666,7 @@ fn failed_session_records(
             "execution_input_unknown" => Some("The task was started, but input delivery is unconfirmed. Do not repeat the operation.".into()),
             "execution_query_unknown" => Some("Task execution result could not be confirmed. Do not repeat the operation.".into()),
             "execution_output_unavailable" => Some("Task output is unavailable. The command must not be repeated automatically.".into()),
+            "workspace_snapshot_failed" => Some("The workspace could not be saved. Its execution environment is retained for recovery; completed commands must not be repeated automatically.".into()),
             _ => None,
         });
     let mut events = Vec::new();
@@ -6414,7 +6432,9 @@ fn upload_recovery_workspace(
     let after_collect = observed_workspace_generation(host);
     observations::timing("recoveryPostCaptureGeneration", generation_started, "ok");
     let generation = stable_workspace_generation(before_collect, after_collect);
-    let snapshot = host.upload_recovery_workspace(prepared)?;
+    let snapshot = host
+        .upload_recovery_workspace(prepared)
+        .map_err(|error| format!("workspace snapshot publication failed: {error}"))?;
     Ok(UploadedRecoveryWorkspace {
         snapshot,
         generation,
@@ -9045,6 +9065,55 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("existing tasks remain supervised"));
+    }
+
+    #[test]
+    fn snapshot_failure_commits_a_safe_specific_reason() {
+        let internal = "sandbox helper snapshot-capture failed (exitCode=1): execution_agent failed: workspace snapshot does not support symlinks";
+        let reason = public_agent_failure_reason(internal, "core_run_failed");
+        assert_eq!(reason, "workspace_snapshot_failed");
+        for (error, transition) in [
+            (
+                "workspace snapshot capture failed: private detail",
+                "core_run_failed",
+            ),
+            (
+                "workspace snapshot publication failed: private detail",
+                "core_run_failed",
+            ),
+            (
+                "private commit diagnostic",
+                "session_workspace_commit_failed",
+            ),
+        ] {
+            assert_eq!(
+                public_agent_failure_reason(error, transition),
+                "workspace_snapshot_failed"
+            );
+        }
+        let start = agent_run_start();
+        let mut sequence = agent_run_session_state(&start);
+        started_session_records(&start, &mut sequence, 1).unwrap();
+        let records = failed_session_records(
+            &start,
+            reason,
+            &AssistantTextProjection::default(),
+            &mut sequence,
+            2,
+        )
+        .unwrap();
+        let terminal = &records.last().unwrap().event;
+        assert_eq!(terminal.event_type, SessionRecordType::AgentRunFailed);
+        assert_eq!(terminal.payload["reasonType"], "workspace_snapshot_failed");
+        assert!(terminal.payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("retained for recovery"));
+        assert!(!terminal.payload.to_string().contains("symlinks"));
+        assert_eq!(
+            public_agent_failure_reason("an unrelated helper failed", "core_run_failed"),
+            "core_run_failed"
+        );
     }
 
     #[test]

@@ -1075,7 +1075,11 @@ export function AppPageContent({ initialSession = null, dockContainer = null, do
         setPendingUserMessage(value => value === pendingMessage ? null : value);
         setWorkTime(null);
         if (rejected) setSubmissionRejected(true);
-        if (isWorkspacePreservationPending(errorValue)) return;
+        if (isWorkspacePreservationPending(errorValue)) {
+          setComposerError(t(errorValue.message === "session_workspace_preservation_blocked"
+            ? "appRoute.workspacePreservationBlocked" : "appRoute.workspacePreservationPending"));
+          return;
+        }
       }
       if (accepted) {
         setConversationError("operations.acceptedReadFailed");

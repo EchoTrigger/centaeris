@@ -57,7 +57,10 @@ const RECOVERABLE_CLEANUP: &str = r#"EXISTS(
    OR p.payload_json::jsonb->>'authorizationDigest' IS DISTINCT FROM a.digest)))"#;
 
 fn control_candidates(stage: &str) -> String {
-    control_candidates_at(stage, "AND j.run_at_ms<=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND COALESCE(j.lease_reclaim_not_before_ms,j.run_at_ms)<=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint")
+    control_candidates_at(
+        stage,
+        "AND j.run_at_ms<=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND COALESCE(j.lease_reclaim_not_before_ms,j.run_at_ms)<=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint",
+    )
 }
 
 fn control_candidates_at(stage: &str, due: &str) -> String {
@@ -68,16 +71,14 @@ fn control_candidates_at(stage: &str, due: &str) -> String {
         queued
     };
     format!(
-        "j.job_kind='agent_run.lifecycle' AND ($1::text IS NULL OR j.job_id=$1) AND ({eligible})"
+        "j.job_kind='agent_run.lifecycle' AND ($1::text IS NULL OR j.job_id=$1) AND j.last_error IS DISTINCT FROM 'workspace_preservation_blocked' AND ({eligible})"
     )
 }
 
-fn record_cleanup_recovery(
+fn cleanup_binding(
     tx: &mut impl GenericClient,
     id: &str,
-    owner: &str,
-    now: i64,
-) -> Result<(), String> {
+) -> Result<(String, String, String), String> {
     let row = tx.query_one("SELECT r.id,r.workspace_id,r.session_id,a.digest,a.payload::text FROM runtime_jobs j JOIN public.app_core_agentrun r ON j.job_id='agent_run.lifecycle:'||r.id JOIN public.app_core_agentrunauthorization a ON a.agent_run_id=r.id WHERE j.job_id=$1", &[&id]).map_err(|e| e.to_string())?;
     let run: String = row.get(0);
     let workspace: String = row.get(1);
@@ -96,6 +97,16 @@ fn record_cleanup_recovery(
     super::pre_admission_failure::has_pre_admission_failure(
         tx, &workspace, &session, &run, &digest,
     )?;
+    Ok((run, session, digest))
+}
+
+fn record_cleanup_recovery(
+    tx: &mut impl GenericClient,
+    id: &str,
+    owner: &str,
+    now: i64,
+) -> Result<(), String> {
+    let (run, _, digest) = cleanup_binding(tx, id)?;
     mark_terminal_pending(tx, &run)?;
     tx.execute("INSERT INTO runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) SELECT 'agent_run_cleanup_recovered:'||job_id||':'||$2::text,session_id,job_id,'runtime.agent_run.cleanup_recovered.v1',$3::bigint,'internal',json_build_object('schema','runtime.agent_run.cleanup_recovered.v1','agentRunId',$4::text,'jobId',job_id,'authorizationDigest',$5::text,'leaseOwner',$2::text,'previousStatus',status,'retryCount',retry_count,'maxRetries',max_retries,'previousError',last_error,'previousUpdatedAtMs',updated_at_ms,'recoveredAtMs',$3::bigint,'deadLetterIds',COALESCE((SELECT json_agg(dead_letter_id ORDER BY dead_letter_id) FROM dead_letters WHERE original_job_id=$1),'[]'::json))::text FROM runtime_jobs WHERE job_id=$1", &[&id,&owner,&now,&run,&digest]).map_err(|error| {
         error.as_db_error().map_or_else(
@@ -106,12 +117,77 @@ fn record_cleanup_recovery(
     Ok(())
 }
 
+fn lock_preservation_target(tx: &mut impl GenericClient, id: &str) -> Result<String, String> {
+    let (run, session, _) = cleanup_binding(tx, id)?;
+    // Match the established Session -> Run -> Environment -> Job order. A repair
+    // cannot race successor admission or transfer responsibility to a new owner.
+    tx.query_opt(
+        "SELECT id FROM public.app_core_session WHERE id=$1 FOR UPDATE",
+        &[&session],
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or("workspace_preservation_session_missing")?;
+    let environment: String = tx.query_opt("SELECT environment_id FROM public.app_core_agentrun WHERE id=$1 AND session_id=$2 AND status IN('completed','failed','cancelled') FOR UPDATE", &[&run, &session])
+        .map_err(|error| error.to_string())?
+        .ok_or("workspace_preservation_terminal_required")?
+        .get(0);
+    tx.query_opt("SELECT id FROM public.app_core_sessionenvironment WHERE id=$1 AND session_id=$2 AND controller_run_id=$3 AND NOT controller_released AND controller_purpose IN('execute','cleanup') FOR UPDATE", &[&environment, &session, &run])
+        .map_err(|error| error.to_string())?
+        .ok_or("workspace_preservation_controller_required")?;
+    let target = tx.query_one(&format!("SELECT EXISTS(SELECT 1 FROM runtime_jobs j WHERE j.job_id=$1 AND j.job_kind='agent_run.lifecycle' AND {RECOVERABLE_CLEANUP}) AND EXISTS(SELECT 1 FROM runtime.execution_instances i JOIN runtime.resident_sandboxes s ON s.execution_id=i.allocation_execution_id AND s.instance_id=i.instance_id AND s.environment_id=i.environment_id AND s.host_id=i.host_id WHERE i.agent_run_id=$2 AND i.environment_id=$3 AND i.session_id=$4) AND NOT EXISTS(SELECT 1 FROM public.app_core_agentrunenvironmentrelease WHERE agent_run_id=$2)") , &[&id, &run, &environment, &session])
+        .map_err(|error| error.to_string())?
+        .get::<_, bool>(0);
+    if !target {
+        return Err("workspace_preservation_target_rejected".into());
+    }
+    Ok(run)
+}
+
 pub(super) fn mark_terminal_pending(tx: &mut impl GenericClient, run: &str) -> Result<(), String> {
     tx.execute("INSERT INTO runtime.runtime_events(event_id,session_id,task_id,event_type,at_ms,visibility,payload_json) SELECT 'agent_run_control_pending:'||$1,session_id,$1,'runtime.agent_run.control_pending.v1',(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,'internal',json_build_object('schema','runtime.agent_run.control_pending.v1','agentRunId',$1,'authorizationDigest',substring(idempotency_key FROM length(job_id)+2))::text FROM runtime.runtime_jobs WHERE job_id='agent_run.lifecycle:'||$1 AND job_kind='agent_run.lifecycle' AND session_id IS NOT NULL ON CONFLICT(event_id) DO NOTHING", &[&run]).map_err(|e|e.to_string())?;
     Ok(())
 }
 
 impl PostgresRuntimeStore {
+    /// Park only this terminal Run's original, still-held cleanup responsibility.
+    /// The environment and its resident charge remain untouched until preservation
+    /// and the ordinary immutable release receipts succeed.
+    pub(crate) fn block_workspace_preservation(&self, id: &str, owner: &str) -> Result<(), String> {
+        self.with_execution_control_client(|client| {
+            let mut tx = client.transaction().map_err(|error| error.to_string())?;
+            super::resource_commit::require_durable_resource_commit(&mut tx)?;
+            let run = lock_preservation_target(&mut tx, id)?;
+            let row = tx.query_opt(
+                "SELECT 1 FROM runtime_jobs WHERE job_id=$1 AND status='running' AND lease_owner=$2 AND lease_expires_at_ms>(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AND (lease_purpose='execute' OR (lease_purpose='control' AND lease_control_stage='cleanup')) AND ($3::text IS NULL OR lease_host_id=$3) FOR UPDATE",
+                &[&id, &owner, &self.dispatch_host_id()],
+            ).map_err(|error| error.to_string())?;
+            if row.is_none() {
+                return Err("workspace_preservation_block_lease_rejected".into());
+            }
+            mark_terminal_pending(&mut tx, &run)?;
+            tx.execute("UPDATE runtime_jobs SET status='failed',last_error='workspace_preservation_blocked',updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,lease_owner=NULL,lease_expires_at_ms=NULL WHERE job_id=$1", &[&id]).map_err(|error| error.to_string())?;
+            tx.execute("UPDATE public.app_core_agentrun SET \"transitionReason\"='workspace_preservation_blocked' WHERE id=$1", &[&run]).map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())
+        })
+    }
+
+    /// Explicit repair acknowledgement resumes the same cleanup Job. It never
+    /// clears a live lease, resets execution/retry history or creates a new Run.
+    pub(crate) fn retry_workspace_preservation(&self, id: &str) -> Result<(), String> {
+        self.with_execution_control_client(|client| {
+            let mut tx = client.transaction().map_err(|error| error.to_string())?;
+            super::resource_commit::require_durable_resource_commit(&mut tx)?;
+            let run = lock_preservation_target(&mut tx, id)?;
+            let row = tx.query_opt("SELECT 1 FROM runtime_jobs WHERE job_id=$1 AND status='failed' AND last_error='workspace_preservation_blocked' AND lease_owner IS NULL AND lease_expires_at_ms IS NULL FOR UPDATE", &[&id]).map_err(|error| error.to_string())?;
+            if row.is_none() {
+                return Err("workspace_preservation_retry_rejected".into());
+            }
+            tx.execute("UPDATE runtime_jobs SET status='queued',last_error=NULL,run_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,updated_at_ms=(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,lease_reclaim_not_before_ms=NULL,lease_purpose='control',lease_control_stage='cleanup' WHERE job_id=$1", &[&id]).map_err(|error| error.to_string())?;
+            tx.execute("UPDATE public.app_core_agentrun SET \"transitionReason\"='runtime_session_terminal_committed' WHERE id=$1 AND \"transitionReason\"='workspace_preservation_blocked'", &[&run]).map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())
+        })
+    }
+
     pub(crate) fn control_job_wait(
         &self,
         stage: &str,

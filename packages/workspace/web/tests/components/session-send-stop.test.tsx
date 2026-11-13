@@ -392,7 +392,8 @@ test("workspace preservation stays out of the transcript when reopening after a 
 });
 
 test.each([
-  [409, "session_workspace_preservation_pending", null],
+  [409, "session_workspace_preservation_pending", "appRoute.workspacePreservationPending"],
+  [409, "session_workspace_preservation_blocked", "appRoute.workspacePreservationBlocked"],
   [413, "upload_body_too_large", "appRoute.attachmentTooLarge"],
   [429, "upload_capacity_exhausted", "appRoute.sendingTemporarilyUnavailable"],
 ] as const)("a definite %i rejection restores the draft and keeps the failure visible until acceptance", async (status, code, feedback) => {

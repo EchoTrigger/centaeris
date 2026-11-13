@@ -41,7 +41,8 @@ function isUnconfirmedRequest(error: unknown) {
 }
 
 export function isWorkspacePreservationPending(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 409 && error.message === "session_workspace_preservation_pending";
+  return error instanceof ApiError && error.status === 409
+    && ["session_workspace_preservation_pending", "session_workspace_preservation_blocked"].includes(error.message);
 }
 
 export function isDefiniteSubmissionRejection(error: unknown): boolean {

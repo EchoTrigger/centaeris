@@ -373,6 +373,13 @@ fn run_claimed(
                 Ok(next) => next,
                 Err(error) => {
                     lease.require()?;
+                    if preservation_blocked(&error) {
+                        lease.handoff()?;
+                        return state
+                            .job_store
+                            .block_workspace_preservation(&job.job_id, owner)
+                            .map_err(Failure::from);
+                    }
                     if let Some(reason) = wait_reason(&error)
                         .or_else(|| lane.stage().map(|_| "control_retry_pending"))
                     {
@@ -661,11 +668,15 @@ fn retry_at(outcome: &AgentRunStepOutcome, now: i64, recheck: i64, deadline: Opt
 }
 
 fn cleanup_pending(error: Failure) -> Failure {
-    if wait_reason(&error).is_some() {
+    if preservation_blocked(&error) || wait_reason(&error).is_some() {
         error
     } else {
         Failure::rejected(503, "retained_cleanup_pending")
     }
+}
+
+fn preservation_blocked(error: &Failure) -> bool {
+    matches!(error, Failure::Rejected { status: 422, code } if code == "workspace_preservation_blocked")
 }
 
 fn wait_reason(error: &Failure) -> Option<&'static str> {
@@ -760,7 +771,7 @@ fn finish(
             }
         }
         Resolution::Ready { .. } => {
-            return Err(Failure::rejected(409, "control_execution_forbidden"))
+            return Err(Failure::rejected(409, "control_execution_forbidden"));
         }
     }
     Ok(Next::Complete)
@@ -841,7 +852,7 @@ fn fail(
                 "agent_run_lifecycle_lease_lost" | "agent_run_execute_lease_required"
             ) =>
         {
-            return Ok(())
+            return Ok(());
         }
         _ => ("agent_run_lifecycle_failed", false),
     };
@@ -884,6 +895,15 @@ fn cleanup_state(state: &HttpServerState) -> HttpServerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn deterministic_preservation_errors_are_not_converted_into_transient_waits() {
+        let blocked = cleanup_pending(Failure::rejected(422, "workspace_preservation_blocked"));
+        assert!(preservation_blocked(&blocked));
+        assert!(wait_reason(&blocked).is_none());
+        let unavailable = cleanup_pending(Failure::rejected(503, "retained_cleanup_unconfirmed"));
+        assert!(!preservation_blocked(&unavailable));
+        assert_eq!(wait_reason(&unavailable), Some("retained_cleanup_pending"));
+    }
     #[tokio::test]
     async fn work_wake_retains_commits_between_scan_and_wait() {
         let wake = WorkWake::default();

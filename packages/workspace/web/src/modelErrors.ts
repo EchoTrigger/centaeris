@@ -28,6 +28,7 @@ export const MODEL_ERROR_KEYS: Readonly<Record<string, string>> = {
   execution_input_unknown: "modelErrors.executionOutcomeUnknown",
   execution_query_unknown: "modelErrors.executionOutcomeUnknown",
   execution_output_unavailable: "modelErrors.executionOutputUnavailable",
+  workspace_snapshot_failed: "modelErrors.workspaceSnapshotFailed",
   stopped: "modelErrors.executionInterrupted",
   shutdown: "modelErrors.executionInterrupted",
   "The model response was interrupted. Retry the request.": "modelErrors.interrupted",

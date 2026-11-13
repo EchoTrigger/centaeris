@@ -20,7 +20,7 @@ pub(crate) fn teardown(
                 "teardown_signing_key",
                 "cleanup_signing_key_unavailable",
                 "retained_cleanup_unavailable",
-            )
+            );
         }
     };
     let cleanup = match cleanup.validate(signing_key.as_bytes()) {
@@ -29,7 +29,7 @@ pub(crate) fn teardown(
             return Err(Failure::rejected(
                 400,
                 "agent_run_cleanup_authority_invalid",
-            ))
+            ));
         }
     };
     let lease = RuntimeJobLeaseFence {
@@ -101,7 +101,7 @@ pub(crate) fn teardown(
                 "teardown_host_context",
                 &error,
                 "retained_cleanup_unavailable",
-            )
+            );
         }
     };
     let authority = CleanupAuthorityRequest {
@@ -292,10 +292,63 @@ fn unavailable<T>(
 }
 
 pub(crate) fn failure(error: &str) -> Failure {
-    if error == "environment_host_busy" || error == crate::resident_capacity::RESIDENT_CAPACITY_WAIT
+    if preservation_blocked(error) {
+        Failure::rejected(422, "workspace_preservation_blocked")
+    } else if error == "environment_host_busy"
+        || error == crate::resident_capacity::RESIDENT_CAPACITY_WAIT
     {
         Failure::rejected(409, error)
     } else {
         Failure::rejected(503, "retained_cleanup_unconfirmed")
     }
+}
+
+/// These failures describe the retained workspace, not a temporarily unavailable
+/// host. Repeating capture cannot repair its node types, paths, format or budget.
+fn preservation_blocked(error: &str) -> bool {
+    matches!(
+        error,
+        "stopped_workspace_node_unsupported"
+            | "stopped_workspace_symlink_invalid"
+            | "stopped_workspace_protected_input_node_rejected"
+            | "stopped_input_inventory_invalid"
+            | "stopped_input_inventory_schema_rejected"
+            | "stopped_input_inventory_archive_invalid"
+            | "stopped_input_inventory_path_rejected"
+            | "stopped_workspace_profile_or_budget_rejected"
+            | "stopped_workspace_mounted_root_rejected"
+            | "stopped_workspace_root_unsupported"
+            | "stopped_workspace_metadata_unsupported"
+            | "stopped_workspace_archive_invalid"
+            | "stopped_workspace_archive_truncated"
+            | "stopped_workspace_archive_trailing_data"
+            | "stopped_workspace_directory_invalid"
+            | "stopped_workspace_metadata_invalid"
+            | "stopped_workspace_archive_path_rejected"
+            | "stopped_workspace_archive_root_rejected"
+            | "stopped_workspace_duplicate_path"
+            | "stopped_workspace_mode_invalid"
+            | "stopped_workspace_manifest_invalid"
+            | "stopped_workspace_root_directory_missing"
+            | "stopped_workspace_path_conflict"
+            | "stopped_workspace_archive_size_rejected"
+            | "stopped_workspace_entry_budget_exceeded"
+            | "stopped_workspace_metadata_budget_exceeded"
+            | "stopped_workspace_logical_budget_exceeded"
+            | "stopped_workspace_manifest_budget_exceeded"
+            | "snapshot manifest length is invalid"
+            | "snapshot manifest is not canonical"
+            | "snapshot manifest is invalid"
+            | "snapshot manifest paths or hashes are invalid"
+            | "snapshot expanded size overflow"
+            | "snapshot manifest paths are not sorted and unique"
+            | "snapshot manifest link metadata is invalid"
+            | "snapshot manifest parent is not a directory"
+            | "snapshot manifest path is invalid"
+            | "snapshot file size is invalid"
+            | "snapshot file integrity mismatch"
+            | "snapshot collect frame has trailing bytes"
+            | "snapshot size overflow"
+            | "snapshot file count overflow"
+    )
 }
