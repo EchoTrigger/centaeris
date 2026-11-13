@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -72,12 +73,21 @@ class SessionTitleTests(TestCase):
     def test_cjk_output_and_session_order_are_preserved(self):
         job = self.job()
         before = self.session.updatedAt
-        with patch("app_core.session_titles.generate_title", new=AsyncMock(return_value="繁體中文資料分析")) as generate:
+        with self.assertLogs("app_core.session_titles", level="INFO") as logs, patch(
+            "app_core.session_titles.generate_title", new=AsyncMock(return_value="繁體中文資料分析")
+        ) as generate:
             process_session_title(job.pk)
         self.session.refresh_from_db()
         self.assertEqual(self.session.title, "繁體中文資料分析")
         self.assertEqual(self.session.updatedAt, before)
         self.assertEqual(generate.call_args.args[1:3], (self.run.prompt, "low"))
+        record = json.loads(logs.records[0].getMessage())
+        self.assertEqual((record["event"], record["jobId"], record["status"], record["reason"]),
+                         ("sessionTitleOutcome", job.pk, "complete", "published"))
+        self.assertGreaterEqual(record["elapsedMs"], 0)
+        self.assertGreaterEqual(record["queueMs"], 0)
+        self.assertNotIn(self.run.prompt, logs.records[0].getMessage())
+        self.assertNotIn("繁體中文資料分析", logs.records[0].getMessage())
         with patch("app_core.session_titles.generate_title") as repeated:
             process_session_title(job.pk)
         repeated.assert_not_called()
@@ -94,19 +104,59 @@ class SessionTitleTests(TestCase):
 
             return result()
 
-        with patch("app_core.session_titles.generate_title", side_effect=rename):
+        with patch("app_core.session_titles.generate_title", new=rename):
             process_session_title(job.pk)
         self.session.refresh_from_db()
         self.assertEqual(self.session.title, "初始标题")
+        job.refresh_from_db()
+        self.assertEqual(job.status, "skipped")
 
     def test_timeout_keeps_initial_title(self):
         job = self.job()
-        with patch("app_core.session_titles.generate_title", new=AsyncMock(side_effect=TimeoutError)):
+        with self.assertLogs("app_core.session_titles", level="WARNING") as logs, patch(
+            "app_core.session_titles.generate_title", new=AsyncMock(side_effect=TimeoutError("private provider detail"))
+        ):
             process_session_title(job.pk)
         self.session.refresh_from_db()
         job.refresh_from_db()
         self.assertEqual(self.session.title, "初始标题")
         self.assertEqual(job.status, "failed")
+        record = json.loads(logs.records[0].getMessage())
+        self.assertEqual((record["status"], record["reason"], record["errorClass"]),
+                         ("failed", "timeout", "TimeoutError"))
+        self.assertNotIn("private provider detail", logs.records[0].getMessage())
+
+    def test_failure_diagnostics_redact_provider_messages(self):
+        from .model_adapter.common import ModelProviderError
+        job = self.job()
+        errors = [(RuntimeError("secret prompt and credential"), "generation_failed"),
+                  (ValueError("title_incomplete"), "title_incomplete"),
+                  (ModelProviderError("provider_authentication_failed", 401), "provider_authentication_failed")]
+        for error, reason in errors:
+            with self.subTest(reason=reason):
+                SessionTitleJob.objects.filter(pk=job.pk).update(status="pending")
+                with self.assertLogs("app_core.session_titles", level="WARNING") as logs, patch(
+                    "app_core.session_titles.generate_title", new=AsyncMock(side_effect=error)
+                ):
+                    process_session_title(job.pk)
+                record = json.loads(logs.records[0].getMessage())
+                self.assertEqual((record["status"], record["reason"]), ("failed", reason))
+                self.assertEqual(record["errorClass"], type(error).__name__)
+                if isinstance(error, ModelProviderError):
+                    self.assertEqual(record["httpStatus"], 401)
+                self.assertNotIn("secret prompt and credential", logs.records[0].getMessage())
+                self.assertIsNone(logs.records[0].exc_info)
+
+    def test_queue_publish_failure_is_recorded_without_failing_chat(self):
+        with self.assertLogs("app_core.session_titles", level="WARNING") as logs, patch(
+            "api.title_queue.app.send_task", side_effect=RuntimeError("private broker endpoint")
+        ), self.captureOnCommitCallbacks(execute=True):
+            job = self.job()
+        job.refresh_from_db()
+        self.assertEqual(job.status, "failed")
+        record = json.loads(logs.records[0].getMessage())
+        self.assertEqual((record["reason"], record["errorClass"]), ("queue_publish_failed", "RuntimeError"))
+        self.assertNotIn("private broker endpoint", logs.records[0].getMessage())
 
     def test_manual_title_before_first_run_is_preserved(self):
         Session.objects.filter(pk=self.session.pk).update(titleRevision=1, title="手動命名")

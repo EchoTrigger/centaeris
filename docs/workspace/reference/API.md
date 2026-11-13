@@ -1059,7 +1059,7 @@ without that capability), independently of chat preferences.
 Null selection creates no title job or provider call. The first accepted message
 can create one asynchronous job after commit; it reads at most 2048 characters
 from that prompt, has no tools, and preserves its language/script. Queue wait and
-model generation share the three-second deadline. Expiry or failure retains the
+model generation share the ten-second deadline. Expiry or failure retains the
 initial title. Clearing the selection, losing authority or manually renaming the
 session prevents pending publication. Successful title publication updates the
 existing navigation stream without changing session ordering. Existing named
@@ -1067,5 +1067,8 @@ sessions are protected by the forward migration.
 
 The title worker runs `celery -A api.title_queue:app worker -Q session_titles`,
 using `MATERIAL_BROKER_URL` and its own queue. `SESSION_TITLE_TIMEOUT_SECONDS`
-defaults to 3. It requires the same database and credential-encryption settings
+defaults to 10. It requires the same database and credential-encryption settings
 as the API; it does not start agent execution environments.
+Outcome logs include the job ID, status, reason, queue wait and processing time;
+failures include the exception class and HTTP status when available. Prompts,
+generated titles, credentials and raw provider errors are excluded.

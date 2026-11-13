@@ -1,5 +1,8 @@
 """Best-effort titles from the first accepted prompt; never an agent execution."""
 import asyncio
+import json
+import logging
+import time
 
 from django.conf import settings
 from django.db import transaction
@@ -8,6 +11,38 @@ from django.utils import timezone
 from .models import AgentRun, Session, SessionTitleJob, WorkspaceModelDefaults
 from .workspace_access import agent_run_membership_is_current, locked_workspace_membership_for
 from .workspace_resources import models_for_workspace
+
+logger = logging.getLogger(__name__)
+# Title outcomes remain observable when the dedicated worker runs at WARNING.
+logger.setLevel(logging.INFO)
+
+
+def _log_outcome(job_id, status, reason, started, *, queue_ms=None, error=None):
+    record = {"event": "sessionTitleOutcome", "jobId": job_id, "status": status,
+              "reason": reason, "elapsedMs": round((time.monotonic() - started) * 1000)}
+    if queue_ms is not None:
+        record["queueMs"] = queue_ms
+    if error is not None:
+        record["errorClass"] = type(error).__name__
+        http_status = getattr(error, "status_code", getattr(error, "httpStatus", None))
+        if isinstance(http_status, int):
+            record["httpStatus"] = http_status
+    logger.log(logging.WARNING if status == "failed" else logging.INFO, json.dumps(record))
+
+
+def _failure_reason(error):
+    from .model_adapter.common import ModelProviderError, provider_error
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    if isinstance(error, ModelProviderError):
+        return error.reasonType
+    mapped = provider_error(error)
+    if mapped is not None:
+        return mapped.reasonType
+    if isinstance(error, ValueError) and str(error) in {"title_incomplete", "title_provider_unsupported"}:
+        return str(error)
+    return "generation_failed"
+
 
 TITLE_INSTRUCTIONS = (
     "Write only a short session title summarizing the user's first prompt. "
@@ -62,12 +97,13 @@ def enqueue_session_title(session, first_run):
 
 
 def _publish(job_id):
+    started = time.monotonic()
     try:
         from api.title_queue import app, PROCESS
         app.send_task(PROCESS, args=[job_id], queue="session_titles",
                       expires=settings.SESSION_TITLE_TIMEOUT_SECONDS, retry=False)
-    except Exception:
-        # No prompt, credentials or provider exceptions enter task logs or chat UI.
+    except Exception as error:
+        _log_outcome(job_id, "failed", "queue_publish_failed", started, error=error)
         try:
             SessionTitleJob.objects.filter(pk=job_id, status="pending").update(status="failed")
         except Exception:
@@ -98,18 +134,26 @@ def _remaining(job):
 def process_session_title(job_id):
     if not SessionTitleJob.objects.filter(pk=job_id, status="pending").update(status="running"):
         return
+    started = time.monotonic()
+    queue_ms = None
+
+    def finish(status, reason, error=None):
+        _finish(job_id, status)
+        _log_outcome(job_id, status, reason, started, queue_ms=queue_ms, error=error)
+
     try:
         job = SessionTitleJob.objects.select_related(
             "session", "firstRun__user", "firstRun__session", "modelConfig",
         ).get(pk=job_id)
+        queue_ms = max(0, round((timezone.now() - job.createdAt).total_seconds() * 1000))
         model = current_title_model(job.session.workspace_id, job.modelConfig)
         remaining = _remaining(job)
         if not _eligible(job) or model is None or not title_mode_supported(model, job.thinkingMode) or remaining <= 0:
-            _finish(job_id, "skipped")
+            finish("skipped", "deadline_expired" if remaining <= 0 else "generation_not_eligible")
             return
         title = asyncio.run(generate_title(model, job.firstRun.prompt, job.thinkingMode, remaining))
         if not isinstance(title, str) or not title.strip() or len(title.strip()) > 200 or "\n" in title.strip():
-            _finish(job_id, "failed")
+            finish("failed", "title_invalid")
             return
         with transaction.atomic():
             # Pin current membership/workspace and session through publication.
@@ -120,12 +164,13 @@ def process_session_title(job_id):
             current = current_title_model(session.workspace_id, job.modelConfig)
             if (member is None or member.pk != job.firstRun.membership_ref or not _eligible(job)
                     or current is None or current.pk != model.pk or _remaining(job) <= 0):
-                _finish(job_id, "skipped")
+                finish("skipped", "deadline_expired" if _remaining(job) <= 0 else "publication_not_eligible")
                 return
             Session.objects.filter(pk=session.pk, titleRevision=job.titleRevision).update(title=title.strip())
             _finish(job_id, "complete")
-    except Exception:
-        _finish(job_id, "failed")
+        _log_outcome(job_id, "complete", "published", started, queue_ms=queue_ms)
+    except Exception as error:
+        finish("failed", _failure_reason(error), error)
 
 
 def _finish(job_id, status):
