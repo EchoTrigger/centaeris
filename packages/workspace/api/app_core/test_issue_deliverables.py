@@ -6,6 +6,7 @@ from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
+from django.db import transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import Client, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
@@ -62,7 +63,10 @@ class IssueDeliverableTests(SessionRecordFixture, TestCase):
         self.assertEqual(list(IssueNotification.objects.values_list("recipient_id", "kind")), [(self.other.pk, "deliverable")])
         event = IssueEvent.objects.get(issue=self.issue)
         self.assertEqual(event.changes, {"deliverableId": {"before": None, "after": item["id"]}})
+        inbox = f"/api/workspaces/{self.workspace.pk}/notifications"
+        self.assertEqual(self.client.get(inbox).json()["notifications"], [])
         self.client.force_login(self.other)
+        self.assertEqual(self.client.get(inbox).json()["notifications"][0]["event"]["id"], event.pk)
         self.assertEqual(self.client.get(self.url).json()["deliverables"][0]["id"], item["id"])
         self.assertEqual(self.client.get(f"/api/sessions/{self.session.pk}").status_code, 404)
         self.assertEqual(self.client.get(f"/api/artifacts/{self.artifact.pk}/download").status_code, 404)
@@ -73,8 +77,25 @@ class IssueDeliverableTests(SessionRecordFixture, TestCase):
         self.assertEqual(async_to_sync(read)(), b"published report")
         self.assertIn("attachment", download["Content-Disposition"])
         self.client.force_login(self.third)
+        self.assertEqual(self.client.get(inbox).json()["notifications"], [])
         self.assertEqual(self.client.get(self.url).json()["deliverables"], [])
         self.assertEqual(self.client.get(item["artifacts"][0]["downloadUrl"]).status_code, 404)
+
+    def test_self_submission_reaches_inbox_without_self_acceptance_notices(self):
+        response = self.submit(recipientId=str(self.user.pk))
+        self.assertEqual(response.status_code, 201, response.content)
+        item = response.json()["deliverable"]
+        inbox = f"/api/workspaces/{self.workspace.pk}/notifications"
+        receipt = self.client.get(inbox).json()
+        self.assertEqual((receipt["total"], receipt["unreadCount"]), (1, 1))
+        notice = receipt["notifications"][0]
+        self.assertEqual((notice["kind"], notice["event"]["type"]), ("deliverable", "deliverableSubmitted"))
+        self.assertEqual(notice["event"]["changes"]["deliverableId"]["after"], item["id"])
+        accepted = self.respond(item, action="accept", text="")
+        self.assertEqual(accepted.status_code, 200, accepted.content)
+        self.assertEqual(self.client.get(inbox).json()["total"], 1)
+        self.client.force_login(self.other)
+        self.assertEqual(self.client.get(inbox).json()["notifications"], [])
 
     def test_feedback_replacement_and_acceptance_preserve_revisions_and_issue_status(self):
         item = self.submit().json()["deliverable"]
@@ -145,6 +166,63 @@ class IssueDeliverableTests(SessionRecordFixture, TestCase):
 
 
 class IssueDeliverableMigrationTests(TransactionTestCase):
+    def test_forward_restores_only_missing_self_submission_receipts(self):
+        previous = [("app_core", "0064_merge_environment_resources")]
+        target = [("app_core", "0065_self_deliverable_receipts")]
+        with isolated_migration_database(previous) as database:
+            alias = database.alias
+            old = MigrationExecutor(database).loader.project_state(previous).apps
+            def create(model_name, **values):
+                return old.get_model("app_core", model_name).objects.using(alias).create(**values)
+            user = old.get_model("auth", "User").objects.using(alias).create(username="self-delivery-upgrade")
+            other = old.get_model("auth", "User").objects.using(alias).create(username="other-recipient")
+            workspace = create("Workspace", name="Existing", createdBy_id=user.pk)
+            memberships = {person.pk: create("WorkspaceMembership", workspace_id=workspace.pk,
+                user_id=person.pk, role="member") for person in (user, other)}
+            issue = create("Issue", workspace_id=workspace.pk, creator_id=user.pk,
+                title="Existing issue", version=4)
+            with transaction.atomic(using=alias):
+                session = create("Session", workspace_id=workspace.pk, owner_id=user.pk)
+                environment = create("SessionEnvironment", session_id=session.pk)
+                old.get_model("app_core", "Session").objects.using(alias).filter(pk=session.pk).update(
+                    current_environment_id=environment.pk)
+            model = create("ModelConfig", displayName="Migration model")
+            run = create("AgentRun", workspace_id=workspace.pk, session_id=session.pk, user_id=user.pk,
+                modelConfig_id=model.pk, membership_ref=memberships[user.pk].pk,
+                environment_id=environment.pk, prompt="Synthetic input", status="completed")
+            execution = create("IssueExecution", issue_id=issue.pk, issuer_id=user.pk,
+                session_id=session.pk, agent_run_id=run.pk, issueVersion=1, issueTitle=issue.title)
+            events = []
+            for revision, recipient in enumerate((user, user, other), start=1):
+                item = create("IssueDeliverable", issue_id=issue.pk, execution_id=execution.pk,
+                    agent_run_id=run.pk, author_id=user.pk, recipient_id=recipient.pk,
+                    revision=revision, summary=f"Result {revision}")
+                events.append(create("IssueEvent", issue_id=issue.pk, actor_id=user.pk,
+                    type="deliverableSubmitted", changes={"deliverableId": {"before": None, "after": str(item.pk)}}))
+            create("IssueEvent", issue_id=issue.pk, actor_id=user.pk, type="deliverableAccepted",
+                changes=events[0].changes)
+            received_at = timezone.now()
+            existing = create("IssueNotification", event_id=events[1].pk, recipient_id=user.pk,
+                issueTitle="Original title", kind="deliverable", readAt=received_at, archivedAt=received_at)
+            executor = MigrationExecutor(database)
+            executor.migrate(target)
+            new = executor.loader.project_state(target).apps
+            notices = new.get_model("app_core", "IssueNotification").objects.using(alias)
+            restored = notices.get(event_id=events[0].pk)
+            self.assertEqual((restored.recipient_id, restored.kind, restored.createdAt),
+                (user.pk, "deliverable", events[0].createdAt))
+            self.assertEqual((restored.readAt, restored.archivedAt), (None, None))
+            preserved = notices.get(pk=existing.pk)
+            self.assertEqual((preserved.issueTitle, preserved.readAt, preserved.archivedAt, preserved.createdAt),
+                ("Original title", received_at, received_at, existing.createdAt))
+            self.assertEqual(notices.count(), 2)
+            current_issue = new.get_model("app_core", "Issue").objects.using(alias).get(pk=issue.pk)
+            self.assertEqual((current_issue.version, current_issue.status), (4, "todo"))
+            migration = executor.loader.get_migration(*target[0])
+            with database.schema_editor() as schema_editor:
+                migration.operations[0].code(new, schema_editor)
+            self.assertEqual(notices.count(), 2)
+
     def test_forward_preserves_existing_issue_and_notification_records(self):
         previous = [("app_core", "0062_issue_materials")]
         target = [("app_core", "0063_issue_deliverables_and_templates")]

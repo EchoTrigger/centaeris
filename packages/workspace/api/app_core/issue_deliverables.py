@@ -53,7 +53,7 @@ def _record(issue, actor, item, event_type):
     event = IssueEvent.objects.create(issue=issue, actor=actor, type=event_type,
         changes={"deliverableId": {"before": None, "after": str(item.pk)}})
     other_id = item.recipient_id if actor.pk == item.author_id else item.author_id
-    if other_id != actor.pk and WorkspaceMembership.objects.filter(workspace_id=issue.workspace_id,
+    if (event_type == "deliverableSubmitted" or other_id != actor.pk) and WorkspaceMembership.objects.filter(workspace_id=issue.workspace_id,
             user_id=other_id, user__is_active=True, role__in=WORKSPACE_ROLES).exists():
         IssueNotification.objects.create(event=event, recipient_id=other_id,
             issueTitle=issue.title, kind="deliverable")
