@@ -4,6 +4,7 @@ import { Button } from "@centaeris/ui/button";
 import { Textarea } from "@centaeris/ui/textarea";
 import { apiJson, jsonOptions } from "../api";
 import { MarkdownContent } from "../chat/MarkdownContent";
+import { FileLinkCard } from "../chat/FileLinkCard";
 import { useTranslation } from "../i18n";
 import "./IssueDeliverables.css";
 
@@ -139,7 +140,7 @@ function DeliverableCard({ deliverable, endpoint, userId, issue, onChanged }) {
   return <article id={`deliverable-${deliverable.id}`} className="issueDeliverableCard" aria-busy={pending}>
     <header><strong>{t("deliverables.revision", { revision: deliverable.revision })}</strong><span>{deliverable.author.name} → {deliverable.recipient.name}</span><time dateTime={deliverable.createdAt}>{new Date(deliverable.createdAt).toLocaleString()}</time>{accepted ? <span>{t("deliverables.accepted")}</span> : null}</header>
     {deliverable.summary ? <MarkdownContent text={deliverable.summary} /> : null}
-    {deliverable.artifacts.length ? <ul className="issueDeliverableFiles">{deliverable.artifacts.map(artifact => <li key={artifact.id}><a href={artifact.downloadUrl} download>{artifact.displayName}</a></li>)}</ul> : null}
+    {deliverable.artifacts.length ? <ul className="issueDeliverableFiles">{deliverable.artifacts.map(artifact => <li key={artifact.id}><FileLinkCard filename={artifact.displayName} href={artifact.downloadUrl} download /></li>)}</ul> : null}
     {deliverable.responses.length ? <ol className="issueDeliverableResponses">{deliverable.responses.map(response => <li key={response.id}>
       <div><strong>{response.actor.name}</strong><span>{t(response.action === "accept" ? "deliverables.accepted" : "deliverables.feedback")}</span><time dateTime={response.createdAt}>{new Date(response.createdAt).toLocaleString()}</time></div>
       {response.text ? <p>{response.text}</p> : null}

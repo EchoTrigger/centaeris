@@ -2,21 +2,10 @@
 import { useTranslation } from "../i18n";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { File, FileArchive, FileAudio, FileCode2, FileSpreadsheet, FileText, FileVideo, ImageOff, X } from "lucide-react";
+import { ImageOff, X } from "lucide-react";
 import { useModalDialog } from "../components/useModalDialog";
 import { attachmentIsImage, attachmentPreviewUrl } from "./attachments.mjs";
-
-function filePresentation(name, contentType) {
-  const extension = name.split(".").at(-1)?.toLowerCase();
-  const label = name.includes(".") && /^[a-z0-9]{1,6}$/.test(extension) ? extension.toUpperCase() : "FILE";
-  const Icon = /^(csv|xlsx?|ods)$/.test(extension) ? FileSpreadsheet
-    : /^(zip|rar|7z|tar|gz)$/.test(extension) ? FileArchive
-      : contentType.startsWith("audio/") ? FileAudio
-        : contentType.startsWith("video/") ? FileVideo
-          : /^(json|html|css|js|ts|jsx|tsx|py|rs|xml|yaml|yml)$/.test(extension) ? FileCode2
-            : contentType.startsWith("text/") || /^(pdf|docx?|odt|rtf)$/.test(extension) ? FileText : File;
-  return { Icon, label };
-}
+import { filePresentation } from "./filePresentation.mjs";
 
 export function AttachmentCard({ attachment, imageUrl, onPreview, onRemove, unavailable = false, className = "" }) {
   const { t } = useTranslation();

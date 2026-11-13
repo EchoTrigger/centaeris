@@ -497,10 +497,14 @@ button.attachmentCardContent { border: 0; background: var(--surface-variant); bo
 .markdownTable tbody tr:last-child td { border-bottom: 0; }
 .workspaceTerminalAnswer { min-width: 0; }
 .workspaceCompactionMarker { color: var(--process-text); font-size: 12px; line-height: 1.35; }
-.workspaceArtifactInline { display: grid; gap: 4px; margin-top: 12px; font-size: 15px; line-height: 1.72; }
-.workspaceArtifactInlineRow { display: inline-flex; align-items: baseline; gap: 7px; }
-.workspaceArtifactPlus { color: var(--muted); font-weight: 650; }
-.workspaceArtifactInline a { color: var(--primary-color); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.workspaceArtifactInline { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+.fileLinkCard { display:flex; align-items:center; gap:12px; width:360px; max-width:100%; min-width:0; padding:12px 14px; border-radius:8px; background:var(--surface-variant); color:var(--on-surface); text-decoration:none; }
+.fileLinkCard:hover { background:var(--surface-hover); text-decoration:none; }
+.fileLinkCardIcon { width:24px; height:24px; flex:none; color:var(--primary-color); stroke-width:1.6; }
+.fileLinkCardCopy { display:grid; gap:2px; flex:1; min-width:0; }
+.fileLinkCardName { font-size:13px; font-weight:500; line-height:1.5; overflow-wrap:anywhere; }
+.fileLinkCardCopy small { color:var(--process-text); font-size:11px; line-height:1.5; }
+.fileLinkCardChevron { width:15px; height:15px; flex:none; color:var(--process-text); }
 .workspaceProjectionFailure { display: flex; width: fit-content; max-width: 100%; align-items: center; gap: 9px; border-radius: 8px; background: var(--surface-container); color: var(--on-surface-variant); padding: 8px 10px; font-size: 12px; }
 .workspaceProjectionFailure button { flex: none; border: 0; border-radius: 6px; background: transparent; color: var(--primary-color); padding: 3px 5px; font-weight: 650; }
 .workspaceLiveStatus { display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 8px; color: var(--on-surface-variant); font-size: 12px; }

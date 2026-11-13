@@ -7,6 +7,7 @@ import { isAgentRunActive } from "./sessionEvents";
 import { activityTarget, activityToolAtom, buildAgentRunSections, formatPhaseElapsed, referenceCitations, runningActivityPresentation } from "./agentRunPresentation.mjs";
 import { MarkdownContent, StreamingMarkdownContent } from "./MarkdownContent";
 import { AttachmentCard } from "./AttachmentCard";
+import { FileLinkCard } from "./FileLinkCard";
 import { ReasoningBlock } from "./ReasoningBlock";
 
 const TOOL_ICONS = { agent: Bot, terminal: SquareTerminal, edit: Pencil, search: Search, globe: Globe, listChecks: ListChecks, fileOutput: FileOutput };
@@ -258,7 +259,7 @@ export const AgentRunRow = memo(function AgentRunRow({
         ) : sealed ? (
           <div className={message.phase === "final" ? "workspaceTerminalAnswer" : "workspaceStageSummary"} aria-live={message.phase === "final" ? "polite" : undefined}>
             {answerMarkdown}
-            {message.phase === "final" && message.artifacts?.length ? <div className="workspaceArtifactInline" aria-label={t("agentRunRow.generatedFiles")}>{message.artifacts.map((artifact) => <span className="workspaceArtifactInlineRow" key={artifact.artifactRef}><span className="workspaceArtifactPlus" aria-hidden="true">+</span><a id={`artifact:${agentRun.id}:${artifact.artifactRef}`} href={artifact.downloadUrl} onClick={(event) => { event.preventDefault(); onShowArtifact?.(agentRun.id, artifact); }}>{artifact.filename}</a></span>)}</div> : null}
+            {message.phase === "final" && message.artifacts?.length ? <div className="workspaceArtifactInline" aria-label={t("agentRunRow.generatedFiles")}>{message.artifacts.map((artifact) => <FileLinkCard key={artifact.artifactRef} id={`artifact:${agentRun.id}:${artifact.artifactRef}`} filename={artifact.filename} href={artifact.downloadUrl} onClick={onShowArtifact ? (event) => { event.preventDefault(); onShowArtifact(agentRun.id, artifact); } : undefined} />)}</div> : null}
           </div>
         ) : <div className="workspaceAnswerText isStreaming">{answerMarkdown}</div> : null}
         {messageVisible && sealed && message.phase === "final" ? <div className={`workspaceAssistantMessageMeta ${copiedMessageId === message.messageId ? "isCopied" : ""}`}><time>{formatMessageTime(message.createdAtMs)}</time><button type="button" onClick={() => void copyMessage(message)} aria-label={t("agentRunRow.copyAnswer")} title={t("agentRunRow.copyAnswer")}>{copiedMessageId === message.messageId ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}</button></div> : null}

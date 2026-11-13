@@ -18,6 +18,7 @@ import {
 import { useTranscriptTurnMetadata } from "./useTranscriptTurnMetadata";
 import { WorkProgress, type WorkProgressSegment } from "./WorkProgress";
 import { TranscriptSupplement } from "./TranscriptSupplement";
+import { FileLinkCard } from "./FileLinkCard";
 import { TranscriptActivity, type TranscriptActivityState } from "./TranscriptActivity";
 import { groupTranscriptTurns, hasCommittedPendingMessage, hasCommittedSupplement, shouldLoadEarlier, shouldReleaseLoadedHistory, type PendingTranscriptMessage, type PendingSupplement } from "./transcriptTurns";
 import { ChevronDown } from "lucide-react";
@@ -656,13 +657,10 @@ export const TranscriptBlockList = memo(function TranscriptBlockList({
               </WorkProgress> : null}
               {turn.answerIds.map((blockId) => <TranscriptBlockRow store={store} blockId={blockId} searchQuery={blockId === targetBlockId ? targetQuery : undefined} key={blockId} />)}
               {time?.artifacts.length ? <div className="workspaceArtifactInline" aria-label={t("agentRunRow.generatedFiles")}>
-                {time.artifacts.map((artifact) => <span className="workspaceArtifactInlineRow" key={artifact.artifactRef}>
-                  <span className="workspaceArtifactPlus" aria-hidden="true">+</span>
-                  <a id={`artifact:${artifact.artifactRef}`} href={artifact.downloadUrl} onClick={onShowArtifact ? (event) => {
+                {time.artifacts.map((artifact) => <FileLinkCard key={artifact.artifactRef} id={`artifact:${artifact.artifactRef}`} filename={artifact.filename} href={artifact.downloadUrl} onClick={onShowArtifact ? (event) => {
                     event.preventDefault();
                     onShowArtifact(artifact, { elementId: event.currentTarget.id });
-                  } : undefined}>{artifact.filename}</a>
-                </span>)}
+                  } : undefined} />)}
               </div> : null}
               {isLast && (isPending ? !pendingTerminal : running) ? <TranscriptActivity activity={activity} /> : null}
             </div>;
