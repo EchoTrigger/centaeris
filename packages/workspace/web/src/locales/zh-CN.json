@@ -1295,6 +1295,7 @@
   "inbox.archived": "已归档",
   "inbox.read": "已读",
   "inbox.detail": "通知详情",
+  "inbox.loadingContent": "正在加载内容…",
   "inbox.markUnread": "标为未读",
   "inbox.markRead": "标为已读",
   "inbox.archive": "归档通知",

@@ -91,9 +91,22 @@
 .inboxActions > a { font-size:12px; color:var(--process-text); }
 .workPrototype .inboxActions button { border:0; padding:6px; min-height:30px; background:transparent; color:var(--process-text); }
 .workPrototype .inboxActions button:hover { color:var(--on-surface); }
-.inboxArticle { max-width:760px; margin:32px auto; padding:0 clamp(24px,5vw,72px); }
-.workPrototype .inboxArticle h2 { font-size:22px; font-weight:500; line-height:1.4; margin:18px 0; }
+.inboxArticle { max-width:820px; margin:24px auto 40px; padding:0 clamp(16px,3vw,40px); }
+.inboxMessageCard { min-width:0; padding:28px; border:0; border-radius:10px; background:var(--surface-raised); }
+.inboxMessageCard > header { margin-bottom:24px; }
+.inboxMessageCard > footer { margin-top:24px; }
+.workPrototype .inboxOpenItem { display:inline-flex; align-items:center; min-height:32px; padding:6px 12px; border:0; border-radius:6px; background:var(--surface-container); color:var(--on-surface); text-decoration:none; font-size:13px; }
+.workPrototype .inboxOpenItem:hover { background:var(--surface-hover); text-decoration:none; }
+.inboxDeliverable { min-width:0; }
+.inboxDeliverableMeta { display:flex; flex-wrap:wrap; gap:8px 16px; margin-bottom:18px; color:var(--process-text); font-size:12px; overflow-wrap:anywhere; }
+.inboxDeliverableFiles { display:flex; flex-wrap:wrap; gap:8px; margin:20px 0 0; padding:0; list-style:none; }
+.inboxDeliverableFiles li { min-width:0; max-width:100%; }
+.inboxDeliverableFiles .fileLinkCard { width:100%; max-width:360px; background:var(--surface-color); }
+.inboxDeliverableFiles .fileLinkCard:hover { background:var(--surface-hover); }
+.workPrototype .inboxMessageCard > header > h2 { font-size:22px; font-weight:500; line-height:1.4; margin:18px 0; }
 .workPrototype .inboxArticle p { line-height:1.8; margin-bottom:20px; font-size:14px; white-space:pre-line; }
+.workPrototype .inboxMessageCard > header p { margin-top:0; margin-bottom:0; }
+.inboxDeliverable .markdownContent { min-width:0; }
 .workPrototype .inboxArticle .inboxByline { display:flex; flex-wrap:wrap; align-items:center; gap:8px; color:var(--process-text); font-size:12px; }
 .inboxLead { color:var(--process-text); }
 .inboxNoSelection { display:grid; place-items:center; height:100%; min-height:240px; color:var(--process-text); font-size:13px; }
@@ -116,6 +129,7 @@
   .inboxLayout.hasSelection .inboxList { display:none; }
   .inboxLayout.hasSelection .inboxDetail { display:block; }
   .inboxArticle { margin-top:16px; padding:0 20px; }
+  .inboxMessageCard { padding:20px; }
   .workHomeBody { margin-top:24px; padding-inline:20px; }
 }
 

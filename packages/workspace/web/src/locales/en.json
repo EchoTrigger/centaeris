@@ -1295,6 +1295,7 @@
   "inbox.archived": "Archived",
   "inbox.read": "Read",
   "inbox.detail": "Notification detail",
+  "inbox.loadingContent": "Loading content…",
   "inbox.markUnread": "Mark as unread",
   "inbox.markRead": "Mark as read",
   "inbox.archive": "Archive notification",

@@ -6,15 +6,20 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { configureApi, clearCsrfToken } from "../../src/api";
 import { i18n } from "../../src/i18n";
 import { WorkspaceInbox } from "../../src/work/WorkspaceInbox";
-const fresh = () => ({ id: "notice", workspaceId: "one", issueId: "issue", issueTitle: "Review evidence", kind: "assigned", event: { actor: { id: "actor", name: "Alex" }, changes: { assigneeId: { before: null, after: "user" } } }, createdAt: "2026-11-12T01:00:00Z", readAt: null as string | null, archivedAt: null as string | null });
+const fresh = () => ({ id: "notice", workspaceId: "one", issueId: "issue", issueTitle: "Review evidence", kind: "assigned", event: { type: "updated", actor: { id: "actor", name: "Alex" }, changes: { assigneeId: { before: null, after: "user" } } as Record<string, { before: string | null; after: string | null }> }, createdAt: "2026-11-12T01:00:00Z", readAt: null as string | null, archivedAt: null as string | null });
 let notification = fresh();
 let fail = false;
 let patches: unknown[] = [];
+let deliverableStatus = 200;
+const submitted = { id: "result", revision: 1, summary: "## Findings\n\nThe selected report is ready.", recipient: { name: "Recipient" }, artifacts: [{ id: "file", displayName: "Report.docx", downloadUrl: "/api/shared/result/file" }] };
 beforeEach(async () => {
-  sessionStorage.clear(); notification = fresh(); fail = false; patches = []; clearCsrfToken(); configureApi({ apiBaseUrl: "http://localhost" }); await i18n.changeLanguage("en");
+  sessionStorage.clear(); notification = fresh(); fail = false; patches = []; deliverableStatus = 200; clearCsrfToken(); configureApi({ apiBaseUrl: "http://localhost" }); await i18n.changeLanguage("en");
   vi.stubGlobal("fetch", vi.fn(async (input, options) => {
     const url = new URL(String(input));
     if (url.pathname === "/api/csrf") return Response.json({ csrfToken: "token" });
+    if (url.pathname.endsWith("/deliverables")) return deliverableStatus === 200
+      ? Response.json({ deliverables: [{ ...submitted, id: "other-result", summary: "Another submission", artifacts: [] }, submitted] })
+      : Response.json({ error: "issue_not_found" }, { status: deliverableStatus });
     if (options?.method === "PATCH") {
       const body = JSON.parse(options.body); patches.push(body);
       if (fail) return Response.json({ error: "receipt_rejected" }, { status: 500 });
@@ -74,4 +79,29 @@ test("failed acknowledgment preserves URL selection and unread receipt; remount 
   notification.readAt = "2026-11-13T01:00:00Z"; notification.issueTitle = "Updated evidence";
   await act(async () => { window.dispatchEvent(new Event("focus")); });
   expect(await screen.findByRole("heading", { name: "Updated evidence" })).toBeTruthy();
+});
+
+test("a selected submission renders its Markdown and downloadable files inside the reading card", async () => {
+  notification = { ...fresh(), kind: "deliverable", event: { ...fresh().event, type: "deliverableSubmitted", changes: { deliverableId: { before: null, after: "result" } } } };
+  mount("/w/one/work/inbox?notification=notice");
+  const article = within(await screen.findByRole("article", { name: "Review evidence" }));
+  expect(await article.findByRole("heading", { name: "Findings" })).toBeTruthy();
+  expect(article.getByText("The selected report is ready.")).toBeTruthy();
+  expect(article.queryByText("Another submission")).toBeNull();
+  const file = article.getByRole("link", { name: "Report.docx" });
+  expect(file.getAttribute("href")).toBe("/api/shared/result/file");
+  expect(file.hasAttribute("download")).toBe(true);
+  expect(article.getByRole("link", { name: "Open Issues" }).getAttribute("href")).toContain("deliverable=result");
+  expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).includes("/api/sessions/"))).toBe(false);
+});
+
+test("a fresh authorization denial removes the previously shown result and files", async () => {
+  notification = { ...fresh(), kind: "deliverable", event: { ...fresh().event, type: "deliverableSubmitted", changes: { deliverableId: { before: null, after: "result" } } } };
+  mount("/w/one/work/inbox?notification=notice");
+  await screen.findByRole("heading", { name: "Findings" });
+  deliverableStatus = 403;
+  await act(async () => { window.dispatchEvent(new Event("focus")); });
+  expect(await screen.findByRole("alert")).toHaveProperty("textContent", "This submission is unavailable.");
+  expect(screen.queryByText("The selected report is ready.")).toBeNull();
+  expect(screen.queryByRole("link", { name: "Report.docx" })).toBeNull();
 });

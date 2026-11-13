@@ -3,6 +3,7 @@ import { useLocation, useSearchParams } from "react-router";
 import { apiJson, jsonOptions } from "../api";
 import { useTranslation } from "../i18n";
 import { Inbox, type InboxItem, type InboxView } from "./Inbox";
+import { InboxDeliverable } from "./InboxDeliverable";
 
 type Notification = {
   id: string; workspaceId: string; issueId: string; issueTitle: string;
@@ -89,5 +90,9 @@ export function WorkspaceInbox({ workspaceId, userId }: { workspaceId: string; u
     if (typeof deliverableId === "string") targetParams.set("deliverable", deliverableId);
     return { ...notification, title: notification.issueTitle, actor: notification.event.actor.name, occurredAt: notification.createdAt, summary, body: "", target: { label: t("work.issues"), href: `/w/${encodeURIComponent(workspaceId)}/work/tasks/${encodeURIComponent(notification.issueId)}?${targetParams}` } };
   }
-  return <Inbox scrollKey={`centaeris:inbox-scroll:${JSON.stringify([userId, workspaceId, view, offset])}`} items={page?.notifications.map(item) || []} selectedItem={selected ? item(selected) : null} view={view as InboxView} selectedId={selectedId} loading={!page} pending={pending} error={error} onSelect={select} onChange={(id, values) => { void change(id, values); }} onViewChange={next => setParams(next === "inbox" ? {} : { view: next })} pagination={{ offset, total: page?.total || 0, onPage: nextOffset => setParams(previous => { const next = new URLSearchParams(previous); next.set("offset", String(nextOffset)); next.delete("notification"); return next; }) }} />;
+  const currentSelection = selected?.id === selectedId ? selected : null;
+  const deliverableId = currentSelection?.kind === "deliverable" ? currentSelection.event.changes.deliverableId?.after : null;
+  const selectedContent = currentSelection && typeof deliverableId === "string"
+    ? <InboxDeliverable key={`${workspaceId}:${currentSelection.id}`} workspaceId={workspaceId} issueId={currentSelection.issueId} deliverableId={deliverableId} /> : undefined;
+  return <Inbox scrollKey={`centaeris:inbox-scroll:${JSON.stringify([userId, workspaceId, view, offset])}`} items={page?.notifications.map(item) || []} selectedItem={currentSelection ? item(currentSelection) : null} selectedContent={selectedContent} view={view as InboxView} selectedId={selectedId} loading={!page} pending={pending} error={error} onSelect={select} onChange={(id, values) => { void change(id, values); }} onViewChange={next => setParams(next === "inbox" ? {} : { view: next })} pagination={{ offset, total: page?.total || 0, onPage: nextOffset => setParams(previous => { const next = new URLSearchParams(previous); next.set("offset", String(nextOffset)); next.delete("notification"); return next; }) }} />;
 }

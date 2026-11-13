@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from "react";
+import { type ReactNode, useLayoutEffect, useRef } from "react";
 import { Archive, ArchiveRestore, Mail, MailOpen, X } from "lucide-react";
 import { Link } from "react-router";
 import { useTranslation } from "../i18n";
@@ -22,6 +22,7 @@ type Props = {
   view: InboxView;
   selectedId: string | null;
   selectedItem?: InboxItem | null;
+  selectedContent?: ReactNode;
   loading?: boolean;
   pending?: boolean;
   error?: string | null;
@@ -32,7 +33,7 @@ type Props = {
 };
 
 // The view consumes notifications and acknowledgement actions independently of their provider.
-export function Inbox({ items, view, selectedId, onSelect, onViewChange, onChange, selectedItem, loading, pending, error, pagination, scrollKey }: Props) {
+export function Inbox({ items, view, selectedId, onSelect, onViewChange, onChange, selectedItem, selectedContent, loading, pending, error, pagination, scrollKey }: Props) {
   const { t, i18n } = useTranslation();
   const listRef = useRef<HTMLElement>(null);
   useLayoutEffect(() => {
@@ -70,9 +71,14 @@ export function Inbox({ items, view, selectedId, onSelect, onViewChange, onChang
             <button type="button" disabled={pending} aria-label={t(selected.archivedAt ? "inbox.restore" : "inbox.archive")} onClick={() => onChange(selected.id, { archivedAt: selected.archivedAt ? null : new Date().toISOString() })}>{selected.archivedAt ? <ArchiveRestore /> : <Archive />}</button>
             <button type="button" aria-label={t("inbox.close")} onClick={() => onSelect(null)}><X /></button>
           </div>
-          <article className="inboxArticle"><p className="inboxByline">{selected.actor}<span>·</span><time dateTime={selected.occurredAt}>{date.format(new Date(selected.occurredAt))}</time></p>
-            <h2>{selected.title}</h2><p className="inboxLead">{selected.summary}</p>{selected.body ? <p>{selected.body}</p> : null}
-            {selected.target ? <Link className="catalogTextLink" to={selected.target.href}>{t("inbox.openItem", { name: selected.target.label })}</Link> : null}
+          <article className="inboxArticle" aria-label={selected.title}>
+            <div className="inboxMessageCard">
+              <header><p className="inboxByline">{selected.actor}<span>·</span><time dateTime={selected.occurredAt}>{date.format(new Date(selected.occurredAt))}</time></p>
+                <h2>{selected.title}</h2><p className="inboxLead">{selected.summary}</p>
+              </header>
+              {selectedContent ?? (selected.body ? <p>{selected.body}</p> : null)}
+              {selected.target ? <footer><Link className="inboxOpenItem" to={selected.target.href}>{t("inbox.openItem", { name: selected.target.label })}</Link></footer> : null}
+            </div>
           </article>
         </> : null}
       </section>
