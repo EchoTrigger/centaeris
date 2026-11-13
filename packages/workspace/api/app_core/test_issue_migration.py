@@ -6,6 +6,7 @@ from .migration_testing import isolated_migration_database
 
 
 class IssueMigrationTests(TransactionTestCase):
+    serialized_rollback = True
     previous = [("app_core", "0055_session_purge_intent")]
     target = [("app_core", "0056_issues")]
 

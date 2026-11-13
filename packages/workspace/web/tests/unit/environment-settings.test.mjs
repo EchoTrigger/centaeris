@@ -28,9 +28,10 @@ test("workspace environment settings URL resolves to the settings page", async (
     ["./components/SessionExpiredDialog", module("export const SessionExpiredDialog=()=>null;")],
     ["./routes/PasswordResetRoute", module("export const ForgotPasswordRoute=()=>null, ResetPasswordRoute=()=>null;")],
   ]);
-  for (const name of ["LibraryObjectRoute", "LibraryRoute", "LoginRoute", "InvitationActivationRoute", "SettingsRoute", "WorkspaceChooserRoute", "WorkspaceHomeRoute", "TrashSessionRoute"]) {
+  for (const name of ["LibraryObjectRoute", "LibraryRoute", "ExtensionsRoute", "LoginRoute", "InvitationActivationRoute", "SettingsRoute", "WorkspaceChooserRoute", "WorkspaceHomeRoute", "TrashSessionRoute"]) {
     overrides.set(`./routes/${name}`, module(`export default function ${name}(){return null}`));
   }
+  overrides.set("./work/WorkPrototypeRoute", module("export default function WorkPrototypeRoute(){return null}"));
   const { createRouter } = await import(await createJsxSubjectLoader(overrides)(fileURLToPath(new URL("../../src/router.tsx", import.meta.url))));
   const matches = matchRoutes(createRouter(), "/w/workspace/settings/environment");
   assert.ok(matches, "settings page must be reachable");

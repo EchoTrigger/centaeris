@@ -6,6 +6,7 @@ from .migration_testing import isolated_migration_database
 
 
 class NotificationMigrationTests(TransactionTestCase):
+    serialized_rollback = True
     previous = [("app_core", "0056_issues")]
     target = [("app_core", "0057_issue_notifications")]
 
