@@ -144,6 +144,7 @@ function LibraryPageContent({ embedded = false } = {}) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: Refresh the directory after closing an editor, while preserving its selection.
   useEffect(() => {
     const previous = previousDirectory.current;
+    if (previous.folderId !== folderId) { setObjects([]); setFolderPath([]); }
     if (previous.folderId !== folderId || (previous.objectId && !libraryObjectId)) void loadLibrary({ preserveSelection: previous.folderId === folderId });
     previousDirectory.current = { folderId, objectId: libraryObjectId };
   }, [folderId, libraryObjectId]);
@@ -500,12 +501,12 @@ function LibraryPageContent({ embedded = false } = {}) {
           {libraryView === "materials" ? <>
             {error && !dialog ? <p className="libraryOperationResult error" role="alert">{error} <button className="pluginEnableButton" type="button" disabled={working} onClick={() => operations.pending() ? void openPendingChat() : void loadLibrary()}>{t("libraryObjectRoute.retry")}</button></p> : null}
             {loadError ? <div className="settingsPanel libraryEmptyState" role="alert">{t("libraryRoute.unableToLoadLibrary")}<button className="pluginEnableButton" type="button" onClick={() => void loadLibrary()}>{t("libraryObjectRoute.retry")}</button></div> : <>
-            <div className={`settingsPanel settingsListPanel libraryList ${selectedItems.length ? "hasSelection" : ""}`} role="table" aria-label={t("libraryRoute.personalLibraryFiles")}>
+            <div className={`settingsPanel settingsListPanel libraryList ${selectedItems.length ? "hasSelection" : ""}`} role="table" aria-busy={loading} aria-label={t("libraryRoute.personalLibraryFiles")}>
               <div className="libraryListHeader" role="row">
                 <button className="librarySelect librarySelectAll" type="button" role="checkbox" aria-checked={allVisibleSelected} aria-label={allVisibleSelected ? t("libraryRoute.deselectAll") : t("libraryRoute.selectAllListedItems")} onClick={toggleAllVisible}>{allVisibleSelected ? <Minus aria-hidden="true" /> : null}</button>
                 <span role="columnheader">{t("libraryRoute.name")}</span><span role="columnheader">{t("libraryRoute.modified")}</span><span role="columnheader">{t("libraryRoute.size")}</span>
               </div>
-              {loading ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.loadingLibrary")}</div> : visibleObjects.map((item) => {
+              {loading && !objects.length ? <div className="libraryEmptyState" role="status" aria-live="polite"><LoaderCircle className="statusIcon" aria-hidden="true" />{t("libraryRoute.loadingLibrary")}</div> : visibleObjects.map((item) => {
                 const ItemIcon = isFolder(item) ? Folder : isImage(item) ? ImageIcon : FileText;
                 const itemStatus = statusLabel(item);
                 return <div className={`libraryRow ${selectedIds.includes(item.id) || libraryObjectId === item.id ? "selected" : ""}`} role="row" key={item.id}>
