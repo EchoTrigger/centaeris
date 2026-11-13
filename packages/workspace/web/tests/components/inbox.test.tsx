@@ -105,3 +105,24 @@ test("a fresh authorization denial removes the previously shown result and files
   expect(screen.queryByText("The selected report is ready.")).toBeNull();
   expect(screen.queryByRole("link", { name: "Report.docx" })).toBeNull();
 });
+
+test("returning to the window keeps the selected result readable while refreshing", async () => {
+  notification = { ...fresh(), kind: "deliverable", readAt: "2026-11-13T01:00:00Z", event: { ...fresh().event, type: "deliverableSubmitted", changes: { deliverableId: { before: null, after: "result" } } } };
+  mount("/w/one/work/inbox?notification=notice");
+  await screen.findByRole("heading", { name: "Findings" });
+  const originalFetch = vi.mocked(fetch).getMockImplementation()!;
+  let releaseNotification: (() => void) | undefined;
+  let releaseContent: (() => void) | undefined;
+  vi.mocked(fetch).mockImplementation(async (input, options) => {
+    const path = new URL(String(input)).pathname;
+    if (path.endsWith("/notice")) return new Promise(resolve => { releaseNotification = () => resolve(Response.json({ notification })); });
+    if (path.endsWith("/deliverables")) return new Promise(resolve => { releaseContent = () => resolve(Response.json({ deliverables: [submitted] })); });
+    return originalFetch(input, options);
+  });
+  await act(async () => { window.dispatchEvent(new Event("focus")); });
+  await waitFor(() => expect(releaseNotification).toBeTypeOf("function"));
+  expect(screen.getByRole("heading", { name: "Findings" })).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Report.docx" })).toBeTruthy();
+  await act(async () => { releaseNotification?.(); releaseContent?.(); });
+  expect(screen.getByRole("heading", { name: "Findings" })).toBeTruthy();
+});

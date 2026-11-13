@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useLocation, useSearchParams } from "react-router";
-import { apiJson, jsonOptions } from "../api";
+import { ApiError, apiJson, jsonOptions } from "../api";
 import { useTranslation } from "../i18n";
 import { Inbox, type InboxItem, type InboxView } from "./Inbox";
 import { InboxDeliverable } from "./InboxDeliverable";
@@ -41,14 +41,20 @@ export function WorkspaceInbox({ workspaceId, userId }: { workspaceId: string; u
     const controller = new AbortController();
     void apiJson<Page>(`${root}?view=${view}&limit=50&offset=${offset}`, { signal: controller.signal }).then(result => {
       if (!controller.signal.aborted) setPage(result);
-    }).catch(failure => { if (!controller.signal.aborted) setError(String(failure.message)); });
+    }).catch(failure => {
+      if (!controller.signal.aborted) {
+        if (failure instanceof ApiError && [401, 403, 404].includes(failure.status)) setPage(null);
+        setError(String(failure.message));
+      }
+    });
     return () => controller.abort();
   }, [root, view, offset, revision]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: Focus rereads the selected notification from the server.
   useEffect(() => {
     const controller = new AbortController();
     const visit = ++owner.current;
-    setSelected(null); setError(null); setPending(false);
+    setSelected(current => current?.id === selectedId && current.workspaceId === workspaceId ? current : null);
+    setError(null); setPending(false);
     mutation.current?.abort();
     if (selectedId) void (async () => {
       try {
@@ -61,7 +67,12 @@ export function WorkspaceInbox({ workspaceId, userId }: { workspaceId: string; u
           if (controller.signal.aborted) return;
           setSelected(receipt.notification); setRevision(value => value + 1);
         }
-      } catch (failure) { if (!controller.signal.aborted) setError(String((failure as Error).message)); }
+      } catch (failure) {
+        if (!controller.signal.aborted) {
+          if (failure instanceof ApiError && [401, 403, 404].includes(failure.status)) setSelected(null);
+          setError(String((failure as Error).message));
+        }
+      }
       finally { if (owner.current === visit && !controller.signal.aborted) setPending(false); }
     })();
     return () => { controller.abort(); mutation.current?.abort(); };
@@ -90,9 +101,9 @@ export function WorkspaceInbox({ workspaceId, userId }: { workspaceId: string; u
     if (typeof deliverableId === "string") targetParams.set("deliverable", deliverableId);
     return { ...notification, title: notification.issueTitle, actor: notification.event.actor.name, occurredAt: notification.createdAt, summary, body: "", target: { label: t("work.issues"), href: `/w/${encodeURIComponent(workspaceId)}/work/tasks/${encodeURIComponent(notification.issueId)}?${targetParams}` } };
   }
-  const currentSelection = selected?.id === selectedId ? selected : null;
+  const currentSelection = selected?.id === selectedId && selected.workspaceId === workspaceId ? selected : null;
   const deliverableId = currentSelection?.kind === "deliverable" ? currentSelection.event.changes.deliverableId?.after : null;
   const selectedContent = currentSelection && typeof deliverableId === "string"
-    ? <InboxDeliverable key={`${workspaceId}:${currentSelection.id}`} workspaceId={workspaceId} issueId={currentSelection.issueId} deliverableId={deliverableId} /> : undefined;
+    ? <InboxDeliverable key={`${workspaceId}:${currentSelection.id}`} workspaceId={workspaceId} issueId={currentSelection.issueId} deliverableId={deliverableId} refreshRevision={focusRevision} /> : undefined;
   return <Inbox scrollKey={`centaeris:inbox-scroll:${JSON.stringify([userId, workspaceId, view, offset])}`} items={page?.notifications.map(item) || []} selectedItem={currentSelection ? item(currentSelection) : null} selectedContent={selectedContent} view={view as InboxView} selectedId={selectedId} loading={!page} pending={pending} error={error} onSelect={select} onChange={(id, values) => { void change(id, values); }} onViewChange={next => setParams(next === "inbox" ? {} : { view: next })} pagination={{ offset, total: page?.total || 0, onPage: nextOffset => setParams(previous => { const next = new URLSearchParams(previous); next.set("offset", String(nextOffset)); next.delete("notification"); return next; }) }} />;
 }

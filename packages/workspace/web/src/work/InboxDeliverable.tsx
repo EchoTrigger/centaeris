@@ -12,26 +12,31 @@ type Deliverable = {
   artifacts: { id: string; displayName: string; downloadUrl: string }[];
 };
 
-export function InboxDeliverable({ workspaceId, issueId, deliverableId }: {
-  workspaceId: string; issueId: string; deliverableId: string;
+export function InboxDeliverable({ workspaceId, issueId, deliverableId, refreshRevision }: {
+  workspaceId: string; issueId: string; deliverableId: string; refreshRevision: number;
 }) {
   const { t } = useTranslation();
   const [deliverable, setDeliverable] = useState<Deliverable | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Window focus rechecks access while keeping the current result mounted.
   useEffect(() => {
     const controller = new AbortController();
+    setError(null);
     const endpoint = `/api/workspaces/${encodeURIComponent(workspaceId)}/issues/${encodeURIComponent(issueId)}/deliverables`;
     void apiJson<{ deliverables: Deliverable[] }>(endpoint, { signal: controller.signal }).then(result => {
       if (controller.signal.aborted) return;
       const item = result.deliverables.find(value => value.id === deliverableId);
       if (item) setDeliverable(item);
-      else setError(t("deliverables.unavailable"));
+      else { setDeliverable(null); setError(t("deliverables.unavailable")); }
     }).catch(failure => {
-      if (!controller.signal.aborted) setError(failure instanceof ApiError && [403, 404].includes(failure.status)
-        ? t("deliverables.unavailable") : String(failure.message));
+      if (!controller.signal.aborted) {
+        setDeliverable(null);
+        setError(failure instanceof ApiError && [403, 404].includes(failure.status)
+          ? t("deliverables.unavailable") : String(failure.message));
+      }
     });
     return () => controller.abort();
-  }, [workspaceId, issueId, deliverableId, t]);
+  }, [workspaceId, issueId, deliverableId, refreshRevision, t]);
   if (error) return <p role="alert">{error}</p>;
   if (!deliverable) return <div className="inboxDeliverable" aria-busy="true"><p role="status">{t("inbox.loadingContent")}</p></div>;
   return <div className="inboxDeliverable">
